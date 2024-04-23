@@ -1,0 +1,52 @@
+---
+title: Polar Information Update Model
+---
+flowchart LR
+    Neo4J(Graph Database)
+    style Neo4J fill:#458588,stroke:#333,stroke-width:2px
+
+    User(User)
+    style User stroke:#333,stroke-width:2px
+
+    VC(Version Control)
+    style VC fill:#999999,stroke:#333,stroke-width:2px
+
+    Res(Resource)
+    style Res fill:#458588,stroke:#333,stroke-width:2px
+
+    User -- Queries --> Neo4J
+    User -- Update Schedule --> VC
+    User -- Update Configuration --> VC
+
+    IP -- Update ---> Neo4J
+
+    IP(Information Processor)
+    style IP fill:#fe8019,stroke:#333,stroke-width:2px
+
+    MB(Message Broker)
+    style MB fill:#999999,stroke:#333,stroke-width:2px
+
+    ROS(Resource Observer Supervisor)
+    style ROS fill:#fe8019,stroke:#333,stroke-width:2px
+
+    ROS -- Schedules --> RO
+
+    RO(Resource Observer)
+    style RO fill:#fe8019,stroke:#333,stroke-width:2px
+
+    RO -- Observes --> Res
+
+    RO -. Observation Event .-> MB -. Observation Event .-> IP
+
+    PA(Policy Agent)
+    style PA fill:#fe8019,stroke:#333,stroke-width:2px
+
+    PA == Detect Update === VC
+
+    PA -. Configuration Update Event .-> MB -. Configuration Update Event .-> RO
+
+    RO -. Configuration Request Event .-> MB -. Configuration Request Event .-> PA
+
+    PA -. Schedule Update Event .-> MB
+
+    MB -. Schedule Update Event .-> ROS

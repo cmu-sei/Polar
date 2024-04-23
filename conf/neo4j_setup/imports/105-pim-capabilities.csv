@@ -1,0 +1,11 @@
+Name,Definition,Process
+ConfigurationManagement,"set of activities used to establish and maintain the integrity of the system and product under development, and associated supporting artifacts, throughout their useful lives",DevSecOps
+Deployment,set of processes related to the delivery or release of the product under development into the environment in which users of the product interact with the product,DevSecOps
+HostingServices,the underlying infrastructure and platforms that both the system and product under development operate upon,DevSecOps
+Integration,The process of merging changes from multiple developers made to a single code base,DevSecOps
+MonitorAndControl," involves continuously monitoring activities, communicating status, and taking corrective action in order to proactively address issues and to consistently improve performance.",DevSecOps
+PlanningAndTracking,The set of practices used to define tasks and activities and the resources needed to perform them,DevSecOps
+QualityAssurance,"Set of independent activities designed to provide confidence to relevant stakeholders that processes and tools are appropriate for and produce products and services of suitable quality for intended purposes, DevSecOpeither intentional or unintentionally designed or inserted as part of the software's SoftwareAssurance,The level of confidence that software functions only as intended and is free from vulnerabilities",DevSecOps
+SoftwareAssurance,"level of confidence that software functions only as intended and is free from vulnerabilities, either intentional or unintentionally designed or inserted as part of the software, throughout the full software lifecycle",DevSecOps
+SolutionDevelopment,determines the best way of satisfying the requirements to achieve an outcome,DevSecOps
+VerificationAndValidation,set of activities that provides evidence that the system or application under development has met the requirements and criteria that are expected,DevSecOps

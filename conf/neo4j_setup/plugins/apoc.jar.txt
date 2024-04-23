@@ -1,0 +1,3 @@
+If you want to use the setup scripts for neo4j, you'll want to place an apoc
+jar in this location and update the setup scripts to point to the exact version
+you have.

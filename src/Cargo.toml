@@ -1,0 +1,7 @@
+[workspace]
+
+members = [
+    "graph_adapter",
+    "neo_graph_adapter",
+    "Agents/Kubernetes/observer"
+]

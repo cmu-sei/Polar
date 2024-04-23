@@ -1,0 +1,28 @@
+# Metadata for your project.
+
+prefix: "someproj"
+task: "Neo4J Datastore, a pipeline data model"
+pwp: ""
+
+string: ""
+
+# By convention, let's make these "PWP-something-that-makes-sense-for-the-current-work"
+# Use this group ID in the script for building a cluster and the same
+# convention for storage accounts and storage containers, listed at the top of
+# the script. Must be no more than 21 characters.
+group_id: ""
+
+# This completely sucks, but Azure insists that these are lowercase, a-z only
+# We can configure everything that the scripts need to set here.
+storage_account: ""
+storage_container: ""
+
+# Configure necessary vars here. Add more as needed.
+# USGov Virginia
+location: "eastus"
+
+# You can get a list of SKUs via, 'az vm list-sizes --location eastus'
+# Pricing for a SKU can be found here: https://azure.microsoft.com/en-us/pricing/calculator/#virtual-machines2 
+node_types: "Standard_D4s_v3"
+
+maintainer_email: ""

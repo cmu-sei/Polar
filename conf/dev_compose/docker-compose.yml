@@ -1,0 +1,38 @@
+version: '3'
+
+services:
+  neo4j:
+    image: neo4j:5.4.0-community
+    restart: unless-stopped
+    ports:
+      - '7474:7474'
+      - '7687:7687'
+    volumes:
+      - neo4j-data:/data
+
+  rabbitmq:
+    image: rabbitmq:3
+    hostname: rabbitmq
+    ports:
+      - '5672:5672'
+
+  gitlab-consumer:
+    image: gitlab_agent_consumer
+    build:
+      context: ../gitlab_agent
+      additional_contexts:
+        - polar=../polar
+      target: gitlab_agent_consumer
+
+  gitlab-observer:
+    image: gitlab_agent_observer
+    build:
+      context: ../gitlab_agent
+      additional_contexts:
+        - polar=../polar
+      target: gitlab_agent_observer
+    env_file:
+      - example.env
+
+volumes:
+  neo4j-data:

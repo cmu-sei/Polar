@@ -1,0 +1,13 @@
+[connection]
+# The URI of the server you will be connecting to.
+uri = "some.org:7687"
+
+# Your database user ID.
+user = "neo4j"
+
+# Your database password.
+pass = ""
+
+[task]
+# Read this CSV for processing.
+csv_path = "some.csv"
