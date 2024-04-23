@@ -1,42 +1,22 @@
+// Polar
+// Copyright 2023 Carnegie Mellon University.
+// NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT, TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+// [DISTRIBUTION STATEMENT D] Distribution authorized to the Department of Defense and U.S. DoD contractors only (materials contain software documentation) (determination date: 2022-05-20). Other requests shall be referred to Defense Threat Reduction Agency.
+// Notice to DoD Subcontractors:  This document may contain Covered Defense Information (CDI).  Handling of this information is subject to the controls identified in DFARS 252.204-7012 – SAFEGUARDING COVERED DEFENSE INFORMATION AND CYBER INCIDENT REPORTING
+// Carnegie Mellon® is registered in the U.S. Patent and Trademark Office by Carnegie Mellon University.
+// This Software includes and/or makes use of Third-Party Software subject to its own license, see license.txt file for more information. 
+// DM23-0821
+//
+use gitlab_types::Pipeline;
 use reqwest::Client;
 use reqwest::Response;
 use reqwest::Error;
 use reqwest::Method;
-use reqwest::header::{LINK};
+use reqwest::header::LINK;
 use serde::Deserialize;
-use url::Url;
-use std::env;
 use parse_link_header::parse_with_rel;
 
 const PRIVATE_TOKEN_HEADER_STR : &str = "PRIVATE-TOKEN";
-
-//TODO: move to helpers
-pub fn get_token() -> String {
-    //TODO: Check validity of token loaded from env
-    //verify "glpat-" prefix, length of token
-
-    let token = env::var("GITLAB_TOKEN").expect("Failed to load private token from the local enviornment.");
-    //check length and prefix
-    if token.chars().count() == 26 && token.starts_with("glpat-") {
-        return token;
-    }else {
-        panic!("received invalid private token from environment.")
-    }
-    
-}
-//TODO: Update name to be descriptive, move to helpers
-pub fn get_service_endpoint()-> String {
-    //TODO: Check validity of service endpoint url loaded from env
-    //verify URL is a valid format
-    let endpoint = env::var("GITLAB_ENDPOINT").expect("Could not find gitlab service endpoint in environment.");
-    match Url::parse(endpoint.as_str()) {
-        Ok(url) => {
-            //TOOD: confirm url furhter?
-            return url.to_string()
-        }
-        Err(e) => panic!("error parsing endpoint read from environemnt, {}", e)
-    }
-}
 
 pub async fn get_version(client: &Client, token: String, endpoint_prefix: String) -> Result<Response, Error> {
     let endpoint = format!("{}{}", endpoint_prefix, "/version");
@@ -192,21 +172,29 @@ pub async fn get_group_registries(client: &Client, group_id: u32 ,token: String,
     Ok(response)
 }
 
-pub async fn get_project_pipelines(client: &Client, pipeline_id: u32 ,token: String, endpoint_prefix: String) -> Result<Response, Error> {
+pub async fn get_project_pipelines(client: &Client, project_id: u32 ,token: String, endpoint_prefix: String) -> Result<Vec<Pipeline>, Error> {
     let endpoint = format!("{}{}{}" 
     ,endpoint_prefix,
-     "/projects/".to_owned() + pipeline_id.to_string().as_ref(), 
+     "/projects/".to_owned() + project_id.to_string().as_ref(), 
      "/pipelines");
+    println!("{}", endpoint);
     let response = client.request(Method::GET, endpoint)
     .header(PRIVATE_TOKEN_HEADER_STR, token)
     .send().await?;
-    Ok(response)
+
+    //check response
+    if response.status().is_success() {
+        Ok(response.json::<Vec<Pipeline>>().await.unwrap())
+    }else {
+        println!("Could not find pipelines for project id: {}", project_id);
+        Ok(Vec::new())
+    }
 }
 
 #[cfg(test)]
 mod service_tests { 
 
-    use crate::{get_service_endpoint, get_token};
+    use common::{get_gitlab_endpoint, get_gitlab_token};
     use crate::{get_user};
     use reqwest::{Client};
     use gitlab_types::User;
@@ -214,7 +202,7 @@ mod service_tests {
     #[should_panic (expected = "received invalid private token from environment.")]
     fn test_reading_bad_token() {
         temp_env::with_var("GITLAB_TOKEN", Some("abcdefg"), || {
-            get_token();    
+            get_gitlab_token();    
         });
             
     }
@@ -224,7 +212,7 @@ mod service_tests {
         let client = Client::new();
         let user_id = 90;
 
-        match get_user(&client, user_id, get_token(), get_service_endpoint()).await {
+        match get_user(&client, user_id, get_gitlab_token(), get_gitlab_endpoint()).await {
             Ok(response) => {
                 let user = response.json::<User>().await.unwrap();
                 assert_eq!(user.id, 90);
@@ -241,7 +229,7 @@ mod service_tests {
 
         let client = Client::new();
         let user_id = 90;
-        match get_user(&client,user_id, "".to_string(), get_service_endpoint()).await {
+        match get_user(&client,user_id, "".to_string(), get_gitlab_endpoint()).await {
             Ok(response) => {
                 assert_eq!(response.status(), reqwest::StatusCode::FORBIDDEN);
             }

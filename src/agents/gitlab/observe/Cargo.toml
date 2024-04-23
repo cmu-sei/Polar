@@ -17,3 +17,27 @@ temp-env = "0.3.4"
 lapin = "2.2.1"
 parse_link_header = "0.3.3"
 gitlab_types = {path = "../types"}
+common = {path = "../common"}
+serde_yaml = "0.9"
+clokwerk = "0.4.0"
+ctrlc = "3.4.1"
+
+[[bin]]
+name = "observer_entrypoint"
+path = "src/entrypoint.rs"
+
+[[bin]]
+name = "gitlab_users"
+path = "src/gitlab_users.rs"
+
+[[bin]]
+name = "gitlab_projects"
+path = "src/gitlab_projects.rs"
+
+[[bin]]
+name = "gitlab_groups"
+path = "src/gitlab_groups.rs"
+
+[[bin]]
+name = "gitlab_runners"
+path = "src/gitlab_runners.rs"

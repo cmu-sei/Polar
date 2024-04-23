@@ -1,36 +1,33 @@
+// Polar
+// Copyright 2023 Carnegie Mellon University.
+// NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT, TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+// [DISTRIBUTION STATEMENT D] Distribution authorized to the Department of Defense and U.S. DoD contractors only (materials contain software documentation) (determination date: 2022-05-20). Other requests shall be referred to Defense Threat Reduction Agency.
+// Notice to DoD Subcontractors:  This document may contain Covered Defense Information (CDI).  Handling of this information is subject to the controls identified in DFARS 252.204-7012 – SAFEGUARDING COVERED DEFENSE INFORMATION AND CYBER INCIDENT REPORTING
+// Carnegie Mellon® is registered in the U.S. Patent and Trademark Office by Carnegie Mellon University.
+// This Software includes and/or makes use of Third-Party Software subject to its own license, see license.txt file for more information. 
+// DM23-0821
+// 
 pub mod helpers;
-use lapin::{options::*, types::FieldTable, 
-    Connection, ConnectionProperties, Result};
+use lapin::{options::*, types::FieldTable, Result};
 use futures_lite::stream::StreamExt;
 use gitlab_types::{User, MessageType, Project, UserGroup, Runner};
 use neo4rs::{Query, Graph};
-use tokio::net::unix::pipe;
+use helpers::helpers::get_neo_config;
+use common::{connect_to_rabbitmq, GITLAB_EXCHANGE_STR};
 
-use crate::helpers::helpers::{get_rabbit_endpoint, get_neo_config};
-
-use serde_json::{from_str};
-/*
-    TODO: How to get rid of magic strings for queue, exchange names
- */
 #[tokio::main]
 async fn main() -> Result<()> {
-    let rabbitmq_host = get_rabbit_endpoint(); 
-    
+
     //get mq connection
-    let conn = Connection::connect(&rabbitmq_host, ConnectionProperties::default()).await?;
-    println!("[*]Connected to rabbitmq!");
+    let conn = connect_to_rabbitmq().await.unwrap();
 
     //create channels, exchange, 
     let consumer_channel = conn.create_channel().await?;
 
-    //declare exchange, que and bind
-    
-    consumer_channel.exchange_declare("gitlab_users", 
-    lapin::ExchangeKind::Fanout, ExchangeDeclareOptions::default(), FieldTable::default()).await?;
-
-    let queue_name = "users";
-
-    consumer_channel.queue_bind(queue_name, "gitlab_users", "", QueueBindOptions::default(), FieldTable::default()).await?;
+    //bind to queue
+    //TODO: Get queue names from config, some shared value
+    let queue_name = "gitlab";
+    consumer_channel.queue_bind(queue_name, GITLAB_EXCHANGE_STR, "gitlab", QueueBindOptions::default(), FieldTable::default()).await?;
 
     println!("[*] waiting to consume");
     let mut consumer = consumer_channel
@@ -58,18 +55,16 @@ async fn main() -> Result<()> {
         let data_str = String::from_utf8(delivery.data).unwrap();
        // println!("received {}", data_str);
         
-        let message : MessageType = from_str(data_str.as_str()).unwrap();
+        let message : MessageType = serde_json::from_str(data_str.as_str()).unwrap();
         //Create query - return query, execut it
         let _ = update_graph(message, &graph_conn).await; 
-    } //end consume looop
+    } //end consume looopa
 
     Ok(())
 }
 
 /*
     Creates Cypher queries based on the messagetype contents received from the resource observer
-    TODO: Logic for handling duplicates?
-    TODO: How to handle failure to update?
  */
 async fn update_graph(message: MessageType, graph_conn: &Graph) -> Result<()> {
     //begin transaction
@@ -114,19 +109,19 @@ async fn update_graph(message: MessageType, graph_conn: &Graph) -> Result<()> {
         },
         MessageType::ProjectRunners(link) => {
             for runner in link.resource_vec as Vec<Runner> {
-                let query = format!("MATCH (n:GitlabProject) WHERE n.project_id = '{}' with n MATCH (r:GitlabRunner) WHERE r.runner_id = '{}' with n, r CREATE (r)-[:onProject]->(n)", link.resource_id, runner.id);
+                let query = format!("MATCH (n:GitlabProject) WHERE n.project_id = '{}' with n MATCH (r:GitlabRunner) WHERE r.runner_id = '{}' with n, r MERGE (r)-[:onProject]->(n)", link.resource_id, runner.id);
                 transaction.run(Query::new(query)).await.expect("could not execute query");
             }
         },
         MessageType::GroupRunners(link) => {
             for runner in link.resource_vec as Vec<Runner> {
-                let query = format!("MATCH (n:GitlabUserGroup) WHERE n.group_id = '{}' with n MATCH (r:GitlabRunner) WHERE r.runner_id = '{}' with n, r CREATE (r)-[:inGroup]->(n)", link.resource_id, runner.id);
+                let query = format!("MATCH (n:GitlabUserGroup) WHERE n.group_id = '{}' with n MATCH (r:GitlabRunner) WHERE r.runner_id = '{}' with n, r MERGE (r)-[:inGroup]->(n)", link.resource_id, runner.id);
                 transaction.run(Query::new(query)).await.expect("could not execute query");
             }
         },
         MessageType::Runners(vec) => {
             for runner in vec{
-                let query = format!("MERGE (n:GitlabRunner {{runner_id: '{}', ip_address: '{}', name: '{}' , runner_type: '{}', status: '{}'}}) return n", runner.id, runner.ip_address, runner.name.unwrap_or_default(), runner.runner_type, runner.status);
+                let query = format!("MERGE (n:GitlabRunner {{runner_id: '{}', ip_address: '{}', name: '{}' , runner_type: '{}', status: '{}', is_shared: '{}'}}) return n", runner.id, runner.ip_address, runner.name.unwrap_or_default(), runner.runner_type, runner.status, runner.is_shared.unwrap_or(false));
                 transaction.run(Query::new(query)).await.expect("could not execute query");
             }
         },
@@ -141,7 +136,7 @@ async fn update_graph(message: MessageType, graph_conn: &Graph) -> Result<()> {
         MessageType::Pipelines(vec) => {
             for pipeline in vec {
                 //create pipeline
-                let q =  format!("MERGE (j:GitlabPipeline {{ pipeline_id: '{}', project_id: '{}'}}) return j", pipeline.id, pipeline.project_id.unwrap_or_default());
+                let q =  format!("MERGE (j:GitlabPipeline {{ pipeline_id: '{}', project_id: '{}', status: '{}', created_at: '{}', updated_at: '{}'}}) return j", pipeline.id, pipeline.project_id.unwrap_or_default(), pipeline.status, pipeline.created_at, pipeline.updated_at);
                 println!("{}",q);
                 transaction.run(Query::new(q)).await.expect("Could not execute query");
                 //create releationship to project
@@ -162,6 +157,9 @@ async fn update_graph(message: MessageType, graph_conn: &Graph) -> Result<()> {
             let q = format!("MATCH (p:GitlabPipeline) WHERE p.pipeline_id = '{}' with p MATCH (j:GitlabJob) WHERE j.job_id = '{}' with p,j MERGE (j)-[:inPipeline]->(p)", job.pipeline.id, job.id);
             transaction.run(Query::new(q)).await.expect("Could not execute query");
         },
+        _ => {
+            todo!()
+        }
     }
    //commit
    match transaction.commit().await {

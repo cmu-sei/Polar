@@ -7,34 +7,15 @@
 // This Software includes and/or makes use of Third-Party Software subject to its own license, see license.txt file for more information. 
 // DM23-0821
 // 
-pub mod helpers {
-    use std::env;
-    use neo4rs::{Config, ConfigBuilder};
-    use url::Url;
+use std::error::Error;
+use std::process::Command;
 
-    pub fn get_neo4j_endpoint() -> String {
-        let endpoint = env::var("NEO4J_ENDPOINT").expect("Could not load neo4j instance endpoint from enviornment.");
-        match Url::parse(endpoint.as_str()) {
-
-           Ok(url) => return url.to_string(),
-
-           Err(e) => panic!("error: {}, the  provided neo4j endpoint is not valid.", e)
-        }
-    }
-
-    pub fn get_neo_config() -> Config {
-        let database_name = env::var("NEO4J_DB").unwrap();
-        let neo_user = env::var("NEO4J_USER").unwrap();
-        let neo_password = env::var("NEO4J_PASSWORD").unwrap();
-        
-        let config = ConfigBuilder::new()
-        .uri(get_neo4j_endpoint())
-        .user(&neo_user)
-        .password(&neo_password)
-        .db(&database_name)
-        .fetch_size(500).max_connections(10).build().unwrap();
-        
-        return config;
-    }
-
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn Error> > {
+    //try spawning consumers
+    Command::new("./projects_consumer").spawn().expect("Could not execute gitlab project consumer binary.");
+    Command::new("./users_consumer").spawn().expect("Could not execute gitlab user consumer binary.");
+    Command::new("./groups_consumer").spawn().expect("Could not execute gitlab group consumer binary.");
+    Command::new("./runners_consumer").spawn().expect("Could not execute gitlab runners consumer binary.");
+    Ok(())
 }

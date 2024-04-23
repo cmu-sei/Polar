@@ -11,6 +11,7 @@ pub enum MessageType {
     ProjectRunners(ResourceLink<Runner>),
     GroupMembers(ResourceLink<User>),
     GroupRunners(ResourceLink<Runner>),
+    GroupProjects(ResourceLink<Project>),
     Runners(Vec<Runner>),
     RunnerJob((u32, Job)),
     Jobs(Vec<Job>),
@@ -35,7 +36,8 @@ pub struct Project {
     #[serde(default)]
     pub creator_id: Option<u32>,
     #[serde(default)]
-    pub namespace: Option<Namespace>
+    pub namespace: Option<Namespace>,
+    pub last_activity_at: String
 }
 #[derive (Serialize, Deserialize, Clone, PartialEq, Debug)]
 pub struct Namespace {

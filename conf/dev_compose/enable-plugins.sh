@@ -1,0 +1,1 @@
+rabbitmq-plugins enable rabbitmq_auth_mechanism_ssl

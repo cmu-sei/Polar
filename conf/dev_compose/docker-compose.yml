@@ -13,26 +13,41 @@ services:
   rabbitmq:
     image: rabbitmq:3
     hostname: rabbitmq
+    restart: unless-stopped
     ports:
-      - '5672:5672'
+      - 5672:5672
+      - 5671:5671
+      - 15672:15672
+    volumes:
+      - ./ssl/ca_certificate.pem:/tmp/ca_cert.pem:ro
+      - ./ssl/server_rabbitmq_key.pem:/tmp/server_key.pem:ro
+      - ./ssl/server_rabbitmq_certificate.pem:/tmp/server_cert.pem:ro
+      - ./rabbitmq.conf:/bitnami/rabbitmq/conf/custom.conf:ro 
+      - ./rabbitmq-docker-entrypoint/:/docker-entrypoint-initdb.d/:ro
+    healthcheck:
+      test: rabbitmq-diagnostics -q ping
+      interval: 30s
+      timeout: 30s
+      retries: 5
+      start_period: 1m
 
-  gitlab-consumer:
-    image: gitlab_agent_consumer
-    build:
-      context: ../gitlab_agent
-      additional_contexts:
-        - polar=../polar
-      target: gitlab_agent_consumer
+  # gitlab-consumer:
+  #   image: gitlab_agent_consumer
+  #   build:
+  #     context: ../gitlab_agent
+  #     additional_contexts:
+  #       - polar=../polar
+  #     target: gitlab_agent_consumer
 
-  gitlab-observer:
-    image: gitlab_agent_observer
-    build:
-      context: ../gitlab_agent
-      additional_contexts:
-        - polar=../polar
-      target: gitlab_agent_observer
-    env_file:
-      - example.env
+  # gitlab-observer:
+  #   image: gitlab_agent_observer
+  #   build:
+  #     context: ../gitlab_agent
+  #     additional_contexts:
+  #       - polar=../polar
+  #     target: gitlab_agent_observer
+  #   env_file:
+  #     - example.env
 
 volumes:
   neo4j-data:
