@@ -1,12 +1,12 @@
 # Pre Build Stage (Make an agent user)
-FROM registry1.dso.mil/ironbank/opensource/alpinelinux/alpine:3.18.2 as prebuild
+FROM alpine:3.18.2 as prebuild
 
 RUN apk --no-cache add shadow bash gcc
 RUN groupadd -r -g 1000 agent && \
     useradd -r -u 1000 -g agent -m -d /opt/agent -s /bin/bash agent
 
 # Build Stage - Builds the rust binary
-FROM registry1.dso.mil/ironbank/opensource/alpinelinux/alpine:3.18.2 as build
+FROM alpine:3.18.2 as build
 RUN mkdir /app
 RUN apk add bash curl git clang gcc g++ wget curl tar make cmake openssl-dev
 # Get Rustup

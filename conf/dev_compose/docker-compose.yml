@@ -2,7 +2,7 @@ version: '3'
 
 services:
   neo4j:
-    image: neo4j:5.4.0-community
+    image: neo4j:5.10.0-community
     restart: unless-stopped
     ports:
       - '7474:7474'
@@ -11,7 +11,7 @@ services:
       - neo4j-data:/data
 
   rabbitmq:
-    image: rabbitmq:3
+    image: bitnami/rabbitmq:3.12
     hostname: rabbitmq
     restart: unless-stopped
     ports:
