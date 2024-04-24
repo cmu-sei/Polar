@@ -1,6 +1,11 @@
 [workspace]
 
 members = [
+
+    "agents/gitlab/common",
+    "agents/gitlab/consume",
+    "agents/gitlab/observe",
+    "agents/gitlab/types",
     "graph_adapter",
     "neo_graph_adapter",
 ]

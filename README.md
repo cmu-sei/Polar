@@ -43,7 +43,7 @@ The suite is composed of three parts
       publish information to.
 * The Types Library
 
-All credentials, endpoints, and the like should be read in as enviornment variables. 
+All credentials, endpoints, and the like should be read in as environment variables. 
 
 
 ## Getting started and running example
