@@ -1,17 +1,11 @@
 # Gitlab Agent
 
-A local development container has been setup to support rust development for the gitlab agent. The visual studio code extension
-*Dev Containers* (`ms-vscode-remote.remote-containers`) needs to be installed on your local machine. It will use docker to spin up 
-a compose stack that includes the required dependencies (rabbitmq & neo4j). ***NOTE***: This is strictly for development purposes only, 
-no security constrains are implemented.
-
 Prep Steps:
-1. Create a copy of the `example.env` named `.env` in the *.devcontainer* directory. 
-   1. The .env file is read by the `devcontainer` service in the docker-compose file. 
+1. Create a copy of the `example.env` named `.env` in the *dev_compose* directory. 
+   1. The .env file is read by the service in the docker-compose file. 
    2. Additionally it is in the `.gitignore` file.
 2. Populate the values contained in the .env file, see the variable descriptions below.
-3. Using the VSCode Command Palette (CMD + SHIFT + P on MACOS), type: `> dev containers: Reopen in container` 
-4. Any changes to the environment variables will require a dev container rebuild (Until we figure out how to properly set variables in the debugger)
+3. Any changes to the environment variables will require a container restart of the services.
 
 **Required Variables:**
 This tool requires the following values to be present in your environment as
