@@ -20,7 +20,7 @@ RUN rustup update && rustup default stable
 COPY . /app
 WORKDIR /app
 
-ENV RUSTFLAGS="-C target-feature=-crt-static"
+ENV RUSTFLAGS="-C target-feature=-crt-static -C target-cpu=native"
 RUN cargo build --release
 
 # Gitlab Agent

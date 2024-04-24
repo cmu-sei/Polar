@@ -2,7 +2,7 @@
 
 #[allow(unused_imports)]
 use graph_adapter::{GraphQuery, GraphConfig, GraphDriver, DriverConfig, DriverType, Connection};
-use neo4rs::{Graph, Config, Error, Error::IOError, Query};
+use neo4rs::{Graph, Config, Error, Query};
 use async_trait::async_trait;
 
 pub struct NeoDriver {

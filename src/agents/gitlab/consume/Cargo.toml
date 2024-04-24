@@ -19,7 +19,7 @@ neo4rs = "0.6.1"
 common = {path = "../common"}
 clokwerk = "0.4.0"
 ctrlc = "3.4.1"
-neo_graph_adapter = {path = "../../neo_graph_adapter"}
+neo_graph_adapter = {path = "../../../neo_graph_adapter"}
 
 [[bin]]
 name = "consumer_entrypoint"
