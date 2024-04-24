@@ -3,3 +3,4 @@ target
 Cargo.lock
 .env
 ssl/
+neo4j_volumes

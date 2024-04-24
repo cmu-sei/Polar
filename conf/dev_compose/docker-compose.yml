@@ -1,4 +1,4 @@
-version: '3'
+version: '3.5'
 
 services:
   neo4j:
@@ -9,6 +9,11 @@ services:
       - '7687:7687'
     volumes:
       - neo4j-data:/data
+      - ./neo4j_volumes/data:/var/lib/neo4j/data
+      - ./neo4j_volumes/logs:/var/lib/neo4j/logs
+      - ./neo4j_volumes/conf:/var/lib/neo4j/conf
+      - ./neo4j_volumes/import:/var/lib/neo4j/import
+      - ./neo4j_volumes/plugins:/var/lib/neo4j/plugins
 
   rabbitmq:
     image: bitnami/rabbitmq:3.12
