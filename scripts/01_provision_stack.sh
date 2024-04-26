@@ -1,4 +1,4 @@
-#!/usr/bin/fish
+#!/usr/bin/env sh
 
 # Polar (OSS)
 
@@ -16,14 +16,15 @@
 
 
 # Neo4J
-mkdir -p ../conf/neo4j_volumes/conf
-mkdir -p ../conf/neo4j_volumes/data
-mkdir -p ../conf/neo4j_volumes/import
-mkdir -p ../conf/neo4j_volumes/logs
-mkdir -p ../conf/neo4j_volumes/plugins
+mkdir -p ../conf/gitlab_compose/neo4j_volumes/conf
+mkdir -p ../conf/gitlab_compose/neo4j_volumes/data
+mkdir -p ../conf/gitlab_compose/neo4j_volumes/import
+mkdir -p ../conf/gitlab_compose/neo4j_volumes/logs
+mkdir -p ../conf/gitlab_compose/neo4j_volumes/plugins
 
-cp -r ../conf/neo4j_setup/plugins/* ../conf/neo4j_volumes/plugins
-cp ../conf/neo4j_setup/conf/neo4j_setup/neo4j.conf ..conf/neo4j_volumes/conf/neo4j.conf
-cp ../conf/neo4j_setup/imports/neo4j_setup/imports* ../conf/neo4j_volumes/import
+cp -r ../conf/neo4j_setup/plugins/* ../conf/gitlab_compose/neo4j_volumes/plugins
+cp ../conf/neo4j_setup/conf/neo4j.conf ../conf/gitlab_compose/neo4j_volumes/conf/neo4j.conf
+cp ../conf/neo4j_setup/imports/* ../conf/gitlab_compose/neo4j_volumes/import
 
-chown -R 7474:7474 ../conf/neo4j_volumes
+chown -R 7474:7474 ../conf/gitlab_compose/neo4j_volumes
+chmod -R 775 ../conf/gitlab_compose/neo4j_volumes

@@ -23,7 +23,7 @@ configuration file, and an associated implementation of the graph for the
 chosen configuration type. Initially, this will be Neo4J, but the graph
 landscape is rich and we plan to support multiple graph types with some effort.
 
-## Tools
+## Agents
 
 ### Gitlab Agent
 
@@ -50,5 +50,5 @@ Three important parts of the framework implementation include:
 All credentials, endpoints, and the like should be read in as environment variables, 
 possibly from an environment file. There is an example in the tree.
 
-## Getting Started
-Please consult the Readme in the specific Agents folder for GitLab for additional details.
+#### Getting Started
+Please consult the [Readme](./docs/README_gitlab.md) in the docs folder 
