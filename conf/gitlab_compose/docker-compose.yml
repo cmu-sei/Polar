@@ -25,6 +25,7 @@
 version: '3.5'
 services:
   neo4j:
+    user: 7474:7474
     image: neo4j:5.10.0-community
     restart: unless-stopped
     ports:
