@@ -52,7 +52,7 @@ services:
       - ./ssl/server_rabbitmq_key.pem:/tmp/server_key.pem:ro
       - ./ssl/server_rabbitmq_certificate.pem:/tmp/server_cert.pem:ro
       - ./rabbitmq.conf:/bitnami/rabbitmq/conf/custom.conf:ro 
-      #- ./rabbitmq-docker-entrypoint/:/docker-entrypoint-initdb.d/:ro
+      - ./rabbitmq-docker-entrypoint/:/docker-entrypoint-initdb.d/:ro
     healthcheck:
       test: rabbitmq-diagnostics -q ping
       interval: 30s

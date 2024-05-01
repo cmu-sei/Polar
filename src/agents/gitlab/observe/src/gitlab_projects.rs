@@ -21,12 +21,13 @@
    DM24-0470
 */
 
+use gitlab_service::{get_all_elements, get_project_pipelines};
 use gitlab_types::{Project, User, Runner, MessageType, ResourceLink, Pipeline};
 use lapin::{options::{QueueDeclareOptions, QueueBindOptions}, types::FieldTable};
 use reqwest::Client;
 use serde_json::to_string;
 use common::{create_lock, get_gitlab_token, get_gitlab_endpoint, connect_to_rabbitmq, publish_message, GITLAB_EXCHANGE_STR, PROJECTS_QUEUE_NAME, PROJECTS_ROUTING_KEY};
-use std::fs::remove_file;
+use std::{error::Error, fs::remove_file};
 
 const LOCK_FILE_PATH: &str = "/tmp/projects_observer.lock";
 

@@ -21,6 +21,9 @@
    DM24-0470
 */
 
+use std::error::Error;
+
+use gitlab_service::get_all_elements;
 use gitlab_types::{Runner, MessageType};
 use lapin::{options::{QueueDeclareOptions, QueueBindOptions}, types::FieldTable};
 use reqwest::Client;
@@ -63,7 +66,7 @@ async fn main() -> Result<(), Box<dyn Error> > {
 
             let _ = mq_conn.close(0, "closed").await?;
 
-            remove_file(LOCK_FILE_PATH).expect("Error deleting lock file");
+            std::fs::remove_file(LOCK_FILE_PATH).expect("Error deleting lock file");
             
             Ok(())
         }
