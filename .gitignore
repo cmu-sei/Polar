@@ -5,3 +5,6 @@ Cargo.lock
 ssl/
 neo4j_volumes
 tls-gen/
+gitlab_config
+gitlab_logs
+gitlab_data

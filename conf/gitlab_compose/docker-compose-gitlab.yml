@@ -1,0 +1,17 @@
+services:
+  gitlab:
+    image: gitlab/gitlab-ce:latest
+    logging:
+      driver: json-file
+      options:
+        max-size: "10k"
+        max-file: "3"
+    hostname: precisionws.192.168.76.134.nip.io
+    ports:
+      - 80:80
+      - 443:443
+    volumes:
+      - ./gitlab_config:/etc/gitlab
+      - ./gitlab_logs:/var/log/gitlab
+      - ./gitlab_data:/var/opt/gitlab
+    restart: unless-stopped
