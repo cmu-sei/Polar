@@ -27,6 +27,31 @@ set -euo pipefail
 # Ensure aliases do not interfere
 unalias -a
 
+
+# ********** Begin global configuration options **********
+
+# Just a gentle reminder that "0" is "success" in Bash and Bash has no actual
+# Boolean type, so we use "0" to represent "true", and "1" to represent
+# "false".
+
+# If you want to use the GitLab Agent:
+POLAR_CONFIG_GITLAB=0
+
+# Commentary: We intend to support multiple alternatives for the graph and the
+# pub/sub broker infrastructure. At present, our defaults are Neo4J and
+# RabbitMQ. It's a bit redundant to have them as configurable options
+# currently, but it does make it more clear that these are not hard
+# requirements.
+
+# If you want to use Neo4J for your graph:
+POLAR_CONFIG_NEO4J=0
+
+# If you want to use RabbitMQ for your pub/sub broker:
+POLAR_CONFIG_RABBITMQ=0
+
+# ********** End global configuration options **********
+
+
 # Commands used in the script could be shadowed by function definitions. Ensure
 # they are not unsetting any conflicting functions definitions.
 clear_shadows() {
@@ -74,18 +99,21 @@ get_project_root() {
 configure_environment() {
     echo "Configuring the environment template. Please provide the required values."
 
-    # read -p "Enter GitLab API endpoint [https://example.com/api/v4]: " GITLAB_ENDPOINT
-    # GITLAB_ENDPOINT=${GITLAB_ENDPOINT:-"https://example.com/api/v4"}
-    read -p "Enter GitLab API endpoint [https://gitlab.sandbox.labz.s-box.org/api/v4]: " GITLAB_ENDPOINT
-    GITLAB_ENDPOINT=${GITLAB_ENDPOINT:-"https://gitlab.sandbox.labz.s-box.org/api/v4"}
+    if [[ POLAR_CONFIG_GITLAB -eq 0 ]]; then
+        # read -p "Enter GitLab API endpoint [https://example.com/api/v4]: " GITLAB_ENDPOINT
+        # GITLAB_ENDPOINT=${GITLAB_ENDPOINT:-"https://example.com/api/v4"}
 
-    # TODO: Add more parameter validation for user inputs
-    if [[ ! "$GITLAB_ENDPOINT" =~ ^https:// ]]; then
-        echo "Invalid URL format for GitLab Endpoint. Please use a valid URL starting with https://"
-        exit 1
+        read -p "Enter GitLab API endpoint [https://gitlab.sandbox.labz.s-box.org/api/v4]: " GITLAB_ENDPOINT
+        GITLAB_ENDPOINT=${GITLAB_ENDPOINT:-"https://gitlab.sandbox.labz.s-box.org/api/v4"}
+
+        # TODO: Add more parameter validation for user inputs
+        if [[ ! "$GITLAB_ENDPOINT" =~ ^https:// ]]; then
+            echo "Invalid URL format for GitLab Endpoint. Please use a valid URL starting with https://"
+            exit 1
+        fi
+
+        read -p "Enter your GitLab personal access token: " GITLAB_TOKEN
     fi
-
-    read -p "Enter your GitLab personal access token: " GITLAB_TOKEN
 
     read -p "Enter Neo4J endpoint [neo4j://neo4j:7687]: " NEO4J_ENDPOINT
     NEO4J_ENDPOINT=${NEO4J_ENDPOINT:-"neo4j://neo4j:7687"}
@@ -119,20 +147,8 @@ create_env_config_file() {
     local config_file="$PROJECT_ROOT/conf/env_setup.sh"
     echo "Creating configuration file at $config_file"
 
-    cat <<EOF >"$config_file"
 # Generated Environment Configuration. If you edit this, do not re-run setup
 # script without backing up this file, first.
-
-# The absolute file path to the observer_config.yaml. One is available in the following dir: ./gitlab_agent/src/observer/src/observer_config.yaml
-#export GITLAB_OBSERVER_CONFIG="/home/djshepard/Documents/projects/polar/src/agents/gitlab/observe/src/observer_config.yaml"
-# The endpoint must end in /api/v4
-export GITLAB_ENDPOINT="$GITLAB_ENDPOINT"
-
-# A Personal Access Token for the instance (Note: The information returned from 
-# GitLab will depend on the permissions granted to the token.
-# See Gitlab's REST API docs for more information)
-# For reference, GitLab tokens use the form, "glpat-xxxxxxxxxxxxxxxxxxxx"
-export GITLAB_TOKEN="$GITLAB_TOKEN"
 
 # The service endpoint of the given neo4j instance.
 # For local development, this could be "neo4j://neo4j:7687"
@@ -148,22 +164,36 @@ export RABBITMQ_ENDPOINT="$RABBITMQ_ENDPOINT"
 # For the development container, this should be "neo4j"
 export NEO4J_USER="$NEO4J_USER"
 
-# For the development container, this will be whatever you set it to be when you set up neo4j.
+# For the development container, this will be whatever you set it to be when
+# you set up neo4j.
 export NEO4J_PASSWORD="$NEO4J_PASSWORD"
 
 # For the development container, this should be "neo4j"
 export NEO4J_DB="$NEO4J_DB"
 
-# The absolute file path to the client .p12 file. This is used by the Rust binaries to auth with RabbitMQ via TLS.
+# The absolute file path to the client .p12 file. This is used by the Rust
+# binaries to auth with RabbitMQ via TLS.
 export TLS_CLIENT_KEY="$TLS_CLIENT_KEY"
 
 # If a password was set for the .p12 file, put it here.
 export TLS_KEY_PASSWORD="$TLS_KEY_PASSWORD"
 
-# The absolute file path to the ca_certificates.pem file created by TLS_GEN. Used by the Rust binaries to auth with RabbitMQ via TLS.
+# The absolute file path to the ca_certificates.pem file created by TLS_GEN.
+# Used by the Rust binaries to auth with RabbitMQ via TLS.
 export TLS_CA_CERT="$TLS_CA_CERT"
+
+# The absolute file path to the observer_config.yaml. One is available in the
+# following dir: ./gitlab_agent/src/observer/src/observer_config.yaml
 export GITLAB_OBSERVER_CONFIG="$GITLAB_OBSERVER_CONFIG"
-EOF
+
+# The endpoint must end in /api/v4
+export GITLAB_ENDPOINT="$GITLAB_ENDPOINT"
+
+# A Personal Access Token for the instance (Note: The information returned from 
+# GitLab will depend on the permissions granted to the token.
+# See Gitlab's REST API docs for more information)
+# For reference, GitLab tokens use the form, "glpat-xxxxxxxxxxxxxxxxxxxx"
+export GITLAB_TOKEN="$GITLAB_TOKEN"
 
     chmod 600 "$config_file"
     source "$config_file"

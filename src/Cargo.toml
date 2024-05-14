@@ -26,7 +26,6 @@
 resolver = "2"
 
 members = [
-
     "agents/gitlab/common",
     "agents/gitlab/consume",
     "agents/gitlab/observe",
