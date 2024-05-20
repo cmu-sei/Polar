@@ -31,7 +31,7 @@ unalias -a
 # ********** Begin global configuration options **********
 
 # Just a gentle reminder that "0" is "success" in Bash and Bash has no actual
-# Boolean type, so we use "0" to represent "true", and "1" to represent
+# Boolean type, so we use "0" to represent "true", and "-1" to represent
 # "false".
 
 # If you want to use the GitLab Agent:
@@ -84,122 +84,124 @@ setup_trap() {
 get_project_root() {
     # Determine the script's directory and set the default project root to one level up
     local script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    local default_project_root="$(dirname "$script_dir")"
 
-    # Prompt user for project root, prefilling the default
-    echo "Enter your project root path (default: $default_project_root):"
-    read -r PROJECT_ROOT
-    PROJECT_ROOT=${PROJECT_ROOT:-$default_project_root}
+    PROJECT_ROOT="../$(dirname "$script_dir")"
+
+    export PROJECT_ROOT=$PROJECT_ROOT
     
     echo "Project root set to: $PROJECT_ROOT"
-    echo "Starting the setup process..."
 }
 
 # Define configuration through user input
-configure_environment() {
+configure_env() {
     echo "Configuring the environment template. Please provide the required values."
 
-    if [[ POLAR_CONFIG_GITLAB -eq 0 ]]; then
-        # read -p "Enter GitLab API endpoint [https://example.com/api/v4]: " GITLAB_ENDPOINT
-        # GITLAB_ENDPOINT=${GITLAB_ENDPOINT:-"https://example.com/api/v4"}
+    # TODO: Add support for other graph engines. Prompt the user for which engine they intend to use.
+    read -p "Enter graph endpoint name [neo4j]: " GRAPH_ENDPOINT_NAME
+    GRAPH_ENDPOINT_NAME=${GRAPH_ENDPOINT_NAME:-"neo4j"}
+    GRAPH_ENDPOINT="neo4j://${GRAPH_ENDPOINT_NAME}:7687"
 
-        read -p "Enter GitLab API endpoint [https://gitlab.sandbox.labz.s-box.org/api/v4]: " GITLAB_ENDPOINT
-        GITLAB_ENDPOINT=${GITLAB_ENDPOINT:-"https://gitlab.sandbox.labz.s-box.org/api/v4"}
+    # TODO: Add support for other brokers. Prompt the user for which broker they intend to use.
+    read -p "Enter pub/sub broker endpoint name [rabbitmq]: " BROKER_ENDPOINT_NAME
+    BROKER_ENDPOINT_NAME=${BROKER_ENDPOINT_NAME:-"rabbitmq"}
+    BROKER_ENDPOINT="amqps://${BROKER_ENDPOINT_NAME}:5671/%2f?auth_mechanism=external"
 
-        # TODO: Add more parameter validation for user inputs
-        if [[ ! "$GITLAB_ENDPOINT" =~ ^https:// ]]; then
-            echo "Invalid URL format for GitLab Endpoint. Please use a valid URL starting with https://"
-            exit 1
-        fi
+    read -p "Enter graph username [neo4j]: " GRAPH_USER
+    GRAPH_USER=${GRAPH_USER:-"neo4j"}
 
-        read -p "Enter your GitLab personal access token: " GITLAB_TOKEN
-    fi
+    read -p "Enter graph password [Password1]: " GRAPH_PASSWORD
+    GRAPH_PASSWORD=${GRAPH_PASSWORD:-"Password1"}
 
-    read -p "Enter Neo4J endpoint [neo4j://neo4j:7687]: " NEO4J_ENDPOINT
-    NEO4J_ENDPOINT=${NEO4J_ENDPOINT:-"neo4j://neo4j:7687"}
+    read -p "Enter graph database name [neo4j]: " GRAPH_DB
+    GRAPH_DB=${GRAPH_DB:-"neo4j"}
 
-    read -p "Enter RabbitMQ endpoint [amqps://rabbitmq:5671/%2f?auth_mechanism=external]: " RABBITMQ_ENDPOINT
-    RABBITMQ_ENDPOINT=${RABBITMQ_ENDPOINT:-"amqps://rabbitmq:5671/%2f?auth_mechanism=external"}
-
-    read -p "Enter Neo4J username [neo4j]: " NEO4J_USER
-    NEO4J_USER=${NEO4J_USER:-"neo4j"}
-
-    read -p "Enter Neo4J password [Password1]: " NEO4J_PASSWORD
-    NEO4J_PASSWORD=${NEO4J_PASSWORD:-"Password1"}
-
-    read -p "Enter Neo4J database name [neo4j]: " NEO4J_DB
-    NEO4J_DB=${NEO4J_DB:-"neo4j"}
-
-    read -p "Enter TLS client key path [$PROJECT_ROOT/conf/gitlab_compose/ssl/client_rabbitmq.p12]: " TLS_CLIENT_KEY
-    TLS_CLIENT_KEY=${TLS_CLIENT_KEY:-"$PROJECT_ROOT/conf/gitlab_compose/ssl/client_rabbitmq.p12"}
+    read -p "Enter TLS client key path [$PROJECT_ROOT/var/ssl/client_rabbitmq.p12]: " TLS_CLIENT_KEY
+    TLS_CLIENT_KEY=${TLS_CLIENT_KEY:-"$PROJECT_ROOT/var/ssl/client_rabbitmq.p12"}
 
     read -p "Enter TLS key password (leave blank if none): " TLS_KEY_PASSWORD
 
-    read -p "Enter TLS CA certificate path [$PROJECT_ROOT/conf/gitlab_compose/ssl/ca_certificate.pem]: " TLS_CA_CERT
-    TLS_CA_CERT=${TLS_CA_CERT:-"$PROJECT_ROOT/conf/gitlab_compose/ssl/ca_certificate.pem"}
+    read -p "Enter TLS CA certificate path [$PROJECT_ROOT/var/ssl/ca_certificate.pem]: " TLS_CA_CERT
+    TLS_CA_CERT=${TLS_CA_CERT:-"$PROJECT_ROOT/var/ssl/ca_certificate.pem"}
 
-    read -p "Enter GitLab Observer Config path [$PROJECT_ROOT/src/agents/gitlab/observe/src/observer_config.yaml]: " GITLAB_OBSERVER_CONFIG
-    GITLAB_OBSERVER_CONFIG=${GITLAB_OBSERVER_CONFIG:-"$PROJECT_ROOT/src/agents/gitlab/observe/src/observer_config.yaml"}
+    if [[ POLAR_CONFIG_GITLAB -eq 0 ]]; then
+        source "$PROJECT_ROOT/src/agents/gitlab/scripts/stack_init.sh"
+    fi
 }
 
 # Configuration is written to a file and sourced in the execution shell
-create_env_config_file() {
+create_env_config() {
     local config_file="$PROJECT_ROOT/conf/env_setup.sh"
-    echo "Creating configuration file at $config_file"
 
-# Generated Environment Configuration. If you edit this, do not re-run setup
-# script without backing up this file, first.
+    # This script is only meant to be run on an initial configuration. If the
+    # config file exists, the user needs to modify it directly. Alternatively,
+    # they can delete the config file and then this script can run.
 
-# The service endpoint of the given neo4j instance.
-# For local development, this could be "neo4j://neo4j:7687"
-export NEO4J_ENDPOINT="$NEO4J_ENDPOINT"
+    if [[ ! -f "$config_file" ]]; then
+        echo "Creating configuration file at $config_file"
 
-# The service endpoint of the rabbitmq instance. Should be prefixed in amqp://
-# For the development container, this could be "rabbitmq". The auth mechanism,
-# if specified, is according to your configuration and follows the docs for
-# rabbitmq.
-# For reference: "amqps://rabbitmq:5671/%2f?auth_mechanism=external"
-export RABBITMQ_ENDPOINT="$RABBITMQ_ENDPOINT"
+        echo '# Generated Environment Configuration. If you edit this, do not re-run dev_stack.sh' >> "$config_file"
+        echo '# script without backing up this file, first.' >> "$config_file"
 
-# For the development container, this should be "neo4j"
-export NEO4J_USER="$NEO4J_USER"
+        echo '# The service endpoint of the given neo4j instance.' >> "$config_file"
+        echo '# For local development, this could be "neo4j://neo4j:7687"' >> "$config_file"
+        COMMAND="export GRAPH_ENDPOINT=\"$GRAPH_ENDPOINT\""
+        eval "$COMMAND"
+        echo "$COMMAND" >> "$config_file"
 
-# For the development container, this will be whatever you set it to be when
-# you set up neo4j.
-export NEO4J_PASSWORD="$NEO4J_PASSWORD"
+        echo '# The service endpoint of the broker instance. (for rabbitmq, prefix with amqp://)' >> "$config_file"
+        echo '# For the development container, the name could be "rabbitmq". The auth mechanism,' >> "$config_file"
+        echo '# if specified, is according to your configuration and follows the docs for' >> "$config_file"
+        echo '# your chosen broker.' >> "$config_file"
+        echo '# For our default, reference: "amqps://rabbitmq:5671/%2f?auth_mechanism=external"' >> "$config_file"
+        COMMAND="export BROKER_ENDPOINT=\"$BROKER_ENDPOINT\""
+        eval "$COMMAND"
+        echo "$COMMAND" >> "$config_file"
 
-# For the development container, this should be "neo4j"
-export NEO4J_DB="$NEO4J_DB"
+        echo '# For the development container, this should be "neo4j"' >> "$config_file"
+        COMMAND="export GRAPH_USER=\"$GRAPH_USER\""
+        eval "$COMMAND"
+        echo "$COMMAND" >> "$config_file"
 
-# The absolute file path to the client .p12 file. This is used by the Rust
-# binaries to auth with RabbitMQ via TLS.
-export TLS_CLIENT_KEY="$TLS_CLIENT_KEY"
+        echo '# For the development container, this will be whatever you set it to be when' >> "$config_file"
+        echo '# you set up your graph.' >> "$config_file"
+        COMMAND="export GRAPH_PASSWORD=\"$GRAPH_PASSWORD\""
+        eval "$COMMAND"
+        echo "$COMMAND" >> "$config_file"
 
-# If a password was set for the .p12 file, put it here.
-export TLS_KEY_PASSWORD="$TLS_KEY_PASSWORD"
+        echo '# For the development container, this might be "neo4j"' >> "$config_file"
+        COMMAND="export GRAPH_DB=\"$GRAPH_DB\""
+        eval "$COMMAND"
+        echo "$COMMAND" >> "$config_file"
 
-# The absolute file path to the ca_certificates.pem file created by TLS_GEN.
-# Used by the Rust binaries to auth with RabbitMQ via TLS.
-export TLS_CA_CERT="$TLS_CA_CERT"
+        echo '# The absolute file path to the client .p12 file. This is used by the Rust' >> "$config_file"
+        echo '# binaries to auth with the broker via TLS.' >> "$config_file"
+        COMMAND="export TLS_CLIENT_KEY=\"$TLS_CLIENT_KEY\""
+        eval "$COMMAND"
+        echo "$COMMAND" >> "$config_file"
 
-# The absolute file path to the observer_config.yaml. One is available in the
-# following dir: ./gitlab_agent/src/observer/src/observer_config.yaml
-export GITLAB_OBSERVER_CONFIG="$GITLAB_OBSERVER_CONFIG"
+        echo '# If a password was set for the .p12 file, put it here.' >> "$config_file"
+        COMMAND="export TLS_KEY_PASSWORD=\"$TLS_KEY_PASSWORD\""
+        eval "$COMMAND"
+        echo "$COMMAND" >> "$config_file"
 
-# The endpoint must end in /api/v4
-export GITLAB_ENDPOINT="$GITLAB_ENDPOINT"
+        echo '# The absolute file path to the ca_certificates.pem file created by TLS_GEN.' >> "$config_file"
+        echo '# Used by the Rust binaries to auth with RabbitMQ via TLS.' >> "$config_file"
+        COMMAND="export TLS_CA_CERT=\"$TLS_CA_CERT\""
+        eval "$COMMAND"
+        echo "$COMMAND" >> "$config_file"
 
-# A Personal Access Token for the instance (Note: The information returned from 
-# GitLab will depend on the permissions granted to the token.
-# See Gitlab's REST API docs for more information)
-# For reference, GitLab tokens use the form, "glpat-xxxxxxxxxxxxxxxxxxxx"
-export GITLAB_TOKEN="$GITLAB_TOKEN"
-
-    chmod 600 "$config_file"
-    source "$config_file"
+        chmod 600 "$config_file"
+        source "$config_file"
+    else
+        echo "Environment config file exists. This script is only meant to be"
+        echo "run once. Edit the config directly or delete it to run this script again."
+        echo "WARNING: Execution has failed and will clean-up any artifacts"
+        echo "potentially created during this run."
+        exit -1
+    fi
 }
 
-generate_rabbit_certs() {
+generate_certs() {
     # Clone tls-gen, generate SSL files, and set up Neo4J volumes
     echo "Generating SSL certificates using tls-gen..."
     git clone https://github.com/rabbitmq/tls-gen.git
@@ -208,7 +210,7 @@ generate_rabbit_certs() {
 
     # Ensure the SSL directory exists and move the generated certificates there
     echo "Moving generated SSL files to the designated directory..."
-    local ssl_dir="$PROJECT_ROOT/conf/gitlab_compose/ssl"
+    local ssl_dir="$PROJECT_ROOT/var/ssl"
     mkdir -p "$ssl_dir"
     cp results/* "$ssl_dir"
     cd "$ssl_dir"
@@ -228,7 +230,7 @@ configure_neo4j() {
     # Provisioning Neo4J directories and setting permissions
     echo "Setting up Neo4J directories and copying configuration files..."
 
-    local neo4j_vol_dir="$PROJECT_ROOT/conf/gitlab_compose/neo4j_volumes"
+    local neo4j_vol_dir="$PROJECT_ROOT/var/neo4j_volumes"
 
     mkdir -p "$neo4j_vol_dir/{conf,data,import,logs,plugins}"
 
@@ -242,22 +244,48 @@ configure_neo4j() {
 
 # Updating DNS entries for local service resolution
 update_dns_entries() {
-    echo "Updating /etc/hosts with local DNS entries for rabbitmq and neo4j..."
-    echo '127.0.0.1 rabbitmq' | sudo tee -a /etc/hosts
-    echo '127.0.0.1 neo4j' | sudo tee -a /etc/hosts
+    local file="/etc/hosts"
 
-    echo "Setup complete. All services should now be configured and started."
+    echo "Updating $file with local DNS entries for the broker and the graph..."
+
+    entry="127.0.0.1 $BROKER_ENDPOINT_NAME"
+    if [[ ! $(grep -Fxq "$entry" "$file") ]]; then
+        echo "$entry" | sudo tee -a "$file"
+    else
+        echo "The line '$entry' already exists in $file. Leaving it alone."
+    fi
+
+    entry="127.0.0.1 $GRAPH_ENDPOINT_NAME"
+    if [[ ! $(grep -Fxq "$entry" "$file") ]]; then
+        echo "$entry" | sudo tee -a "$file"
+    else
+        echo "The line '$entry' already exists in $file. Leaving it alone."
+    fi
 }
 
 main() {
     clear_shadows
     check_prereqs
     setup_trap
+
+    echo "WARNING: This script makes modifications to your system, including"
+    echo "configuration files, environment variables, and certificates. Back up files"
+    echo "before running this script if you don't want them modified or deleted."
+    echo ""
+    echo "Press any key to continue or Ctrl+C to cancel."
+
+    # Wait for user input or Ctrl+C
+    read -n 1 -s -r -p ""
+
     get_project_root
-    configure_environment
-    create_env_config_file
-    generate_rabbit_certs
+    configure_env
+    create_env_config
+    generate_certs
+
+    # TODO: If we add support for other graphs and brokers, this will need to
+    # be run conditionally.
     configure_neo4j
+
     update_dns_entries
 }
 
