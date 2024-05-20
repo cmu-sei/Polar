@@ -134,7 +134,7 @@ fn get_file_as_byte_vec(filename: &String) -> Vec<u8> {
 /// Ensure valid certificates are present
 pub async fn connect_to_rabbitmq() -> Result<Connection, String> {
     // You need to use amqp:// scheme here to handle the TLS part manually as it's automatic when you use amqps://
-    let rabbit_endpoint = env::var("RABBITMQ_ENDPOINT").expect("Could not load rabbitmq instance endpoint from environment.");
+    let rabbit_endpoint = env::var("BROKER_ENDPOINT").expect("Could not load rabbitmq instance endpoint from environment.");
     let cert_chain = env::var("TLS_CA_CERT").expect("Could not locate TLS_CA_CERT");
 
     //configure uri auth mechanism

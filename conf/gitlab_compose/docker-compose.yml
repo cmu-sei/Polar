@@ -33,11 +33,11 @@ services:
       - '7687:7687'
     volumes:
       - neo4j-data:/data
-      - ./neo4j_volumes/data:/var/lib/neo4j/data
-      - ./neo4j_volumes/logs:/var/lib/neo4j/logs
-      - ./neo4j_volumes/conf:/var/lib/neo4j/conf
-      - ./neo4j_volumes/import:/var/lib/neo4j/import
-      - ./neo4j_volumes/plugins:/var/lib/neo4j/plugins
+      - ../../var/neo4j_volumes/data:/var/lib/neo4j/data
+      - ../../var/neo4j_volumes/logs:/var/lib/neo4j/logs
+      - ../../var/neo4j_volumes/conf:/var/lib/neo4j/conf
+      - ../../var/neo4j_volumes/import:/var/lib/neo4j/import
+      - ../../var/neo4j_volumes/plugins:/var/lib/neo4j/plugins
 
   rabbitmq:
     image: bitnami/rabbitmq:3.12
@@ -48,9 +48,9 @@ services:
       - 5671:5671
       - 15672:15672
     volumes:
-      - ./ssl/ca_certificate.pem:/tmp/ca_cert.pem:ro
-      - ./ssl/server_rabbitmq_key.pem:/tmp/server_key.pem:ro
-      - ./ssl/server_rabbitmq_certificate.pem:/tmp/server_cert.pem:ro
+      - ../../var/ssl/ca_certificate.pem:/tmp/ca_cert.pem:ro
+      - ../../var/ssl/server_rabbitmq_key.pem:/tmp/server_key.pem:ro
+      - ../../var/ssl/server_rabbitmq_certificate.pem:/tmp/server_cert.pem:ro
       - ./rabbitmq.conf:/bitnami/rabbitmq/conf/custom.conf:ro 
       - ./rabbitmq-docker-entrypoint/:/docker-entrypoint-initdb.d/:ro
     healthcheck:

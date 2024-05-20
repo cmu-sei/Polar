@@ -2,9 +2,10 @@ target
 .DS_Store
 Cargo.lock
 .env
-ssl/
 neo4j_volumes
 tls-gen/
 gitlab_config
 gitlab_logs
 gitlab_data
+env_setup.sh
+var/

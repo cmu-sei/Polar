@@ -34,10 +34,10 @@ unalias -a
 # "false".
 
 # Get the parent process ID (PPID) of the current script
-PPID=$(ps -o ppid= -p $$)
+MPPID=$(ps -o ppid= -p $$)
 
 # Get the command name of the parent process
-PARENT_CMD=$(ps -o comm= -p $PPID)
+PARENT_CMD=$(ps -o comm= -p $MPPID)
 
 # ********** End global configuration options **********
 
@@ -105,12 +105,13 @@ modify_env_config() {
 
 main() {
     # Check if the parent command is the expected one
-    EXPECTED_CMD="dev_stack.sh"
+    #TODO: This check doesn't work as expected. Fix check. For example, calling with fish or bash does not work
+    # EXPECTED_CMD="dev_stack.sh"
 
-    if [ "$PARENT_CMD" != "$EXPECTED_CMD" ]; then
-        echo "This script was not called by the expected command. It was called by: $PARENT_CMD"
-        exit -1
-    fi
+    # if [ "$PARENT_CMD" != "$EXPECTED_CMD" ]; then
+    #     echo "This script was not called by the expected command. It was called by: $PARENT_CMD"
+    #     exit -1
+    # fi
 
     env_config_exists
     configure_gitlab_env

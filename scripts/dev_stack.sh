@@ -85,7 +85,7 @@ get_project_root() {
     # Determine the script's directory and set the default project root to one level up
     local script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-    PROJECT_ROOT="../$(dirname "$script_dir")"
+    PROJECT_ROOT="$(dirname "$script_dir")"
 
     export PROJECT_ROOT=$PROJECT_ROOT
     
@@ -123,9 +123,7 @@ configure_env() {
     read -p "Enter TLS CA certificate path [$PROJECT_ROOT/var/ssl/ca_certificate.pem]: " TLS_CA_CERT
     TLS_CA_CERT=${TLS_CA_CERT:-"$PROJECT_ROOT/var/ssl/ca_certificate.pem"}
 
-    if [[ POLAR_CONFIG_GITLAB -eq 0 ]]; then
-        source "$PROJECT_ROOT/src/agents/gitlab/scripts/stack_init.sh"
-    fi
+
 }
 
 # Configuration is written to a file and sourced in the execution shell
@@ -204,6 +202,8 @@ create_env_config() {
 generate_certs() {
     # Clone tls-gen, generate SSL files, and set up Neo4J volumes
     echo "Generating SSL certificates using tls-gen..."
+    mkdir -p $PROJECT_ROOT/var
+    cd $PROJECT_ROOT/var
     git clone https://github.com/rabbitmq/tls-gen.git
     cd tls-gen/basic
     make CN=rabbitmq
@@ -212,7 +212,7 @@ generate_certs() {
     echo "Moving generated SSL files to the designated directory..."
     local ssl_dir="$PROJECT_ROOT/var/ssl"
     mkdir -p "$ssl_dir"
-    cp results/* "$ssl_dir"
+    cp result/* "$ssl_dir"
     cd "$ssl_dir"
     cp client_rabbitmq.p12 client_rabbitmq.p12.original
 
@@ -222,7 +222,7 @@ generate_certs() {
 
 # Adjust permissions for security
     echo "Adjusting permissions for SSL files..."
-    sudo chown 1001:root *
+    sudo chown 1001:0 *
     sudo chmod 400 *
 }
 
@@ -232,7 +232,11 @@ configure_neo4j() {
 
     local neo4j_vol_dir="$PROJECT_ROOT/var/neo4j_volumes"
 
-    mkdir -p "$neo4j_vol_dir/{conf,data,import,logs,plugins}"
+    mkdir -p $neo4j_vol_dir/conf
+    mkdir -p $neo4j_vol_dir/data
+    mkdir -p $neo4j_vol_dir/import
+    mkdir -p $neo4j_vol_dir/logs
+    mkdir -p $neo4j_vol_dir/plugins
 
     cp -r "$PROJECT_ROOT/conf/neo4j_setup/plugins/"* "$neo4j_vol_dir/plugins"
     cp "$PROJECT_ROOT/conf/neo4j_setup/conf/neo4j.conf" "$neo4j_vol_dir/conf"
@@ -280,6 +284,9 @@ main() {
     get_project_root
     configure_env
     create_env_config
+    if [[ POLAR_CONFIG_GITLAB -eq 0 ]]; then
+        source "$PROJECT_ROOT/src/agents/gitlab/scripts/stack_init.sh"
+    fi
     generate_certs
 
     # TODO: If we add support for other graphs and brokers, this will need to

@@ -27,7 +27,7 @@ pub mod helpers {
     use url::Url;
 
     pub fn get_neo4j_endpoint() -> String {
-        let endpoint = env::var("NEO4J_ENDPOINT").expect("Could not load neo4j instance endpoint from enviornment.");
+        let endpoint = env::var("GRAPH_ENDPOINT").expect("Could not load graph instance endpoint from environment.");
         match Url::parse(endpoint.as_str()) {
 
            Ok(url) => return url.to_string(),
@@ -37,9 +37,9 @@ pub mod helpers {
     }
 
     pub fn get_neo_config() -> Config {
-        let database_name = env::var("NEO4J_DB").unwrap();
-        let neo_user = env::var("NEO4J_USER").unwrap();
-        let neo_password = env::var("NEO4J_PASSWORD").unwrap();
+        let database_name = env::var("GRAPH_DB").unwrap();
+        let neo_user = env::var("GRAPH_USER").unwrap();
+        let neo_password = env::var("GRAPH_PASSWORD").unwrap();
         
         let config = ConfigBuilder::new()
         .uri(get_neo4j_endpoint())
