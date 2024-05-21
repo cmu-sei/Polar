@@ -1,5 +1,6 @@
 target
 .DS_Store
+.vscode
 Cargo.lock
 .env
 neo4j_volumes
