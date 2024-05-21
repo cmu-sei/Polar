@@ -62,9 +62,8 @@ async fn main() -> Result<(), Box<dyn Error> > {
             publish_message(to_string(&MessageType::Projects(projects.clone())).unwrap().as_bytes(), &mq_publish_channel, GITLAB_EXCHANGE_STR, PROJECTS_ROUTING_KEY).await;
             
             for project in projects {
-                //get users of each project
+                // get users of each project
                 let users: Vec<User> = get_all_elements(&web_client, gitlab_token.clone(), format!("{}{}{}{}", service_endpoint, "/projects/" , project.id, "/users")).await.unwrap();
-
                 publish_message(to_string(&MessageType::ProjectUsers(ResourceLink {
                     resource_id: project.id,
                     resource_vec: users.clone()
@@ -76,19 +75,15 @@ async fn main() -> Result<(), Box<dyn Error> > {
                     resource_id: project.id, 
                     resource_vec: runners.clone() }))
                     .unwrap().as_bytes(), &mq_publish_channel, GITLAB_EXCHANGE_STR, PROJECTS_ROUTING_KEY).await;
-                //get 20 projects pipelines
                 
+                // get 20 projects pipelines
                 let pipelines: Vec<Pipeline> = get_project_pipelines(&web_client, project.id, gitlab_token.clone(), service_endpoint.clone()).await.unwrap();
-
                 publish_message(to_string(&MessageType::Pipelines(pipelines.clone())).unwrap().as_bytes(), &mq_publish_channel, GITLAB_EXCHANGE_STR, PROJECTS_ROUTING_KEY).await;
-
             }
             let _ = mq_conn.close(0, "closed").await?;
 
             //delete lock file
             remove_file(LOCK_FILE_PATH).expect("Error deleting lock file.");
-
-
             Ok(())
         }
     }

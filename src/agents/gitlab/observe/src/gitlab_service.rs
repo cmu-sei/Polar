@@ -105,7 +105,9 @@ pub async fn get_runner_jobs(client: &Client, runner_id: u32, endpoint_prefix: S
     let response = client.get(endpoint).header(PRIVATE_TOKEN_HEADER_STR, token).send().await?;
     Ok(response)
 }
-
+/**
+ * Makes a request for to a given endpoint using provided credentials to retrieve elements from a single page.
+ */
 async fn get_elements(client: &Client, token: String, endpoint: String) -> Result<Response, Error> {
     let response = client
     .request(Method::GET, endpoint)
@@ -114,7 +116,10 @@ async fn get_elements(client: &Client, token: String, endpoint: String) -> Resul
 
     Ok(response)
 }
-
+/**
+ * Makes one or a series of requests to a given endpoint using provided credentials to retrieve as many items as possible.
+ * Uses LINK header to crawl pages and retrieve multiple items as JSON elements that are then converted into a given type.
+ */
 pub async fn get_all_elements<T: for<'a> Deserialize<'a>>(client: &Client, token: String, endpoint: String) -> Option<Vec<T>> {
 
     let mut elements: Vec<T> = Vec::new();
@@ -122,7 +127,7 @@ pub async fn get_all_elements<T: for<'a> Deserialize<'a>>(client: &Client, token
     let resp = get_elements(client, token.clone(), endpoint.clone()).await.unwrap();
     
     if  !resp.status().is_success() {
-        println!("Error code: {} recieved", resp.status().as_str());
+        println!("Error code: {} received", resp.status().as_str());
         return Some(elements)
     }
 
@@ -131,10 +136,18 @@ pub async fn get_all_elements<T: for<'a> Deserialize<'a>>(client: &Client, token
     
     let mut link_map = parse_with_rel(headers.get(LINK).unwrap().to_str().unwrap()).unwrap();
     
+    //Crawl pages, appending all elements to the list
     while let Some(link) = link_map.get("next") {
         let resp = get_elements(client, token.clone(), link.raw_uri.clone()).await.unwrap();
         headers = resp.headers().clone();
-        elements.append(&mut resp.json::<Vec<T>>().await.unwrap());
+        //attempt to deserialize objects
+        match resp.json::<Vec<T>>().await {
+            Ok(mut vec) => {
+                //append elements
+                elements.append(&mut vec);
+            },
+            Err(_) => println!("Could not deserialize elements from {}", link.raw_uri),
+        }
         link_map = parse_with_rel(headers.get(LINK).unwrap().to_str().unwrap()).unwrap();
     }
 

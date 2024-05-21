@@ -145,7 +145,7 @@ pub struct Runner {
     pub is_shared: Option<bool>,
 
     pub description: Option<String>,
-    pub ip_address: String,
+    pub ip_address: Option<String>,
     pub runner_type: String,
 
     pub name: Option<String>,
