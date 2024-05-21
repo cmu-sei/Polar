@@ -135,7 +135,7 @@ async fn update_graph(message: MessageType, graph_conn: &Graph) -> Result<()> {
         },
         MessageType::Runners(vec) => {
             for runner in vec{
-                let query = format!("MERGE (n:GitlabRunner {{runner_id: '{}', ip_address: '{}', name: '{}' , runner_type: '{}', status: '{}', is_shared: '{}'}}) return n", runner.id, runner.ip_address, runner.name.unwrap_or_default(), runner.runner_type, runner.status, runner.is_shared.unwrap_or(false));
+                let query = format!("MERGE (n:GitlabRunner {{runner_id: '{}', ip_address: '{}', name: '{}' , runner_type: '{}', status: '{}', is_shared: '{}'}}) return n", runner.id, runner.ip_address.unwrap_or_default(), runner.name.unwrap_or_default(), runner.runner_type, runner.status, runner.is_shared.unwrap_or(false));
                 transaction.run(Query::new(query)).await.expect("could not execute query");
             }
         },

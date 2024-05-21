@@ -92,7 +92,7 @@ async fn main() -> Result<()> {
                 println!("[**]GITLAB GROUP RUNNERS RECEIVED[**]");
                 for runner in link.resource_vec as Vec<Runner> {
                     let q = format!("OPTIONAL MATCH (n:GitlabRunner {{runner_id: \"{}\"}}) WITH n WHERE n IS NULL CREATE (r:GitlabRunner {{runner_id: \"{}\", runner_type: '{}', ip_address: '{}'}} )",
-                     runner.id, runner.id, runner.runner_type, runner.ip_address);
+                     runner.id, runner.id, runner.runner_type, runner.ip_address.unwrap_or_default());
                     transaction.run(Query::new(q)).await.expect("could not execute query");
                     let query = format!("MATCH (n:GitlabUserGroup) WHERE n.group_id = '{}' with n MATCH (r:GitlabRunner) WHERE r.runner_id = '{}' with n, r MERGE (r)-[:inGroup]->(n)", link.resource_id, runner.id);
                     println!("{}", query);
