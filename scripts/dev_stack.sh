@@ -76,6 +76,15 @@ check_prereqs() {
     done
 }
 
+## Check for non-root
+check_root() {
+    if [ "$EUID" -eq 0 ]; then
+        echo "Warning: You are running this script as root. It's recommended to run as a non-root user."
+        echo "Press any key to continue as root or Ctrl+C to cancel."
+        read -n 1 -s -r -p ""
+    fi
+}
+
 # Signal handling for cleanup
 setup_trap() {
     trap 'echo "Script interrupted."; exit 1' INT
@@ -270,6 +279,7 @@ update_dns_entries() {
 main() {
     clear_shadows
     check_prereqs
+    check_root
     setup_trap
 
     echo "WARNING: This script makes modifications to your system, including"
