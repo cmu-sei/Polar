@@ -263,14 +263,14 @@ update_dns_entries() {
     echo "Updating $file with local DNS entries for the broker and the graph..."
 
     entry="127.0.0.1 $BROKER_ENDPOINT_NAME"
-    if ! grep -Fxq "$entry" "$file"; then
+    if [[ -z $(grep -Fx "$entry" "$file") ]]; then
         echo "$entry" | sudo tee -a "$file"
     else
         echo "The line '$entry' already exists in $file. Leaving it alone."
     fi
 
     entry="127.0.0.1 $GRAPH_ENDPOINT_NAME"
-    if ! grep -Fxq "$entry" "$file"; then
+    if [[ -z $(grep -Fx "$entry" "$file") ]]; then
         echo "$entry" | sudo tee -a "$file"
     else
         echo "The line '$entry' already exists in $file. Leaving it alone."
