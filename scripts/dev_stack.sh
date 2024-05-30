@@ -233,6 +233,7 @@ generate_certs() {
     echo "Adjusting permissions for SSL files..."
     sudo chown $(whoami):0 *
     sudo chmod 400 *
+    sudo chmod 777 -R "$ssl_dir"
 }
 
 configure_neo4j() {
