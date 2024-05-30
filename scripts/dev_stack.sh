@@ -231,7 +231,7 @@ generate_certs() {
 
 # Adjust permissions for security
     echo "Adjusting permissions for SSL files..."
-    sudo chown $(whoami):$(whoami) *
+    sudo chown $(whoami):0 *
     sudo chmod 400 *
 }
 
