@@ -67,7 +67,7 @@ clear_shadows() {
 # Check for required commands. No need to check for the core utils or posix
 # ones.
 check_prereqs() {
-    local required="git openssl sudo"
+    local required="git openssl sudo make"
     for cmd in $required; do
         if ! command -v "$cmd" &> /dev/null; then
             echo "Error: Required command '$cmd' is not installed." >&2
