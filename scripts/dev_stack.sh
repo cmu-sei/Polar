@@ -290,13 +290,15 @@ configure_neo4j() {
 }
 
 # Delete /var directory, which contains certificates & configuration for Neo4J and Rabbit
+# This must be run as root, and will prompt the user for their password.
 delete_vars() {
     local var_dir="$PROJECT_ROOT/var"
 
     # Fully delete /var folder if it exists.
     if [[ -d "$var_dir" ]]; then
-        echo "Removing SSL certificates..."
-        rm -rf "$var_dir"
+        echo "Removing /var directory..."
+        echo "Enter password to remove /var"
+        sudo rm -rf "$var_dir"
     else
         echo "Certificates and config were not generated."
     fi
