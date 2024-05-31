@@ -87,14 +87,18 @@ check_root() {
 
 # Signal handling for cleanup
 setup_trap() {
-    trap trap_handler INT
+    trap exit_handler EXIT
+    trap "exit -1" INT
 }
 
-trap_handler() {
-    echo "Script interrupted."
-    delete_env_config
-    delete_vars
-    exit 1
+exit_handler() {
+    # if the script exits on code 0 is successful, else perform cleanup.
+    if [ $? -eq 0 ]; then echo "Setup complete."
+    else 
+        echo "Script interrupted."
+        delete_env_config
+        delete_vars
+    fi
 }
 
 get_project_root() {
@@ -219,7 +223,7 @@ create_env_config() {
 delete_env_config() {
     local config_file="$PROJECT_ROOT/conf/env_setup.sh"
 
-    if [[ -f "$config_file"]]; then
+    if [[ -f "$config_file" ]]; then
         echo "Removing environmental config file..."
         rm "$config_file"
     else
@@ -290,14 +294,12 @@ configure_neo4j() {
 }
 
 # Delete /var directory, which contains certificates & configuration for Neo4J and Rabbit
-# This must be run as root, and will prompt the user for their password.
 delete_vars() {
     local var_dir="$PROJECT_ROOT/var"
 
     # Fully delete /var folder if it exists.
     if [[ -d "$var_dir" ]]; then
         echo "Removing /var directory..."
-        echo "Enter password to remove /var"
         sudo rm -rf "$var_dir"
     else
         echo "Certificates and config were not generated."
