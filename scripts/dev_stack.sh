@@ -87,7 +87,14 @@ check_root() {
 
 # Signal handling for cleanup
 setup_trap() {
-    trap 'echo "Script interrupted."; exit 1' INT
+    trap trap_handler INT
+}
+
+trap_handler() {
+    echo "Script interrupted."
+    delete_env_config
+    delete_vars
+    exit 1
 }
 
 get_project_root() {
@@ -208,10 +215,28 @@ create_env_config() {
     fi
 }
 
+# Configuration file is removed if it exists, as in the case of premature exit
+delete_env_config() {
+    local config_file="$PROJECT_ROOT/conf/env_setup.sh"
+
+    if [[ -f "$config_file"]]; then
+        echo "Removing environmental config file..."
+        rm "$config_file"
+    else
+        echo "Environmental config file was not generated."
+    fi
+}
+
+# Generate SSL certificates for Rabbit
+# This & configure_neo4j can be executed in either order
 generate_certs() {
+    # Check for /var and generate if it does not exist
+    local var_dir="$PROJECT_ROOT/var"
+    if [[ ! -d "$var_dir" ]]; then
+        mkdir -p $PROJECT_ROOT/var
+    fi
     # Clone tls-gen, generate SSL files, and set up Neo4J volumes
     echo "Generating SSL certificates using tls-gen..."
-    mkdir -p $PROJECT_ROOT/var
     cd $PROJECT_ROOT/var
     git clone https://github.com/rabbitmq/tls-gen.git
     cd tls-gen/basic
@@ -236,9 +261,17 @@ generate_certs() {
     sudo chmod 777 -R "$ssl_dir"
 }
 
+# Configure Neo4J in /var directory
+# This & generate_certs can be executed in either order
 configure_neo4j() {
     # Provisioning Neo4J directories and setting permissions
     echo "Setting up Neo4J directories and copying configuration files..."
+
+    # Check for /var and generate if it does not exist
+    local var_dir="$PROJECT_ROOT/var"
+    if [[ ! -d "$var_dir" ]]; then
+        mkdir -p $PROJECT_ROOT/var
+    fi
 
     local neo4j_vol_dir="$PROJECT_ROOT/var/neo4j_volumes"
 
@@ -254,6 +287,19 @@ configure_neo4j() {
 
     sudo chown -R 7474:7474 "$neo4j_vol_dir"
     sudo chmod -R 775 "$neo4j_vol_dir"
+}
+
+# Delete /var directory, which contains certificates & configuration for Neo4J and Rabbit
+delete_vars() {
+    local var_dir="$PROJECT_ROOT/var"
+
+    # Fully delete /var folder if it exists.
+    if [[ -d "$var_dir" ]]; then
+        echo "Removing SSL certificates..."
+        rm -rf "$var_dir"
+    else
+        echo "Certificates and config were not generated."
+    fi
 }
 
 # Updating DNS entries for local service resolution
@@ -275,6 +321,21 @@ update_dns_entries() {
     else
         echo "The line '$entry' already exists in $file. Leaving it alone."
     fi
+}
+
+# Removing broker & graph entries from local service resolution
+# Note: this is not used in the trap handler, since the update method (above)
+# handles when the entries already exist. may be useful for an uninstaller.
+remove_dns_entries() {
+    local file="/etc/hosts"
+
+    echo "Removing DNS entries for the broker and the graph from $file..."
+
+    entry="127.0.0.1 $BROKER_ENDPOINT_NAME"
+    sed -i "/$entry/d" "$file"
+
+    entry="127.0.0.1 $GRAPH_ENDPOINT_NAME"
+    sed -i "/$entry/d" "$file"
 }
 
 main() {
