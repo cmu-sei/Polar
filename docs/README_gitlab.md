@@ -50,23 +50,31 @@ Instructions written and tested on an Intel Mac running MacOS Sonoma (14.5) and 
 ## Install Commands
 
 ### Fedora/CentOS/RHEL:
+If sudo is not installed: `dnf install sudo`
 ```sh
-sudo dnf install make git openssl sudo
+sudo dnf install make git openssl
 ```
 
-### Debian:
+### Debian/Ubuntu:
+If sudo is not installed: `apt-get install sudo`
 ```sh
-sudo apt-get install make git openssl sudo
+sudo apt-get install make git openssl
 ```
 
 ### Arch:
+If sudo is not installed `pacman -S sudo` or `yay -S sudo`
 ```sh
-sudo pacman -S make git openssl sudo
+sudo pacman -S make git openssl
+```
+or 
+```sh
+sudo yay -S make git openssl
 ```
 
 ### Alpine:
+If sudo is not installed: `apk add sudo`
 ```sh
-sudo apk add make git openssl sudo
+sudo apk add make git openssl
 ```
 
 ### MacOS
