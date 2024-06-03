@@ -32,7 +32,7 @@ There are some first time components before the Gitlab agent can be ran. When do
 ## Operating System
 MacOS Monterrey or newer or modern Linux
 
-Instructions written and tested on an Intel Mac running MacOS Sonoma (14.5) and Ubuntu 22.04 (LTS). 
+Instructions written and tested on an Intel Mac running MacOS Sonoma (14.5) and Ubuntu 22.04 (LTS) on an Amazon EC2 instance (t3.2xlarge). 
 
 ## Hardware
 - Multi-core CPU
