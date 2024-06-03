@@ -25,50 +25,67 @@ DM24-0470
 
 # Gitlab Agent Development Compose SetUp
 
-There are some first time components before `docker compose up` can be ran. When doing local development, the rust binaries should be compiled and ran locally outside a container. More will be explained further down. 
+There are some first time components before the Gitlab agent can be ran. When doing local development, the rust binaries should be compiled and ran locally outside a container. More will be explained further down. 
 
 # Requirements
 
 ## Operating System
-- **MacOS**: Version 12 or later
-- **Ubuntu**: Version 20.04 or later
+MacOS Monterrey or newer or modern Linux
+
+Instructions written and testing on an Intel Mac running MacOS Sonoma (14.5) and Ubuntu 22.04 (LTS). 
 
 ## Hardware
-- **RAM**: 16 GB
-- **Storage**: 25 GB
-- **CPU**: 4 cores
+- Multi-core CPU
+- At least 8GB of RAM
+- 25GB Free Storage
 
 ## Software
-- [Docker Engine](https://docs.docker.com/engine/install/) with [Docker Compose Plugin](https://docs.docker.com/compose/install/)
 - [Rust](https://doc.rust-lang.org/cargo/getting-started/installation.html)
 - GNU Make
 - Git
 - OpenSSL
 - Sudo
+- (Recommended, but not required, instructions written assuming Docker is installed) [Docker Engine](https://docs.docker.com/engine/install/) with [Docker Compose Plugin](https://docs.docker.com/compose/install/)
 
 ## Install Commands
 
-### Ubuntu
+### Fedora/CentOS/RHEL:
+```sh
+sudo dnf install make git openssl sudo
+```
+
+### Debian:
 ```sh
 sudo apt-get install make git openssl sudo
 ```
 
-### MacOS
+### Arch:
+```sh
+sudo pacman -S make git openssl sudo
 ```
+
+### Alpine:
+```sh
+sudo apk add make git openssl sudo
+```
+
+### MacOS
+Brew required. Install if you are missing it: https://brew.sh/
+```sh
 brew install make git openssl
 ```
 
 # Automated Setup
-Running the below set up script will create an environments file, creates the neccessary certificates files and updates permissions to allow you to run the .
+Running the below set up script will create an environments file, creates the necessary certificates files and updates permissions to allow you to run the tool.
 ```sh
-cd <project-folder>
-cd scripts
+cd $PROJECT_ROOT/scripts
 chmod +x dev_stack.sh
 ./dev_stack.sh
 ```
 
 # Manual Setup
-## Required Variable
+[skip if you have already run the automated setup above]
+
 This tool requires the following values to be present in your environment as
 variables - some of which may contain sensitive data and should be stored
 securely. See your team about how to retrieve this information.
@@ -116,6 +133,7 @@ export GITLAB_TOKEN=""
    1. Clone the repo and change into the `basic` directory
    2. Run `make CN=rabbitmq` to generate the basic certificates.
    3. Copy the contents of the created `results` directory to the `ssl` one created in the same directory as this README. 
+   `
       1. `mkdir $PROJECT_ROOT/conf/gitlab_compose/ssl`
       2. `cp results/* $PROJECT_ROOT/conf/gitlab_compose/ssl`
 4. Due to a bug in a Rust Library, the client p12 file created will need to be converted to a legacy file using openssl. Change the `rabbitmq` portion of the command to whatever **CN** was used in the make command above. 
@@ -142,9 +160,11 @@ openssl pkcs12 -legacy -export -inkey client_rabbitmq_key.pem -in client_rabbitm
    1. `echo '127.0.0.1 rabbitmq' | sudo tee -a /etc/hosts`
    2. `echo '127.0.0.1 neo4j' | sudo tee -a /etc/hosts`
 
-# Running
-## Running NEO4J and RabbitMQ
-1. Run `docker compose up` in the development-compose directory and spawn the NEO4J and RabbitMQ servers. Make sure to auth with your private registry if you're using one.
+# Running a Local Stack
+## Running a Pub/Sub Broker and a Graph Data Store
+[We currently support Neo4j and RabbitMQ, but intend to expand support for other common infrastructure]
+
+1. Run `docker compose up` in the gitlab_compose directory [$PROJECT_ROOT/conf/gitlab_compose/](/conf/gitlab_compose/) and spawn the NEO4J and RabbitMQ servers. Make sure to auth with your private registry if you're using one.
 2. Access the NEO4J web UI via http://localhost:7474 to configure a password. The default user/pass combo is `neo4j:neo4j`. *This will need to be changed before running the rust binaries for the first time.*
 
 ## Running the Rust Binaries (Using Gitlab Agent)
@@ -160,8 +180,6 @@ openssl pkcs12 -legacy -export -inkey client_rabbitmq_key.pem -in client_rabbitm
    3. Observer: `./observer_entrypoint`
    4. Consumer: `./consumer_entrypoint`
 4. After some time, nodes should start to show up in the Neo4J instance. 
-
-
 
 ## Fun queries
 match (r:GitlabRunner) where r.runner_id = '304' with r  match p=(r)-[:hasJob]->(j:GitlabRunnerJob) where j.status = 'failed' return p as failedjob
