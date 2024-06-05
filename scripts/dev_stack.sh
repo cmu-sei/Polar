@@ -93,13 +93,14 @@ setup_trap() {
 
 exit_handler() {
     # if the script exits on code 0 is successful, else perform cleanup.
-    local ecode = $?
+    local ecode=$?
     if [ $ecode -eq 0 ]; then echo "Setup complete."
-    else if [ $ecode -eq 2 ] then echo "Setup cancelled."
+    elif [ $ecode -eq 2 ]; then echo "Setup cancelled."
     else 
         echo "Script interrupted."
         delete_env_config
         delete_vars
+        remove_dns_entries
     fi
 }
 
@@ -118,8 +119,8 @@ get_project_root() {
 configure_env() {
     local config_file="$PROJECT_ROOT/conf/env_setup.sh"
     if [[ -f "$config_file" ]]; then
-        echo "Environment config file exists. Overwrite? [yN] " OVERWRITE
-        if [[ $OVERWRITE =~ ^[yY]$ ]]; then
+        read -p "Environment config file exists. Overwrite? [yN] " OVERWRITE
+        if [[ "$OVERWRITE" =~ ^[yY]$ ]]; then
             rm "$config_file"
         else
             exit 2
@@ -341,18 +342,25 @@ update_dns_entries() {
 }
 
 # Removing broker & graph entries from local service resolution
-# Note: this is not used in the trap handler, since the update method (above)
-# handles when the entries already exist. may be useful for an uninstaller.
 remove_dns_entries() {
     local file="/etc/hosts"
 
     echo "Removing DNS entries for the broker and the graph from $file..."
 
+    # this is a little silly, but you can't sed the hosts file directly from a container, so.
+    local dup="$PROJECT_ROOT/scripts/hostsdup"
+    cp $file $dup
+
     entry="127.0.0.1 $BROKER_ENDPOINT_NAME"
-    sed -i "/$entry/d" "$file"
+    # sed -i "/$entry/d" "$file"
+    sed -i "/$entry/d" "$dup"
 
     entry="127.0.0.1 $GRAPH_ENDPOINT_NAME"
-    sed -i "/$entry/d" "$file"
+    # sed -i "/$entry/d" "$file"
+    sed -i "/$entry/d" "$dup"
+
+    cp $dup $file
+    rm $dup
 }
 
 main() {
