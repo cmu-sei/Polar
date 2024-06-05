@@ -31,7 +31,7 @@ DM24-0470
 ## Background
 
 ### General Background
-"Polar" is a play on the original "Mercator", as it was released by Lending Club, a set of agents designed to collect infrastructure data and load it into a graph, using Neo4J. The original Lending Club Mercator agents were all built in Java, for an obsolete version of Neo4J, and is no longer publicly-available on Github. 
+"Polar" is a play on the original "Mercator", as it was released by Lending Club, a set of agents designed to collect infrastructure data and load it into a graph, using Neo4J. The original [Lending Club Mercator](https://github.com/LendingClub/) agents were all built in Java, for an obsolete version of Neo4J, and is no longer publicly-available on Github. 
 
 Polar is a knowledge graph framework that takes inspiration from that original project, bringing with it modern ideas for software. Polar alters the original architecture to include pub/sub, mutual TLS, and external observation of services and infrastructure.
 
@@ -62,10 +62,10 @@ Three important parts of the framework implementation include:
 * The Types Library
     * Contains implementation of the various GitLab types, as well as implementations  for serialization / deserialization.
 
-All credentials, endpoints, and the like should be read in as environment variables,possibly from an environment file. There is an example an environment file in the gitlab agent [readme](./docs/README_gitlab.md) in the manual setup.
+All credentials, endpoints, and the like should be read in as environment variables,possibly from an environment file. There is an example an environment file in the gitlab agent [README](./docs/README_gitlab.md) in the manual setup.
 
 ## Getting Started
-Please consult the [readme](./docs/README_gitlab.md) in the docs folder 
+Please consult the [README](./docs/README_gitlab.md) in the docs folder 
 
 ## Additional Resources
 * [Polar: Improving DevSecOps Observability](https://insights.sei.cmu.edu/blog/polar-improving-devsecops-observability/): Blog that provides comprehensive insights into Polar's architecture, components, and capabilities.
