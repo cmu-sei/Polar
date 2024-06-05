@@ -88,12 +88,14 @@ check_root() {
 # Signal handling for cleanup
 setup_trap() {
     trap exit_handler EXIT
-    trap "exit -1" INT
+    trap "exit 2" INT
 }
 
 exit_handler() {
     # if the script exits on code 0 is successful, else perform cleanup.
-    if [ $? -eq 0 ]; then echo "Setup complete."
+    local ecode = $?
+    if [ $ecode -eq 0 ]; then echo "Setup complete."
+    else if [ $ecode -eq 2 ] then echo "Setup cancelled."
     else 
         echo "Script interrupted."
         delete_env_config
@@ -114,6 +116,16 @@ get_project_root() {
 
 # Define configuration through user input
 configure_env() {
+    local config_file="$PROJECT_ROOT/conf/env_setup.sh"
+    if [[ -f "$config_file" ]]; then
+        echo "Environment config file exists. Overwrite? [yN] " OVERWRITE
+        if [[ $OVERWRITE =~ ^[yY]$ ]]; then
+            rm "$config_file"
+        else
+            exit 2
+        fi
+    fi
+
     echo "Configuring the environment template. Please provide the required values."
 
     # TODO: Add support for other graph engines. Prompt the user for which engine they intend to use.
@@ -211,6 +223,7 @@ create_env_config() {
         chmod 600 "$config_file"
         source "$config_file"
     else
+        echo "Hm. You shouldn't have been able to get here."
         echo "Environment config file exists. This script is only meant to be"
         echo "run once. Edit the config directly or delete it to run this script again."
         echo "WARNING: Execution has failed and will clean-up any artifacts"
