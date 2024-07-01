@@ -121,7 +121,9 @@ configure_env() {
     if [[ -f "$config_file" ]]; then
         read -p "Environment config file exists. Overwrite? [yN] " OVERWRITE
         if [[ "$OVERWRITE" =~ ^[yY]$ ]]; then
-            rm "$config_file"
+            delete_env_config
+            delete_vars
+            remove_dns_entries
         else
             exit 2
         fi
