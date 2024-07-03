@@ -67,7 +67,7 @@ clear_shadows() {
 # Check for required commands. No need to check for the core utils or posix
 # ones.
 check_prereqs() {
-    local required="git openssl sudo"
+    local required="git openssl sudo make"
     for cmd in $required; do
         if ! command -v "$cmd" &> /dev/null; then
             echo "Error: Required command '$cmd' is not installed." >&2
@@ -76,9 +76,32 @@ check_prereqs() {
     done
 }
 
+## Check for non-root
+check_root() {
+    if [ "$EUID" -eq 0 ]; then
+        echo "Warning: You are running this script as root. It's recommended to run as a non-root user."
+        echo "Press any key to continue as root or Ctrl+C to cancel."
+        read -n 1 -s -r -p ""
+    fi
+}
+
 # Signal handling for cleanup
 setup_trap() {
-    trap 'echo "Script interrupted."; exit 1' INT
+    trap exit_handler EXIT
+    trap "exit 2" INT
+}
+
+exit_handler() {
+    # if the script exits on code 0 is successful, else perform cleanup.
+    local ecode=$?
+    if [ $ecode -eq 0 ]; then echo "Setup complete."
+    elif [ $ecode -eq 2 ]; then echo "Setup cancelled."
+    else 
+        echo "Script interrupted."
+        delete_env_config
+        delete_vars
+        remove_dns_entries
+    fi
 }
 
 get_project_root() {
@@ -94,6 +117,16 @@ get_project_root() {
 
 # Define configuration through user input
 configure_env() {
+    local config_file="$PROJECT_ROOT/conf/env_setup.sh"
+    if [[ -f "$config_file" ]]; then
+        read -p "Environment config file exists. Overwrite? [yN] " OVERWRITE
+        if [[ "$OVERWRITE" =~ ^[yY]$ ]]; then
+            rm "$config_file"
+        else
+            exit 2
+        fi
+    fi
+
     echo "Configuring the environment template. Please provide the required values."
 
     # TODO: Add support for other graph engines. Prompt the user for which engine they intend to use.
@@ -191,6 +224,7 @@ create_env_config() {
         chmod 600 "$config_file"
         source "$config_file"
     else
+        echo "Hm. You shouldn't have been able to get here."
         echo "Environment config file exists. This script is only meant to be"
         echo "run once. Edit the config directly or delete it to run this script again."
         echo "WARNING: Execution has failed and will clean-up any artifacts"
@@ -199,10 +233,28 @@ create_env_config() {
     fi
 }
 
+# Configuration file is removed if it exists, as in the case of premature exit
+delete_env_config() {
+    local config_file="$PROJECT_ROOT/conf/env_setup.sh"
+
+    if [[ -f "$config_file" ]]; then
+        echo "Removing environmental config file..."
+        rm "$config_file"
+    else
+        echo "Environmental config file was not generated."
+    fi
+}
+
+# Generate SSL certificates for Rabbit
+# This & configure_neo4j can be executed in either order
 generate_certs() {
+    # Check for /var and generate if it does not exist
+    local var_dir="$PROJECT_ROOT/var"
+    if [[ ! -d "$var_dir" ]]; then
+        mkdir -p $PROJECT_ROOT/var
+    fi
     # Clone tls-gen, generate SSL files, and set up Neo4J volumes
     echo "Generating SSL certificates using tls-gen..."
-    mkdir -p $PROJECT_ROOT/var
     cd $PROJECT_ROOT/var
     git clone https://github.com/rabbitmq/tls-gen.git
     cd tls-gen/basic
@@ -222,13 +274,22 @@ generate_certs() {
 
 # Adjust permissions for security
     echo "Adjusting permissions for SSL files..."
-    sudo chown 1001:0 *
+    sudo chown $(whoami):0 *
     sudo chmod 400 *
+    sudo chmod 777 -R "$ssl_dir"
 }
 
+# Configure Neo4J in /var directory
+# This & generate_certs can be executed in either order
 configure_neo4j() {
     # Provisioning Neo4J directories and setting permissions
     echo "Setting up Neo4J directories and copying configuration files..."
+
+    # Check for /var and generate if it does not exist
+    local var_dir="$PROJECT_ROOT/var"
+    if [[ ! -d "$var_dir" ]]; then
+        mkdir -p $PROJECT_ROOT/var
+    fi
 
     local neo4j_vol_dir="$PROJECT_ROOT/var/neo4j_volumes"
 
@@ -246,6 +307,19 @@ configure_neo4j() {
     sudo chmod -R 775 "$neo4j_vol_dir"
 }
 
+# Delete /var directory, which contains certificates & configuration for Neo4J and Rabbit
+delete_vars() {
+    local var_dir="$PROJECT_ROOT/var"
+
+    # Fully delete /var folder if it exists.
+    if [[ -d "$var_dir" ]]; then
+        echo "Removing /var directory..."
+        sudo rm -rf "$var_dir"
+    else
+        echo "Certificates and config were not generated."
+    fi
+}
+
 # Updating DNS entries for local service resolution
 update_dns_entries() {
     local file="/etc/hosts"
@@ -253,23 +327,46 @@ update_dns_entries() {
     echo "Updating $file with local DNS entries for the broker and the graph..."
 
     entry="127.0.0.1 $BROKER_ENDPOINT_NAME"
-    if [[ ! $(grep -Fxq "$entry" "$file") ]]; then
+    if [[ -z $(grep -Fx "$entry" "$file") ]]; then
         echo "$entry" | sudo tee -a "$file"
     else
         echo "The line '$entry' already exists in $file. Leaving it alone."
     fi
 
     entry="127.0.0.1 $GRAPH_ENDPOINT_NAME"
-    if [[ ! $(grep -Fxq "$entry" "$file") ]]; then
+    if [[ -z $(grep -Fx "$entry" "$file") ]]; then
         echo "$entry" | sudo tee -a "$file"
     else
         echo "The line '$entry' already exists in $file. Leaving it alone."
     fi
 }
 
+# Removing broker & graph entries from local service resolution
+remove_dns_entries() {
+    local file="/etc/hosts"
+
+    echo "Removing DNS entries for the broker and the graph from $file..."
+
+    # this is a little silly, but you can't sed the hosts file directly from a container, so.
+    local dup="$PROJECT_ROOT/scripts/hostsdup"
+    cp $file $dup
+
+    entry="127.0.0.1 $BROKER_ENDPOINT_NAME"
+    # sed -i "/$entry/d" "$file"
+    sed -i "/$entry/d" "$dup"
+
+    entry="127.0.0.1 $GRAPH_ENDPOINT_NAME"
+    # sed -i "/$entry/d" "$file"
+    sed -i "/$entry/d" "$dup"
+
+    cp $dup $file
+    rm $dup
+}
+
 main() {
     clear_shadows
     check_prereqs
+    check_root
     setup_trap
 
     echo "WARNING: This script makes modifications to your system, including"
