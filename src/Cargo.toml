@@ -32,4 +32,5 @@ members = [
     "agents/gitlab/types",
     "graph_adapter",
     "neo_graph_adapter",
+    "todo_app_sqlite_axum",
 ]
