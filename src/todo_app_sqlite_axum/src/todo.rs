@@ -25,12 +25,17 @@ pub struct Todo {
 
 #[cfg(feature = "ssr")]
 pub mod ssr {
+    use std::env;
+
     // use http::{header::SET_COOKIE, HeaderMap, HeaderValue, StatusCode};
     use leptos::ServerFnError;
     use sqlx::{Connection, SqliteConnection};
 
     pub async fn db() -> Result<SqliteConnection, ServerFnError> {
-        Ok(SqliteConnection::connect("sqlite:Todos.db").await?)
+        //read dbfile from env var to read other todo dbs. 
+        //TODO: Pass in as an argument rather than an env var?
+        let db_file = std::env::var("DB_FILE").unwrap();
+        Ok(SqliteConnection::connect(format!("sqlite:{}", db_file).as_str()).await?)
     }
 }
 
