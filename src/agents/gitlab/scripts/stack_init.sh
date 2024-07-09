@@ -103,6 +103,19 @@ modify_env_config() {
     echo "$COMMAND" >> "$config_file"
 }
 
+modify_compose() {
+    local compose_file="$PROJECT_ROOT/run-container/docker-compose.yml"
+
+    COMMAND="      - GITLAB_ENDPOINT=$GITLAB_ENDPOINT"
+    sed -i "/    volumes: /i\\$COMMAND" "$compose_file"
+
+    COMMAND="      - GITLAB_TOKEN=$GITLAB_TOKEN"
+    sed -i "/    volumes: /i\\$COMMAND" "$compose_file"
+
+    COMMAND="      - $GITLAB_OBSERVER_CONFIG:/etc/gitlab/observer_config.yaml"
+    sed -i "/    network_mode: host/i\\$COMMAND" "$compose_file"
+}
+
 main() {
     # Check if the parent command is the expected one
     #TODO: This check doesn't work as expected. Fix check. For example, calling with fish or bash does not work
@@ -116,6 +129,7 @@ main() {
     env_config_exists
     configure_gitlab_env
     modify_env_config
+    modify_compose
 }
 
 main

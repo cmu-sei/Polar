@@ -99,6 +99,7 @@ exit_handler() {
     else 
         echo "Script interrupted."
         delete_env_config
+        delete_compose
         delete_vars
         remove_dns_entries
     fi
@@ -122,6 +123,7 @@ configure_env() {
         read -p "Environment config file exists. Overwrite? [yN] " OVERWRITE
         if [[ "$OVERWRITE" =~ ^[yY]$ ]]; then
             delete_env_config
+            delete_compose
             delete_vars
             remove_dns_entries
         else
@@ -247,6 +249,85 @@ delete_env_config() {
     fi
 }
 
+# Configuration is written into a docker compose file for use in the run container
+create_compose() {
+    local compose_file="$PROJECT_ROOT/run-container/docker-compose.yml"
+
+    # This script is only meant to be run on an initial configuration. If the
+    # compose file exists, the user needs to modify it directly. Alternatively,
+    # they can delete the compose file and then this script can run.
+
+    if [[ ! -f "$compose_file" ]]; then
+        echo "Creating docker compose file at $compose_file"
+        echo "This contains the same information as the config file."
+
+        echo 'services:' >> "$compose_file"
+        echo '  polar:' >> "$compose_file"
+        echo '    image: polar-run' >> "$compose_file"
+        echo '    environment: ' >> "$compose_file"
+
+        # put GRAPH_ENDPOINT into the compose file
+        COMMAND="      - GRAPH_ENDPOINT=$GRAPH_ENDPOINT"
+        echo "$COMMAND" >> "$compose_file"
+
+        # put BROKER_ENDPOINT into the compose file
+        COMMAND="      - BROKER_ENDPOINT=$BROKER_ENDPOINT"
+        echo "$COMMAND" >> "$compose_file"
+
+        # put GRAPH_USER into the compose file
+        COMMAND="      - GRAPH_USER=$GRAPH_USER"
+        echo "$COMMAND" >> "$compose_file"
+
+        # put GRAPH_PASSWORD into the compose file
+        COMMAND="      - GRAPH_PASSWORD=$GRAPH_PASSWORD"
+        echo "$COMMAND" >> "$compose_file"
+
+        # put GRAPH_DB into the compose file
+        COMMAND="      - GRAPH_DB=$GRAPH_DB"
+        echo "$COMMAND" >> "$compose_file"
+
+        # put TLS_KEY_PASSWORD into the compose file
+        COMMAND="      - TLS_KEY_PASSWORD=$TLS_KEY_PASSWORD"
+        echo "$COMMAND" >> "$compose_file"
+
+        # these TLS paths are always the same inside the container;
+        # where they are mounted may differ.
+        echo '      - TLS_CLIENT_KEY=/etc/ssl/client_rabbitmq.p12' >> "$compose_file"
+        echo '      - TLS_CA_CERT=/etc/ssl/ca_certificate.pem' >> "$compose_file"
+        
+        echo '      - GITLAB_OBSERVER_CONFIG=/etc/gitlab/observer_config.yaml' >> "$compose_file"
+
+        echo '    volumes: ' >> "$compose_file"
+        COMMAND="      - $TLS_CLIENT_KEY:/etc/ssl/client_rabbitmq.p12"
+        echo "$COMMAND" >> "$compose_file"
+
+        COMMAND="      - $TLS_CA_CERT:/etc/ssl/ca_certificate.pem"
+        echo "$COMMAND" >> "$compose_file"
+
+        echo '    network_mode: host' >> "$compose_file"
+        echo '    command: tail -f /dev/null' >> "$compose_file"
+    else
+        echo "Hm. You shouldn't have been able to get here."
+        echo "Docker compose file exists. This script is only meant to be"
+        echo "run once. Edit the compose directly or delete it to run this script again."
+        echo "WARNING: Execution has failed and will clean-up any artifacts"
+        echo "potentially created during this run."
+        exit -1
+    fi
+}
+
+# Compose file is removed if it exists, as in the case of premature exit
+delete_compose() {
+    local compose_file="$PROJECT_ROOT/run-container/docker-compose.yml"
+
+    if [[ -f "$compose_file" ]]; then
+        echo "Removing docker compose file..."
+        rm "$compose_file"
+    else
+        echo "Docker compose file was not generated."
+    fi
+}
+
 # Generate SSL certificates for Rabbit
 # This & configure_neo4j can be executed in either order
 generate_certs() {
@@ -347,21 +428,26 @@ update_dns_entries() {
 remove_dns_entries() {
     local file="/etc/hosts"
 
+    local brokers=("rabbitmq")
+    local graphs=("neo4j")
+
     echo "Removing DNS entries for the broker and the graph from $file..."
 
     # this is a little silly, but you can't sed the hosts file directly from a container, so.
     local dup="$PROJECT_ROOT/scripts/hostsdup"
     cp $file $dup
 
-    entry="127.0.0.1 $BROKER_ENDPOINT_NAME"
-    # sed -i "/$entry/d" "$file"
-    sed -i "/$entry/d" "$dup"
+    for broker in "${brokers[@]}"; do
+        entry="127.0.0.1 $broker"
+        sed -i "/$entry/d" "$dup"
+    done
 
-    entry="127.0.0.1 $GRAPH_ENDPOINT_NAME"
-    # sed -i "/$entry/d" "$file"
-    sed -i "/$entry/d" "$dup"
+    for graph in "${graphs[@]}"; do
+        entry="127.0.0.1 $graph"
+        sed -i "/$entry/d" "$dup"
+    done
 
-    cp $dup $file
+    sudo cp $dup $file
     rm $dup
 }
 
@@ -383,6 +469,7 @@ main() {
     get_project_root
     configure_env
     create_env_config
+    create_compose
     if [[ POLAR_CONFIG_GITLAB -eq 0 ]]; then
         source "$PROJECT_ROOT/src/agents/gitlab/scripts/stack_init.sh"
     fi
