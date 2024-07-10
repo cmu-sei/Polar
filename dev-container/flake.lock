@@ -327,14 +327,17 @@
         "rust-overlay": "rust-overlay_2"
       },
       "locked": {
-        "lastModified": 1,
-        "narHash": "sha256-xuJzgN0pidmXWdBfh/FL290XQ47BXK/8hiQr+uBtbwQ=",
-        "path": "./static-analysis",
-        "type": "path"
+        "lastModified": 1720624086,
+        "narHash": "sha256-jlps5SJYi6umacrWxvtRxNx58+NwltMlC371WsWdGyY=",
+        "owner": "rmdettmar",
+        "repo": "polar-static-analysis",
+        "rev": "ee99bc9793aa9025f9cf8d817e353cf4be66bb1d",
+        "type": "github"
       },
       "original": {
-        "path": "./static-analysis",
-        "type": "path"
+        "owner": "rmdettmar",
+        "repo": "polar-static-analysis",
+        "type": "github"
       }
     },
     "systems": {

@@ -6,7 +6,7 @@
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable"; # Main Nix package repository
     rust-overlay.url = "github:oxalica/rust-overlay";
     myNeovimOverlay.url = "github:daveman1010221/nix-neovim";
-    staticanalysis.url = "path:./static-analysis";
+    staticanalysis.url = "github:rmdettmar/polar-static-analysis";
   };
 
   outputs = { self, flake-utils, nixpkgs, rust-overlay, myNeovimOverlay, staticanalysis, ... }:
