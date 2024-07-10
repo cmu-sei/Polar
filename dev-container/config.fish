@@ -71,17 +71,16 @@ end
 function fish_greeting --description="Displays the Fish logo and some other init stuff."
     set_color $fish_color_autosuggestion
     set_color normal
-    lol_fig "Welcome to the Dave Shell."
-    #neofetch
-    #fortune | \
-        #cowsay -n -f (set cows (ls /nix/store/0qfhxizh6l7mcf7xsqa3afc8q1g0ina0-cowsay-3.7.0/share/cowsay/cows); \
-        #set total_cows (count $cows); \
-        #set random_cow (random 1 $total_cows); \
-        #set my_cow $cows[$random_cow]; \
-        #echo -n $my_cow | 
-            #cut -d '.' -f 1) -W 79 | \
-            #lolcat --force | \
-            #cat
+    lol_fig "Welcome to the Polar Shell."
+    
+    # Array of funny phrases
+    set phrases "Brace yourself for a flurry of brilliant code!" "Keep calm and code like an Eskimo!" "Our code is cooler than an ice cube in Antarctica!" "Get ready to chill and code!" "Let's make some code that's ice-olated in perfection!" "There are no polar bears, only coding bears!" "Next stop: Bug-free code!" "Where the only thing frozen is the bugs!" "It's time to break the ice and dive into development!" "Where every line of code is as cool as the Arctic!"
+
+    # Select a random funny phrase
+    set random_index (random 1 (count $phrases))
+    set phrase $phrases[$random_index]
+
+    echo $phrase | lolcat --force | cat
 end
 
 function hash_get --description="Return a hash of the input string."

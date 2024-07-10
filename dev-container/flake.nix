@@ -95,6 +95,7 @@
             findutils
             gnugrep
             getent
+            gawk
 
             # -- Compilers, Etc. --
             gcc
@@ -131,7 +132,7 @@
           tag = "latest";
           copyToRoot = [ myEnv ] ++ baseInfo ++ [ fishConfig ];
           config = {
-            WorkingDir = "/workspaces";
+            WorkingDir = "/workspace";
             Env = [
               # Add certificates to allow for cargo to download files
               "SSL_CERT_FILE=/etc/ssl/certs/ca-bundle.crt"
