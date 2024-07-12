@@ -10,3 +10,4 @@ gitlab_logs
 gitlab_data
 env_setup.sh
 var/
+output/
