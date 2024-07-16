@@ -55,7 +55,10 @@ POLAR_CONFIG_RABBITMQ=0
 # Commands used in the script could be shadowed by function definitions. Ensure
 # they are not unsetting any conflicting functions definitions.
 clear_shadows() {
-    local commands="ls cp chmod chown echo mkdir cp git openssl sudo tee"
+    local commands="ls cp chmod chown echo mkdir cp git openssl tee"
+    if [ ! "$EUID" -eq 0 ]; then
+        commands="$commands sudo"
+    fi
 
     for cmd in $commands; do
         if declare -F "$cmd" > /dev/null; then
@@ -67,7 +70,10 @@ clear_shadows() {
 # Check for required commands. No need to check for the core utils or posix
 # ones.
 check_prereqs() {
-    local required="git openssl sudo make"
+    local required="git openssl make"
+    if [ ! "$EUID" -eq 0 ]; then
+        required="$required sudo"
+    fi
     for cmd in $required; do
         if ! command -v "$cmd" &> /dev/null; then
             echo "Error: Required command '$cmd' is not installed." >&2
@@ -80,6 +86,7 @@ check_prereqs() {
 check_root() {
     if [ "$EUID" -eq 0 ]; then
         echo "Warning: You are running this script as root. It's recommended to run as a non-root user."
+        echo "If you are running as root inside a dev container, ignore this warning."
         echo "Press any key to continue as root or Ctrl+C to cancel."
         read -n 1 -s -r -p ""
     fi
@@ -209,6 +216,7 @@ create_env_config() {
         echo "$COMMAND" >> "$config_file"
 
         chmod 600 "$config_file"
+        chown 1000:1000 "$config_file"
         source "$config_file"
     else
         echo "Environment config file exists. This script is only meant to be"
@@ -260,9 +268,15 @@ generate_certs() {
 
 # Adjust permissions for security
     echo "Adjusting permissions for SSL files..."
-    sudo chown $(whoami):0 *
-    sudo chmod 400 *
-    sudo chmod 777 -R "$ssl_dir"
+    if [ "$EUID" -eq 0 ]; then
+        chown $(whoami):0 *
+        chmod 400 *
+        chmod 777 -R "$ssl_dir"
+    else
+        sudo chown $(whoami):0 *
+        sudo chmod 400 *
+        sudo chmod 777 -R "$ssl_dir"
+    fi
 }
 
 # Configure Neo4J in /var directory
@@ -289,8 +303,13 @@ configure_neo4j() {
     cp "$PROJECT_ROOT/conf/neo4j_setup/conf/neo4j.conf" "$neo4j_vol_dir/conf"
     cp "$PROJECT_ROOT/conf/neo4j_setup/imports/"* "$neo4j_vol_dir/import"
 
-    sudo chown -R 7474:7474 "$neo4j_vol_dir"
-    sudo chmod -R 775 "$neo4j_vol_dir"
+    if [ "$EUID" -eq 0 ]; then
+        chown -R 7474:7474 "$neo4j_vol_dir"
+        chmod -R 775 "$neo4j_vol_dir"
+    else
+        sudo chown -R 7474:7474 "$neo4j_vol_dir"
+        sudo chmod -R 775 "$neo4j_vol_dir"
+    fi
 }
 
 # Delete /var directory, which contains certificates & configuration for Neo4J and Rabbit
@@ -300,7 +319,11 @@ delete_vars() {
     # Fully delete /var folder if it exists.
     if [[ -d "$var_dir" ]]; then
         echo "Removing /var directory..."
-        sudo rm -rf "$var_dir"
+        if [ "$EUID" -eq 0 ]; then
+            rm -rf "$var_dir"
+        else
+            sudo rm -rf "$var_dir"
+        fi
     else
         echo "Certificates and config were not generated."
     fi
@@ -314,14 +337,22 @@ update_dns_entries() {
 
     entry="127.0.0.1 $BROKER_ENDPOINT_NAME"
     if [[ -z $(grep -Fx "$entry" "$file") ]]; then
-        echo "$entry" | sudo tee -a "$file"
+        if [ "$EUID" -eq 0 ]; then
+            echo "$entry" |  tee -a "$file"
+        else
+            sudo echo "$entry" |  tee -a "$file"
+        fi
     else
         echo "The line '$entry' already exists in $file. Leaving it alone."
     fi
 
     entry="127.0.0.1 $GRAPH_ENDPOINT_NAME"
     if [[ -z $(grep -Fx "$entry" "$file") ]]; then
-        echo "$entry" | sudo tee -a "$file"
+        if [ "$EUID" -eq 0 ]; then
+            echo "$entry" |  tee -a "$file"
+        else
+            echo "$entry" |  tee -a "$file"
+        fi
     else
         echo "The line '$entry' already exists in $file. Leaving it alone."
     fi

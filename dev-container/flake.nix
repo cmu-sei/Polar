@@ -103,6 +103,7 @@
             gnugrep
             getent
             gawk
+            ps
 
             # -- Compilers, Etc. --
             gcc
@@ -110,6 +111,7 @@
             cmake
             gnumake
             libclang
+            python3
 
             # -- Rust --
             (lib.meta.hiPrio rust-bin.nightly.latest.default)
