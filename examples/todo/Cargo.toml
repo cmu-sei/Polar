@@ -1,0 +1,23 @@
+[package]
+name = "todo-polar"
+description = "Simple todo example api with OpenAPI, Axum, Utoipa, Swagger UI and Scalar"
+version = "1.0.0"
+edition = "2021"
+
+
+[dependencies]
+axum = { version = "0.6", features = ["json"] }
+hyper = "0.14"
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+utoipa = { version = "3.0.1", features = ["axum_extras"] }
+utoipa-swagger-ui = { version = "3.0.2", features = ["axum"] }
+utoipa-scalar = { version = "0.1.0", features = ["axum"] }
+tower-http = { version = "0.4", features = ["fs", "cors"] }
+futures = "0.3"
+async-stream = "0.3.3"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
+
+[workspace]
