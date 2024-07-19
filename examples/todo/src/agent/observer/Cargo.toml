@@ -1,0 +1,11 @@
+[package]
+name = "observer"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+reqwest = { version = "0.12.5", features = ["json"] }
+serde = { version = "1.0.204", features = ["derive"] }
+tokio = { version = "1.38.1", features = ["full"] }
+oas3 = "0.8.1"
+
