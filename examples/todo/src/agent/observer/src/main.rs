@@ -7,7 +7,6 @@
 
 
 use serde::Deserialize;
-use reqwest::Error;
 use oas3::from_str;
 
 #[derive(Debug, Deserialize)]
@@ -18,9 +17,9 @@ pub struct Todo {
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Error> {
+async fn main() -> Result<(), oas3::Error> {
     // Fetch and print todos
-    fetch_todos().await?;
+    let _ = fetch_todos().await;
 
     // Parse OpenAPI specification from a local file or URL
     let spec = parse_openapi_spec("http://localhost:8000/api/json").await?;
@@ -29,7 +28,7 @@ async fn main() -> Result<(), Error> {
     Ok(())
 }
 
-async fn fetch_todos() -> Result<(), Error> {
+async fn fetch_todos() -> Result<(), reqwest::Error> {
     let response = reqwest::get("http://localhost:8000/api/v1/todos")
         .await?
         .json::<Vec<Todo>>()
@@ -42,12 +41,16 @@ async fn fetch_todos() -> Result<(), Error> {
     Ok(())
 }
 
-async fn parse_openapi_spec(url: &str) -> Result<oas3::OpenApiV3Spec, Error> {
-    let response: &str = reqwest::get(url).await?.text().await.unwrap().as_ref();
-    println!("{}",response);
-    match oas3::from_str(response) {
+async fn parse_openapi_spec(url: &str) -> Result<oas3::OpenApiV3Spec, oas3::Error> {
+    let response_string: String = reqwest::get(url).await
+        .unwrap()
+        .text()
+        .await.unwrap();
+    
+    println!("{}",response_string);
+
+    match from_str(response_string) {
         Ok(spec) => Ok(spec),
         Err(err) => Err(err)
-      };
-       panic!("Unable to find header")
+    }
 }
