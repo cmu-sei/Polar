@@ -276,7 +276,7 @@ generate_certs() {
     echo "Adjusting permissions for SSL files..."
     sudo chown $(whoami):0 *
     sudo chmod 400 *
-    sudo chmod 777 -R "$ssl_dir"
+    sudo chmod -R 777 "$ssl_dir"
 }
 
 # Configure Neo4J in /var directory
@@ -351,16 +351,24 @@ remove_dns_entries() {
     local dup="$PROJECT_ROOT/scripts/hostsdup"
     cp $file $dup
 
+    # Remove entries for broker and graph
     entry="127.0.0.1 $BROKER_ENDPOINT_NAME"
-    # sed -i "/$entry/d" "$file"
-    sed -i "/$entry/d" "$dup"
+    if [[ "$OSTYPE" == "darwin"* ]]; then
+        sed -i '' -e "/$entry/d" "$dup"
+    else
+        sed -i "/$entry/d" "$dup"
+    fi
 
     entry="127.0.0.1 $GRAPH_ENDPOINT_NAME"
-    # sed -i "/$entry/d" "$file"
-    sed -i "/$entry/d" "$dup"
+    if [[ "$OSTYPE" == "darwin"* ]]; then
+        sed -i '' -e "/$entry/d" "$dup"
+    else
+        sed -i "/$entry/d" "$dup"
+    fi
 
-    cp $dup $file
-    rm $dup
+    # Sudo user possibly needed on MacOS
+    sudo cp $dup $file
+    sudo rm $dup
 }
 
 main() {
