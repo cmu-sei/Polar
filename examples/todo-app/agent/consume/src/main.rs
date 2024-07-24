@@ -22,6 +22,8 @@
 */
 
 use common::{connect_to_rabbitmq};
+use serde_json::json;
+
 use futures_lite::StreamExt;
 use todo_types::{Todo, MessageType, TODO_EXCHANGE_STR, TODO_QUEUE_NAME};
 use lapin::{options::{BasicAckOptions, QueueBindOptions, BasicConsumeOptions}, Result, types::FieldTable};
@@ -108,7 +110,7 @@ async fn main() -> Result<()> {
             //TODO: Implement putting the api spec within the graph, represent each endpoint as a node?
             MessageType::OpenApiSpec(spec) => {
                 //decompose the api spec, create a node for the application itself, and nodes for each endpoint, which should have relationships to their operations.
-                let query = format!(
+                let mut query = format!(
                     "CREATE (o:Application {{ \
                     openapi_version: \"{}\", \
                     title: \"{}\", \
@@ -124,9 +126,40 @@ async fn main() -> Result<()> {
                 );
                 println!("{}", query);
 
-                transaction.run(Query::new(query)).await.expect("Could not execute query on neo4j graph");
+                //transaction.run(Query::new(query)).await.expect("Could not execute query on neo4j graph");
 
                 //iterate through paths
+                for (endpoint, path_item) in spec.paths.paths.iter() {
+                    println!("found endpoint \"{endpoint}\"");
+                    //create node for endpoint
+
+                    query = format!(
+                        "CREATE (p:Path {{ \
+                            summary: '{}', \
+                            description: '{}' \
+                        }}) RETURN p",
+                        path_item.summary.clone().unwrap_or_default(),
+                        path_item.description.clone().unwrap_or_default(),
+                    );
+                    println!("{}", query);
+                   // transaction.run(Query::new(query)).await.expect("Could not execute query on neo4j graph");
+                    
+                    for (operation_type, operation) in path_item.operations.iter() {
+                        println!("found operation of type with id {}", operation.operation_id.clone().unwrap_or_default());
+
+                        //TODO: process
+                        //create node for endpoint operation
+                        let newquery = format!(
+                        "CREATE (o:EndpointOperation {{ \
+                            operation_id: '{}', \
+                            description: '{}' \
+                        }}) RETURN o",
+                        operation.operation_id.clone().unwrap_or_default(),
+                        operation.description.clone().unwrap_or_default(),
+                        );
+                        println!("{}", newquery);
+                    }
+                }
             }
             _ => todo!()
         }
