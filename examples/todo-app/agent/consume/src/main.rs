@@ -22,7 +22,6 @@
 */
 
 use common::{connect_to_rabbitmq};
-
 use futures_lite::StreamExt;
 use todo_types::{Todo, MessageType, TODO_EXCHANGE_STR, TODO_QUEUE_NAME};
 use lapin::{options::{BasicAckOptions, QueueBindOptions, BasicConsumeOptions}, Result, types::FieldTable};
@@ -102,33 +101,33 @@ async fn main() -> Result<()> {
                 for todo in vec as Vec<Todo> {
                     let query = format!("CREATE (n: Todo {{id: \"{}\", title: \"{}\", completed: \"{}\" }}) return n ", todo.id, todo.title, todo.completed);
                     println!("{}", query);
-                    
+
                     transaction.run(Query::new(query)).await.expect("Could not execute query on neo4j graph");
                 }
             },
             //TODO: Implement putting the api spec within the graph, represent each endpoint as a node?
-            // MessageType::OpenApiSpec(spec) => {
-            //     let query = format!(
-            //         "CREATE (o:OpenApi {{ \
-            //             openapi: '{}', \
-            //             info: '{}', \
-            //             servers: {}, \
-            //             paths: '{}', \
-            //             components: '{}', \
-            //             security: {}, \
-            //             tags: {}, \
-            //             external_docs: '{}' \
-            //         }}) RETURN o",
-            //         spec.openapi,
-            //         spec.info,
-            //         servers_str,
-            //         paths_id,
-            //         components_id,
-            //         security_str,
-            //         tags_str,
-            //         external_docs_id
-            //     );
-            // }
+            MessageType::OpenApiSpec(spec) => {
+                //decompose the api spec, create a node for the application itself, and nodes for each endpoint, which should have relationships to their operations.
+                let query = format!(
+                    "CREATE (o:Application {{ \
+                    openapi_version: \"{}\", \
+                    title: \"{}\", \
+                    description: \"{}\", \
+                    version: \"{}\", \
+                    license: \"{}\" \
+                }}) RETURN o",
+                serde_json::json!(spec.openapi).as_str().unwrap_or_default(),
+                spec.info.title,
+                spec.info.description.unwrap_or_default(),
+                spec.info.version,
+                spec.info.license.unwrap_or_default().name
+                );
+                println!("{}", query);
+
+                transaction.run(Query::new(query)).await.expect("Could not execute query on neo4j graph");
+
+                //iterate through paths
+            }
             _ => todo!()
         }
         match transaction.commit().await {
