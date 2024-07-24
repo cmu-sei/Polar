@@ -63,13 +63,16 @@
               WorkingDir = "/workspaces";
               Env = [  ];
               Volumes = { };
-              Cmd = [ "/bin/bash" ]; # Start bash
+              Entrypoint = [ "/bin/bash" "-c" "echo 'The license for this container can be found in /workspaces/license.txt'; exec \"$@\"" "--" ];
+              Cmd = [ "/bin/bash" ];
             };
             extraCommands = ''
               # Create /tmp dir
               mkdir -p tmp
               
-              cp -r ${polar}/bin workspaces
+              mkdir workspaces
+              cp ${polar.src}/license.txt workspaces
+              cp -r ${polar}/bin/* workspaces
             '';
           };
         }
