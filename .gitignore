@@ -10,4 +10,3 @@ gitlab_logs
 gitlab_data
 env_setup.sh
 var/
-src/todo_app_sqlite_axum/Todos.db

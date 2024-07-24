@@ -1,4 +1,5 @@
 use crate::error_template::ErrorTemplate;
+use error::Error;
 use leptos::*;
 use leptos_meta::*;
 use leptos_router::*;
@@ -17,23 +18,22 @@ pub(super) struct TodoApi;
 #[derive(Clone, Debug, ToSchema, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ssr", derive(sqlx::FromRow))]
 pub struct Todo {  
-    id: u16,
+   pub id: u16,
     #[schema(example = "Buy groceries")]
-    title: String,
-    completed: bool,
+    pub title: String,
+    pub completed: bool,
 }
 
 #[cfg(feature = "ssr")]
 pub mod ssr {
-    use std::env;
-
+    
     // use http::{header::SET_COOKIE, HeaderMap, HeaderValue, StatusCode};
     use leptos::ServerFnError;
     use sqlx::{Connection, SqliteConnection};
 
     pub async fn db() -> Result<SqliteConnection, ServerFnError> {
         //read dbfile from env var to read other todo dbs. 
-        //TODO: Pass in as an argument rather than an env var?
+
         let db_file = std::env::var("DB_FILE").unwrap();
         Ok(SqliteConnection::connect(format!("sqlite:{}", db_file).as_str()).await?)
     }
@@ -128,6 +128,26 @@ pub async fn delete_todo(id: u16) -> Result<(), ServerFnError> {
         .map(|_| ())?)
 }
 
+//TODO: Add get_todo fn and document with Scalar
+// pub async fn get_todo_by_id(id: u16) -> Result<String, Error> {
+                
+//     let mut conn = db().await?;
+        
+//     let mut row = sqlx::query("SELECT FROM todos WHERE id = $1")
+//     .bind(id)
+//     .fetch_one(&mut conn).await.unwrap();
+
+//     let todo = Todo {
+//         id: row.get(0),
+//         title: row.get(1),
+//         completed: row.get(2)
+//     };
+    
+//     let json = serde_json::to_string(&todo).unwrap();
+
+//     Ok(json)
+// }
+
 #[component]
 pub fn TodoApp() -> impl IntoView {
     //let id = use_context::<String>();
@@ -189,7 +209,7 @@ pub fn Todos() -> impl IntoView {
                                                         view! {
 
                                                             <li>
-                                                                {todo.title}
+                                                                {todo.id}: {todo.title}
                                                                 <ActionForm action=delete_todo>
                                                                     <input type="hidden" name="id" value={todo.id}/>
                                                                     <input type="submit" value="X"/>

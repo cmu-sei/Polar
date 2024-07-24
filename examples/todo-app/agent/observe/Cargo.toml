@@ -1,0 +1,14 @@
+[package]
+name = "todo-observer"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+reqwest = { version = "0.12.5", features = ["json"] }
+serde = { version = "1.0.204", features = ["derive"] }
+tokio = { version = "1.38.1", features = ["full"] }
+common = { path = "../../../../src/agents/gitlab/common/" }
+serde_json = "1.0.120"
+lapin = "2.4.0"
+utoipa = "4.2.3"
+todo_types = {path = "../../types"}
