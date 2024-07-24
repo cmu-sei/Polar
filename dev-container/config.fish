@@ -71,6 +71,7 @@ end
 function fish_greeting --description="Displays the Fish logo and some other init stuff."
     set_color $fish_color_autosuggestion
     set_color normal
+    echo 'The license for this container can be found in /root/license.txt' | lolcat --force | cat
     lol_fig "Welcome to the Polar Shell."
     
     # Array of funny phrases

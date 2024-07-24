@@ -133,13 +133,18 @@
           destination = "/root/.config/fish/config.fish";
           text = builtins.readFile ./config.fish;
         };
+        license = pkgs.writeTextFile {
+          name = "license";
+          destination = "/root/license.txt";
+          text = builtins.readFile ./license.txt;
+        };
 
       in
       {
         packages.default = pkgs.dockerTools.buildImage {
           name = "polar-dev";
           tag = "latest";
-          copyToRoot = [ myEnv ] ++ baseInfo ++ [ fishConfig ];
+          copyToRoot = [ myEnv ] ++ baseInfo ++ [ fishConfig ] ++ [license];
           config = {
             WorkingDir = "/workspace";
             Env = [
