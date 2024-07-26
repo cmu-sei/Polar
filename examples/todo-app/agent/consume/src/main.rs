@@ -22,8 +22,7 @@
 */
 
 use common::{connect_to_rabbitmq};
-use serde_json::json;
-
+use utoipa::openapi::{PathItemType,Deprecated};
 use futures_lite::StreamExt;
 use todo_types::{Todo, MessageType, TODO_EXCHANGE_STR, TODO_QUEUE_NAME};
 use lapin::{options::{BasicAckOptions, QueueBindOptions, BasicConsumeOptions}, Result, types::FieldTable};
@@ -31,7 +30,6 @@ use neo4rs::Query;
 use std::env;
 use neo4rs::{Config, ConfigBuilder};
 use url::Url;
-
 pub fn get_neo4j_endpoint() -> String {
     let endpoint = env::var("GRAPH_ENDPOINT").expect("Could not load graph instance endpoint from environment.");
     match Url::parse(endpoint.as_str()) {
@@ -55,6 +53,27 @@ pub fn get_neo_config() -> Config {
     .fetch_size(500).max_connections(10).build().unwrap();
     
     return config;
+}
+
+pub fn get_operation_str(path_item_type: &PathItemType) -> &str {
+    match path_item_type {
+        PathItemType::Get => "GET",
+        PathItemType::Post => "POST",
+        PathItemType::Put => "PUT",
+        PathItemType::Delete => "DELETE",
+        PathItemType::Options => "OPTIONS",
+        PathItemType::Head => "HEAD",
+        PathItemType::Patch => "PATCH",
+        PathItemType::Trace => "TRACE",
+        PathItemType::Connect => "CONNECT"
+    }
+}
+
+pub fn get_deprecated_string(deprecated: &Deprecated) -> &str {
+    match deprecated {
+        Deprecated::True => "true",
+        Deprecated::False=> "false"
+    }
 }
 
 #[tokio::main]
@@ -101,17 +120,19 @@ async fn main() -> Result<()> {
         match message {
             MessageType::Todo(vec) => {
                 for todo in vec as Vec<Todo> {
-                    let query = format!("CREATE (n: Todo {{id: \"{}\", title: \"{}\", completed: \"{}\" }}) return n ", todo.id, todo.title, todo.completed);
+                    let mut query = format!("CREATE (n: Todo {{id: \"{}\", title: \"{}\", completed: \"{}\" }}) return n ", todo.id, todo.title, todo.completed);
                     println!("{}", query);
 
                     transaction.run(Query::new(query)).await.expect("Could not execute query on neo4j graph");
+
+                    //TODO: What node to link these back to? The application node itself or some node representing a database/service?
                 }
             },
             //TODO: Implement putting the api spec within the graph, represent each endpoint as a node?
             MessageType::OpenApiSpec(spec) => {
                 //decompose the api spec, create a node for the application itself, and nodes for each endpoint, which should have relationships to their operations.
                 let mut query = format!(
-                    "CREATE (o:Application {{ \
+                    "MERGE (o:Application {{ \
                     openapi_version: \"{}\", \
                     title: \"{}\", \
                     description: \"{}\", \
@@ -126,38 +147,56 @@ async fn main() -> Result<()> {
                 );
                 println!("{}", query);
 
-                //transaction.run(Query::new(query)).await.expect("Could not execute query on neo4j graph");
-
+                transaction.run(Query::new(query)).await.expect("Could not execute query on neo4j graph");
                 //iterate through paths
                 for (endpoint, path_item) in spec.paths.paths.iter() {
                     println!("found endpoint \"{endpoint}\"");
-                    //create node for endpoint
-
-                    query = format!(
-                        "CREATE (p:Path {{ \
-                            summary: '{}', \
-                            description: '{}' \
-                        }}) RETURN p",
-                        path_item.summary.clone().unwrap_or_default(),
-                        path_item.description.clone().unwrap_or_default(),
-                    );
-                    println!("{}", query);
-                   // transaction.run(Query::new(query)).await.expect("Could not execute query on neo4j graph");
+                    //deconstruct operation
+                    //TODO: extract expected params, request_body schema, security scheme.
+                    // How to represent each of these? JSON strings?
                     
                     for (operation_type, operation) in path_item.operations.iter() {
-                        println!("found operation of type with id {}", operation.operation_id.clone().unwrap_or_default());
+                        let op_type = get_operation_str(&operation_type);
+                        let op_id = operation.operation_id.clone().unwrap_or_default();
+                        let mut is_deprecated = "";
+                        let mut external_docs_url = String::from("");
 
-                        //TODO: process
-                        //create node for endpoint operation
-                        let newquery = format!(
-                        "CREATE (o:EndpointOperation {{ \
-                            operation_id: '{}', \
-                            description: '{}' \
-                        }}) RETURN o",
-                        operation.operation_id.clone().unwrap_or_default(),
+                        if let Some(deprecated) = operation.deprecated.clone() {
+                            match deprecated {
+                                Deprecated::True => is_deprecated="true",
+                                Deprecated::False =>is_deprecated="false"
+                            }
+                        }
+
+                        if let Some(external_docs) = operation.external_docs.clone() {
+                            external_docs_url = external_docs.url.clone();
+                        }
+                        println!("found {op_type} operation with id \"{}\"", operation.operation_id.clone().unwrap_or_default());
+                      
+                        let mut operation_query = format!(
+                        "MERGE (e:Endpoint {{ \
+                            endpoint: '{}',\
+                            operationId: '{}', \
+                            description: '{}', \
+                            operationType: '{}',\
+                            isDeprecated: '{}', \
+                            externalDocsUrl: '{}'
+                        }}) RETURN e",
+                        endpoint,
+                        op_id.clone(),
                         operation.description.clone().unwrap_or_default(),
+                        op_type,
+                        is_deprecated,
+                        external_docs_url
                         );
-                        println!("{}", newquery);
+                        println!("{}", operation_query);
+                        
+                        transaction.run(Query::new(operation_query)).await.expect("Could not execute query on neo4j graph");
+
+                        //draw relationship back to endpoint path node
+                        operation_query = format!("MATCH (a:Application) WHERE a.title = '{}' with a MATCH (e:Endpoint) WHERE e.operationId = '{}' WITH a,e MERGE (a)-[:hasEndpoint]->(e) ",spec.info.title ,op_id.clone());
+                        println!("{}", operation_query);
+                        transaction.run(Query::new(operation_query)).await.expect("Could not execute query on neo4j graph");
                     }
                 }
             }
