@@ -397,9 +397,14 @@ remove_dns_entries() {
         sed -i "/$entry/d" "$dup"
     fi
 
-    # Sudo user possibly needed on MacOS
-    sudo cp $dup $file
-    sudo rm $dup
+    if [[ "$OSTYPE" == "darwin"* ]]; then
+        # Sudo user possibly needed on MacOS
+        sudo cp $dup $file
+        sudo rm $dup
+    else
+        cp $dup $file
+        rm $dup
+    fi
 }
 
 main() {
