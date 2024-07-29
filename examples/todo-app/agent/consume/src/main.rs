@@ -77,6 +77,105 @@ pub fn get_deprecated_string(deprecated: &Deprecated) -> &str {
     }
 }
 
+pub async fn handle_message(message: MessageType, transaction: neo4rs::Txn) -> Result<()> {
+    match message {
+        MessageType::Todo(vec) => {
+            for todo in vec as Vec<Todo> {
+                let mut query = format!("CREATE (n: Todo {{id: \"{}\", title: \"{}\", completed: \"{}\" }}) return n ", todo.id, todo.title, todo.completed);
+                trace!("{}", query);
+
+                transaction.run(Query::new(query)).await.expect("Could not execute query on neo4j graph");
+
+                query = format!("MATCH (a:Application) WHERE a.title = '{}' with a MATCH (t:Todo) WHERE t.id = '{}' with a,t MERGE (a)-[:hasTodo]-(t)", "todo_app_sqlite_axum", todo.id);
+                trace!("{}", query);
+                transaction.run(Query::new(query)).await.expect("Could not execute query on neo4j graph");
+            }
+        },
+        //TODO: Implement putting the api spec within the graph, represent each endpoint as a node?
+        MessageType::OpenApiSpec(spec) => {
+            //decompose the api spec, create a node for the application itself, and nodes for each endpoint, which should have relationships to their operations.
+            let query = format!(
+                "MERGE (o:Application {{ \
+                openapi_version: \"{}\", \
+                title: \"{}\", \
+                description: \"{}\", \
+                version: \"{}\", \
+                license: \"{}\" \
+            }}) RETURN o",
+            serde_json::json!(spec.openapi).as_str().unwrap_or_default(),
+            spec.info.title,
+            spec.info.description.unwrap_or_default(),
+            spec.info.version,
+            spec.info.license.unwrap_or_default().name
+            );
+            trace!("{}", query);
+
+            transaction.run(Query::new(query)).await.expect("Could not execute query on neo4j graph");
+            //iterate through paths
+            for (endpoint, path_item) in spec.paths.paths.iter() {
+                debug!("found endpoint \"{endpoint}\"");
+                //destructure operation
+                for (operation_type, operation) in path_item.operations.iter() {
+                    let op_type = get_operation_str(&operation_type);
+                    let op_id = operation.operation_id.clone().unwrap_or_default();
+                    let mut is_deprecated = "";
+                    let mut external_docs_url = String::from("");
+
+                    if let Some(deprecated) = operation.deprecated.clone() {
+                        match deprecated {
+                            Deprecated::True => is_deprecated="true",
+                            Deprecated::False =>is_deprecated="false"
+                        }
+                    }
+
+                    if let Some(external_docs) = operation.external_docs.clone() {
+                        external_docs_url = external_docs.url.clone();
+                    }
+                    debug!("found {op_type} operation with id \"{}\"", operation.operation_id.clone().unwrap_or_default());
+                  
+                    let mut operation_query = format!(
+                    "MERGE (e:Endpoint {{ \
+                        endpoint: '{}',\
+                        operationId: '{}', \
+                        description: '{}', \
+                        operationType: '{}',\
+                        isDeprecated: '{}', \
+                        externalDocsUrl: '{}'
+                    }}) RETURN e",
+                    endpoint,
+                    op_id.clone(),
+                    operation.description.clone().unwrap_or_default(),
+                    op_type,
+                    is_deprecated,
+                    external_docs_url
+                    );
+                    trace!("{}", operation_query);
+                    
+                    transaction.run(Query::new(operation_query)).await.expect("Could not execute query on neo4j graph");
+
+                    //draw relationship back to app node
+                    operation_query = format!("MATCH (a:Application) WHERE a.title = '{}' with a MATCH (e:Endpoint) WHERE e.operationId = '{}' WITH a,e MERGE (a)-[:hasEndpoint]->(e) ",spec.info.title ,op_id.clone());
+                    trace!("{}", operation_query);
+                    transaction.run(Query::new(operation_query)).await.expect("Could not execute query on neo4j graph");
+                }
+            }
+        }
+        _ => todo!()
+
+    } //end message metch
+    match transaction.commit().await {
+        Ok(_) => {
+            debug!("[*] Transaction Committed")
+            Ok(())
+         },
+         Err(e) => panic!("Error updating graph {}", e)
+    }
+}
+
+pub async fn send_to_dead_letter_queue(message: MessageType) -> Result<()> {
+    todo!()
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let env = Env::default()
@@ -119,98 +218,19 @@ async fn main() -> Result<()> {
         
         let message : MessageType = serde_json::from_str(data_str.as_str()).unwrap();
 
-        let transaction = graph_conn.start_txn().await.unwrap();
-
-        match message {
-            MessageType::Todo(vec) => {
-                for todo in vec as Vec<Todo> {
-                    let mut query = format!("CREATE (n: Todo {{id: \"{}\", title: \"{}\", completed: \"{}\" }}) return n ", todo.id, todo.title, todo.completed);
-                    trace!("{}", query);
-
-                    transaction.run(Query::new(query)).await.expect("Could not execute query on neo4j graph");
-
-                    query = format!("MATCH (a:Application) WHERE a.title = '{}' with a MATCH (t:Todo) WHERE t.id = '{}' with a,t MERGE (a)-[:hasTodo]-(t)", "todo_app_sqlite_axum", todo.id);
-                    trace!("{}", query);
-                    transaction.run(Query::new(query)).await.expect("Could not execute query on neo4j graph");
-                }
-            },
-            //TODO: Implement putting the api spec within the graph, represent each endpoint as a node?
-            MessageType::OpenApiSpec(spec) => {
-                //decompose the api spec, create a node for the application itself, and nodes for each endpoint, which should have relationships to their operations.
-                let query = format!(
-                    "MERGE (o:Application {{ \
-                    openapi_version: \"{}\", \
-                    title: \"{}\", \
-                    description: \"{}\", \
-                    version: \"{}\", \
-                    license: \"{}\" \
-                }}) RETURN o",
-                serde_json::json!(spec.openapi).as_str().unwrap_or_default(),
-                spec.info.title,
-                spec.info.description.unwrap_or_default(),
-                spec.info.version,
-                spec.info.license.unwrap_or_default().name
-                );
-                trace!("{}", query);
-
-                transaction.run(Query::new(query)).await.expect("Could not execute query on neo4j graph");
-                //iterate through paths
-                for (endpoint, path_item) in spec.paths.paths.iter() {
-                    debug!("found endpoint \"{endpoint}\"");
-                    //destructure operation
-                    for (operation_type, operation) in path_item.operations.iter() {
-                        let op_type = get_operation_str(&operation_type);
-                        let op_id = operation.operation_id.clone().unwrap_or_default();
-                        let mut is_deprecated = "";
-                        let mut external_docs_url = String::from("");
-
-                        if let Some(deprecated) = operation.deprecated.clone() {
-                            match deprecated {
-                                Deprecated::True => is_deprecated="true",
-                                Deprecated::False =>is_deprecated="false"
-                            }
-                        }
-
-                        if let Some(external_docs) = operation.external_docs.clone() {
-                            external_docs_url = external_docs.url.clone();
-                        }
-                        debug!("found {op_type} operation with id \"{}\"", operation.operation_id.clone().unwrap_or_default());
-                      
-                        let mut operation_query = format!(
-                        "MERGE (e:Endpoint {{ \
-                            endpoint: '{}',\
-                            operationId: '{}', \
-                            description: '{}', \
-                            operationType: '{}',\
-                            isDeprecated: '{}', \
-                            externalDocsUrl: '{}'
-                        }}) RETURN e",
-                        endpoint,
-                        op_id.clone(),
-                        operation.description.clone().unwrap_or_default(),
-                        op_type,
-                        is_deprecated,
-                        external_docs_url
-                        );
-                        trace!("{}", operation_query);
-                        
-                        transaction.run(Query::new(operation_query)).await.expect("Could not execute query on neo4j graph");
-
-                        //draw relationship back to app node
-                        operation_query = format!("MATCH (a:Application) WHERE a.title = '{}' with a MATCH (e:Endpoint) WHERE e.operationId = '{}' WITH a,e MERGE (a)-[:hasEndpoint]->(e) ",spec.info.title ,op_id.clone());
-                        trace!("{}", operation_query);
-                        transaction.run(Query::new(operation_query)).await.expect("Could not execute query on neo4j graph");
-                    }
+        //TOOD: app panics and exists here if Neo4J goes down between transactions, handle thi by sending the new message to a dead letter queue
+        
+        match graph_conn.start_txn().await {
+            Ok(transaction) => {
+                handle_message(message, transaction).await;
+            } Err(error) => match error.kind() {
+                ErrorKind::IOError => {
+                    todo!()
                 }
             }
-            _ => todo!()
         }
-        match transaction.commit().await {
-            Ok(_) => {
-                debug!("[*] Transaction Committed")
-             },
-             Err(e) => panic!("Error updating graph {}", e)
-        }
+
+
 
     } //end consume loop
 
