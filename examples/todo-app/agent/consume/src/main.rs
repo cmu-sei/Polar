@@ -131,7 +131,7 @@ async fn main() -> Result<()> {
 
                     query = format!("MATCH (a:Application) WHERE a.title = '{}' with a MATCH (t:Todo) WHERE t.id = '{}' with a,t MERGE (a)-[:hasTodo]-(t)", "todo_app_sqlite_axum", todo.id);
                     trace!("{}", query);
-                    transaction.run(Query::new(query));
+                    transaction.run(Query::new(query)).await.expect("Could not execute query on neo4j graph");
                 }
             },
             //TODO: Implement putting the api spec within the graph, represent each endpoint as a node?
