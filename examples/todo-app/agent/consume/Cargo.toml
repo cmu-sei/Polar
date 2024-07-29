@@ -15,3 +15,5 @@ utoipa = "4.2.3"
 neo4rs = "0.6.1"
 todo_types = {path = "../../types"}
 url = "2.5.2"
+log = "0.4.22"
+env_logger = "0.11.5"

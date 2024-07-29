@@ -14,13 +14,14 @@
    full terms.
 
    [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
-   distribution.  Please see Copyright notice for non-US Government use and distribution.
+   distribution.  Please see Copyright notice for non-US Government use and distribution.2
 
    This Software includes and/or makes use of Third-Party Software each subject to its own license.
 
    DM24-0470
 */
-
+use env_logger::{Builder, Env};
+use log::{info, debug, trace};
 use common::{connect_to_rabbitmq};
 use utoipa::openapi::{PathItemType,Deprecated};
 use futures_lite::StreamExt;
@@ -78,6 +79,9 @@ pub fn get_deprecated_string(deprecated: &Deprecated) -> &str {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let env = Env::default()
+        .filter_or("MY_LOG_LEVEL", "trace");
+    env_logger::init_from_env(env);
     //get mq connection
     let conn = connect_to_rabbitmq().await.unwrap();
 
@@ -87,7 +91,7 @@ async fn main() -> Result<()> {
     //bind to queue
     consumer_channel.queue_bind(TODO_QUEUE_NAME, TODO_EXCHANGE_STR, "", QueueBindOptions::default(), FieldTable::default()).await?;
 
-    println!("[*] waiting to consume");
+    info!("Waiting to consume messages");
     let mut consumer = consumer_channel
     .basic_consume(
         TODO_QUEUE_NAME,
@@ -99,7 +103,7 @@ async fn main() -> Result<()> {
 
     //load neo config and connect to graph db TODO: get credentials securely
     let graph_conn = neo4rs::Graph::connect(get_neo_config()).await.unwrap();
-    println!("[*] Connected to neo4j");
+    info!("[*] Connected to neo4j");
     //begin consume loop
 
     while let Some(delivery) = consumer.next().await {
@@ -111,7 +115,7 @@ async fn main() -> Result<()> {
 
         // //deserialize json value
         let data_str = String::from_utf8(delivery.data).unwrap();
-       // println!("received {}", data_str);
+        debug!("received {}", data_str);
         
         let message : MessageType = serde_json::from_str(data_str.as_str()).unwrap();
 
@@ -121,17 +125,19 @@ async fn main() -> Result<()> {
             MessageType::Todo(vec) => {
                 for todo in vec as Vec<Todo> {
                     let mut query = format!("CREATE (n: Todo {{id: \"{}\", title: \"{}\", completed: \"{}\" }}) return n ", todo.id, todo.title, todo.completed);
-                    println!("{}", query);
+                    trace!("{}", query);
 
                     transaction.run(Query::new(query)).await.expect("Could not execute query on neo4j graph");
 
-                    //TODO: What node to link these back to? The application node itself or some node representing a database/service?
+                    query = format!("MATCH (a:Application) WHERE a.title = '{}' with a MATCH (t:Todo) WHERE t.id = '{}' with a,t MERGE (a)-[:hasTodo]-(t)", "todo_app_sqlite_axum", todo.id);
+                    trace!("{}", query);
+                    transaction.run(Query::new(query));
                 }
             },
             //TODO: Implement putting the api spec within the graph, represent each endpoint as a node?
             MessageType::OpenApiSpec(spec) => {
                 //decompose the api spec, create a node for the application itself, and nodes for each endpoint, which should have relationships to their operations.
-                let mut query = format!(
+                let query = format!(
                     "MERGE (o:Application {{ \
                     openapi_version: \"{}\", \
                     title: \"{}\", \
@@ -145,16 +151,13 @@ async fn main() -> Result<()> {
                 spec.info.version,
                 spec.info.license.unwrap_or_default().name
                 );
-                println!("{}", query);
+                trace!("{}", query);
 
                 transaction.run(Query::new(query)).await.expect("Could not execute query on neo4j graph");
                 //iterate through paths
                 for (endpoint, path_item) in spec.paths.paths.iter() {
-                    println!("found endpoint \"{endpoint}\"");
-                    //deconstruct operation
-                    //TODO: extract expected params, request_body schema, security scheme.
-                    // How to represent each of these? JSON strings?
-                    
+                    debug!("found endpoint \"{endpoint}\"");
+                    //destructure operation
                     for (operation_type, operation) in path_item.operations.iter() {
                         let op_type = get_operation_str(&operation_type);
                         let op_id = operation.operation_id.clone().unwrap_or_default();
@@ -171,7 +174,7 @@ async fn main() -> Result<()> {
                         if let Some(external_docs) = operation.external_docs.clone() {
                             external_docs_url = external_docs.url.clone();
                         }
-                        println!("found {op_type} operation with id \"{}\"", operation.operation_id.clone().unwrap_or_default());
+                        debug!("found {op_type} operation with id \"{}\"", operation.operation_id.clone().unwrap_or_default());
                       
                         let mut operation_query = format!(
                         "MERGE (e:Endpoint {{ \
@@ -189,13 +192,13 @@ async fn main() -> Result<()> {
                         is_deprecated,
                         external_docs_url
                         );
-                        println!("{}", operation_query);
+                        trace!("{}", operation_query);
                         
                         transaction.run(Query::new(operation_query)).await.expect("Could not execute query on neo4j graph");
 
-                        //draw relationship back to endpoint path node
+                        //draw relationship back to app node
                         operation_query = format!("MATCH (a:Application) WHERE a.title = '{}' with a MATCH (e:Endpoint) WHERE e.operationId = '{}' WITH a,e MERGE (a)-[:hasEndpoint]->(e) ",spec.info.title ,op_id.clone());
-                        println!("{}", operation_query);
+                        trace!("{}", operation_query);
                         transaction.run(Query::new(operation_query)).await.expect("Could not execute query on neo4j graph");
                     }
                 }
@@ -204,7 +207,7 @@ async fn main() -> Result<()> {
         }
         match transaction.commit().await {
             Ok(_) => {
-                println!("[*] Transaction Committed")
+                debug!("[*] Transaction Committed")
              },
              Err(e) => panic!("Error updating graph {}", e)
         }
