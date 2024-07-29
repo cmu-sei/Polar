@@ -378,7 +378,7 @@ remove_dns_entries() {
     echo "Removing DNS entries for the broker and the graph from $file..."
 
     # this is a little silly, but you can't sed the hosts file directly from a container, so.
-    local dup="$PROJECT_ROOT/scripts/hostsdup"
+    local dup="/tmp/hostsdup"
     cp $file $dup
 
     # Remove entries for broker and graph
