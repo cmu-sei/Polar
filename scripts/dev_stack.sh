@@ -397,7 +397,7 @@ remove_dns_entries() {
         sed -i "/$entry/d" "$dup"
     fi
 
-    if [[ "$OSTYPE" == "darwin"* ]]; then
+    if [ "$EUID" -eq 0 ]; then
         # Sudo user possibly needed on MacOS
         sudo cp $dup $file
         sudo rm $dup
