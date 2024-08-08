@@ -212,9 +212,9 @@
 
               echo "$fishPlugins" > .plugins.fish
 
-              chmod +x root/create-user.sh
+              chmod +x create-user.sh
           '';
         };
       }
     );
-}
+}\
