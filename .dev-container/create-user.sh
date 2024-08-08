@@ -52,7 +52,7 @@ create_user_in_container() {
     chown -R $username:$username /workspace
 
     # Change ownership of the /workspaces directory
-    chown -R $username:$username /workspacess
+    chown -R $username:$username /workspaces
     HOME=/home/$username
 
     # set env vars
