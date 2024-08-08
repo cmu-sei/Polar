@@ -139,13 +139,20 @@
           destination = "/root/license.txt";
           text = builtins.readFile ./license.txt;
         };
+        
+        # User creation script
+        createUserScript = pkgs.writeTextFile {
+          name = "create-user.sh";
+          destination = "/create-user.sh";
+          text = builtins.readFile ./create-user.sh;
+        };
 
       in
       {
         packages.default = pkgs.dockerTools.buildImage {
           name = "polar-dev";
           tag = "latest";
-          copyToRoot = [ myEnv ] ++ baseInfo ++ [ fishConfig license ];
+          copyToRoot = [ myEnv baseInfo fishConfig license createUserScript ];
           config = {
             WorkingDir = "/workspace";
             Env = [
@@ -205,6 +212,7 @@
 
               echo "$fishPlugins" > .plugins.fish
 
+              chmod +x root/create-user.sh
           '';
         };
       }
