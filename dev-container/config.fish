@@ -285,8 +285,6 @@ set -xg EDITOR /nix/store/yiz4s56j80q3c22psybvnib2vmkrpgw3-neovim-0.9.5/bin/nvim
 # This is safer for special shells than kitty.
 set -xg TERM screen-256color
 
-set -xg SHELL /nix/store/rswmlkz46y7svb399kfzvp3gdihml8mg-fish-3.7.1/bin/fish
-
 set -xg NIXOS_OZONE_WL 1
 
 # Aliases:
