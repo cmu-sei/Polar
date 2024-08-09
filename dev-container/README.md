@@ -40,7 +40,7 @@ Before starting, ensure you have the following installed:
 
 1. **Run the Docker container with your project directory mounted:**
     ```bash
-    docker run -it -v /path/to/your/project:/workspace polar-dev:latest bash -c "/create_user.sh $(whoami) $(id -u) $(id -g)"
+    docker run -it -v /path/to/your/project:/workspace polar-dev:latest bash -c "/create-user.sh $(whoami) $(id -u) $(id -g)"
     ```
 
     The create user command will set the user within the container and then drop into the fish shell. Replace `/path/to/your/project` with the path to your project directory. This command mounts your project directory into the container at the `/workspace` directory, allowing you to work on your project files within the container.
