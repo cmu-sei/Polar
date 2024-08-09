@@ -48,11 +48,6 @@ create_user_in_container() {
     # Set permissions for the /tmp directory
     chmod -R 777 /tmp
 
-    # Change ownership of the /workspace directory
-    chown -R $username:$username /workspace
-
-    # Change ownership of the /workspaces directory
-    chown -R $username:$username /workspaces
     HOME=/home/$username
 
     # set env vars
