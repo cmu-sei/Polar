@@ -95,16 +95,19 @@ check_root() {
 # Signal handling for cleanup
 setup_trap() {
     trap exit_handler EXIT
-    trap "exit -1" INT
+    trap "exit 2" INT
 }
 
 exit_handler() {
     # if the script exits on code 0 is successful, else perform cleanup.
-    if [ $? -eq 0 ]; then echo "Setup complete."
+    local ecode=$?
+    if [ $ecode -eq 0 ]; then echo "Setup complete."
+    elif [ $ecode -eq 2 ]; then echo "Setup cancelled."
     else 
         echo "Script interrupted."
         delete_env_config
         delete_vars
+        remove_dns_entries
     fi
 }
 
@@ -121,6 +124,18 @@ get_project_root() {
 
 # Define configuration through user input
 configure_env() {
+    local config_file="$PROJECT_ROOT/conf/env_setup.sh"
+    if [[ -f "$config_file" ]]; then
+        read -p "Environment config file exists. Overwrite? [yN] " OVERWRITE
+        if [[ "$OVERWRITE" =~ ^[yY]$ ]]; then
+            delete_env_config
+            delete_vars
+            remove_dns_entries
+        else
+            exit 2
+        fi
+    fi
+
     echo "Configuring the environment template. Please provide the required values."
 
     # TODO: Add support for other graph engines. Prompt the user for which engine they intend to use.
@@ -219,6 +234,7 @@ create_env_config() {
         chown 1000:1000 "$config_file"
         source "$config_file"
     else
+        echo "Hm. You shouldn't have been able to get here."
         echo "Environment config file exists. This script is only meant to be"
         echo "run once. Edit the config directly or delete it to run this script again."
         echo "WARNING: Execution has failed and will clean-up any artifacts"
@@ -359,18 +375,25 @@ update_dns_entries() {
 }
 
 # Removing broker & graph entries from local service resolution
-# Note: this is not used in the trap handler, since the update method (above)
-# handles when the entries already exist. may be useful for an uninstaller.
 remove_dns_entries() {
     local file="/etc/hosts"
 
     echo "Removing DNS entries for the broker and the graph from $file..."
 
+    # this is a little silly, but you can't sed the hosts file directly from a container, so.
+    local dup="$PROJECT_ROOT/scripts/hostsdup"
+    cp $file $dup
+
     entry="127.0.0.1 $BROKER_ENDPOINT_NAME"
-    sed -i "/$entry/d" "$file"
+    # sed -i "/$entry/d" "$file"
+    sed -i "/$entry/d" "$dup"
 
     entry="127.0.0.1 $GRAPH_ENDPOINT_NAME"
-    sed -i "/$entry/d" "$file"
+    # sed -i "/$entry/d" "$file"
+    sed -i "/$entry/d" "$dup"
+
+    cp $dup $file
+    rm $dup
 }
 
 main() {
