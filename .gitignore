@@ -1,7 +1,6 @@
 target
 .DS_Store
 .vscode
-Cargo.lock
 .env
 neo4j_volumes
 tls-gen/
@@ -11,3 +10,5 @@ gitlab_data
 env_setup.sh
 var/
 output/
+result
+report.json

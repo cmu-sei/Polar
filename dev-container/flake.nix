@@ -10,13 +10,16 @@
     myNeovimOverlay.url = "github:daveman1010221/nix-neovim";
       myNeovimOverlay.inputs.nixpkgs.follows = "nixpkgs";
       myNeovimOverlay.inputs.flake-utils.follows = "flake-utils";
+    nix-vscode-extensions.url = "github:nix-community/nix-vscode-extensions";
+      nix-vscode-extensions.inputs.nixpkgs.follows = "nixpkgs";
+      nix-vscode-extensions.inputs.flake-utils.follows = "flake-utils";
     staticanalysis.url = "github:rmdettmar/polar-static-analysis";
       staticanalysis.inputs.nixpkgs.follows = "nixpkgs";
       staticanalysis.inputs.flake-utils.follows = "flake-utils";
       staticanalysis.inputs.rust-overlay.follows = "rust-overlay";
   };
 
-  outputs = { self, flake-utils, nixpkgs, rust-overlay, myNeovimOverlay, staticanalysis, ... }:
+  outputs = { self, flake-utils, nixpkgs, rust-overlay, myNeovimOverlay, nix-vscode-extensions, staticanalysis, ... }:
     flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = import nixpkgs {
@@ -55,11 +58,32 @@
           '')
         ];
 
+        extensions = nix-vscode-extensions.extensions.${system};
+
+        code-extended = pkgs.vscode-with-extensions.override {
+          vscode = pkgs.code-server;
+          vscodeExtensions = [
+            extensions.open-vsx-release.rust-lang.rust-analyzer
+            extensions.vscode-marketplace.vadimcn.vscode-lldb # does not work yet - known bug
+            extensions.vscode-marketplace.fill-labs.dependi
+            extensions.vscode-marketplace.tamasfe.even-better-toml
+            extensions.vscode-marketplace.jnoortheen.nix-ide
+            extensions.vscode-marketplace.jinxdash.prettier-rust
+            extensions.vscode-marketplace.dustypomerleau.rust-syntax
+            extensions.vscode-marketplace.ms-vscode.test-adapter-converter
+            extensions.vscode-marketplace.hbenl.vscode-test-explorer # dependency for rust test adapter
+            extensions.vscode-marketplace.swellaby.vscode-rust-test-adapter
+            extensions.vscode-marketplace.vscodevim.vim
+            extensions.vscode-marketplace.redhat.vscode-yaml
+            extensions.vscode-marketplace.ms-azuretools.vscode-docker
+          ];
+        };
+
         myEnv = pkgs.buildEnv {
           name = "my-env";
           paths = with pkgs; [
             # -- Basic Required Files --
-            bash # Basic bash to run bare essnetial code
+            bash # Basic bash to run bare essential code
             coreutils-full # Essential GNU utilities (ls, cat, etc.)
 
             # -- Needed for VSCode dev container --
@@ -84,7 +108,9 @@
             openssl.dev
 
             # -- Development tools --
-            code-server
+            code-extended
+            rust-analyzer
+
             which
             nvim-pkg
             curl
@@ -112,10 +138,10 @@
             gnumake
             libclang
             python3
+            glibc
 
             # -- Rust --
             (lib.meta.hiPrio rust-bin.nightly.latest.default)
-            rustup
             pkg-config
 
             # -- Static Analysis Tools --
@@ -123,6 +149,8 @@
           ];
           pathsToLink = [
             "/bin"
+            "/lib"
+            "/inc"
             "/etc/ssl/certs"
           ];
         };
@@ -134,12 +162,31 @@
           text = builtins.readFile ./config.fish;
         };
 
+        codeSettings = pkgs.writeTextFile {
+          name = "settings.json";
+          destination = "/root/.local/share/code-server/User/settings.json";
+          text = builtins.readFile ./settings.json;
+        };
+
+        license = pkgs.writeTextFile {
+          name = "license.txt";
+          destination = "/root/license.txt";
+          text = builtins.readFile ./license.txt;
+        };
+        
+        # User creation script
+        createUserScript = pkgs.writeTextFile {
+          name = "create-user.sh";
+          destination = "/create-user.sh";
+          text = builtins.readFile ./create-user.sh;
+        };
+
       in
       {
         packages.default = pkgs.dockerTools.buildImage {
           name = "polar-dev";
           tag = "latest";
-          copyToRoot = [ myEnv ] ++ baseInfo ++ [ fishConfig ];
+          copyToRoot = [ myEnv baseInfo fishConfig codeSettings license createUserScript ];
           config = {
             WorkingDir = "/workspace";
             Env = [
@@ -160,6 +207,7 @@
               "CMAKE=/bin/cmake"
               "CMAKE_MAKE_PROGRAM=/bin/make"
               "LIBCLANG_PATH=${pkgs.libclang.lib}/lib/"
+              "SHELL=/bin/fish"
             ];
             Volumes = { };
             Cmd = [ "/bin/fish" ]; # Runs fish
@@ -197,8 +245,9 @@
               set -xg COREUTILS "${pkgs.uutils-coreutils-noprefix}"
             ' #end fish plugins variable
 
-              echo "$fishPlugins" > .plugins.fish
+            echo "$fishPlugins" > .plugins.fish
 
+              chmod +x create-user.sh
           '';
         };
       }

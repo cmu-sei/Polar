@@ -39,22 +39,22 @@ Before starting, ensure you have the following installed:
 ## Running the Docker Container
 
 1. **Run the Docker container with your project directory mounted:**
-
     ```bash
-    docker run -it -v /path/to/your/project:/workspace polar-dev:latest
+    docker run -it -v /path/to/your/project:/workspace polar-dev:latest bash -c "/create_user.sh $(whoami) $(id -u) $(id -g)"
     ```
 
-    Replace `/path/to/your/project` with the path to your project directory. This command mounts your project directory into the container at the `/workspace` directory, allowing you to work on your project files within the container.
+    The create user command will set the user within the container and then drop into the fish shell. Replace `/path/to/your/project` with the path to your project directory. This command mounts your project directory into the container at the `/workspace` directory, allowing you to work on your project files within the container.
 
-## Integrating with VSCode Dev Containers
+## Running with VSCode Dev Containers
 
-This setup is compatible with the VSCode Dev Containers feature, allowing you to use Visual Studio Code as your IDE inside the Docker container.
+This setup is compatible with the VSCode Dev Containers feature, allowing you to use Visual Studio Code as your IDE inside the Nix based container.
 
-1. **Install the Remote - Containers extension in VSCode.**
+1. **Open this project in Visual Studio Code.**
 
-2. **Open the command palette (`Ctrl+Shift+P`) and select `Remote-Containers: Open Folder in Container`.**
+2. **Install the Remote - Containers extension in VSCode.**
 
-3. **Navigate to your project directory and start coding within the containerized environment.**
+3. **Open the command palette (`Ctrl+Shift+P`) and select `Dev-containers: Reopen in Container`.**
+
 
 ## Running Code Server
 
