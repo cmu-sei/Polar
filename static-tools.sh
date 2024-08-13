@@ -2,7 +2,8 @@
 
 # Define directories
 src_dir="src"
-output_dir="../output"
+#TODO: add base dir variable, and change output_dir to be relative to base
+output_dir="../output" 
 datastore_path="$output_dir/noseyparker_datastore"
 skip_summary=false
 show_progress=true
