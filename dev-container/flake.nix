@@ -22,13 +22,8 @@
   outputs = { self, flake-utils, nixpkgs, rust-overlay, myNeovimOverlay, nix-vscode-extensions, staticanalysis, ... }:
     flake-utils.lib.eachDefaultSystem (system:
       let
-        # ADDITION: Set crossSystem to x86_64-linux when building on macOS
-        crossSystem = if builtins.match ".*darwin.*" system != null then "x86_64-linux" else system;
-
         pkgs = import nixpkgs {
           inherit system;
-          # ADDITION: Use crossSystem for cross-compilation
-          crossSystem = if system != crossSystem then crossSystem else null;
           overlays = [ rust-overlay.overlays.default myNeovimOverlay.overlays.default ];
         };
         # This is needed since VSCode Devcontainers need the following files in order to function.
@@ -157,6 +152,7 @@
               targets = [ "wasm32-unknown-unknown" "wasm32-wasip1" ];
             }))
             cargo-wasi
+            cargo-leptos
             lunatic
             pkg-config
             trunk
