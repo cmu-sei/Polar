@@ -141,8 +141,20 @@
             glibc
 
             # -- Rust --
-            (lib.meta.hiPrio rust-bin.nightly.latest.default)
+            #(lib.meta.hiPrio rust-bin.nightly.latest.default)
+
+            # We need to support various WASM targets, possibly ARM64 targets.
+            # This allows us to select those. Also, by default, we should
+            # include the sources for Rust, so that the debugger works properly
+            # and can jump to definition.
+            (rust-bin.selectLatestNightlyWith (toolchain: toolchain.default.override {
+              extensions = [ "rust-src" ];
+              targets = [ "wasm32-unknown-unknown" "wasm32-wasip1" ];
+            }))
+            cargo-wasi
+            lunatic
             pkg-config
+            trunk
 
             # -- Static Analysis Tools --
             staticanalysis.packages.${system}.default
