@@ -130,7 +130,8 @@
             getent
             gawk
             ps
-
+            ncurses
+            
             # -- Compilers, Etc. --
             gcc
             grc
