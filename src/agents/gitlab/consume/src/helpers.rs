@@ -24,11 +24,12 @@
 //TODO: Move to global consumer common lib
 pub mod helpers {
     use std::env;
+    use common::read_from_env;
     use neo4rs::{Config, ConfigBuilder};
     use url::Url;
 
     pub fn get_neo4j_endpoint() -> String {
-        let endpoint = env::var("GRAPH_ENDPOINT").expect("Could not load graph instance endpoint from environment.");
+        let endpoint = read_from_env("GRAPH_ENDPOINT".to_owned());
         match Url::parse(endpoint.as_str()) {
 
            Ok(url) => return url.to_string(),
@@ -38,9 +39,9 @@ pub mod helpers {
     }
 
     pub fn get_neo_config() -> Config {
-        let database_name = env::var("GRAPH_DB").unwrap();
-        let neo_user = env::var("GRAPH_USER").unwrap();
-        let neo_password = env::var("GRAPH_PASSWORD").unwrap();
+        let database_name = read_from_env("GRAPH_DB".to_owned());
+        let neo_user = read_from_env("GRAPH_USER".to_owned());
+        let neo_password = read_from_env("GRAPH_PASSWORD".to_owned());
         
         let config = ConfigBuilder::new()
         .uri(get_neo4j_endpoint())

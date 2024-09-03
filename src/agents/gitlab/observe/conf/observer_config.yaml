@@ -25,7 +25,7 @@
 resources:
   - projects: # retrieve project data every 30 minutes
       frequency: 30
-  - users:
-      frequency: 30
-  - groups:
-      frequency: 20
+#   - users:
+#       frequency: 30
+#   - groups:
+#       frequency: 20

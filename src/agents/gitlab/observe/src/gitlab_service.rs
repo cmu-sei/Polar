@@ -146,7 +146,7 @@ pub async fn get_all_elements<T: for<'a> Deserialize<'a>>(client: &Client, token
     while let Some(link) = link_map.get("next") {
         let resp = get_elements(client, token.clone(), link.raw_uri.clone()).await.unwrap();
         headers = resp.headers().clone();
-        //attempt to deserialize objectsd
+        //attempt to deserialize objects
         match resp.json::<Vec<T>>().await {
             Ok(mut vec) => {
                 //append elements
@@ -206,7 +206,7 @@ pub async fn get_project_pipelines(client: &Client, project_id: u32 ,token: Stri
     ,endpoint_prefix,
      "/projects/".to_owned() + project_id.to_string().as_ref(), 
      "/pipelines");
-    println!("{}", endpoint);
+    debug!("{}", endpoint);
     let response = client.request(Method::GET, endpoint)
     .header(PRIVATE_TOKEN_HEADER_STR, token)
     .send().await?;
@@ -215,7 +215,7 @@ pub async fn get_project_pipelines(client: &Client, project_id: u32 ,token: Stri
     if response.status().is_success() {
         Ok(response.json::<Vec<Pipeline>>().await.unwrap())
     }else {
-        println!("Could not find pipelines for project id: {}", project_id);
+        info!("Could not find pipelines for project id: {}", project_id);
         Ok(Vec::new())
     }
 }
@@ -224,6 +224,7 @@ pub async fn get_project_pipelines(client: &Client, project_id: u32 ,token: Stri
 mod service_tests { 
 
     use common::{get_gitlab_endpoint, get_gitlab_token};
+    use log::error;
     use crate::{get_user};
     use reqwest::{Client};
     use gitlab_types::User;
@@ -248,7 +249,7 @@ mod service_tests {
                 assert_eq!(user.username, "vcaaron");
             }
             Err(e) => {
-                println!("{}", e);
+                error!("{}", e);
             }
         }
     }
@@ -262,7 +263,7 @@ mod service_tests {
             Ok(response) => {
                 assert_eq!(response.status(), reqwest::StatusCode::FORBIDDEN);
             }
-            Err(e) => println!("error {}", e)
+            Err(e) => error!("error {}", e)
         }
     }
 }

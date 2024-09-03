@@ -28,7 +28,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool,Ordering};
 use std::sync::{mpsc, Arc};
 use std::thread;
-use common::GITLAB_EXCHANGE_STR;
+use common::{read_from_env, GITLAB_EXCHANGE_STR};
 use clokwerk::{Interval::{self}, Scheduler};
 use ctrlc;
 use lapin::{options::ExchangeDeclareOptions,types::FieldTable};
@@ -175,10 +175,7 @@ async fn main() -> Result<(), Box<dyn Error> > {
     setup_rabbitmq().await?;
 
     //schedule and fire off observers
-    let config_path = env::var("GITLAB_OBSERVER_CONFIG").unwrap_or_else(|_| {
-        error!("Could not find the gitlab observer scheduler configuration variable, (GITLAB_OBSERVER_CONFIG) in the runtime environment. Please ensure the location of this file has been set in the named variable.");
-        process::exit(1)
-    });
+    let config_path = read_from_env("GITLAB_OBSERVER_CONFIG".to_owned());
 
     let (tx, rx) = mpsc::channel();
     let ctrl_c = Arc::new(AtomicBool::new(false));

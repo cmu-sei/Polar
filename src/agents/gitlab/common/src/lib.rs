@@ -101,10 +101,7 @@ pub fn create_lock(filepath: &str) -> Result<bool, std::io::Error> {
 }
 
 pub fn get_gitlab_token() -> String {
-    let token = env::var("GITLAB_TOKEN").unwrap_or_else(|_| {
-       error!("Failed to load private token from the local environment.");
-       process::exit(1)
-    });
+    let token = read_from_env("GITLAB_TOKEN".to_owned());
     //check length and prefix
     if token.chars().count() == 26 && token.starts_with("glpat-") {
         return token;
@@ -117,10 +114,7 @@ pub fn get_gitlab_token() -> String {
 pub fn get_gitlab_endpoint()-> String {
     //TODO: Check validity of service endpoint url loaded from env
     //verify URL is a valid format
-    let endpoint = env::var("GITLAB_ENDPOINT").unwrap_or_else(|_| {
-        error!("Could not find gitlab service endpoint in environment.");
-        process::exit(1)
-    });
+    let endpoint = read_from_env("GITLAB_ENDPOINT".to_owned());
     match Url::parse(endpoint.as_str()) {
         Ok(url) => {
             //TODO: confirm url further?
@@ -197,4 +191,15 @@ pub async fn publish_message(payload: &[u8], channel: &Channel, exchange: &str, 
         BasicProperties::default()).await.unwrap().await.unwrap();
     
     assert_eq!(confirmation, Confirmation::NotRequested);
+}
+
+//TODO: Review this fn, do we always want to exit when the environment isn't fully configured? Are any env vars optional?
+pub fn read_from_env(var_name: String) -> String {
+    match env::var(var_name.clone()) {
+        Ok(val) => val,
+        Err(e) => {
+            error!("Can't read {} from environment", var_name);
+            process::exit(1)
+        }
+    }
 }
