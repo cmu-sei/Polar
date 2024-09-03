@@ -21,6 +21,8 @@
    DM24-0470
 */
 
+use core::fmt;
+
 use serde::Serialize;
 use serde::Deserialize;
 use serde_json::{Value};
@@ -224,4 +226,12 @@ pub struct ContainerRegistry {
     pub created_at: String,
     pub cleanup_policy_started_at: String,
     pub tags: Value
+}
+#[derive(Debug, Clone)]
+pub struct VarError;
+
+impl fmt::Display for VarError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f,"Could not read variable from enviornment")
+    }
 }

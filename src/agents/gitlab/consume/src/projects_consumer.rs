@@ -27,11 +27,15 @@ use helpers::helpers::get_neo_config;
 use common::{connect_to_rabbitmq, GITLAB_EXCHANGE_STR, PROJECTS_ROUTING_KEY, PROJECTS_QUEUE_NAME};
 use lapin::{options::*, types::FieldTable, Result};
 use neo4rs::Query;
+use log::{info,error,debug};
+
 mod helpers;
 
 #[tokio::main]
 async fn main() -> Result<()> {
     
+    env_logger::init();
+
     //get mq connection
     let conn = connect_to_rabbitmq().await.unwrap();
 
@@ -50,11 +54,11 @@ async fn main() -> Result<()> {
         FieldTable::default(),
     )
     .await?;
-    println!("[*] waiting to consume");
+    info!("Consumer is waiting...");
 
     //load neo config and connect to graph db TODO: get credentials securely
     let graph_conn = neo4rs::Graph::connect(get_neo_config()).await.unwrap();
-    println!("[*] Connected to neo4j");
+    info!("Connected to neo4j");
 
     while let Some(delivery) = consumer.next().await {
         let delivery = delivery.expect("error in consumer");
@@ -95,11 +99,11 @@ async fn main() -> Result<()> {
                 for pipeline in vec {
                     //create pipeline
                     let q =  format!("MERGE (j:GitlabPipeline {{ pipeline_id: '{}', project_id: '{}', status: '{}', created_at: '{}', updated_at: '{}'}}) return j", pipeline.id, pipeline.project_id.unwrap_or_default(), pipeline.status, pipeline.created_at, pipeline.updated_at);
-                    println!("{}",q);
+                    debug!("{}",q);
                     transaction.run(Query::new(q)).await.expect("Could not execute query");
                     //create relationship to project
                     let q = format!("MATCH (p:GitlabProject) where p.project_id = '{}' with p MATCH (q:GitlabPipeline) where q.pipeline_id = '{}' with p,q MERGE (q)-[:onProject]->(p)", pipeline.project_id.unwrap(), pipeline.id);
-                    println!("{}",q);
+                    debug!("{}",q);
                     transaction.run(Query::new(q)).await.expect("could not execute query");
                 }
             },
@@ -115,7 +119,7 @@ async fn main() -> Result<()> {
         }
         match transaction.commit().await {
              Ok(_) => {
-                println!("[*] Transaction Committed")
+                debug!("Transaction Committed")
              },
              Err(e) => panic!("Error updating graph {}", e)
         }        

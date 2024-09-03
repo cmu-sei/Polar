@@ -21,7 +21,7 @@
    DM24-0470
 */
 
-use std::env;
+use std::{env, process};
 use std::{error::Error, time::Duration};
 use std::process::Command;
 use std::path::Path;
@@ -32,6 +32,7 @@ use common::GITLAB_EXCHANGE_STR;
 use clokwerk::{Interval::{self}, Scheduler};
 use ctrlc;
 use lapin::{options::ExchangeDeclareOptions,types::FieldTable};
+use log::{error, info};
 use serde_yaml::Value;
 
 enum ChildMessage {
@@ -160,7 +161,7 @@ async fn setup_rabbitmq() -> Result<(), lapin::Error> {
     mq_publish_channel.exchange_declare(GITLAB_EXCHANGE_STR, lapin::ExchangeKind::Direct, 
     ExchangeDeclareOptions::default(),FieldTable::default()).await?;
 
-    println!("[*] Gitlab Exchange Declared");
+    info!("[*] Gitlab Exchange Declared");
 
     let _ = mq_conn.close(0, "closed").await?;
 
@@ -169,10 +170,15 @@ async fn setup_rabbitmq() -> Result<(), lapin::Error> {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error> > {
+    env_logger::init();
+    
     setup_rabbitmq().await?;
 
     //schedule and fire off observers
-    let config_path = env::var("GITLAB_OBSERVER_CONFIG").expect("Could not find the gitlab observer scheduler configuration variable, (GITLAB_OBSERVER_CONFIG) in the runtime environment. Please ensure the location of this file has been set in the named variable.");
+    let config_path = env::var("GITLAB_OBSERVER_CONFIG").unwrap_or_else(|_| {
+        error!("Could not find the gitlab observer scheduler configuration variable, (GITLAB_OBSERVER_CONFIG) in the runtime environment. Please ensure the location of this file has been set in the named variable.");
+        process::exit(1)
+    });
 
     let (tx, rx) = mpsc::channel();
     let ctrl_c = Arc::new(AtomicBool::new(false));

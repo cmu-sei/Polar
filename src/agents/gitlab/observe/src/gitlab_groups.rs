@@ -25,6 +25,7 @@ use std::{error::Error, fs::remove_file};
 use gitlab_service::get_all_elements;
 use gitlab_types::{UserGroup, MessageType, ResourceLink, User, Runner, Project};
 use lapin::{options::{QueueDeclareOptions, QueueBindOptions}, types::FieldTable};
+use log::info;
 use reqwest::Client;
 use serde_json::to_string;
 use common::{create_lock, get_gitlab_token, get_gitlab_endpoint, connect_to_rabbitmq, publish_message, GITLAB_EXCHANGE_STR, GROUPS_ROUTING_KEY, GROUPS_QUEUE_NAME};
@@ -38,7 +39,8 @@ async fn main() -> Result<(), Box<dyn Error> > {
         Err(e) => panic!("{}", e),
         Ok(false) => Ok(()),
         Ok(true) => {
-            println!("running groups task");
+            env_logger::init();
+            info!("Runnng groups task");
 
             //publish user id and list of user's projects to queue?
             let mq_conn = connect_to_rabbitmq().await?;
@@ -58,7 +60,7 @@ async fn main() -> Result<(), Box<dyn Error> > {
             let service_endpoint = get_gitlab_endpoint();
 
             let web_client = Client::builder().build().unwrap();
-            println!("Retrieving groups");
+            
             let groups: Vec<UserGroup> = get_all_elements(&web_client, gitlab_token.clone(), format!("{}{}", service_endpoint, "/groups")).await.unwrap();
             publish_message(to_string(&MessageType::Groups(groups.clone())).unwrap().as_bytes(), &mq_publish_channel, GITLAB_EXCHANGE_STR, GROUPS_ROUTING_KEY).await;
 
@@ -70,7 +72,6 @@ async fn main() -> Result<(), Box<dyn Error> > {
                     resource_id: group.id,
                     resource_vec: users.clone()
                 })).unwrap().as_bytes(), &mq_publish_channel, GITLAB_EXCHANGE_STR, GROUPS_ROUTING_KEY).await;
-                println!("[*] Group Users published!");
                 
                 //get group runners
                 let runners: Vec<Runner> = get_all_elements(&web_client, gitlab_token.clone(), format!("{}{}{}{}", service_endpoint, "/groups/", group.id, "/runners")).await.unwrap();
@@ -88,9 +89,9 @@ async fn main() -> Result<(), Box<dyn Error> > {
                 
             }
             
-            remove_file(LOCK_FILE_PATH).expect("Error deleting lock file");
+            let _ = remove_file(LOCK_FILE_PATH);
 
-            let _ = mq_conn.close(0, "closed").await?;
+            let _ = mq_conn.close(0, "closed").await;
 
             Ok(())
         }

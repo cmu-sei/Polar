@@ -22,6 +22,9 @@
 */
 
 use gitlab_types::Pipeline;
+use log::debug;
+use log::error;
+use log::info;
 use reqwest::Client;
 use reqwest::Response;
 use reqwest::Error;
@@ -123,16 +126,19 @@ async fn get_elements(client: &Client, token: String, endpoint: String) -> Resul
 pub async fn get_all_elements<T: for<'a> Deserialize<'a>>(client: &Client, token: String, endpoint: String) -> Option<Vec<T>> {
 
     let mut elements: Vec<T> = Vec::new();
-    println!("{}", endpoint);
+    debug!("{}", endpoint);
     let resp = get_elements(client, token.clone(), endpoint.clone()).await.unwrap();
     
     if  !resp.status().is_success() {
-        println!("Error code: {} received", resp.status().as_str());
+        error!("Error code: {} received", resp.status().as_str());
         return Some(elements)
     }
 
     let mut headers = resp.headers().clone();
-    elements.append(&mut resp.json::<Vec<T>>().await.unwrap());
+    elements.append(&mut resp.json::<Vec<T>>().await.unwrap_or_else(|_| {
+        error!("Error parsing JSON");
+        vec![]
+    }));
     
     let mut link_map = parse_with_rel(headers.get(LINK).unwrap().to_str().unwrap()).unwrap();
     
@@ -140,23 +146,19 @@ pub async fn get_all_elements<T: for<'a> Deserialize<'a>>(client: &Client, token
     while let Some(link) = link_map.get("next") {
         let resp = get_elements(client, token.clone(), link.raw_uri.clone()).await.unwrap();
         headers = resp.headers().clone();
-        //attempt to deserialize objects
+        //attempt to deserialize objectsd
         match resp.json::<Vec<T>>().await {
             Ok(mut vec) => {
                 //append elements
                 elements.append(&mut vec);
             },
-            Err(_) => println!("Could not deserialize elements from {}", link.raw_uri),
+            Err(_) => error!("Could not deserialize elements from {}", link.raw_uri),
         }
         link_map = parse_with_rel(headers.get(LINK).unwrap().to_str().unwrap()).unwrap();
     }
 
     return Some(elements)
 }
-
-// pub fn get_type_of<T>(_: &T) -> &str {
-//     std::intrinsics::type_name::<T>()
-// }
 
 
 pub async fn get_user(client: &Client, user_id: u32 ,token: String, endpoint_prefix: String) -> Result<Response, Error> {

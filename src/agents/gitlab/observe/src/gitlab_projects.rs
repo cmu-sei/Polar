@@ -28,7 +28,7 @@ use reqwest::Client;
 use serde_json::to_string;
 use common::{create_lock, get_gitlab_token, get_gitlab_endpoint, connect_to_rabbitmq, publish_message, GITLAB_EXCHANGE_STR, PROJECTS_QUEUE_NAME, PROJECTS_ROUTING_KEY};
 use std::{error::Error, fs::remove_file};
-
+use log::{info, warn, debug, error};
 const LOCK_FILE_PATH: &str = "/tmp/projects_observer.lock";
 
 #[tokio::main]
@@ -38,7 +38,9 @@ async fn main() -> Result<(), Box<dyn Error> > {
         Err(e) => panic!("{}", e),
         Ok(false) => Ok(()),
         Ok(true) => {
-            println!("Running project task");
+            env_logger::init();
+
+            info!("Running project task");
 
             //publish user id and list of user's projects to queue?
             let mq_conn = connect_to_rabbitmq().await?;
@@ -57,7 +59,7 @@ async fn main() -> Result<(), Box<dyn Error> > {
 
             let web_client = Client::builder().build().unwrap();
 
-            println!("Retrieving projects");
+            
             let projects: Vec<Project> = get_all_elements(&web_client, gitlab_token.clone(), format!("{}{}", service_endpoint.clone(), "/projects")).await.unwrap();
             publish_message(to_string(&MessageType::Projects(projects.clone())).unwrap().as_bytes(), &mq_publish_channel, GITLAB_EXCHANGE_STR, PROJECTS_ROUTING_KEY).await;
             
@@ -83,7 +85,9 @@ async fn main() -> Result<(), Box<dyn Error> > {
             let _ = mq_conn.close(0, "closed").await?;
 
             //delete lock file
-            remove_file(LOCK_FILE_PATH).expect("Error deleting lock file.");
+            remove_file(LOCK_FILE_PATH).unwrap_or_else(|_| {
+                warn!("Error deleting lock file")
+            });
             Ok(())
         }
     }
