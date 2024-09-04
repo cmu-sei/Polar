@@ -25,7 +25,7 @@ use core::fmt;
 
 use serde::Serialize;
 use serde::Deserialize;
-use serde_json::{Value};
+use serde_json::Value;
 
 #[derive (Serialize, Deserialize, Clone, PartialEq, Debug)]
 pub enum MessageType {

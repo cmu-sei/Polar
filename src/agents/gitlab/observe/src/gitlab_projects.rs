@@ -22,13 +22,14 @@
 */
 
 use gitlab_service::{get_all_elements, get_project_pipelines};
-use gitlab_types::{Project, User, Runner, MessageType, ResourceLink, Pipeline};
+use gitlab_types::{MessageType, ResourceLink};
 use lapin::{options::{QueueDeclareOptions, QueueBindOptions}, types::FieldTable};
-use reqwest::Client;
 use serde_json::to_string;
 use common::{create_lock, get_gitlab_token, get_gitlab_endpoint, connect_to_rabbitmq, publish_message, GITLAB_EXCHANGE_STR, PROJECTS_QUEUE_NAME, PROJECTS_ROUTING_KEY};
 use std::{error::Error, fs::remove_file};
-use log::{info, warn, debug, error};
+use log::{info, warn, error};
+mod helpers;
+
 const LOCK_FILE_PATH: &str = "/tmp/projects_observer.lock";
 
 #[tokio::main]
@@ -57,31 +58,41 @@ async fn main() -> Result<(), Box<dyn Error> > {
             let gitlab_token = get_gitlab_token();
             let service_endpoint = get_gitlab_endpoint();
 
-            let web_client = Client::builder().build().unwrap();
+            let web_client = helpers::helpers::web_client();
 
             
-            let projects: Vec<Project> = get_all_elements(&web_client, gitlab_token.clone(), format!("{}{}", service_endpoint.clone(), "/projects")).await.unwrap();
-            publish_message(to_string(&MessageType::Projects(projects.clone())).unwrap().as_bytes(), &mq_publish_channel, GITLAB_EXCHANGE_STR, PROJECTS_ROUTING_KEY).await;
-            
-            for project in projects {
-                // get users of each project
-                let users: Vec<User> = get_all_elements(&web_client, gitlab_token.clone(), format!("{}{}{}{}", service_endpoint, "/projects/" , project.id, "/users")).await.unwrap();
-                publish_message(to_string(&MessageType::ProjectUsers(ResourceLink {
-                    resource_id: project.id,
-                    resource_vec: users.clone()
-                })).unwrap().as_bytes(), &mq_publish_channel, GITLAB_EXCHANGE_STR, PROJECTS_ROUTING_KEY).await;
+            if let Some(projects) = get_all_elements(&web_client, gitlab_token.clone(), format!("{}{}", service_endpoint.clone(), "/projects")).await {
+                publish_message(to_string(&MessageType::Projects(projects.clone())).unwrap().as_bytes(), &mq_publish_channel, GITLAB_EXCHANGE_STR, PROJECTS_ROUTING_KEY).await;
+                for project in projects {
+                    // get users of each project
+                    if let Some(users) = get_all_elements(&web_client, gitlab_token.clone(), format!("{}{}{}{}", service_endpoint, "/projects/" , project.id, "/users")).await {
+                        publish_message(to_string(&MessageType::ProjectUsers(ResourceLink {
+                            resource_id: project.id,
+                            resource_vec: users.clone()
+                        })).unwrap().as_bytes(), &mq_publish_channel, GITLAB_EXCHANGE_STR, PROJECTS_ROUTING_KEY).await;
+    
+                    }
+    
+                    //get runners
+                    if let Some(runners) = get_all_elements(&web_client, gitlab_token.clone(), format!("{}{}{}{}", service_endpoint, "/projects/", project.id, "/runners")).await {
+                        publish_message(to_string(&MessageType::ProjectRunners(ResourceLink { 
+                            resource_id: project.id, 
+                            resource_vec: runners.clone() }))
+                            .unwrap().as_bytes(), &mq_publish_channel, GITLAB_EXCHANGE_STR, PROJECTS_ROUTING_KEY).await;    
+                    }
 
-                //get runners
-                let runners: Vec<Runner> = get_all_elements(&web_client, gitlab_token.clone(), format!("{}{}{}{}", service_endpoint, "/projects/", project.id, "/runners")).await.unwrap();
-                publish_message(to_string(&MessageType::ProjectRunners(ResourceLink { 
-                    resource_id: project.id, 
-                    resource_vec: runners.clone() }))
-                    .unwrap().as_bytes(), &mq_publish_channel, GITLAB_EXCHANGE_STR, PROJECTS_ROUTING_KEY).await;
-                
-                // get 20 projects pipelines
-                let pipelines: Vec<Pipeline> = get_project_pipelines(&web_client, project.id, gitlab_token.clone(), service_endpoint.clone()).await.unwrap();
-                publish_message(to_string(&MessageType::Pipelines(pipelines.clone())).unwrap().as_bytes(), &mq_publish_channel, GITLAB_EXCHANGE_STR, PROJECTS_ROUTING_KEY).await;
+                    // get 20 projects pipelines
+                    //TODO: Get all runs of pipelines? Make configurable (number of pipeline runs to retrieve etc)
+                    match get_project_pipelines(&web_client, project.id, gitlab_token.clone(), service_endpoint.clone()).await {
+                        Ok(pipelines) => publish_message(to_string(&MessageType::Pipelines(pipelines.clone())).unwrap().as_bytes(), &mq_publish_channel, GITLAB_EXCHANGE_STR, PROJECTS_ROUTING_KEY).await,
+                        Err(e) => error!("Could not get project {} pipelines, {}", project.id, e)
+                    }
+                    
+                }
             }
+            
+            
+            
             let _ = mq_conn.close(0, "closed").await?;
 
             //delete lock file

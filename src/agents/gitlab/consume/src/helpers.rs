@@ -23,7 +23,6 @@
 
 //TODO: Move to global consumer common lib
 pub mod helpers {
-    use std::env;
     use common::read_from_env;
     use neo4rs::{Config, ConfigBuilder};
     use url::Url;

@@ -27,7 +27,7 @@ use helpers::helpers::get_neo_config;
 use common::{connect_to_rabbitmq, GITLAB_EXCHANGE_STR, PROJECTS_ROUTING_KEY, PROJECTS_QUEUE_NAME};
 use lapin::{options::*, types::FieldTable, Result};
 use neo4rs::Query;
-use log::{info,error,debug};
+use log::{info,debug};
 
 mod helpers;
 

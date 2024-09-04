@@ -22,13 +22,13 @@ DM24-0470
 */
 
 
-use std::{env, fs::{File, self}, io::{Read, Write}};
+use std::{env, fs::{self,File}, io::{Read, Write}};
 use std::process;
 use url::Url;
 use lapin::{Connection,ConnectionProperties, Channel, BasicProperties, publisher_confirm::Confirmation, options::BasicPublishOptions};
 use tcp_stream::OwnedTLSConfig;
 use sysinfo::{System, SystemExt, ProcessRefreshKind, Pid};
-use log::{debug, error, info, warn};
+use log::{error, info};
 
 pub const GITLAB_EXCHANGE_STR: &str = "gitlab_exchange";
 
@@ -112,7 +112,6 @@ pub fn get_gitlab_token() -> String {
 }
 
 pub fn get_gitlab_endpoint()-> String {
-    //TODO: Check validity of service endpoint url loaded from env
     //verify URL is a valid format
     let endpoint = read_from_env("GITLAB_ENDPOINT".to_owned());
     match Url::parse(endpoint.as_str()) {
@@ -127,9 +126,23 @@ pub fn get_gitlab_endpoint()-> String {
     }
 }
 
+
+/// Helper function to parse a file at a given path and return the raw bytes as a vector
 fn get_file_as_byte_vec(filename: &String) -> Vec<u8> {
-    let mut f = File::open(&filename).expect("no file found");
-    let metadata = std::fs::metadata(&filename).expect("unable to read metadata");
+    let mut f = match File::open(&filename) {
+        Ok(file) => file,
+        Err(e) => {
+            error!("Could not read file {}, {}", filename, e);
+            process::exit(1);
+        }
+    };
+    let metadata = match std::fs::metadata(&filename) {
+        Ok(metadata) => metadata, 
+        Err(e) => {
+            error!("Could not get metadata for file {}, {}", filename, e);
+            process::exit(1);
+        }
+    };
     let mut buffer = vec![0; metadata.len() as usize];
     f.read(&mut buffer).expect("buffer overflow");
 
@@ -140,45 +153,39 @@ fn get_file_as_byte_vec(filename: &String) -> Vec<u8> {
 /// Ensure valid certificates are present
 pub async fn connect_to_rabbitmq() -> Result<Connection, String> {
     // You need to use amqp:// scheme here to handle the TLS part manually as it's automatic when you use amqps://
-    let rabbit_endpoint = env::var("BROKER_ENDPOINT").unwrap_or_else( |_| {
-        //TODO: alert user via logs that endpoint wasn't loaded from config, exit.
-        
-        error!("Could not load rabbitmq instance endpoint from environment.");
-        process::exit(1)
-    });
-    let cert_chain = env::var("TLS_CA_CERT").unwrap_or_else(|_| {
-        error!("Could not locate TLS_CA_CERT using path from environment.");
-        process::exit(1)
-    });
+    let rabbit_endpoint = read_from_env("BROKER_ENDPOINT".to_owned());
+    let cert_chain = read_from_env("TLS_CA_CERT".to_owned());
+    let client_key_file= read_from_env("TLS_CLIENT_KEY".to_owned());
+    let client_key_pwd = read_from_env("TLS_KEY_PASSWORD".to_owned());
 
-    //configure uri auth mechanism
-    let client_key_file= env::var("TLS_CLIENT_KEY").unwrap_or_else(|_| {
-        error!("Could not read TLS_CLIENT_KEY using path from environment.");
-        process::exit(1)
-    });
-    let client_key_pwd = env::var("TLS_KEY_PASSWORD").unwrap_or_else(|_| {
-        error!("Could not read TLS_KEY_PASSWORD from environment.");
-        process::exit(1)
-     });
+    let cert_chain = match std::fs::read_to_string(cert_chain) {
+        Ok(chain) => chain,
+        Err(e) => {
+            error!("Could not parse cert chain file as string: {}",e);
+            process::exit(1)
+        },
+    };
 
    let tls_config = OwnedTLSConfig {
         identity: Some(tcp_stream::OwnedIdentity {
             der: get_file_as_byte_vec(&client_key_file),
             password: client_key_pwd
         }),
-        cert_chain: Some(std::fs::read_to_string(cert_chain).unwrap())
+        cert_chain: Some(cert_chain)
 
     };
 
    info!("connecting to: {}", rabbit_endpoint);
 
-   // println!("rabbit endpoint: {}", &rabbit_endpoint);
-   // println!("TLS config: {:?}", tls_config);
-   let conn = Connection::connect_with_config(&rabbit_endpoint, ConnectionProperties::default() ,tls_config).await.unwrap_or_else(|_| {
-    error!("Could not connect to rabbitmq at {}", rabbit_endpoint);
-    process::exit(1)
-   });
-
+    //TODO: This fn no longer needs to return a result, refactor.
+    //TODO: confirm whether we wish to exit when we can't connect to the broker, do we want to keep retrying?
+   let conn = match Connection::connect_with_config(&rabbit_endpoint, ConnectionProperties::default() ,tls_config).await {
+    Ok(conn) => conn,
+    Err(e) => {
+        error!("Could not connect to rabbitmq! {}",e);
+        process::exit(1)
+    }
+   };
    Ok(conn)
 }
 
@@ -197,7 +204,7 @@ pub async fn publish_message(payload: &[u8], channel: &Channel, exchange: &str, 
 pub fn read_from_env(var_name: String) -> String {
     match env::var(var_name.clone()) {
         Ok(val) => val,
-        Err(e) => {
+        Err(_) => {
             error!("Can't read {} from environment", var_name);
             process::exit(1)
         }

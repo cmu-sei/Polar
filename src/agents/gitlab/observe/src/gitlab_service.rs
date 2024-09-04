@@ -21,6 +21,8 @@
    DM24-0470
 */
 
+mod helpers;
+
 use gitlab_types::Pipeline;
 use log::debug;
 use log::error;
@@ -112,12 +114,18 @@ pub async fn get_runner_jobs(client: &Client, runner_id: u32, endpoint_prefix: S
  * Makes a request for to a given endpoint using provided credentials to retrieve elements from a single page.
  */
 async fn get_elements(client: &Client, token: String, endpoint: String) -> Result<Response, Error> {
-    let response = client
-    .request(Method::GET, endpoint)
+    match client
+    .request(Method::GET, endpoint.clone())
     .header(PRIVATE_TOKEN_HEADER_STR, token)
-    .send().await?;
+    .send().await {
+        Ok(response) => Ok(response),
+        Err(e) => {
+            error!("could not make request to {}, {}" , endpoint, e);
+            Err(e)
+        }
+    }
 
-    Ok(response)
+    
 }
 /**
  * Makes one or a series of requests to a given endpoint using provided credentials to retrieve as many items as possible.
@@ -126,33 +134,54 @@ async fn get_elements(client: &Client, token: String, endpoint: String) -> Resul
 pub async fn get_all_elements<T: for<'a> Deserialize<'a>>(client: &Client, token: String, endpoint: String) -> Option<Vec<T>> {
 
     let mut elements: Vec<T> = Vec::new();
-    debug!("{}", endpoint);
-    let resp = get_elements(client, token.clone(), endpoint.clone()).await.unwrap();
-    
+    debug!("Getting all elements from {}", endpoint);
+    let resp = match get_elements(client, token.clone(), endpoint.clone()).await {
+        Ok(resp) => resp,
+        Err(_) => {
+            return None
+        }
+    };
+        
     if  !resp.status().is_success() {
-        error!("Error code: {} received", resp.status().as_str());
-        return Some(elements)
+        //TODO: make message elaborate on what each code could mean, 401, 403, etc.
+        error!("Error code: {} received at {}", resp.status().as_str(), endpoint.clone());
+        return None
     }
 
     let mut headers = resp.headers().clone();
-    elements.append(&mut resp.json::<Vec<T>>().await.unwrap_or_else(|_| {
-        error!("Error parsing JSON");
-        vec![]
-    }));
+    //get data from first page, if any
+    match resp.json::<Vec<T>>().await {
+        Ok(mut vec) => {
+            elements.append(&mut vec);
+        },
+        Err(e) => {
+            error!("Could not deserialize elements from json, {}", e);
+        },
+    }
     
-    let mut link_map = parse_with_rel(headers.get(LINK).unwrap().to_str().unwrap()).unwrap();
+    let mut link_map = parse_with_rel(headers
+        .get(LINK)
+        .unwrap().to_str()
+    .unwrap()).unwrap();
     
     //Crawl pages, appending all elements to the list
     while let Some(link) = link_map.get("next") {
-        let resp = get_elements(client, token.clone(), link.raw_uri.clone()).await.unwrap();
+        let resp = match get_elements(client, token.clone(), link.raw_uri.clone()).await {
+            Ok(resp) => resp, 
+            Err(_) => {
+                return None
+            }
+        };
+
         headers = resp.headers().clone();
-        //attempt to deserialize objects
         match resp.json::<Vec<T>>().await {
             Ok(mut vec) => {
-                //append elements
                 elements.append(&mut vec);
             },
-            Err(_) => error!("Could not deserialize elements from {}", link.raw_uri),
+            Err(e) => {
+                error!("Could not deserialize elements from json, {}", e);
+                //TODO: we got bad data here, continue or break?                
+            },
         }
         link_map = parse_with_rel(headers.get(LINK).unwrap().to_str().unwrap()).unwrap();
     }
@@ -225,8 +254,8 @@ mod service_tests {
 
     use common::{get_gitlab_endpoint, get_gitlab_token};
     use log::error;
-    use crate::{get_user};
-    use reqwest::{Client};
+    use crate::get_user;
+    use reqwest::Client;
     use gitlab_types::User;
     #[test]
     #[should_panic (expected = "received invalid private token from environment.")]
