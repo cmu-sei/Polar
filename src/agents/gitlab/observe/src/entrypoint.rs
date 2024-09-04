@@ -21,7 +21,6 @@
    DM24-0470
 */
 
-use std::os::unix::process;
 use std::{error::Error, time::Duration};
 use std::process::Command;
 use std::path::Path;
@@ -178,15 +177,12 @@ async fn setup_rabbitmq() {
 
             match conn.close(0, "closed").await {
                 Ok(_) => log::debug!("Connection to rabbitmq closed"),
-                Err(e) => {
-                    log::error!("Failed to close connection to rabbitmq, {}",e)
-                }
+                Err(e) => log::error!("Failed to close connection to rabbitmq, {}",e)
             }
-
-    }
+        }
 
         Err(e) => {
-            log::error!("Failed to connect to rabbitmq");
+            log::error!("Failed to connect to rabbitmq, {}", e);
             std::process::exit(1)
         }
     }

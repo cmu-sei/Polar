@@ -24,9 +24,22 @@
 //TODO: Move to global consumer common lib
 pub mod helpers {
     use common::read_from_env;
-    use neo4rs::{Config, ConfigBuilder};
+    use log::{debug, error};
+    use neo4rs::{Config, ConfigBuilder, Query, Txn};
     use url::Url;
-
+    
+    pub async fn run_query(txn: &Txn, query: String) -> bool {
+        match txn.run(Query::new(query.clone())).await {
+            Ok(_) => {
+                debug!("{}", query);
+                return true
+            }, 
+            Err(e) => {
+                error!("Could not execute query! {}", e);
+                return false
+            }
+        }
+    }
     pub fn get_neo4j_endpoint() -> String {
         let endpoint = read_from_env("GRAPH_ENDPOINT".to_owned());
         match Url::parse(endpoint.as_str()) {

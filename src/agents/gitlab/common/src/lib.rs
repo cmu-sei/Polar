@@ -116,7 +116,6 @@ pub fn get_gitlab_endpoint()-> String {
     let endpoint = read_from_env("GITLAB_ENDPOINT".to_owned());
     match Url::parse(endpoint.as_str()) {
         Ok(url) => {
-            //TODO: confirm url further?
             return url.to_string()
         }
         Err(e) => {
@@ -176,8 +175,6 @@ pub async fn connect_to_rabbitmq() -> Result<Connection, String> {
     };
 
    info!("connecting to: {}", rabbit_endpoint);
-
-    //TODO: This fn no longer needs to return a result, refactor.
     //TODO: confirm whether we wish to exit when we can't connect to the broker, do we want to keep retrying?
    let conn = match Connection::connect_with_config(&rabbit_endpoint, ConnectionProperties::default() ,tls_config).await {
     Ok(conn) => conn,
