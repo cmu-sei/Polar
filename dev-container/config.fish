@@ -198,6 +198,13 @@ function yaml_to_json --description="Converts YAML input to JSON output."
     python -c 'import sys, yaml, json; y=yaml.safe_load(sys.stdin.read()); print(json.dumps(y))' $argv[1] | read; or exit -1
 end
 
+function code_server --description="Starts code-server in the background."
+    # Create a log file for the code-server instance.
+    set -l log_file /var/log/code-server-$(date +%s).log
+    # Run code-server in the background.
+    code-server --auth none --bind-addr 0.0.0.0:8080 /workspace & > $log_file 2>&1 
+end
+
 # You'll want to install some nerd fonts, patched for powerline support of the theme.
 # Recommend: 'UbuntuMono Nerd Font 13'
 # gsettings set org.gnome.desktop.interface monospace-font-name 'UbuntuMono Nerd Font 13'
