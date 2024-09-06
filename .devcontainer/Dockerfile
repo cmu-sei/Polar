@@ -6,8 +6,8 @@ ARG USER_UID=1000
 ARG USER_GID=1000
 
 # Run and remove the create-user.sh script
-RUN sh create-user.sh $USERNAME $USER_UID $USER_GID
-RUN rm create-user.sh
+RUN sh /create-user.sh $USERNAME $USER_UID $USER_GID
+RUN rm /create-user.sh
 
 # Switch to the created user
 USER $USERNAME
