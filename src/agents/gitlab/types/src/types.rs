@@ -23,7 +23,7 @@
 
 use serde::Serialize;
 use serde::Deserialize;
-use serde_json::{Value};
+use serde_json::Value;
 
 #[derive (Serialize, Deserialize, Clone, PartialEq, Debug)]
 pub enum MessageType {
@@ -41,11 +41,10 @@ pub enum MessageType {
     Pipelines(Vec<Pipeline>),
     PipelineJobs(ResourceLink<Job>)
 }
-/* Generic type of resource wrapper for linking a resource to a group of items,
-* i.e. Groups to their members, projects to their users, runners, groups, etc.
-* In gitlab, every resource/ entity has an id associated with it, allowing us to retrieve an array of items associated with them
-* This wrapper is to save us some coding
- */
+/// Generic type of resource wrapper for linking a resource to a group of items,
+/// i.e. Groups to their members, projects to their users, runners, groups, etc.
+/// In gitlab, every resource/ entity has an id associated with it, allowing us to retrieve an array of items associated with them
+/// This wrapper is to save us some coding
 #[derive (Serialize, Deserialize, Clone, PartialEq, Debug)]
 pub struct ResourceLink<T> {
     pub resource_id: u32,
@@ -72,36 +71,6 @@ pub struct Namespace {
     pub web_url: String
 }
 
-impl Namespace {
-    pub fn id(mut self, id: u32) -> Self {
-        self.id = id;
-        return self
-    }
-    pub fn parent_id(mut self, id: u32) -> Self {
-        self.parent_id = Some(id);
-        return self
-    }
-
-    pub fn name(mut self, name: String) -> Self {
-        self.name = name;
-        return self
-    }
-
-    pub fn full_path(mut self, path: String) -> Self {
-        self.full_path = path;
-        return self
-    }
-
-    pub fn kind(mut self, kind: String) -> Self {
-        self.kind = kind;
-        return self
-    }
-
-    pub fn web_url(mut self, url: String) -> Self {
-        self.web_url = url;
-        return self
-    }
-}
 #[derive (Serialize, Deserialize, Clone, PartialEq, Debug)]
 pub struct User {
     pub id: u32,
@@ -117,27 +86,6 @@ pub struct User {
     pub created_by: Option<Value>
 }
 
-impl User { 
-    pub fn id(mut self, id: u32) -> Self {
-        self.id = id;
-        return self;
-    }
-    
-    pub fn username(mut self, username: String) -> Self {
-        self.username = username;
-        return self;
-    }
-
-    pub fn name(mut self, name: String) -> Self {
-        self.name = name;
-        return self;
-    }
-
-    pub fn state(mut self, state: String) -> Self {
-        self.state = state;
-        return self;
-    }
-}
 #[derive (Serialize, Deserialize, Clone, PartialEq, Debug)]
 pub struct Runner {
     pub id: u32,
@@ -194,7 +142,7 @@ pub struct Job {
     pub commit: GitCommit,
     pub pipeline: Pipeline,
     pub project: Value,
-    // TODO: Propject data read from the pipelin jobs api only returns one field, vs the runner jobs api which returns a full project
+    // TODO: Project data read from the pipeline jobs api only returns one field, vs the runner jobs api which returns a full project
     //implement custom deserialziation to handle this case
     pub allow_failure: bool,
     pub runner: Option<Runner>,

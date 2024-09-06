@@ -22,7 +22,6 @@
 
 # DM24-0470
 
-version: '3.5'
 services:
   neo4j:
     user: 7474:7474
