@@ -79,6 +79,14 @@ To run `Code Server` inside the Docker container and access it via a web browser
 
 3. **Access `Code Server` by navigating to `http://localhost:8080` in your web browser.**
 
+4. [Optional if on a remote server] **Forward port via ssh:**
+
+    ```bash
+    ssh -L 8080:localhost:8080 user@remote-server
+    ```
+
+    Replace `user` with your username and `remote-server` with the IP address or hostname of the remote server. This command forwards port 8080 from the remote server to your local machine, allowing you to access `Code Server` running on the remote server.
+
 ### Why Use `Code Server` Over VSCode Dev Containers?
 
 - **Fewer Dependencies:**
