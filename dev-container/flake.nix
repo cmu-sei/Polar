@@ -84,7 +84,7 @@
           paths = with pkgs; [
             # -- Basic Required Files --
             bash # Basic bash to run bare essential code
-            coreutils-full # Essential GNU utilities (ls, cat, etc.)
+            uutils-coreutils-noprefix # Essential GNU utilities (ls, cat, etc.)
 
             # -- Needed for VSCode dev container --
             gnutar # GNU version of tar for archiving 
@@ -124,7 +124,6 @@
             fzf
             fd
             eza
-            deterministic-uname
             findutils
             gnugrep
             getent
@@ -153,7 +152,6 @@
               targets = [ "wasm32-unknown-unknown" "wasm32-wasip1" ];
             }))
             cargo-wasi
-            lunatic
             pkg-config
             trunk
 
