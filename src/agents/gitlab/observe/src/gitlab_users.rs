@@ -28,7 +28,7 @@ use lapin::{options::{QueueDeclareOptions, QueueBindOptions}, types::FieldTable}
 use reqwest::Client;
 use serde_json::to_string;
 use common::{get_gitlab_token, get_gitlab_endpoint, connect_to_rabbitmq, publish_message, GITLAB_EXCHANGE_STR, USERS_QUEUE_NAME, USERS_ROUTING_KEY, create_lock};
-
+use log::{info, warn};
 const LOCK_FILE_PATH: &str = "/tmp/users_observer.lock";
 
 #[tokio::main]
@@ -38,8 +38,8 @@ async fn main() -> Result<(), Box<dyn Error> > {
         Err(e) => panic!("{}", e),
         Ok(false) => Ok(()),
         Ok(true) => {
-            println!("running users task");
-
+            info!("Starting users task.");
+            env_logger::init();
             //publish user id and list of user's projects to queue?
             let mq_conn = connect_to_rabbitmq().await?;
             
@@ -57,15 +57,15 @@ async fn main() -> Result<(), Box<dyn Error> > {
             let service_endpoint = get_gitlab_endpoint();
 
             let web_client = Client::builder().build().unwrap();
-            println!("Retrieving users");
+            
             let users: Vec<User> = get_all_elements(&web_client, gitlab_token.clone(), format!("{}{}", service_endpoint, "/users")).await.unwrap();
             publish_message(to_string(&MessageType::Users(users.clone())).unwrap().as_bytes(), &mq_publish_channel, GITLAB_EXCHANGE_STR, USERS_ROUTING_KEY).await;
             
-            println!("[*] Messages published!");
-
             let _ = mq_conn.close(0, "closed").await?;
 
-            remove_file(LOCK_FILE_PATH).expect("Error deleting lock file");
+            remove_file(LOCK_FILE_PATH).unwrap_or_else(|_| {
+                warn!("Error deleting lock file")
+            });
             
             Ok(())
         },

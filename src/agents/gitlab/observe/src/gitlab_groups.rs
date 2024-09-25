@@ -23,12 +23,12 @@
 
 use std::{error::Error, fs::remove_file};
 use gitlab_service::get_all_elements;
-use gitlab_types::{UserGroup, MessageType, ResourceLink, User, Runner, Project};
+use gitlab_types::{MessageType, ResourceLink};
 use lapin::{options::{QueueDeclareOptions, QueueBindOptions}, types::FieldTable};
-use reqwest::Client;
+use log::info;
 use serde_json::to_string;
 use common::{create_lock, get_gitlab_token, get_gitlab_endpoint, connect_to_rabbitmq, publish_message, GITLAB_EXCHANGE_STR, GROUPS_ROUTING_KEY, GROUPS_QUEUE_NAME};
-
+mod helpers;
 const LOCK_FILE_PATH: &str = "/tmp/groups_observer.lock";
 
 #[tokio::main]
@@ -38,7 +38,8 @@ async fn main() -> Result<(), Box<dyn Error> > {
         Err(e) => panic!("{}", e),
         Ok(false) => Ok(()),
         Ok(true) => {
-            println!("running groups task");
+            env_logger::init();
+            info!("Runnng groups task");
 
             //publish user id and list of user's projects to queue?
             let mq_conn = connect_to_rabbitmq().await?;
@@ -57,40 +58,45 @@ async fn main() -> Result<(), Box<dyn Error> > {
             let gitlab_token = get_gitlab_token();
             let service_endpoint = get_gitlab_endpoint();
 
-            let web_client = Client::builder().build().unwrap();
-            println!("Retrieving groups");
-            let groups: Vec<UserGroup> = get_all_elements(&web_client, gitlab_token.clone(), format!("{}{}", service_endpoint, "/groups")).await.unwrap();
-            publish_message(to_string(&MessageType::Groups(groups.clone())).unwrap().as_bytes(), &mq_publish_channel, GITLAB_EXCHANGE_STR, GROUPS_ROUTING_KEY).await;
+            let web_client = helpers::helpers::web_client();
 
-            for group in groups {
-                //get users of each project
-                let users: Vec<User> = get_all_elements(&web_client, gitlab_token.clone(), format!("{}{}{}{}", service_endpoint, "/groups/" , group.id, "/members")).await.unwrap();
+            if let Some(groups) = get_all_elements(&web_client, gitlab_token.clone(), format!("{}{}", service_endpoint, "/groups")).await {
+                publish_message(to_string(&MessageType::Groups(groups.clone())).unwrap().as_bytes(), &mq_publish_channel, GITLAB_EXCHANGE_STR, GROUPS_ROUTING_KEY).await;
+                for group in groups {
+                    //get users of each project
+                    if let Some(users) = get_all_elements(&web_client, gitlab_token.clone(), format!("{}{}{}{}", service_endpoint, "/groups/" , group.id, "/members")).await {
+                        publish_message(to_string(&MessageType::GroupMembers(ResourceLink {
+                            resource_id: group.id,
+                            resource_vec: users.clone()
+                        })).unwrap().as_bytes(), &mq_publish_channel, GITLAB_EXCHANGE_STR, GROUPS_ROUTING_KEY).await;
+                        
+                    } 
+                    //get group runners
+                    if let Some(runners) = get_all_elements(&web_client, gitlab_token.clone(), format!("{}{}{}{}", service_endpoint, "/groups/", group.id, "/runners")).await {
+                        publish_message(to_string(&MessageType::GroupRunners(ResourceLink {
+                            resource_id: group.id,
+                            resource_vec: runners.clone()
+                        })).unwrap().as_bytes(), &mq_publish_channel, GITLAB_EXCHANGE_STR, GROUPS_ROUTING_KEY).await;    
+                    }
 
-                publish_message(to_string(&MessageType::GroupMembers(ResourceLink {
-                    resource_id: group.id,
-                    resource_vec: users.clone()
-                })).unwrap().as_bytes(), &mq_publish_channel, GITLAB_EXCHANGE_STR, GROUPS_ROUTING_KEY).await;
-                println!("[*] Group Users published!");
-                
-                //get group runners
-                let runners: Vec<Runner> = get_all_elements(&web_client, gitlab_token.clone(), format!("{}{}{}{}", service_endpoint, "/groups/", group.id, "/runners")).await.unwrap();
-                publish_message(to_string(&MessageType::GroupRunners(ResourceLink {
-                    resource_id: group.id,
-                    resource_vec: runners.clone()
-                })).unwrap().as_bytes(), &mq_publish_channel, GITLAB_EXCHANGE_STR, GROUPS_ROUTING_KEY).await;
+                    // get all group's projects
+                    if let Some(projects) = get_all_elements(&web_client, gitlab_token.clone(), format!("{}{}{}{}", service_endpoint, "/groups/", group.id, "/projects")).await {
+                        publish_message(to_string(&MessageType::GroupProjects(ResourceLink {
+                            resource_id: group.id,
+                            resource_vec: projects.clone()
+                        })).unwrap().as_bytes(), &mq_publish_channel, GITLAB_EXCHANGE_STR, GROUPS_ROUTING_KEY).await;
+                        
+                    }
 
-                // get all group's projects
-                let projects: Vec<Project> = get_all_elements(&web_client, gitlab_token.clone(), format!("{}{}{}{}", service_endpoint, "/groups/", group.id, "/projects")).await.unwrap();
-                publish_message(to_string(&MessageType::GroupProjects(ResourceLink {
-                    resource_id: group.id,
-                    resource_vec: projects.clone()
-                })).unwrap().as_bytes(), &mq_publish_channel, GITLAB_EXCHANGE_STR, GROUPS_ROUTING_KEY).await;
-                
+                }
             }
             
-            remove_file(LOCK_FILE_PATH).expect("Error deleting lock file");
 
-            let _ = mq_conn.close(0, "closed").await?;
+            
+            
+            let _ = remove_file(LOCK_FILE_PATH);
+
+            let _ = mq_conn.close(0, "closed").await;
 
             Ok(())
         }
