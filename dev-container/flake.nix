@@ -128,6 +128,7 @@
             gnugrep
             getent
             gawk
+            jq
             ps
             ncurses
             
