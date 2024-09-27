@@ -158,12 +158,13 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 
-# Setup output directory
-rm -rf "$output_dir"
-mkdir -p "$datastore_path" || { print_color "31" "Failed to create directory structure."; exit 1; }
 
 # Navigate to source directory
 cd "$src_dir" || { print_color "31" "Failed to change directory to $src_dir"; exit 1; }
+
+# Setup output directory
+rm -rf "$output_dir"
+mkdir -p "$datastore_path" || { print_color "31" "Failed to create directory structure."; exit 1; }
 
 # Check tools before running
 required_tools=("cargo" "cargo-deny" "cargo-spellcheck" "cargo-clippy" "cargo-udeps" "cargo-semver-checks")
