@@ -71,6 +71,15 @@ To run `Code Server` inside the Docker container and access it via a web browser
     docker run -it -v /path/to/your/project:/workspace -p 8080:8080 polar-dev:latest bash -c "/create-user.sh $(whoami) $(id -u) $(id -g)"
     ```
 
+> ![Note]
+> For Fish, please use the following command:
+> ```fish
+> set -xu USER_ID (id -u) && set -xu GROUP_ID (id -g) && docker run -it -v /path/to/your/project:/workspace -p 8080:8080 polar-dev:latest bash -c "/create-user.sh (whoami) $USER_ID $GROUP_ID"
+> ```
+    
+        Replace `/path/to/your/project` with the path to your project directory.
+
+
 2. **Inside the container, start `Code Server`:**
 
     ```bash
