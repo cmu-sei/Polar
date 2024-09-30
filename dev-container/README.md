@@ -40,10 +40,12 @@ Before starting, ensure you have the following installed:
 
 1. **Run the Docker container with your project directory mounted:**
     ```bash
-    docker run -it -v /path/to/your/project:/workspace polar-dev:latest bash -c "/create-user.sh $(whoami) $(id -u) $(id -g)"
+    docker run -it -v /path/to/your/project:/workspace -p 8080:8080 polar-dev:latest bash -c "/create-user.sh $(whoami) $(id -u) $(id -g)"
     ```
 
-    The create user command will set the user within the container and then drop into the fish shell. Replace `/path/to/your/project` with the path to your project directory. This command mounts your project directory into the container at the `/workspace` directory, allowing you to work on your project files within the container.
+    The create user command will set the user within the container and then drop into the fish shell. Replace `/path/to/your/project` with the path to your project directory. This command mounts your project directory into the container at the `/workspace` directory, allowing you to work on your project files within the container. 
+    
+    The `-p 8080:8080` flag forwards port 8080 from the container to your local machine, allowing you to access services running inside the container, which can be removed if not using Code Server.
 
 ## Running with VSCode Dev Containers
 
@@ -53,36 +55,61 @@ This setup is compatible with the VSCode Dev Containers feature, allowing you to
 
 2. **Install the Remote - Containers extension in VSCode.**
 
-3. **Open the command palette (`Ctrl+Shift+P`) and select `Dev-containers: Reopen in Container`.**
+3. **Open the command palette (`Ctrl+Shift+P` or `Cmd+Shift+P`) and select `Dev-containers: Reopen in Container`.**
 
 
 ## Running Code Server
 
-To run `code-server` inside the Docker container and access it via a web browser:
+> [!NOTE]  
+> You cannot run Code Server from within a container if it is already running as a VSCode Dev Container.
+
+To run `Code Server` inside the Docker container and access it via a web browser:
 
 1. **Start the Docker container with port forwarding:**
 
     ```bash
-    docker run -it -p 8080:8080 -v /path/to/your/project:/workspace polar-dev:latest
+    docker run -it -v /path/to/your/project:/workspace -p 8080:8080 polar-dev:latest bash -c "/create-user.sh $(whoami) $(id -u) $(id -g)"
     ```
 
-2. **Inside the container, start `code-server`:**
+> ![Note]
+> For Fish, please use the following command:
+> ```fish
+> set -xu USER_ID (id -u) && set -xu GROUP_ID (id -g) && docker run -it -v /path/to/your/project:/workspace -p 8080:8080 polar-dev:latest bash -c "/create-user.sh (whoami) $USER_ID $GROUP_ID"
+> ```
+    
+        Replace `/path/to/your/project` with the path to your project directory.
+
+
+2. **Inside the container, start `Code Server`:**
 
     ```bash
-    code-server --bind-addr 0.0.0.0:8080 /workspace
+    code_server
     ```
 
-3. **Access `code-server` by navigating to `http://localhost:8080` in your web browser.**
+3. **Access `Code Server` by navigating to `http://localhost:8080` in your web browser.**
 
-### Why Use `code-server` Over VSCode Dev Containers?
+4. [Optional if on a remote server] **Forward port via ssh:**
 
-- **Remote Access:** `code-server` allows you to access your development environment from any device with a web browser, enabling remote development without the need for a local VSCode installation.
-  
-- **Lightweight Setup:** Running `code-server` in a Docker container can be more lightweight and resource-efficient compared to running the full VSCode Dev Containers setup.
+    ```bash
+    ssh -L 8080:localhost:8080 user@remote-server
+    ```
 
-- **Consistency:** `code-server` provides a consistent development environment regardless of the local machine setup, ensuring that all developers work with the same tools and configurations.
+    Replace `user` with your username and `remote-server` with the IP address or hostname of the remote server. This command forwards port 8080 from the remote server to your local machine, allowing you to access `Code Server` running on the remote server.
 
-- **Security:** `code-server` runs in an isolated Docker container, providing an additional layer of security by keeping the development environment separate from the host system. This isolation helps protect the host from potential security vulnerabilities within the development environment.
+### Why Use `Code Server` Over VSCode Dev Containers?
+
+- **Fewer Dependencies:**
+    Running `Code Server` does not require installing the VSCode IDE on your local machine, reducing the number of dependencies needed to work on your project, to only a web browser and docker.
+
+- **Lightweight:**
+    `Code Server` is a lightweight version of Visual Studio Code that can be run in a browser, making it more resource-efficient than running the full VSCode IDE.
+
+- **Remote Access:**
+    `Code Server` can be accessed remotely, allowing you to work on your project from any device with a web browser and the ability to connect to the server.
+
+- **Consistency:**
+    Using `Code Server` ensures that the development environment is consistent across different machines and setups, providing a seamless developer experience.
+
 
 ## Benefits of Using Nix and Flakes
 
@@ -93,3 +120,6 @@ Nix provides a highly reproducible build system by describing the entire build e
 **Compatibility:**
 
 The use of Nix Flakes makes this environment easily compatible with VSCode Dev Containers, ensuring a seamless developer experience across different machines and setups.
+
+**Efficiency:**
+The Nix-based environment is lightweight and efficient, by only installing the necessary dependencies for the build process, reducing the overall size and complexity of the build environment and speeding up the build process.
