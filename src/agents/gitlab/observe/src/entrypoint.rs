@@ -21,17 +21,17 @@
    DM24-0470
 */
 
-use std::env;
 use std::{error::Error, time::Duration};
 use std::process::Command;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool,Ordering};
 use std::sync::{mpsc, Arc};
 use std::thread;
-use common::GITLAB_EXCHANGE_STR;
+use common::{read_from_env, GITLAB_EXCHANGE_STR};
 use clokwerk::{Interval::{self}, Scheduler};
 use ctrlc;
 use lapin::{options::ExchangeDeclareOptions,types::FieldTable};
+use log::{debug, info};
 use serde_yaml::Value;
 
 enum ChildMessage {
@@ -152,33 +152,58 @@ fn schedule_observers(config: Value, tx: mpsc::Sender<ChildMessage>, ctrl_c: Arc
     });
 }
 
-async fn setup_rabbitmq() -> Result<(), lapin::Error> {
-    let mq_conn = common::connect_to_rabbitmq().await.unwrap();
-    
-    // Create publish channel and exchange
-    let mq_publish_channel = mq_conn.create_channel().await?;
-    mq_publish_channel.exchange_declare(GITLAB_EXCHANGE_STR, lapin::ExchangeKind::Direct, 
-    ExchangeDeclareOptions::default(),FieldTable::default()).await?;
+async fn setup_rabbitmq() {
+    match common::connect_to_rabbitmq().await {
+        Ok(conn) => {
+            // Create publish channel and exchange
+           let mq_publish_channel = match conn.create_channel().await {
+                Ok(channel) => {
+                    log::debug!("Gitlab Channel established");
+                    channel
+                }
+                Err(e) => {
+                    log::error!("Could not establsh rabbitmq channel, {}",e);
+                    std::process::exit(1)
+                }
+            };
+            match mq_publish_channel.exchange_declare(GITLAB_EXCHANGE_STR, lapin::ExchangeKind::Direct, 
+            ExchangeDeclareOptions::default(),FieldTable::default()).await {
+                Ok(_) => info!("Gitlab Exchange Declared"),
+                Err(e) => {
+                    log::error!("Could not declare Gitlab Exchange, {}", e);
+                    std::process::exit(1)
+                }
+            }
 
-    println!("[*] Gitlab Exchange Declared");
+            match conn.close(0, "closed").await {
+                Ok(_) => log::debug!("Connection to rabbitmq closed"),
+                Err(e) => log::error!("Failed to close connection to rabbitmq, {}",e)
+            }
+        }
 
-    let _ = mq_conn.close(0, "closed").await?;
-
-    Ok(())
+        Err(e) => {
+            log::error!("Failed to connect to rabbitmq, {}", e);
+            std::process::exit(1)
+        }
+    }
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error> > {
-    setup_rabbitmq().await?;
+    env_logger::init();
+    
+    setup_rabbitmq().await;
 
     //schedule and fire off observers
-    let config_path = env::var("GITLAB_OBSERVER_CONFIG").expect("Could not find the gitlab observer scheduler configuration variable, (GITLAB_OBSERVER_CONFIG) in the runtime environment. Please ensure the location of this file has been set in the named variable.");
+    let config_path = read_from_env("GITLAB_OBSERVER_CONFIG".to_owned());
 
     let (tx, rx) = mpsc::channel();
     let ctrl_c = Arc::new(AtomicBool::new(false));
 
     let config = get_scheduler_config(config_path);
+    debug!("using provided config:\n {:#?}", config);
 
+    info!("Scheduling observers");
     schedule_observers(config, tx.clone(), ctrl_c.clone());
 
     // Handle the CTRL-C signal

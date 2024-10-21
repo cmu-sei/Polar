@@ -153,6 +153,7 @@
               targets = [ "wasm32-unknown-unknown" "wasm32-wasip1" ];
             }))
             cargo-wasi
+            cargo-leptos
             pkg-config
             trunk
 
