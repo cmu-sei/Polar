@@ -47,7 +47,7 @@ create_user_in_container() {
 
     # Set permissions for the /tmp directory
     chmod -R 777 /tmp
-
+    
     HOME=/home/$username
 
     # set env vars

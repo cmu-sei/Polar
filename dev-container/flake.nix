@@ -5,26 +5,28 @@
     flake-utils.url = "github:numtide/flake-utils"; # Utility functions for Nix flakes
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable"; # Main Nix package repository
     rust-overlay.url = "github:oxalica/rust-overlay?rev=260ff391290a2b23958d04db0d3e7015c8417401";
-      rust-overlay.inputs.nixpkgs.follows = "nixpkgs";
-      rust-overlay.inputs.flake-utils.follows = "flake-utils";
+    rust-overlay.inputs.nixpkgs.follows = "nixpkgs";
+    rust-overlay.inputs.flake-utils.follows = "flake-utils";
     myNeovimOverlay.url = "github:daveman1010221/nix-neovim";
-      myNeovimOverlay.inputs.nixpkgs.follows = "nixpkgs";
-      myNeovimOverlay.inputs.flake-utils.follows = "flake-utils";
+    myNeovimOverlay.inputs.nixpkgs.follows = "nixpkgs";
+    myNeovimOverlay.inputs.flake-utils.follows = "flake-utils";
     nix-vscode-extensions.url = "github:nix-community/nix-vscode-extensions";
-      nix-vscode-extensions.inputs.nixpkgs.follows = "nixpkgs";
-      nix-vscode-extensions.inputs.flake-utils.follows = "flake-utils";
+    nix-vscode-extensions.inputs.nixpkgs.follows = "nixpkgs";
+    nix-vscode-extensions.inputs.flake-utils.follows = "flake-utils";
     staticanalysis.url = "github:rmdettmar/polar-static-analysis";
-      staticanalysis.inputs.nixpkgs.follows = "nixpkgs";
-      staticanalysis.inputs.flake-utils.follows = "flake-utils";
-      staticanalysis.inputs.rust-overlay.follows = "rust-overlay";
+    staticanalysis.inputs.nixpkgs.follows = "nixpkgs";
+    staticanalysis.inputs.flake-utils.follows = "flake-utils";
+    staticanalysis.inputs.rust-overlay.follows = "rust-overlay";
+    home-manager.url = "github:nix-community/home-manager";
+    home-manager.inputs.nixpkgs.follows = "nixpkgs";
   };
 
-  outputs = { self, flake-utils, nixpkgs, rust-overlay, myNeovimOverlay, nix-vscode-extensions, staticanalysis, ... }:
+  outputs = { self, flake-utils, nixpkgs, rust-overlay, myNeovimOverlay, nix-vscode-extensions, staticanalysis, home-manager, ... }:
     flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = import nixpkgs {
           inherit system;
-          overlays = [ rust-overlay.overlays.default myNeovimOverlay.overlays.default ];
+          overlays = [ rust-overlay.overlays.default myNeovimOverlay.overlays.default home-manager.overlays.default ];
         };
         # This is needed since VSCode Devcontainers need the following files in order to function.
         baseInfo = with pkgs; [
@@ -131,7 +133,7 @@
             jq
             ps
             ncurses
-            
+
             # -- Compilers, Etc. --
             gcc
             grc
@@ -158,6 +160,9 @@
 
             # -- Static Analysis Tools --
             staticanalysis.packages.${system}.default
+
+            # -- Home Manager --
+            home-manager
           ];
           pathsToLink = [
             "/bin"
@@ -185,7 +190,20 @@
           destination = "/root/license.txt";
           text = builtins.readFile ./license.txt;
         };
-        
+
+        # Nix configuration file
+        nixConfig = pkgs.writeTextFile {
+          name = "nix.conf";
+          destination = "/etc/nix/nix.conf";
+          text = ''
+            build-users-group =
+            allowed-users = *
+            trusted-users = root *
+            sandbox = false
+            store = auto
+            experimental-features = nix-command flakes
+          '';
+        };
         # User creation script
         createUserScript = pkgs.writeTextFile {
           name = "create-user.sh";
@@ -198,7 +216,7 @@
         packages.default = pkgs.dockerTools.buildImage {
           name = "polar-dev";
           tag = "latest";
-          copyToRoot = [ myEnv baseInfo fishConfig codeSettings license createUserScript ];
+          copyToRoot = [ myEnv baseInfo fishConfig codeSettings license createUserScript nixConfig ];
           config = {
             WorkingDir = "/workspace";
             Env = [
@@ -224,6 +242,7 @@
             Volumes = { };
             Cmd = [ "/bin/fish" ]; # Runs fish
           };
+          
           extraCommands = ''
             # Link the env binary (needed for the check requirements script)
             mkdir -p usr/bin/
@@ -262,6 +281,7 @@
               chmod +x create-user.sh
           '';
         };
+        
       }
     );
 }
