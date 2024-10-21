@@ -170,26 +170,26 @@
 
         # Path to the local fish config file
         fishConfig = pkgs.writeTextFile {
-          name = "config.fish";
+          name = "container-files/config.fish";
           destination = "/root/.config/fish/config.fish";
           text = builtins.readFile ./config.fish;
         };
 
         codeSettings = pkgs.writeTextFile {
-          name = "settings.json";
+          name = "container-files/settings.json";
           destination = "/root/.local/share/code-server/User/settings.json";
           text = builtins.readFile ./settings.json;
         };
 
         license = pkgs.writeTextFile {
-          name = "license.txt";
+          name = "container-files/license.txt";
           destination = "/root/license.txt";
           text = builtins.readFile ./license.txt;
         };
         
         # User creation script
         createUserScript = pkgs.writeTextFile {
-          name = "create-user.sh";
+          name = "container-files/create-user.sh";
           destination = "/create-user.sh";
           text = builtins.readFile ./create-user.sh;
         };
