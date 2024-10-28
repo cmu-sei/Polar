@@ -138,7 +138,6 @@
             cmake
             gnumake
             libclang
-            python3
             glibc
 
             # -- Rust --
