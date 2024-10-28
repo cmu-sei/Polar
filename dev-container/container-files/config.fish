@@ -108,7 +108,7 @@ end
     #grc ls -alh --color $argv
 #end
 function lh --description="Uses eza, a replacement for ls, with some useful options as defaults."
-    eza --group --header --group-directories-first --long --icons --git --all --binary --dereference --links --total-size $argv
+    eza --group --header --group-directories-first --long --icons --git --all --binary --dereference --links $argv
 end
 
 function myps --description="ps auww --ppid 2 -p2 --deselect"

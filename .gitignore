@@ -1,6 +1,5 @@
 target
 .DS_Store
-.vscode
 .env
 neo4j_volumes
 tls-gen/
