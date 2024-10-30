@@ -164,7 +164,7 @@ cd "$src_dir" || { print_color "31" "Failed to change directory to $src_dir"; ex
 
 # Setup output directory
 rm -rf "$output_dir"
-mkdir -p "$datastore_path" || { print_color "31" "Failed to create directory structure."; exit 1; }
+mkdir -p "$output_dir" || { print_color "31" "Failed to create directory structure."; exit 1; }
 
 # Check tools before running
 required_tools=("cargo" "cargo-deny" "cargo-spellcheck" "cargo-clippy" "cargo-udeps" "cargo-semver-checks")
@@ -200,9 +200,10 @@ find /workspace/src -name "report.json" -newermt "@$START_TIME" | while read fil
 done
 
 # Nosey Parker Operations
-run_with_progress "noseyparker scan --datastore $datastore_path/ . > $noseyparker_output 2>&1" "Running Nosey Parker Scan"
-noseyparker report --datastore $datastore_path/ > $noseyparker_report 2>&1
-rm -rf "$datastore_path"
+noseyparker-cli datastore init --datastore $datastore_path/
+run_with_progress "noseyparker-cli scan --datastore $datastore_path/ . > $noseyparker_output 2>&1" "Running Nosey Parker Scan"
+noseyparker-cli report --datastore $datastore_path/ > $noseyparker_report 2>&1
+#rm -rf "$datastore_path"
 
 # Generate Summary Report
 if [ "$skip_summary" = false ]; then
