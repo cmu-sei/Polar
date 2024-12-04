@@ -22,8 +22,8 @@
 */
 
 use common::{GITLAB_EXCHANGE_STR, connect_to_rabbitmq, GROUPS_ROUTING_KEY, GROUPS_QUEUE_NAME};
+use common::types::{MessageType, UserGroup, User, Runner, Project};
 use futures_lite::StreamExt;
-use gitlab_types::{MessageType, UserGroup, User, Runner, Project};
 use lapin::{options::{BasicAckOptions, QueueBindOptions, BasicConsumeOptions}, Result, types::FieldTable};
 use log::{debug, error, info};
 

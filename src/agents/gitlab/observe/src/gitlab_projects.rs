@@ -22,10 +22,10 @@
 */
 
 use gitlab_service::{get_all_elements, get_project_pipelines};
-use gitlab_types::{MessageType, ResourceLink};
 use lapin::{options::{QueueDeclareOptions, QueueBindOptions}, types::FieldTable};
 use serde_json::to_string;
 use common::{create_lock, get_gitlab_token, get_gitlab_endpoint, connect_to_rabbitmq, publish_message, GITLAB_EXCHANGE_STR, PROJECTS_QUEUE_NAME, PROJECTS_ROUTING_KEY};
+use common::types::{MessageType, ResourceLink};
 use std::{error::Error, fs::remove_file};
 use log::{info, warn, error};
 mod helpers;

@@ -29,7 +29,14 @@ members = [
     "agents/gitlab/common",
     "agents/gitlab/consume",
     "agents/gitlab/observe",
-    "agents/gitlab/types",
-    "graph_adapter",
-    "neo_graph_adapter",
+    # "graph_adapter",
+    # "neo_graph_adapter",
+    "workspace-hack"
 ]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+
+[workspace.metadata.crane]
+name = "polar"
