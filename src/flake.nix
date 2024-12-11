@@ -5,31 +5,36 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
-
+    rust-overlay.url = "github:oxalica/rust-overlay?rev=260ff391290a2b23958d04db0d3e7015c8417401";
+    rust-overlay.inputs.nixpkgs.follows = "nixpkgs";
+    rust-overlay.inputs.flake-utils.follows = "flake-utils";
     crane.url = "github:ipetkov/crane";
-
-    fenix = {
-      url = "github:nix-community/fenix";
-      inputs.nixpkgs.follows = "nixpkgs";
-      inputs.rust-analyzer-src.follows = "";
-    };
-
     flake-utils.url = "github:numtide/flake-utils";
-
     advisory-db = {
       url = "github:rustsec/advisory-db";
       flake = false;
     };
   };
 
-  outputs = { self, nixpkgs, crane, fenix, flake-utils, advisory-db, ... }:
+  outputs = { self, nixpkgs, crane, rust-overlay, flake-utils, advisory-db, ... }:
     flake-utils.lib.eachDefaultSystem (system:
       let
-        pkgs = nixpkgs.legacyPackages.${system};
-
+        overlays = [ (import rust-overlay) ];
+        pkgs = import nixpkgs {
+          inherit system overlays;
+        };
+        
         inherit (pkgs) lib;
 
-        craneLib = crane.mkLib pkgs;
+        # NB: we don't need to overlay our custom toolchain for the *entire*
+        # pkgs (which would require rebuidling anything else which uses rust).
+        # Instead, we just want to update the scope that crane will use by appending
+        # our specific toolchain there.
+        craneLib = (crane.mkLib pkgs).overrideToolchain (p: p.rust-bin.stable.latest.default.override {
+          extensions = ["rust-src"];
+          targets = ["x86_64-unknown-linux-gnu" "x86_64-apple-darwin" ];
+        });
+
         src = craneLib.cleanCargoSource ./.;
 
         # Common arguments can be set here to avoid repeating them later
@@ -44,23 +49,19 @@
             pkgs.libiconv
           ];
 
-          # Additional environment variables can be set directly
-          # MY_CUSTOM_VAR = "some value";
-        };
+          nativeBuildInputs = [
+            pkgs.openssl
+            pkgs.pkg-config            
+          ];
 
-        craneLibLLvmTools = craneLib.overrideToolchain
-          (fenix.packages.${system}.complete.withComponents [
-            "cargo"
-            "llvm-tools"
-            "rustc"
-          ]);
+          PKG_CONFIG_PATH="${pkgs.openssl.dev}/lib/pkgconfig";
+        };
 
         # Build *just* the cargo dependencies (of the entire workspace),
         # so we can reuse all of that work (e.g. via cachix) when running in CI
-        # It is *highly* recommended to use something like cargo-hakari to avoid
-        # cache misses when building individual top-level-crates
         cargoArtifacts = craneLib.buildDepsOnly commonArgs;
 
+        #Build arguments we want to pass to each crate
         individualCrateArgs = commonArgs // {
           inherit cargoArtifacts;
           inherit (craneLib.crateNameFromCargoToml { inherit src; }) version;
@@ -86,7 +87,6 @@
         # Though it is possible to build the entire workspace as a single derivation,
         # so this is left up to you on how to organize things
         #
-        # TODO: Decide whether we want to keep each crate in the same derivation or not.
         # For example, we could group our crates by the service they're intended for, or we could serve each one individually.
         # Note that the cargo workspace must define `workspace.members` using wildcards,
         # otherwise, omitting a crate (like we do below) will result in errors since
@@ -102,11 +102,6 @@
           cargoExtraArgs = "-p gitlab_consumer"; 
           src = fileSetForCrate ./agents/gitlab/consume;
         });
-        #
-        # commonGitlabLib = craneLib.buildPackage (individualCrateArgs // {
-        #   pname = "common";
-        #   src = fileSetForCrate ./agents/gitlab/common;
-        # });
 
       in
       {
@@ -177,25 +172,11 @@
             ];
           };
         };
-
         #TODO: Investigate how we can build and apply checks to the whole workspace, but still distribute each crate individually.
         #TODO: We have to specify a default package for this flake, determine the best value for this.
         packages = {
           inherit gitlabObserver gitlabConsumer;
           default = gitlabObserver;
-        } // lib.optionalAttrs (!pkgs.stdenv.isDarwin) {
-          gitlabAgentcoverage = craneLibLLvmTools.cargoLlvmCov (commonArgs // {
-            inherit cargoArtifacts;
-          });
-        };
-
-        apps = {
-          gitlabConsumer = flake-utils.lib.mkApp {
-            drv = gitlabConsumer;
-          };
-          gitlabObserver = flake-utils.lib.mkApp {
-            drv = gitlabObserver;
-          };
         };
       });
 }
