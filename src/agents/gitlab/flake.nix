@@ -74,9 +74,9 @@
           fileset = lib.fileset.unions [
             ./Cargo.toml
             ./Cargo.lock
-            (craneLib.fileset.commonCargoSources ./agents/gitlab/consume)
-            (craneLib.fileset.commonCargoSources ./agents/gitlab/observe)
-            (craneLib.fileset.commonCargoSources ./agents/gitlab/common)
+            (craneLib.fileset.commonCargoSources ./consume)
+            (craneLib.fileset.commonCargoSources ./observe)
+            (craneLib.fileset.commonCargoSources ./common)
             (craneLib.fileset.commonCargoSources ./workspace-hack)
             (craneLib.fileset.commonCargoSources crate)
           ];
@@ -95,12 +95,12 @@
         gitlabObserver = craneLib.buildPackage (individualCrateArgs // {
           pname = "gitlab_agent";
           cargoExtraArgs = "-p gitlab_agent"; #build the binaries and all its dependencies, including common
-          src = fileSetForCrate ./agents/gitlab/observe;
+          src = fileSetForCrate ./observe;
         });
         gitlabConsumer = craneLib.buildPackage (individualCrateArgs // {
           pname = "gitlab_consumer";
           cargoExtraArgs = "-p gitlab_consumer"; 
-          src = fileSetForCrate ./agents/gitlab/consume;
+          src = fileSetForCrate ./consume;
         });
 
       in

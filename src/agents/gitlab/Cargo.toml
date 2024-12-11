@@ -26,11 +26,9 @@
 resolver = "2"
 
 members = [
-    "agents/gitlab/common",
-    "agents/gitlab/consume",
-    "agents/gitlab/observe",
-    # "graph_adapter",
-    # "neo_graph_adapter",
+    "common",
+    "consume",
+    "observe",
     "workspace-hack"
 ]
 
