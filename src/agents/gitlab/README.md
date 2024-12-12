@@ -1,7 +1,6 @@
-**NOTE:** FIXME: this readme is incomplete, many of the commands and information may be inaccurate
 # Gitlab Agent
 
- This repository leverages [Nix flakes](https://nixos.wiki/wiki/Flakes) and the [Crane](https://github.com/ipetkov/crane) library to streamline building, testing, packaging, and linting.
+ The agent's flake leverages [Nix flakes](https://nixos.wiki/wiki/Flakes) and the [Crane](https://github.com/ipetkov/crane) library to streamline building, testing, packaging, and linting.
 
 
 Three important parts of the framework implementation include:
@@ -22,104 +21,28 @@ All credentials, endpoints, and the like should be read in as environment variab
 - **Test**: Automates running tests across the project.
 - **Lint**: Enforces code quality using Clippy and other tools.
 - **Package**: Produces binary packages for distribution.
+- **Containers**: Produces container images for each agent component.
 
 ---
 
 ## Prerequisites
 
 ### Tools
-1. [Nix](https://nixos.org/download.html) (Ensure flakes are enabled)
-2. [Rust](https://rustup.rs/) (Optional for local development)
-
+ [Nix](https://nix.dev/) (Ensure flakes are enabled)
 ---
 
 ## Quick Start
 
-### Clone the Repository
-```bash
-git clone https://github.com/your-org/your-rust-project.git
-cd your-rust-project
-```
+Run static analysis checks
+`nix flake check`
 
-### Run All Actions with Nix
-```bash
-nix run .#check
-```
+If you want to compile and package the agent's binaries, you can simply run
+`nix build . --out-link "polar-gitlab-agent"`
 
-This runs build, test, lint, and packaging steps.
+The packages will appear under a symlink named polar-gitlab-agent.
 
----
+If we want to build one part of the agent over the others, or multiple parts , we can stack the nix build command like so.
 
-## Using Nix Flake Commands
+`nix build .#gitlabConsumer .#consumerImage`
 
-### Build the Project
-```bash
-nix build .#defaultPackage
-```
 
-### Run Tests
-```bash
-nix run .#test
-```
-
-### Run Linter
-```bash
-nix run .#lint
-```
-
-### Enter a Development Shell
-```bash
-nix develop
-```
-This sets up the environment with all necessary dependencies.
-
----
-
-## Development
-
-1. **Editing Code**  
-   Use your preferred IDE (we recommend [VS Code](https://code.visualstudio.com/)) with the [rust-analyzer](https://rust-analyzer.github.io/) extension.
-
-2. **Adding Dependencies**  
-   Update the `Cargo.toml` file as usual. The Nix flake will pick them up automatically.
-
-3. **Updating Nix Flake**  
-   If new dependencies require extra system libraries, update the flake inputs accordingly in `flake.nix`.
-
----
-
-## Continuous Integration (CI)
-
-This project can integrate with CI pipelines to run `nix run .#check`, ensuring every pull request meets the required standards for builds, tests, and linting.
-
----
-
-## Contributing
-
-Contributions are welcome! Please:
-1. Fork the repository.
-2. Create a feature branch.
-3. Submit a pull request, ensuring it passes `nix run .#check`.
-
----
-
-## Troubleshooting
-
-- **Flake errors?**  
-  Ensure you have the latest Nix version and flakes enabled:
-  ```bash
-  nix --version
-  ```
-
-- **Rust-specific errors?**  
-  Verify the toolchain version in `rust-toolchain.toml`.
-
----
-
-## License
-
-This project is licensed under the MIT License. See [LICENSE](./LICENSE) for details.
-
----
-
-Thank you for contributing to the project! 🚀

@@ -82,6 +82,14 @@
           ];
         };
 
+        #build workspace derivation to be given as a default package
+        agentPkgs = craneLib.buildPackage (individualCrateArgs // {
+          pname = "gitlabAgent";
+          cargoExtraArgs = "-p gitlab_agent -p gitlab_consumer";
+          src = fileSetForCrate ./observe;
+        });
+
+
         # Build the top-level crates of the workspace as individual derivations.
         # This allows consumers to only depend on (and build) only what they need.
         # Though it is possible to build the entire workspace as a single derivation,
@@ -89,7 +97,7 @@
         #
         # For example, we could group our crates by the service they're intended for, or we could serve each one individually.
         # Note that the cargo workspace must define `workspace.members` using wildcards,
-        # otherwise, omitting a crate (like we do below) will result in errors since
+        # otherwise, omitting a crate will result in errors since
         # cargo won't be able to find the sources for all members.
         
         gitlabObserver = craneLib.buildPackage (individualCrateArgs // {
@@ -175,8 +183,54 @@
         #TODO: Investigate how we can build and apply checks to the whole workspace, but still distribute each crate individually.
         #TODO: We have to specify a default package for this flake, determine the best value for this.
         packages = {
-          inherit gitlabObserver gitlabConsumer;
-          default = gitlabObserver;
-        };
+          inherit gitlabObserver gitlabConsumer agentPkgs;
+          default = agentPkgs;
+          observerImage = pkgs.dockerTools.buildImage {
+            name = "polar-gitlab-observer";
+            tag = "latest";
+            copyToRoot = pkgs.buildEnv {
+              name = "image-root";
+              paths = [ gitlabObserver pkgs.busybox pkgs.bash ];
+              pathsToLink = [ "/bin" ];
+            };
+
+            #TODO: Run any other setup
+            # runAsRoot = ''
+            #   mkdir -p /data
+            # '';
+
+            config = {
+              Cmd = [ "/app/observer-entrypoint" ]; #TOOD: evaluate whether this is still the case
+              WorkingDir = "/app";
+              Env = [ ]; #TODO: Populate env vars with info depending on environment
+              # Volumes = {
+              #   "/data" = { };
+              # };
+            };
+         };
+          consumerImage = pkgs.dockerTools.buildImage {
+              name = "polar-gitlab-consumer";
+              tag = "latest";
+              copyToRoot = pkgs.buildEnv {
+                name = "image-root";
+                paths = [ gitlabConsumer pkgs.busybox pkgs.bash ];
+                pathsToLink = [ "/bin" ];
+              };
+
+              #TODO: Run any other setup
+              # runAsRoot = ''
+              #   mkdir -p /data
+              # '';
+
+              config = {
+                Cmd = [ "/app/observer-entrypoint" ]; #TOOD: evaluate whether this is still the case
+                WorkingDir = "/app";
+                Env = [ ]; #TODO: Populate env vars with info depending on environment
+                # Volumes = {
+                #   "/data" = { };
+                # };
+              };
+            };
+          };
       });
 }
