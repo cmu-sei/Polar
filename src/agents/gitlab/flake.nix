@@ -1,6 +1,6 @@
 {
-  description = "Build the Polar workspace";
-  #CAUTION: This flake should build the entire project, after a while, this flake might become tough to maintain as we add agents, adapters, etc.
+  description = "This flake builds, tests, and runs static analysis on the Polar Gitlab Agent Workspace, outputting binaries and container images for each service.";
+  #CAUTION: A single flake could build the entire project, after a while, it might become tough to maintain as we add agents, adapters, etc.
   #TODO: Explore ways to decompose this flake as it grows. Perhaps flake-parts can help https://github.com/hercules-ci/flake-parts
 
   inputs = {
@@ -111,6 +111,22 @@
           src = fileSetForCrate ./consume;
         });
 
+        #get certificates
+        tlsCerts = pkgs.callPackage ./scripts/gen-certs.nix { inherit pkgs; };
+        #TODO: how to get *just* the client certificates and keys in the containers?
+
+        #set up service environments
+        observerEnv = pkgs.buildEnv {
+              name = "image-root";
+              paths =  [pkgs.bashInteractiveFHS pkgs.busybox gitlabObserver ];
+              pathsToLink = [ "/bin" ];
+        };
+
+        consumerEnv = pkgs.buildEnv {
+          name = "image-root";
+          paths = [ pkgs.bashInteractiveFHS pkgs.busybox gitlabConsumer ];
+          pathsToLink = [ "/bin" ];
+        };
       in
       {
         checks = {
@@ -180,19 +196,14 @@
             ];
           };
         };
-        #TODO: Investigate how we can build and apply checks to the whole workspace, but still distribute each crate individually.
-        #TODO: We have to specify a default package for this flake, determine the best value for this.
+
         packages = {
-          inherit gitlabObserver gitlabConsumer agentPkgs;
+          inherit gitlabObserver gitlabConsumer agentPkgs tlsCerts;
           default = agentPkgs;
           observerImage = pkgs.dockerTools.buildImage {
             name = "polar-gitlab-observer";
             tag = "latest";
-            copyToRoot = pkgs.buildEnv {
-              name = "image-root";
-              paths = [ gitlabObserver pkgs.busybox pkgs.bash ];
-              pathsToLink = [ "/bin" ];
-            };
+            copyToRoot = [ observerEnv]; 
 
             #TODO: Run any other setup
             # runAsRoot = ''
@@ -200,7 +211,7 @@
             # '';
 
             config = {
-              Cmd = [ "/app/observer-entrypoint" ]; #TOOD: evaluate whether this is still the case
+              Cmd = [ "/app/observer-entrypoint" ];
               WorkingDir = "/app";
               Env = [ ]; #TODO: Populate env vars with info depending on environment
               # Volumes = {
@@ -211,11 +222,7 @@
           consumerImage = pkgs.dockerTools.buildImage {
               name = "polar-gitlab-consumer";
               tag = "latest";
-              copyToRoot = pkgs.buildEnv {
-                name = "image-root";
-                paths = [ gitlabConsumer pkgs.busybox pkgs.bash ];
-                pathsToLink = [ "/bin" ];
-              };
+              copyToRoot = [consumerEnv tlsCerts];
 
               #TODO: Run any other setup
               # runAsRoot = ''
