@@ -49,6 +49,8 @@
             pkgs.libiconv
           ];
 
+          # TOOD: use FIPS compliant openssl
+          # REFERENCE: https://github.com/MaxfieldKassel/nix-flake-openssl-fips
           nativeBuildInputs = [
             pkgs.openssl
             pkgs.pkg-config            
@@ -82,7 +84,7 @@
           ];
         };
 
-        #build workspace derivation to be given as a default package
+        # build workspace derivation to be given as a default package
         agentPkgs = craneLib.buildPackage (individualCrateArgs // {
           pname = "gitlabAgent";
           cargoExtraArgs = "-p gitlab_agent -p gitlab_consumer";
@@ -111,22 +113,41 @@
           src = fileSetForCrate ./consume;
         });
 
-        #get certificates
+        # get certificates for mtls
         tlsCerts = pkgs.callPackage ./scripts/gen-certs.nix { inherit pkgs; };
-        #TODO: how to get *just* the client certificates and keys in the containers?
 
+        # Read environment vars
+        
         #set up service environments
         observerEnv = pkgs.buildEnv {
-              name = "image-root";
-              paths =  [pkgs.bashInteractiveFHS pkgs.busybox gitlabObserver ];
-              pathsToLink = [ "/bin" ];
+          name = "image-root";
+          paths =  [ 
+            pkgs.bashInteractiveFHS 
+            pkgs.busybox 
+            gitlabObserver
+          ];
+          
+          pathsToLink = [ 
+            "/bin"
+            "/etc/ssl/certs"
+          ];
+        };
+
+        observerConfig = pkgs.writeTextFile {
+          name = "observerConfig";
+          destination = "/.config/polar/observer_config.yaml";
+          text = builtins.readFile ./observe/conf/observer_config.yaml;
         };
 
         consumerEnv = pkgs.buildEnv {
           name = "image-root";
           paths = [ pkgs.bashInteractiveFHS pkgs.busybox gitlabConsumer ];
-          pathsToLink = [ "/bin" ];
+          pathsToLink = [ 
+            "/bin"
+            "/etc/ssl/certs"
+          ];
         };
+
       in
       {
         checks = {
@@ -203,39 +224,56 @@
           observerImage = pkgs.dockerTools.buildImage {
             name = "polar-gitlab-observer";
             tag = "latest";
-            copyToRoot = [ observerEnv]; 
+            copyToRoot = [ 
+              observerEnv
+              observerConfig
+              "${tlsCerts}/ca_certificates"
+              "${tlsCerts}/client"              
+            ]; 
 
-            #TODO: Run any other setup
-            # runAsRoot = ''
-            #   mkdir -p /data
+            # FIXME: certs get put in '/' which isn't bad but it's not great either, we'd rather have them in etc.
+            # the buildEnv creates the /etc/ssl/certs path but it doesn't exist when these comamnds are ran.
+            # extraCommands = ''
+            #  mv ca_ * /etc/ssl/certs
+            #  mv client_* /etc/ssl/certs
             # '';
 
             config = {
               Cmd = [ "/app/observer-entrypoint" ];
               WorkingDir = "/app";
-              Env = [ ]; #TODO: Populate env vars with info depending on environment
-              # Volumes = {
-              #   "/data" = { };
-              # };
+              Env = [
+                # The absolute file path to the client .p12 file. This is used by the Rust
+                # binaries to auth with the broker via TLS.
+                "TLS_CLIENT_KEY=/client_rabbitmq.p12"
+                # If a password was set for the .p12 file, put it here.
+                # "TLS_KEY_PASSWORD=somepassword"
+                # The absolute file path to the ca_certificates.pem file created by TLS_GEN.
+                # Used by the Rust binaries to auth with RabbitMQ via TLS.
+                "TLS_CA_CERT=/ca_certificate.pem"
+               ];
             };
          };
           consumerImage = pkgs.dockerTools.buildImage {
               name = "polar-gitlab-consumer";
               tag = "latest";
-              copyToRoot = [consumerEnv tlsCerts];
-
-              #TODO: Run any other setup
-              # runAsRoot = ''
-              #   mkdir -p /data
-              # '';
+              copyToRoot = [consumerEnv tlsCerts
+              "${tlsCerts}/ca_certificates"
+              "${tlsCerts}/client"              
+              ];
 
               config = {
                 Cmd = [ "/app/observer-entrypoint" ]; #TOOD: evaluate whether this is still the case
                 WorkingDir = "/app";
-                Env = [ ]; #TODO: Populate env vars with info depending on environment
-                # Volumes = {
-                #   "/data" = { };
-                # };
+                Env = [
+                  # The absolute file path to the client .p12 file. This is used by the Rust
+                  # binaries to auth with the broker via TLS.
+                  "TLS_CLIENT_KEY=/client_rabbitmq.p12"
+                  # If a password was set for the .p12 file, put it here.
+                  # "TLS_KEY_PASSWORD=somepassword"
+                  # The absolute file path to the ca_certificates.pem file created by TLS_GEN.
+                  # Used by the Rust binaries to auth with RabbitMQ via TLS.
+                  "TLS_CA_CERT=/ca_certificate.pem"
+                 ];
               };
             };
           };

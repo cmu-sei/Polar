@@ -18,10 +18,10 @@ All credentials, endpoints, and the like should be read in as environment variab
 ## Features
 
 - **Build**: Ensures reproducible builds using Nix and Rust's `cargo` and `harkari` plugin
-- **Test**: Automates running tests across the project.
 - **Lint**: Enforces code quality using Clippy and other tools.
 - **Package**: Produces binary packages for distribution.
 - **Containers**: Produces container images for each agent component.
+- **Certificates**: Produces self signed certificates for mTLS using rabbitmq's [tls-gen](https://github.com/rabbitmq/tls-gen)
 
 ---
 
@@ -36,13 +36,11 @@ All credentials, endpoints, and the like should be read in as environment variab
 Run static analysis checks
 `nix flake check`
 
-If you want to compile and package the agent's binaries, you can simply run
-`nix build . --out-link "polar-gitlab-agent"`
+If you want to compile and package the agent's binaries, you can simply run from this directory
+`nix build . --out-link "gitlab-agent"`
 
 The packages will appear under a symlink named polar-gitlab-agent.
 
 If we want to build one part of the agent over the others, or multiple parts , we can stack the nix build command like so.
 
 `nix build .#gitlabConsumer .#consumerImage`
-
-
