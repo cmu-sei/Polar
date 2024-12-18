@@ -155,6 +155,7 @@
             cargo-leptos
             pkg-config
             trunk
+            util-linux
 
             # -- Static Analysis Tools --
             staticanalysis.packages.${system}.default
