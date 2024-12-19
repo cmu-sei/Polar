@@ -17,15 +17,34 @@
     staticanalysis.inputs.nixpkgs.follows = "nixpkgs";
     staticanalysis.inputs.flake-utils.follows = "flake-utils";
     staticanalysis.inputs.rust-overlay.follows = "rust-overlay";
+    openssl-fips.url = "github:daveman1010221/openssl-fips";
   };
 
-  outputs = { self, flake-utils, nixpkgs, rust-overlay, myNeovimOverlay, nix-vscode-extensions, staticanalysis, ... }:
+  outputs = { flake-utils, nixpkgs, rust-overlay, myNeovimOverlay, nix-vscode-extensions, staticanalysis, openssl-fips, ... }:
     flake-utils.lib.eachDefaultSystem (system:
       let
+        overlayNetSSLeay = import ./overlay-netssleay.nix;
+
         pkgs = import nixpkgs {
           inherit system;
-          overlays = [ rust-overlay.overlays.default myNeovimOverlay.overlays.default ];
+          overlays = [ 
+            rust-overlay.overlays.default
+            myNeovimOverlay.overlays.default
+
+            # Overlay replaces openssl with FIPS-compliant openssl
+            (final: prev: {
+              openssl = (openssl-fips.packages.${prev.system}.default).override (old: old // {
+                meta = old.meta // {
+                  description = "FIPS-compliant OpenSSL for Dev Container";
+                };
+              });
+            })
+
+            overlayNetSSLeay    # The FIPS OpenSSL is used by a package that
+                                # uses this perl package, which doesn't build right...
+          ];
         };
+
         # This is needed since VSCode Devcontainers need the following files in order to function.
         baseInfo = with pkgs; [
           # Set up shadow file with user information
