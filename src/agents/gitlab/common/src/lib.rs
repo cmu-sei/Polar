@@ -30,6 +30,8 @@ use tcp_stream::OwnedTLSConfig;
 use sysinfo::{System, SystemExt, ProcessRefreshKind, Pid};
 use log::{error, info};
 
+pub mod types;
+
 pub const GITLAB_EXCHANGE_STR: &str = "gitlab_exchange";
 
 pub const PROJECTS_ROUTING_KEY: &str = "projects";

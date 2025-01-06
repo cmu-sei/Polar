@@ -24,11 +24,11 @@
 use std::error::Error;
 
 use gitlab_service::get_all_elements;
-use gitlab_types::MessageType;
 use lapin::{options::{QueueDeclareOptions, QueueBindOptions}, types::FieldTable};
 use log::info;
 use serde_json::to_string;
 use common::{get_gitlab_token, get_gitlab_endpoint, connect_to_rabbitmq, publish_message, GITLAB_EXCHANGE_STR, RUNNERS_QUEUE_NAME, RUNNERS_ROUTING_KEY, create_lock};
+use common::types::MessageType;
 mod helpers;
 
 const LOCK_FILE_PATH: &str = "/tmp/runners_observer.lock";

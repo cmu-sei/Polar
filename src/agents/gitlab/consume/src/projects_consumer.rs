@@ -22,9 +22,9 @@
 */
 
 use futures_lite::StreamExt;
-use gitlab_types::{MessageType, User, Runner, Project};
 use helpers::helpers::get_neo_config;
 use common::{connect_to_rabbitmq, GITLAB_EXCHANGE_STR, PROJECTS_ROUTING_KEY, PROJECTS_QUEUE_NAME};
+use common::types::{MessageType, User, Runner, Project};
 use lapin::{options::*, types::FieldTable, Result};
 use log::{debug, error, info};
 

@@ -23,7 +23,6 @@
 
 mod helpers;
 
-use gitlab_types::Pipeline;
 use log::debug;
 use log::error;
 use log::info;
@@ -34,6 +33,7 @@ use reqwest::Method;
 use reqwest::header::LINK;
 use serde::Deserialize;
 use parse_link_header::parse_with_rel;
+use common::types::Pipeline;
 
 const PRIVATE_TOKEN_HEADER_STR : &str = "PRIVATE-TOKEN";
 
@@ -253,10 +253,11 @@ pub async fn get_project_pipelines(client: &Client, project_id: u32 ,token: Stri
 mod service_tests { 
 
     use common::{get_gitlab_endpoint, get_gitlab_token};
+    use common::types::User;
     use log::error;
     use crate::get_user;
     use reqwest::Client;
-    use gitlab_types::User;
+    
     #[test]
     #[should_panic (expected = "received invalid private token from environment.")]
     fn test_reading_bad_token() {
