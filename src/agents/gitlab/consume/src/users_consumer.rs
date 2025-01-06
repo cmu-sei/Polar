@@ -22,11 +22,12 @@
 */
 
 use futures_lite::StreamExt;
-use gitlab_types::{MessageType, User};
-use helpers::helpers::get_neo_config;
+use common::types::{MessageType, User};
+use helpers::helpers::{get_neo_config, run_query};
 use common::{connect_to_rabbitmq, GITLAB_EXCHANGE_STR, USERS_QUEUE_NAME, USERS_ROUTING_KEY};
 use lapin::{options::*, types::FieldTable, Result};
-use neo4rs::Query;
+use log::{debug, error, info};
+
 mod helpers;
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -40,7 +41,7 @@ async fn main() -> Result<()> {
     //bind to queue
     consumer_channel.queue_bind(USERS_QUEUE_NAME, GITLAB_EXCHANGE_STR, USERS_ROUTING_KEY, QueueBindOptions::default(), FieldTable::default()).await?;
 
-    println!("[*] waiting to consume");
+    info!("[*] waiting to consume");
     let mut consumer = consumer_channel
     .basic_consume(
         USERS_QUEUE_NAME,
@@ -52,45 +53,63 @@ async fn main() -> Result<()> {
 
     //load neo config and connect to graph db TODO: get credentials securely
     let graph_conn = neo4rs::Graph::connect(get_neo_config()).await.unwrap();
-    println!("[*] Connected to neo4j");
+    info!("[*] Connected to neo4j");
     //begin consume loop
 
-    while let Some(delivery) = consumer.next().await {
-        let delivery = delivery.expect("error in consumer");
-        delivery
-            .ack(BasicAckOptions::default())
-            .await
-            .expect("ack");
-
-        // //deserialize json value
-        let data_str = String::from_utf8(delivery.data).unwrap();
-       // println!("received {}", data_str);
-        
-        let message : MessageType = serde_json::from_str(data_str.as_str()).unwrap();
-        
-        //begin transaction
-        let transaction = graph_conn.start_txn().await.unwrap();
-
-        match message {
-            MessageType::Users(user_vec) => {
-                //build query from scratch
-                for user in user_vec as Vec<User> {
-                    //create new nodes
-                    let query = format!("MERGE (n:GitlabUser {{username: \"{}\", user_id: \"{}\" , created_at: \"{}\" , state: \"{}\"}}) return n", user.username, user.id, user.created_at.unwrap_or("".to_string()), user.state);            
-                    //execute
-                    transaction.run(Query::new(query)).await.expect("Could not execute query on neo4j graph");
+    while let Some(result) = consumer.next().await {
+        match result {
+            Ok(delivery) => {
+                delivery
+                .ack(BasicAckOptions::default())
+                .await
+                .expect("ack");
+    
+            // //deserialize json value
+            //TODO: What else can be done on these error cases? Log message data?
+            let message : MessageType = match serde_json::from_slice(delivery.data.as_slice()) {
+                Ok(msg) => msg,
+                Err(e) => {
+                    error!("Could not deserialize message! {}", e);
+                    continue
                 }
-            },
-            _ => todo!()
+            };
             
-        }
-        match transaction.commit().await {
-            Ok(_) => {
-                println!("[*] Transaction Committed")
-             },
-             Err(e) => panic!("Error updating graph {}", e)
-        }
-
-    } //end consume looopa
+            debug!("{:?}", message);
+            
+            let transaction = match graph_conn.start_txn().await {
+                Ok(t) => t,
+                Err(e) => {
+                    error!("Could not open transaction with graph! {}", e);
+                    continue
+                }
+            };
+            
+            match message {
+                MessageType::Users(user_vec) => {
+                    //build query from scratch
+                    for user in user_vec as Vec<User> {
+                        //create new nodes
+                        let query = format!("MERGE (n:GitlabUser {{username: \"{}\", user_id: \"{}\" , created_at: \"{}\" , state: \"{}\"}}) return n", user.username, user.id, user.created_at.unwrap_or("".to_string()), user.state);            
+                        if !run_query(&transaction, query).await {
+                            continue;
+                        }
+                    }
+                },
+                _ => todo!()
+                
+            }
+            match transaction.commit().await {
+                Ok(_) => {
+                    info!("[*] Transaction Committed")
+                 },
+                 Err(e) => error!("Error updating graph {}", e)
+            }
+    
+            }Err(e) => {
+                error!("Error getting message Delivery!{}", e );
+                continue
+            }
+        };
+    }
     Ok(())
 }

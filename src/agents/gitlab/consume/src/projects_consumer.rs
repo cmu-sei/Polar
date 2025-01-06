@@ -22,16 +22,19 @@
 */
 
 use futures_lite::StreamExt;
-use gitlab_types::{MessageType, User, Runner, Project};
 use helpers::helpers::get_neo_config;
 use common::{connect_to_rabbitmq, GITLAB_EXCHANGE_STR, PROJECTS_ROUTING_KEY, PROJECTS_QUEUE_NAME};
+use common::types::{MessageType, User, Runner, Project};
 use lapin::{options::*, types::FieldTable, Result};
-use neo4rs::Query;
+use log::{debug, error, info};
+
 mod helpers;
 
 #[tokio::main]
 async fn main() -> Result<()> {
     
+    env_logger::init();
+
     //get mq connection
     let conn = connect_to_rabbitmq().await.unwrap();
 
@@ -50,75 +53,103 @@ async fn main() -> Result<()> {
         FieldTable::default(),
     )
     .await?;
-    println!("[*] waiting to consume");
+    info!("Consumer is waiting...");
 
     //load neo config and connect to graph db TODO: get credentials securely
     let graph_conn = neo4rs::Graph::connect(get_neo_config()).await.unwrap();
-    println!("[*] Connected to neo4j");
+    info!("Connected to neo4j");
 
-    while let Some(delivery) = consumer.next().await {
-        let delivery = delivery.expect("error in consumer");
-        delivery
-            .ack(BasicAckOptions::default())
-            .await
-            .expect("ack");
-
-        // Deserialize json value.
-        let data_str = String::from_utf8(delivery.data).unwrap();
+    while let Some(result) = consumer.next().await {
+        match result {
+            Ok(delivery) => {
+                delivery
+                .ack(BasicAckOptions::default())
+                .await
+                .expect("ack");
         
-        let message : MessageType = serde_json::from_str(data_str.as_str()).unwrap();
-        // Create query - return query, execute it.
-        let transaction = graph_conn.start_txn().await.unwrap();
-
-        match message {
-            MessageType::Projects(vec) => {
-                for p in vec as Vec<Project> {
-                    let query = format!("MERGE (n: GitlabProject {{project_id: \"{}\", name: \"{}\", creator_id: \"{}\"}}) return n ", p.id, p.name, p.creator_id.unwrap());
-                    transaction.run(Query::new(query)).await.expect("Could not execute query on neo4j graph");
+                //TODO: What else can be done on these error cases? Log message data?
+                let message : MessageType = match serde_json::from_slice(delivery.data.as_slice()) {
+                    Ok(msg) => msg,
+                    Err(e) => {
+                        error!("Could not deserialize message! {}", e);
+                        continue
+                    }
+                };
+                
+                debug!("{:?}", message);
+                
+                let transaction = match graph_conn.start_txn().await {
+                    Ok(t) => t,
+                    Err(e) => {
+                        error!("Could not open transaction with graph! {}", e);
+                        continue
+                    }
+                };
+                match message {
+                    MessageType::Projects(vec) => {
+                        for p in vec as Vec<Project> {
+                            let query = format!("MERGE (n: GitlabProject {{project_id: \"{}\", name: \"{}\", creator_id: \"{}\"}}) return n ", p.id, p.name, p.creator_id.unwrap());
+                            if !helpers::helpers::run_query(&transaction, query).await {
+                                continue
+                            }
+                        }
+                    },
+                    MessageType::ProjectUsers(link) => {
+                        //add relationship for every user given
+                        for user in link.resource_vec as Vec<User>  {
+                            let query = format!("MATCH (p:GitlabProject) WHERE p.project_id = '{}' with p MATCH (u:GitlabUser) WHERE u.user_id = '{}' with p, u MERGE (u)-[:onProject]->(p)", link.resource_id, user.id);
+                            if !helpers::helpers::run_query(&transaction, query).await {
+                                continue
+                            }
+                        }
+                    },
+                    MessageType::ProjectRunners(link) => {
+                        for runner in link.resource_vec as Vec<Runner> {
+                            let query = format!("MATCH (n:GitlabProject) WHERE n.project_id = '{}' with n MATCH (r:GitlabRunner) WHERE r.runner_id = '{}' with n, r MERGE (r)-[:onProject]->(n)", link.resource_id, runner.id);
+                            if !helpers::helpers::run_query(&transaction, query).await {
+                                continue
+                            }
+                        }
+                    },
+                    MessageType::Pipelines(vec) => {
+                        for pipeline in vec {
+                            //create pipeline
+                            let query =  format!("MERGE (j:GitlabPipeline {{ pipeline_id: '{}', project_id: '{}', status: '{}', created_at: '{}', updated_at: '{}'}}) return j", pipeline.id, pipeline.project_id.unwrap_or_default(), pipeline.status, pipeline.created_at, pipeline.updated_at);
+                            if !helpers::helpers::run_query(&transaction, query).await {
+                                continue
+                            }
+                            //create relationship to project
+                            let query = format!("MATCH (p:GitlabProject) where p.project_id = '{}' with p MATCH (q:GitlabPipeline) where q.pipeline_id = '{}' with p,q MERGE (q)-[:onProject]->(p)", pipeline.project_id.unwrap(), pipeline.id);
+                            if !helpers::helpers::run_query(&transaction, query).await {
+                                continue
+                            }
+                        }
+                    },
+                    MessageType::PipelineJobs(link) => {
+                        for job in link.resource_vec {
+                            let query = format!("MATCH (p:GitlabPipeline) WHERE p.pipeline_id = '{}' with p MATCH (j:GitlabJob) WHERE j.job_id = '{}' with p,j MERGE (j)-[:inPipeline]->(p)", link.resource_id, job.id);
+                            if !helpers::helpers::run_query(&transaction, query).await {
+                                continue
+                            }
+                        }
+                    },
+                    _ => {
+                        todo!()
+                    }
                 }
-            },
-            MessageType::ProjectUsers(link) => {
-                //add relationship for every user given
-                for user in link.resource_vec as Vec<User>  {
-                    let query = format!("MATCH (p:GitlabProject) WHERE p.project_id = '{}' with p MATCH (u:GitlabUser) WHERE u.user_id = '{}' with p, u MERGE (u)-[:onProject]->(p)", link.resource_id, user.id);
-    
-                    transaction.run(Query::new(query)).await.expect("could not execute query");
-                }
-            },
-            MessageType::ProjectRunners(link) => {
-                for runner in link.resource_vec as Vec<Runner> {
-                    let query = format!("MATCH (n:GitlabProject) WHERE n.project_id = '{}' with n MATCH (r:GitlabRunner) WHERE r.runner_id = '{}' with n, r MERGE (r)-[:onProject]->(n)", link.resource_id, runner.id);
-                    transaction.run(Query::new(query)).await.expect("could not execute query");
-                }
-            },
-            MessageType::Pipelines(vec) => {
-                for pipeline in vec {
-                    //create pipeline
-                    let q =  format!("MERGE (j:GitlabPipeline {{ pipeline_id: '{}', project_id: '{}', status: '{}', created_at: '{}', updated_at: '{}'}}) return j", pipeline.id, pipeline.project_id.unwrap_or_default(), pipeline.status, pipeline.created_at, pipeline.updated_at);
-                    println!("{}",q);
-                    transaction.run(Query::new(q)).await.expect("Could not execute query");
-                    //create relationship to project
-                    let q = format!("MATCH (p:GitlabProject) where p.project_id = '{}' with p MATCH (q:GitlabPipeline) where q.pipeline_id = '{}' with p,q MERGE (q)-[:onProject]->(p)", pipeline.project_id.unwrap(), pipeline.id);
-                    println!("{}",q);
-                    transaction.run(Query::new(q)).await.expect("could not execute query");
-                }
-            },
-            MessageType::PipelineJobs(link) => {
-                for job in link.resource_vec {
-                    let q = format!("MATCH (p:GitlabPipeline) WHERE p.pipeline_id = '{}' with p MATCH (j:GitlabJob) WHERE j.job_id = '{}' with p,j MERGE (j)-[:inPipeline]->(p)", link.resource_id, job.id);
-                    transaction.run(Query::new(q)).await.expect("Could not execute query");
-                }
-            },
-            _ => {
-                todo!()
+                match transaction.commit().await {
+                    Ok(_) => {
+                        info!("Transaction Committed")
+                    },
+                    Err(e) => error!("Error updating graph {}", e)
+                }        
+            }
+            Err(e) => {
+                error!("Error getting message delivery! {}", e);
+                continue;
             }
         }
-        match transaction.commit().await {
-             Ok(_) => {
-                println!("[*] Transaction Committed")
-             },
-             Err(e) => panic!("Error updating graph {}", e)
-        }        
+        
     } //end consume loop
 
     Ok(())

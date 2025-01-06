@@ -24,11 +24,12 @@
 use std::error::Error;
 
 use gitlab_service::get_all_elements;
-use gitlab_types::{Runner, MessageType};
 use lapin::{options::{QueueDeclareOptions, QueueBindOptions}, types::FieldTable};
-use reqwest::Client;
+use log::info;
 use serde_json::to_string;
 use common::{get_gitlab_token, get_gitlab_endpoint, connect_to_rabbitmq, publish_message, GITLAB_EXCHANGE_STR, RUNNERS_QUEUE_NAME, RUNNERS_ROUTING_KEY, create_lock};
+use common::types::MessageType;
+mod helpers;
 
 const LOCK_FILE_PATH: &str = "/tmp/runners_observer.lock";
 #[tokio::main]
@@ -38,7 +39,7 @@ async fn main() -> Result<(), Box<dyn Error> > {
         Err(e) => panic!("{}", e),
         Ok(false) => Ok(()),
         Ok(true) => {
-            println!("running runners task");
+            info!("running runners task");
 
             //publish user id and list of user's projects to queue?
             let mq_conn = connect_to_rabbitmq().await?;
@@ -57,13 +58,12 @@ async fn main() -> Result<(), Box<dyn Error> > {
             let gitlab_token = get_gitlab_token();
             let service_endpoint = get_gitlab_endpoint();
 
-            let web_client = Client::builder().build().unwrap();
-            println!("Retrieving runners");
-            let runners: Vec<Runner> = get_all_elements(&web_client, gitlab_token.clone(), format!("{}{}", service_endpoint, "/runners/all")).await.unwrap();
-            publish_message(to_string(&MessageType::Runners(runners.clone())).unwrap().as_bytes(), &mq_publish_channel, GITLAB_EXCHANGE_STR, RUNNERS_ROUTING_KEY).await;
+            let web_client = helpers::helpers::web_client();
             
-            println!("[*] Messages published!");
-
+            if let Some(runners) = get_all_elements(&web_client, gitlab_token.clone(), format!("{}{}", service_endpoint, "/runners/all")).await {
+                publish_message(to_string(&MessageType::Runners(runners.clone())).unwrap().as_bytes(), &mq_publish_channel, GITLAB_EXCHANGE_STR, RUNNERS_ROUTING_KEY).await;
+            }
+            
             let _ = mq_conn.close(0, "closed").await?;
 
             std::fs::remove_file(LOCK_FILE_PATH).expect("Error deleting lock file");

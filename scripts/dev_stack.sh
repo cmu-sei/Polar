@@ -27,7 +27,6 @@ set -euo pipefail
 # Ensure aliases do not interfere
 unalias -a
 
-
 # ********** Begin global configuration options **********
 
 # Just a gentle reminder that "0" is "success" in Bash and Bash has no actual
@@ -51,14 +50,16 @@ POLAR_CONFIG_RABBITMQ=0
 
 # ********** End global configuration options **********
 
-
 # Commands used in the script could be shadowed by function definitions. Ensure
 # they are not unsetting any conflicting functions definitions.
 clear_shadows() {
-    local commands="ls cp chmod chown echo mkdir cp git openssl sudo tee"
+    local commands="ls cp chmod chown echo mkdir cp git openssl tee"
+    if [ ! "$EUID" -eq 0 ]; then
+        commands="$commands sudo"
+    fi
 
     for cmd in $commands; do
-        if declare -F "$cmd" > /dev/null; then
+        if declare -F "$cmd" >/dev/null; then
             unset -f "$cmd"
         fi
     done
@@ -67,9 +68,12 @@ clear_shadows() {
 # Check for required commands. No need to check for the core utils or posix
 # ones.
 check_prereqs() {
-    local required="git openssl sudo make"
+    local required="git openssl make"
+    if [ ! "$EUID" -eq 0 ]; then
+        required="$required sudo"
+    fi
     for cmd in $required; do
-        if ! command -v "$cmd" &> /dev/null; then
+        if ! command -v "$cmd" &>/dev/null; then
             echo "Error: Required command '$cmd' is not installed." >&2
             exit 1
         fi
@@ -80,6 +84,7 @@ check_prereqs() {
 check_root() {
     if [ "$EUID" -eq 0 ]; then
         echo "Warning: You are running this script as root. It's recommended to run as a non-root user."
+        echo "If you are running as root inside a dev container, ignore this warning."
         echo "Press any key to continue as root or Ctrl+C to cancel."
         read -n 1 -s -r -p ""
     fi
@@ -94,9 +99,11 @@ setup_trap() {
 exit_handler() {
     # if the script exits on code 0 is successful, else perform cleanup.
     local ecode=$?
-    if [ $ecode -eq 0 ]; then echo "Setup complete."
-    elif [ $ecode -eq 2 ]; then echo "Setup cancelled."
-    else 
+    if [ $ecode -eq 0 ]; then
+        echo "Setup complete."
+    elif [ $ecode -eq 2 ]; then
+        echo "Setup cancelled."
+    else
         echo "Script interrupted."
         delete_env_config
         delete_vars
@@ -111,7 +118,7 @@ get_project_root() {
     PROJECT_ROOT="$(dirname "$script_dir")"
 
     export PROJECT_ROOT=$PROJECT_ROOT
-    
+
     echo "Project root set to: $PROJECT_ROOT"
 }
 
@@ -121,7 +128,9 @@ configure_env() {
     if [[ -f "$config_file" ]]; then
         read -p "Environment config file exists. Overwrite? [yN] " OVERWRITE
         if [[ "$OVERWRITE" =~ ^[yY]$ ]]; then
-            rm "$config_file"
+            delete_env_config
+            delete_vars
+            remove_dns_entries
         else
             exit 2
         fi
@@ -156,7 +165,6 @@ configure_env() {
     read -p "Enter TLS CA certificate path [$PROJECT_ROOT/var/ssl/ca_certificate.pem]: " TLS_CA_CERT
     TLS_CA_CERT=${TLS_CA_CERT:-"$PROJECT_ROOT/var/ssl/ca_certificate.pem"}
 
-
 }
 
 # Configuration is written to a file and sourced in the execution shell
@@ -170,58 +178,59 @@ create_env_config() {
     if [[ ! -f "$config_file" ]]; then
         echo "Creating configuration file at $config_file"
 
-        echo '# Generated Environment Configuration. If you edit this, do not re-run dev_stack.sh' >> "$config_file"
-        echo '# script without backing up this file, first.' >> "$config_file"
+        echo '# Generated Environment Configuration. If you edit this, do not re-run dev_stack.sh' >>"$config_file"
+        echo '# script without backing up this file, first.' >>"$config_file"
 
-        echo '# The service endpoint of the given neo4j instance.' >> "$config_file"
-        echo '# For local development, this could be "neo4j://neo4j:7687"' >> "$config_file"
+        echo '# The service endpoint of the given neo4j instance.' >>"$config_file"
+        echo '# For local development, this could be "neo4j://neo4j:7687"' >>"$config_file"
         COMMAND="export GRAPH_ENDPOINT=\"$GRAPH_ENDPOINT\""
         eval "$COMMAND"
-        echo "$COMMAND" >> "$config_file"
+        echo "$COMMAND" >>"$config_file"
 
-        echo '# The service endpoint of the broker instance. (for rabbitmq, prefix with amqp://)' >> "$config_file"
-        echo '# For the development container, the name could be "rabbitmq". The auth mechanism,' >> "$config_file"
-        echo '# if specified, is according to your configuration and follows the docs for' >> "$config_file"
-        echo '# your chosen broker.' >> "$config_file"
-        echo '# For our default, reference: "amqps://rabbitmq:5671/%2f?auth_mechanism=external"' >> "$config_file"
+        echo '# The service endpoint of the broker instance. (for rabbitmq, prefix with amqp://)' >>"$config_file"
+        echo '# For the development container, the name could be "rabbitmq". The auth mechanism,' >>"$config_file"
+        echo '# if specified, is according to your configuration and follows the docs for' >>"$config_file"
+        echo '# your chosen broker.' >>"$config_file"
+        echo '# For our default, reference: "amqps://rabbitmq:5671/%2f?auth_mechanism=external"' >>"$config_file"
         COMMAND="export BROKER_ENDPOINT=\"$BROKER_ENDPOINT\""
         eval "$COMMAND"
-        echo "$COMMAND" >> "$config_file"
+        echo "$COMMAND" >>"$config_file"
 
-        echo '# For the development container, this should be "neo4j"' >> "$config_file"
+        echo '# For the development container, this should be "neo4j"' >>"$config_file"
         COMMAND="export GRAPH_USER=\"$GRAPH_USER\""
         eval "$COMMAND"
-        echo "$COMMAND" >> "$config_file"
+        echo "$COMMAND" >>"$config_file"
 
-        echo '# For the development container, this will be whatever you set it to be when' >> "$config_file"
-        echo '# you set up your graph.' >> "$config_file"
+        echo '# For the development container, this will be whatever you set it to be when' >>"$config_file"
+        echo '# you set up your graph.' >>"$config_file"
         COMMAND="export GRAPH_PASSWORD=\"$GRAPH_PASSWORD\""
         eval "$COMMAND"
-        echo "$COMMAND" >> "$config_file"
+        echo "$COMMAND" >>"$config_file"
 
-        echo '# For the development container, this might be "neo4j"' >> "$config_file"
+        echo '# For the development container, this might be "neo4j"' >>"$config_file"
         COMMAND="export GRAPH_DB=\"$GRAPH_DB\""
         eval "$COMMAND"
-        echo "$COMMAND" >> "$config_file"
+        echo "$COMMAND" >>"$config_file"
 
-        echo '# The absolute file path to the client .p12 file. This is used by the Rust' >> "$config_file"
-        echo '# binaries to auth with the broker via TLS.' >> "$config_file"
+        echo '# The absolute file path to the client .p12 file. This is used by the Rust' >>"$config_file"
+        echo '# binaries to auth with the broker via TLS.' >>"$config_file"
         COMMAND="export TLS_CLIENT_KEY=\"$TLS_CLIENT_KEY\""
         eval "$COMMAND"
-        echo "$COMMAND" >> "$config_file"
+        echo "$COMMAND" >>"$config_file"
 
-        echo '# If a password was set for the .p12 file, put it here.' >> "$config_file"
+        echo '# If a password was set for the .p12 file, put it here.' >>"$config_file"
         COMMAND="export TLS_KEY_PASSWORD=\"$TLS_KEY_PASSWORD\""
         eval "$COMMAND"
-        echo "$COMMAND" >> "$config_file"
+        echo "$COMMAND" >>"$config_file"
 
-        echo '# The absolute file path to the ca_certificates.pem file created by TLS_GEN.' >> "$config_file"
-        echo '# Used by the Rust binaries to auth with RabbitMQ via TLS.' >> "$config_file"
+        echo '# The absolute file path to the ca_certificates.pem file created by TLS_GEN.' >>"$config_file"
+        echo '# Used by the Rust binaries to auth with RabbitMQ via TLS.' >>"$config_file"
         COMMAND="export TLS_CA_CERT=\"$TLS_CA_CERT\""
         eval "$COMMAND"
-        echo "$COMMAND" >> "$config_file"
+        echo "$COMMAND" >>"$config_file"
 
         chmod 600 "$config_file"
+        chown 1000:1000 "$config_file"
         source "$config_file"
     else
         echo "Hm. You shouldn't have been able to get here."
@@ -268,15 +277,21 @@ generate_certs() {
     cd "$ssl_dir"
     cp client_rabbitmq.p12 client_rabbitmq.p12.original
 
-# Convert the client .p12 file using OpenSSL
+    # Convert the client .p12 file using OpenSSL
     echo "Converting client p12 file to legacy format using OpenSSL..."
     openssl pkcs12 -legacy -export -inkey client_rabbitmq_key.pem -in client_rabbitmq_certificate.pem -out client_rabbitmq.p12 -passout pass:""
 
-# Adjust permissions for security
+    # Adjust permissions for security
     echo "Adjusting permissions for SSL files..."
-    sudo chown $(whoami):0 *
-    sudo chmod 400 *
-    sudo chmod 777 -R "$ssl_dir"
+    if [ "$EUID" -eq 0 ]; then
+        chown $(whoami):0 *
+        chmod 400 *
+        chmod -R 777 "$ssl_dir"
+    else
+        sudo chown $(whoami):0 *
+        sudo chmod 400 *
+        sudo chmod -R 777 "$ssl_dir"
+    fi
 }
 
 # Configure Neo4J in /var directory
@@ -303,8 +318,13 @@ configure_neo4j() {
     cp "$PROJECT_ROOT/conf/neo4j_setup/conf/neo4j.conf" "$neo4j_vol_dir/conf"
     cp "$PROJECT_ROOT/conf/neo4j_setup/imports/"* "$neo4j_vol_dir/import"
 
-    sudo chown -R 7474:7474 "$neo4j_vol_dir"
-    sudo chmod -R 775 "$neo4j_vol_dir"
+    if [ "$EUID" -eq 0 ]; then
+        chown -R 7474:7474 "$neo4j_vol_dir"
+        chmod -R 775 "$neo4j_vol_dir"
+    else
+        sudo chown -R 7474:7474 "$neo4j_vol_dir"
+        sudo chmod -R 775 "$neo4j_vol_dir"
+    fi
 }
 
 # Delete /var directory, which contains certificates & configuration for Neo4J and Rabbit
@@ -314,7 +334,11 @@ delete_vars() {
     # Fully delete /var folder if it exists.
     if [[ -d "$var_dir" ]]; then
         echo "Removing /var directory..."
-        sudo rm -rf "$var_dir"
+        if [ "$EUID" -eq 0 ]; then
+            rm -rf "$var_dir"
+        else
+            sudo rm -rf "$var_dir"
+        fi
     else
         echo "Certificates and config were not generated."
     fi
@@ -328,14 +352,22 @@ update_dns_entries() {
 
     entry="127.0.0.1 $BROKER_ENDPOINT_NAME"
     if [[ -z $(grep -Fx "$entry" "$file") ]]; then
-        echo "$entry" | sudo tee -a "$file"
+        if [ "$EUID" -eq 0 ]; then
+            echo "$entry" | tee -a "$file"
+        else
+            sudo echo "$entry" | tee -a "$file"
+        fi
     else
         echo "The line '$entry' already exists in $file. Leaving it alone."
     fi
 
     entry="127.0.0.1 $GRAPH_ENDPOINT_NAME"
     if [[ -z $(grep -Fx "$entry" "$file") ]]; then
-        echo "$entry" | sudo tee -a "$file"
+        if [ "$EUID" -eq 0 ]; then
+            echo "$entry" | tee -a "$file"
+        else
+            echo "$entry" | tee -a "$file"
+        fi
     else
         echo "The line '$entry' already exists in $file. Leaving it alone."
     fi
@@ -348,19 +380,32 @@ remove_dns_entries() {
     echo "Removing DNS entries for the broker and the graph from $file..."
 
     # this is a little silly, but you can't sed the hosts file directly from a container, so.
-    local dup="$PROJECT_ROOT/scripts/hostsdup"
+    local dup="/tmp/hostsdup"
     cp $file $dup
 
+    # Remove entries for broker and graph
     entry="127.0.0.1 $BROKER_ENDPOINT_NAME"
-    # sed -i "/$entry/d" "$file"
-    sed -i "/$entry/d" "$dup"
+    if [[ "$OSTYPE" == "darwin"* ]]; then
+        sed -i '' -e "/$entry/d" "$dup"
+    else
+        sed -i "/$entry/d" "$dup"
+    fi
 
     entry="127.0.0.1 $GRAPH_ENDPOINT_NAME"
-    # sed -i "/$entry/d" "$file"
-    sed -i "/$entry/d" "$dup"
+    if [[ "$OSTYPE" == "darwin"* ]]; then
+        sed -i '' -e "/$entry/d" "$dup"
+    else
+        sed -i "/$entry/d" "$dup"
+    fi
 
-    cp $dup $file
-    rm $dup
+    if [ "$EUID" -eq 0 ]; then
+        # Sudo user possibly needed on MacOS
+        sudo cp $dup $file
+        sudo rm $dup
+    else
+        cp $dup $file
+        rm $dup
+    fi
 }
 
 main() {

@@ -22,11 +22,11 @@
 */
 
 use futures_lite::StreamExt;
-use gitlab_types::{MessageType};
-use helpers::helpers::get_neo_config;
+use helpers::helpers::{get_neo_config, run_query};
 use common::{connect_to_rabbitmq, GITLAB_EXCHANGE_STR, RUNNERS_ROUTING_KEY, RUNNERS_QUEUE_NAME};
+use common::types::MessageType;
 use lapin::{options::*, types::FieldTable, Result};
-use neo4rs::Query;
+use log::{debug, error, info};
 mod helpers;
 
 #[tokio::main]
@@ -50,52 +50,76 @@ async fn main() -> Result<()> {
         FieldTable::default(),
     )
     .await?;
-    println!("[*] waiting to consume");
+    info!("[*] waiting to consume");
 
     //load neo config and connect to graph db TODO: get credentials securely
     let graph_conn = neo4rs::Graph::connect(get_neo_config()).await.unwrap();
-    println!("[*] Connected to neo4j");
+    info!("[*] Connected to neo4j");
 
-    while let Some(delivery) = consumer.next().await {
-        let delivery = delivery.expect("error in consumer");
-        delivery
-            .ack(BasicAckOptions::default())
-            .await
-            .expect("ack");
-
-        // //deserialize json value
-        let data_str = String::from_utf8(delivery.data).unwrap();
-        
-        let message : MessageType = serde_json::from_str(data_str.as_str()).unwrap();
-        //Create query - return query, execut it
-        let transaction = graph_conn.start_txn().await.unwrap();
-
-        match message {
-            MessageType::Runners(vec) => {
-                for runner in vec{
-                    let query = format!("MERGE (n:GitlabRunner {{runner_id: '{}', ip_address: '{}', name: '{}' , runner_type: '{}', status: '{}', is_shared: '{}'}}) return n",
-                     runner.id, runner.ip_address.unwrap_or_default(), runner.name.unwrap_or_default(), 
-                     runner.runner_type, runner.status, runner.is_shared.unwrap_or(false));
-
-                    transaction.run(Query::new(query)).await.expect("could not execute query");
+    while let Some(result) = consumer.next().await {
+        match result {
+            Ok(delivery) => {
+                delivery
+                    .ack(BasicAckOptions::default())
+                    .await
+                    .expect("ack");
+                // //deserialize json value
+            // //deserialize json value
+            //TODO: What else can be done on these error cases? Log message data?
+            let message : MessageType = match serde_json::from_slice(delivery.data.as_slice()) {
+                Ok(msg) => msg,
+                Err(e) => {
+                    error!("Could not deserialize message! {}", e);
+                    continue
                 }
-            },
-            MessageType::RunnerJob((runner_id, job)) =>{
-                let q = format!("MATCH (r:GitlabRunner) where r.runner_id = '{}' with r MATCH (j:GitlabJob) where j.job_id = '{}' with j,r MERGE (r)-[:hasJob]->(j)", runner_id, job.id);
-                transaction.run(Query::new(q)).await.expect("Could not execute query");
-                let q = format!("MATCH (p:GitlabPipeline) WHERE p.pipeline_id = '{}' with p MATCH (j:GitlabJob) WHERE j.job_id = '{}' with p,j MERGE (j)-[:inPipeline]->(p)", job.pipeline.id, job.id);
-                transaction.run(Query::new(q)).await.expect("Could not execute query");
-            },
-            _ => {
-                todo!()
+            };
+            
+            debug!("{:?}", message);
+            
+            let transaction = match graph_conn.start_txn().await {
+                Ok(t) => t,
+                Err(e) => {
+                    error!("Could not open transaction with graph! {}", e);
+                    continue
+                }
+            };
+            
+                match message {
+                    MessageType::Runners(vec) => {
+                        for runner in vec{
+                            let query = format!("MERGE (n:GitlabRunner {{runner_id: '{}', ip_address: '{}', name: '{}' , runner_type: '{}', status: '{}', is_shared: '{}'}}) return n",
+                            runner.id, runner.ip_address.unwrap_or_default(), runner.name.unwrap_or_default(), 
+                            runner.runner_type, runner.status, runner.is_shared.unwrap_or(false));
+                            if !run_query(&transaction, query).await {
+                                continue;
+                            }
+                        }
+                    },
+                    MessageType::RunnerJob((runner_id, job)) =>{
+                        let q = format!("MATCH (r:GitlabRunner) where r.runner_id = '{}' with r MATCH (j:GitlabJob) where j.job_id = '{}' with j,r MERGE (r)-[:hasJob]->(j)", runner_id, job.id);
+                        if !run_query(&transaction, q).await {
+                            continue;
+                        }
+                        let q = format!("MATCH (p:GitlabPipeline) WHERE p.pipeline_id = '{}' with p MATCH (j:GitlabJob) WHERE j.job_id = '{}' with p,j MERGE (j)-[:inPipeline]->(p)", job.pipeline.id, job.id);
+                        if !run_query(&transaction, q).await {
+                            continue;
+                        }
+                    },
+                    _ => {
+                        todo!()
+                    }
+                }
+                match transaction.commit().await {
+                    Ok(_) => {
+                        info!("[*] Transaction Committed")
+                    },
+                    Err(e) => panic!("Error updating graph {}", e)
+                }        
+            }Err(e) => {
+                error!("Error getting message Delivery!{}", e );
+                continue
             }
-        }
-        match transaction.commit().await {
-             Ok(_) => {
-                println!("[*] Transaction Committed")
-             },
-             Err(e) => panic!("Error updating graph {}", e)
-        }        
+        }           
     } //end consume looopa
 
     Ok(())

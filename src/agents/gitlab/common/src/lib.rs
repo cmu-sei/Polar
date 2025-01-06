@@ -21,12 +21,16 @@ This Software includes and/or makes use of Third-Party Software each subject to 
 DM24-0470
 */
 
-use std::{env, fs::{File, self}, io::{Read, Write}};
+
+use std::{env, fs::{self,File}, io::{Read, Write}};
 use std::process;
 use url::Url;
 use lapin::{Connection,ConnectionProperties, Channel, BasicProperties, publisher_confirm::Confirmation, options::BasicPublishOptions};
 use tcp_stream::OwnedTLSConfig;
 use sysinfo::{System, SystemExt, ProcessRefreshKind, Pid};
+use log::{error, info};
+
+pub mod types;
 
 pub const GITLAB_EXCHANGE_STR: &str = "gitlab_exchange";
 
@@ -99,31 +103,47 @@ pub fn create_lock(filepath: &str) -> Result<bool, std::io::Error> {
 }
 
 pub fn get_gitlab_token() -> String {
-    let token = env::var("GITLAB_TOKEN").expect("Failed to load private token from the local environment.");
+    let token = read_from_env("GITLAB_TOKEN".to_owned());
     //check length and prefix
     if token.chars().count() == 26 && token.starts_with("glpat-") {
         return token;
     }else {
-        panic!("received invalid private token from environment.")
+        error!("received invalid private token from environment.");
+        process::exit(1)
     }
 }
 
 pub fn get_gitlab_endpoint()-> String {
-    //TODO: Check validity of service endpoint url loaded from env
     //verify URL is a valid format
-    let endpoint = env::var("GITLAB_ENDPOINT").expect("Could not find gitlab service endpoint in environment.");
+    let endpoint = read_from_env("GITLAB_ENDPOINT".to_owned());
     match Url::parse(endpoint.as_str()) {
         Ok(url) => {
-            //TODO: confirm url further?
             return url.to_string()
         }
-        Err(e) => panic!("error parsing endpoint read from environment, {}", e)
+        Err(e) => {
+            error!("error parsing Gitlab Endpoint read from environment, {}", e);
+            process::exit(1)
+        }
     }
 }
 
+
+/// Helper function to parse a file at a given path and return the raw bytes as a vector
 fn get_file_as_byte_vec(filename: &String) -> Vec<u8> {
-    let mut f = File::open(&filename).expect("no file found");
-    let metadata = std::fs::metadata(&filename).expect("unable to read metadata");
+    let mut f = match File::open(&filename) {
+        Ok(file) => file,
+        Err(e) => {
+            error!("Could not read file {}, {}", filename, e);
+            process::exit(1);
+        }
+    };
+    let metadata = match std::fs::metadata(&filename) {
+        Ok(metadata) => metadata, 
+        Err(e) => {
+            error!("Could not get metadata for file {}, {}", filename, e);
+            process::exit(1);
+        }
+    };
     let mut buffer = vec![0; metadata.len() as usize];
     f.read(&mut buffer).expect("buffer overflow");
 
@@ -134,40 +154,38 @@ fn get_file_as_byte_vec(filename: &String) -> Vec<u8> {
 /// Ensure valid certificates are present
 pub async fn connect_to_rabbitmq() -> Result<Connection, String> {
     // You need to use amqp:// scheme here to handle the TLS part manually as it's automatic when you use amqps://
-    let rabbit_endpoint = env::var("BROKER_ENDPOINT").expect("Could not load rabbitmq instance endpoint from environment.");
-    let cert_chain = env::var("TLS_CA_CERT").expect("Could not locate TLS_CA_CERT");
+    let rabbit_endpoint = read_from_env("BROKER_ENDPOINT".to_owned());
+    let cert_chain = read_from_env("TLS_CA_CERT".to_owned());
+    let client_key_file= read_from_env("TLS_CLIENT_KEY".to_owned());
+    let client_key_pwd = read_from_env("TLS_KEY_PASSWORD".to_owned());
 
-    //configure uri auth mechanism
+    let cert_chain = match std::fs::read_to_string(cert_chain) {
+        Ok(chain) => chain,
+        Err(e) => {
+            error!("Could not parse cert chain file as string: {}",e);
+            process::exit(1)
+        },
+    };
+
    let tls_config = OwnedTLSConfig {
         identity: Some(tcp_stream::OwnedIdentity {
-            der: get_file_as_byte_vec(&env::var("TLS_CLIENT_KEY").expect("Could not read TLS_CLIENT_KEY")),
-            password: env::var("TLS_KEY_PASSWORD").expect("Could not locate TLS_KEY_PASSWORD")
+            der: get_file_as_byte_vec(&client_key_file),
+            password: client_key_pwd
         }),
-        cert_chain: Some(std::fs::read_to_string(cert_chain).unwrap())
+        cert_chain: Some(cert_chain)
 
     };
 
-   println!("connecting to: {}", rabbit_endpoint);
-
-   // println!("rabbit endpoint: {}", &rabbit_endpoint);
-   // println!("TLS config: {:?}", tls_config);
-   let conn = Connection::connect_with_config(&rabbit_endpoint, ConnectionProperties::default() ,tls_config).await.expect("Connection error");
-
+   info!("connecting to: {}", rabbit_endpoint);
+    //TODO: confirm whether we wish to exit when we can't connect to the broker, do we want to keep retrying?
+   let conn = match Connection::connect_with_config(&rabbit_endpoint, ConnectionProperties::default() ,tls_config).await {
+    Ok(conn) => conn,
+    Err(e) => {
+        error!("Could not connect to rabbitmq! {}",e);
+        process::exit(1)
+    }
+   };
    Ok(conn)
-}
-/// Gets a connection to rabbitmq by trying to use PLAIN authentication with credentials
-/// DEPRECATED
-#[deprecated]
-pub async fn get_mq_conn(addr: String)  -> Connection {
-    let conn = Connection::connect(
-        &addr,
-        ConnectionProperties::default(),
-    )
-    .await.expect("Could not connect to rabbit mq at given address");
-
-    println!("[*] Connected to RabbitMq");
-
-    return conn
 }
 
 /// Publish a message to the rabbitmq instance at a given exchange, using the channel and routing key for a desired queue.
@@ -179,4 +197,15 @@ pub async fn publish_message(payload: &[u8], channel: &Channel, exchange: &str, 
         BasicProperties::default()).await.unwrap().await.unwrap();
     
     assert_eq!(confirmation, Confirmation::NotRequested);
+}
+
+//TODO: Review this fn, do we always want to exit when the environment isn't fully configured? Are any env vars optional?
+pub fn read_from_env(var_name: String) -> String {
+    match env::var(var_name.clone()) {
+        Ok(val) => val,
+        Err(_) => {
+            error!("Can't read {} from environment", var_name);
+            process::exit(1)
+        }
+    }
 }
