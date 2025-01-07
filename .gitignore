@@ -12,3 +12,5 @@ output/
 src/agents/*/result
 result*
 report.json
+bin
+certs
