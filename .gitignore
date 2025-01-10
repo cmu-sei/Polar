@@ -9,5 +9,8 @@ gitlab_data
 env_setup.sh
 var/
 output/
-result
+src/agents/*/result
+result*
 report.json
+bin
+certs

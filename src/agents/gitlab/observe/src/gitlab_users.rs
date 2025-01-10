@@ -23,11 +23,11 @@
 
 use std::{error::Error, fs::remove_file};
 use gitlab_service::get_all_elements;
-use gitlab_types::{User, MessageType};
 use lapin::{options::{QueueDeclareOptions, QueueBindOptions}, types::FieldTable};
 use reqwest::Client;
 use serde_json::to_string;
 use common::{get_gitlab_token, get_gitlab_endpoint, connect_to_rabbitmq, publish_message, GITLAB_EXCHANGE_STR, USERS_QUEUE_NAME, USERS_ROUTING_KEY, create_lock};
+use common::types::{User, MessageType};
 use log::{info, warn};
 const LOCK_FILE_PATH: &str = "/tmp/users_observer.lock";
 

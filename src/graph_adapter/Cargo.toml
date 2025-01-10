@@ -32,3 +32,4 @@ edition = "2021"
 [dependencies]
 async-trait = "0.1.68"
 serde = { version = "1.0.156", features = ["derive"] }
+workspace-hack = { version = "0.1", path = "../workspace-hack" }

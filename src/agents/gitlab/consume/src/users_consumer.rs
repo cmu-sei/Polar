@@ -22,7 +22,7 @@
 */
 
 use futures_lite::StreamExt;
-use gitlab_types::{MessageType, User};
+use common::types::{MessageType, User};
 use helpers::helpers::{get_neo_config, run_query};
 use common::{connect_to_rabbitmq, GITLAB_EXCHANGE_STR, USERS_QUEUE_NAME, USERS_ROUTING_KEY};
 use lapin::{options::*, types::FieldTable, Result};

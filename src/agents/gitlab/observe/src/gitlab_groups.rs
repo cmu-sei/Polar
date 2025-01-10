@@ -23,11 +23,11 @@
 
 use std::{error::Error, fs::remove_file};
 use gitlab_service::get_all_elements;
-use gitlab_types::{MessageType, ResourceLink};
 use lapin::{options::{QueueDeclareOptions, QueueBindOptions}, types::FieldTable};
 use log::info;
 use serde_json::to_string;
 use common::{create_lock, get_gitlab_token, get_gitlab_endpoint, connect_to_rabbitmq, publish_message, GITLAB_EXCHANGE_STR, GROUPS_ROUTING_KEY, GROUPS_QUEUE_NAME};
+use common::types::{MessageType, ResourceLink};
 mod helpers;
 const LOCK_FILE_PATH: &str = "/tmp/groups_observer.lock";
 

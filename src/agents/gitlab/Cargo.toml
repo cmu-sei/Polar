@@ -22,15 +22,19 @@
 
 # DM24-0470
 
-[package]
-name = "gitlab_types"
+[workspace]
+resolver = "2"
+
+members = [
+    "common",
+    "consume",
+    "observe",
+    "workspace-hack"
+]
+
+[workspace.package]
 version = "0.1.0"
 edition = "2021"
 
-[lib]
-name = "gitlab_types"
-path = "src/types.rs"
-
-[dependencies]
-serde = {version = "1", features = ["derive"]}
-serde_json = "1.0"
+[workspace.metadata.crane]
+name = "polar"
