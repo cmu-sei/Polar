@@ -20,6 +20,9 @@ This Software includes and/or makes use of Third-Party Software each subject to 
 
 DM24-0470
 */
+pub mod gitlab_capnp {
+    include!(concat!(env!("OUT_DIR"), "/src/gitlab_capnp.rs"));
+}
 
 
 use std::{env, fs::{self,File}, io::{Read, Write}};

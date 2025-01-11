@@ -150,6 +150,7 @@ pub async fn get_all_elements<T: for<'a> Deserialize<'a>>(client: &Client, token
 
     let mut headers = resp.headers().clone();
     //get data from first page, if any
+    //TODO: Do not serialize to json, forward bytes as part of message to broker
     match resp.json::<Vec<T>>().await {
         Ok(mut vec) => {
             elements.append(&mut vec);

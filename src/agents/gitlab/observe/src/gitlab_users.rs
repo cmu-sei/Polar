@@ -57,7 +57,7 @@ async fn main() -> Result<(), Box<dyn Error> > {
             let service_endpoint = get_gitlab_endpoint();
 
             let web_client = Client::builder().build().unwrap();
-            
+            //TOOD: Remove serialization just send raw bytes?
             let users: Vec<User> = get_all_elements(&web_client, gitlab_token.clone(), format!("{}{}", service_endpoint, "/users")).await.unwrap();
             publish_message(to_string(&MessageType::Users(users.clone())).unwrap().as_bytes(), &mq_publish_channel, GITLAB_EXCHANGE_STR, USERS_ROUTING_KEY).await;
             
