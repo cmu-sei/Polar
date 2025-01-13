@@ -167,6 +167,7 @@ pub enum ClientMessage {
         },
         /// Unsubscribe request from the client.
         UnsubscribeRequest {
+            registration_id: Option<String>,
             topic: String,
         },
         UnsubscribeAcknowledgment {
@@ -206,7 +207,7 @@ impl BrokerMessage {
                     topic,
                 }
             },
-            ClientMessage::UnsubscribeRequest {  topic } => {
+            ClientMessage::UnsubscribeRequest {  registration_id, topic } => {
                 BrokerMessage::UnsubscribeRequest {
                     registration_id,
                     topic,
@@ -260,15 +261,3 @@ pub fn init_logging() {
 }
 
 pub fn get_subscriber_name(registration_id: &str, topic: &str) -> String { format!("{0}:{1}", registration_id, topic) }
-
-// pub fn try_get_session(registration_id: String) -> Option<ActorRef<BrokerMessage>> {
-//     match &where_is(registration_id.clone()) {
-//         Some(session) => {
-//             Some(ActorRef::from(session.to_owned()))
-//         }, 
-//         None => {
-//             warn!("Session {registration_id} not found!");
-//             None
-//         }
-//     }
-// }

@@ -126,21 +126,9 @@ impl Actor for SubscriberManager {
             BrokerMessage::UnsubscribeRequest { registration_id, topic } => {
                 match registration_id {
                     Some(id) => {         
-                        if let Some(subscribers) = state.subscriptions.get_mut(&topic) {
-                            let subscriber_name = format!("{id}:{topic}");
-
-                            where_is(subscriber_name.clone()).map_or_else(
-                                || { warn!("Could not find subscriber for client {id}. They may not be subscribed to the topic: {topic}")},
-                                |subscriber| {
-                                    subscriber.kill();
-                                });
-                            //TODO: Monitor this approach for effectiveness
-                            match subscribers.binary_search(&subscriber_name) {
-                                Ok(index) => subscribers.remove(index),
-                                Err(_) => todo!("Expected to find index of the subscriber name for client but couldn't, send error message")
-                            };
-
-
+                        let subscriber_name = format!("{id}:{topic}");
+                        if let Some(subscriber) = where_is(subscriber_name.clone()) {
+                            subscriber.stop(Some("UNSUBSCRIBED".to_string()));
                             //send ack
                             let id_clone = id.clone();
                             where_is(id).map_or_else(|| { error!("Could not find session for client: {id_clone}")}, |session| {
@@ -296,7 +284,6 @@ impl Actor for SubscriberAgent {
                         CallResult::Success(result) => {
                             if let Err(e) = result {
                                 //session couldn't talk to listener, add message to DLQ
-                                warn!("{}", format!("{PUBLISH_REQ_FAILED_TXT}: Client not available."));
                                 state.dead_letter_queue.push_back(payload.clone());
                                 debug!("{t} queue has {0} message(s) waiting", state.dead_letter_queue.len());
                             }

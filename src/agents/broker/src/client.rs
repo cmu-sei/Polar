@@ -76,7 +76,7 @@ impl Actor for TcpClientActor {
         state: &mut Self::State ) ->  Result<(), ActorProcessingErr> {
         
         let addr = state.bind_addr.clone();
-        info!("{myself:?} started. Connecting to {addr}...");
+        info!("Connecting to {addr}...");
         let connector = TlsConnector::from(Arc::clone(&state.client_config));
         
         match TcpStream::connect(&addr).await {

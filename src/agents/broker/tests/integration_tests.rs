@@ -9,7 +9,7 @@ mod tests {
     use ractor::registry::where_is;
     use ractor::{async_trait, ActorProcessingErr, ActorRef, SupervisionEvent};
     use ractor::{concurrency::Duration, Actor};
-    use cassini::{ClientMessage, BROKER_NAME, LISTENER_MANAGER_NAME};
+    use cassini::{get_subscriber_name, ClientMessage, BROKER_NAME, LISTENER_MANAGER_NAME};
     use tokio::sync::Notify;
     use tokio::time::timeout;
     use tracing::{debug, info};
@@ -371,6 +371,57 @@ mod tests {
         new_client.kill_and_wait(None).await.expect("Expected to kill client");
     }
 
+    #[tokio::test]
+    async fn test_client_unsubscribe() {
+        // Wait for the server to be ready
+        timeout(Duration::from_secs(15), SERVER_READY.notified())
+        .await
+        .expect(TIMEOUT_ERR_MSG);
+
+        let supervisor = where_is(TEST_SUPERVISOR.to_string()).unwrap();
+    
+    
+        let (client, _) = Actor::spawn_linked(Some("test_registration_client".to_owned()),
+        TcpClientActor,
+        TcpClientArgs {
+            bind_addr: BIND_ADDR.to_string(),
+            registration_id: None,
+            client_cert_file: env::var("TLS_CLIENT_CERT").unwrap(),
+            private_key_file: env::var("TLS_CLIENT_KEY").unwrap(),
+            ca_cert_file: env::var("TLS_CA_CERT").unwrap(),
+
+        }, supervisor.clone().into()).await.expect("Failed to start client actor");    
+
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        
+        let session_id = client
+        .call(TcpClientMessage::GetRegistrationId, Some(Duration::from_secs(10)))
+        .await.unwrap().unwrap();
+
+        assert_ne!(where_is(session_id.clone()), None);
+
+        let topic = String::from("Cherries");
+
+        
+        //subscribe client to topic
+        client.send_message(TcpClientMessage::Send(
+            ClientMessage::SubscribeRequest { topic: topic.clone(), registration_id: Some(session_id.clone())}
+        )).expect("Expected to forward msg");
+
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        
+        //unsub
+        client.send_message(TcpClientMessage::Send(
+            ClientMessage::UnsubscribeRequest { registration_id: Some(session_id.clone()), topic: topic.clone() }
+        )).expect("Expected to forward msg");
+
+        tokio::time::sleep(Duration::from_secs(1)).await;
+
+        assert_eq!(where_is(get_subscriber_name(&session_id, &topic.clone())), None);
+        
+        client.kill_and_wait(None).await.expect("Expected to stop client");
+        
+    }
 
 
     // #[tokio::test]

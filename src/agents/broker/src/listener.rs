@@ -516,7 +516,7 @@ impl Actor for Listener {
                 }
                
             },
-            BrokerMessage::UnsubscribeRequest { registration_id,topic } => {
+            BrokerMessage::UnsubscribeRequest { registration_id, topic } => {
                 if registration_id == state.registration_id && registration_id.is_some() {
                     let id = registration_id.unwrap();
                     match where_is(id.clone()) {
@@ -548,7 +548,7 @@ impl Actor for Listener {
                             }
                          }
                     }
-                } else {warn!("Received request from unregistered client!!"); }
+                } else {warn!("Received request from unregistered client!! "); }
             }
             BrokerMessage::UnsubscribeAcknowledgment { registration_id, topic, .. } => {
 

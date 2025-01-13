@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 use ractor::registry::where_is;
 use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef};
-use tracing::{debug, error, warn};
-use crate::{BrokerMessage, PUBLISH_REQ_FAILED_TXT, SUBSCRIBE_REQUEST_FAILED_TXT};
+use tracing::{debug, error, info, warn};
+use crate::{get_subscriber_name, BrokerMessage, PUBLISH_REQ_FAILED_TXT, SUBSCRIBE_REQUEST_FAILED_TXT};
 use crate::UNEXPECTED_MESSAGE_STR;
 
 pub const TOPIC_ADD_FAILED_TXT: &str = "Failed to add topic \"{topic}!\"";
@@ -196,24 +196,23 @@ impl Actor for TopicAgent {
 
     async fn pre_start(
         &self,
-        myself: ActorRef<Self::Msg>,
+        _: ActorRef<Self::Msg>,
         args: TopicAgentArgs
     ) -> Result<Self::State, ActorProcessingErr> {
-
         let subscribers = args.subscribers.unwrap_or_default();
 
         let state: TopicAgentState  = TopicAgentState {subscribers};
         
-        debug!("Starting... {myself:?}");
-
         Ok(state)
     }
 
     async fn post_start(
         &self,
         myself: ActorRef<Self::Msg>,
-        _: &mut Self::State ) ->  Result<(), ActorProcessingErr> {
-            debug!("{myself:?} Started");
+        state: &mut Self::State ) ->  Result<(), ActorProcessingErr> {
+            
+            debug!("{myself:?} Started with {0} subscriber(s)", state.subscribers.len() );
+            debug!("{:?}", state.subscribers);
             Ok(())
 
     }
@@ -234,36 +233,34 @@ impl Actor for TopicAgent {
                         //alert subscribers
                         for subscriber in &state.subscribers {
                             if let Some(actor) = where_is(subscriber.to_string()) {
-                                actor.send_message(BrokerMessage::PublishResponse {
+                                if let Err(e) = actor.send_message(BrokerMessage::PublishResponse {
                                     topic: topic.clone(),
                                     payload: payload.clone(),
                                     result: Ok(())
-                                })
-                                .map_err(|e| {
-                                    warn!("{PUBLISH_REQ_FAILED_TXT}: {e}")
-                                }).unwrap();
+                                }) { warn!("{PUBLISH_REQ_FAILED_TXT}: {e}") }
                             } else { warn!("{PUBLISH_REQ_FAILED_TXT}: failed to lookup subscriber for {registration_id}") }
                         }
 
                         //send ACK to session that made the request
                         match where_is(registration_id.clone()) {
                             Some(session) => {
-                                session.send_message(BrokerMessage::PublishRequestAck(topic))
-                                .map_err(|e| { warn!("Failed to send publish Ack to session! {e}") })
-                                .unwrap();
+                                if let Err(e) = session.send_message(BrokerMessage::PublishRequestAck(topic)) {
+                                    warn!("Failed to send publish Ack to session! {e}")
+                                }
                             }
                             None => warn!("Failed to lookup session {registration_id}")
                         }
                     }, 
                     None => {
                         warn!("Received publish request from unknown session: {payload}");
-                        //TODO: send error message
+                        //TODO: send error message?
                     }
                 }
             }
             BrokerMessage::Subscribe { reply, registration_id, topic } => {
             
-                let sub_id = format!("{}:{}", registration_id.clone(), topic.clone());
+                let sub_id = get_subscriber_name(&registration_id, &topic);
+                debug!("Adding {sub_id} to subscriber list");
                 state.subscribers.push(sub_id.clone());
                 if let Err(e) = reply.send(Ok(sub_id)) {
                     error!("{e}");
@@ -271,21 +268,13 @@ impl Actor for TopicAgent {
             
             }
             BrokerMessage::UnsubscribeRequest { registration_id, topic } => {
-                if let Some(id) = registration_id {
-                    match state.subscribers.binary_search(&id) {
-                        Ok(i) => {
-                            state.subscribers.remove(i);
-                        }
-                        Err(e) => {
-                            warn!("Failed to unsubscribe couldn't find subscriber?");
-                            todo!()
-                        }
+                if let Some(registration_id) = registration_id {
+                    let sub_id = get_subscriber_name(&registration_id, &topic);
+                    if let Ok(i) = state.subscribers.binary_search(&sub_id) {
+                        state.subscribers.remove(i);
+                        info!("Removed session {registration_id} from subscribers.")
                     }
-
-                } else {
-                    warn!("Received unexpected unsubscribe request, no registration_id present.")
                 }
-            
             }
         _ => {
             warn!("{}", format!("{UNEXPECTED_MESSAGE_STR}: {message:?}"))

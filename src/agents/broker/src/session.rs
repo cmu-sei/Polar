@@ -346,8 +346,6 @@ impl Actor for SessionAgent {
             },
             BrokerMessage::UnsubscribeRequest { registration_id, topic } => {
                 if let Err(e) = state.broker.send_message(BrokerMessage::UnsubscribeRequest { registration_id, topic}) {
-                    // error!("{SUBSCRIBE_REQUEST_FAILED_TXT} {BROKER_NOT_FOUND_TXT}");
-
                     if let Err(fwd_err) = myself.send_message(BrokerMessage::TimeoutMessage { client_id: state.client_ref.get_name().unwrap_or_default(), registration_id: Some(myself.get_name().unwrap_or_default()), error: Some(format!("{e}")) }) {
                         error!("{e}: {fwd_err}");
                         myself.stop(Some("{err_msg}: {listener_err}: {fwd_err}".to_string()));

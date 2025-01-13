@@ -207,7 +207,7 @@ impl Actor for Broker {
                 //Look for existing subscriber actor.
                 
                 if let Some(registration_id) = registration_id {
-                    tracing::debug!("Received subscribe request");
+
                     match where_is(get_subscriber_name(&registration_id, &topic)) {
                         Some(_) => {
                             //Send success message, session already subscribed
@@ -232,15 +232,15 @@ impl Actor for Broker {
                                         let id = registration_id .clone();
                                         
                                         // If no subscriber exists,
-                                        match call(&manager, |reply| {BrokerMessage::Subscribe { reply: reply, registration_id: id.clone(), topic: t.clone() } }, None)
+                                        match call(&manager, |reply| { BrokerMessage::Subscribe { reply: reply, registration_id: id.clone(), topic: t.clone() } }, None)
                                         .await.expect("Expected to call Subscriber Manager") {
                                             Success(add_subscribeer) => {
                                                 match add_subscribeer {
                                                     Ok(_) => {
                                                         //  create one, then notify topic actor, subscribe it on behalf
                                                         match call(&actor,|reply| { 
-                                                            BrokerMessage::Subscribe { reply, registration_id: registration_id.clone(), topic: topic.clone() }
-                                                        }, None).await.expect("Expected to call topic actor") {
+                                                            BrokerMessage::Subscribe { reply, registration_id: registration_id.clone(), topic: topic.clone() } }, None)
+                                                            .await.expect("Expected to call topic actor") {
                                                             Success(result) => {
                                                                 match result {
                                                                     Ok(_) => {
@@ -329,7 +329,6 @@ impl Actor for Broker {
                                                                         }
                                                                     }
                                                                 }
-
                                                             },
                                                             _ => todo!("Failed to communicate with critical worker")
                                                         }      
@@ -360,7 +359,38 @@ impl Actor for Broker {
 
             },
             BrokerMessage::UnsubscribeRequest { registration_id, topic } => {
-                where_is(SUBSCRIBER_MANAGER_NAME.to_owned()).unwrap().send_message(BrokerMessage::UnsubscribeRequest { registration_id: registration_id.clone(), topic: topic.clone() }).expect("Failed to forward request to subscriber manager");
+                if let Some(registration_id) = registration_id {
+
+                    //find topic actor, tell it to forget session
+                    if let Some(topic_actor) = where_is(topic.clone()) {
+                        if let Err(e) = topic_actor.send_message(BrokerMessage::UnsubscribeRequest { registration_id: Some(registration_id.clone()), topic: topic.clone() }) {
+                            warn!("Failed to find topic to unsubscribe to")
+                        }
+                        // tell subscriber manager to cleanup subscribers
+                        if let Some(subscriber_mgr) = where_is(SUBSCRIBER_MANAGER_NAME.to_string()) {
+                            if let Err(e) = subscriber_mgr.send_message(BrokerMessage::UnsubscribeRequest { registration_id: Some(registration_id.clone()), topic: topic.clone() }) {
+                                error!("{e}");
+                                if let Some(session) = where_is(registration_id.clone()) {
+                                    if let Err(e) = session.send_message(BrokerMessage::UnsubscribeAcknowledgment { registration_id, topic: topic.clone(), result: Err(e.to_string()) }) {
+                                        error!("{e}");
+                                    }
+                                }
+                                //TODO: Stop self here?
+                            }
+                        } else {
+                            let msg = "Failed to unsubscribe from topic".to_string();
+    
+                            error!("{msg}");
+                            if let Some(session) = where_is(registration_id.clone()) {
+                                if let Err(e) = session.send_message(BrokerMessage::UnsubscribeAcknowledgment { registration_id, topic: topic.clone(), result: Err(msg) }) {
+                                    error!("{e}");
+                                }
+                            }
+                            //TODO: Stop self here?
+                        }
+                    }
+                }
+                                
             }
             BrokerMessage::SubscribeAcknowledgment { registration_id, topic, .. } => {
                 where_is(registration_id.clone()).map(|session_agent_ref|{
@@ -368,49 +398,59 @@ impl Actor for Broker {
                 });
             },
             BrokerMessage::PublishRequest { registration_id, topic, payload } => {
-                //publish to topic, await it's response, forward to subscriber
+                //publish to topic
                 if let Some(registration_id) = registration_id {
                     match where_is(topic.clone()) {
                         Some(actor) => {
-                            actor.send_message(BrokerMessage::PublishRequest { registration_id: Some(registration_id.clone()), topic, payload })
-                            .map_err(|e| {
-                                warn!("{PUBLISH_REQ_FAILED_TXT}: {e}")
-                            }).unwrap();
+                            if let Err(e) = actor.send_message(BrokerMessage::PublishRequest { registration_id: Some(registration_id.clone()), topic: topic.clone(), payload: payload.clone() }) {
+                                warn!("{PUBLISH_REQ_FAILED_TXT}: {e}");
+                                //send err to session
+                                if let Some(session) = where_is(registration_id.clone()) {
+                                    if let Err(e) = session.send_message(BrokerMessage::PublishResponse { topic, payload: payload.clone(), result: Err(e.to_string()) }) {
+                                        warn!("{PUBLISH_REQ_FAILED_TXT} {e}");
+                                    }
+                                }
+                            }
                         },
                         None => {
                             // topic doesn't exist
 
                             if let Some(manager) = where_is(TOPIC_MANAGER_NAME.to_string()) {
-                                let id = registration_id.clone();
-                                let t = topic.clone();
-                                let p = payload.clone();
                                 //tell topicmgr to add one, await it to complete, 
-                                call(&manager, |reply| {
-                                    BrokerMessage::AddTopic { reply, registration_id: Some(registration_id.clone()), topic }
+                                match call(&manager, |reply| {
+                                    BrokerMessage::AddTopic { reply, registration_id: Some(registration_id.clone()), topic: topic.clone() }
                                     },
                                 None).await
-                                .expect("{PUBLISH_REQ_FAILED_TXT}: {TOPIC_MGR_NOT_FOUND_TXT}")
-                                .map(|call_result| {
-                                    //forward publish req to topic
-                                    call_result.map(|actor| {
-                                        actor.send_message(BrokerMessage::PublishRequest { registration_id: Some(id), topic: t.clone(), payload: p })
-                                        .map_err(|e| { 
-                                            //Failed to send message to topic
-                                            let err_msg = format!("{PUBLISH_REQ_FAILED_TXT}: {e}");
-                                            warn!("{err_msg}"); 
-                                            where_is(registration_id.clone())
-                                            .map(|session| {
-                                                
-                                                session.send_message(BrokerMessage::PublishResponse { topic: t, payload, result: Err(err_msg) })
-                                            })
-
-                                        }).unwrap();
-                                    })
-                                    .map_err(|e| {
-                                        //failed to add topic, tell client
-                                        warn!("{e}");
-                                    })
-                                });
+                                .expect("{PUBLISH_REQ_FAILED_TXT}: {TOPIC_MGR_NOT_FOUND_TXT}") {
+                                    Success(add_topic_result) => {
+                                        match add_topic_result {
+                                            Ok(topic_actor) => {
+                                                //push message to that topic
+                                                if let Err(e) = topic_actor.send_message(BrokerMessage::PublishRequest { registration_id: Some(registration_id.clone()), topic: topic.clone(), payload: payload.clone() }) {
+                                                    warn!("{PUBLISH_REQ_FAILED_TXT}: {e}");
+                                                    //send err to session
+                                                    if let Some(session) = where_is(registration_id.clone()) {
+                                                        if let Err(e) = session.send_message(BrokerMessage::PublishResponse { topic, payload: payload.clone(), result: Err(e.to_string()) }) {
+                                                            warn!("{PUBLISH_REQ_FAILED_TXT} {e}");
+                                                        }
+                                                    }
+                                                }
+                                            } Err(e) => {
+                                                //send err to session
+                                                if let Some(session) = where_is(registration_id.clone()) {
+                                                    if let Err(e) = session.send_message(BrokerMessage::PublishResponse { topic, payload: payload.clone(), result: Err(e.to_string()) }) {
+                                                        warn!("{PUBLISH_REQ_FAILED_TXT} {e}");
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    },
+                                    _ => {
+                                        todo!("Failed to communicate with critical actor for some reason, respond")
+                                    }
+                                }
+                                    
+                                
                             }
                         },
                     }
