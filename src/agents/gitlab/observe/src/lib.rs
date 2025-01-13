@@ -22,6 +22,7 @@
 */
 
 mod helpers;
+mod supervisor;
 
 use log::debug;
 use log::error;

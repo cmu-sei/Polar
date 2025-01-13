@@ -22,14 +22,79 @@
 */
 
 use std::{error::Error, fs::remove_file};
-use gitlab_service::get_all_elements;
+
+use gitlab_observer::get_all_elements;
+
 use lapin::{options::{QueueDeclareOptions, QueueBindOptions}, types::FieldTable};
+use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef};
 use reqwest::Client;
 use serde_json::to_string;
 use common::{get_gitlab_token, get_gitlab_endpoint, connect_to_rabbitmq, publish_message, GITLAB_EXCHANGE_STR, USERS_QUEUE_NAME, USERS_ROUTING_KEY, create_lock};
 use common::types::{User, MessageType};
-use log::{info, warn};
+use log::{debug, info, warn};
 const LOCK_FILE_PATH: &str = "/tmp/users_observer.lock";
+
+
+pub struct GitlabUserObserver;
+
+pub struct GitlabUserObserverState {
+    gitlab_endpoint: String, //endpoint of gitlab instance
+    token: Option<String>, //token for auth,
+    client: Client,
+}
+
+
+pub struct GitlabUserObserverArgs {
+    pub gitlab_endpoint: String, //endpoint of gitlab instance
+    pub token: Option<String> //token for auth
+}
+#[async_trait]
+impl Actor for GitlabUserObserver {
+    type Msg = ();
+    type State = GitlabUserObserverState;
+    type Arguments = GitlabUserObserverArgs;
+
+    async fn pre_start(
+        &self,
+        myself: ActorRef<Self::Msg>,
+        args: GitlabUserObserverArgs
+    ) -> Result<Self::State, ActorProcessingErr> {
+        debug!("{myself:?} starting, connecting to instance");
+        match Client::builder().build() {
+            Ok(client) => {
+
+                let state = GitlabUserObserverState {gitlab_endpoint: args.gitlab_endpoint, token: args.token, client: client.clone() };
+                Ok(state)
+            }
+            Err(e) => Err(Box::new(e))
+        }
+    }
+
+    async fn post_start(
+        &self,
+        myself: ActorRef<Self::Msg>,
+        state: &mut Self::State ) ->  Result<(), ActorProcessingErr> {
+
+        //TODO: use client in state to pull gitlab user data
+        
+        Ok(())
+    }
+    async fn handle(
+        &self,
+        _myself: ActorRef<Self::Msg>,
+        _: Self::Msg,
+        _: &mut Self::State,
+    ) -> Result<(), ActorProcessingErr> {
+        
+
+        Ok(())
+    }
+
+}
+
+
+
+
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error> > {

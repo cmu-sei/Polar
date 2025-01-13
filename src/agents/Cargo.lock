@@ -532,7 +532,6 @@ dependencies = [
  "tracing-glog",
  "tracing-subscriber",
  "uuid",
- "workspace-hack",
 ]
 
 [[package]]
@@ -1230,27 +1229,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "07e28edb80900c19c28f1072f2e8aeca7fa06b23cd4169cefe1af5aa3260783f"
 
 [[package]]
-name = "gitlab_agent"
-version = "0.1.0"
-dependencies = [
- "clokwerk",
- "common",
- "ctrlc",
- "env_logger",
- "lapin",
- "log",
- "parse_link_header",
- "reqwest",
- "serde",
- "serde_json",
- "serde_yaml",
- "temp-env",
- "tokio",
- "url",
- "workspace-hack",
-]
-
-[[package]]
 name = "gitlab_consumer"
 version = "0.1.0"
 dependencies = [
@@ -1262,6 +1240,29 @@ dependencies = [
  "log",
  "neo4rs",
  "serde_json",
+ "tokio",
+ "url",
+ "workspace-hack",
+]
+
+[[package]]
+name = "gitlab_observer"
+version = "0.1.0"
+dependencies = [
+ "cassini",
+ "clokwerk",
+ "common",
+ "ctrlc",
+ "env_logger",
+ "lapin",
+ "log",
+ "parse_link_header",
+ "ractor",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "temp-env",
  "tokio",
  "url",
  "workspace-hack",

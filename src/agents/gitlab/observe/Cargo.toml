@@ -23,13 +23,9 @@
 # DM24-0470
 
 [package]
-name = "gitlab_agent"
+name = "gitlab_observer"
 version = "0.1.0"
 edition = "2021"
-
-[lib]
-name = "gitlab_service"
-path = "src/gitlab_service.rs"
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
@@ -47,6 +43,8 @@ ctrlc = "3.4.1"
 log = "0.4.22"
 env_logger = "0.11.5"
 workspace-hack = { version = "0.1", path = "../../workspace-hack" }
+cassini = { path = "../../broker" }
+ractor = { version="0.14.1", features = ["async-trait"]}
 
 [[bin]]
 name = "observer_entrypoint"

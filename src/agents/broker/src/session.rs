@@ -79,7 +79,7 @@ impl Actor for SessionManager {
                 // Start brand new session
                 let new_id = Uuid::new_v4().to_string();
 
-                info!("SessionManager: Stating session for client: {client_id} with registration ID {new_id}");
+                info!("SessionManager: Starting session for client: {client_id} with registration ID {new_id}");
 
                 match myself.try_get_supervisor() {
                     Some(broker_ref) => {
@@ -224,7 +224,6 @@ impl Actor for SessionAgent {
         myself: ActorRef<Self::Msg>,
         args: SessionAgentArgs
     ) -> Result<Self::State, ActorProcessingErr> {
-        info!("{myself:?} starting");
         //parse args. if any
         let state = SessionAgentState { client_ref: args.client_ref.clone(), broker: args.broker_ref};
 
@@ -235,7 +234,7 @@ impl Actor for SessionAgent {
         
         let client_id = state.client_ref.get_name().unwrap_or_default();
         let registration_id = myself.get_name().unwrap_or_default();
-        info!("Started session {myself:?} for client {client_id}. Contacting");      
+        info!("Started session {myself:?} for client {client_id}");      
 
         //send ack to client listener
        state.client_ref.send_message(BrokerMessage::RegistrationResponse { 

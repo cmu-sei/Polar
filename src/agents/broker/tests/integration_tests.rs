@@ -93,34 +93,6 @@ mod tests {
 
     }
 
-    
-    #[tokio::test]
-    async fn test_tcp_client_connect() {
-        
-        // Wait for the server to be ready
-        
-        timeout(Duration::from_secs(15), SERVER_READY.notified())
-        .await
-        .expect(TIMEOUT_ERR_MSG);
-
-        let supervisor = where_is(TEST_SUPERVISOR.to_string()).unwrap();
-        let client_name = "test_tcp_connect_client".to_string();
-        
-        let (client, handle) = Actor::spawn_linked(Some(client_name.clone()), TcpClientActor, TcpClientArgs {
-            bind_addr: BIND_ADDR.to_string(),
-            registration_id: None,
-            client_cert_file: env::var("TLS_CLIENT_CERT").unwrap(),
-            private_key_file: env::var("TLS_CLIENT_KEY").unwrap(),
-            ca_cert_file: env::var("TLS_CA_CERT").unwrap(),
-        }, supervisor.clone().into()).await.expect("Failed to start client actor");    
-
-        tokio::time::sleep(Duration::from_secs(1)).await;
-
-        client.send_message(TcpClientMessage::Send(ClientMessage::DisconnectRequest(None))).expect("Failed to send message to client actor {e}");
-        
-        client.kill_and_wait(None).await.expect("Expected to stop client");
-
-    }
     #[tokio::test]
     async fn test_client_registers_successfully() {
         // Wait for the server to be ready
@@ -131,7 +103,7 @@ mod tests {
         let supervisor = where_is(TEST_SUPERVISOR.to_string()).unwrap();
     
     
-        let (client, handle) = Actor::spawn_linked(Some("test_registration_client".to_owned()),
+        let (client, _) = Actor::spawn_linked(Some("test_registration_client".to_owned()),
         TcpClientActor,
         TcpClientArgs {
             bind_addr: BIND_ADDR.to_string(),
@@ -141,10 +113,6 @@ mod tests {
             ca_cert_file: env::var("TLS_CA_CERT").unwrap(),
 
         }, supervisor.clone().into()).await.expect("Failed to start client actor");    
-
-        client.send_message(TcpClientMessage::Send(
-            ClientMessage::RegistrationRequest { registration_id: None }
-        )).unwrap();
 
         tokio::time::sleep(Duration::from_secs(1)).await;
         
@@ -174,10 +142,6 @@ mod tests {
             private_key_file: env::var("TLS_CLIENT_KEY").unwrap(),
             ca_cert_file: env::var("TLS_CA_CERT").unwrap(),
         }, supervisor.clone().into()).await.expect("Failed to start client actor");    
-
-        client.send_message(TcpClientMessage::Send(
-            ClientMessage::RegistrationRequest { registration_id: None }
-        )).unwrap();
 
         tokio::time::sleep(Duration::from_secs(1)).await;
         
@@ -222,10 +186,6 @@ mod tests {
             private_key_file: env::var("TLS_CLIENT_KEY").unwrap(),
             ca_cert_file: env::var("TLS_CA_CERT").unwrap(),
         }, supervisor.clone().into()).await.expect("Failed to start client actor");    
-
-        client.send_message(TcpClientMessage::Send(
-            ClientMessage::RegistrationRequest { registration_id: None }
-        )).unwrap();
 
         tokio::time::sleep(Duration::from_secs(1)).await;
 
@@ -277,17 +237,11 @@ mod tests {
             ca_cert_file: env::var("TLS_CA_CERT").unwrap(),
         }, supervisor.clone().into()).await.expect("Failed to start client actor");    
 
-        client.send_message(TcpClientMessage::Send(
-            ClientMessage::RegistrationRequest { registration_id: None }
-        )).unwrap();
-
         tokio::time::sleep(Duration::from_secs(1)).await;
 
         let session_id = client
         .call(TcpClientMessage::GetRegistrationId, Some(Duration::from_secs(10)))
         .await.unwrap().unwrap();
-
-        
 
         //subscribe to topic
         let topic = String::from("Apples");
@@ -313,13 +267,6 @@ mod tests {
             ca_cert_file: env::var("TLS_CA_CERT").unwrap(),
         }, supervisor.clone().into()).await.expect("Failed to start client actor");    
 
-        let cloned_id = session_id.clone();
-        // send new registration request with same registration_id to resume session
-        let _ = new_client.send_after(Duration::from_secs(1), || {
-            TcpClientMessage::Send(
-                ClientMessage::RegistrationRequest { registration_id: Some(cloned_id) }
-            )
-        } ).await.expect("Expected to send re registration request");
         
         //Publish messsage
         let _ = new_client.send_message( TcpClientMessage::Send(ClientMessage::PublishRequest { topic, payload: "Hello apple".to_string(), registration_id: Some(session_id.clone())}));
@@ -352,11 +299,6 @@ mod tests {
         },
         supervisor.clone().into()).await.expect("Failed to start client actor");
 
-        //register
-        subscriber_client.send_message(TcpClientMessage::Send(
-            ClientMessage::RegistrationRequest { registration_id: None }
-        )).unwrap();
-
         tokio::time::sleep(Duration::from_secs(1)).await;    
 
         //confirm registration
@@ -373,9 +315,6 @@ mod tests {
             
         // wait a moment
         tokio::time::sleep(Duration::from_secs(2)).await;
-
-        //assert subscription exists
-        //assert_ne!(where_is(format!("{subscriber_session_id}:Apples")), None);
 
         //send fake timeout, should stop listener
         subscriber_client.send_message(TcpClientMessage::Send(
@@ -396,12 +335,6 @@ mod tests {
             ca_cert_file: env::var("TLS_CA_CERT").unwrap(),
         },
         supervisor.clone().into()).await.expect("Failed to start client actor");
-
-        //register publisher
-        publisher_client.send_message(TcpClientMessage::Send(
-            ClientMessage::RegistrationRequest { registration_id: None }
-        )).unwrap();
-
         
         tokio::time::sleep(Duration::from_secs(1)).await;
         //confirm registration
@@ -431,16 +364,9 @@ mod tests {
             ca_cert_file: env::var("TLS_CA_CERT").unwrap(),
         }, supervisor.clone().into()).await.expect("Failed to start client actor");    
 
-        let cloned_id = subscriber_session_id.clone();
-
         //kill first client now that we have this one
         subscriber_client.kill_and_wait(None).await.expect("Expected to kill client");
-
-        // send new registration request with same registration_id to resume session
-        let _ = new_client.send_message(
-            TcpClientMessage::Send(
-                ClientMessage::RegistrationRequest { registration_id: Some(cloned_id) }
-            )).expect("Expected to send re registration request");        
+    
         tokio::time::sleep(Duration::from_secs(3)).await;
         new_client.kill_and_wait(None).await.expect("Expected to kill client");
     }

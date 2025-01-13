@@ -20,10 +20,6 @@ This Software includes and/or makes use of Third-Party Software each subject to 
 
 DM24-0470
 */
-pub mod gitlab_capnp {
-    include!(concat!(env!("OUT_DIR"), "/src/gitlab_capnp.rs"));
-}
-
 
 use std::{env, fs::{self,File}, io::{Read, Write}};
 use std::process;
@@ -32,6 +28,10 @@ use lapin::{Connection,ConnectionProperties, Channel, BasicProperties, publisher
 use tcp_stream::OwnedTLSConfig;
 use sysinfo::{System, SystemExt, ProcessRefreshKind, Pid};
 use log::{error, info};
+
+pub mod gitlab_capnp {
+    include!(concat!(env!("OUT_DIR"), "/src/gitlab_capnp.rs"));
+}
 
 pub mod types;
 
@@ -110,7 +110,7 @@ pub fn get_gitlab_token() -> String {
     //check length and prefix
     if token.chars().count() == 26 && token.starts_with("glpat-") {
         return token;
-    }else {
+    } else {
         error!("received invalid private token from environment.");
         process::exit(1)
     }
@@ -202,7 +202,6 @@ pub async fn publish_message(payload: &[u8], channel: &Channel, exchange: &str, 
     assert_eq!(confirmation, Confirmation::NotRequested);
 }
 
-//TODO: Review this fn, do we always want to exit when the environment isn't fully configured? Are any env vars optional?
 pub fn read_from_env(var_name: String) -> String {
     match env::var(var_name.clone()) {
         Ok(val) => val,

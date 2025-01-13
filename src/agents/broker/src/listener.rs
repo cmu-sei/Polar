@@ -1,4 +1,4 @@
-use rustls::{pki_types::{pem::PemObject, CertificateDer, PrivateKeyDer}, server::WebPkiClientVerifier, RootCertStore, ServerConfig};
+use rustls::{crypto::CryptoProvider, pki_types::{pem::PemObject, CertificateDer, PrivateKeyDer}, server::WebPkiClientVerifier, RootCertStore, ServerConfig};
 use serde_json::to_string;
 use tokio::{io::{split, AsyncBufReadExt, AsyncWriteExt, BufWriter, ReadHalf, WriteHalf}, net::{TcpListener, TcpStream}, sync::Mutex};
 use tokio_rustls::{server::TlsStream, TlsAcceptor};
@@ -42,7 +42,8 @@ impl Actor for ListenerManager {
         args: ListenerManagerArgs
     ) -> Result<Self::State, ActorProcessingErr> {
         tracing::info!("ListenerManager: Starting {myself:?}");
-                
+
+        tracing::debug!("ListenerManager: Gathering certificates for mTLS");
         let certs = CertificateDer::pem_file_iter(args.server_cert_file)
         .unwrap()
         .map(|cert| cert.unwrap())
@@ -55,7 +56,8 @@ impl Actor for ListenerManager {
         let verifier = WebPkiClientVerifier::builder(Arc::new(root_store)).build().expect("Expected to build server verifier");
 
         let private_key = PrivateKeyDer::from_pem_file(args.private_key_file).expect("Expected to load private key from file");
-
+        
+        tracing::debug!("ListenerManager: Building configuration for mTLS ");
         let server_config = ServerConfig::builder()
         .with_client_cert_verifier(verifier)
         .with_single_cert(certs, private_key)

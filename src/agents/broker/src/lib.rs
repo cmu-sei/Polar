@@ -25,8 +25,8 @@ pub const CLIENT_NOT_FOUND_TXT: &str = "Listener not found!";
 pub const TOPIC_MGR_NOT_FOUND_TXT: &str = "Topic Manager not found!";
 pub const SUBSCRIBER_MGR_NOT_FOUND_TXT: &str = "Subscription Manager not found!";
 pub const BROKER_NOT_FOUND_TXT: &str = "Broker not found!";
-pub const SUBSCRIBE_REQUEST_FAILED_TXT: &str = "Failed to subscribe to topic: \"{topic}\"";
-pub const PUBLISH_REQ_FAILED_TXT: &str = "Failed to publish message to topic \"{topic}\"";
+pub const SUBSCRIBE_REQUEST_FAILED_TXT: &str = "Failed to subscribe to topic";
+pub const PUBLISH_REQ_FAILED_TXT: &str = "Failed to publish message to topic";
 pub const REGISTRATION_REQ_FAILED_TXT: &str = "Failed to register session!";
 pub const LISTENER_MGR_NOT_FOUND_TXT: & str = "Listener Manager not found!";
 pub const TIMEOUT_REASON: &str = "SESSION_TIMEDOUT";
@@ -66,17 +66,25 @@ pub enum BrokerMessage {
     PublishRequestAck(String),
     PublishResponseAck,
     /// Subscribe request from the client.
-    // This request originates externally, so a registration_id is not added until it is received by the session
     SubscribeRequest {
-        registration_id: Option<String>, //TODO: Remove option
+        registration_id: Option<String>,
         topic: String,
+    },
+    /// Sent to the subscriber manager to create a new subscriber actor to handle pushing messages to the client.
+    /// If successful, the associated topic actor is notified, adding the id of the new actor to it's subscriber list
+    Subscribe {
+        reply: RpcReplyPort<Result<String, String>>,
+        topic: String,
+        registration_id: String
     },
     AddTopic {
         reply: RpcReplyPort<Result<ActorRef<BrokerMessage>, String>>,
         registration_id: Option<String>,
         topic: String
         
-    },
+    }, 
+    /// Sent to session actors to forward messages to their clients.
+    /// Messages that fail to be delivered for some reason are kept in their queues.
     PushMessage {
         reply: RpcReplyPort<Result<(), String>>,
         payload: String,
@@ -90,7 +98,7 @@ pub enum BrokerMessage {
     },
     /// Unsubscribe request from the client.
     UnsubscribeRequest {
-        registration_id: Option<String>, //TODO: Remove option
+        registration_id: Option<String>,
         topic: String,
     },
     /// Unsubscribe acknowledgment to the client.
@@ -251,7 +259,7 @@ pub fn init_logging() {
     tracing::subscriber::set_global_default(subscriber).expect("to set global subscriber");
 }
 
-pub fn get_subsciber_name(registration_id: &str, topic: &str) -> String { format!("{0}:{1}", registration_id, topic) }
+pub fn get_subscriber_name(registration_id: &str, topic: &str) -> String { format!("{0}:{1}", registration_id, topic) }
 
 // pub fn try_get_session(registration_id: String) -> Option<ActorRef<BrokerMessage>> {
 //     match &where_is(registration_id.clone()) {

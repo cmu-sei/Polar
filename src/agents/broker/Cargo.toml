@@ -14,9 +14,11 @@ tracing-glog = "0.4.0"
 tracing-subscriber = { version ="0.3.19", features=["std", "env-filter"]}
 uuid = { version = "1.11.0", features = ["v4"] }
 tokio-util = "0.7.13"
+#TODO: Consider using FIPS cryptography features?
+# REFERENCE: https://docs.rs/rustls/latest/rustls/index.html#crate-features
 rustls = "0.23.20"
 tokio-rustls = "0.26.1"
-workspace-hack = { version = "0.1", path = "../workspace-hack" }
+# workspace-hack = { version = "0.1", path = "../workspace-hack" }
 
 [[bin]]
 name = "cassini-server"

@@ -60,9 +60,10 @@ impl Actor for TcpClientActor {
         let client_cert = CertificateDer::from_pem_file(args.client_cert_file).expect("Expected to read server cert as pem");
         let private_key = PrivateKeyDer::from_pem_file(args.private_key_file).unwrap();
         let verifier = WebPkiServerVerifier::builder(Arc::new(root_cert_store)).build().expect("Expected to build server verifier");
-
+        let mut certs = Vec::new();
+        certs.push(client_cert);
         let config = rustls::ClientConfig::builder()
-            .with_webpki_verifier(verifier).with_client_auth_cert(vec![client_cert], private_key).unwrap();
+            .with_webpki_verifier(verifier).with_client_auth_cert(certs, private_key).unwrap();
 
         let state = TcpClientState { bind_addr: args.bind_addr, reader: None, writer: None, registration_id: args.registration_id , client_config: Arc::new(config)};
 
@@ -95,7 +96,9 @@ impl Actor for TcpClientActor {
                         
                         info!("{myself:?} Listening... ");
                         let reader = tokio::io::BufReader::new(state.reader.take().expect("Reader already taken!"));
-    
+                        
+                        let cloned_self = myself.clone();
+                        
                         //start listening
                         let _ = tokio::spawn(async move {
                             let mut buf = String::new();
@@ -110,10 +113,11 @@ impl Actor for TcpClientActor {
                                                 ClientMessage::RegistrationResponse { registration_id, success, error } => {
                                                     if success {
                                                         info!("Successfully began session with id: {registration_id}");
-                                                        myself.send_message(TcpClientMessage::RegistrationResponse(registration_id)).expect("Could not forward message to {myself:?");
+                                                        cloned_self.send_message(TcpClientMessage::RegistrationResponse(registration_id)).expect("Could not forward message to {myself:?");
                                                         
                                                     } else {
                                                         warn!("Failed to register session with the server. {error:?}");
+                                                        //TODO: Stop?
                                                     }
                                                 },
                                                 ClientMessage::PublishResponse { topic, payload, result } => {
@@ -170,7 +174,11 @@ impl Actor for TcpClientActor {
             }
         };
 
-            
+        //Send registration request
+        if let Err(e) = myself.send_message(TcpClientMessage::Send(ClientMessage::RegistrationRequest { registration_id: state.registration_id.clone() })) {
+            error!("{e}");
+            myself.stop(Some(format!("{e}")));
+        }
 
         Ok(())
     }

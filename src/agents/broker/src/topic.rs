@@ -135,7 +135,10 @@ impl Actor for TopicManager {
             BrokerMessage::AddTopic {reply, registration_id, topic } => {
                 // add some topic, optionally on behalf of a session
                 if let Some(registration_id) = registration_id {
-                    let subscribers = vec![format!("{}:{}", registration_id.clone(), topic.clone())];
+                    
+                    let mut subscribers = Vec::new();
+                    subscribers.push(format!("{}:{}", registration_id.clone(), topic.clone()));
+                    
                     
                     match Actor::spawn_linked(Some(
                         topic.clone()),
@@ -258,25 +261,35 @@ impl Actor for TopicAgent {
                     }
                 }
             }
-            BrokerMessage::SubscribeRequest { registration_id, topic } => {
-                if let Some(registration_id) = registration_id {
-                    
-                    match where_is(registration_id.clone()) {
-                        Some(session) => {
-                            state.subscribers.push(registration_id.clone());
-                            //send ack
-                            if let Err(e) = session.send_message(BrokerMessage::SubscribeAcknowledgment { registration_id, topic, result: Ok(()) }) {
-                                warn!("{SUBSCRIBE_REQUEST_FAILED_TXT}: {e}");
-                            }
-                            
-                        },
-                        None => todo!()
-                    }
+            BrokerMessage::Subscribe { reply, registration_id, topic } => {
+            
+                let sub_id = format!("{}:{}", registration_id.clone(), topic.clone());
+                state.subscribers.push(sub_id.clone());
+                if let Err(e) = reply.send(Ok(sub_id)) {
+                    error!("{e}");
                 }
-        }
-            _ => {
-                warn!("{}", format!("{UNEXPECTED_MESSAGE_STR}: {message:?}"))
+            
             }
+            BrokerMessage::UnsubscribeRequest { registration_id, topic } => {
+                if let Some(id) = registration_id {
+                    match state.subscribers.binary_search(&id) {
+                        Ok(i) => {
+                            state.subscribers.remove(i);
+                        }
+                        Err(e) => {
+                            warn!("Failed to unsubscribe couldn't find subscriber?");
+                            todo!()
+                        }
+                    }
+
+                } else {
+                    warn!("Received unexpected unsubscribe request, no registration_id present.")
+                }
+            
+            }
+        _ => {
+            warn!("{}", format!("{UNEXPECTED_MESSAGE_STR}: {message:?}"))
+        }
         }
         Ok(())
     }

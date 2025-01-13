@@ -2,7 +2,7 @@ use std::collections::{HashMap, VecDeque};
 use ractor::rpc::{call, CallResult};
 use ractor::{async_trait, registry::where_is, Actor, ActorProcessingErr, ActorRef, SupervisionEvent};
 use tracing::{debug, error, info, warn};
-use crate::{BrokerMessage, CLIENT_NOT_FOUND_TXT, DISCONNECTED_REASON, PUBLISH_REQ_FAILED_TXT, REGISTRATION_REQ_FAILED_TXT, SESSION_NOT_FOUND_TXT, SUBSCRIBE_REQUEST_FAILED_TXT, TIMEOUT_REASON};
+use crate::{get_subscriber_name, BrokerMessage, CLIENT_NOT_FOUND_TXT, DISCONNECTED_REASON, PUBLISH_REQ_FAILED_TXT, REGISTRATION_REQ_FAILED_TXT, SESSION_NOT_FOUND_TXT, SUBSCRIBE_REQUEST_FAILED_TXT, TIMEOUT_REASON};
 use crate::UNEXPECTED_MESSAGE_STR;
 
 
@@ -100,32 +100,29 @@ impl Actor for SubscriberManager {
                     }
                 });
             }
-            BrokerMessage::SubscribeRequest { registration_id, topic } => {
-                match registration_id {
-                    Some(registration_id) => {
-                        
-                        let subscriber_id = format!("{registration_id}:{topic}");
-
-                        // start new subscriber actor for session
-                        Actor::spawn_linked(Some(subscriber_id), SubscriberAgent, (), myself.clone().into()).await
-                        .map_err(|e| {
-                            let err_msg = format!("{SUBSCRIBE_REQUEST_FAILED_TXT}, {e}");
-                            warn!("{err_msg}");
-                            //send error message to session
-                            let cloned_msg = err_msg.clone();
-                            if let Some(session) = where_is(registration_id.clone()) {
-                                session.send_message(BrokerMessage::SubscribeAcknowledgment { registration_id, topic, result: Err(err_msg) })
-                                .map_err(|e| {
-                                    warn!("{}", format!("{cloned_msg}: {SESSION_NOT_FOUND_TXT} {e}"));
-                                }).unwrap();
-                            } else {
-                                warn!("{SUBSCRIBE_REQUEST_FAILED_TXT}, {SESSION_NOT_FOUND_TXT}");
-                            }
-                        }).unwrap();
-                    } 
-                    None => warn!("{SUBSCRIBE_REQUEST_FAILED_TXT}, No registration_id provided!")
+            BrokerMessage::Subscribe { reply, registration_id, topic } => {
+                                  
+                let subscriber_id = get_subscriber_name(&registration_id, &topic);
+                // start new subscriber actor for session
+                match Actor::spawn_linked(Some(subscriber_id.clone()), SubscriberAgent, (), myself.clone().into()).await {
+                    Ok(_) => {
+                        if let Err(e) = reply.send(Ok(subscriber_id)) {
+                            error!("{SUBSCRIBE_REQUEST_FAILED_TXT}, {e}");
+                            myself.stop(None);
+                        }
+                    }
+                    Err(e) => {
+                        if let Err(e) = reply.send(Err(e.to_string())) {
+                            error!("{SUBSCRIBE_REQUEST_FAILED_TXT}, Couldn't communicate with broker, {e}");
+                            myself.stop(None);
+                            
+                        }
+                    }
+                    
                 }
+            
             },
+            
             BrokerMessage::UnsubscribeRequest { registration_id, topic } => {
                 match registration_id {
                     Some(id) => {         
@@ -171,7 +168,7 @@ impl Actor for SubscriberManager {
                 }
                 else { warn!(" Failed to process timeout request! registration_id missing!") }
             }
-            _ => warn!(UNEXPECTED_MESSAGE_STR)
+            _ => warn!(UNEXPECTED_MESSAGE_STR, "{message:?}")
 
         }
         Ok(())
@@ -232,19 +229,6 @@ impl Actor for SubscriberAgent {
         myself: ActorRef<Self::Msg>,
         state: &mut Self::State ) ->  Result<(), ActorProcessingErr> {
             tracing::debug!("{myself:?} Started");
-            
-            //send ACK to session so they know they're subscribed
-            if let Some(session) = where_is(state.registration_id.clone()) {
-                session.send_message(BrokerMessage::SubscribeAcknowledgment {
-                    registration_id: state.registration_id.clone(),
-                    topic: state.topic.clone(),
-                    result: Ok(())
-                })
-                .map_err(|e| {
-                    // if we can't ack to the session, it's probably dead
-                    myself.stop(Some(format!("SESSION_MISSING {e}")));
-                }).unwrap();
-            }
             Ok(())
     }
 
