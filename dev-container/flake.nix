@@ -129,6 +129,7 @@
             # -- Development tools --
             code-extended
             rust-analyzer
+            rustlings
 
             which
             nvim-pkg
