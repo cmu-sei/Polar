@@ -21,20 +21,32 @@
    DM24-0470
 */
 
-mod helpers;
 mod supervisor;
+mod users;
+mod projects;
+mod runners;
+mod groups;
 
+use cassini::client::TcpClientMessage;
+use cassini::ClientMessage;
+use common::types::GitlabData;
 use log::debug;
 use log::error;
 use log::info;
+use ractor::ActorRef;
 use reqwest::Client;
 use reqwest::Response;
 use reqwest::Error;
 use reqwest::Method;
 use reqwest::header::LINK;
+use reqwest::StatusCode;
 use serde::Deserialize;
 use parse_link_header::parse_with_rel;
 use common::types::Pipeline;
+use serde_json::to_string;
+use tokio::fs::read;
+
+pub const BROKER_CLIENT_NAME: &str = "gitlab_web_client";
 
 const PRIVATE_TOKEN_HEADER_STR : &str = "PRIVATE-TOKEN";
 
@@ -249,7 +261,44 @@ pub async fn get_project_pipelines(client: &Client, project_id: u32 ,token: Stri
         info!("Could not find pipelines for project id: {}", project_id);
         Ok(Vec::new())
     }
+
+    
 }
+
+
+
+/// TODO: Write a generic function to retrieve a list of a given capnproto message from an endpoint. 
+/// 
+/// The main problem with this at the moment is that I haven't yet figured out how to append additional elements onto the list after they're
+/// deserailized. SEE: get_all_elements() for the comparison using serde
+/// 
+// pub async fn fetch_all<'a, T>(
+//     client: &Client,
+//     token: String, 
+//     endpoint: String,
+// ) -> Result<TypedReader<OwnedSegments, T>, Box<dyn std::error::Error>>
+// where
+//     T: Owned + 'a
+// {}
+
+/// Helper function to help DRYness
+/// Send some wrapped Gitlab data
+/// TODO: "Generisize" the data type and move to an "agents" util library for other observers
+pub fn send(data: GitlabData, client: ActorRef<TcpClientMessage>, registration_id: String, topic: String) -> Result<(), Box<dyn std::error::Error>> {
+    match to_string(&data) {
+        Ok(serialized) => {
+            let msg = ClientMessage::PublishRequest { topic: topic, payload: serialized , registration_id: Some(registration_id.clone()) };
+            match client.send_message(TcpClientMessage::Send(msg)) {
+                Ok(_) => Ok(()),
+                Err(e) => Err(Box::new(e))
+            }
+        }
+        Err(e) => Err(Box::new(e))
+    } 
+
+}
+
+        
 
 #[cfg(test)]
 mod service_tests { 

@@ -26,7 +26,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 #[derive (Serialize, Deserialize, Clone, PartialEq, Debug)]
-pub enum MessageType {
+pub enum GitlabData {
     Users(Vec<User>),
     Projects(Vec<Project>),
     Groups(Vec<UserGroup>),

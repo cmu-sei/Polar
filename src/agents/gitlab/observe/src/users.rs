@@ -22,15 +22,14 @@
 */
 
 use std::{error::Error, fs::remove_file};
-
-use gitlab_observer::get_all_elements;
-
+use crate::{ get_all_elements, send, BROKER_CLIENT_NAME};
+use cassini::{client::TcpClientMessage, ClientMessage};
 use lapin::{options::{QueueDeclareOptions, QueueBindOptions}, types::FieldTable};
-use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef};
+use ractor::{async_trait, registry::where_is, Actor, ActorProcessingErr, ActorRef};
 use reqwest::Client;
 use serde_json::to_string;
-use common::{get_gitlab_token, get_gitlab_endpoint, connect_to_rabbitmq, publish_message, GITLAB_EXCHANGE_STR, USERS_QUEUE_NAME, USERS_ROUTING_KEY, create_lock};
-use common::types::{User, MessageType};
+use common::USERS_QUEUE_NAME;
+use common::types::{User, GitlabData};
 use log::{debug, info, warn};
 const LOCK_FILE_PATH: &str = "/tmp/users_observer.lock";
 
@@ -40,13 +39,15 @@ pub struct GitlabUserObserver;
 pub struct GitlabUserObserverState {
     gitlab_endpoint: String, //endpoint of gitlab instance
     token: Option<String>, //token for auth,
-    client: Client,
+    web_client: Client,
+    registration_id: String
 }
 
 
 pub struct GitlabUserObserverArgs {
     pub gitlab_endpoint: String, //endpoint of gitlab instance
-    pub token: Option<String> //token for auth
+    pub token: Option<String>, //token for auth
+    pub registration_id: String, //id of agent's current session with the broker
 }
 #[async_trait]
 impl Actor for GitlabUserObserver {
@@ -60,10 +61,16 @@ impl Actor for GitlabUserObserver {
         args: GitlabUserObserverArgs
     ) -> Result<Self::State, ActorProcessingErr> {
         debug!("{myself:?} starting, connecting to instance");
+        
         match Client::builder().build() {
             Ok(client) => {
-
-                let state = GitlabUserObserverState {gitlab_endpoint: args.gitlab_endpoint, token: args.token, client: client.clone() };
+                let state = GitlabUserObserverState {
+                    gitlab_endpoint: args.gitlab_endpoint,
+                    token: args.token,
+                    web_client:
+                    client.clone(),
+                    registration_id: args.registration_id
+                };
                 Ok(state)
             }
             Err(e) => Err(Box::new(e))
@@ -76,6 +83,21 @@ impl Actor for GitlabUserObserver {
         state: &mut Self::State ) ->  Result<(), ActorProcessingErr> {
 
         //TODO: use client in state to pull gitlab user data
+        let users: Vec<User> = get_all_elements(&state.web_client, state.token.clone().unwrap_or_default(), format!("{}{}", state.gitlab_endpoint, "/users")).await.unwrap();
+        
+        debug!("Retrieved {} users", users.len());
+        
+        //forwrard to client
+        if let Some(client) = where_is(BROKER_CLIENT_NAME.to_string()) {
+            let data = GitlabData::Users(users);
+            match send(data, client.into(), state.registration_id.clone(), USERS_QUEUE_NAME.to_string()) {
+                Ok(_) => {
+                    debug!("Successfully sent user data");
+                } Err(e) => todo!()
+            }
+        }
+        
+        myself.stop(Some("FINISHED".to_string()));
         
         Ok(())
     }
@@ -90,49 +112,4 @@ impl Actor for GitlabUserObserver {
         Ok(())
     }
 
-}
-
-
-
-
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn Error> > {
-    let result = create_lock(LOCK_FILE_PATH);
-    match result {
-        Err(e) => panic!("{}", e),
-        Ok(false) => Ok(()),
-        Ok(true) => {
-            info!("Starting users task.");
-            env_logger::init();
-            //publish user id and list of user's projects to queue?
-            let mq_conn = connect_to_rabbitmq().await?;
-            
-            //create publish channel
-            let mq_publish_channel = mq_conn.create_channel().await?;
-
-            //create fresh queue, empty string prompts the server backend to create a random name
-            let _ = mq_publish_channel.queue_declare(USERS_QUEUE_NAME,QueueDeclareOptions::default() , FieldTable::default()).await?;
-
-            //bind queue to exchange so it sends messages where we need them
-            mq_publish_channel.queue_bind(USERS_QUEUE_NAME, GITLAB_EXCHANGE_STR, USERS_ROUTING_KEY, QueueBindOptions::default(), FieldTable::default()).await?;
-
-            // Poll gitlab for available users
-            let gitlab_token = get_gitlab_token();
-            let service_endpoint = get_gitlab_endpoint();
-
-            let web_client = Client::builder().build().unwrap();
-            //TOOD: Remove serialization just send raw bytes?
-            let users: Vec<User> = get_all_elements(&web_client, gitlab_token.clone(), format!("{}{}", service_endpoint, "/users")).await.unwrap();
-            publish_message(to_string(&MessageType::Users(users.clone())).unwrap().as_bytes(), &mq_publish_channel, GITLAB_EXCHANGE_STR, USERS_ROUTING_KEY).await;
-            
-            let _ = mq_conn.close(0, "closed").await?;
-
-            remove_file(LOCK_FILE_PATH).unwrap_or_else(|_| {
-                warn!("Error deleting lock file")
-            });
-            
-            Ok(())
-        },
-    }
 }

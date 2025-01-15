@@ -23,6 +23,8 @@ DM24-0470
 
 use std::{env, fs::{self,File}, io::{Read, Write}};
 use std::process;
+use ractor::ActorRef;
+use types::GitlabData;
 use url::Url;
 use lapin::{Connection,ConnectionProperties, Channel, BasicProperties, publisher_confirm::Confirmation, options::BasicPublishOptions};
 use tcp_stream::OwnedTLSConfig;
@@ -201,6 +203,9 @@ pub async fn publish_message(payload: &[u8], channel: &Channel, exchange: &str, 
     
     assert_eq!(confirmation, Confirmation::NotRequested);
 }
+
+
+
 
 pub fn read_from_env(var_name: String) -> String {
     match env::var(var_name.clone()) {

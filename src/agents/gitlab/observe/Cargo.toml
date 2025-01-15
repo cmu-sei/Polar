@@ -45,23 +45,12 @@ env_logger = "0.11.5"
 workspace-hack = { version = "0.1", path = "../../workspace-hack" }
 cassini = { path = "../../broker" }
 ractor = { version="0.14.1", features = ["async-trait"]}
+capnp = "0.20.3"
+
+[build-dependencies]
+capnpc = "0.20.1"
 
 [[bin]]
-name = "observer_entrypoint"
+name = "gitlab_observer"
 path = "src/entrypoint.rs"
 
-[[bin]]
-name = "gitlab_users"
-path = "src/gitlab_users.rs"
-
-[[bin]]
-name = "gitlab_projects"
-path = "src/gitlab_projects.rs"
-
-[[bin]]
-name = "gitlab_groups"
-path = "src/gitlab_groups.rs"
-
-[[bin]]
-name = "gitlab_runners"
-path = "src/gitlab_runners.rs"

@@ -653,10 +653,12 @@ dependencies = [
  "amq-protocol-uri",
  "capnp",
  "capnpc",
+ "cassini",
  "env_logger",
  "futures-lite 1.13.0",
  "lapin",
  "log",
+ "ractor",
  "serde",
  "serde_json",
  "sysinfo",
@@ -1249,6 +1251,8 @@ dependencies = [
 name = "gitlab_observer"
 version = "0.1.0"
 dependencies = [
+ "capnp",
+ "capnpc",
  "cassini",
  "clokwerk",
  "common",

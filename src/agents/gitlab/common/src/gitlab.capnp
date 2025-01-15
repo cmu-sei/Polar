@@ -16,25 +16,7 @@ struct GitlabData {
   }
 }
 
-struct UserLink {
-  resourceId @0 :UInt32;
-  resourceList @1 :List(User);
-}
 
-struct GroupLink {
-  resourceId @0 :UInt32;
-  resourceList @1 :List(UserGroup);
-}
-
-struct RunnerLink {
-  resourceId @0 :UInt32;
-  resourceList @1 :List(Runner);
-}
-
-struct ProjectLink {
-  resourceId @0 :UInt32;
-  resourceList @1 :List(Project);
-}
 
 struct Project {
   id @0 :UInt32;
@@ -58,7 +40,7 @@ struct User {
   id @0 :UInt32;
   username @1 :Text;
   name @2 :Text;
-  state @3 :Text; #TODO: restrict possible values
+  state @3 :Text;
   createdAt @4 :Text;
   isAdmin @5 :Bool;
   lastSignInAt @6 :Text; 
@@ -134,4 +116,49 @@ struct ContainerRegistry {
   projectId @3 :UInt32;
   createdAt @4 :Text;
   cleanupPolicyStartedAt @5 :Text;
+}
+
+# datatypes to represent linkages between resources by ID
+struct UserLink {
+  resourceId @0 :UInt32;
+  resourceList @1 :List(User);
+}
+
+struct GroupLink {
+  resourceId @0 :UInt32;
+  resourceList @1 :List(UserGroup);
+}
+
+struct RunnerLink {
+  resourceId @0 :UInt32;
+  resourceList @1 :List(Runner);
+}
+
+struct ProjectLink {
+  resourceId @0 :UInt32;
+  resourceList @1 :List(Project);
+}
+
+
+struct UserList {
+  users @0 :List(User);
+}
+
+struct ProjectList {
+  projects @0 :List(Project);
+}
+struct NamespaceList {
+  namespaces @0 :List(Namespace);
+}
+struct UserGroupList {
+  groups @0 :List(UserGroup);
+}
+struct RunnerList {
+  runners @0 :List(Runner);
+}
+struct PipelineList {
+  pipelines @0 :List(Pipeline);
+}
+struct JobList {
+  jobs @0 :List(Job);
 }
