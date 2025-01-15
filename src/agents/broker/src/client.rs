@@ -18,7 +18,7 @@ pub enum TcpClientMessage {
     Send(ClientMessage),
     RegistrationResponse(String),
     ErrorMessage(String),
-    GetRegistrationId(RpcReplyPort<String>)
+    GetRegistrationId(RpcReplyPort<String>) //TODO: return optional string
 }
 
 /// Actor state for the TCP client

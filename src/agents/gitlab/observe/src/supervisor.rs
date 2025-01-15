@@ -1,6 +1,10 @@
+use std::time::Duration;
+
 use log::debug;
 use log::error;
 use log::info;
+use log::warn;
+use ractor::rpc::call;
 use ractor::Actor;
 use ractor::async_trait;
 use ractor::ActorProcessingErr;
@@ -8,13 +12,13 @@ use ractor::ActorRef;
 use ractor::SupervisionEvent;
 use cassini::client::*;
 
+use crate::users::GitlabUserObserver;
+use crate::GitlabObserverArgs;
 use crate::BROKER_CLIENT_NAME;
 
 pub struct ObserverSupervisor;
 
-pub struct ObserverSupervisorState {
-    broker_addr: String,
-}
+pub struct ObserverSupervisorState;
 
 
 pub struct ObserverSupervisorArgs {
@@ -22,6 +26,8 @@ pub struct ObserverSupervisorArgs {
     pub client_cert_file: String,
     pub client_private_key_file: String,
     pub ca_cert_file: String,
+    pub gitlab_endpoint: String,
+    pub gitlab_token: String,
     
 }
 #[async_trait]
@@ -37,10 +43,9 @@ impl Actor for ObserverSupervisor {
     ) -> Result<Self::State, ActorProcessingErr> {
         debug!("{myself:?} starting");
         
-        let state = ObserverSupervisorState { broker_addr: args.broker_addr.clone()  };
-            
-        //TODO name client
-        if let Err(e) = Actor::spawn_linked(Some(BROKER_CLIENT_NAME.to_string()), TcpClientActor, TcpClientArgs {
+        let state = ObserverSupervisorState;
+
+        match Actor::spawn_linked(Some(BROKER_CLIENT_NAME.to_string()), TcpClientActor, TcpClientArgs {
             bind_addr: args.broker_addr.clone(),
             ca_cert_file: args.ca_cert_file,
             client_cert_file: args.client_cert_file,
@@ -48,13 +53,30 @@ impl Actor for ObserverSupervisor {
             registration_id: None
             
         }, myself.clone().into()).await {
-            error!("{e}");
-            myself.stop(None);
+            Ok((client, _)) => {
+                //when client starts, successfully, start workers
+                //TODO: start users actor
+                let id = call(&client, |reply| { TcpClientMessage::GetRegistrationId(reply) }, None)
+                .await.expect("Expected client to register successfully.").unwrap();
+
+                let args = GitlabObserverArgs {
+                    gitlab_endpoint: args.gitlab_endpoint,
+                    token: Some(args.gitlab_token.clone()),
+                    registration_id: id.clone()
+                };
+
+                //TODO: start observers based off of some configuration
+                if let Err(e) = Actor::spawn_linked(Some("GITLAB_USERS_OBSERVER".to_string()), GitlabUserObserver, args, myself.clone().into()).await { warn!( "failed to start users observer {e}") }
+                
+            
+            }
+            Err(e) => {
+                error!("{e}");
+                myself.stop(None);
+            }
         }
 
-        //when client starts, successfully, start workers
-        //TODO: start users actor
-        
+
         Ok(state)
     }
 
@@ -77,8 +99,8 @@ impl Actor for ObserverSupervisor {
             SupervisionEvent::ActorTerminated(actor_cell, _, reason) => {
                 info!("OBSERVER_SUPERVISOR: {0:?}:{1:?} terminated. {reason:?}", actor_cell.get_name(), actor_cell.get_id());
             },
-            SupervisionEvent::ActorFailed(actor_cell, _) => {
-                panic!("{}" ,format!("Error: actor {0:?}:{1:?} Should not have failed", actor_cell.get_name(), actor_cell.get_id()));
+            SupervisionEvent::ActorFailed(actor_cell, e) => {
+                warn!("OBSERVER_SUPERVISOR: {0:?}:{1:?} failed! {e:?}", actor_cell.get_name(), actor_cell.get_id());
             },
             SupervisionEvent::ProcessGroupChanged(..) => todo!(),
         }    

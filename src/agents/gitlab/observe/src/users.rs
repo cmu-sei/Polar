@@ -22,9 +22,8 @@
 */
 
 use std::{error::Error, fs::remove_file};
-use crate::{ get_all_elements, send, BROKER_CLIENT_NAME};
-use cassini::{client::TcpClientMessage, ClientMessage};
-use lapin::{options::{QueueDeclareOptions, QueueBindOptions}, types::FieldTable};
+use crate::{ get_all_elements, send, GitlabObserverArgs, GitlabObserverState, BROKER_CLIENT_NAME};
+
 use ractor::{async_trait, registry::where_is, Actor, ActorProcessingErr, ActorRef};
 use reqwest::Client;
 use serde_json::to_string;
@@ -36,35 +35,22 @@ const LOCK_FILE_PATH: &str = "/tmp/users_observer.lock";
 
 pub struct GitlabUserObserver;
 
-pub struct GitlabUserObserverState {
-    gitlab_endpoint: String, //endpoint of gitlab instance
-    token: Option<String>, //token for auth,
-    web_client: Client,
-    registration_id: String
-}
-
-
-pub struct GitlabUserObserverArgs {
-    pub gitlab_endpoint: String, //endpoint of gitlab instance
-    pub token: Option<String>, //token for auth
-    pub registration_id: String, //id of agent's current session with the broker
-}
 #[async_trait]
 impl Actor for GitlabUserObserver {
     type Msg = ();
-    type State = GitlabUserObserverState;
-    type Arguments = GitlabUserObserverArgs;
+    type State = GitlabObserverState;
+    type Arguments = GitlabObserverArgs;
 
     async fn pre_start(
         &self,
         myself: ActorRef<Self::Msg>,
-        args: GitlabUserObserverArgs
+        args: GitlabObserverArgs
     ) -> Result<Self::State, ActorProcessingErr> {
         debug!("{myself:?} starting, connecting to instance");
         
         match Client::builder().build() {
             Ok(client) => {
-                let state = GitlabUserObserverState {
+                let state = GitlabObserverState {
                     gitlab_endpoint: args.gitlab_endpoint,
                     token: args.token,
                     web_client:

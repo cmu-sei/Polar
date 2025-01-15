@@ -50,62 +50,20 @@ pub const BROKER_CLIENT_NAME: &str = "gitlab_web_client";
 
 const PRIVATE_TOKEN_HEADER_STR : &str = "PRIVATE-TOKEN";
 
-pub async fn get_version(client: &Client, token: String, endpoint_prefix: String) -> Result<Response, Error> {
-    let endpoint = format!("{}{}", endpoint_prefix, "/version");
-    let response = client.get(endpoint).header(PRIVATE_TOKEN_HEADER_STR, token).send().await?;
-    Ok(response)
+/// General state for all gitlab observers
+pub struct GitlabObserverState {
+    pub gitlab_endpoint: String, // Endpoint of GitLab instance
+    pub token: Option<String>,   // Token for authentication
+    pub web_client: Client,      // HTTP client
+    pub registration_id: String, // ID of the agent's session with the broker
+}
+/// Arguments taken in by gitlab observers
+pub struct GitlabObserverArgs {
+    pub gitlab_endpoint: String, 
+    pub token: Option<String>,   
+    pub registration_id: String, 
 }
 
-pub async fn get_all_namespaces(client: &Client, token: String, endpoint_prefix: String) -> Result<Response, Error> {
-    let endpoint = format!("{}{}", endpoint_prefix, "/namespaces");
-
-    let response = client.get(endpoint).header(PRIVATE_TOKEN_HEADER_STR, token).send().await?;
-    Ok(response)
-}
-
-//NOTE: will get all subgroups as well if caller is an administrator
-pub async fn get_all_groups(client: &Client, token: String, endpoint_prefix: String) -> Result<Response, Error> {
-    let endpoint = format!("{}{}", endpoint_prefix, "/groups");
-
-    let response = client.get(endpoint).header(PRIVATE_TOKEN_HEADER_STR, token).send().await?;
-    Ok(response)
-}
-pub async fn get_group_members(client: &Client, token: String, endpoint_prefix: String, group_id: u32) -> Result<Response, Error> {
-    let endpoint = format!("{}{}{}", endpoint_prefix, "/groups/".to_string() + &group_id.to_string(), "/members");
-
-    let response = client.get(endpoint).header(PRIVATE_TOKEN_HEADER_STR, token).send().await?;
-    Ok(response)
-}
-
-pub async fn find_group(client: &Client, query: String, token: String, endpoint_prefix: String) -> Result<Response, Error> {
-    let endpoint = format!("{}{}", endpoint_prefix, "/groups?search=".to_owned() + &query);
-    let response = client.get(endpoint).header(PRIVATE_TOKEN_HEADER_STR, token).send().await?;
-
-    Ok(response)
-}
-
-pub async fn get_group_projects(client: &Client, group_id: u32, token: String, endpoint_prefix: String) -> Result<Response, Error> {
-    let endpoint = format!("{}{}{}", endpoint_prefix, "/".to_owned() + group_id.to_string().as_ref(), "/projects");
-    let response = client.get(endpoint).header(PRIVATE_TOKEN_HEADER_STR, token).send().await?;
-    Ok(response)
-}
-
-pub async fn get_projects(client: &Client, token: String, endpoint_prefix: String) -> Result<Response, Error>{
-    let endpoint = format!("{}{}", endpoint_prefix, "/projects");
-
-    let request = client.get(endpoint).header(PRIVATE_TOKEN_HEADER_STR, token)
-    .query(&[("per_page", "20")]).build().unwrap();
-
-    let response = client.execute(request).await?;
-    Ok(response)
-}
-
-pub async fn get_project_runners(client: &Client, project_id: u32, token: String, endpoint_prefix: String) -> Result<Response, Error> {
-    let endpoint = format!("{}{}{}", endpoint_prefix, "/".to_owned() + &project_id.to_string(), "/runners");
-
-    let response = client.get(endpoint).header(PRIVATE_TOKEN_HEADER_STR, token).send().await?;
-    Ok(response)
-}
 
 pub async fn get_all_runners(client: &Client, token: String, endpoint_prefix: String) -> Result<Response, Error> {
     let endpoint = format!("{}{}", endpoint_prefix, "/runners/all");
@@ -203,70 +161,6 @@ pub async fn get_all_elements<T: for<'a> Deserialize<'a>>(client: &Client, token
     return Some(elements)
 }
 
-
-pub async fn get_user(client: &Client, user_id: u32 ,token: String, endpoint_prefix: String) -> Result<Response, Error> {
-    let endpoint = format!("{}{}{}", endpoint_prefix, "/users/", user_id.to_string());
-    let response = client
-    .get(endpoint)
-    .header(PRIVATE_TOKEN_HEADER_STR, token)
-    .send().await?;
-    Ok(response)
-}
-pub async fn get_user_projects(client: &Client, user_id: u32 ,token: String, endpoint_prefix: String) -> Result<Response, Error> {
-    let endpoint = format!("{}{}{}", endpoint_prefix, "/users/".to_owned() + &user_id.to_string(), "/projects" );
-    let response = client.get(endpoint).header(PRIVATE_TOKEN_HEADER_STR, token).send().await?;
-    Ok(response)
-}
-
-pub async fn get_project_releases(client: &Client, project_id: u32 ,token: String, endpoint_prefix: String) -> Result<Response, Error> {
-
-    let endpoint = format!("{}{}{}", endpoint_prefix, 
-    "/projects/".to_owned() + project_id.to_string().as_ref(), 
-    "/releases");
-
-    let response = client.get(endpoint).header(PRIVATE_TOKEN_HEADER_STR, token).send().await?;
-
-    Ok(response)
-}
-
-pub async fn get_project_registries(client: &Client, project_id: u32 ,token: String, endpoint_prefix: String) -> Result<Response, Error> {
-    let endpoint = format!("{}{}{}", endpoint_prefix, "/".to_owned() + &project_id.to_string(), "/registry/repositories");
-    let response = client.get(endpoint).header(PRIVATE_TOKEN_HEADER_STR, token).send().await?;
-    Ok(response)
-}
-
-pub async fn get_group_registries(client: &Client, group_id: u32 ,token: String, endpoint_prefix: String) -> Result<Response, Error> {
-    let endpoint = format!("{}{}{}", endpoint_prefix, "/groups/".to_owned() + group_id.to_string().as_ref(), "/registry/repositories");
-    let response = client
-    .get(endpoint)
-    .header(PRIVATE_TOKEN_HEADER_STR, token)
-    .query(&["tags", "true"]).send().await?;
-    Ok(response)
-}
-
-pub async fn get_project_pipelines(client: &Client, project_id: u32 ,token: String, endpoint_prefix: String) -> Result<Vec<Pipeline>, Error> {
-    let endpoint = format!("{}{}{}" 
-    ,endpoint_prefix,
-     "/projects/".to_owned() + project_id.to_string().as_ref(), 
-     "/pipelines");
-    debug!("{}", endpoint);
-    let response = client.request(Method::GET, endpoint)
-    .header(PRIVATE_TOKEN_HEADER_STR, token)
-    .send().await?;
-
-    //check response
-    if response.status().is_success() {
-        Ok(response.json::<Vec<Pipeline>>().await.unwrap())
-    }else {
-        info!("Could not find pipelines for project id: {}", project_id);
-        Ok(Vec::new())
-    }
-
-    
-}
-
-
-
 /// TODO: Write a generic function to retrieve a list of a given capnproto message from an endpoint. 
 /// 
 /// The main problem with this at the moment is that I haven't yet figured out how to append additional elements onto the list after they're
@@ -283,7 +177,8 @@ pub async fn get_project_pipelines(client: &Client, project_id: u32 ,token: Stri
 
 /// Helper function to help DRYness
 /// Send some wrapped Gitlab data
-/// TODO: "Generisize" the data type and move to an "agents" util library for other observers
+/// TODO: "Generisize" the data type and move to an "agents" util library for other observers, consider accepting any datatype that is serializable with serde
+/// NOTE: This fn may serve as a basis for decentralizing serailization techniques
 pub fn send(data: GitlabData, client: ActorRef<TcpClientMessage>, registration_id: String, topic: String) -> Result<(), Box<dyn std::error::Error>> {
     match to_string(&data) {
         Ok(serialized) => {
@@ -296,55 +191,4 @@ pub fn send(data: GitlabData, client: ActorRef<TcpClientMessage>, registration_i
         Err(e) => Err(Box::new(e))
     } 
 
-}
-
-        
-
-#[cfg(test)]
-mod service_tests { 
-
-    use common::{get_gitlab_endpoint, get_gitlab_token};
-    use common::types::User;
-    use log::error;
-    use crate::get_user;
-    use reqwest::Client;
-    
-    #[test]
-    #[should_panic (expected = "received invalid private token from environment.")]
-    fn test_reading_bad_token() {
-        temp_env::with_var("GITLAB_TOKEN", Some("abcdefg"), || {
-            get_gitlab_token();    
-        });
-            
-    }
-    
-    #[tokio::test]
-    async fn test_get_user_as_admin() {
-        let client = Client::new();
-        let user_id = 90;
-
-        match get_user(&client, user_id, get_gitlab_token(), get_gitlab_endpoint()).await {
-            Ok(response) => {
-                let user = response.json::<User>().await.unwrap();
-                assert_eq!(user.id, 90);
-                assert_eq!(user.username, "vcaaron");
-            }
-            Err(e) => {
-                error!("{}", e);
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn test_get_user_no_credentials() {
-
-        let client = Client::new();
-        let user_id = 90;
-        match get_user(&client,user_id, "".to_string(), get_gitlab_endpoint()).await {
-            Ok(response) => {
-                assert_eq!(response.status(), reqwest::StatusCode::FORBIDDEN);
-            }
-            Err(e) => error!("error {}", e)
-        }
-    }
 }

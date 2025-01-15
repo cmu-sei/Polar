@@ -28,7 +28,7 @@ use common::{types::{GitlabData, Runner}, RUNNERS_QUEUE_NAME};
 use log::{debug, error, warn};
 use reqwest::Client;
 use serde_json::to_string;
-use crate::{get_all_elements, send};
+use crate::{get_all_elements, send, GitlabObserverArgs, GitlabObserverState};
 use ractor::{async_trait, registry::where_is, Actor, ActorProcessingErr, ActorRef};
 
 use crate::BROKER_CLIENT_NAME;
@@ -38,35 +38,22 @@ const LOCK_FILE_PATH: &str = "/tmp/runners_observer.lock";
 
 pub struct GitlabRunnerObserver;
 
-pub struct GitlabRunnerObserverState {
-    gitlab_endpoint: String, //endpoint of gitlab instance
-    token: Option<String>, //token for auth,
-    web_client: Client,
-    registration_id: String
-}
-
-
-pub struct GitlabRunnerObserverArgs {
-    pub gitlab_endpoint: String, //endpoint of gitlab instance
-    pub token: Option<String>, //token for auth
-    pub registration_id: String, //id of agent's current session with the broker
-}
 #[async_trait]
 impl Actor for GitlabRunnerObserver {
     type Msg = ();
-    type State = GitlabRunnerObserverState;
-    type Arguments = GitlabRunnerObserverArgs;
+    type State = GitlabObserverState;
+    type Arguments = GitlabObserverArgs;
 
     async fn pre_start(
         &self,
         myself: ActorRef<Self::Msg>,
-        args: GitlabRunnerObserverArgs
+        args: GitlabObserverArgs
     ) -> Result<Self::State, ActorProcessingErr> {
         debug!("{myself:?} starting, connecting to instance");
         
         match Client::builder().build() {
             Ok(client) => {
-                let state = GitlabRunnerObserverState {
+                let state = GitlabObserverState {
                     gitlab_endpoint: args.gitlab_endpoint,
                     token: args.token,
                     web_client:
