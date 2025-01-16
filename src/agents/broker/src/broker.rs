@@ -233,7 +233,7 @@ impl Actor for Broker {
                                         
                                         // If no subscriber exists,
                                         match call(&manager, |reply| { BrokerMessage::Subscribe { reply: reply, registration_id: id.clone(), topic: t.clone() } }, None)
-                                        .await.expect("Expected to call Subscriber Manager") {
+                                        .await.expect("Expected to call Subscriber Manager") { //TODO: Don't panic with expect, call .map_err and stop cleanly
                                             Success(add_subscribeer) => {
                                                 match add_subscribeer {
                                                     Ok(_) => {
@@ -292,7 +292,7 @@ impl Actor for Broker {
                                     let t = topic.clone();
                                     let id = registration_id.clone();
 
-                                    
+                                    //TODO: Remove this if/else case, if we don't have either of these actor's present, the broker isn't in a sane state, just panic/fail
                                     if topic_mgr.is_some() && sub_mgr.is_some() {
 
                                         // create a topic on the session's behalf
@@ -314,9 +314,7 @@ impl Actor for Broker {
                                                                             if let Err(e) = session.send_message(BrokerMessage::SubscribeAcknowledgment { registration_id: registration_id, topic: topic.clone(), result: Ok(()) }) {
                                                                                 warn!("{SUBSCRIBE_REQUEST_FAILED_TXT} {SESSION_NOT_FOUND_TXT}");
                                                                             }
-                                                                        } else {
-                                                                            warn!("{SUBSCRIBE_REQUEST_FAILED_TXT} {SESSION_NOT_FOUND_TXT}");
-                                                                        }
+                                                                        } else { warn!("{SUBSCRIBE_REQUEST_FAILED_TXT} {SESSION_NOT_FOUND_TXT}"); }
                                                                     }
                                                                     Err(e) => {
                                                                         //send err to session
@@ -324,9 +322,7 @@ impl Actor for Broker {
                                                                             if let Err(e) = session.send_message(BrokerMessage::SubscribeAcknowledgment { registration_id: registration_id, topic: topic.clone(), result: Err(e) }) {
                                                                                 warn!("{SUBSCRIBE_REQUEST_FAILED_TXT} {SESSION_NOT_FOUND_TXT} {e}");
                                                                             }
-                                                                        } else {
-                                                                            warn!("{SUBSCRIBE_REQUEST_FAILED_TXT} {SESSION_NOT_FOUND_TXT} {e}");
-                                                                        }
+                                                                        } else { warn!("{SUBSCRIBE_REQUEST_FAILED_TXT} {SESSION_NOT_FOUND_TXT} {e}"); }
                                                                     }
                                                                 }
                                                             },

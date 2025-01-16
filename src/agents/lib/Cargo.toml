@@ -1,0 +1,10 @@
+[package]
+name = "polar"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+workspace-hack = { version = "0.1", path = "../workspace-hack" }
+tracing = "0.1.41"
+tracing-glog = "0.4.0"
+tracing-subscriber = { version ="0.3.19", features=["std", "env-filter"]}

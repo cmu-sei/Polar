@@ -21,33 +21,28 @@
    DM24-0470
 */
 
-mod supervisor;
-mod users;
-mod projects;
-mod runners;
-mod groups;
+pub mod supervisor;
+pub mod users;
+pub mod projects;
+pub mod runners;
+pub mod groups;
 
 use cassini::client::TcpClientMessage;
 use cassini::ClientMessage;
 use common::types::GitlabData;
-use log::debug;
-use log::error;
-use log::info;
+use tracing::{debug, error};
 use ractor::ActorRef;
 use reqwest::Client;
 use reqwest::Response;
 use reqwest::Error;
 use reqwest::Method;
 use reqwest::header::LINK;
-use reqwest::StatusCode;
 use serde::Deserialize;
 use parse_link_header::parse_with_rel;
-use common::types::Pipeline;
 use serde_json::to_string;
-use tokio::fs::read;
 
+pub const GITLAB_USERS_OBSERVER: &str = "GITLAB_USERS_OBSERVER";
 pub const BROKER_CLIENT_NAME: &str = "gitlab_web_client";
-
 const PRIVATE_TOKEN_HEADER_STR : &str = "PRIVATE-TOKEN";
 
 /// General state for all gitlab observers
@@ -57,7 +52,9 @@ pub struct GitlabObserverState {
     pub web_client: Client,      // HTTP client
     pub registration_id: String, // ID of the agent's session with the broker
 }
+
 /// Arguments taken in by gitlab observers
+#[derive(Clone)]
 pub struct GitlabObserverArgs {
     pub gitlab_endpoint: String, 
     pub token: Option<String>,   
@@ -121,7 +118,6 @@ pub async fn get_all_elements<T: for<'a> Deserialize<'a>>(client: &Client, token
 
     let mut headers = resp.headers().clone();
     //get data from first page, if any
-    //TODO: Do not serialize to json, forward bytes as part of message to broker
     match resp.json::<Vec<T>>().await {
         Ok(mut vec) => {
             elements.append(&mut vec);

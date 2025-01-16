@@ -21,17 +21,15 @@
    DM24-0470
 */
 
-use std::{error::Error, fs::remove_file};
-use crate::{ get_all_elements, send, GitlabObserverArgs, GitlabObserverState, BROKER_CLIENT_NAME};
 
+use core::error;
+
+use crate::{ get_all_elements, send, GitlabObserverArgs, GitlabObserverState, BROKER_CLIENT_NAME};
 use ractor::{async_trait, registry::where_is, Actor, ActorProcessingErr, ActorRef};
 use reqwest::Client;
-use serde_json::to_string;
 use common::USERS_QUEUE_NAME;
 use common::types::{User, GitlabData};
-use log::{debug, info, warn};
-const LOCK_FILE_PATH: &str = "/tmp/users_observer.lock";
-
+use tracing::{debug, info, warn, error};
 
 pub struct GitlabUserObserver;
 
@@ -59,7 +57,10 @@ impl Actor for GitlabUserObserver {
                 };
                 Ok(state)
             }
-            Err(e) => Err(Box::new(e))
+            Err(e) => {
+                error!("{e}");
+                Err(Box::new(e))
+            }
         }
     }
 
@@ -67,9 +68,12 @@ impl Actor for GitlabUserObserver {
         &self,
         myself: ActorRef<Self::Msg>,
         state: &mut Self::State ) ->  Result<(), ActorProcessingErr> {
-
+        info!("{myself:?} Started");
         //TODO: use client in state to pull gitlab user data
-        let users: Vec<User> = get_all_elements(&state.web_client, state.token.clone().unwrap_or_default(), format!("{}{}", state.gitlab_endpoint, "/users")).await.unwrap();
+        let users: Vec<User> = get_all_elements(&state.web_client, state.token.clone().unwrap_or_default(), format!("{}{}", state.gitlab_endpoint, "/users"))
+        .await
+        .expect("Expected to get user data");
+    
         
         debug!("Retrieved {} users", users.len());
         

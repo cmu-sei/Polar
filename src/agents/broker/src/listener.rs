@@ -43,6 +43,10 @@ impl Actor for ListenerManager {
     ) -> Result<Self::State, ActorProcessingErr> {
         tracing::info!("ListenerManager: Starting {myself:?}");
 
+        // install default crypto provider
+        let provider = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        if let Err(_) = provider { debug!("Crypto provider configured"); }
+
         tracing::debug!("ListenerManager: Gathering certificates for mTLS");
         let certs = CertificateDer::pem_file_iter(args.server_cert_file)
         .unwrap()
@@ -58,16 +62,18 @@ impl Actor for ListenerManager {
         let private_key = PrivateKeyDer::from_pem_file(args.private_key_file).expect("Expected to load private key from file");
         
         tracing::debug!("ListenerManager: Building configuration for mTLS ");
+        
+
         let server_config = ServerConfig::builder()
         .with_client_cert_verifier(verifier)
         .with_single_cert(certs, private_key)
         .expect("bad certificate/key");
 
-
         //set up state object
         let state = ListenerManagerState { bind_addr: args.bind_addr, server_config: Arc::new(server_config) };
         info!("ListenerManager: Agent starting");
         Ok(state)
+
     }
 
     /// Once a the manager is running as a process, start the server

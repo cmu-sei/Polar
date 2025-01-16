@@ -27,10 +27,10 @@ use cassini::{client::TcpClientMessage};
 use ractor::{async_trait, registry::where_is, Actor, ActorProcessingErr, ActorRef};
 
 use crate::{get_all_elements, send, GitlabObserverArgs, GitlabObserverState};
-use log::{debug, info, warn};
+use tracing::{debug, info, warn, error};
 use reqwest::Client;
 use serde_json::to_string;
-use common::{types::{GitlabData, Project, Runner, User, UserGroup}, GROUPS_QUEUE_NAME, PROJECTS_QUEUE_NAME, RUNNERS_QUEUE_NAME, USERS_QUEUE_NAME};
+use common::{types::{GitlabData, Project, ResourceLink, Runner, User, UserGroup}, GROUPS_QUEUE_NAME, PROJECTS_QUEUE_NAME, RUNNERS_QUEUE_NAME, USERS_QUEUE_NAME};
 
 
 use crate::BROKER_CLIENT_NAME;
@@ -60,7 +60,11 @@ impl Actor for GitlabGroupObserver {
                 };
                 Ok(state)
             }
-            Err(e) => Err(Box::new(e))
+            Err(e) => {   
+                error!("{e}");
+                todo!()
+        
+            }
         }
     }
 
@@ -78,41 +82,43 @@ impl Actor for GitlabGroupObserver {
 
             if let Some(groups) = get_all_elements::<UserGroup>(&state.web_client, state.token.clone().unwrap_or_default(), format!("{}{}", state.gitlab_endpoint, "/groups")).await {
                 let data = GitlabData::Groups(groups.clone());
-                match send(data, client_ref.clone(), state.registration_id.clone(), GROUPS_QUEUE_NAME.to_string()) {
-                    Ok(_) => {
-                        debug!("Successfully sent project data");
-                    } Err(e) => todo!()
+                if let Err(e) = send(data, client_ref.clone(), state.registration_id.clone(), GROUPS_QUEUE_NAME.to_string()){
+                    error!("{e}");
+                    todo!();
                 }
-
                 for group in groups {
-                    //get users of each project
                     if let Some(users) = get_all_elements::<User>(&state.web_client, state.token.clone().unwrap_or_default(), format!("{}{}{}{}", state.gitlab_endpoint, "/groups/" , group.id, "/members")).await {
-                        let data = GitlabData::Users(users.clone());
-                        match send(data, client_ref.clone(), state.registration_id.clone(), USERS_QUEUE_NAME.to_string()) {
-                            Ok(_) => {
-                                debug!("Successfully sent project data");
-                            } Err(e) => todo!()
-                        }
-                    } 
-                    //get group runners
-                    if let Some(runners) = get_all_elements::<Runner>(&state.web_client, state.token.clone().unwrap_or_default(), format!("{}{}{}{}", state.gitlab_endpoint, "/groups/", group.id, "/runners")).await {
-                        let data = GitlabData::Runners(runners.clone());
-                        match send(data, client_ref.clone(), state.registration_id.clone(), RUNNERS_QUEUE_NAME.to_string()) {
-                            Ok(_) => {
-                                debug!("Successfully sent project data");
-                            } Err(e) => todo!()
-                        }
-                    }
-
-                    // get all group's projects
-                    if let Some(projects) = get_all_elements::<Project>(&state.web_client, state.token.clone().unwrap_or_default(), format!("{}{}{}{}", state.gitlab_endpoint, "/groups/", group.id, "/projects")).await {
-                        let data = GitlabData::Projects(projects.clone());
-                        match send(data, client_ref.clone(), state.registration_id.clone(), PROJECTS_QUEUE_NAME.to_string()) {
-                            Ok(_) => {
-                                debug!("Successfully sent project data");
-                            } Err(e) => todo!()
+                        let data = GitlabData::GroupMembers(ResourceLink {
+                            resource_id: group.id,
+                            resource_vec: users
+                        });
+                        if let Err(e) = send(data, client_ref.clone(), state.registration_id.clone(), GROUPS_QUEUE_NAME.to_string()){
+                            error!("{e}");
+                            todo!()
                         }
                         
+                    } 
+                    if let Some(runners) = get_all_elements::<Runner>(&state.web_client, state.token.clone().unwrap_or_default(), format!("{}{}{}{}", state.gitlab_endpoint, "/groups/", group.id, "/runners")).await {
+                        let data = GitlabData::GroupRunners(ResourceLink {
+                            resource_id: group.id,
+                            resource_vec: runners
+                        });
+                        if let Err(e) = send(data, client_ref.clone(), state.registration_id.clone(), GROUPS_QUEUE_NAME.to_string()){
+                            error!("{e}");
+                            todo!()
+                        }
+                        
+                    }
+                    if let Some(projects) = get_all_elements::<Project>(&state.web_client, state.token.clone().unwrap_or_default(), format!("{}{}{}{}", state.gitlab_endpoint, "/groups/", group.id, "/projects")).await {
+                        let data = GitlabData::GroupProjects(ResourceLink {
+                            resource_id: group.id,
+                            resource_vec: projects
+                        });
+                        if let Err(e) = send(data, client_ref.clone(), state.registration_id.clone(), GROUPS_QUEUE_NAME.to_string()){
+                            error!("{e}");
+                            todo!()
+                        }
+ 
                     }
 
                 }
@@ -137,47 +143,3 @@ impl Actor for GitlabGroupObserver {
 }
 
 
-
-
-// #[tokio::main]
-// async fn main() -> Result<(), Box<dyn Error> > {
-//     let result = create_lock(LOCK_FILE_PATH);
-//     match result {
-//         Err(e) => panic!("{}", e),
-//         Ok(false) => Ok(()),
-//         Ok(true) => {
-//             env_logger::init();
-//             info!("Runnng groups task");
-
-//             //publish user id and list of user's projects to queue?
-//             let mq_conn = connect_to_rabbitmq().await?;
-            
-//             //create publish channel
-
-//             let mq_publish_channel = mq_conn.create_channel().await?;
-
-//             //create fresh queue, empty string prompts the server backend to create a random name
-//             let _ = mq_publish_channel.queue_declare(GROUPS_QUEUE_NAME,QueueDeclareOptions::default() , FieldTable::default()).await?;
-
-//             //bind queue to exchange so it sends messages where we need them
-//             mq_publish_channel.queue_bind(GROUPS_QUEUE_NAME, GITLAB_EXCHANGE_STR, GROUPS_ROUTING_KEY, QueueBindOptions::default(), FieldTable::default()).await?;
-
-//             //poll gitlab for available users
-//             .unwrap_or_default()let state.token = get_state.token();
-//             l.unwrap_or_default()et state.gitlab_endpoint = get_gitlab_endpoint();
-
-//             let state.web_client = helpers::helpers::state.web_client();
-
-//            
-            
-
-            
-            
-//             let _ = remove_file(LOCK_FILE_PATH);
-
-//             let _ = mq_conn.close(0, "closed").await;
-
-//             Ok(())
-//         }
-//     }
-// }

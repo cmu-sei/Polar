@@ -25,7 +25,7 @@
 use cassini::{client::TcpClientMessage, ClientMessage};
 use common::{types::{GitlabData, Runner}, RUNNERS_QUEUE_NAME};
 
-use log::{debug, error, warn};
+use tracing::{debug, info, warn, error};
 use reqwest::Client;
 use serde_json::to_string;
 use crate::{get_all_elements, send, GitlabObserverArgs, GitlabObserverState};

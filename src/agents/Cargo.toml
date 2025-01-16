@@ -28,6 +28,7 @@ resolver = "2"
 members = [
     "broker",
     "serialize",
+    "lib",
     "gitlab/common",
     "gitlab/consume",
     "gitlab/observe", 

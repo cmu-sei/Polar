@@ -120,7 +120,7 @@ mod tests {
         .call(TcpClientMessage::GetRegistrationId, Some(Duration::from_secs(10)))
         .await.unwrap().unwrap();
 
-        assert_ne!(session_id, String::default());
+        assert_ne!(session_id, None);
         client.kill_and_wait(None).await.expect("Expected to stop client");
         
     }
@@ -151,10 +151,10 @@ mod tests {
         .call(TcpClientMessage::GetRegistrationId, Some(Duration::from_secs(3)))
         .await.unwrap().unwrap();
 
-        assert_ne!(session_id, String::default());
+        assert_ne!(session_id, None);
 
         client.send_message(TcpClientMessage::Send(
-            ClientMessage::DisconnectRequest(Some(session_id))
+            ClientMessage::DisconnectRequest(session_id)
         )).expect("Expected to forward msg");
 
         tokio::time::sleep(Duration::from_secs(1)).await;
@@ -194,14 +194,14 @@ mod tests {
             Some(Duration::from_secs(3)))
         .await.unwrap().unwrap();
 
-        assert_ne!(session_id, String::default());
+        assert_ne!(session_id, None);
         
         tokio::time::sleep(Duration::from_secs(1)).await;
         
         //create some subscription
         client.send_message(TcpClientMessage::Send(
             ClientMessage::SubscribeRequest { 
-                registration_id: Some(session_id.clone()),
+                registration_id: session_id.clone(),
                 topic: String::from("Apples")
             }
         )).map_err(|e| { println!("{e}")}).unwrap();
@@ -210,7 +210,7 @@ mod tests {
 
         //disconnect
         client.send_message(TcpClientMessage::Send(
-            ClientMessage::TimeoutMessage(Some(session_id))
+            ClientMessage::TimeoutMessage(session_id)
         )).expect("Expected to foward msg");
 
         client.kill_and_wait(None).await.expect("Expected to stop client");
@@ -243,17 +243,19 @@ mod tests {
         .call(TcpClientMessage::GetRegistrationId, Some(Duration::from_secs(10)))
         .await.unwrap().unwrap();
 
+        assert_ne!(session_id, None);
+
         //subscribe to topic
         let topic = String::from("Apples");
         client.send_message(TcpClientMessage::Send(
-            ClientMessage::SubscribeRequest { topic: topic.clone(), registration_id: Some(session_id.clone())}
+            ClientMessage::SubscribeRequest { topic: topic.clone(), registration_id: session_id.clone() }
         )).expect("Expected to foward msg");
 
         // wait a moment, then force timeout and kill first client
         tokio::time::sleep(Duration::from_secs(3)).await;
         
         client.send_message(TcpClientMessage::Send(
-            ClientMessage::TimeoutMessage(Some(session_id.clone()))
+            ClientMessage::TimeoutMessage(session_id.clone())
         )).map_err(|e| { println!("{e}")}).expect("Expected to foward msg");
 
         //create new client, connect and send registration request with same session_id
@@ -261,7 +263,7 @@ mod tests {
         TcpClientActor,
         TcpClientArgs {
             bind_addr: BIND_ADDR.to_string(),
-            registration_id: Some(session_id.clone()),
+            registration_id: session_id.clone(),
             client_cert_file: env::var("TLS_CLIENT_CERT").unwrap(),
             private_key_file: env::var("TLS_CLIENT_KEY").unwrap(),
             ca_cert_file: env::var("TLS_CA_CERT").unwrap(),
@@ -269,7 +271,7 @@ mod tests {
 
         
         //Publish messsage
-        let _ = new_client.send_message( TcpClientMessage::Send(ClientMessage::PublishRequest { topic, payload: "Hello apple".to_string(), registration_id: Some(session_id.clone())}));
+        let _ = new_client.send_message( TcpClientMessage::Send(ClientMessage::PublishRequest { topic, payload: "Hello apple".to_string(), registration_id: session_id.clone()}));
         
         //wait for responses, panics
         tokio::time::sleep(Duration::from_secs(3)).await;
@@ -306,11 +308,11 @@ mod tests {
         .call(TcpClientMessage::GetRegistrationId, Some(Duration::from_secs(10)))
         .await.unwrap().unwrap();
         
-        assert_ne!(subscriber_session_id, String::default());
+        assert_ne!(subscriber_session_id, None);
 
         //subscribe client to topic
         subscriber_client.send_message(TcpClientMessage::Send(
-            ClientMessage::SubscribeRequest { topic: topic.clone(), registration_id: Some(subscriber_session_id.clone())}
+            ClientMessage::SubscribeRequest { topic: topic.clone(), registration_id: subscriber_session_id.clone()}
         )).expect("Expected to foward msg");
             
         // wait a moment
@@ -318,7 +320,7 @@ mod tests {
 
         //send fake timeout, should stop listener
         subscriber_client.send_message(TcpClientMessage::Send(
-            ClientMessage::TimeoutMessage(Some(subscriber_session_id.clone()))
+            ClientMessage::TimeoutMessage(subscriber_session_id.clone())
         )).expect("Expected to foward msg");
 
         // wait a moment
@@ -342,11 +344,11 @@ mod tests {
         .call(TcpClientMessage::GetRegistrationId, Some(Duration::from_secs(10)))
         .await.unwrap().unwrap();
 
-        assert_ne!(publisher_session_id, String::default());
+        assert_ne!(publisher_session_id, None);
 
         //send a few messages
         for i in 1..10 {
-            publisher_client.send_message( TcpClientMessage::Send(ClientMessage::PublishRequest { topic: topic.clone(), payload: "Hello apple".to_string(), registration_id: Some(publisher_session_id.clone())})).unwrap();
+            publisher_client.send_message( TcpClientMessage::Send(ClientMessage::PublishRequest { topic: topic.clone(), payload: "Hello apple".to_string(), registration_id: publisher_session_id.clone()})).unwrap();
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
         //kill publisher
@@ -358,7 +360,7 @@ mod tests {
         TcpClientActor,
         TcpClientArgs {
             bind_addr: BIND_ADDR.to_string(),
-            registration_id: Some(subscriber_session_id.clone()),
+            registration_id: subscriber_session_id.clone(),
             client_cert_file: env::var("TLS_CLIENT_CERT").unwrap(),
             private_key_file: env::var("TLS_CLIENT_KEY").unwrap(),
             ca_cert_file: env::var("TLS_CA_CERT").unwrap(),
@@ -398,26 +400,26 @@ mod tests {
         .call(TcpClientMessage::GetRegistrationId, Some(Duration::from_secs(10)))
         .await.unwrap().unwrap();
 
-        assert_ne!(where_is(session_id.clone()), None);
+        assert_ne!(session_id, None);
 
         let topic = String::from("Cherries");
 
         
         //subscribe client to topic
         client.send_message(TcpClientMessage::Send(
-            ClientMessage::SubscribeRequest { topic: topic.clone(), registration_id: Some(session_id.clone())}
+            ClientMessage::SubscribeRequest { topic: topic.clone(), registration_id: session_id.clone()}
         )).expect("Expected to forward msg");
 
         tokio::time::sleep(Duration::from_secs(1)).await;
         
         //unsub
         client.send_message(TcpClientMessage::Send(
-            ClientMessage::UnsubscribeRequest { registration_id: Some(session_id.clone()), topic: topic.clone() }
+            ClientMessage::UnsubscribeRequest { registration_id: session_id.clone(), topic: topic.clone() }
         )).expect("Expected to forward msg");
 
         tokio::time::sleep(Duration::from_secs(1)).await;
 
-        assert_eq!(where_is(get_subscriber_name(&session_id, &topic.clone())), None);
+        assert_eq!(where_is(get_subscriber_name(&session_id.unwrap(), &topic.clone())), None);
         
         client.kill_and_wait(None).await.expect("Expected to stop client");
         

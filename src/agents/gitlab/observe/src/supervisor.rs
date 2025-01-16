@@ -1,10 +1,11 @@
+use core::error;
 use std::time::Duration;
 
-use log::debug;
-use log::error;
-use log::info;
-use log::warn;
+use tracing::error;
+use tracing::{debug, info, warn};
+use ractor::call;
 use ractor::rpc::call;
+use ractor::rpc::CallResult;
 use ractor::Actor;
 use ractor::async_trait;
 use ractor::ActorProcessingErr;
@@ -12,13 +13,19 @@ use ractor::ActorRef;
 use ractor::SupervisionEvent;
 use cassini::client::*;
 
+use crate::groups::GitlabGroupObserver;
+use crate::projects::GitlabProjectObserver;
+use crate::runners::GitlabRunnerObserver;
 use crate::users::GitlabUserObserver;
 use crate::GitlabObserverArgs;
 use crate::BROKER_CLIENT_NAME;
+use crate::GITLAB_USERS_OBSERVER;
 
 pub struct ObserverSupervisor;
 
-pub struct ObserverSupervisorState;
+pub struct ObserverSupervisorState {
+    max_registration_attempts: u32 // amount of times the supervisor will try to get the session_id from the client
+}
 
 
 pub struct ObserverSupervisorArgs {
@@ -27,7 +34,7 @@ pub struct ObserverSupervisorArgs {
     pub client_private_key_file: String,
     pub ca_cert_file: String,
     pub gitlab_endpoint: String,
-    pub gitlab_token: String,
+    pub gitlab_token: Option<String>,
     
 }
 #[async_trait]
@@ -43,32 +50,56 @@ impl Actor for ObserverSupervisor {
     ) -> Result<Self::State, ActorProcessingErr> {
         debug!("{myself:?} starting");
         
-        let state = ObserverSupervisorState;
+        let state = ObserverSupervisorState {
+            max_registration_attempts: 5 //TODO: take from args
+        };
 
-        match Actor::spawn_linked(Some(BROKER_CLIENT_NAME.to_string()), TcpClientActor, TcpClientArgs {
-            bind_addr: args.broker_addr.clone(),
-            ca_cert_file: args.ca_cert_file,
-            client_cert_file: args.client_cert_file,
-            private_key_file: args.client_private_key_file,
-            registration_id: None
-            
-        }, myself.clone().into()).await {
+        let client_started_result =  Actor::spawn_linked(
+            Some(BROKER_CLIENT_NAME.to_string()),
+            TcpClientActor,
+            TcpClientArgs {
+                bind_addr: args.broker_addr.clone(),
+                ca_cert_file: args.ca_cert_file,
+                client_cert_file: args.client_cert_file,
+                private_key_file: args.client_private_key_file,
+                registration_id: None
+            }, myself.clone().into())
+            .await;
+
+        //TODO: Try to confirm client is registered before moving on with sending messages
+        
+        match client_started_result {
             Ok((client, _)) => {
-                //when client starts, successfully, start workers
-                //TODO: start users actor
-                let id = call(&client, |reply| { TcpClientMessage::GetRegistrationId(reply) }, None)
-                .await.expect("Expected client to register successfully.").unwrap();
-
-                let args = GitlabObserverArgs {
-                    gitlab_endpoint: args.gitlab_endpoint,
-                    token: Some(args.gitlab_token.clone()),
-                    registration_id: id.clone()
-                };
-
-                //TODO: start observers based off of some configuration
-                if let Err(e) = Actor::spawn_linked(Some("GITLAB_USERS_OBSERVER".to_string()), GitlabUserObserver, args, myself.clone().into()).await { warn!( "failed to start users observer {e}") }
-                
+                // Set up an interval
+                //TODO: make configurable
+                let mut interval = tokio::time::interval(Duration::from_secs(5));
+                //wait until we get a session id to start clients, try some configured amount of times every few seconds
+                let mut attempts= 0; 
+                loop {
+                    interval.tick().await;
+                    attempts += 1;
+                    info!("Getting session data...");
+                    if let CallResult::Success(result) = call(&client, |reply| { TcpClientMessage::GetRegistrationId(reply) }, None).await.expect("Expected to call client!") {    
+                        if let Some(registration_id) = result {
+                            let args = GitlabObserverArgs {
+                                gitlab_endpoint: args.gitlab_endpoint.clone(),
+                                token: args.gitlab_token.clone(),
+                                registration_id: registration_id.clone()
+                            };
             
+                            //TODO: start observers based off of some configuration, and break
+                            if let Err(e) = Actor::spawn_linked(Some(GITLAB_USERS_OBSERVER.to_string()), GitlabUserObserver, args.clone(), myself.clone().into()).await { warn!( "failed to start users observer {e}") }
+                            //TODO: Unfreeze other observers
+                            // if let Err(e) = Actor::spawn_linked(Some("GITLAB_PROJECT_OBSERVER".to_string()), GitlabProjectObserver, args.clone(), myself.clone().into()).await { warn!( "failed to start project observer {e}") }
+                            // if let Err(e) = Actor::spawn_linked(Some("GITLAB_GROUOP_OBSERVER".to_string()), GitlabGroupObserver, args.clone(), myself.clone().into()).await { warn!( "failed to start group observer {e}") }
+                            // if let Err(e) = Actor::spawn_linked(Some("GITLAB_RUNNER_OBSERVER".to_string()), GitlabRunnerObserver, args.clone(), myself.clone().into()).await { warn!( "failed to start runner observer {e}") }
+                            break;
+                        } else if attempts == state.max_registration_attempts {
+                            error!("Failed to retrieve session data! timed out");
+                            myself.stop(Some("Failed to retrieve session data! timed out".to_string()));
+                        }
+                    }
+                }
             }
             Err(e) => {
                 error!("{e}");
@@ -80,22 +111,28 @@ impl Actor for ObserverSupervisor {
         Ok(state)
     }
 
+    async fn post_start(
+        &self,
+        _: ActorRef<Self::Msg>,
+        _: &mut Self::State ) ->  Result<(), ActorProcessingErr> {
+        //TODO: Implement scheduling logic via clockwerk or some other means based off of configuration values within the state
+        Ok(())
+    }
+
     async fn handle(
         &self,
         _myself: ActorRef<Self::Msg>,
         _: Self::Msg,
         _: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        
+        //TODO: Implement some message handling here, handle cases where the scheudler may request a certain resource be observed, like users, projects, etc.
         Ok(())
     }
 
-    async fn handle_supervisor_evt(&self, myself: ActorRef<Self::Msg>, msg: SupervisionEvent, _: &mut Self::State) -> Result<(), ActorProcessingErr> {
+    async fn handle_supervisor_evt(&self, _: ActorRef<Self::Msg>, msg: SupervisionEvent, _: &mut Self::State) -> Result<(), ActorProcessingErr> {
         
         match msg {
-            SupervisionEvent::ActorStarted(actor_cell) => {
-                info!("OBSERVER_SUPERVISOR: {0:?}:{1:?} started", actor_cell.get_name(), actor_cell.get_id());
-            },
+            SupervisionEvent::ActorStarted(_) => (),
             SupervisionEvent::ActorTerminated(actor_cell, _, reason) => {
                 info!("OBSERVER_SUPERVISOR: {0:?}:{1:?} terminated. {reason:?}", actor_cell.get_name(), actor_cell.get_id());
             },

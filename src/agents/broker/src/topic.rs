@@ -231,6 +231,7 @@ impl Actor for TopicAgent {
                         debug!("{myself:?}: New message from {0}: {1}", registration_id, payload);
                         
                         //alert subscribers
+                        //TODO: bring back the vecdeque, What if there are no subscribers????
                         for subscriber in &state.subscribers {
                             if let Some(actor) = where_is(subscriber.to_string()) {
                                 if let Err(e) = actor.send_message(BrokerMessage::PublishResponse {

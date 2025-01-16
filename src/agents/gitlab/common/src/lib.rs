@@ -37,6 +37,8 @@ pub mod gitlab_capnp {
 
 pub mod types;
 
+///TODO: Rewrite these constants to serve as actor names for the observers and consumers
+///TODO: Assign a constant value to serve as topic names for the gitlab agent
 pub const GITLAB_EXCHANGE_STR: &str = "gitlab_exchange";
 
 pub const PROJECTS_ROUTING_KEY: &str = "projects";

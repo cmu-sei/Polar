@@ -23,13 +23,16 @@ DM24-0470
 
 use std::error::Error;
 use std::process::Command;
+use ractor::Actor;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error> > {
     //try spawning consumers
-    Command::new("./projects_consumer").spawn().expect("Could not execute gitlab project consumer binary.");
-    Command::new("./users_consumer").spawn().expect("Could not execute gitlab user consumer binary.");
-    Command::new("./groups_consumer").spawn().expect("Could not execute gitlab group consumer binary.");
-    Command::new("./runners_consumer").spawn().expect("Could not execute gitlab runners consumer binary.");
+    // Command::new("./projects_consumer").spawn().expect("Could not execute gitlab project consumer binary.");
+    // Command::new("./users_consumer").spawn().expect("Could not execute gitlab user consumer binary.");
+    // Command::new("./groups_consumer").spawn().expect("Could not execute gitlab group consumer binary.");
+    // Command::new("./runners_consumer").spawn().expect("Could not execute gitlab runners consumer binary.");
+    //TODO: Start consumer supervisor
+
     Ok(())
 }

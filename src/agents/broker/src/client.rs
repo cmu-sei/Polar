@@ -18,7 +18,7 @@ pub enum TcpClientMessage {
     Send(ClientMessage),
     RegistrationResponse(String),
     ErrorMessage(String),
-    GetRegistrationId(RpcReplyPort<String>) //TODO: return optional string
+    GetRegistrationId(RpcReplyPort<Option<String>>) //TODO: return optional string
 }
 
 /// Actor state for the TCP client
@@ -53,13 +53,16 @@ impl Actor for TcpClientActor {
         _: ActorRef<Self::Msg>,
         args: TcpClientArgs) -> Result<Self::State, ActorProcessingErr> {
         info!("TCP Client Actor starting...");
+        // install default crypto provider
+        let provider = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        if let Err(_) = provider { debug!("Crypto provider configured"); }
                         
         let mut root_cert_store = rustls::RootCertStore::empty();
-        let _ = root_cert_store.add(CertificateDer::from_pem_file(args.ca_cert_file).expect("Expected to read server cert as pem"));
+        let _ = root_cert_store.add(CertificateDer::from_pem_file(args.ca_cert_file).expect("Expected to read CA cert as pem"));
     
-        let client_cert = CertificateDer::from_pem_file(args.client_cert_file).expect("Expected to read server cert as pem");
-        let private_key = PrivateKeyDer::from_pem_file(args.private_key_file).unwrap();
-        let verifier = WebPkiServerVerifier::builder(Arc::new(root_cert_store)).build().expect("Expected to build server verifier");
+        let client_cert = CertificateDer::from_pem_file(args.client_cert_file).expect("Expected to read client cert as pem");
+        let private_key = PrivateKeyDer::from_pem_file(args.private_key_file).expect("Expected to read client cert as pem");
+        let verifier = WebPkiServerVerifier::builder(Arc::new(root_cert_store)).build().expect("Expected to build client verifier");
         let mut certs = Vec::new();
         certs.push(client_cert);
         let config = rustls::ClientConfig::builder()
@@ -196,7 +199,6 @@ impl Actor for TcpClientActor {
             TcpClientMessage::Send(broker_msg) => {
                 let str = serde_json::to_string(&broker_msg).unwrap();
                 let msg = format!("{str}\n");
-                debug!("Sending message: {msg}");
                 let unwrapped_writer = state.writer.clone().unwrap();
                 let mut writer = unwrapped_writer.lock().await;        
                 if let Err(e) = writer.write(msg.as_bytes()).await {
@@ -209,10 +211,13 @@ impl Actor for TcpClientActor {
                     myself.stop(Some("UNEXPECTED_DISCONNECT".to_string()))
                 }
             }
-            TcpClientMessage::RegistrationResponse(registration_id) => state.registration_id = Some(registration_id),
+            TcpClientMessage::RegistrationResponse(registration_id) => {
+                state.registration_id = Some(registration_id)
+                
+            },
             TcpClientMessage::GetRegistrationId(reply) => {
-                if let Some(registration_id) = &state.registration_id { reply.send(registration_id.to_owned()).expect("Expected to send registration_id to reply port"); } 
-                else { reply.send(String::default()).expect("Expected to send default string"); }
+                if let Some(registration_id) = &state.registration_id { reply.send(Some(registration_id.to_owned())).expect("Expected to send registration_id to reply port"); } 
+                else { reply.send(None).expect("Expected to send default string"); }
             }
             _ => todo!()
                                 

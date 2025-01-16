@@ -16,9 +16,13 @@ uuid = { version = "1.11.0", features = ["v4"] }
 tokio-util = "0.7.13"
 #TODO: Consider using FIPS cryptography features?
 # REFERENCE: https://docs.rs/rustls/latest/rustls/index.html#crate-features
-rustls = "0.23.20"
+rustls = { version = "0.23.20", features = ["aws_lc_rs"]}
 tokio-rustls = "0.26.1"
-# workspace-hack = { version = "0.1", path = "../workspace-hack" }
+#TODO: Use the workspace hack to help centralize our dependencies
+# At the moment, enabling it prevents the listener manager from starting
+# I believe it is because the workspace-hack Cargo.toml tries to use the "ring" feature of rustls
+# Which we do not need presntly, by default, it uses the aws-lc_rs crate
+workspace-hack = { version = "0.1", path = "../workspace-hack" }
 
 [[bin]]
 name = "cassini-server"

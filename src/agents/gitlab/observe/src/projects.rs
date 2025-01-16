@@ -32,7 +32,7 @@ use serde_json::to_string;
 use common::{types::Project, RUNNERS_QUEUE_NAME, USERS_QUEUE_NAME};
 use common::types::{GitlabData, Pipeline, ResourceLink, Runner, User};
 use std::{error::Error, fs::remove_file};
-use log::{debug, error, info, warn};
+use tracing::{debug, error, info, warn};
 
 
 const LOCK_FILE_PATH: &str = "/tmp/projects_observer.lock";
@@ -89,7 +89,7 @@ impl Actor for GitlabProjectObserver {
                     // get users of each project
                     if let Some(users) = get_all_elements::<User>(&state.web_client, state.token.clone().unwrap_or_default(), format!("{}{}{}{}", state.gitlab_endpoint, "/projects/" , project.id, "/users")).await {
                         let data = GitlabData::Users(users.clone());
-                        match send(data, client_ref.clone(), state.registration_id.clone(), USERS_QUEUE_NAME.to_string()) {
+                        match send(data, client_ref.clone(), state.registration_id.clone(), PROJECTS_QUEUE_NAME.to_string()) {
                             Ok(_) => {
                                 debug!("Successfully sent user data");
                             } Err(e) => todo!()
@@ -100,7 +100,7 @@ impl Actor for GitlabProjectObserver {
                     //get runners
                     if let Some(runners) = get_all_elements::<Runner>(&state.web_client, state.token.clone().unwrap_or_default(), format!("{}{}{}{}", state.gitlab_endpoint, "/projects/", project.id, "/runners")).await {
                         let data = GitlabData::Runners(runners.clone());
-                        match send(data, client_ref.clone(), state.registration_id.clone(), RUNNERS_QUEUE_NAME.to_string()) {
+                        match send(data, client_ref.clone(), state.registration_id.clone(), PROJECTS_QUEUE_NAME.to_string()) {
                             Ok(_) => {
                                 debug!("Successfully sent runner data");
                             } Err(e) => todo!()
