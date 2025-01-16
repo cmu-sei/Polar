@@ -288,46 +288,12 @@
         "type": "github"
       }
     },
-    "nixpkgs_3": {
-      "locked": {
-        "lastModified": 1734627754,
-        "narHash": "sha256-IlpjGUr91wQG67YZ+/W28vbZL3LOx97LzMAG+r5OKkE=",
-        "owner": "NixOS",
-        "repo": "nixpkgs",
-        "rev": "98dd0ae04cf3052b93074ebff8e1f564f9518405",
-        "type": "github"
-      },
-      "original": {
-        "owner": "NixOS",
-        "repo": "nixpkgs",
-        "type": "github"
-      }
-    },
-    "openssl-fips": {
-      "inputs": {
-        "nixpkgs": "nixpkgs_3"
-      },
-      "locked": {
-        "lastModified": 1734628642,
-        "narHash": "sha256-/A3Lb/tlbYyQH1fG5P0SKFwYe0qnD4QaMpReI5q9eYs=",
-        "owner": "daveman1010221",
-        "repo": "openssl-fips",
-        "rev": "a5451bb97eb9dda7ea1b93c1e1039b5af9b85e33",
-        "type": "github"
-      },
-      "original": {
-        "owner": "daveman1010221",
-        "repo": "openssl-fips",
-        "type": "github"
-      }
-    },
     "root": {
       "inputs": {
         "flake-utils": "flake-utils",
         "myNeovimOverlay": "myNeovimOverlay",
         "nix-vscode-extensions": "nix-vscode-extensions",
         "nixpkgs": "nixpkgs_2",
-        "openssl-fips": "openssl-fips",
         "rust-overlay": "rust-overlay",
         "staticanalysis": "staticanalysis"
       }

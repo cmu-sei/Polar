@@ -17,13 +17,13 @@
     staticanalysis.inputs.nixpkgs.follows = "nixpkgs";
     staticanalysis.inputs.flake-utils.follows = "flake-utils";
     staticanalysis.inputs.rust-overlay.follows = "rust-overlay";
-    openssl-fips.url = "github:daveman1010221/openssl-fips";
+    #openssl-fips.url = "github:daveman1010221/openssl-fips";
   };
 
-  outputs = { flake-utils, nixpkgs, rust-overlay, myNeovimOverlay, nix-vscode-extensions, staticanalysis, openssl-fips, ... }:
+  outputs = { flake-utils, nixpkgs, rust-overlay, myNeovimOverlay, nix-vscode-extensions, staticanalysis, ... }:
     flake-utils.lib.eachDefaultSystem (system:
       let
-        overlayNetSSLeay = import ./overlay-netssleay.nix;
+        #overlayNetSSLeay = import ./overlay-netssleay.nix;
 
         pkgs = import nixpkgs {
           inherit system;
@@ -32,15 +32,15 @@
             myNeovimOverlay.overlays.default
 
             # Overlay replaces openssl with FIPS-compliant openssl
-            (final: prev: {
-              openssl = (openssl-fips.packages.${prev.system}.default).override (old: old // {
-                meta = old.meta // {
-                  description = "FIPS-compliant OpenSSL for Dev Container";
-                };
-              });
-            })
+            # (final: prev: {
+            #   openssl = (openssl-fips.packages.${prev.system}.default).override (old: old // {
+            #     meta = old.meta // {
+            #       description = "FIPS-compliant OpenSSL for Dev Container";
+            #     };
+            #   });
+            # })
 
-            overlayNetSSLeay    # The FIPS OpenSSL is used by a package that
+            #overlayNetSSLeay    # The FIPS OpenSSL is used by a package that
                                 # uses this perl package, which doesn't build right...
           ];
         };
@@ -103,22 +103,23 @@
           paths = with pkgs; [
             # -- Basic Required Files --
             bash # Basic bash to run bare essential code
+            glibcLocalesUtf8
             uutils-coreutils-noprefix # Essential GNU utilities (ls, cat, etc.)
 
             # -- Needed for VSCode dev container --
-            gnutar # GNU version of tar for archiving 
-            gzip # Compression utility
             gnugrep # GNU version of grep for searching text
             gnused # GNU version of sed for text processing
+            gnutar # GNU version of tar for archiving 
+            gzip # Compression utility
             pkgs.stdenv.cc.cc.lib # Standard C library needed for linking C++ programs
 
             # -- FISH! --
+            figlet
             fish
             fishPlugins.bass
             fishPlugins.bobthefish
             fishPlugins.foreign-env
             fishPlugins.grc
-            figlet
             lolcat
 
             # -- OpenSSL --
@@ -128,37 +129,36 @@
 
             # -- Development tools --
             code-extended
+            curl
+            eza
+            fd
+            findutils
+            fzf
+            gawk
+            getent
+            git
+            gnugrep
+            jq
+            lsof
+            ncurses
+            nix
+            nvim-pkg
+            ps
+            ripgrep
             rust-analyzer
             rustlings
-
-            which
-            nvim-pkg
-            curl
-            lsof
             strace
-            ripgrep
             tree
             tree-sitter
-            nix
-            git
-            fzf
-            fd
-            eza
-            findutils
-            gnugrep
-            getent
-            gawk
-            jq
-            ps
-            ncurses
+            which
 
             # -- Compilers, Etc. --
-            gcc
-            grc
             cmake
-            gnumake
-            libclang
+            gcc
             glibc
+            gnumake
+            grc
+            libclang
 
             # -- Rust --
             #(lib.meta.hiPrio rust-bin.nightly.latest.default)
@@ -171,11 +171,15 @@
               extensions = [ "rust-src" ];
               targets = [ "wasm32-unknown-unknown" "wasm32-wasip1" ];
             }))
-            cargo-wasi
             cargo-leptos
+            cargo-wasi
             pkg-config
             trunk
             util-linux
+
+            # Testing
+            erlang
+            rabbitmq-server
 
             # -- Static Analysis Tools --
             staticanalysis.packages.${system}.default
@@ -229,29 +233,40 @@
           config = {
             WorkingDir = "/workspace";
             Env = [
-              # Add certificates to allow for cargo to download files from the internet
-              "SSL_CERT_FILE=/etc/ssl/certs/ca-bundle.crt"
-              "SSL_CERT_DIR=/etc/ssl/certs"
               "CARGO_HTTP_CAINFO=/etc/ssl/certs/ca-bundle.crt"
-              "CC=gcc" # Set GCC as the default C compiler
-              "CXX=g++" # Set G++ as the default C++ compiler
-              # Library path for dynamic linking
-              "LD_LIBRARY_PATH=${pkgs.stdenv.cc.cc.lib}/lib"
-              # Add openssl to pkg config to ensure that it loads for cargo build
-              "PKG_CONFIG_PATH=${pkgs.openssl.dev}/lib/pkgconfig"
-              # Setting PATH to include essential binaries
-              "PATH=/bin:/usr/bin:${myEnv}/bin:/root/.cargo/bin"
-              "USER=root" # Setting user to root
-              "COREUTILS=${pkgs.uutils-coreutils-noprefix}"
-              "CMAKE=/bin/cmake"
-              "CMAKE_MAKE_PROGRAM=/bin/make"
-              "LIBCLANG_PATH=${pkgs.libclang.lib}/lib/"
-              "SHELL=/bin/fish"
 
               # Fish plugins
-              "FISH_GRC=${pkgs.fishPlugins.grc}"
-              "FISH_BASS=${pkgs.fishPlugins.bass}"
               "BOB_THE_FISH=${pkgs.fishPlugins.bobthefish}"
+              "FISH_BASS=${pkgs.fishPlugins.bass}"
+              "FISH_GRC=${pkgs.fishPlugins.grc}"
+
+              # Set GCC as default compiler -- will make this clang, eventually
+              "CC=gcc"
+              "CXX=g++"
+              "CMAKE=/bin/cmake"
+              "CMAKE_MAKE_PROGRAM=/bin/make"
+              "COREUTILS=${pkgs.uutils-coreutils-noprefix}"
+
+              "LANG=en_US.UTF-8"
+              "TZ=UTC"
+
+              "LD_LIBRARY_PATH=${pkgs.stdenv.cc.cc.lib}/lib"
+
+              "LIBCLANG_PATH=${pkgs.libclang.lib}/lib/"
+
+              "PATH=/bin:/usr/bin:${myEnv}/bin:/root/.cargo/bin"
+
+              # Add openssl to pkg config to ensure that it loads for cargo build
+              "PKG_CONFIG_PATH=${pkgs.openssl.dev}/lib/pkgconfig"
+
+              "SHELL=/bin/fish"
+              "SSL_CERT_DIR=/etc/ssl/certs"
+
+              # Add certificates to allow for cargo to download files from the
+              # internet. May have to adjust this for FIPS.
+              "SSL_CERT_FILE=/etc/ssl/certs/ca-bundle.crt"
+
+              "USER=root"
             ];
             Volumes = { };
             Cmd = [ "/bin/fish" ]; # Runs fish
