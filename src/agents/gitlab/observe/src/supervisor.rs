@@ -76,7 +76,7 @@ impl Actor for ObserverSupervisor {
                 //wait until we get a session id to start clients, try some configured amount of times every few seconds
                 let mut attempts= 0; 
                 loop {
-                    interval.tick().await;
+                    
                     attempts += 1;
                     info!("Getting session data...");
                     if let CallResult::Success(result) = call(&client, |reply| { TcpClientMessage::GetRegistrationId(reply) }, None).await.expect("Expected to call client!") {    
@@ -94,11 +94,15 @@ impl Actor for ObserverSupervisor {
                             // if let Err(e) = Actor::spawn_linked(Some("GITLAB_GROUOP_OBSERVER".to_string()), GitlabGroupObserver, args.clone(), myself.clone().into()).await { warn!( "failed to start group observer {e}") }
                             // if let Err(e) = Actor::spawn_linked(Some("GITLAB_RUNNER_OBSERVER".to_string()), GitlabRunnerObserver, args.clone(), myself.clone().into()).await { warn!( "failed to start runner observer {e}") }
                             break;
-                        } else if attempts == state.max_registration_attempts {
+                        } else if attempts < state.max_registration_attempts {
+                          warn!("Failed to get session data. Retrying.");
+                        } else if attempts >= state.max_registration_attempts{
                             error!("Failed to retrieve session data! timed out");
                             myself.stop(Some("Failed to retrieve session data! timed out".to_string()));
                         }
+                        
                     }
+                    interval.tick().await;
                 }
             }
             Err(e) => {

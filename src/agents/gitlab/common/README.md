@@ -1,20 +1,13 @@
-# CapnProto Data Models for Rust
+# Gitlab Observer Common Utilities 
+This crate provides some shared untilities for the gitlab agent and its components.
 
-This crate provides Cap’n Proto-generated data types for serialization. It uses the **Cap’n Proto** schema language to define the data models and automatically generates Rust code using the `capnpc` compiler.
 
 ## Features
+ - **Graphql Schema** :Generated using the `cynic` CLI tool.
+    Over time, the gitlab API schema may be updated, when this happens, we can regenerate it with the following command
 
-- **Cap’n Proto Integration**: Define schemas in `.capnp` files and generate efficient Rust types.
-- **High-Performance Serialization**: Leverage Cap’n Proto's zero-copy serialization for fast and compact data transmission.
-- **Flexible Data Modeling**: Includes unions and nested structs for complex relationships.
-- **Compatibility**: Easily integrate with other Cap’n Proto-supported languages (e.g., Python, C++).
+    `cynic introspect -H "PRIVATE-TOKEN: $GITLAB_TOKEN" "${GITLAB_GRAPHQL_ENDPOINT}" -o schema/gitlab.graphql`
 
-### Cap’n Proto Compiler
-Ensure you have the `capnp` compiler installed on your system:
+    Refer to (the cynic docs)[https://cynic-rs.dev/schemas/introspection] for more details on how this is done.
 
-```sh
-sudo apt install capnproto   # Debian/Ubuntu
-brew install capnp           # macOS
-nix-shell -p capnproto
-```
 

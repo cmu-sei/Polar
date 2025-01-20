@@ -31,10 +31,6 @@ use tcp_stream::OwnedTLSConfig;
 use sysinfo::{System, SystemExt, ProcessRefreshKind, Pid};
 use log::{error, info};
 
-pub mod gitlab_capnp {
-    include!(concat!(env!("OUT_DIR"), "/src/gitlab_capnp.rs"));
-}
-
 pub mod types;
 
 ///TODO: Rewrite these constants to serve as actor names for the observers and consumers
@@ -206,9 +202,6 @@ pub async fn publish_message(payload: &[u8], channel: &Channel, exchange: &str, 
     assert_eq!(confirmation, Confirmation::NotRequested);
 }
 
-
-
-
 pub fn read_from_env(var_name: String) -> String {
     match env::var(var_name.clone()) {
         Ok(val) => val,
@@ -218,3 +211,4 @@ pub fn read_from_env(var_name: String) -> String {
         }
     }
 }
+

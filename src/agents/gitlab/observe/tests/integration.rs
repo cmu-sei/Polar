@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::{error::Error, time::Duration};
 use std::{env};
 use broker::{Broker, BrokerArgs};
-use client::TcpClientMessage;
+use client::{TcpClientActor, TcpClientArgs, TcpClientMessage};
 use gitlab_observer::*;
 use ractor::registry::where_is;
 use ractor::rpc::call;
@@ -38,8 +38,23 @@ use tokio::time::timeout;
             .expect("Failed to start Broker");
         
         tokio::time::sleep(Duration::from_secs(1)).await;
+        
+        //start client
+        let _ =  Actor::spawn(
+            Some(BROKER_CLIENT_NAME.to_string()),
+            TcpClientActor,
+            TcpClientArgs {
+                bind_addr: BIND_ADDR.to_string(),
+                registration_id: None,
+                client_cert_file: env::var("TLS_CLIENT_CERT").unwrap(),
+                private_key_file: env::var("TLS_CLIENT_KEY").unwrap(),
+                ca_cert_file: env::var("TLS_CA_CERT").unwrap(),
+            }).await.expect("Expected client to start");
+
+        
         BROKER_READY.notify_waiters();
 
+        
         assert_ne!(where_is(BROKER_NAME.to_string()), None);
 
         //wait to end 
@@ -48,49 +63,41 @@ use tokio::time::timeout;
 
 
     #[tokio::test]
-    pub async fn test_observer_init() {
+    pub async fn test_user_observer() {
 
         timeout(Duration::from_secs(15), BROKER_READY.notified())
         .await
         .expect(TIMEOUT_ERR_MSG);
         
         ACTIVE_TESTS.fetch_add(1, Ordering::SeqCst);
-
-        let client_cert_file = env::var("TLS_CLIENT_CERT").unwrap();
-        let client_private_key_file = env::var("TLS_CLIENT_KEY").unwrap();
-        let ca_cert_file =  env::var("TLS_CA_CERT").unwrap();   
         
         let gitlab_endpoint = env::var("GITLAB_ENDPOINT").unwrap();
         let broker_addr = env::var("BROKER_ADDR").unwrap();
         let gitlab_token = env::var("GITLAB_TOKEN").unwrap();
-    
-        let args = supervisor::ObserverSupervisorArgs {
-            broker_addr,
-            client_cert_file,
-            client_private_key_file,
-            ca_cert_file: ca_cert_file,
-            gitlab_endpoint,
-            gitlab_token: Some(gitlab_token)
-        };
-
-        //start supervisor and it's children
-        let (supervisor, handle) = Actor::spawn(Some("GITLAB_OBSERVER_SUPERVISOR".to_string()), supervisor::ObserverSupervisor,args).await.expect("Expected to start observer agent");
         
-        // tokio::time::sleep(Duration::from_secs(10)).await;
-
-        //asset children started
-        // assert_ne!(where_is(GITLAB_USERS_OBSERVER.to_string()), None);
-        
-        
-
         let client = where_is(BROKER_CLIENT_NAME.to_string()).expect("Expected client to be present");
 
-        tokio::time::sleep(Duration::from_secs(5)).await;
+        tokio::time::sleep(Duration::from_secs(3)).await;
+
         //confirm registration  
         let session_id = call(&client, |reply|{TcpClientMessage::GetRegistrationId(reply)}, Some(Duration::from_secs(10)))
-        .await.unwrap().unwrap();
+        .await.unwrap().unwrap().unwrap();
+
+        let args = GitlabObserverArgs {
+            registration_id: session_id,
+            gitlab_endpoint,
+            token: Some(gitlab_token),
+        };
+
+        //start users observer
+        let (observer, handle) = Actor::spawn(Some(GITLAB_USERS_OBSERVER.to_string()), users::GitlabUserObserver, args).await.expect("Expected to start observer agent");
         
-        assert_ne!(session_id, None);
+        //wait for interval to pass
+        
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        observer.stop(None);
+        
+
         // Signal completion
         if ACTIVE_TESTS.fetch_sub(1, Ordering::SeqCst) == 1 { TEST_NOTIFY.notify_one(); }
 

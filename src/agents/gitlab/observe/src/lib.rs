@@ -30,6 +30,17 @@ pub mod groups;
 use cassini::client::TcpClientMessage;
 use cassini::ClientMessage;
 use common::types::GitlabData;
+
+use cynic::Operation;
+use cynic::QueryFragment;
+use cynic::QueryVariables;
+use ractor::rpc::call;
+use ractor::rpc::CallResult;
+use ractor::RpcReplyPort;
+use tokio::task::JoinError;
+use tokio::task::JoinHandle;
+use tokio::time;
+use tokio::time::Interval;
 use tracing::{debug, error};
 use ractor::ActorRef;
 use reqwest::Client;
@@ -61,6 +72,34 @@ pub struct GitlabObserverArgs {
     pub registration_id: String, 
 }
 
+/// Messages that observers send themselves to prompt the retrieval of resources
+
+pub enum GitlabObserverMessage {
+    GetUsers(RpcReplyPort<Result<(), String>>, Operation<UserCore, UserCoreQueryArguments>),
+    // GetProjects(RpcReplyPort<Result<(), String>>),
+    // GetGroups(RpcReplyPort<Result<(), String>>),
+}
+
+use std::time::Duration;
+
+
+// let config = Config {
+//     observers: vec![
+//         ObserverConfig {
+//             resource: "users".to_string(),
+//             interval: Duration::from_secs(60),
+//             connected_resources: vec!["groups".to_string()],
+//         },
+//         ObserverConfig {
+//             resource: "projects".to_string(),
+//             interval: Duration::from_secs(120),
+//             connected_resources: vec!["users".to_string(), "runners".to_string()],
+//         },
+//     ],
+// };
+
+
+
 
 pub async fn get_all_runners(client: &Client, token: String, endpoint_prefix: String) -> Result<Response, Error> {
     let endpoint = format!("{}{}", endpoint_prefix, "/runners/all");
@@ -78,6 +117,7 @@ pub async fn get_runner_jobs(client: &Client, runner_id: u32, endpoint_prefix: S
     let response = client.get(endpoint).header(PRIVATE_TOKEN_HEADER_STR, token).send().await?;
     Ok(response)
 }
+
 /**
  * Makes a request for to a given endpoint using provided credentials to retrieve elements from a single page.
  */
@@ -92,8 +132,6 @@ async fn get_elements(client: &Client, token: String, endpoint: String) -> Resul
             Err(e)
         }
     }
-
-    
 }
 /**
  * Makes one or a series of requests to a given endpoint using provided credentials to retrieve as many items as possible.
@@ -187,4 +225,44 @@ pub fn send(data: GitlabData, client: ActorRef<TcpClientMessage>, registration_i
         Err(e) => Err(Box::new(e))
     } 
 
+}
+
+///TODO: Helper function to spawn a task that calls an actor in a loop over some given interval of time.
+/// Ideally, we'd be able to call and wait for a reply on an iterval, this is made difficult because RpcReplyPorts can't be moved.
+/// The motiviation here is to avoid usele
+// pub async fn call_every(observer: ActorRef<GitlabObserverMessage>, resource_type: GitlabResourceType, duration: Duration, timeout: Option<Duration>) -> Result<JoinHandle<()>, JoinError> {
+//     let mut interval = tokio::time::interval(duration);
+//      let handle = tokio::task::spawn(async move {
+//         loop {
+//             match call(&observer.get_cell(), |reply: RpcReplyPort<Result<(), String>>| { 
+                
+//                 match resource_type {                    
+//                     _ => todo!()
+//                 }
+
+//              }, timeout)
+//             .await.expect("expected to call actor: {observer:?}") {
+//                 CallResult::Success(result) => {
+//                  if let Err(e) = result {
+//                     let err_msg = format!("Failed to send message to observer: {observer:?} {e}");
+//                     error!("{err_msg}");
+//                     observer.stop(Some(err_msg));
+//                  }
+//                 }
+//                _ => todo!()
+//             }
+            
+//             interval.tick();
+//         }
+//     });
+
+//     Ok(handle)
+
+// }
+
+// fn build_user_query(para)
+
+/// TODO: Helper function that retrieves a given resource type once
+pub fn get_once(observer: ActorRef<GitlabObserverMessage> ,message: GitlabObserverMessage) {
+    todo!()
 }

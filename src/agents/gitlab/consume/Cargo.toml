@@ -43,7 +43,7 @@ env_logger = "0.11.5"
 workspace-hack = { version = "0.1", path = "../../workspace-hack" }
 cassini = { path = "../../broker" }
 ractor = { version="0.14.1", features = ["async-trait"]}
-
+polar = { path = "../../lib" }
 
 [[bin]]
 name = "gitlab_consumer"

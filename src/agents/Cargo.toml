@@ -33,7 +33,7 @@ members = [
     "gitlab/consume",
     "gitlab/observe", 
     # "serialize", 
-    "workspace-hack",
+    "workspace-hack", "gitlab/schema", "gitlab/query",
     ]
 
 [workspace.package]

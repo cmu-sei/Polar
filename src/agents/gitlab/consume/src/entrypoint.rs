@@ -21,18 +21,31 @@ This Software includes and/or makes use of Third-Party Software each subject to 
 DM24-0470
 */
 
-use std::error::Error;
-use std::process::Command;
+use std::{env, error::Error};
 use ractor::Actor;
+use gitlab_consumer::supervisor;
+use polar::init_logging;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error> > {
-    //try spawning consumers
-    // Command::new("./projects_consumer").spawn().expect("Could not execute gitlab project consumer binary.");
-    // Command::new("./users_consumer").spawn().expect("Could not execute gitlab user consumer binary.");
-    // Command::new("./groups_consumer").spawn().expect("Could not execute gitlab group consumer binary.");
-    // Command::new("./runners_consumer").spawn().expect("Could not execute gitlab runners consumer binary.");
+    init_logging();
+
     //TODO: Start consumer supervisor
+
+    let client_cert_file = env::var("TLS_CLIENT_CERT").unwrap();
+    let client_private_key_file = env::var("TLS_CLIENT_KEY").unwrap();
+    let ca_cert_file =  env::var("TLS_CA_CERT").unwrap();   
+    let broker_addr = env::var("BROKER_ADDR").unwrap();
+
+    let args = supervisor::ConsumerSupervisorArgs {
+        broker_addr,
+        client_cert_file,
+        client_private_key_file,
+        ca_cert_file: ca_cert_file,
+    };
+
+    let (supervisor, handle) = Actor::spawn(Some("GITLAB_OBSERVER_SUPERVISOR".to_string()), supervisor::ConsumerSupervisor ,args).await.expect("Expected to start observer agent");
+    let _ = handle.await;
 
     Ok(())
 }

@@ -33,11 +33,11 @@ use ractor::{registry::where_is, ActorProcessingErr, MessagingErr};
 use url::Url;
 
 
-mod supervisor;
-mod users;
-mod projects;
-mod groups;
-mod runners;
+pub mod supervisor;
+pub mod users;
+pub mod projects;
+pub mod groups;
+pub mod runners;
 
 pub const BROKER_CLIENT_NAME: &str = "GITLAB_CONSUMER_CLIENT";
 

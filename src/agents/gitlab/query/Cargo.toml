@@ -1,0 +1,11 @@
+[package]
+name = "gitlab-queries"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+cynic = "3.9.1"
+gitlab-schema = { path = "../schema" }
+
+[build-dependencies]
+cynic-codegen = "3.9.1"

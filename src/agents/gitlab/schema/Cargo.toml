@@ -1,0 +1,10 @@
+[package]
+name = "gitlab-schema"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+cynic = "3.9.1"
+
+[build-dependencies]
+cynic-codegen = "3.9.1"
