@@ -42,6 +42,10 @@
 
             #overlayNetSSLeay    # The FIPS OpenSSL is used by a package that
                                 # uses this perl package, which doesn't build right...
+
+            (final: prev: {
+              stdenv = prev.llvmPackages.latest.stdenv;
+            })
           ];
         };
 
@@ -154,32 +158,31 @@
 
             # -- Compilers, Etc. --
             cmake
-            gcc
-            glibc
             gnumake
+            clang
+            clang.dev
+            glibc
+            lld
+            clang-tools
             grc
             libclang
 
             # -- Rust --
-            #(lib.meta.hiPrio rust-bin.nightly.latest.default)
+            (lib.meta.hiPrio rust-bin.nightly.latest.default)
 
             # We need to support various WASM targets, possibly ARM64 targets.
             # This allows us to select those. Also, by default, we should
             # include the sources for Rust, so that the debugger works properly
             # and can jump to definition.
-            (rust-bin.selectLatestNightlyWith (toolchain: toolchain.default.override {
-              extensions = [ "rust-src" ];
-              targets = [ "wasm32-unknown-unknown" "wasm32-wasip1" ];
-            }))
+            #(rust-bin.selectLatestNightlyWith (toolchain: toolchain.default.override {
+              #extensions = [ "rust-src" ];
+              #targets = [ "wasm32-unknown-unknown" "wasm32-wasip1" ];
+            #}))
             cargo-leptos
             cargo-wasi
             pkg-config
             trunk
             util-linux
-
-            # Testing
-            erlang
-            rabbitmq-server
 
             # -- Static Analysis Tools --
             staticanalysis.packages.${system}.default
@@ -241,8 +244,9 @@
               "FISH_GRC=${pkgs.fishPlugins.grc}"
 
               # Set GCC as default compiler -- will make this clang, eventually
-              "CC=gcc"
-              "CXX=g++"
+              "CC=clang"
+              "CXX=clang++"
+              "LD=ld.lld"
               "CMAKE=/bin/cmake"
               "CMAKE_MAKE_PROGRAM=/bin/make"
               "COREUTILS=${pkgs.uutils-coreutils-noprefix}"
