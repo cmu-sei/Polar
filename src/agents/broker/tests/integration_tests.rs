@@ -282,7 +282,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_dlq_on_reconnect() {
-        let topic = String::from("Apples");
+        let topic = String::from("Oranges");
         // Wait for the server to be ready
         timeout(Duration::from_secs(15), SERVER_READY.notified())
         .await
@@ -348,7 +348,7 @@ mod tests {
 
         //send a few messages
         for i in 1..10 {
-            publisher_client.send_message( TcpClientMessage::Send(ClientMessage::PublishRequest { topic: topic.clone(), payload: "Hello apple".to_string(), registration_id: publisher_session_id.clone()})).unwrap();
+            publisher_client.send_message( TcpClientMessage::Send(ClientMessage::PublishRequest { topic: topic.clone(), payload: "Hello orange".to_string(), registration_id: publisher_session_id.clone()})).unwrap();
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
         //kill publisher

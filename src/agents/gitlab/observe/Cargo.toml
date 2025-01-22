@@ -45,7 +45,7 @@ workspace-hack = { version = "0.1", path = "../../workspace-hack" }
 cassini = { path = "../../broker" }
 polar = {path = "../../lib"}
 ractor = { version="0.14.1", features = ["async-trait"]}
-cynic = "3.9.1"
+cynic = { version = "3.9.1" }
 gitlab-queries = { path = "../query" }
 
 [build-dependencies]

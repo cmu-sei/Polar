@@ -34,6 +34,10 @@ use common::types::GitlabData;
 use cynic::Operation;
 use cynic::QueryFragment;
 use cynic::QueryVariables;
+use gitlab_queries::MultiUserQuery;
+use gitlab_queries::MultiUserQueryArguments;
+use gitlab_queries::MultiUserQueryArgumentsFields;
+use gitlab_queries::UserCoreConnection;
 use ractor::rpc::call;
 use ractor::rpc::CallResult;
 use ractor::RpcReplyPort;
@@ -75,7 +79,7 @@ pub struct GitlabObserverArgs {
 /// Messages that observers send themselves to prompt the retrieval of resources
 
 pub enum GitlabObserverMessage {
-    GetUsers(RpcReplyPort<Result<(), String>>, Operation<UserCore, UserCoreQueryArguments>),
+    GetUsers(RpcReplyPort<Result<(), String>>, Operation<MultiUserQuery, MultiUserQueryArguments>),
     // GetProjects(RpcReplyPort<Result<(), String>>),
     // GetGroups(RpcReplyPort<Result<(), String>>),
 }
@@ -231,30 +235,7 @@ pub fn send(data: GitlabData, client: ActorRef<TcpClientMessage>, registration_i
 /// Ideally, we'd be able to call and wait for a reply on an iterval, this is made difficult because RpcReplyPorts can't be moved.
 /// The motiviation here is to avoid usele
 // pub async fn call_every(observer: ActorRef<GitlabObserverMessage>, resource_type: GitlabResourceType, duration: Duration, timeout: Option<Duration>) -> Result<JoinHandle<()>, JoinError> {
-//     let mut interval = tokio::time::interval(duration);
-//      let handle = tokio::task::spawn(async move {
-//         loop {
-//             match call(&observer.get_cell(), |reply: RpcReplyPort<Result<(), String>>| { 
-                
-//                 match resource_type {                    
-//                     _ => todo!()
-//                 }
-
-//              }, timeout)
-//             .await.expect("expected to call actor: {observer:?}") {
-//                 CallResult::Success(result) => {
-//                  if let Err(e) = result {
-//                     let err_msg = format!("Failed to send message to observer: {observer:?} {e}");
-//                     error!("{err_msg}");
-//                     observer.stop(Some(err_msg));
-//                  }
-//                 }
-//                _ => todo!()
-//             }
-            
-//             interval.tick();
-//         }
-//     });
+//    
 
 //     Ok(handle)
 

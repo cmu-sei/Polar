@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 cynic = "3.9.1"
+serde = {version = "1", features = ["derive"]}
 
 [build-dependencies]
 cynic-codegen = "3.9.1"

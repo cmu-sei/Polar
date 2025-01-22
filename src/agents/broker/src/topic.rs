@@ -200,9 +200,7 @@ impl Actor for TopicAgent {
         args: TopicAgentArgs
     ) -> Result<Self::State, ActorProcessingErr> {
         let subscribers = args.subscribers.unwrap_or_default();
-
         let state: TopicAgentState  = TopicAgentState {subscribers};
-        
         Ok(state)
     }
 
@@ -228,7 +226,7 @@ impl Actor for TopicAgent {
             BrokerMessage::PublishRequest{registration_id,topic,payload} => {
                 match registration_id {
                     Some(registration_id) => {
-                        debug!("{myself:?}: New message from {0}: {1}", registration_id, payload);
+                        // debug!("{myself:?}: New message from {0}: {1}", registration_id, payload);
                         
                         //alert subscribers
                         //TODO: bring back the vecdeque, What if there are no subscribers????

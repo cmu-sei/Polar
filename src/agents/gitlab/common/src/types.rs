@@ -21,13 +21,15 @@
    DM24-0470
 */
 
+use gitlab_queries::UserCore;
 use serde::Serialize;
 use serde::Deserialize;
 use serde_json::Value;
+use gitlab_queries::UserCoreConnection;
 
-#[derive (Serialize, Deserialize, Clone, PartialEq, Debug)]
+#[derive (Serialize, Deserialize, Debug)]
 pub enum GitlabData {
-    Users(Vec<User>),
+    Users(Vec<UserCore>),
     Projects(Vec<Project>),
     Groups(Vec<UserGroup>),
     ProjectUsers(ResourceLink<User>),

@@ -645,6 +645,7 @@ dependencies = [
  "cynic-codegen",
  "env_logger",
  "futures-lite 1.13.0",
+ "gitlab-queries",
  "lapin",
  "log",
  "ractor",
@@ -1263,6 +1264,7 @@ dependencies = [
  "cynic",
  "cynic-codegen",
  "gitlab-schema",
+ "serde",
 ]
 
 [[package]]
@@ -1271,6 +1273,7 @@ version = "0.1.0"
 dependencies = [
  "cynic",
  "cynic-codegen",
+ "serde",
 ]
 
 [[package]]

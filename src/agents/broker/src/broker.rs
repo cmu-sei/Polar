@@ -414,7 +414,7 @@ impl Actor for Broker {
                             if let Some(manager) = where_is(TOPIC_MANAGER_NAME.to_string()) {
                                 //tell topicmgr to add one, await it to complete, 
                                 match call(&manager, |reply| {
-                                    BrokerMessage::AddTopic { reply, registration_id: Some(registration_id.clone()), topic: topic.clone() }
+                                    BrokerMessage::AddTopic { reply, registration_id: None, topic: topic.clone() }
                                     },
                                 None).await
                                 .expect("{PUBLISH_REQ_FAILED_TXT}: {TOPIC_MGR_NOT_FOUND_TXT}") {
