@@ -7,6 +7,7 @@ edition.workspace = true
 cynic = "3.9.1"
 gitlab-schema = { path = "../schema" }
 serde = {version = "1", features = ["derive"]}
+chrono = { version = "0.4.39", features = ["serde"]} # enable serialization
 
 [build-dependencies]
 cynic-codegen = "3.9.1"

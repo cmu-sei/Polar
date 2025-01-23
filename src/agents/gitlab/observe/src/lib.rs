@@ -84,27 +84,6 @@ pub enum GitlabObserverMessage {
     // GetGroups(RpcReplyPort<Result<(), String>>),
 }
 
-use std::time::Duration;
-
-
-// let config = Config {
-//     observers: vec![
-//         ObserverConfig {
-//             resource: "users".to_string(),
-//             interval: Duration::from_secs(60),
-//             connected_resources: vec!["groups".to_string()],
-//         },
-//         ObserverConfig {
-//             resource: "projects".to_string(),
-//             interval: Duration::from_secs(120),
-//             connected_resources: vec!["users".to_string(), "runners".to_string()],
-//         },
-//     ],
-// };
-
-
-
-
 pub async fn get_all_runners(client: &Client, token: String, endpoint_prefix: String) -> Result<Response, Error> {
     let endpoint = format!("{}{}", endpoint_prefix, "/runners/all");
     let response = client

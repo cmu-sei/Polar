@@ -84,7 +84,7 @@ impl Actor for GitlabUserObserver {
                 match call(&&myself.get_cell(), |reply: RpcReplyPort<Result<(), String>>|  { 
                     //TODO: get query arguments from config params
                     //build query
-                    let op = MultiUserQuery::build(MultiUserQueryArguments{ admins: Some(true), active: None, ids: None, usernames: None, humans: Some(true) });
+                    let op = MultiUserQuery::build(MultiUserQueryArguments{ after: None, admins: Some(true), active: None, ids: None, usernames: None, humans: Some(true) });
         
                     // pass query in message
                     GitlabObserverMessage::GetUsers(reply, op) 

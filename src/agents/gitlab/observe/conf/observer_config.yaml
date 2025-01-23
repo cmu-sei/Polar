@@ -23,37 +23,36 @@
 # DM24-0470
 
 global_settings:                   # Optional global configurations
-  gitlab_endpoint: "https://gitlab.example.com/api/v4"
-  token: "your_gitlab_access_token"
-  retry_attempts: 3                # Number of retries if an API call fails
-  retry_delay: 5                   # Delay between retries (in seconds)
+                # Delay between retries (in seconds)
 
+service:
+  gitlab:
+    graphql_endpoint: "https://gitlab.example.com/api/v4"    
+    observers:
+      - resource: "users"              # The main resource to observe
+        connected_resources:           # Resources linked to this resource
+          - "groups"                   # Retrieve groups associated with users
+        enabled: true                  # Whether this observer is active
+        # Parameters taken by gitlab's users graphql API
+        # REFERENCE: https://docs.gitlab.com/ee/api/graphql/reference/index.html#queryusers
+        parameters:
+            active: true 	# boolean Filter by active users. When true, returns active users. When false, returns non-active users.
+            admins: true    # Boolean Return only admin users.
+            groupId: null 	#  GroupID Return users member of a given group.
+            humans: false   #  Boolean Filter by regular users. When true, returns only users that are not bot or internal users. When false, returns only users that are bot or internal users.
+            ids: []         # [ID!] List of user Global IDs.
+            usernames: []  	# [String!] List of usernames.
+            # TODO: Enable?
+            # search: 
 
-observers:
-  - resource: "users"              # The main resource to observe
-    connected_resources:           # Resources linked to this resource
-      - "groups"                   # Retrieve groups associated with users
-    enabled: true                  # Whether this observer is active
-    # Parameters taken by gitlab's users graphql API
-    # REFERENCE: https://docs.gitlab.com/ee/api/graphql/reference/index.html#queryusers
-    parameters:
-        active: true 	# boolean Filter by active users. When true, returns active users. When false, returns non-active users.
-        admins: true    # Boolean Return only admin users.
-        groupId: null 	#  GroupID Return users member of a given group.
-        humans: false   #  Boolean Filter by regular users. When true, returns only users that are not bot or internal users. When false, returns only users that are bot or internal users.
-        ids: []         # [ID!] List of user Global IDs.
-        usernames: []  	# [String!] List of usernames.
-        # TODO: Enable?
-        # search: 
+    #   - resource: "projects"
+    #     interval: 120
+    #     connected_resources:
+    #       - "users"                    # Retrieve users associated with projects
+    #       - "runners"                  # Retrieve runners associated with projects
+    #     enabled: true
 
-#   - resource: "projects"
-#     interval: 120
-#     connected_resources:
-#       - "users"                    # Retrieve users associated with projects
-#       - "runners"                  # Retrieve runners associated with projects
-#     enabled: true
-
-#   - resource: "runners"
-#     interval: 300                  # Fetch every 5 minutes
-#     connected_resources: []        # No connected resources for runners
-#     enabled: false                 # This observer is disabled
+    #   - resource: "runners"
+    #     interval: 300                  # Fetch every 5 minutes
+    #     connected_resources: []        # No connected resources for runners
+    #     enabled: false                 # This observer is disabled

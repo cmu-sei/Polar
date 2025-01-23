@@ -82,7 +82,7 @@ impl Actor for GitlabUserConsumer {
                             Ok(transaction)  => {
                                 for user in users {
                                     //create new nodes
-                                    let query = format!("MERGE (n:GitlabUser {{username: \"{}\", user_id: \"{}\" , created_at: \"{}\" , state: \"{}\"}}) return n", user.username, user.id, user.created_at.unwrap_or("".to_string()), user.state);            
+                                    let query = format!("MERGE (n:GitlabUser {{username: \"{}\", user_id: \"{}\" , created_at: \"{}\" , state: \"{}\"}}) return n", user.username.unwrap_or_default(), user.id.inner(), user.created_at.unwrap_or_default(), user.state);            
                                     run_query(&transaction, query).await;
                                 }
 

@@ -75,13 +75,18 @@
           cargoExtraArgs = "--locked"; 
         });
 
+        # get certificates for mtls
+        tlsCerts = pkgs.callPackage ../../../scripts/gen-certs.nix { inherit pkgs; };
+
+
+
         #set up service environments
         cassiniEnv = pkgs.buildEnv {
           name = "image-root";
           paths =  [ 
             pkgs.bashInteractiveFHS 
             pkgs.busybox 
-            cassini
+            cassini 
           ];
 
           pathsToLink = [ 
@@ -98,11 +103,20 @@
           brokerImage = pkgs.dockerTools.buildImage {
             name = "cassini";
             tag = "latest";
-            copyToRoot = [ cassiniEnv ]; 
+            copyToRoot = [
+              cassiniEnv
+              "${tlsCerts}/ca_certificates"
+              "${tlsCerts}/server"     
+            ]; 
             config = {
-              Cmd = [ "/app/observer-entrypoint" ];
+              Cmd = [ "/broker/cassini" ];
               WorkingDir = "/app";
-              Env = [ ];
+              Env = [ 
+                "BIND_ADDR=0.0.0.0:8080"
+                "TLS_CA_CERT=/ca_certificate.pem"
+                "TLS_SERVER_CERT_CHAIN=/server_polar_certificate_chain.pem"
+                "TLS_SERVER_KEY=broker/server_polar_key.pem"
+              ];
             };
           };
         };

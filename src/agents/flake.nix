@@ -53,7 +53,9 @@
           # REFERENCE: https://github.com/MaxfieldKassel/nix-flake-openssl-fips
           nativeBuildInputs = [
             pkgs.openssl
-            pkgs.pkg-config            
+            pkgs.pkg-config
+            pkgs.cmake
+            pkgs.libgcc            
           ];
 
           PKG_CONFIG_PATH="${pkgs.openssl.dev}/lib/pkgconfig";
@@ -76,9 +78,10 @@
           fileset = lib.fileset.unions [
             ./Cargo.toml
             ./Cargo.lock
-            (craneLib.fileset.commonCargoSources ./consume)
-            (craneLib.fileset.commonCargoSources ./observe)
-            (craneLib.fileset.commonCargoSources ./common)
+            (craneLib.fileset.commonCargoSources ./broker)
+            (craneLib.fileset.commonCargoSources ./gitlab/consume)
+            (craneLib.fileset.commonCargoSources ./gitlab/observe)
+            (craneLib.fileset.commonCargoSources ./gitlab/common)
             (craneLib.fileset.commonCargoSources ./workspace-hack)
             (craneLib.fileset.commonCargoSources crate)
           ];
@@ -87,8 +90,8 @@
         # build workspace derivation to be given as a default package
         agentPkgs = craneLib.buildPackage (individualCrateArgs // {
           pname = "gitlabAgent";
-          cargoExtraArgs = "-p gitlab_agent -p gitlab_consumer";
-          src = fileSetForCrate ./observe;
+          cargoExtraArgs = "--workspace --locked";
+          src = fileSetForCrate ./.;
         });
 
 
@@ -105,18 +108,24 @@
         gitlabObserver = craneLib.buildPackage (individualCrateArgs // {
           pname = "gitlab_agent";
           cargoExtraArgs = "-p gitlab_agent"; #build the binaries and all its dependencies, including common
-          src = fileSetForCrate ./observe;
+          src = fileSetForCrate ./gitlab/observe;
         });
         gitlabConsumer = craneLib.buildPackage (individualCrateArgs // {
           pname = "gitlab_consumer";
           cargoExtraArgs = "-p gitlab_consumer"; 
-          src = fileSetForCrate ./consume;
+          src = fileSetForCrate ./gitlab/consume;
+        });
+
+        cassini = craneLib.buildPackage (commonArgs // {
+          inherit cargoArtifacts;
+          cargoExtraArgs = "--locked"; 
+          src = ./broker;
         });
 
         # get certificates for mtls
-        tlsCerts = pkgs.callPackage ./scripts/gen-certs.nix { inherit pkgs; };
+        tlsCerts = pkgs.callPackage ../scripts/gen-certs.nix { inherit pkgs; };
 
-        # Read environment vars
+        ### set up environments
         
         #set up service environments
         observerEnv = pkgs.buildEnv {
@@ -142,6 +151,20 @@
         consumerEnv = pkgs.buildEnv {
           name = "image-root";
           paths = [ pkgs.bashInteractiveFHS pkgs.busybox gitlabConsumer ];
+          pathsToLink = [ 
+            "/bin"
+            "/etc/ssl/certs"
+          ];
+        };
+
+        cassiniEnv = pkgs.buildEnv {
+          name = "image-root";
+          paths =  [ 
+            pkgs.bashInteractiveFHS 
+            pkgs.busybox 
+            cassini 
+          ];
+
           pathsToLink = [ 
             "/bin"
             "/etc/ssl/certs"
@@ -219,7 +242,7 @@
         };
 
         packages = {
-          inherit gitlabObserver gitlabConsumer agentPkgs tlsCerts;
+          inherit gitlabObserver gitlabConsumer cassini agentPkgs tlsCerts;
           default = agentPkgs;
           observerImage = pkgs.dockerTools.buildImage {
             name = "polar-gitlab-observer";
@@ -252,7 +275,7 @@
                 "TLS_CA_CERT=/ca_certificate.pem"
                ];
             };
-         };
+          };
           consumerImage = pkgs.dockerTools.buildImage {
               name = "polar-gitlab-consumer";
               tag = "latest";
@@ -276,6 +299,26 @@
                  ];
               };
             };
+          
+          brokerImage = pkgs.dockerTools.buildImage {
+            name = "cassini";
+            tag = "latest";
+            copyToRoot = [
+              cassiniEnv
+              "${tlsCerts}/ca_certificates"
+              "${tlsCerts}/server"     
+            ]; 
+            config = {
+              Cmd = [ "/broker/cassini" ];
+              WorkingDir = "/app";
+              Env = [ 
+                "BIND_ADDR=0.0.0.0:8080"
+                "TLS_CA_CERT=/ca_certificate.pem"
+                "TLS_SERVER_CERT_CHAIN=/server_polar_certificate_chain.pem"
+                "TLS_SERVER_KEY=broker/server_polar_key.pem"
+              ];
+            };
+          };
           };
       });
 }

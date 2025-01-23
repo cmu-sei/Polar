@@ -1,7 +1,8 @@
-use coercions::CoercesTo;
+use std::fmt;
+
+use chrono::{DateTime, Utc};
 use gitlab_schema::gitlab::{self as schema};
 use cynic::*;
-use serde::Serialize;
 
 // #[derive(cynic::Scalar, serde::Serialize,serde::Deserialize, Clone, Debug)]
 // #[cynic(schema = "gitlab", graphql_type = "UserID")]
@@ -22,8 +23,24 @@ pub enum UserState {
     ldap_blocked
 }
 
-#[derive(cynic::QueryVariables, serde::Deserialize, Debug)]
+impl fmt::Display for UserState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let state_str = match self {
+            UserState::active => "active",
+            UserState::banned => "banned",
+            UserState::blocked => "blocked",
+            UserState::blocked_pending_approval => "blocked_pending_approval",
+            UserState::deactivated => "deactivated",
+            UserState::ldap_blocked => "ldap_blocked",
+        };
+        write!(f, "{}", state_str)
+    }
+}
+
+
+#[derive(cynic::QueryVariables, serde::Deserialize, Debug, Clone)]
 pub struct MultiUserQueryArguments {
+    pub after: Option<String>,
     pub admins: Option<bool>,
     pub active: Option<bool>,
     pub ids: Option<Vec<Id>>,
@@ -61,15 +78,15 @@ pub struct PageInfo {
 #[derive(cynic::QueryFragment, serde::Serialize, Debug)]
 #[cynic(schema = "gitlab")]
 pub struct UserCore {
-    id: Id,
-    bot: bool,
-    username: Option<String>,
-    name: String,
+    pub id: Id,
+    pub bot: bool,
+    pub username: Option<String>,
+    pub name: String,
     // status: Option<schema::UserStatus>,
-    state: UserState,
+    pub state: UserState,
     // last_activity_on: Option<schema::Date>,
-    location: Option<String>,
-    // created_at: Option<schema::Time>
+    pub location: Option<String>,
+    pub created_at: Option<DateTime<Utc>>
 }
 
 #[derive(cynic::QueryFragment, serde::Serialize, Debug)]

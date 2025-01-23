@@ -1,6 +1,9 @@
 use cynic::{impl_scalar, Id};
+use chrono::{DateTime, Utc};
+
 
 #[cynic::schema("gitlab")]
 pub mod gitlab {}
 
-// impl_scalar!(Id, gitlab::UserID);
+// represent timestamps
+impl_scalar!(DateTime<Utc>, gitlab::Time);
