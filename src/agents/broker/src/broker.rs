@@ -237,7 +237,7 @@ impl Actor for Broker {
                                             Success(add_subscribeer) => {
                                                 match add_subscribeer {
                                                     Ok(_) => {
-                                                        //  create one, then notify topic actor, subscribe it on behalf
+                                                        //  create one, then notify topic actor, subscribe to it on behalf of the session
                                                         match call(&actor,|reply| { 
                                                             BrokerMessage::Subscribe { reply, registration_id: registration_id.clone(), topic: topic.clone() } }, None)
                                                             .await.expect("Expected to call topic actor") {

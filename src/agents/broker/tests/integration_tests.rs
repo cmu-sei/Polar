@@ -426,6 +426,77 @@ mod tests {
     }
 
 
+    #[tokio::test]
+    async fn test_client_gets_queued_messages() {
+        // Wait for the server to be ready
+        timeout(Duration::from_secs(15), SERVER_READY.notified())
+        .await
+        .expect(TIMEOUT_ERR_MSG);
+
+        let supervisor = where_is(TEST_SUPERVISOR.to_string()).unwrap();
+    
+    
+        let (client, _) = Actor::spawn_linked(Some("queued_message_test_client".to_owned()),
+        TcpClientActor,
+        TcpClientArgs {
+            bind_addr: BIND_ADDR.to_string(),
+            registration_id: None,
+            client_cert_file: env::var("TLS_CLIENT_CERT").unwrap(),
+            private_key_file: env::var("TLS_CLIENT_KEY").unwrap(),
+            ca_cert_file: env::var("TLS_CA_CERT").unwrap(),
+
+        }, supervisor.clone().into()).await.expect("Failed to start client actor");    
+
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        
+        let session_id = client
+        .call(TcpClientMessage::GetRegistrationId, Some(Duration::from_secs(10)))
+        .await.unwrap().unwrap();
+
+        assert_ne!(session_id, None);
+
+        let topic = String::from("Comics");
+
+        //create a client to send messages to that topic
+        let (publisher_client, _ ) =  Actor::spawn_linked(Some(format!("comic_publisher_client")),
+        TcpClientActor,
+        TcpClientArgs {
+            bind_addr: BIND_ADDR.to_string(),
+            registration_id: None,
+            client_cert_file: env::var("TLS_CLIENT_CERT").unwrap(),
+            private_key_file: env::var("TLS_CLIENT_KEY").unwrap(),
+            ca_cert_file: env::var("TLS_CA_CERT").unwrap(),
+        },
+        supervisor.clone().into()).await.expect("Failed to start client actor");
+        
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        //confirm registration
+        let publisher_session_id = publisher_client
+        .call(TcpClientMessage::GetRegistrationId, Some(Duration::from_secs(10)))
+        .await.unwrap().unwrap();
+
+        assert_ne!(publisher_session_id, None);
+
+        //send a few messages
+        for i in 1..10 {
+            publisher_client.send_message( TcpClientMessage::Send(ClientMessage::PublishRequest { topic: topic.clone(), payload: format!("comic {i}"), registration_id: publisher_session_id.clone()})).unwrap();
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+
+        //subscribe client to topic
+        client.send_message(TcpClientMessage::Send(
+            ClientMessage::SubscribeRequest { topic: topic.clone(), registration_id: session_id.clone()}
+        )).expect("Expected to forward msg");
+
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        
+        client.kill_and_wait(None).await.expect("Expected to stop client");
+        
+    }
+
+
+
+
     // #[tokio::test]
     // async fn test_teardown() {
     //     let supervisor = where_is(TEST_SUPERVISOR.to_string()).expect("Expected supervsior to be present");

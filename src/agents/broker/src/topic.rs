@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use ractor::registry::where_is;
 use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef};
 use tracing::{debug, error, info, warn};
@@ -173,6 +173,7 @@ struct TopicAgent;
 
 struct TopicAgentState {
     subscribers: Vec<String>,
+    queue: VecDeque<String>
 }
 
 pub struct TopicAgentArgs {
@@ -199,9 +200,7 @@ impl Actor for TopicAgent {
         _: ActorRef<Self::Msg>,
         args: TopicAgentArgs
     ) -> Result<Self::State, ActorProcessingErr> {
-        let subscribers = args.subscribers.unwrap_or_default();
-        let state: TopicAgentState  = TopicAgentState {subscribers};
-        Ok(state)
+        Ok(TopicAgentState { subscribers: args.subscribers.unwrap_or_default(), queue: VecDeque::new() })   
     }
 
     async fn post_start(
@@ -226,18 +225,20 @@ impl Actor for TopicAgent {
             BrokerMessage::PublishRequest{registration_id,topic,payload} => {
                 match registration_id {
                     Some(registration_id) => {
-                        // debug!("{myself:?}: New message from {0}: {1}", registration_id, payload);
-                        
                         //alert subscribers
-                        //TODO: bring back the vecdeque, What if there are no subscribers????
-                        for subscriber in &state.subscribers {
-                            if let Some(actor) = where_is(subscriber.to_string()) {
-                                if let Err(e) = actor.send_message(BrokerMessage::PublishResponse {
-                                    topic: topic.clone(),
-                                    payload: payload.clone(),
-                                    result: Ok(())
-                                }) { warn!("{PUBLISH_REQ_FAILED_TXT}: {e}") }
-                            } else { warn!("{PUBLISH_REQ_FAILED_TXT}: failed to lookup subscriber for {registration_id}") }
+                        if !state.subscribers.is_empty(){
+                            for subscriber in &state.subscribers {
+                                if let Some(actor) = where_is(subscriber.to_string()) {
+                                    if let Err(e) = actor.send_message(BrokerMessage::PublishResponse {
+                                        topic: topic.clone(),
+                                        payload: payload.clone(),
+                                        result: Ok(())
+                                    }) { warn!("{PUBLISH_REQ_FAILED_TXT}: {e}") }
+                                } else { warn!("{PUBLISH_REQ_FAILED_TXT}: failed to lookup subscriber for {registration_id}") }
+                            }
+                        } else {
+                            //queue message
+                            state.queue.push_back(payload);
                         }
 
                         //send ACK to session that made the request
@@ -261,6 +262,14 @@ impl Actor for TopicAgent {
                 let sub_id = get_subscriber_name(&registration_id, &topic);
                 debug!("Adding {sub_id} to subscriber list");
                 state.subscribers.push(sub_id.clone());
+                //send any waiting messages
+                if let Some(subscriber) = where_is(sub_id.clone()) {
+                    while let Some(msg) = &state.queue.pop_front() {
+                        if let Err(e) = subscriber.send_message(BrokerMessage::PublishResponse { topic: topic.clone(), payload: msg.to_string(), result: Ok(()) }) {
+                            warn!("{PUBLISH_REQ_FAILED_TXT}: {e}");
+                        }
+                    }
+                }
                 if let Err(e) = reply.send(Ok(sub_id)) {
                     error!("{e}");
                 }
