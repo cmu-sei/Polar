@@ -32,7 +32,7 @@ pkgs.stdenv.mkDerivation {
     cd basic
     # pass a private key password using the PASSWORD variable if needed
     # TODO: Add a password, managed as a secret?
-    make CN=rabbitmq 
+    make CN=polar 
   '';
 
   #copy out our files

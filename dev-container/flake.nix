@@ -272,13 +272,14 @@
               "TZ=UTC"
               "MANPAGER=sh -c 'col -bx | bat --language man --style plain'"
               "MANPATH=${pkgs.man-db}/share/man:$MANPATH"
+              "LOCALE_ARCHIVE=${pkgs.glibcLocalesUtf8}/lib/locale/locale-archive"
 
               # stdenv.cc is clang-based now, so this is fine:
               "LD_LIBRARY_PATH=${pkgs.stdenv.cc.cc.lib}/lib"
 
               #"LIBCLANG_PATH=${pkgs.libclang.lib}/lib/"
 
-              "RUSTFLAGS=${"$"}RUSTFLAGS -Clinker=clang"
+              "RUSTFLAGS=-Clinker=clang"
 
               "PATH=/bin:/usr/bin:${myEnv}/bin:/root/.cargo/bin"
 
