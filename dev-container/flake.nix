@@ -4,19 +4,23 @@
   inputs = {
     flake-utils.url = "github:numtide/flake-utils"; # Utility functions for Nix flakes
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable"; # Main Nix package repository
-    rust-overlay.url = "github:oxalica/rust-overlay?rev=260ff391290a2b23958d04db0d3e7015c8417401";
+
+    rust-overlay.url = "github:oxalica/rust-overlay";
     rust-overlay.inputs.nixpkgs.follows = "nixpkgs";
-    rust-overlay.inputs.flake-utils.follows = "flake-utils";
+
     myNeovimOverlay.url = "github:daveman1010221/nix-neovim";
     myNeovimOverlay.inputs.nixpkgs.follows = "nixpkgs";
     myNeovimOverlay.inputs.flake-utils.follows = "flake-utils";
+
     nix-vscode-extensions.url = "github:nix-community/nix-vscode-extensions";
     nix-vscode-extensions.inputs.nixpkgs.follows = "nixpkgs";
     nix-vscode-extensions.inputs.flake-utils.follows = "flake-utils";
+
     staticanalysis.url = "github:rmdettmar/polar-static-analysis";
     staticanalysis.inputs.nixpkgs.follows = "nixpkgs";
     staticanalysis.inputs.flake-utils.follows = "flake-utils";
     staticanalysis.inputs.rust-overlay.follows = "rust-overlay";
+
     #openssl-fips.url = "github:daveman1010221/openssl-fips";
   };
 
@@ -103,10 +107,13 @@
             extensions.vscode-marketplace.dustypomerleau.rust-syntax
             extensions.vscode-marketplace.ms-vscode.test-adapter-converter
             extensions.vscode-marketplace.hbenl.vscode-test-explorer # dependency for rust test adapter
+            extensions.vscode-marketplace.connorshea.vscode-test-explorer-status-bar
+            extensions.vscode-marketplace.emilylilylime.vscode-test-explorer-diagnostics
             extensions.vscode-marketplace.swellaby.vscode-rust-test-adapter
             extensions.vscode-marketplace.vscodevim.vim
             extensions.vscode-marketplace.redhat.vscode-yaml
             extensions.vscode-marketplace.ms-azuretools.vscode-docker
+            extensions.vscode-marketplace.jdinhlife.gruvbox
           ];
         };
 
