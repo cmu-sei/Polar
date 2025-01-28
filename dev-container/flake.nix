@@ -27,6 +27,16 @@
 
         pkgs = import nixpkgs {
           inherit system;
+          config = {
+            cc = "clang";
+          };
+          documentation = {
+            dev.enable = true;
+            man = {
+              man-db.enable = true;
+              generateCaches = true;
+            };
+          };
           overlays = [ 
             rust-overlay.overlays.default
             myNeovimOverlay.overlays.default
@@ -43,9 +53,7 @@
             #overlayNetSSLeay    # The FIPS OpenSSL is used by a package that
                                 # uses this perl package, which doesn't build right...
 
-            (final: prev: {
-              stdenv = prev.llvmPackages.latest.stdenv;
-            })
+            # 2) Directly use the prebuilt Clang-based stdenv from llvmPackages_19:
           ];
         };
 
@@ -113,9 +121,8 @@
             # -- Needed for VSCode dev container --
             gnugrep # GNU version of grep for searching text
             gnused # GNU version of sed for text processing
-            gnutar # GNU version of tar for archiving 
+            gnutar # GNU version of tar for archiving
             gzip # Compression utility
-            pkgs.stdenv.cc.cc.lib # Standard C library needed for linking C++ programs
 
             # -- FISH! --
             figlet
@@ -132,8 +139,10 @@
             openssl.dev
 
             # -- Development tools --
+            bat
             code-extended
             curl
+            delta
             eza
             fd
             findutils
@@ -144,6 +153,9 @@
             gnugrep
             jq
             lsof
+            man-db
+            man-pages
+            man-pages-posix
             ncurses
             nix
             nvim-pkg
@@ -159,25 +171,16 @@
             # -- Compilers, Etc. --
             cmake
             gnumake
-            clang
-            clang.dev
-            glibc
+            # clang or clang-tools are not strictly needed if stdenv is clang-based
+            # but you can add them if you want the standalone `clang` CLI, e.g.:
+            pkgs.llvmPackages_19.clang
             lld
-            clang-tools
+            glibc
             grc
-            libclang
 
             # -- Rust --
             (lib.meta.hiPrio rust-bin.nightly.latest.default)
 
-            # We need to support various WASM targets, possibly ARM64 targets.
-            # This allows us to select those. Also, by default, we should
-            # include the sources for Rust, so that the debugger works properly
-            # and can jump to definition.
-            #(rust-bin.selectLatestNightlyWith (toolchain: toolchain.default.override {
-              #extensions = [ "rust-src" ];
-              #targets = [ "wasm32-unknown-unknown" "wasm32-wasip1" ];
-            #}))
             cargo-leptos
             cargo-wasi
             pkg-config
@@ -219,6 +222,12 @@
           text = builtins.readFile ./container-files/license.txt;
         };
 
+        gitconfig = pkgs.writeTextFile {
+          name = "container-files/.gitconfig";
+          destination = "/root/.gitconfig";
+          text = builtins.readFile ./container-files/.gitconfig;
+        };
+
         # User creation script
         createUserScript = pkgs.writeTextFile {
           name = "container-files/create-user.sh";
@@ -232,7 +241,16 @@
         packages.default = pkgs.dockerTools.buildImage {
           name = "polar-dev";
           tag = "latest";
-          copyToRoot = [ myEnv baseInfo fishConfig codeSettings license createUserScript fishPluginsFile ];
+          copyToRoot = [
+            myEnv
+            baseInfo
+            fishConfig
+            codeSettings
+            license
+            gitconfig
+            createUserScript
+            fishPluginsFile
+          ];
           config = {
             WorkingDir = "/workspace";
             Env = [
@@ -243,7 +261,6 @@
               "FISH_BASS=${pkgs.fishPlugins.bass}"
               "FISH_GRC=${pkgs.fishPlugins.grc}"
 
-              # Set GCC as default compiler -- will make this clang, eventually
               "CC=clang"
               "CXX=clang++"
               "LD=ld.lld"
@@ -253,10 +270,15 @@
 
               "LANG=en_US.UTF-8"
               "TZ=UTC"
+              "MANPAGER=sh -c 'col -bx | bat --language man --style plain'"
+              "MANPATH=${pkgs.man-db}/share/man:$MANPATH"
 
+              # stdenv.cc is clang-based now, so this is fine:
               "LD_LIBRARY_PATH=${pkgs.stdenv.cc.cc.lib}/lib"
 
-              "LIBCLANG_PATH=${pkgs.libclang.lib}/lib/"
+              #"LIBCLANG_PATH=${pkgs.libclang.lib}/lib/"
+
+              "RUSTFLAGS=${"$"}RUSTFLAGS -Clinker=clang"
 
               "PATH=/bin:/usr/bin:${myEnv}/bin:/root/.cargo/bin"
 
@@ -272,17 +294,17 @@
 
               "USER=root"
             ];
-            Volumes = { };
+            Volumes = {};
             Cmd = [ "/bin/fish" ]; # Runs fish
           };
           extraCommands = ''
             # Link the env binary (needed for the check requirements script)
             mkdir -p usr/bin/
-            ln -n bin/env usr/bin/env 
+            ln -n bin/env usr/bin/env
 
             # Link the dynamic linker/loader (needed for Node within vscode server)
-            mkdir -p lib64 
-            ln -s ${pkgs.glibc}/lib/ld-linux-x86-64.so.2 lib64/ld-linux-x86-64.so.2 
+            mkdir -p lib64
+            ln -s ${pkgs.stdenv.cc.cc}/lib/ld-linux-x86-64.so.2 lib64/ld-linux-x86-64.so.2
 
             # Create /tmp dir
             mkdir -p tmp
