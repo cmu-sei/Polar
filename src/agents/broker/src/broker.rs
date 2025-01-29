@@ -1,4 +1,4 @@
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 use crate::{
     get_subsciber_name,
     listener::{ ListenerManager, ListenerManagerArgs },
@@ -10,23 +10,24 @@ use crate::{
 };
 use crate::{
     BrokerMessage,
+    CLIENT_NOT_FOUND_TXT,
     LISTENER_MANAGER_NAME,
-    SESSION_MANAGER_NAME,
     PUBLISH_REQ_FAILED_TXT,
+    REGISTRATION_REQ_FAILED_TXT,
+    SESSION_MANAGER_NAME,
+    SESSION_MGR_NOT_FOUND_TXT,
+    SESSION_NOT_FOUND_TXT,
     SUBSCRIBER_MANAGER_NAME,
     SUBSCRIBER_MGR_NOT_FOUND_TXT,
-    TOPIC_MANAGER_NAME,
-    REGISTRATION_REQ_FAILED_TXT,
-    SESSION_NOT_FOUND_TXT,
-    CLIENT_NOT_FOUND_TXT
+    TOPIC_MANAGER_NAME
 };
 use ractor::{
     async_trait,
-    registry::where_is,
-    rpc::{call, call_and_forward},
     Actor,
     ActorProcessingErr,
     ActorRef,
+    registry::where_is,
+    rpc::{call, call_and_forward},
     SupervisionEvent
 };
 
@@ -176,7 +177,7 @@ impl Actor for Broker {
         // (yet), maybe we could make these debug!(...), so we can cut down on
         // some of the verbosity, unless someone has the logging turned up to
         // eleven.
-        info!("Broker: Started {myself:?}");
+        debug!("Broker: Started {myself:?}");
         Ok(())
     }
 
@@ -185,8 +186,7 @@ impl Actor for Broker {
         myself: ActorRef<Self::Msg>,
         _: &mut Self::State
     ) -> Result<(), ActorProcessingErr> {
-        // Vaughn, same as above.
-        info!("Broker: Stopped {myself:?}");
+        debug!("Broker: Stopped {myself:?}");
         Ok(())
     }
     
@@ -199,10 +199,10 @@ impl Actor for Broker {
         match message {
             
             BrokerMessage::RegistrationRequest { registration_id, client_id } => {                         
-                info!("Received Registration Request from client: {client_id:?}");
+                debug!("Received Registration Request from client: {client_id:?}");
                 match registration_id {
                     Some(id) => {
-                        //forward RegistrationRequest to the session and subscriber mgrs
+                        // Forward RegistrationRequest to the session and subscriber mgrs
                         let session_option = where_is(id.clone());
                         let sub_mgr_option = where_is(SUBSCRIBER_MANAGER_NAME.to_string());
                         
@@ -213,7 +213,9 @@ impl Actor for Broker {
                             
                             let client_id_clone = client_id.clone();
                             
-                            if let Err(e) = session.send_message(BrokerMessage::RegistrationRequest { registration_id: Some(id.clone()), client_id }){
+                            if let Err(e) = session.send_message(
+                                BrokerMessage::RegistrationRequest { registration_id: Some(id.clone()), client_id }
+                            ) {
                                 let err_msg = format!("{REGISTRATION_REQ_FAILED_TXT}: {SESSION_NOT_FOUND_TXT}: {e}");
                                 if let Some(listener) = where_is(id.clone()) {
                                     listener.send_message(BrokerMessage::RegistrationResponse { registration_id: Some(id.clone()), client_id: id.clone(), success: false, error: Some(err_msg) })
@@ -235,7 +237,8 @@ impl Actor for Broker {
                                 }
                             }
                         } else {
-                            let err_msg = format!("{REGISTRATION_REQ_FAILED_TXT}: Couldn't locate session or subscribers!");
+                            let err_msg = format!(
+                                "{REGISTRATION_REQ_FAILED_TXT}: Couldn't locate session or subscribers!");
                             warn!("{err_msg}");  
                             match where_is(client_id.clone()) {
                                 Some(listener) => {
@@ -254,13 +257,52 @@ impl Actor for Broker {
                         }
                     }
                     None => {
-                        //start new session
+                        // Start new session. Send a registration request from
+                        // the broker, on behalf of a new client, to the session
+                        // manager. If successful, the session manager creates a
+                        // new session, which directly sends the registration ID
+                        // back to the new client, for use on subsequent
+                        // connection attempts.
                         match where_is(SESSION_MANAGER_NAME.to_string()) {
                             Some(manager) => {
-                                if let Err(e) = manager.send_message(BrokerMessage::RegistrationRequest { registration_id: registration_id.clone(), client_id: client_id.clone() }) {
-                                    let err_msg = format!("{REGISTRATION_REQ_FAILED_TXT}: {SUBSCRIBER_MGR_NOT_FOUND_TXT}: {e}");
+                                if let Err(e) = manager.send_message(
+                                    BrokerMessage::RegistrationRequest {
+                                        registration_id: registration_id.clone(),
+                                        client_id: client_id.clone()
+                                }) {
+                                    // Vaughn, I added a new string for session
+                                    // manager not found, as the code was
+                                    // pointing at a string for subscriber
+                                    // manager, which seemed wrong, based on the
+                                    // selected manager. However, I'm not
+                                    // convinced this is right. This is another
+                                    // case where we should panic if the manager
+                                    // is missing Or... there is some other way
+                                    // to get an error back that has nothing to
+                                    // do with a missing session manager and we
+                                    // should handle that case. The alternative
+                                    // is that you really intended to send this
+                                    // to the subscriber manager, in which case
+                                    // the wrong manager is being selected
+                                    // above.
+                                    // UPDATE: I checked and they both have handler
+                                    // logic for RegistrationRequest.
+                                    // SessionManager definitely looks like the
+                                    // right place. It's unclear to me how
+                                    // SubscriberManager would ever get involved
+                                    // in this flow, based on the current logic.
+                                    let err_msg = format!(
+                                        "{REGISTRATION_REQ_FAILED_TXT}:
+                                        {SESSION_MGR_NOT_FOUND_TXT}: {e}"
+                                    );
                                     if let Some(listener) = where_is(client_id.clone()) {
-                                        listener.send_message(BrokerMessage::RegistrationResponse { registration_id: registration_id.clone(), client_id: client_id.clone(), success: false, error: Some(err_msg) })
+                                        listener.send_message(
+                                            BrokerMessage::RegistrationResponse
+                                            { registration_id:
+                                            registration_id.clone(), client_id:
+                                            client_id.clone(), success: false,
+                                            error: Some(err_msg)
+                                        })
                                         .map_err(|e| {
                                             warn!("{e}");
                                         }).unwrap()
@@ -269,8 +311,14 @@ impl Actor for Broker {
                                         error!("{err_msg}: {CLIENT_NOT_FOUND_TXT}");
                                     }
                                 }
-                                
-                            } None => {
+                                // So, the above is entirely about error handling if the message coming back from the session manager is a failure case.
+                            }
+                            None => {
+                                // Vaughn, I think the None case here is
+                                // 'session manager not found', which would be
+                                // bad. Just panic. The error case you're
+                                // handling here appears to be the same as the
+                                // case above, so this can probably go.
                                 let err_msg = format!("{REGISTRATION_REQ_FAILED_TXT}: {SUBSCRIBER_MGR_NOT_FOUND_TXT}");
                                 if let Some(listener) = where_is(client_id.clone()) {
                                     listener.send_message(BrokerMessage::RegistrationResponse { registration_id: registration_id.clone(), client_id: client_id.clone(), success: false, error: Some(err_msg) })

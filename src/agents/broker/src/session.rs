@@ -75,38 +75,83 @@ impl Actor for SessionManager {
     ) -> Result<(), ActorProcessingErr>  {
         match message {
             BrokerMessage::RegistrationRequest { client_id, ..} => {
-                
-                // Start brand new session
+                // Vaughn,
+                // Start a brand new session: Create an ID. Spawn a new session
+                // to store the ID. If for some reason we can't create a new
+                // session, we kick the failure back to the client's listener
+                // directly, so that they can handle the error. We don't appear
+                // to ever notify the broker, which is how we got into this
+                // code, from the RegistrationRequest handler in broker.
+                // The broker appears to find out about this failure in creating a new
+                // session, from the failure response?
                 let new_id = Uuid::new_v4().to_string();
 
-                info!("SessionManager: Stating session for client: {client_id} with registration ID {new_id}");
+                info!("SessionManager: Starting session for client: {client_id} with registration ID {new_id}");
 
                 match myself.try_get_supervisor() {
                     Some(broker_ref) => {
-
                         if let Some(listener_ref) = where_is(client_id.clone()) {
-                            let args = SessionAgentArgs { registration_id: new_id.clone(), client_ref: listener_ref.clone().into() , broker_ref: broker_ref.clone().into()};
+                            let args = SessionAgentArgs {
+                                registration_id: new_id.clone(),
+                                client_ref: listener_ref.clone().into(),
+                                broker_ref: broker_ref.clone().into()
+                            };
                             
-                            if let Ok((session_agent, _)) = Actor::spawn_linked(Some(new_id.clone()), SessionAgent, args, myself.clone().into()).await {
-                                state.sessions.insert(new_id.clone(), Session {
-                                    agent_ref: session_agent                            
-                                });
-                            } else { 
-                                let err_msg = format!("{REGISTRATION_REQ_FAILED_TXT} Couldn't start session agent!");
+                            if let Ok((session_agent, _)) = Actor::spawn_linked(
+                                Some(new_id.clone()),
+                                SessionAgent,
+                                args,
+                                myself.clone().into()
+                            ).await {
+                                state.sessions.insert(
+                                    new_id.clone(),
+                                    Session { agent_ref: session_agent }
+                                );
+                            }
+                            else { 
+                                let err_msg = format!(
+                                    "{REGISTRATION_REQ_FAILED_TXT} Couldn't start session agent!");
                                 warn!("{err_msg}");
-                                if let Err(e) = listener_ref.send_message(BrokerMessage::RegistrationResponse { registration_id: None, client_id: client_id.clone(), success: false, error: Some(err_msg.clone()) }) {
-                                    error!("{err_msg}: {e}")
+
+                                // Vaughn,
+                                // After we inform the client listener of
+                                // the error, we don't ever return the error
+                                // to the broker? The broker additionally
+                                // has this same logic to send a failure
+                                // message to the client, but from what I
+                                // can tell, we can't ever get there, since the
+                                // default return here is Ok. Does the error ever get
+                                // returned to the caller? It doesn't appear so.
+                                // The broker has this same logic as below to
+                                // send a message to the listener. If we're not
+                                // ever going to use that logic, we should get
+                                // rid of it. Otherwise, we should use the
+                                // return value here and not send the listener
+                                // error here. In any event, I did some light
+                                // refactoring, in case we want to think about
+                                // returning error from here to the broker.
+                                if let Err(e) = listener_ref.send_message(
+                                    BrokerMessage::RegistrationResponse {
+                                        registration_id: None,
+                                        client_id: client_id.clone(),
+                                        success: false,
+                                        error: Some(err_msg.clone())
+                                    }
+                                ) {
+                                    error!("{err_msg}: {e}");
                                 }
                             }
                         } else {
+                            // LOL they didn't stick around very long!
                             warn!("{REGISTRATION_REQ_FAILED_TXT} {CLIENT_NOT_FOUND_TXT}")
                         }
-                        
-                    } None => {
+                    }
+                    None => {
+                        // I am a rogue Actor now. The world will hear what I have to say.
                         error!("Couldn't lookup root broker actor!");
-                        
                     }
                 }   
+                Ok(())
             }
             BrokerMessage::RegistrationResponse { registration_id, client_id, .. } => {
                 //A client has (re)registered. Cancel timeout thread
@@ -126,6 +171,7 @@ impl Actor for SessionManager {
                 } else {
                     warn!("Received registration response from unknown client: {client_id}");
                 }
+                Ok(())
             }
             BrokerMessage::DisconnectRequest { client_id, registration_id } => {
                 //forward to broker, kill session
@@ -144,6 +190,7 @@ impl Actor for SessionManager {
                     }
                     
                 }
+                Ok(())
             }
             BrokerMessage::TimeoutMessage { client_id, registration_id, error } => {
                 if let Some(registration_id) = registration_id {
@@ -182,9 +229,14 @@ impl Actor for SessionManager {
                         });
                     }
                 }
-            }, _ => warn!("Received unexpected message: {message:?}")
+                Ok(())
+            },
+            _ => {
+                warn!("Received unexpected message: {message:?}");
+                // TODO: This is actually an error case, but I don't know what the right generic error is at this momement.
+                Ok(())
+            }
         }
-        Ok(())
     }
 
     async fn handle_supervisor_evt(&self, _: ActorRef<Self::Msg>, msg: SupervisionEvent, _: &mut Self::State) -> Result<(), ActorProcessingErr> {
@@ -198,7 +250,6 @@ impl Actor for SessionManager {
         }
         Ok(())
     }
-
 }
 
 /// Worker process for handling client sessions.
@@ -392,9 +443,6 @@ impl Actor for SessionAgent {
                 warn!("{}",format!("{UNEXPECTED_MESSAGE_STR}: {message:?}"));
             }
         }
-    
         Ok(())
     }
-
-
 }

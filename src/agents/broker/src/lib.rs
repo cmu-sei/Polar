@@ -24,6 +24,7 @@ pub const SESSION_NOT_FOUND_TXT: &str = "Session not found!";
 pub const CLIENT_NOT_FOUND_TXT: &str = "Listener not found!";
 pub const TOPIC_MGR_NOT_FOUND_TXT: &str = "Topic Manager not found!";
 pub const SUBSCRIBER_MGR_NOT_FOUND_TXT: &str = "Subscription Manager not found!";
+pub const SESSION_MGR_NOT_FOUND_TXT: &str = "Session Manager not found!";
 pub const BROKER_NOT_FOUND_TXT: &str = "Broker not found!";
 pub const SUBSCRIBE_REQUEST_FAILED_TXT: &str = "Failed to subscribe to topic: \"{topic}\"";
 pub const PUBLISH_REQ_FAILED_TXT: &str = "Failed to publish message to topic \"{topic}\"";
