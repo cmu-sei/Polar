@@ -1,7 +1,8 @@
 #![allow(clippy::incompatible_msrv)]
 use std::env;
-use cassini::{broker::{Broker, BrokerArgs}, init_logging, BROKER_NAME};
+use cassini::{broker::{Broker, BrokerArgs}, BROKER_NAME};
 use ractor::Actor;
+use polar::init_logging;
 
 // ============================== Main ============================== //
 

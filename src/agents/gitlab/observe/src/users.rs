@@ -25,18 +25,23 @@
 use core::error;
 use std::time::Duration;
 
-use crate::{ get_all_elements, send, GitlabObserverArgs, GitlabObserverMessage, GitlabObserverState, BROKER_CLIENT_NAME, PRIVATE_TOKEN_HEADER_STR};
+use crate::{GitlabObserverArgs, GitlabObserverMessage, GitlabObserverState, BROKER_CLIENT_NAME, PRIVATE_TOKEN_HEADER_STR};
+use cassini::client::TcpClientMessage;
+use cassini::ClientMessage;
+use common::USERS_QUEUE_NAME;
 use cynic::{GraphQlResponse, Id, Operation, QueryFragment, QueryVariables};
+use ractor::concurrency::Interval;
 use ractor::rpc::{call, CallResult};
 use ractor::RpcReplyPort;
 use ractor::{async_trait, registry::where_is, Actor, ActorProcessingErr, ActorRef};
 use reqwest::{Client, Method, StatusCode};
-use common::USERS_QUEUE_NAME;
+
 use common::types::{User, GitlabData};
 use tokio::time;
 use tracing::{debug, info, warn, error};
 use gitlab_queries::*;
 use cynic::QueryBuilder;
+use rkyv::rancor::Error;
 
 pub struct GitlabUserObserver;
 
@@ -76,34 +81,35 @@ impl Actor for GitlabUserObserver {
         myself: ActorRef<Self::Msg>,
         state: &mut Self::State ) ->  Result<(), ActorProcessingErr> {
         info!("{myself:?} Started");
-
-    
-        let mut interval = time::interval(Duration::from_secs(10));
-        let handle = tokio::task::spawn(async move {
-            loop {
-                match call(&&myself.get_cell(), |reply: RpcReplyPort<Result<(), String>>|  { 
-                    //TODO: get query arguments from config params
-                    //build query
-                    let op = MultiUserQuery::build(MultiUserQueryArguments{ after: None, admins: Some(true), active: None, ids: None, usernames: None, humans: Some(true) });
         
-                    // pass query in message
-                    GitlabObserverMessage::GetUsers(reply, op) 
-                    } , None)
-                .await.expect("expected to call actor: {observer:?}") {
-                    CallResult::Success(result) => {
-                        if let Err(e) = result {
-                        let err_msg = format!("Failed to gather user data {e}");
-                        warn!("{err_msg}");
-                        myself.stop(Some(err_msg));
-                        }
-                    }
-                    CallResult::Timeout => error!("timed out sending message"),
-                    CallResult::SenderError => error!("Failed to send message")   
-                }
-                interval.tick().await;
-            }
+        myself.send_interval(Duration::from_secs(10), || { 
+            //TODO: get query arguments from config params
+            //build query
+            let op = MultiUserQuery::build(MultiUserQueryArguments{ after: None, admins: Some(true), active: None, ids: None, usernames: None, humans: Some(true) });
+
+            // pass query in message
+            GitlabObserverMessage::GetUsers(op) 
         });
 
+        // match call(&&myself.get_cell(), |reply: RpcReplyPort<Result<(), String>>|  { 
+        //     //TODO: get query arguments from config params
+        //     //build query
+        //     let op = MultiUserQuery::build(MultiUserQueryArguments{ after: None, admins: Some(true), active: None, ids: None, usernames: None, humans: Some(true) });
+
+        //     // pass query in message
+        //     GitlabObserverMessage::GetUsers(op) 
+        //     } , None)
+        // .await.expect("expected to call actor: {observer:?}") {
+        //     CallResult::Success(result) => {
+        //         if let Err(e) = result {
+        //         let err_msg = format!("Failed to gather user data {e}");
+        //         warn!("{err_msg}");
+        //         myself.stop(Some(err_msg));
+        //         }
+        //     }
+        //     CallResult::Timeout => error!("timed out sending message"),
+        //     CallResult::SenderError => error!("Failed to send message")   
+        // }
         
         Ok(())
     }
@@ -115,7 +121,7 @@ impl Actor for GitlabUserObserver {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
-            GitlabObserverMessage::GetUsers(reply, op) =>  {
+            GitlabObserverMessage::GetUsers(op) =>  {
 
                 debug!("Sending query: {op:?}");
 
@@ -125,54 +131,56 @@ impl Actor for GitlabUserObserver {
                 .json(&op)
                 .send().await {
                     Ok(response) => {
-                        if response.status() == StatusCode::OK {
-                            //TODO: take json and send to broker
-                            //forwrard to client
-                            match response.json::<GraphQlResponse<MultiUserQuery>>().await {
-                                Ok(deserialized) => {
-                                    if let Some(query) = deserialized.data {
+                    
+                        //TODO: take json and send to broker
+                        //forwrard to client
+                        match response.json::<GraphQlResponse<MultiUserQuery>>().await {
+                            Ok(deserialized) => {
+                                if let Some(query) = deserialized.data {
 
-                                        if let Some(connection) = query.users {
-                                            
-                                            info!("Found {} user(s)", connection.count);
+                                    if let Some(connection) = query.users {
+                                        
+                                        info!("Found {} user(s)", connection.count);
 
-                                            let mut read_users: Vec<UserCore> = Vec::new();
+                                        let mut read_users: Vec<UserCore> = Vec::new();
 
-                                            if let Some(users) = connection.nodes {
-                                                // Append nodes to the result list.
-                                                read_users.extend(users.into_iter().map(|option| option.unwrap()));
-                                            }
-                                            
-                                            //TODO:                                            
-                                            // if connection.pageInfo.has_next_page {
-                                            //     todo!("TODO: crawl pages and build list of UserCore types")
-                                            // }
+                                        if let Some(users) = connection.nodes {
+                                            // Append nodes to the result list.
+                                            read_users.extend(users.into_iter().map(|option| option.unwrap()));
+                                        }
+                                        //serialize list to byte vec
+                                        let byte_vec = rkyv::to_bytes::<Error>(&read_users).unwrap();
+                                        //TODO:                                            
+                                        // if connection.pageInfo.has_next_page {
+                                        //     todo!("TODO: crawl pages and build list of UserCore types")
+                                        // }
 
-                                            match where_is(BROKER_CLIENT_NAME.to_string()) {
-                                                Some(client) => {
-                                                    let data = GitlabData::Users(read_users);
-                                                    if let Err(e) = send(data, client.into(), state.registration_id.clone(), USERS_QUEUE_NAME.to_string()) {
-                                                        let err_msg = format!("Failed to send message. {e}");
-                                                        error!("{err_msg}");
-                                                        reply.send(Err(format!("{err_msg}"))).unwrap();
-                                                    }
-                                                    else { reply.send(Ok(())).unwrap() }
+                                        match where_is(BROKER_CLIENT_NAME.to_string()) {
+                                            Some(client) => {
+                                                let data = GitlabData::Users(byte_vec.to_vec());
+                                                // Serializing is as easy as a single function call
+                                                let bytes = rkyv::to_bytes::<Error>(&data).unwrap();
+                                                
+
+                                                let msg = ClientMessage::PublishRequest { topic: USERS_QUEUE_NAME.to_string(), payload: bytes.to_vec(), registration_id: Some(state.registration_id.clone()) };
+                                                if let Err(e) = client.send_message(TcpClientMessage::Send(msg)) {
+                                                    todo!()
                                                 }
-                                                None => {
-                                                    let err_msg = "Failed to locate tcp client";
-                                                    error!("{err_msg}");
-                                                    reply.send(Err(format!("{err_msg}"))).unwrap();
-                                                 }   
-                                            } 
-                                        } else { reply.send(Ok(())).unwrap() }
-                                    }    
-                                }
-                                Err(e) => {
-                                    error!("{e}");
-                                    reply.send(Err(e.to_string())).unwrap();
-                                }
+                                            }
+                                            None => {
+                                                let err_msg = "Failed to locate tcp client";
+                                                error!("{err_msg}");
+                                                
+                                                }   
+                                        } 
+                                    }
+                                }    
                             }
-                        } else { reply.send(Err(format!("{:?}", response))).unwrap() }
+                            Err(e) => {
+                                error!("{e}");
+                            }
+                        }
+                        
 
                     } Err(e) => error!("{e}")
                 }

@@ -91,7 +91,7 @@ impl Actor for GitlabUserConsumer {
                                     error!("{err_msg}");
                                     todo!("What to do if we fail to commit queries?");
                                 }
-                                
+                                info!("Committed transaction to database");
                             }
                             Err(e) => {
                                 error!("Could not open transaction with graph! {e}");

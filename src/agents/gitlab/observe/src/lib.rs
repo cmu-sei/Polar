@@ -79,7 +79,7 @@ pub struct GitlabObserverArgs {
 /// Messages that observers send themselves to prompt the retrieval of resources
 
 pub enum GitlabObserverMessage {
-    GetUsers(RpcReplyPort<Result<(), String>>, Operation<MultiUserQuery, MultiUserQueryArguments>),
+    GetUsers(Operation<MultiUserQuery, MultiUserQueryArguments>),
     // GetProjects(RpcReplyPort<Result<(), String>>),
     // GetGroups(RpcReplyPort<Result<(), String>>),
 }
@@ -192,23 +192,6 @@ pub async fn get_all_elements<T: for<'a> Deserialize<'a>>(client: &Client, token
 //     T: Owned + 'a
 // {}
 
-/// Helper function to help DRYness
-/// Send some wrapped Gitlab data
-/// TODO: "Generisize" the data type and move to an "agents" util library for other observers, consider accepting any datatype that is serializable with serde
-/// NOTE: This fn may serve as a basis for decentralizing serailization techniques
-pub fn send(data: GitlabData, client: ActorRef<TcpClientMessage>, registration_id: String, topic: String) -> Result<(), Box<dyn std::error::Error>> {
-    match to_string(&data) {
-        Ok(serialized) => {
-            let msg = ClientMessage::PublishRequest { topic: topic, payload: serialized , registration_id: Some(registration_id.clone()) };
-            match client.send_message(TcpClientMessage::Send(msg)) {
-                Ok(_) => Ok(()),
-                Err(e) => Err(Box::new(e))
-            }
-        }
-        Err(e) => Err(Box::new(e))
-    } 
-
-}
 
 ///TODO: Helper function to spawn a task that calls an actor in a loop over some given interval of time.
 /// Ideally, we'd be able to call and wait for a reply on an iterval, this is made difficult because RpcReplyPorts can't be moved.

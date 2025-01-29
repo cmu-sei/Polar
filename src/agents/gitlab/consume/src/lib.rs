@@ -40,12 +40,13 @@ pub mod groups;
 pub mod runners;
 
 pub const BROKER_CLIENT_NAME: &str = "GITLAB_CONSUMER_CLIENT";
-
+pub const GITLAB_USER_CONSUMER: &str = "gitlab:observer:users";
 //TODO: Give consumer state info about neo4j, and eventually, a graph adapter to work with
 pub struct GitlabConsumerState {
     pub registration_id: String,
     graph: neo4rs::Graph
 }
+#[derive(Clone, Debug)]
 pub struct GitlabConsumerArgs {
     pub registration_id: String
 }
@@ -55,6 +56,7 @@ pub struct GitlabConsumerArgs {
 pub enum ConsumerMessage {
     GitlabData(GitlabData)
 }
+
 ///
 /// Helper fn to setup consumer state, subscribe to a given topic, and connect to the graph database
 /// TODO: Consider updating this function in the future to leverage a grpah adapter should support alternatives to neo4j

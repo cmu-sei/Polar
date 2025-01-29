@@ -121,7 +121,7 @@ impl Actor for TopicManager {
                     }
                 }
                     },
-                None => warn!("Received publish request from unknown session. {payload}")
+                None => warn!("Received publish request from unknown session. {payload:?}")
                 }
             },
             BrokerMessage::PublishResponse { topic, payload, .. } => {
@@ -173,7 +173,7 @@ struct TopicAgent;
 
 struct TopicAgentState {
     subscribers: Vec<String>,
-    queue: VecDeque<String>
+    queue: VecDeque<Vec<u8>>
 }
 
 pub struct TopicAgentArgs {
@@ -209,7 +209,6 @@ impl Actor for TopicAgent {
         state: &mut Self::State ) ->  Result<(), ActorProcessingErr> {
             
             debug!("{myself:?} Started with {0} subscriber(s)", state.subscribers.len() );
-            debug!("{:?}", state.subscribers);
             Ok(())
 
     }
@@ -239,6 +238,7 @@ impl Actor for TopicAgent {
                         } else {
                             //queue message
                             state.queue.push_back(payload);
+                            info!("{}", format!("New message on topic \"{0:?}\", queue has {1} message(s) waiting.",myself.get_name(), state.queue.len()));
                         }
 
                         //send ACK to session that made the request
@@ -252,7 +252,7 @@ impl Actor for TopicAgent {
                         }
                     }, 
                     None => {
-                        warn!("Received publish request from unknown session: {payload}");
+                        warn!("Received publish request from unknown session: {payload:?}");
                         //TODO: send error message?
                     }
                 }
@@ -265,7 +265,7 @@ impl Actor for TopicAgent {
                 //send any waiting messages
                 if let Some(subscriber) = where_is(sub_id.clone()) {
                     while let Some(msg) = &state.queue.pop_front() {
-                        if let Err(e) = subscriber.send_message(BrokerMessage::PublishResponse { topic: topic.clone(), payload: msg.to_string(), result: Ok(()) }) {
+                        if let Err(e) = subscriber.send_message(BrokerMessage::PublishResponse { topic: topic.clone(), payload: msg.to_vec(), result: Ok(()) }) {
                             warn!("{PUBLISH_REQ_FAILED_TXT}: {e}");
                         }
                     }

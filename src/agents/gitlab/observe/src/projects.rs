@@ -25,7 +25,7 @@ use cassini::{client::TcpClientMessage, ClientMessage};
 use common::PROJECTS_QUEUE_NAME;
 use tokio::time::interval;
 
-use crate::{get_all_elements, send, GitlabObserverArgs, GitlabObserverMessage, GitlabObserverState, BROKER_CLIENT_NAME};
+use crate::{get_all_elements, GitlabObserverArgs, GitlabObserverMessage, GitlabObserverState, BROKER_CLIENT_NAME};
 
 use ractor::{async_trait, registry::where_is, Actor, ActorProcessingErr, ActorRef};
 use reqwest::Client;

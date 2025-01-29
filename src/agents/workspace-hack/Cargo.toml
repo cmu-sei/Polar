@@ -15,38 +15,46 @@ publish = false
 
 ### BEGIN HAKARI SECTION
 [dependencies]
-chrono = { version = "0.4", features = ["serde"] }
+chrono = { version = "0.4", features = ["rkyv-32", "serde"] }
 form_urlencoded = { version = "1" }
+futures-core = { version = "0.3" }
 futures-io = { version = "0.3" }
+futures-sink = { version = "0.3" }
 getrandom = { version = "0.2", default-features = false, features = ["std"] }
 log = { version = "0.4", default-features = false, features = ["std"] }
 memchr = { version = "2" }
 num-traits = { version = "0.2", features = ["i128"] }
 once_cell = { version = "1" }
 percent-encoding = { version = "2" }
+ptr_meta = { version = "0.1", default-features = false, features = ["std"] }
 regex = { version = "1" }
 regex-automata = { version = "0.4", default-features = false, features = ["dfa-onepass", "hybrid", "meta", "nfa-backtrack", "perf-inline", "perf-literal", "unicode"] }
 regex-syntax = { version = "0.8" }
+rkyv = { version = "0.7", features = ["validation"] }
 rustls = { version = "0.23", features = ["ring"] }
 rustls-webpki = { version = "0.102", default-features = false, features = ["aws_lc_rs", "ring", "std"] }
 serde = { version = "1", features = ["derive"] }
+simdutf8 = { version = "0.1", default-features = false, features = ["std"] }
 smallvec = { version = "1", default-features = false, features = ["const_generics"] }
+tokio = { version = "1", features = ["full", "tracing"] }
 
 [build-dependencies]
 once_cell = { version = "1" }
-proc-macro2 = { version = "1" }
-quote = { version = "1" }
+ptr_meta = { version = "0.1", default-features = false, features = ["std"] }
 regex-syntax = { version = "0.8" }
-syn = { version = "2", features = ["extra-traits", "fold", "full", "visit", "visit-mut"] }
+rkyv = { version = "0.7", features = ["validation"] }
+simdutf8 = { version = "0.1", default-features = false, features = ["std"] }
+syn-dff4ba8e3ae991db = { package = "syn", version = "1", features = ["extra-traits", "full"] }
+syn-f595c2ba2a3f28df = { package = "syn", version = "2", features = ["extra-traits", "fold", "full", "visit", "visit-mut"] }
 
 [target.x86_64-unknown-linux-gnu.dependencies]
 futures-channel = { version = "0.3", features = ["sink"] }
 libc = { version = "0.2" }
 spin = { version = "0.9" }
-tokio = { version = "1", features = ["full", "tracing"] }
 tokio-util = { version = "0.7", features = ["codec", "io"] }
 
 [target.x86_64-unknown-linux-gnu.build-dependencies]
+getrandom = { version = "0.2", default-features = false, features = ["std"] }
 libc = { version = "0.2" }
 
 [target.x86_64-apple-darwin.dependencies]
@@ -55,10 +63,10 @@ libc = { version = "0.2", features = ["extra_traits"] }
 rustix = { version = "0.38", features = ["event", "fs", "net", "pipe", "process", "time"] }
 security-framework-sys = { version = "2" }
 spin = { version = "0.9" }
-tokio = { version = "1", features = ["full", "tracing"] }
 tokio-util = { version = "0.7", features = ["codec", "io"] }
 
 [target.x86_64-apple-darwin.build-dependencies]
+getrandom = { version = "0.2", default-features = false, features = ["std"] }
 libc = { version = "0.2", features = ["extra_traits"] }
 
 ### END HAKARI SECTION

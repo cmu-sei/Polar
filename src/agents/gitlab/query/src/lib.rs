@@ -1,10 +1,12 @@
 use std::fmt;
 
-use chrono::{DateTime, Utc};
 use gitlab_schema::gitlab::{self as schema};
 use cynic::*;
+use rkyv::Serialize;
+use rkyv::Deserialize;
 
-// #[derive(cynic::Scalar, serde::Serialize,serde::Deserialize, Clone, Debug)]
+
+// #[derive(cynic::Scalar,serde::Deserialize, Clone, Debug)]
 // #[cynic(schema = "gitlab", graphql_type = "UserID")]
 // pub struct UserID(Id);
 
@@ -12,7 +14,7 @@ use cynic::*;
 /// NOTE: Cynic matches rust variants up to their equivalent SCREAMING_SNAKE_CASE GraphQL variants. 
 /// This behaviour is disabled because the gitlab schema goes against this
 /// TODO: Disable warnings on this datatype
-#[derive(cynic::Enum, Clone, Copy, Debug)]
+#[derive(cynic::Enum, Clone, Copy, Deserialize, Serialize, rkyv::Archive, Debug)]
 #[cynic(schema = "gitlab", rename_all = "None")]
 pub enum UserState {
     active, 
@@ -38,7 +40,7 @@ impl fmt::Display for UserState {
 }
 
 
-#[derive(cynic::QueryVariables, serde::Deserialize, Debug, Clone)]
+#[derive(cynic::QueryVariables, Debug, Clone)]
 pub struct MultiUserQueryArguments {
     pub after: Option<String>,
     pub admins: Option<bool>,
@@ -49,7 +51,7 @@ pub struct MultiUserQueryArguments {
 
 }
 
-#[derive(cynic::QueryFragment, serde::Serialize, Debug)]
+#[derive(cynic::QueryFragment)]
 #[cynic(schema = "gitlab")]
 pub struct UserCoreConnection {
     pub count: i32, 	  //Int! 	Total count of collection.
@@ -58,7 +60,7 @@ pub struct UserCoreConnection {
     pub pageInfo: PageInfo, // 	PageInfo! 	Information to aid in pagination. 
 }
 
-#[derive(cynic::QueryFragment, serde::Serialize, Debug)]
+#[derive(cynic::QueryFragment, Debug)]
 #[cynic(schema = "gitlab")]
 pub struct PageInfo {
     
@@ -75,10 +77,10 @@ pub struct PageInfo {
 //     username: Option<String>
 // }
 
-#[derive(cynic::QueryFragment, serde::Serialize, Debug)]
+#[derive(cynic::QueryFragment, Deserialize, Serialize, rkyv::Archive)]
 #[cynic(schema = "gitlab")]
 pub struct UserCore {
-    pub id: Id,
+    pub id: gitlab_schema::IdString,
     pub bot: bool,
     pub username: Option<String>,
     pub name: String,
@@ -86,10 +88,10 @@ pub struct UserCore {
     pub state: UserState,
     // last_activity_on: Option<schema::Date>,
     pub location: Option<String>,
-    pub created_at: Option<DateTime<Utc>>
+    pub created_at: Option<gitlab_schema::DateTimeString>
 }
 
-#[derive(cynic::QueryFragment, serde::Serialize, Debug)]
+#[derive(cynic::QueryFragment)]
 #[cynic(schema = "gitlab")]
 pub struct UserCoreEdge {
     cursor: String,
@@ -97,7 +99,7 @@ pub struct UserCoreEdge {
 }
 
 
-#[derive(cynic::QueryFragment, Debug, serde::Serialize)]
+#[derive(cynic::QueryFragment)]
 #[cynic(schema = "gitlab", graphql_type = "Query", variables = "MultiUserQueryArguments")]
 pub struct MultiUserQuery {
     #[arguments(ids: $ids, usernames: $usernames)]

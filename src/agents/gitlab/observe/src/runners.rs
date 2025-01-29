@@ -28,7 +28,7 @@ use common::{types::{GitlabData, Runner}, RUNNERS_QUEUE_NAME};
 use tracing::{debug, info, warn, error};
 use reqwest::Client;
 use serde_json::to_string;
-use crate::{get_all_elements, send, GitlabObserverArgs, GitlabObserverState};
+use crate::{get_all_elements, GitlabObserverArgs, GitlabObserverState};
 use ractor::{async_trait, registry::where_is, Actor, ActorProcessingErr, ActorRef};
 
 use crate::BROKER_CLIENT_NAME;
@@ -72,22 +72,22 @@ impl Actor for GitlabRunnerObserver {
         state: &mut Self::State ) ->  Result<(), ActorProcessingErr> {
 
     
-        //forwrard to client
-        if let Some(client) = where_is(BROKER_CLIENT_NAME.to_string()) {
-            let client_ref: ActorRef<TcpClientMessage> = ActorRef::from(client);
+        // //forwrard to client
+        // if let Some(client) = where_is(BROKER_CLIENT_NAME.to_string()) {
+        //     let client_ref: ActorRef<TcpClientMessage> = ActorRef::from(client);
             
-            if let Some(runners) = get_all_elements::<Runner>(&state.web_client, state.token.clone().unwrap_or_default(), format!("{}{}", state.gitlab_endpoint, "/runners/all")).await {
-                let data = GitlabData::Runners(runners.clone());
-                match send(data, client_ref.clone(), state.registration_id.clone(), RUNNERS_QUEUE_NAME.to_string()) {
-                    Ok(_) => {
-                        debug!("Successfully sent project data");
-                    } Err(e) => todo!()
-                }
-            }
-            else { error!("Couldn't find runners!") }
-        } else { error!("Couldn't locate client!") }
+        //     if let Some(runners) = get_all_elements::<Runner>(&state.web_client, state.token.clone().unwrap_or_default(), format!("{}{}", state.gitlab_endpoint, "/runners/all")).await {
+        //         let data = GitlabData::Runners(runners.clone());
+        //         match send(data, client_ref.clone(), state.registration_id.clone(), RUNNERS_QUEUE_NAME.to_string()) {
+        //             Ok(_) => {
+        //                 debug!("Successfully sent project data");
+        //             } Err(e) => todo!()
+        //         }
+        //     }
+        //     else { error!("Couldn't find runners!") }
+        // } else { error!("Couldn't locate client!") }
         
-        myself.stop(Some("FINISHED".to_string()));
+        // myself.stop(Some("FINISHED".to_string()));
         
         Ok(())
     }

@@ -73,7 +73,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_init() {
-        cassini::init_logging();
+        polar::init_logging();
         let (supervisor, supervisor_handle) = Actor::spawn(Some(TEST_SUPERVISOR.to_string()), MockSupervisor, ()).await.expect("Expected supervisor to start");
 
         let broker_args = BrokerArgs { bind_addr: String::from(BIND_ADDR), session_timeout: Some(5), server_cert_file: env::var("TLS_SERVER_CERT_CHAIN").unwrap(), private_key_file: env::var("TLS_SERVER_KEY").unwrap(), ca_cert_file: env::var("TLS_CA_CERT").unwrap() };
@@ -271,7 +271,8 @@ mod tests {
 
         
         //Publish messsage
-        let _ = new_client.send_message( TcpClientMessage::Send(ClientMessage::PublishRequest { topic, payload: "Hello apple".to_string(), registration_id: session_id.clone()}));
+        let payload = "Hello apple";
+        let _ = new_client.send_message( TcpClientMessage::Send(ClientMessage::PublishRequest { topic, payload: payload.into(), registration_id: session_id.clone()}));
         
         //wait for responses, panics
         tokio::time::sleep(Duration::from_secs(3)).await;
@@ -348,7 +349,7 @@ mod tests {
 
         //send a few messages
         for i in 1..10 {
-            publisher_client.send_message( TcpClientMessage::Send(ClientMessage::PublishRequest { topic: topic.clone(), payload: "Hello orange".to_string(), registration_id: publisher_session_id.clone()})).unwrap();
+            publisher_client.send_message( TcpClientMessage::Send(ClientMessage::PublishRequest { topic: topic.clone(), payload: "Hello orange".into(), registration_id: publisher_session_id.clone()})).unwrap();
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
         //kill publisher
@@ -479,7 +480,7 @@ mod tests {
 
         //send a few messages
         for i in 1..10 {
-            publisher_client.send_message( TcpClientMessage::Send(ClientMessage::PublishRequest { topic: topic.clone(), payload: format!("comic {i}"), registration_id: publisher_session_id.clone()})).unwrap();
+            publisher_client.send_message( TcpClientMessage::Send(ClientMessage::PublishRequest { topic: topic.clone(), payload: format!("comic {i}").into(), registration_id: publisher_session_id.clone()})).unwrap();
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
 

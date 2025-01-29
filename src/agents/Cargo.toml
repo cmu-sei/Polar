@@ -27,12 +27,10 @@ resolver = "2"
 
 members = [
     "broker",
-    "serialize",
     "lib",
     "gitlab/common",
     "gitlab/consume",
     "gitlab/observe", 
-    # "serialize", 
     "workspace-hack", "gitlab/schema", "gitlab/query",
     ]
 

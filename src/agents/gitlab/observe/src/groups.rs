@@ -26,7 +26,7 @@
 use cassini::{client::TcpClientMessage};
 use ractor::{async_trait, registry::where_is, Actor, ActorProcessingErr, ActorRef};
 
-use crate::{get_all_elements, send, GitlabObserverArgs, GitlabObserverState};
+use crate::{get_all_elements, GitlabObserverArgs, GitlabObserverState};
 use tracing::{debug, info, warn, error};
 use reqwest::Client;
 use serde_json::to_string;
@@ -77,55 +77,55 @@ impl Actor for GitlabGroupObserver {
         // let users: Vec<> = get_all_elements(&state.state.web_client, state.token.clone().unwrap_or_default(), format!("{}{}", state.gitlab_endpoint, "/users")).await.unwrap();
         
         //forwrard to client
-        if let Some(client) = where_is(BROKER_CLIENT_NAME.to_string()) {
-            let client_ref: ActorRef<TcpClientMessage> = ActorRef::from(client);
+        // if let Some(client) = where_is(BROKER_CLIENT_NAME.to_string()) {
+        //     let client_ref: ActorRef<TcpClientMessage> = ActorRef::from(client);
 
-            if let Some(groups) = get_all_elements::<UserGroup>(&state.web_client, state.token.clone().unwrap_or_default(), format!("{}{}", state.gitlab_endpoint, "/groups")).await {
-                let data = GitlabData::Groups(groups.clone());
-                if let Err(e) = send(data, client_ref.clone(), state.registration_id.clone(), GROUPS_QUEUE_NAME.to_string()){
-                    error!("{e}");
-                    todo!();
-                }
-                for group in groups {
-                    if let Some(users) = get_all_elements::<User>(&state.web_client, state.token.clone().unwrap_or_default(), format!("{}{}{}{}", state.gitlab_endpoint, "/groups/" , group.id, "/members")).await {
-                        let data = GitlabData::GroupMembers(ResourceLink {
-                            resource_id: group.id,
-                            resource_vec: users
-                        });
-                        if let Err(e) = send(data, client_ref.clone(), state.registration_id.clone(), GROUPS_QUEUE_NAME.to_string()){
-                            error!("{e}");
-                            todo!()
-                        }
+        //     if let Some(groups) = get_all_elements::<UserGroup>(&state.web_client, state.token.clone().unwrap_or_default(), format!("{}{}", state.gitlab_endpoint, "/groups")).await {
+        //         let data = GitlabData::Groups(groups.clone());
+        //         if let Err(e) = send(data, client_ref.clone(), state.registration_id.clone(), GROUPS_QUEUE_NAME.to_string()){
+        //             error!("{e}");
+        //             todo!();
+        //         }
+        //         for group in groups {
+        //             if let Some(users) = get_all_elements::<User>(&state.web_client, state.token.clone().unwrap_or_default(), format!("{}{}{}{}", state.gitlab_endpoint, "/groups/" , group.id, "/members")).await {
+        //                 let data = GitlabData::GroupMembers(ResourceLink {
+        //                     resource_id: group.id,
+        //                     resource_vec: users
+        //                 });
+        //                 if let Err(e) = send(data, client_ref.clone(), state.registration_id.clone(), GROUPS_QUEUE_NAME.to_string()){
+        //                     error!("{e}");
+        //                     todo!()
+        //                 }
                         
-                    } 
-                    if let Some(runners) = get_all_elements::<Runner>(&state.web_client, state.token.clone().unwrap_or_default(), format!("{}{}{}{}", state.gitlab_endpoint, "/groups/", group.id, "/runners")).await {
-                        let data = GitlabData::GroupRunners(ResourceLink {
-                            resource_id: group.id,
-                            resource_vec: runners
-                        });
-                        if let Err(e) = send(data, client_ref.clone(), state.registration_id.clone(), GROUPS_QUEUE_NAME.to_string()){
-                            error!("{e}");
-                            todo!()
-                        }
+        //             } 
+        //             if let Some(runners) = get_all_elements::<Runner>(&state.web_client, state.token.clone().unwrap_or_default(), format!("{}{}{}{}", state.gitlab_endpoint, "/groups/", group.id, "/runners")).await {
+        //                 let data = GitlabData::GroupRunners(ResourceLink {
+        //                     resource_id: group.id,
+        //                     resource_vec: runners
+        //                 });
+        //                 if let Err(e) = send(data, client_ref.clone(), state.registration_id.clone(), GROUPS_QUEUE_NAME.to_string()){
+        //                     error!("{e}");
+        //                     todo!()
+        //                 }
                         
-                    }
-                    if let Some(projects) = get_all_elements::<Project>(&state.web_client, state.token.clone().unwrap_or_default(), format!("{}{}{}{}", state.gitlab_endpoint, "/groups/", group.id, "/projects")).await {
-                        let data = GitlabData::GroupProjects(ResourceLink {
-                            resource_id: group.id,
-                            resource_vec: projects
-                        });
-                        if let Err(e) = send(data, client_ref.clone(), state.registration_id.clone(), GROUPS_QUEUE_NAME.to_string()){
-                            error!("{e}");
-                            todo!()
-                        }
+        //             }
+        //             if let Some(projects) = get_all_elements::<Project>(&state.web_client, state.token.clone().unwrap_or_default(), format!("{}{}{}{}", state.gitlab_endpoint, "/groups/", group.id, "/projects")).await {
+        //                 let data = GitlabData::GroupProjects(ResourceLink {
+        //                     resource_id: group.id,
+        //                     resource_vec: projects
+        //                 });
+        //                 if let Err(e) = send(data, client_ref.clone(), state.registration_id.clone(), GROUPS_QUEUE_NAME.to_string()){
+        //                     error!("{e}");
+        //                     todo!()
+        //                 }
  
-                    }
+        //             }
 
-                }
-            }
-        }
+        //         }
+        //     }
+        // }
         
-        myself.stop(Some("FINISHED".to_string()));
+        // myself.stop(Some("FINISHED".to_string()));
         
         Ok(())
     }

@@ -123,7 +123,7 @@
         });
 
         # get certificates for mtls
-        tlsCerts = pkgs.callPackage ../scripts/gen-certs.nix { inherit pkgs; };
+        tlsCerts = pkgs.callPackage ../flake/gen-certs.nix { inherit pkgs; };
 
         ### set up environments
         

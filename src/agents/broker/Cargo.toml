@@ -18,10 +18,7 @@ tokio-util = "0.7.13"
 # REFERENCE: https://docs.rs/rustls/latest/rustls/index.html#crate-features
 rustls = { version = "0.23.20", features = ["aws_lc_rs"]}
 tokio-rustls = "0.26.1"
-#TODO: Use the workspace hack to help centralize our dependencies
-# At the moment, enabling it prevents the listener manager from starting
-# I believe it is because the workspace-hack Cargo.toml tries to use the "ring" feature of rustls
-# Which we do not need presntly, by default, it uses the aws-lc_rs crate
+polar = { path = "../lib" }
 workspace-hack = { version = "0.1", path = "../workspace-hack" }
 
 [[bin]]

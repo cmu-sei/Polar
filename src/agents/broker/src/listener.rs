@@ -260,7 +260,6 @@ impl Actor for Listener {
 
                             if let Ok(msg) = serde_json::from_str::<ClientMessage>(&buf) {
                                 match msg {
-                                    ClientMessage::PingMessage => debug!("PING"),
                                     _ => {
                                       //convert datatype to broker_meessage, fields will be populated during message handling
                                       let converted_msg = BrokerMessage::from_client_message(msg, id.clone(), None);

@@ -5,6 +5,10 @@ edition.workspace = true
 
 [dependencies]
 workspace-hack = { version = "0.1", path = "../workspace-hack" }
+# gitlab-queries = { path = "../gitlab/query"}
 tracing = "0.1.41"
 tracing-glog = "0.4.0"
 tracing-subscriber = { version ="0.3.19", features=["std", "env-filter"]}
+serde = {version = "1", features = ["derive"]}
+# rkyv = "0.8.10"
+ractor = { version = "0.14.7", features = ["async-trait"] }

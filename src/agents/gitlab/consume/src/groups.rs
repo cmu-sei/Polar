@@ -66,58 +66,58 @@ impl Actor for GitlabGroupConsumer {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
 
-        match message {
-            ConsumerMessage::GitlabData(data_type) => {
-                match state.graph.start_txn().await {
-                    Ok(transaction) => {
-                        match data_type {
-                            GitlabData::Groups(vec) => {
-                                for g in vec as Vec<UserGroup> {
-                                    let query = format!("MERGE (n: GitlabGroupGroup {{group_id: \"{}\", name: \"{}\", created_at: \"{}\" , visibility: \"{}\"}}) return n ", g.id, g.full_name, g.created_at, g.visibility);
-                                    run_query(&transaction, query).await;
-                                }
-                            },
-                            GitlabData::GroupMembers(link) => {
-                                for member in link.resource_vec as Vec<User> {
-                                    let query = format!("OPTIONAL MATCH (n:GitlabGroup {{user_id: \"{}\"}}) WITH n WHERE n IS NULL CREATE (u:GitlabGroup {{user_id: \"{}\", username: '{}', state: '{}'}} )",
-                                    member.id, member.id, member.username, member.state);
-                                    run_query(&transaction, query).await;
-                                    let query = format!(" MATCH (g:GitlabGroupGroup) WHERE g.group_id = '{}' with g MATCH (u:GitlabGroup) WHERE u.user_id = '{}' with g, u MERGE (u)-[:inGroup]->(g) ", link.resource_id, member.id);
-                                    run_query(&transaction, query).await;
-                                }
-                            },
-                            GitlabData::GroupRunners(link) => {
-                                for runner in link.resource_vec as Vec<Runner> {
-                                    let query = format!("OPTIONAL MATCH (n:GitlabRunner {{runner_id: \"{}\"}}) WITH n WHERE n IS NULL CREATE (r:GitlabRunner {{runner_id: \"{}\", runner_type: '{}', ip_address: '{}'}} )",
-                                    runner.id, runner.id, runner.runner_type, runner.ip_address.unwrap_or_default());
-                                    run_query(&transaction, query).await;
-                                    let query = format!("MATCH (n:GitlabGroupGroup) WHERE n.group_id = '{}' with n MATCH (r:GitlabRunner) WHERE r.runner_id = '{}' with n, r MERGE (r)-[:inGroup]->(n)", link.resource_id, runner.id);
-                                    run_query(&transaction, query).await;
-                                }
-                            },
-                            GitlabData::GroupProjects(link) => {
-                                for project in link.resource_vec as Vec<Project> {
-                                    let query = format!("OPTIONAL MATCH (n:GitlabProject {{project_id: '{}'}}) WITH n WHERE n IS NULL CREATE (p:GitlabProject {{project_id: '{}', name: '{}', last_activity_at: '{}'}} )",
-                                    project.id, project.id, project.name, project.last_activity_at);
-                                    run_query(&transaction, query).await;
-                                    let query = format!("MATCH (n:GitlabGroupGroup) WHERE n.group_id = '{}' with n MATCH (p:GitlabProject) WHERE p.project_id = '{}' with n, p MERGE (p)-[:inGroup]->(n)", link.resource_id, project.id);
-                                    run_query(&transaction, query).await;
-                                }
-                            }
-                            _ => todo!()
-                        }
+        // match message {
+        //     ConsumerMessage::GitlabData(data_type) => {
+        //         match state.graph.start_txn().await {
+        //             Ok(transaction) => {
+        //                 match data_type {
+        //                     GitlabData::Groups(vec) => {
+        //                         for g in vec as Vec<UserGroup> {
+        //                             let query = format!("MERGE (n: GitlabGroupGroup {{group_id: \"{}\", name: \"{}\", created_at: \"{}\" , visibility: \"{}\"}}) return n ", g.id, g.full_name, g.created_at, g.visibility);
+        //                             run_query(&transaction, query).await;
+        //                         }
+        //                     },
+        //                     GitlabData::GroupMembers(link) => {
+        //                         for member in link.resource_vec as Vec<User> {
+        //                             let query = format!("OPTIONAL MATCH (n:GitlabGroup {{user_id: \"{}\"}}) WITH n WHERE n IS NULL CREATE (u:GitlabGroup {{user_id: \"{}\", username: '{}', state: '{}'}} )",
+        //                             member.id, member.id, member.username, member.state);
+        //                             run_query(&transaction, query).await;
+        //                             let query = format!(" MATCH (g:GitlabGroupGroup) WHERE g.group_id = '{}' with g MATCH (u:GitlabGroup) WHERE u.user_id = '{}' with g, u MERGE (u)-[:inGroup]->(g) ", link.resource_id, member.id);
+        //                             run_query(&transaction, query).await;
+        //                         }
+        //                     },
+        //                     GitlabData::GroupRunners(link) => {
+        //                         for runner in link.resource_vec as Vec<Runner> {
+        //                             let query = format!("OPTIONAL MATCH (n:GitlabRunner {{runner_id: \"{}\"}}) WITH n WHERE n IS NULL CREATE (r:GitlabRunner {{runner_id: \"{}\", runner_type: '{}', ip_address: '{}'}} )",
+        //                             runner.id, runner.id, runner.runner_type, runner.ip_address.unwrap_or_default());
+        //                             run_query(&transaction, query).await;
+        //                             let query = format!("MATCH (n:GitlabGroupGroup) WHERE n.group_id = '{}' with n MATCH (r:GitlabRunner) WHERE r.runner_id = '{}' with n, r MERGE (r)-[:inGroup]->(n)", link.resource_id, runner.id);
+        //                             run_query(&transaction, query).await;
+        //                         }
+        //                     },
+        //                     GitlabData::GroupProjects(link) => {
+        //                         for project in link.resource_vec as Vec<Project> {
+        //                             let query = format!("OPTIONAL MATCH (n:GitlabProject {{project_id: '{}'}}) WITH n WHERE n IS NULL CREATE (p:GitlabProject {{project_id: '{}', name: '{}', last_activity_at: '{}'}} )",
+        //                             project.id, project.id, project.name, project.last_activity_at);
+        //                             run_query(&transaction, query).await;
+        //                             let query = format!("MATCH (n:GitlabGroupGroup) WHERE n.group_id = '{}' with n MATCH (p:GitlabProject) WHERE p.project_id = '{}' with n, p MERGE (p)-[:inGroup]->(n)", link.resource_id, project.id);
+        //                             run_query(&transaction, query).await;
+        //                         }
+        //                     }
+        //                     _ => todo!()
+        //                 }
 
-                        if let Err(e) = transaction.commit().await {
-                            let err_msg = format!("Error committing transaction to graph: {e}");
-                            error!("{err_msg}");
-                            todo!("What to do if we fail to commit queries?");
-                        }
-                    }
-                    Err(e) => todo!()
-                }
-            },
-            _ => todo!("Gitlab consumer shouldn't get anything but gitlab data")
-        }
+        //                 if let Err(e) = transaction.commit().await {
+        //                     let err_msg = format!("Error committing transaction to graph: {e}");
+        //                     error!("{err_msg}");
+        //                     todo!("What to do if we fail to commit queries?");
+        //                 }
+        //             }
+        //             Err(e) => todo!()
+        //         }
+        //     },
+        //     _ => todo!("Gitlab consumer shouldn't get anything but gitlab data")
+        // }
         Ok(())
     }
 }

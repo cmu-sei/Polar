@@ -318,8 +318,9 @@ impl Actor for SessionAgent {
                     }
                     
                 } else {
-                    warn!("{}", format!("{PUBLISH_REQ_FAILED_TXT}: {CLIENT_NOT_FOUND_TXT}"));
-                    if let Err(e) = reply.send(Err(payload)) {
+                    let err_msg = format!("{PUBLISH_REQ_FAILED_TXT}: {CLIENT_NOT_FOUND_TXT}");
+                    warn!("{err_msg}");
+                    if let Err(e) = reply.send(Err(err_msg)) {
                         warn!("{}", format!("{PUBLISH_REQ_FAILED_TXT}: {CLIENT_NOT_FOUND_TXT}: {e}"))
                     }
                 }

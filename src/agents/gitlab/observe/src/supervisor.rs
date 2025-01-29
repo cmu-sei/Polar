@@ -13,9 +13,6 @@ use ractor::ActorRef;
 use ractor::SupervisionEvent;
 use cassini::client::*;
 
-use crate::groups::GitlabGroupObserver;
-use crate::projects::GitlabProjectObserver;
-use crate::runners::GitlabRunnerObserver;
 use crate::users::GitlabUserObserver;
 use crate::GitlabObserverArgs;
 use crate::BROKER_CLIENT_NAME;

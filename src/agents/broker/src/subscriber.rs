@@ -1,4 +1,5 @@
 use std::collections::{HashMap, VecDeque};
+use std::io::Read;
 use ractor::rpc::{call, CallResult};
 use ractor::{async_trait, registry::where_is, Actor, ActorProcessingErr, ActorRef, SupervisionEvent};
 use tracing::{debug, error, info, warn};
@@ -185,7 +186,7 @@ pub struct SubscriberAgent;
 pub struct SubscriberAgentState {
     registration_id: String,
     topic: String,
-    dead_letter_queue: VecDeque<String>,
+    dead_letter_queue: VecDeque<Vec<u8>>,
 }
 
 #[async_trait]
@@ -237,7 +238,7 @@ impl Actor for SubscriberAgent {
                             while let Some(msg) = &state.dead_letter_queue.pop_front() {
                                 match call(&session,
                                     |reply| {
-                                        BrokerMessage::PushMessage { reply, payload: msg.to_string(), topic: state.topic.clone()}
+                                        BrokerMessage::PushMessage { reply, payload: msg.clone().to_vec(), topic: state.topic.clone()}
                                     }, None)
                                 .await
                                 .expect("Expected to forward message to subscriber") {
@@ -245,7 +246,7 @@ impl Actor for SubscriberAgent {
                                         if let Err(message) = result {
                                             //session couldn't talk to listener, add message to DLQ
                                             warn!("{REGISTRATION_REQ_FAILED_TXT} Session not available.");
-                                            state.dead_letter_queue.push_back(message);
+                                            state.dead_letter_queue.push_back(msg.clone().to_vec());
                                             debug!("Subscriber: {myself:?} queue has {0} message(s) waiting", state.dead_letter_queue.len());
                                         }
                                     },

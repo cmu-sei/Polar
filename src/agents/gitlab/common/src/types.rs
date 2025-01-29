@@ -27,21 +27,25 @@ use serde::Deserialize;
 use serde_json::Value;
 use gitlab_queries::UserCoreConnection;
 
-#[derive (Serialize, Deserialize, Debug)]
+use rkyv::{Serialize as RSerialize, Deserialize as RDeserialize, Archive};
+
+/// This enum mostly serves as a way to inform the deserializer what datatype to map the bytes into.
+/// The underlying byte vector contains a message meant for some consumer on a given topic
+#[derive (RSerialize, RDeserialize, Archive, Debug)]
 pub enum GitlabData {
-    Users(Vec<UserCore>),
-    Projects(Vec<Project>),
-    Groups(Vec<UserGroup>),
-    ProjectUsers(ResourceLink<User>),
-    ProjectRunners(ResourceLink<Runner>),
-    GroupMembers(ResourceLink<User>),
-    GroupRunners(ResourceLink<Runner>),
-    GroupProjects(ResourceLink<Project>),
-    Runners(Vec<Runner>),
-    RunnerJob((u32, Job)),
-    Jobs(Vec<Job>),
-    Pipelines(Vec<Pipeline>),
-    PipelineJobs(ResourceLink<Job>)
+    Users(Vec<u8>),
+    // Projects(Vec<Project>),
+    // Groups(Vec<UserGroup>),
+    // ProjectUsers(ResourceLink<User>),
+    // ProjectRunners(ResourceLink<Runner>),
+    // GroupMembers(ResourceLink<User>),
+    // GroupRunners(ResourceLink<Runner>),
+    // GroupProjects(ResourceLink<Project>),
+    // Runners(Vec<Runner>),
+    // RunnerJob((u32, Job)),
+    // Jobs(Vec<Job>),
+    // Pipelines(Vec<Pipeline>),
+    // PipelineJobs(ResourceLink<Job>)
 }
 /// Generic type of resource wrapper for linking a resource to a group of items,
 /// i.e. Groups to their members, projects to their users, runners, groups, etc.

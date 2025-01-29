@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use ractor::registry::where_is;
 use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef, RpcReplyPort};
 use rustls::client::WebPkiServerVerifier;
 use rustls::pki_types::pem::PemObject;
@@ -110,8 +111,10 @@ impl Actor for TcpClientActor {
     
                                 while let Ok(bytes) = buf_reader.read_line(&mut buf).await {                
                                     if bytes == 0 { () } else {
+
+                                        //TODO: Do not deserailize here, send message containing bytes to "Serializer" actor to deserialize message
+                                        // The serializer should also forward the message to dispatch
                                         if let Ok(msg) = serde_json::from_slice::<ClientMessage>(buf.as_bytes()) {
-                                            debug!("recieved: {msg:?}");
                                             match msg {
                                                 ClientMessage::RegistrationResponse { registration_id, success, error } => {
                                                     if success {
@@ -126,8 +129,9 @@ impl Actor for TcpClientActor {
                                                 ClientMessage::PublishResponse { topic, payload, result } => {
                                                     //new message on topic
                                                     if result.is_ok() {
-                                                        info!("New message on topic {topic}: {payload}");
-                                                        //TODO: Forward message to some consumer
+                                                        info!("Recieved new message on topic {topic}: {payload:?}");
+                                                        //TOOD: Forward to some deserializer/data processing layer that'll route the message where it needs to go
+                                                        
                                                     } else {
                                                         warn!("Failed to publish message to topic: {topic}");
                                                     }
