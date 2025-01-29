@@ -1,9 +1,10 @@
 use std::time::Duration;
 
-use log::debug;
-use log::error;
-use log::info;
-use log::warn;
+use common::dispatch::MessageDispatcher;
+use tracing::debug;
+use tracing::error;
+use tracing::info;
+use tracing::warn;
 use ractor::rpc::call;
 use ractor::rpc::CallResult;
 use ractor::Actor;
@@ -52,7 +53,8 @@ impl Actor for ConsumerSupervisor {
         debug!("{myself:?} starting");
         
         let state = ConsumerSupervisorState { max_registration_attempts: 5 };
-
+        // start dispatcher
+        let _ = Actor::spawn_linked(Some("DISPATCH".to_string()), MessageDispatcher, (), myself.clone().into()).await.expect("Expected to start dispatcher");
         match Actor::spawn_linked(Some(BROKER_CLIENT_NAME.to_string()), TcpClientActor, TcpClientArgs {
             bind_addr: args.broker_addr.clone(),
             ca_cert_file: args.ca_cert_file,
@@ -96,7 +98,7 @@ impl Actor for ConsumerSupervisor {
                 myself.stop(None);
             }
         }
-
+        
         Ok(state)
     }
 

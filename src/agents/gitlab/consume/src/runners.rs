@@ -22,13 +22,13 @@
 */
 
 use common::types::GitlabData;
-use crate::{subscribe_to_topic, ConsumerMessage, GitlabConsumerArgs, GitlabConsumerState};
+use crate::{subscribe_to_topic, GitlabConsumerArgs, GitlabConsumerState};
 // use helpers::helpers::{get_neo_config, run_query};
 use crate::run_query;
 
 use common::{RUNNERS_QUEUE_NAME, USERS_QUEUE_NAME};
 
-use log::{debug, error, info};
+use tracing::{debug, error, info};
 use ractor::{async_trait, registry::where_is, Actor, ActorProcessingErr, ActorRef};
 
 
@@ -36,7 +36,7 @@ pub struct GitlabRunnerConsumer;
 
 #[async_trait]
 impl Actor for GitlabRunnerConsumer {
-    type Msg = ConsumerMessage;
+    type Msg = GitlabData;
     type State = GitlabConsumerState;
     type Arguments = GitlabConsumerArgs;
 
@@ -71,40 +71,40 @@ impl Actor for GitlabRunnerConsumer {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         //TODO: Implement message type for consumers to handle new messages
-        match message {
-            ConsumerMessage::GitlabData(data_type) => {
-                match state.graph.start_txn().await {
-                    Ok(transaction) => {
-                        match data_type {
-                            GitlabData::Runners(vec) => {
-                                for runner in vec{
-                                    let query = format!("MERGE (n:GitlabRunner {{runner_id: '{}', ip_address: '{}', name: '{}' , runner_type: '{}', status: '{}', is_shared: '{}'}}) return n",
-                                    runner.id, runner.ip_address.unwrap_or_default(), runner.name.unwrap_or_default(), 
-                                    runner.runner_type, runner.status, runner.is_shared.unwrap_or(false));
-                                    run_query(&transaction, query).await;
-                                }
-                            },
-                            GitlabData::RunnerJob((runner_id, job)) =>{
-                                let query = format!("MATCH (r:GitlabRunner) where r.runner_id = '{}' with r MATCH (j:GitlabJob) where j.job_id = '{}' with j,r MERGE (r)-[:hasJob]->(j)", runner_id, job.id);
-                                run_query(&transaction, query).await;
-                                let query = format!("MATCH (p:GitlabPipeline) WHERE p.pipeline_id = '{}' with p MATCH (j:GitlabJob) WHERE j.job_id = '{}' with p,j MERGE (j)-[:inPipeline]->(p)", job.pipeline.id, job.id);
-                                run_query(&transaction, query).await;
-                            },
-                            _ => { todo!() }
-                        }
-                        if let Err(e) = transaction.commit().await {
-                            let err_msg = format!("Error committing transaction to graph: {e}");
-                            error!("{err_msg}");
-                            todo!("What to do if we fail to commit queries?");
-                        }
-                    }
-                    Err(e) => todo!()
-                }
+        // match message {
+        //     ConsumerMessage::GitlabData(data_type) => {
+        //         match state.graph.start_txn().await {
+        //             Ok(transaction) => {
+        //                 match data_type {
+        //                     GitlabData::Runners(vec) => {
+        //                         for runner in vec{
+        //                             let query = format!("MERGE (n:GitlabRunner {{runner_id: '{}', ip_address: '{}', name: '{}' , runner_type: '{}', status: '{}', is_shared: '{}'}}) return n",
+        //                             runner.id, runner.ip_address.unwrap_or_default(), runner.name.unwrap_or_default(), 
+        //                             runner.runner_type, runner.status, runner.is_shared.unwrap_or(false));
+        //                             run_query(&transaction, query).await;
+        //                         }
+        //                     },
+        //                     GitlabData::RunnerJob((runner_id, job)) =>{
+        //                         let query = format!("MATCH (r:GitlabRunner) where r.runner_id = '{}' with r MATCH (j:GitlabJob) where j.job_id = '{}' with j,r MERGE (r)-[:hasJob]->(j)", runner_id, job.id);
+        //                         run_query(&transaction, query).await;
+        //                         let query = format!("MATCH (p:GitlabPipeline) WHERE p.pipeline_id = '{}' with p MATCH (j:GitlabJob) WHERE j.job_id = '{}' with p,j MERGE (j)-[:inPipeline]->(p)", job.pipeline.id, job.id);
+        //                         run_query(&transaction, query).await;
+        //                     },
+        //                     _ => { todo!() }
+        //                 }
+        //                 if let Err(e) = transaction.commit().await {
+        //                     let err_msg = format!("Error committing transaction to graph: {e}");
+        //                     error!("{err_msg}");
+        //                     todo!("What to do if we fail to commit queries?");
+        //                 }
+        //             }
+        //             Err(e) => todo!()
+        //         }
                 
-            },
+        //     },
 
-            _ => todo!("Gitlab consumer shouldn't get anything but gitlab data")
-        }
+        //     _ => todo!("Gitlab consumer shouldn't get anything but gitlab data")
+        // }
         Ok(())
     }
 }

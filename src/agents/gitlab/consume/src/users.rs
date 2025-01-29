@@ -22,23 +22,21 @@
 */
 
 use common::types::GitlabData;
-use crate::{subscribe_to_topic, ConsumerMessage, GitlabConsumerArgs, GitlabConsumerState};
+use crate::{subscribe_to_topic, GitlabConsumerArgs, GitlabConsumerState};
 // use helpers::helpers::{get_neo_config, run_query};
 use crate::run_query;
 
 use common::{connect_to_rabbitmq, GITLAB_EXCHANGE_STR, USERS_QUEUE_NAME, USERS_ROUTING_KEY};
 
-use log::{debug, error, info};
+use tracing::{debug, error, info};
 use ractor::{async_trait, registry::where_is, Actor, ActorProcessingErr, ActorRef};
-
-
 
 
 pub struct GitlabUserConsumer;
 
 #[async_trait]
 impl Actor for GitlabUserConsumer {
-    type Msg = ConsumerMessage;
+    type Msg = GitlabData;
     type State = GitlabConsumerState;
     type Arguments = GitlabConsumerArgs;
 
@@ -74,34 +72,29 @@ impl Actor for GitlabUserConsumer {
     ) -> Result<(), ActorProcessingErr> {
         //TODO: Implement message type for consumers to handle new messages
         match message {
-            ConsumerMessage::GitlabData(data_type) => {
-                match data_type {
-                    GitlabData::Users(users) => {
-                        // build query from scratch
-                        match state.graph.start_txn().await {
-                            Ok(transaction)  => {
-                                for user in users {
-                                    //create new nodes
-                                    let query = format!("MERGE (n:GitlabUser {{username: \"{}\", user_id: \"{}\" , created_at: \"{}\" , state: \"{}\"}}) return n", user.username.unwrap_or_default(), user.id.inner(), user.created_at.unwrap_or_default(), user.state);            
-                                    run_query(&transaction, query).await;
-                                }
+            GitlabData::Users(users) => {
+                // build query from scratch
+                match state.graph.start_txn().await {
+                    Ok(transaction)  => {
+                        for user in users {
+                            //create new nodes
+                            let query = format!("MERGE (n:GitlabUser {{username: \"{}\", user_id: \"{}\" , created_at: \"{}\" , state: \"{}\"}}) return n", user.username.unwrap_or_default(), user.id, user.created_at.unwrap_or_default(), user.state);            
+                            run_query(&transaction, query).await;
+                        }
 
-                                if let Err(e) = transaction.commit().await {
-                                    let err_msg = format!("Error committing transaction to graph: {e}");
-                                    error!("{err_msg}");
-                                    todo!("What to do if we fail to commit queries?");
-                                }
-                                info!("Committed transaction to database");
-                            }
-                            Err(e) => {
-                                error!("Could not open transaction with graph! {e}");
-                                todo!("What to do when we can't access the graph")
-                            }
-                        } 
+                        if let Err(e) = transaction.commit().await {
+                            let err_msg = format!("Error committing transaction to graph: {e}");
+                            error!("{err_msg}");
+                            todo!("What to do if we fail to commit queries?");
+                        }
+                        info!("Committed transaction to database");
                     }
-                    _ => todo!()
-                }
-            },
+                    Err(e) => {
+                        error!("Could not open transaction with graph! {e}");
+                        todo!("What to do when we can't access the graph")
+                    }
+                } 
+            }
             _ => todo!("Gitlab consumer shouldn't get anything but gitlab data")
         }
         Ok(())

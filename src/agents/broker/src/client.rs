@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use polar::DispatcherMessage;
 use ractor::registry::where_is;
 use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef, RpcReplyPort};
 use rustls::client::WebPkiServerVerifier;
@@ -129,9 +130,18 @@ impl Actor for TcpClientActor {
                                                 ClientMessage::PublishResponse { topic, payload, result } => {
                                                     //new message on topic
                                                     if result.is_ok() {
-                                                        info!("Recieved new message on topic {topic}: {payload:?}");
-                                                        //TOOD: Forward to some deserializer/data processing layer that'll route the message where it needs to go
-                                                        
+                                                        // debug!("Recieved new message on topic {topic}: {payload:?}");
+                                                        //TODO: Forward to some deserializer/data processing layer that'll route the message where it needs to go
+                                                        //try to find dispatcher
+                                                        if let Some(dispatcher) = where_is("DISPATCH".to_string()) {
+                                                            if let Err(e) = dispatcher.send_message(DispatcherMessage::Dispatch { message: payload, topic }) {
+                                                                warn!("Failed to forward new message to agent");
+                                                            }
+                                                        }
+                                                        else {
+                                                            error!("Failed to find dispatcher")
+                                                        }
+
                                                     } else {
                                                         warn!("Failed to publish message to topic: {topic}");
                                                     }

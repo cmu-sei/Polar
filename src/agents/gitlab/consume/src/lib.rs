@@ -27,7 +27,7 @@ use std::error::Error;
 use cassini::{client::TcpClientMessage, ClientMessage};
 //TODO: Move to global consumer common lib
 use common::{read_from_env, types::GitlabData};
-use log::{debug, error, info};
+use tracing::{debug, error, info};
 use neo4rs::{Config, ConfigBuilder, Query, Txn};
 use ractor::{registry::where_is, ActorProcessingErr, MessagingErr};
 use url::Url;
@@ -40,7 +40,7 @@ pub mod groups;
 pub mod runners;
 
 pub const BROKER_CLIENT_NAME: &str = "GITLAB_CONSUMER_CLIENT";
-pub const GITLAB_USER_CONSUMER: &str = "gitlab:observer:users";
+pub const GITLAB_USER_CONSUMER: &str = "users";
 //TODO: Give consumer state info about neo4j, and eventually, a graph adapter to work with
 pub struct GitlabConsumerState {
     pub registration_id: String,
@@ -49,12 +49,6 @@ pub struct GitlabConsumerState {
 #[derive(Clone, Debug)]
 pub struct GitlabConsumerArgs {
     pub registration_id: String
-}
-
-/// Evaluating this for extensibility, we may have multiple consumers from different services, wrapping the enumerated data may
-/// assist with extensibility
-pub enum ConsumerMessage {
-    GitlabData(GitlabData)
 }
 
 ///

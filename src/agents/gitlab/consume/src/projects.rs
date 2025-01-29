@@ -24,15 +24,15 @@
 
 use common::PROJECTS_QUEUE_NAME;
 use common::types::{GitlabData, User, Runner, Project};
-use log::{debug, error, info};
+use tracing::{debug, error, info};
 use ractor::{async_trait, registry::where_is, Actor, ActorProcessingErr, ActorRef};
-use crate::{run_query, subscribe_to_topic, ConsumerMessage, GitlabConsumerArgs, GitlabConsumerState, BROKER_CLIENT_NAME};
+use crate::{run_query, subscribe_to_topic, GitlabConsumerArgs, GitlabConsumerState, BROKER_CLIENT_NAME};
 
 pub struct GitlabProjectConsumer;
 
 #[async_trait]
 impl Actor for GitlabProjectConsumer {
-    type Msg = ConsumerMessage;
+    type Msg = GitlabData;
     type State = GitlabConsumerState;
     type Arguments = GitlabConsumerArgs;
 
@@ -67,46 +67,46 @@ impl Actor for GitlabProjectConsumer {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         //TODO: Implement message type for consumers to handle new messages
-        match message {
-            ConsumerMessage::GitlabData(data_type) => {
-                match state.graph.start_txn().await {
-                    Ok(transaction) => {
-                        match data_type {
-                            GitlabData::Projects(vec) => {
-                                for p in vec as Vec<Project> {
-                                    let query = format!("MERGE (n: GitlabProject {{project_id: \"{}\", name: \"{}\", creator_id: \"{}\"}}) return n ", p.id, p.name, p.creator_id.unwrap());
-                                    run_query(&transaction, query).await;
-                                }
-                            },
-                            GitlabData::ProjectUsers(link) => {
-                                //add relationship for every user given
-                                for user in link.resource_vec as Vec<User>  {
-                                    let query = format!("MATCH (p:GitlabProject) WHERE p.project_id = '{}' with p MATCH (u:GitlabProject) WHERE u.user_id = '{}' with p, u MERGE (u)-[:onProject]->(p)", link.resource_id, user.id);
-                                    run_query(&transaction, query).await; 
-                                }
-                            },
-                            GitlabData::ProjectRunners(link) => {
-                                for runner in link.resource_vec as Vec<Runner> {
-                                    let query = format!("MATCH (n:GitlabProject) WHERE n.project_id = '{}' with n MATCH (r:GitlabRunner) WHERE r.runner_id = '{}' with n, r MERGE (r)-[:onProject]->(n)", link.resource_id, runner.id);
-                                    run_query(&transaction, query).await;
-                                }
-                            },
-                            _ => todo!()  
-                        }
-                        if let Err(e) = transaction.commit().await {
-                            let err_msg = format!("Error committing transaction to graph: {e}");
-                            error!("{err_msg}");
-                            todo!("What to do if we fail to commit queries?");
-                        }
-                    },
-                    Err(e) => {
-                        error!("Could not open transaction with graph! {e}");
-                        todo!("Couldn't open transaction, What to do if we fail to commit queries?");
-                    }
-                }                
-            },
-            _ => todo!("Gitlab consumer shouldn't get anything but gitlab data")
-        }
+        // match message {
+        //     ConsumerMessage::GitlabData(data_type) => {
+        //         match state.graph.start_txn().await {
+        //             Ok(transaction) => {
+        //                 match data_type {
+        //                     GitlabData::Projects(vec) => {
+        //                         for p in vec as Vec<Project> {
+        //                             let query = format!("MERGE (n: GitlabProject {{project_id: \"{}\", name: \"{}\", creator_id: \"{}\"}}) return n ", p.id, p.name, p.creator_id.unwrap());
+        //                             run_query(&transaction, query).await;
+        //                         }
+        //                     },
+        //                     GitlabData::ProjectUsers(link) => {
+        //                         //add relationship for every user given
+        //                         for user in link.resource_vec as Vec<User>  {
+        //                             let query = format!("MATCH (p:GitlabProject) WHERE p.project_id = '{}' with p MATCH (u:GitlabProject) WHERE u.user_id = '{}' with p, u MERGE (u)-[:onProject]->(p)", link.resource_id, user.id);
+        //                             run_query(&transaction, query).await; 
+        //                         }
+        //                     },
+        //                     GitlabData::ProjectRunners(link) => {
+        //                         for runner in link.resource_vec as Vec<Runner> {
+        //                             let query = format!("MATCH (n:GitlabProject) WHERE n.project_id = '{}' with n MATCH (r:GitlabRunner) WHERE r.runner_id = '{}' with n, r MERGE (r)-[:onProject]->(n)", link.resource_id, runner.id);
+        //                             run_query(&transaction, query).await;
+        //                         }
+        //                     },
+        //                     _ => todo!()  
+        //                 }
+        //                 if let Err(e) = transaction.commit().await {
+        //                     let err_msg = format!("Error committing transaction to graph: {e}");
+        //                     error!("{err_msg}");
+        //                     todo!("What to do if we fail to commit queries?");
+        //                 }
+        //             },
+        //             Err(e) => {
+        //                 error!("Could not open transaction with graph! {e}");
+        //                 todo!("Couldn't open transaction, What to do if we fail to commit queries?");
+        //             }
+        //         }                
+        //     },
+        //     _ => todo!("Gitlab consumer shouldn't get anything but gitlab data")
+        // }
         Ok(())
     }
 }

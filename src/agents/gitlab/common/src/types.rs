@@ -31,9 +31,9 @@ use rkyv::{Serialize as RSerialize, Deserialize as RDeserialize, Archive};
 
 /// This enum mostly serves as a way to inform the deserializer what datatype to map the bytes into.
 /// The underlying byte vector contains a message meant for some consumer on a given topic
-#[derive (RSerialize, RDeserialize, Archive, Debug)]
+#[derive (RSerialize, RDeserialize, Archive)]
 pub enum GitlabData {
-    Users(Vec<u8>),
+    Users(Vec<UserCore>),
     // Projects(Vec<Project>),
     // Groups(Vec<UserGroup>),
     // ProjectUsers(ResourceLink<User>),

@@ -25,6 +25,14 @@ use serde::{Deserialize, Serialize};
 //     // PipelineJobs(ResourceLink<Job>)
 // }
 
+pub enum DispatcherMessage {
+    Dispatch {
+        message: Vec<u8>,
+        topic: String
+    }
+    // Serialize()
+}
+
 pub fn init_logging() {
     let dir = tracing_subscriber::filter::Directive::from(tracing::Level::DEBUG);
 

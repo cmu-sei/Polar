@@ -157,7 +157,7 @@ impl Actor for GitlabUserObserver {
 
                                         match where_is(BROKER_CLIENT_NAME.to_string()) {
                                             Some(client) => {
-                                                let data = GitlabData::Users(byte_vec.to_vec());
+                                                let data = GitlabData::Users(read_users);
                                                 // Serializing is as easy as a single function call
                                                 let bytes = rkyv::to_bytes::<Error>(&data).unwrap();
                                                 

@@ -44,7 +44,7 @@ async fn main() -> Result<(), Box<dyn Error> > {
         ca_cert_file: ca_cert_file,
     };
 
-    let (supervisor, handle) = Actor::spawn(Some("GITLAB_OBSERVER_SUPERVISOR".to_string()), supervisor::ConsumerSupervisor ,args).await.expect("Expected to start observer agent");
+    let (supervisor, handle) = Actor::spawn(Some("GITLAB_CONSUMER_SUPERVISOR".to_string()), supervisor::ConsumerSupervisor ,args).await.expect("Expected to start observer agent");
     let _ = handle.await;
 
     Ok(())

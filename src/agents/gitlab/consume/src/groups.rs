@@ -21,9 +21,9 @@
    DM24-0470
 */
 use common::{types::{GitlabData, Project, Runner, User, UserGroup}, GROUPS_QUEUE_NAME};
-use crate::{get_neo_config, run_query, subscribe_to_topic, ConsumerMessage, GitlabConsumerArgs, GitlabConsumerState};
+use crate::{get_neo_config, run_query, subscribe_to_topic, GitlabConsumerArgs, GitlabConsumerState};
 use common::{connect_to_rabbitmq, GITLAB_EXCHANGE_STR, USERS_QUEUE_NAME, USERS_ROUTING_KEY};
-use log::{debug, error, info};
+use tracing::{debug, error, info};
 use ractor::{async_trait, registry::where_is, Actor, ActorProcessingErr, ActorRef};
 
 
@@ -31,7 +31,7 @@ pub struct GitlabGroupConsumer;
 
 #[async_trait]
 impl Actor for GitlabGroupConsumer {
-    type Msg = ConsumerMessage;
+    type Msg = GitlabData;
     type State = GitlabConsumerState;
     type Arguments = GitlabConsumerArgs;
 

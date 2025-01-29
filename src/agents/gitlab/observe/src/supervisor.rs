@@ -32,8 +32,8 @@ pub struct ObserverSupervisorArgs {
     pub ca_cert_file: String,
     pub gitlab_endpoint: String,
     pub gitlab_token: Option<String>,
-    
 }
+
 #[async_trait]
 impl Actor for ObserverSupervisor {
     type Msg = ();

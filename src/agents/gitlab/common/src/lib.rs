@@ -23,15 +23,15 @@ DM24-0470
 
 use std::{env, fs::{self,File}, io::{Read, Write}};
 use std::process;
-use ractor::ActorRef;
-use types::GitlabData;
+use tracing::{error, info};
 use url::Url;
 use lapin::{Connection,ConnectionProperties, Channel, BasicProperties, publisher_confirm::Confirmation, options::BasicPublishOptions};
 use tcp_stream::OwnedTLSConfig;
 use sysinfo::{System, SystemExt, ProcessRefreshKind, Pid};
-use log::{error, info};
 
 pub mod types;
+pub mod dispatch;
+
 
 ///TODO: Rewrite these constants to serve as actor names for the observers and consumers
 ///TODO: Assign a constant value to serve as topic names for the gitlab agent
