@@ -1,5 +1,5 @@
 use ractor::{ActorRef, RpcReplyPort};
-use serde::{Deserialize, Serialize};
+use rkyv::{Deserialize, Serialize, Archive};
 
 pub mod topic;
 pub mod listener;
@@ -135,8 +135,8 @@ pub enum BrokerMessage {
 
 ///External Messages for client comms
 /// These messages are serialized/deserialized to/from JSON
-#[derive(Serialize, Deserialize, Debug, Clone)]
-#[serde(tag = "type", content = "data")]
+#[derive(Serialize, Deserialize, Archive, Debug, Clone)]
+// #[serde(tag = "type", content = "data")]
 pub enum ClientMessage {
         RegistrationRequest {
             registration_id: Option<String>,
@@ -217,10 +217,6 @@ impl BrokerMessage {
                 }
             },
             ClientMessage::TimeoutMessage(registration_id) => BrokerMessage::TimeoutMessage { client_id, registration_id, error: None },
-            
-            // ClientMessage::PingMessage { client_id } => {
-            //     BrokerMessage::PingMessage { client_id }
-            // },
             // Handle unexpected messages
             _ => {
                 todo!()

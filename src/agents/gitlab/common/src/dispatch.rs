@@ -45,15 +45,11 @@ impl Actor for MessageDispatcher {
     ) -> Result<(), ActorProcessingErr> {
         match message {
             DispatcherMessage::Dispatch { message, topic } => {
-                //TODO: implement dispatch logic to determine what kind of message we got here, safe to assume whatever message comes in contains data for the gitlab agent, we can discard any message that doesn't invovle it
+                //TODO: implement dispatch logic to determine what kind of message we got here, 
+                // safe to assume whatever message comes in contains data for our agent, we can discard any message that don't conform to our schema
                 // Recall the naming convention for actors 
                 // service:role:topic
-                // whwere possible topics are users, projects, groups, etc. + config
-                // let parts: Vec<&str> = topic.split(':').collect();
-    
-                // let role = parts[1];
-                // let topic = parts[2];
-
+                // where possible topics are users, projects, groups, etc. + config
                 // Deserialize message data
                 info!("Received dispatch message");
 

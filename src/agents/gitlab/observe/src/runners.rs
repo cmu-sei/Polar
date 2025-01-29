@@ -23,7 +23,7 @@
 
 
 use cassini::{client::TcpClientMessage, ClientMessage};
-use common::{types::{GitlabData, Runner}, RUNNERS_QUEUE_NAME};
+use common::{types::{GitlabData, Runner}, RUNNERS_CONSUMER_TOPIC};
 
 use tracing::{debug, info, warn, error};
 use reqwest::Client;

@@ -30,7 +30,7 @@ use crate::{get_all_elements, GitlabObserverArgs, GitlabObserverState};
 use tracing::{debug, info, warn, error};
 use reqwest::Client;
 use serde_json::to_string;
-use common::{types::{GitlabData, Project, ResourceLink, Runner, User, UserGroup}, GROUPS_QUEUE_NAME, PROJECTS_QUEUE_NAME, RUNNERS_QUEUE_NAME, USERS_QUEUE_NAME};
+use common::{types::{GitlabData, Project, ResourceLink, Runner, User, UserGroup}, GROUPS_CONSUMER_TOPIC, PROJECTS_CONSUMER_TOPIC, RUNNERS_CONSUMER_TOPIC, USER_CONSUMER_TOPIC};
 
 
 use crate::BROKER_CLIENT_NAME;

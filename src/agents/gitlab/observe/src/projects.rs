@@ -22,7 +22,7 @@
 */
 
 use cassini::{client::TcpClientMessage, ClientMessage};
-use common::PROJECTS_QUEUE_NAME;
+use common::PROJECTS_CONSUMER_TOPIC;
 use tokio::time::interval;
 
 use crate::{get_all_elements, GitlabObserverArgs, GitlabObserverMessage, GitlabObserverState, BROKER_CLIENT_NAME};
@@ -36,8 +36,6 @@ use std::time::Duration;
 use std::{error::Error, fs::remove_file};
 use tracing::{debug, error, info, warn};
 
-
-const LOCK_FILE_PATH: &str = "/tmp/projects_observer.lock";
 
 pub struct GitlabProjectObserver;
 

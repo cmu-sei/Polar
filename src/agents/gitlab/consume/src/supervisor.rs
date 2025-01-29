@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use common::dispatch::MessageDispatcher;
+use common::USER_CONSUMER_TOPIC;
 use tracing::debug;
 use tracing::error;
 use tracing::info;
@@ -79,7 +80,7 @@ impl Actor for ConsumerSupervisor {
 
                             let args = GitlabConsumerArgs { registration_id };
                             
-                            if let Err(e) = Actor::spawn_linked(Some(GITLAB_USER_CONSUMER.to_string()), GitlabUserConsumer, args.clone(), myself.clone().into()).await { warn!( "failed to start users observer {e}") }
+                            if let Err(e) = Actor::spawn_linked(Some(USER_CONSUMER_TOPIC.to_string()), GitlabUserConsumer, args.clone(), myself.clone().into()).await { warn!( "failed to start users observer {e}") }
                                                     
                             break;
                         } else if attempts < state.max_registration_attempts {

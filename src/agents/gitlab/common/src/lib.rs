@@ -32,21 +32,11 @@ use sysinfo::{System, SystemExt, ProcessRefreshKind, Pid};
 pub mod types;
 pub mod dispatch;
 
+pub const PROJECTS_CONSUMER_TOPIC: &str = "gitlab:consumer:projects";
+pub const GROUPS_CONSUMER_TOPIC: &str = "gitlab:consumer:groups";
+pub const USER_CONSUMER_TOPIC: &str = "gitlab:consumer:users";
+pub const RUNNERS_CONSUMER_TOPIC: &str = "gitlab:consumer:runners";
 
-///TODO: Rewrite these constants to serve as actor names for the observers and consumers
-///TODO: Assign a constant value to serve as topic names for the gitlab agent
-pub const GITLAB_EXCHANGE_STR: &str = "gitlab_exchange";
-
-pub const PROJECTS_ROUTING_KEY: &str = "projects";
-pub const PROJECTS_QUEUE_NAME : &str = "gitlab_projects";
-
-pub const GROUPS_ROUTING_KEY: &str = "groups";
-pub const GROUPS_QUEUE_NAME: &str = "gitlab_groups";
-
-pub const USERS_QUEUE_NAME: &str = "users";
-pub const USERS_ROUTING_KEY: &str = "gitlab_users";
-
-pub const RUNNERS_QUEUE_NAME: &str = "runners";
 pub const RUNNERS_ROUTING_KEY: &str = "gitlab_runners";
 
 // Checks for the existence of a lock file at the given path. Creates lock file if not found.

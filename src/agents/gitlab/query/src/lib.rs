@@ -106,11 +106,3 @@ pub struct MultiUserQuery {
     pub users: Option<UserCoreConnection>
 }
 
-
-// #[derive(cynic::QueryFragment)]
-// #[cynic(schema = "gitlab", graphql_type = "Query", variables = "UserCoreQueryArguments")]
-// pub struct UserQuery {
-//     #[arguments(id: $id, username: $username)]
-//     user: Option<UserCore>
-// }
-

@@ -26,7 +26,7 @@ use crate::{subscribe_to_topic, GitlabConsumerArgs, GitlabConsumerState};
 // use helpers::helpers::{get_neo_config, run_query};
 use crate::run_query;
 
-use common::{connect_to_rabbitmq, GITLAB_EXCHANGE_STR, USERS_QUEUE_NAME, USERS_ROUTING_KEY};
+use common::{connect_to_rabbitmq, USER_CONSUMER_TOPIC};
 
 use tracing::{debug, error, info};
 use ractor::{async_trait, registry::where_is, Actor, ActorProcessingErr, ActorRef};
@@ -47,10 +47,10 @@ impl Actor for GitlabUserConsumer {
     ) -> Result<Self::State, ActorProcessingErr> {
         debug!("{myself:?} starting, connecting to broker");
         //subscribe to topic
-        match subscribe_to_topic(args.registration_id, USERS_QUEUE_NAME.to_string()).await {
+        match subscribe_to_topic(args.registration_id, USER_CONSUMER_TOPIC.to_string()).await {
             Ok(state) => Ok(state),
             Err(e) => {
-                let err_msg = format!("Error subscribing to topic \"{USERS_QUEUE_NAME}\" {e}");
+                let err_msg = format!("Error subscribing to topic \"{USER_CONSUMER_TOPIC}\" {e}");
                 Err(ActorProcessingErr::from(err_msg))
             }
         }

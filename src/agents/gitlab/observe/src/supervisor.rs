@@ -69,7 +69,7 @@ impl Actor for ObserverSupervisor {
             Ok((client, _)) => {
                 // Set up an interval
                 //TODO: make configurable
-                let mut interval = tokio::time::interval(Duration::from_secs(5));
+                let mut interval = tokio::time::interval(Duration::from_secs(3));
                 //wait until we get a session id to start clients, try some configured amount of times every few seconds
                 let mut attempts= 0; 
                 loop {

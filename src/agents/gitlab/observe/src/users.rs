@@ -28,7 +28,7 @@ use std::time::Duration;
 use crate::{GitlabObserverArgs, GitlabObserverMessage, GitlabObserverState, BROKER_CLIENT_NAME, PRIVATE_TOKEN_HEADER_STR};
 use cassini::client::TcpClientMessage;
 use cassini::ClientMessage;
-use common::USERS_QUEUE_NAME;
+use common::USER_CONSUMER_TOPIC;
 use cynic::{GraphQlResponse, Id, Operation, QueryFragment, QueryVariables};
 use ractor::concurrency::Interval;
 use ractor::rpc::{call, CallResult};
@@ -162,7 +162,7 @@ impl Actor for GitlabUserObserver {
                                                 let bytes = rkyv::to_bytes::<Error>(&data).unwrap();
                                                 
 
-                                                let msg = ClientMessage::PublishRequest { topic: USERS_QUEUE_NAME.to_string(), payload: bytes.to_vec(), registration_id: Some(state.registration_id.clone()) };
+                                                let msg = ClientMessage::PublishRequest { topic: USER_CONSUMER_TOPIC.to_string(), payload: bytes.to_vec(), registration_id: Some(state.registration_id.clone()) };
                                                 if let Err(e) = client.send_message(TcpClientMessage::Send(msg)) {
                                                     todo!()
                                                 }

@@ -15,7 +15,6 @@ publish = false
 
 ### BEGIN HAKARI SECTION
 [dependencies]
-chrono = { version = "0.4", features = ["rkyv-32", "serde"] }
 form_urlencoded = { version = "1" }
 futures-core = { version = "0.3" }
 futures-io = { version = "0.3" }
@@ -26,23 +25,20 @@ memchr = { version = "2" }
 num-traits = { version = "0.2", features = ["i128"] }
 once_cell = { version = "1" }
 percent-encoding = { version = "2" }
-ptr_meta = { version = "0.1", default-features = false, features = ["std"] }
 regex = { version = "1" }
 regex-automata = { version = "0.4", default-features = false, features = ["dfa-onepass", "hybrid", "meta", "nfa-backtrack", "perf-inline", "perf-literal", "unicode"] }
 regex-syntax = { version = "0.8" }
-rkyv = { version = "0.7", features = ["validation"] }
 rustls = { version = "0.23", features = ["ring"] }
 rustls-webpki = { version = "0.102", default-features = false, features = ["aws_lc_rs", "ring", "std"] }
-serde = { version = "1", features = ["derive"] }
 simdutf8 = { version = "0.1", default-features = false, features = ["std"] }
 smallvec = { version = "1", default-features = false, features = ["const_generics"] }
 tokio = { version = "1", features = ["full", "tracing"] }
 
 [build-dependencies]
 once_cell = { version = "1" }
-ptr_meta = { version = "0.1", default-features = false, features = ["std"] }
+proc-macro2 = { version = "1" }
+quote = { version = "1" }
 regex-syntax = { version = "0.8" }
-rkyv = { version = "0.7", features = ["validation"] }
 simdutf8 = { version = "0.1", default-features = false, features = ["std"] }
 syn-dff4ba8e3ae991db = { package = "syn", version = "1", features = ["extra-traits", "full"] }
 syn-f595c2ba2a3f28df = { package = "syn", version = "2", features = ["extra-traits", "fold", "full", "visit", "visit-mut"] }

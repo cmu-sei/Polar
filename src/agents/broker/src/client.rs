@@ -1,26 +1,27 @@
+use crate::{ArchivedClientMessage, ClientMessage};
 use std::sync::Arc;
 use polar::DispatcherMessage;
 use ractor::registry::where_is;
 use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef, RpcReplyPort};
+use rkyv::deserialize;
+use rkyv::rancor::Error;
 use rustls::client::WebPkiServerVerifier;
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
 use rustls::ClientConfig;
-use tokio::io::{split, AsyncBufReadExt, AsyncWriteExt, BufWriter, ReadHalf, WriteHalf};
+use tokio::io::{split, AsyncReadExt, AsyncWriteExt, BufWriter, ReadHalf, WriteHalf};
 use tokio::net::TcpStream;
-use crate::ClientMessage;
 use tokio::sync::Mutex;
 use tokio_rustls::client::TlsStream;
 use tokio_rustls::TlsConnector;
 use tracing::{debug, error, info, warn};
-
 
 /// Messages handled by the TCP client actor
 pub enum TcpClientMessage {
     Send(ClientMessage),
     RegistrationResponse(String),
     ErrorMessage(String),
-    GetRegistrationId(RpcReplyPort<Option<String>>) //TODO: return optional string
+    GetRegistrationId(RpcReplyPort<Option<String>>)
 }
 
 /// Actor state for the TCP client
@@ -106,17 +107,20 @@ impl Actor for TcpClientActor {
                         
                         //start listening
                         let _ = tokio::spawn(async move {
-                            let mut buf = String::new();
     
                             let mut buf_reader = tokio::io::BufReader::new(reader);
-    
-                                while let Ok(bytes) = buf_reader.read_line(&mut buf).await {                
-                                    if bytes == 0 { () } else {
-
-                                        //TODO: Do not deserailize here, send message containing bytes to "Serializer" actor to deserialize message
-                                        // The serializer should also forward the message to dispatch
-                                        if let Ok(msg) = serde_json::from_slice::<ClientMessage>(buf.as_bytes()) {
-                                            match msg {
+                            
+                            while let Ok(incoming_msg_length) = buf_reader.read_u32().await {
+                                
+                                if incoming_msg_length > 0 {
+                                    let mut buffer = vec![0; incoming_msg_length as usize];
+                                    if let Ok(_) = buf_reader.read_exact(&mut buffer).await {
+                                        
+                                        let archived = rkyv::access::<ArchivedClientMessage, Error>(&buffer[..]).unwrap();
+                                        // And you can always deserialize back to the original type
+                                        
+                                        if let Ok(message) = deserialize::<ClientMessage, Error>(archived) {
+                                            match message {
                                                 ClientMessage::RegistrationResponse { registration_id, success, error } => {
                                                     if success {
                                                         info!("Successfully began session with id: {registration_id}");
@@ -124,24 +128,18 @@ impl Actor for TcpClientActor {
                                                         
                                                     } else {
                                                         warn!("Failed to register session with the server. {error:?}");
-                                                        //TODO: Stop?
                                                     }
                                                 },
                                                 ClientMessage::PublishResponse { topic, payload, result } => {
                                                     //new message on topic
                                                     if result.is_ok() {
-                                                        // debug!("Recieved new message on topic {topic}: {payload:?}");
-                                                        //TODO: Forward to some deserializer/data processing layer that'll route the message where it needs to go
+                                                        
                                                         //try to find dispatcher
                                                         if let Some(dispatcher) = where_is("DISPATCH".to_string()) {
                                                             if let Err(e) = dispatcher.send_message(DispatcherMessage::Dispatch { message: payload, topic }) {
                                                                 warn!("Failed to forward new message to agent");
                                                             }
                                                         }
-                                                        else {
-                                                            error!("Failed to find dispatcher")
-                                                        }
-
                                                     } else {
                                                         warn!("Failed to publish message to topic: {topic}");
                                                     }
@@ -166,16 +164,14 @@ impl Actor for TcpClientActor {
                                                     }  
                                                 },
                                                 _ => {
-                                                    warn!("Unexpected message {buf}");
+                                                    warn!("Unexpected message {message:?}");
                                                 }
                                             }
-                                        } else {
-                                            //bad data
-                                            warn!("Failed to parse message: {buf}");
-                                        }
+                                        }   
                                     }
-                                    buf.clear(); //empty the buffer
-                                }        
+                                }
+                            }
+    
                         });
                     }
                     Err(e) => {
@@ -211,19 +207,38 @@ impl Actor for TcpClientActor {
         state: &mut Self::State,) -> Result<(), ActorProcessingErr> {
         match message {
             TcpClientMessage::Send(broker_msg) => {
-                let str = serde_json::to_string(&broker_msg).unwrap();
-                let msg = format!("{str}\n");
-                let unwrapped_writer = state.writer.clone().unwrap();
-                let mut writer = unwrapped_writer.lock().await;        
-                if let Err(e) = writer.write(msg.as_bytes()).await {
-                    error!("Failed to flush stream {e}, stopping client");
-                    myself.stop(Some("UNEXPECTED_DISCONNECT".to_string()))
+                match rkyv::to_bytes::<Error>(&broker_msg){
+                    Ok(mut bytes) => {   
+                        
+                        //create new buffer
+                        let mut buffer = Vec::new();
+
+                        //get message length as header
+                        let len = bytes.len().to_be_bytes();
+                        buffer.extend_from_slice(&len);
+
+                        //add message to buffer
+                        buffer.extend_from_slice(&bytes);
+
+                        //write message                        
+
+                        let unwrapped_writer = state.writer.clone().unwrap();
+                        let mut writer = unwrapped_writer.lock().await;        
+                        if let Err(e) = writer.write(&buffer).await {
+                            error!("Failed to flush stream {e}, stopping client");
+                            myself.stop(Some("UNEXPECTED_DISCONNECT".to_string()))
+                        }
+                        
+                        if let Err(e) = writer.flush().await {
+                            error!("Failed to flush stream {e}, stopping client");
+                            myself.stop(Some("UNEXPECTED_DISCONNECT".to_string()))
+                        }
+                    }
+                    Err(e) => {
+                        warn!("Failed to serialize message. {e}")
+                    }
                 }
-                
-                if let Err(e) = writer.flush().await {
-                    error!("Failed to flush stream {e}, stopping client");
-                    myself.stop(Some("UNEXPECTED_DISCONNECT".to_string()))
-                }
+
             }
             TcpClientMessage::RegistrationResponse(registration_id) => {
                 state.registration_id = Some(registration_id)

@@ -1,29 +1,4 @@
 use serde::{Deserialize, Serialize};
-// use gitlab_queries::UserCore;
-
-// pub mod serialize;
-
-// // #[derive (Serialize, Deserialize, Debug)]
-// pub enum MessageType {
-//     GitlabMessage(GitlabData),
-//     ConfigMessage
-// }
-
-// pub enum GitlabData {
-//     Users(Vec<UserCore>),
-//     // Projects(Vec<Project>),
-//     // Groups(Vec<UserGroup>),
-//     // ProjectUsers(ResourceLink<User>),
-//     // ProjectRunners(ResourceLink<Runner>),
-//     // GroupMembers(ResourceLink<User>),
-//     // GroupRunners(ResourceLink<Runner>),
-//     // GroupProjects(ResourceLink<Project>),
-//     // Runners(Vec<Runner>),
-//     // RunnerJob((u32, Job)),
-//     // Jobs(Vec<Job>),
-//     // Pipelines(Vec<Pipeline>),
-//     // PipelineJobs(ResourceLink<Job>)
-// }
 
 pub enum DispatcherMessage {
     Dispatch {

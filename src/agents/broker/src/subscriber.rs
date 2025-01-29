@@ -1,5 +1,4 @@
-use std::collections::{HashMap, VecDeque};
-use std::io::Read;
+use std::collections::VecDeque;
 use ractor::rpc::{call, CallResult};
 use ractor::{async_trait, registry::where_is, Actor, ActorProcessingErr, ActorRef, SupervisionEvent};
 use tracing::{debug, error, info, warn};
@@ -17,9 +16,7 @@ pub struct SubscriberManager;
 
 
 /// Define the state for the actor
-pub struct SubscriberManagerState {
-    subscriptions: HashMap<String, Vec<String>> // Map of topics to list subscriber ids
-}
+pub struct SubscriberManagerState;
 
 impl SubscriberManager {
     /// Removes all subscriptions for a given session
@@ -47,9 +44,7 @@ impl Actor for SubscriberManager {
     ) -> Result<Self::State, ActorProcessingErr> {
         tracing::debug!("{myself:?} starting");
 
-        //parse args. if any
-        let state = SubscriberManagerState { subscriptions: HashMap::new()};
-        Ok(state)
+        Ok(SubscriberManagerState)
     }
 
     async fn post_start(
@@ -65,7 +60,7 @@ impl Actor for SubscriberManager {
         &self,
         myself: ActorRef<Self::Msg>,
         message: Self::Msg,
-        state: &mut Self::State,
+        _: &mut Self::State,
     ) -> Result<(), ActorProcessingErr>  {
         match message {
             BrokerMessage::RegistrationRequest { registration_id, client_id } => {
@@ -216,7 +211,7 @@ impl Actor for SubscriberAgent {
     async fn post_start(
         &self,
         myself: ActorRef<Self::Msg>,
-        state: &mut Self::State ) ->  Result<(), ActorProcessingErr> {
+        _: &mut Self::State ) ->  Result<(), ActorProcessingErr> {
             tracing::debug!("{myself:?} Started");
             Ok(())
     }
@@ -243,7 +238,7 @@ impl Actor for SubscriberAgent {
                                 .await
                                 .expect("Expected to forward message to subscriber") {
                                     CallResult::Success(result) => {
-                                        if let Err(message) = result {
+                                        if let Err(_) = result {
                                             //session couldn't talk to listener, add message to DLQ
                                             warn!("{REGISTRATION_REQ_FAILED_TXT} Session not available.");
                                             state.dead_letter_queue.push_back(msg.clone().to_vec());
