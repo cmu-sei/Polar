@@ -23,9 +23,9 @@
 
 pub mod supervisor;
 pub mod users;
-pub mod projects;
-pub mod runners;
-pub mod groups;
+// pub mod projects;
+// pub mod runners;
+// pub mod groups;
 
 use cassini::client::TcpClientMessage;
 use cassini::ClientMessage;
@@ -80,7 +80,7 @@ pub struct GitlabObserverArgs {
 
 pub enum GitlabObserverMessage {
     GetUsers(Operation<MultiUserQuery, MultiUserQueryArguments>),
-    // GetProjects(RpcReplyPort<Result<(), String>>),
+    // GetProjects()
     // GetGroups(RpcReplyPort<Result<(), String>>),
 }
 

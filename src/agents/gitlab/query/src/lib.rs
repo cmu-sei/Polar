@@ -2,6 +2,9 @@ use std::fmt;
 
 use gitlab_schema::gitlab::{self as schema};
 use cynic::*;
+use gitlab_schema::DateTimeString;
+use gitlab_schema::IdString;
+use rkyv::Archive;
 use rkyv::Serialize;
 use rkyv::Deserialize;
 
@@ -38,8 +41,46 @@ impl fmt::Display for UserState {
         write!(f, "{}", state_str)
     }
 }
+#[derive(cynic::QueryFragment, Debug, Clone, Deserialize, Serialize, rkyv::Archive)]
+#[cynic(schema = "gitlab")]
+pub struct Namespace {
+    pub id: IdString,
+    // pub parent_id: Option<u32>,
+    pub full_name: String,
+    pub full_path: IdString,
+
+}
 
 
+#[derive(cynic::QueryFragment, Debug, Clone, Deserialize, Serialize, rkyv::Archive)]
+#[cynic(schema = "gitlab")]
+pub struct Project {
+    pub id: IdString,
+    pub name: String,
+    pub description: Option<String>,
+    pub created_at: Option<DateTimeString>,
+    pub namespace: Option<Namespace>,
+    pub last_activity_at: Option<DateTimeString>
+}
+#[derive(cynic::QueryFragment, Debug, Clone,  Deserialize, Serialize, Archive)]
+#[cynic(schema = "gitlab")]
+pub struct ProjectEdge {
+    pub cursor: String,
+    pub node: Option<Project>
+}
+
+#[derive(cynic::QueryFragment, Debug, Clone, Deserialize, Serialize, rkyv::Archive)]
+#[cynic(schema = "gitlab")]
+pub struct ProjectConnection {
+    pub count: i32, 	  //Int! 	Total count of collection.
+    pub edges: Option<Vec<Option<ProjectEdge>>>,	  
+    pub nodes: Option<Vec<Option<Project>>>,	  //[UserCore] 	A list of nodes.
+    pub pageInfo: PageInfo, // 	PageInfo! 	Information to aid in pagination. 
+}
+
+/// Arguments type for the User Observer. Akin to the query.users parameters in the schema
+/// 
+/// This datatype represents the arguments that will populate the query to the graphql database.
 #[derive(cynic::QueryVariables, Debug, Clone)]
 pub struct MultiUserQueryArguments {
     pub after: Option<String>,
@@ -47,7 +88,8 @@ pub struct MultiUserQueryArguments {
     pub active: Option<bool>,
     pub ids: Option<Vec<Id>>,
     pub usernames: Option<Vec<String>>,
-    pub humans: Option<bool>
+    pub humans: Option<bool>,
+    
 
 }
 
@@ -60,15 +102,14 @@ pub struct UserCoreConnection {
     pub pageInfo: PageInfo, // 	PageInfo! 	Information to aid in pagination. 
 }
 
-#[derive(cynic::QueryFragment, Debug)]
+#[derive(cynic::QueryFragment, Debug, Clone, Deserialize, Serialize, rkyv::Archive)]
 #[cynic(schema = "gitlab")]
 pub struct PageInfo {
-    
     pub end_cursor: Option<String>,
     pub has_next_page: bool,
     pub has_previous_page: bool,
     pub start_cursor: Option<String>
-  }
+}
 
 
 // #[derive(cynic::QueryVariables, serde::Deserialize)]
@@ -77,6 +118,7 @@ pub struct PageInfo {
 //     username: Option<String>
 // }
 
+/// Gitlab's core user representation. Add fields here to get more data back.
 #[derive(cynic::QueryFragment, Deserialize, Serialize, rkyv::Archive)]
 #[cynic(schema = "gitlab")]
 pub struct UserCore {
@@ -88,7 +130,8 @@ pub struct UserCore {
     pub state: UserState,
     // last_activity_on: Option<schema::Date>,
     pub location: Option<String>,
-    pub created_at: Option<gitlab_schema::DateTimeString>
+    pub created_at: Option<gitlab_schema::DateTimeString>,
+    pub contributed_projects: Option<ProjectConnection>
 }
 
 #[derive(cynic::QueryFragment)]

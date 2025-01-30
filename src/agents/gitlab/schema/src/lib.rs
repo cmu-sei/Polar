@@ -11,7 +11,7 @@ pub mod gitlab {}
 /// For our use of rkyv, we need newtypes that can be serialized easily to bytes by implementing the needed traits.
 
 /// wrap timestamp in newtype string we can serialize to bytes later
-#[derive (Debug, Serialize, Deserialize, serde::Deserialize, serde::Serialize, Archive, Default)]
+#[derive (Debug, Serialize, Deserialize, serde::Deserialize, serde::Serialize, Archive, Default, Clone)]
 pub struct DateTimeString(String);
 
 impl fmt::Display for DateTimeString {
@@ -20,7 +20,7 @@ impl fmt::Display for DateTimeString {
     }
 }
 
-#[derive (Debug, Serialize, Deserialize, serde::Deserialize, serde::Serialize, Archive)]
+#[derive (Debug, Serialize, Deserialize, serde::Deserialize, serde::Serialize, Archive, Clone)]
 pub struct IdString(String);
 
 impl fmt::Display for IdString {

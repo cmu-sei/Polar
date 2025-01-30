@@ -22,13 +22,10 @@
 */
 
 use common::types::GitlabData;
+use neo4rs::Query;
 use crate::{subscribe_to_topic, GitlabConsumerArgs, GitlabConsumerState};
-// use helpers::helpers::{get_neo_config, run_query};
-use crate::run_query;
-
-use common::{connect_to_rabbitmq, USER_CONSUMER_TOPIC};
-
-use tracing::{debug, error, info};
+use common::{USER_CONSUMER_TOPIC};
+use tracing::{debug, error, field::debug, info, warn};
 use ractor::{async_trait, registry::where_is, Actor, ActorProcessingErr, ActorRef};
 
 
@@ -79,13 +76,55 @@ impl Actor for GitlabUserConsumer {
                         for user in users {
                             //create new nodes
                             let query = format!("MERGE (n:GitlabUser {{username: \"{}\", user_id: \"{}\" , created_at: \"{}\" , state: \"{}\"}}) return n", user.username.unwrap_or_default(), user.id, user.created_at.unwrap_or_default(), user.state);            
-                            run_query(&transaction, query).await;
+                            if let Err(e) = transaction.run(Query::new(query)).await {
+                                warn!("Failed to run query! {e}");
+                            }
+
+                            if let Some(project_connection) = user.contributed_projects {
+                                
+                                if let Some(nodes) = project_connection.nodes {
+                                    for node in nodes {
+                                        let project = node.unwrap();
+                                        let namespace = project.namespace.unwrap();
+
+                                        let cypher_query = format!(
+                                            r#"
+                                            MERGE (p: GitlabProject {{ 
+                                                project_id: "{project_id}", 
+                                                name: "{project_name}",
+                                                created_at: "{created_at}"
+                                            }})
+                                            MERGE (n: GitlabNamespace {{
+                                                namespace_id: "{namespace_id}",
+                                                full_name: "{full_name}",
+                                                full_path: "{full_path}"
+                                            }})
+                                            WITH p, n MERGE (p)-[:inNamespace]->(n)
+                                            WITH p, n MATCH (u:GitlabUser) WHERE u.user_id = '{user_id}'
+                                            WITH p, u MERGE (u)-[:contributedTo]->(p)
+                                            "#,
+                                            project_id = project.id,
+                                            project_name = project.name,
+                                            created_at = project.created_at.unwrap_or_default(),
+                                            user_id = user.id,
+                                            namespace_id = namespace.id,
+                                            full_name = namespace.full_name,
+                                            full_path = namespace.full_path,
+                                        );
+                                        debug!(cypher_query);
+
+                                        if let Err(e) = transaction.run(Query::new(cypher_query)).await {
+                                            warn!("Failed to run query!");
+                                        }
+
+                                    }
+                                }
+                            }
                         }
 
                         if let Err(e) = transaction.commit().await {
                             let err_msg = format!("Error committing transaction to graph: {e}");
                             error!("{err_msg}");
-                            todo!("What to do if we fail to commit queries?");
                         }
                         info!("Committed transaction to database");
                     }

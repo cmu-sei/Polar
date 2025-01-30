@@ -36,7 +36,7 @@ use ractor::RpcReplyPort;
 use ractor::{async_trait, registry::where_is, Actor, ActorProcessingErr, ActorRef};
 use reqwest::{Client, Method, StatusCode};
 
-use common::types::{User, GitlabData};
+use common::types::{GitlabData};
 use tokio::time;
 use tracing::{debug, info, warn, error};
 use gitlab_queries::*;
@@ -90,26 +90,6 @@ impl Actor for GitlabUserObserver {
             // pass query in message
             GitlabObserverMessage::GetUsers(op) 
         });
-
-        // match call(&&myself.get_cell(), |reply: RpcReplyPort<Result<(), String>>|  { 
-        //     //TODO: get query arguments from config params
-        //     //build query
-        //     let op = MultiUserQuery::build(MultiUserQueryArguments{ after: None, admins: Some(true), active: None, ids: None, usernames: None, humans: Some(true) });
-
-        //     // pass query in message
-        //     GitlabObserverMessage::GetUsers(op) 
-        //     } , None)
-        // .await.expect("expected to call actor: {observer:?}") {
-        //     CallResult::Success(result) => {
-        //         if let Err(e) = result {
-        //         let err_msg = format!("Failed to gather user data {e}");
-        //         warn!("{err_msg}");
-        //         myself.stop(Some(err_msg));
-        //         }
-        //     }
-        //     CallResult::Timeout => error!("timed out sending message"),
-        //     CallResult::SenderError => error!("Failed to send message")   
-        // }
         
         Ok(())
     }
