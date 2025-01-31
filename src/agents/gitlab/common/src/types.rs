@@ -21,7 +21,7 @@
    DM24-0470
 */
 
-use gitlab_queries::UserCore;
+use gitlab_queries::{Group, Project, UserCore};
 
 use rkyv::{Serialize, Deserialize, Archive};
 
@@ -30,8 +30,8 @@ use rkyv::{Serialize, Deserialize, Archive};
 #[derive (Serialize, Deserialize, Archive)]
 pub enum GitlabData {
     Users(Vec<UserCore>),
-    // Projects(Vec<Project>),
-    // Groups(Vec<UserGroup>),
+    Projects(Vec<Project>),
+    Groups(Vec<Group>),
     // ProjectUsers(ResourceLink<User>),
     // ProjectRunners(ResourceLink<Runner>),
     // GroupMembers(ResourceLink<User>),
@@ -60,15 +60,7 @@ pub enum GitlabData {
 //     pub online: Option<bool>,
 //     pub status: String,
 // }
-// #[derive (Serialize, Deserialize, Archive, Clone, PartialEq, Debug)]
-// pub struct UserGroup {
-//     pub id: u32,
-//     pub full_name: String,
-//     pub description: Option<String>,
-//     pub visibility: String,
-//     pub parent_id: Option<u32>,
-//     pub created_at: String
-// }
+
 // #[derive (Serialize, Deserialize, Archive, Clone, PartialEq, Debug)]
 // pub struct Pipeline { 
 //     pub id: u32,

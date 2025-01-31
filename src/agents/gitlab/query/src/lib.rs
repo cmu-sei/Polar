@@ -51,16 +51,66 @@ pub struct Namespace {
 
 }
 
+#[derive(cynic::QueryVariables, Debug, Clone, Deserialize, Serialize, rkyv::Archive)]
+pub struct MultiGroupQueryArguments {
+    //TODO: Doesn't appear to be supported in our test version of gitlab, but it is mentioned as as an argument in the docs
+    // pub ids: Option<Vec<IdString>>,
+    pub search: Option<String>,
+    //NOTE: Gitlab has an expected format for this input
+    //REFERENCE: https://docs.gitlab.com/17.7/ee/api/graphql/reference/#querygroups
+    pub sort: String,
+    pub marked_for_deletion_on: Option<DateTimeString>,
+    pub after: Option<String>,
+    pub before: Option<String>,
+    pub first: Option<i32>,
+    pub last: Option<i32>,
+}
+
+#[derive(cynic::QueryFragment, Debug, Clone)]
+#[cynic(schema = "gitlab")]
+pub struct GroupConnection {
+    pub edges: Option<Vec<Option<GroupEdge>>>,
+    pub nodes: Option<Vec<Option<Group>>>,
+    pub pageInfo: PageInfo,
+}
+
+#[derive(cynic::QueryFragment, Debug, Clone)]
+#[cynic(schema = "gitlab")]
+pub struct GroupEdge {
+    pub cursor: String,
+    pub node: Option<Group>,
+}
+
+#[derive(cynic::QueryFragment, Debug, Clone, Deserialize, Serialize, rkyv::Archive)]
+#[cynic(schema = "gitlab")]
+pub struct Group {
+    pub id: IdString,
+    pub full_name: String,
+    pub full_path: IdString,
+    pub description: Option<String>,
+    pub created_at: Option<DateTimeString>,
+    pub marked_for_deletion_on: Option<DateTimeString>,
+    pub group_members_count: i32
+}
+#[derive(cynic::QueryFragment)]
+#[cynic(schema = "gitlab", graphql_type = "Query", variables = "MultiGroupQueryArguments")]
+pub struct MultiGroupQuery {
+    #[arguments(sort: $sort)]
+    pub groups: Option<GroupConnection>
+}
+
 
 #[derive(cynic::QueryFragment, Debug, Clone, Deserialize, Serialize, rkyv::Archive)]
 #[cynic(schema = "gitlab")]
 pub struct Project {
     pub id: IdString,
     pub name: String,
+    pub full_path: IdString,
     pub description: Option<String>,
     pub created_at: Option<DateTimeString>,
     pub namespace: Option<Namespace>,
-    pub last_activity_at: Option<DateTimeString>
+    pub last_activity_at: Option<DateTimeString>,
+    pub group: Option<Group>
 }
 #[derive(cynic::QueryFragment, Debug, Clone,  Deserialize, Serialize, Archive)]
 #[cynic(schema = "gitlab")]
@@ -91,6 +141,33 @@ pub struct MultiUserQueryArguments {
     pub humans: Option<bool>,
     
 
+}
+
+#[derive(cynic::QueryVariables, Debug, Clone)]
+pub struct MultiProjectQueryArguments {
+    pub membership: Option<bool>,
+    pub search: Option<String>,
+    pub search_namespaces: Option<bool>,
+    pub topics: Option<Vec<String>>,
+    pub personal: Option<bool>,
+    pub sort: String,
+    pub ids: Option<Vec<IdString>>,
+    pub full_paths: Option<Vec<String>>,
+    pub with_issues_enabled: Option<bool>,
+    pub with_merge_requests_enabled: Option<bool>,
+    pub aimed_for_deletion: Option<bool>,
+    pub include_hidden: Option<bool>,
+    pub marked_for_deletion_on: Option<DateTimeString>,
+    pub after: Option<String>,
+    pub before: Option<String>,
+    pub first: Option<i32>,
+    pub last: Option<i32>,
+}
+
+#[derive(cynic::QueryFragment, Debug, Clone)]
+#[cynic(schema = "gitlab", graphql_type = "Query", variables = "MultiProjectQueryArguments")]
+pub struct MultiProjectQuery {
+    pub projects: Option<ProjectConnection>
 }
 
 #[derive(cynic::QueryFragment)]

@@ -13,6 +13,8 @@ use ractor::ActorRef;
 use ractor::SupervisionEvent;
 use cassini::client::*;
 
+use crate::groups::GitlabGroupObserver;
+use crate::projects::GitlabProjectObserver;
 use crate::users::GitlabUserObserver;
 use crate::GitlabObserverArgs;
 use crate::BROKER_CLIENT_NAME;
@@ -63,13 +65,12 @@ impl Actor for ObserverSupervisor {
             }, myself.clone().into())
             .await;
 
-        //TODO: Try to confirm client is registered before moving on with sending messages
-        
+        //TODO: Expect client to start, because if it doesn't we're SOL, don't bother matching.
         match client_started_result {
             Ok((client, _)) => {
                 // Set up an interval
                 //TODO: make configurable
-                let mut interval = tokio::time::interval(Duration::from_secs(3));
+                let mut interval = tokio::time::interval(Duration::from_millis(500));
                 //wait until we get a session id to start clients, try some configured amount of times every few seconds
                 let mut attempts= 0; 
                 loop {
@@ -87,8 +88,8 @@ impl Actor for ObserverSupervisor {
                             //TODO: start observers based off of some configuration, and break
                             if let Err(e) = Actor::spawn_linked(Some(GITLAB_USERS_OBSERVER.to_string()), GitlabUserObserver, args.clone(), myself.clone().into()).await { warn!( "failed to start users observer {e}") }
                             //TODO: Unfreeze other observers
-                            // if let Err(e) = Actor::spawn_linked(Some("GITLAB_PROJECT_OBSERVER".to_string()), GitlabProjectObserver, args.clone(), myself.clone().into()).await { warn!( "failed to start project observer {e}") }
-                            // if let Err(e) = Actor::spawn_linked(Some("GITLAB_GROUOP_OBSERVER".to_string()), GitlabGroupObserver, args.clone(), myself.clone().into()).await { warn!( "failed to start group observer {e}") }
+                            if let Err(e) = Actor::spawn_linked(Some("GITLAB_PROJECT_OBSERVER".to_string()), GitlabProjectObserver, args.clone(), myself.clone().into()).await { warn!( "failed to start project observer {e}") }
+                            if let Err(e) = Actor::spawn_linked(Some("GITLAB_GROUP_OBSERVER".to_string()), GitlabGroupObserver, args.clone(), myself.clone().into()).await { warn!( "failed to start group observer {e}") }
                             // if let Err(e) = Actor::spawn_linked(Some("GITLAB_RUNNER_OBSERVER".to_string()), GitlabRunnerObserver, args.clone(), myself.clone().into()).await { warn!( "failed to start runner observer {e}") }
                             break;
                         } else if attempts < state.max_registration_attempts {

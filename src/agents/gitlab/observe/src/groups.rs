@@ -23,14 +23,19 @@
 
 
 
-use cassini::{client::TcpClientMessage};
-use ractor::{async_trait, registry::where_is, Actor, ActorProcessingErr, ActorRef};
+use std::time::Duration;
 
-use crate::{get_all_elements, GitlabObserverArgs, GitlabObserverState};
+use cassini::{client::TcpClientMessage, ClientMessage, UNEXPECTED_MESSAGE_STR};
+use cynic::{GraphQlResponse, QueryBuilder};
+use gitlab_queries::{MultiGroupQuery, MultiGroupQueryArguments};
+use ractor::{async_trait, registry::where_is, Actor, ActorProcessingErr, ActorRef};
+use rkyv::rancor::Error;
+
+use crate::{get_all_elements, GitlabObserverArgs, GitlabObserverMessage, GitlabObserverState};
 use tracing::{debug, info, warn, error};
 use reqwest::Client;
 use serde_json::to_string;
-use common::{types::{GitlabData, Project, ResourceLink, Runner, User, UserGroup}, GROUPS_CONSUMER_TOPIC, PROJECTS_CONSUMER_TOPIC, RUNNERS_CONSUMER_TOPIC, USER_CONSUMER_TOPIC};
+use common::{types::{GitlabData}, GROUPS_CONSUMER_TOPIC, PROJECTS_CONSUMER_TOPIC, RUNNERS_CONSUMER_TOPIC, USER_CONSUMER_TOPIC};
 
 
 use crate::BROKER_CLIENT_NAME;
@@ -39,7 +44,7 @@ pub struct GitlabGroupObserver;
 
 #[async_trait]
 impl Actor for GitlabGroupObserver {
-    type Msg = ();
+    type Msg = GitlabObserverMessage;
     type State = GitlabObserverState;
     type Arguments = GitlabObserverArgs;
 
@@ -50,22 +55,15 @@ impl Actor for GitlabGroupObserver {
     ) -> Result<Self::State, ActorProcessingErr> {
         debug!("{myself:?} starting, connecting to instance");
         
-        match Client::builder().build() {
-            Ok(client) => {
-                let state = GitlabObserverState {
-                    gitlab_endpoint: args.gitlab_endpoint,
-                    token: args.token,
-                    web_client: client,
-                    registration_id: args.registration_id
-                };
-                Ok(state)
-            }
-            Err(e) => {   
-                error!("{e}");
-                todo!()
-        
-            }
-        }
+        let client = Client::new();
+
+        let state = GitlabObserverState {
+            gitlab_endpoint: args.gitlab_endpoint,
+            token: args.token,
+            web_client: client,
+            registration_id: args.registration_id
+        };
+        Ok(state)
     }
 
     async fn post_start(
@@ -73,68 +71,73 @@ impl Actor for GitlabGroupObserver {
         myself: ActorRef<Self::Msg>,
         state: &mut Self::State ) ->  Result<(), ActorProcessingErr> {
 
-        //TODO: use client in state to pull gitlab user data
-        // let users: Vec<> = get_all_elements(&state.state.web_client, state.token.clone().unwrap_or_default(), format!("{}{}", state.gitlab_endpoint, "/users")).await.unwrap();
-        
-        //forwrard to client
-        // if let Some(client) = where_is(BROKER_CLIENT_NAME.to_string()) {
-        //     let client_ref: ActorRef<TcpClientMessage> = ActorRef::from(client);
 
-        //     if let Some(groups) = get_all_elements::<UserGroup>(&state.web_client, state.token.clone().unwrap_or_default(), format!("{}{}", state.gitlab_endpoint, "/groups")).await {
-        //         let data = GitlabData::Groups(groups.clone());
-        //         if let Err(e) = send(data, client_ref.clone(), state.registration_id.clone(), GROUPS_QUEUE_NAME.to_string()){
-        //             error!("{e}");
-        //             todo!();
-        //         }
-        //         for group in groups {
-        //             if let Some(users) = get_all_elements::<User>(&state.web_client, state.token.clone().unwrap_or_default(), format!("{}{}{}{}", state.gitlab_endpoint, "/groups/" , group.id, "/members")).await {
-        //                 let data = GitlabData::GroupMembers(ResourceLink {
-        //                     resource_id: group.id,
-        //                     resource_vec: users
-        //                 });
-        //                 if let Err(e) = send(data, client_ref.clone(), state.registration_id.clone(), GROUPS_QUEUE_NAME.to_string()){
-        //                     error!("{e}");
-        //                     todo!()
-        //                 }
-                        
-        //             } 
-        //             if let Some(runners) = get_all_elements::<Runner>(&state.web_client, state.token.clone().unwrap_or_default(), format!("{}{}{}{}", state.gitlab_endpoint, "/groups/", group.id, "/runners")).await {
-        //                 let data = GitlabData::GroupRunners(ResourceLink {
-        //                     resource_id: group.id,
-        //                     resource_vec: runners
-        //                 });
-        //                 if let Err(e) = send(data, client_ref.clone(), state.registration_id.clone(), GROUPS_QUEUE_NAME.to_string()){
-        //                     error!("{e}");
-        //                     todo!()
-        //                 }
-                        
-        //             }
-        //             if let Some(projects) = get_all_elements::<Project>(&state.web_client, state.token.clone().unwrap_or_default(), format!("{}{}{}{}", state.gitlab_endpoint, "/groups/", group.id, "/projects")).await {
-        //                 let data = GitlabData::GroupProjects(ResourceLink {
-        //                     resource_id: group.id,
-        //                     resource_vec: projects
-        //                 });
-        //                 if let Err(e) = send(data, client_ref.clone(), state.registration_id.clone(), GROUPS_QUEUE_NAME.to_string()){
-        //                     error!("{e}");
-        //                     todo!()
-        //                 }
- 
-        //             }
+        myself.send_interval(Duration::from_secs(10), || { 
+            //TODO: get query arguments from config params
+            //build query
 
-        //         }
-        //     }
-        // }
-        
-        // myself.stop(Some("FINISHED".to_string()));
+            let args = MultiGroupQueryArguments { 
+                search: None, sort: "name_asc".to_string(), 
+                marked_for_deletion_on: None, after: None, 
+                before: None, first: None, last: None
+            };
+
+            let op = MultiGroupQuery::build(args);
+
+            // pass query in message
+            GitlabObserverMessage::GetGroups(op)
+        });
         
         Ok(())
     }
     async fn handle(
         &self,
         _myself: ActorRef<Self::Msg>,
-        _: Self::Msg,
-        _: &mut Self::State,
+        message: Self::Msg,
+        state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
+        
+        match message {
+            GitlabObserverMessage::GetGroups(op) => {
+                debug!("Sending query: {op:?}");
+
+                match state.web_client
+                .post(state.gitlab_endpoint.clone())
+                .bearer_auth(state.token.clone().unwrap_or_default())
+                .json(&op)
+                .send().await {
+                    Ok(response) => {
+                        if let Ok(deserialized) = response.json::<GraphQlResponse<MultiGroupQuery>>().await {
+                            if let Some(query) = deserialized.data {
+                             if let Some(connection) =  query.groups {
+                                
+                                let mut read_groups = Vec::new();
+
+                                if let Some(groups) = connection.nodes {
+                                    read_groups.extend(groups.into_iter().map(|option| option.unwrap()));
+                                }
+
+                                let client = where_is(BROKER_CLIENT_NAME.to_string()).expect("Expected to find tcp client!");
+                                
+                                let bytes = rkyv::to_bytes::<Error>(&GitlabData::Groups(read_groups)).unwrap();
+                                
+
+                                let msg = ClientMessage::PublishRequest { topic: GROUPS_CONSUMER_TOPIC.to_string(), payload: bytes.to_vec(), registration_id: Some(state.registration_id.clone()) };
+                                client.send_message(TcpClientMessage::Send(msg)).expect("Expected to send message to tcp client!");
+
+                             }
+                                
+                            }
+                        }
+                    },
+                    Err(e) => todo!()
+                }
+            
+            
+            }
+            _ => warn!(UNEXPECTED_MESSAGE_STR)
+            
+        }
         
 
         Ok(())

@@ -58,22 +58,15 @@ impl Actor for GitlabUserObserver {
     ) -> Result<Self::State, ActorProcessingErr> {
         debug!("{myself:?} starting");
         
-        match Client::builder().build() {
-            Ok(client) => {
-                let state = GitlabObserverState {
-                    gitlab_endpoint: args.gitlab_endpoint,
-                    token: args.token,
-                    web_client:
-                    client.clone(),
-                    registration_id: args.registration_id
-                };
-                Ok(state)
-            }
-            Err(e) => {
-                error!("{e}");
-                Err(Box::new(e))
-            }
-        }
+        let client = Client::new();
+        
+        let state = GitlabObserverState {
+            gitlab_endpoint: args.gitlab_endpoint,
+            token: args.token,
+            web_client: client,
+            registration_id: args.registration_id
+        };
+        Ok(state)
     }
 
     async fn post_start(
@@ -112,7 +105,7 @@ impl Actor for GitlabUserObserver {
                 .send().await {
                     Ok(response) => {
                     
-                        //TODO: take json and send to broker
+                        
                         //forwrard to client
                         match response.json::<GraphQlResponse<MultiUserQuery>>().await {
                             Ok(deserialized) => {
@@ -128,8 +121,7 @@ impl Actor for GitlabUserObserver {
                                             // Append nodes to the result list.
                                             read_users.extend(users.into_iter().map(|option| option.unwrap()));
                                         }
-                                        //serialize list to byte vec
-                                        let byte_vec = rkyv::to_bytes::<Error>(&read_users).unwrap();
+
                                         //TODO:                                            
                                         // if connection.pageInfo.has_next_page {
                                         //     todo!("TODO: crawl pages and build list of UserCore types")
@@ -143,9 +135,9 @@ impl Actor for GitlabUserObserver {
                                                 
 
                                                 let msg = ClientMessage::PublishRequest { topic: USER_CONSUMER_TOPIC.to_string(), payload: bytes.to_vec(), registration_id: Some(state.registration_id.clone()) };
-                                                if let Err(e) = client.send_message(TcpClientMessage::Send(msg)) {
-                                                    todo!()
-                                                }
+                                                client.send_message(TcpClientMessage::Send(msg)).expect("Expected to send message");
+
+                                                
                                             }
                                             None => {
                                                 let err_msg = "Failed to locate tcp client";

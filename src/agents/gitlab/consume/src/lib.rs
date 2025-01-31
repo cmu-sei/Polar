@@ -36,8 +36,8 @@ use url::Url;
 pub mod supervisor;
 pub mod users;
 //TODO: Uncomment when other actors are done
-// pub mod projects;
-// pub mod groups;
+pub mod projects;
+pub mod groups;
 // pub mod runners;
 
 pub const BROKER_CLIENT_NAME: &str = "GITLAB_CONSUMER_CLIENT";

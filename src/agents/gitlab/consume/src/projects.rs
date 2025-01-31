@@ -22,11 +22,12 @@
 */
 
 
-use common::PROJECTS_QUEUE_NAME;
-use common::types::{GitlabData, User, Runner, Project};
+use common::PROJECTS_CONSUMER_TOPIC;
+use common::types::{GitlabData};
+use neo4rs::Query;
 use tracing::{debug, error, info};
 use ractor::{async_trait, registry::where_is, Actor, ActorProcessingErr, ActorRef};
-use crate::{run_query, subscribe_to_topic, GitlabConsumerArgs, GitlabConsumerState, BROKER_CLIENT_NAME};
+use crate::{subscribe_to_topic, GitlabConsumerArgs, GitlabConsumerState, BROKER_CLIENT_NAME};
 
 pub struct GitlabProjectConsumer;
 
@@ -42,10 +43,10 @@ impl Actor for GitlabProjectConsumer {
         args: GitlabConsumerArgs
     ) -> Result<Self::State, ActorProcessingErr> {
         debug!("{myself:?} starting, connecting to broker");
-        match subscribe_to_topic(args.registration_id, PROJECTS_QUEUE_NAME.to_string()).await {
+        match subscribe_to_topic(args.registration_id, PROJECTS_CONSUMER_TOPIC.to_string()).await {
             Ok(state) => Ok(state),
             Err(e) => {
-                let err_msg = format!("Error subscribing to topic \"{PROJECTS_QUEUE_NAME}\" {e}");
+                let err_msg = format!("Error subscribing to topic \"{PROJECTS_CONSUMER_TOPIC}\" {e}");
                 Err(ActorProcessingErr::from(err_msg))
             }
         }
@@ -66,6 +67,43 @@ impl Actor for GitlabProjectConsumer {
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
+
+        match message {
+            GitlabData::Projects(vec) => {
+                let transaction = state.graph.start_txn().await.expect("Expected to start a transaction with the graph.");
+                for p in vec {
+                    let query = format!(
+                    r#"
+                        MERGE (project:GitlabProject {{ 
+                            project_id: "{id}"
+                        }})
+                        SET project.name = "{name}",
+                            project.full_path = "{full_path}",
+                            project.created_at = "{created_at}",
+                            project.last_activity_at = "{last_activity_at}"
+
+                        MERGE (group:GitlabGroup {{ group_id: "{group_id}" }})
+
+                        MERGE (project)-[:inGroup]->(group);
+                    "#, 
+                    id = p.id,
+                    name = p.name,
+                    full_path = p.full_path,
+                    created_at = p.created_at.unwrap_or_default(),
+                    last_activity_at = p.last_activity_at.unwrap_or_default(),
+                    group_id = p.group.map_or_else(|| {String::default()}, |group| { group.id.to_string() })
+                    
+                    );
+
+                    debug!(query);
+
+                    transaction.run(Query::new(query)).await.expect("Expected to run query on transaction.");
+                }
+                transaction.commit().await.expect("Expected to commit transaction");
+            }
+            _ => todo!()
+        }
+        
         //TODO: Implement message type for consumers to handle new messages
         // match message {
         //     ConsumerMessage::GitlabData(data_type) => {

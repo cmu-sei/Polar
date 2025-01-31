@@ -116,7 +116,6 @@ impl Actor for GitlabUserConsumer {
                                         if let Err(e) = transaction.run(Query::new(cypher_query)).await {
                                             warn!("Failed to run query!");
                                         }
-
                                     }
                                 }
                             }

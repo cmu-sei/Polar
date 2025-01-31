@@ -23,28 +23,17 @@
 
 pub mod supervisor;
 pub mod users;
-// pub mod projects;
+pub mod projects;
 // pub mod runners;
-// pub mod groups;
-
-use cassini::client::TcpClientMessage;
-use cassini::ClientMessage;
-use common::types::GitlabData;
+pub mod groups;
 
 use cynic::Operation;
-use cynic::QueryFragment;
-use cynic::QueryVariables;
+use gitlab_queries::MultiGroupQuery;
+use gitlab_queries::MultiGroupQueryArguments;
+use gitlab_queries::MultiProjectQuery;
+use gitlab_queries::MultiProjectQueryArguments;
 use gitlab_queries::MultiUserQuery;
 use gitlab_queries::MultiUserQueryArguments;
-use gitlab_queries::MultiUserQueryArgumentsFields;
-use gitlab_queries::UserCoreConnection;
-use ractor::rpc::call;
-use ractor::rpc::CallResult;
-use ractor::RpcReplyPort;
-use tokio::task::JoinError;
-use tokio::task::JoinHandle;
-use tokio::time;
-use tokio::time::Interval;
 use tracing::{debug, error};
 use ractor::ActorRef;
 use reqwest::Client;
@@ -54,7 +43,7 @@ use reqwest::Method;
 use reqwest::header::LINK;
 use serde::Deserialize;
 use parse_link_header::parse_with_rel;
-use serde_json::to_string;
+
 
 pub const GITLAB_USERS_OBSERVER: &str = "GITLAB_USERS_OBSERVER";
 pub const BROKER_CLIENT_NAME: &str = "gitlab_web_client";
@@ -80,8 +69,8 @@ pub struct GitlabObserverArgs {
 
 pub enum GitlabObserverMessage {
     GetUsers(Operation<MultiUserQuery, MultiUserQueryArguments>),
-    // GetProjects()
-    // GetGroups(RpcReplyPort<Result<(), String>>),
+    GetProjects(Operation<MultiProjectQuery, MultiProjectQueryArguments>),
+    GetGroups(Operation<MultiGroupQuery, MultiGroupQueryArguments>),
 }
 
 pub async fn get_all_runners(client: &Client, token: String, endpoint_prefix: String) -> Result<Response, Error> {
