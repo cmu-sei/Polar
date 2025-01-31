@@ -1283,6 +1283,7 @@ dependencies = [
  "cassini",
  "common",
  "futures-lite 1.13.0",
+ "gitlab-queries",
  "lapin",
  "neo4rs",
  "polar",

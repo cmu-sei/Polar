@@ -27,7 +27,7 @@ use common::types::{GitlabData};
 use neo4rs::Query;
 use tracing::{debug, error, info};
 use ractor::{async_trait, registry::where_is, Actor, ActorProcessingErr, ActorRef};
-use crate::{subscribe_to_topic, GitlabConsumerArgs, GitlabConsumerState, BROKER_CLIENT_NAME};
+use crate::{merge_group_query, merge_project_query, subscribe_to_topic, GitlabConsumerArgs, GitlabConsumerState, BROKER_CLIENT_NAME};
 
 pub struct GitlabProjectConsumer;
 
@@ -72,79 +72,16 @@ impl Actor for GitlabProjectConsumer {
             GitlabData::Projects(vec) => {
                 let transaction = state.graph.start_txn().await.expect("Expected to start a transaction with the graph.");
                 for p in vec {
-                    let query = format!(
-                    r#"
-                        MERGE (project:GitlabProject {{ 
-                            project_id: "{id}"
-                        }})
-                        SET project.name = "{name}",
-                            project.full_path = "{full_path}",
-                            project.created_at = "{created_at}",
-                            project.last_activity_at = "{last_activity_at}"
-
-                        MERGE (group:GitlabGroup {{ group_id: "{group_id}" }})
-
-                        MERGE (project)-[:inGroup]->(group);
-                    "#, 
-                    id = p.id,
-                    name = p.name,
-                    full_path = p.full_path,
-                    created_at = p.created_at.unwrap_or_default(),
-                    last_activity_at = p.last_activity_at.unwrap_or_default(),
-                    group_id = p.group.map_or_else(|| {String::default()}, |group| { group.id.to_string() })
-                    
-                    );
-
+                    let query = merge_project_query(p);
                     debug!(query);
 
                     transaction.run(Query::new(query)).await.expect("Expected to run query on transaction.");
                 }
                 transaction.commit().await.expect("Expected to commit transaction");
+                info!("Transaction committed.");
             }
             _ => todo!()
         }
-        
-        //TODO: Implement message type for consumers to handle new messages
-        // match message {
-        //     ConsumerMessage::GitlabData(data_type) => {
-        //         match state.graph.start_txn().await {
-        //             Ok(transaction) => {
-        //                 match data_type {
-        //                     GitlabData::Projects(vec) => {
-        //                         for p in vec as Vec<Project> {
-        //                             let query = format!("MERGE (n: GitlabProject {{project_id: \"{}\", name: \"{}\", creator_id: \"{}\"}}) return n ", p.id, p.name, p.creator_id.unwrap());
-        //                             run_query(&transaction, query).await;
-        //                         }
-        //                     },
-        //                     GitlabData::ProjectUsers(link) => {
-        //                         //add relationship for every user given
-        //                         for user in link.resource_vec as Vec<User>  {
-        //                             let query = format!("MATCH (p:GitlabProject) WHERE p.project_id = '{}' with p MATCH (u:GitlabProject) WHERE u.user_id = '{}' with p, u MERGE (u)-[:onProject]->(p)", link.resource_id, user.id);
-        //                             run_query(&transaction, query).await; 
-        //                         }
-        //                     },
-        //                     GitlabData::ProjectRunners(link) => {
-        //                         for runner in link.resource_vec as Vec<Runner> {
-        //                             let query = format!("MATCH (n:GitlabProject) WHERE n.project_id = '{}' with n MATCH (r:GitlabRunner) WHERE r.runner_id = '{}' with n, r MERGE (r)-[:onProject]->(n)", link.resource_id, runner.id);
-        //                             run_query(&transaction, query).await;
-        //                         }
-        //                     },
-        //                     _ => todo!()  
-        //                 }
-        //                 if let Err(e) = transaction.commit().await {
-        //                     let err_msg = format!("Error committing transaction to graph: {e}");
-        //                     error!("{err_msg}");
-        //                     todo!("What to do if we fail to commit queries?");
-        //                 }
-        //             },
-        //             Err(e) => {
-        //                 error!("Could not open transaction with graph! {e}");
-        //                 todo!("Couldn't open transaction, What to do if we fail to commit queries?");
-        //             }
-        //         }                
-        //     },
-        //     _ => todo!("Gitlab consumer shouldn't get anything but gitlab data")
-        // }
         Ok(())
     }
 }

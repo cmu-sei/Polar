@@ -66,7 +66,7 @@ pub struct MultiGroupQueryArguments {
     pub last: Option<i32>,
 }
 
-#[derive(cynic::QueryFragment, Debug, Clone)]
+#[derive(cynic::QueryFragment, Debug, Clone, Deserialize, Serialize, rkyv::Archive)]
 #[cynic(schema = "gitlab")]
 pub struct GroupConnection {
     pub edges: Option<Vec<Option<GroupEdge>>>,
@@ -74,7 +74,7 @@ pub struct GroupConnection {
     pub pageInfo: PageInfo,
 }
 
-#[derive(cynic::QueryFragment, Debug, Clone)]
+#[derive(cynic::QueryFragment, Debug, Clone, Deserialize, Serialize, rkyv::Archive)]
 #[cynic(schema = "gitlab")]
 pub struct GroupEdge {
     pub cursor: String,
@@ -92,6 +92,57 @@ pub struct Group {
     pub marked_for_deletion_on: Option<DateTimeString>,
     pub group_members_count: i32
 }
+
+/// Datatype representing a users's membership for a group
+#[derive(cynic::QueryFragment)]
+#[cynic(schema = "gitlab")]
+pub struct GroupMember {
+    /// GitLab::Access level.
+    // pub access_level: Option<AccessLevel>,
+
+    /// Date and time the membership was created.
+    pub created_at: Option<DateTimeString>,
+
+    /// User that authorized membership.
+    pub created_by: Option<UserCore>,
+
+    /// Date and time the membership expires.
+    pub expires_at: Option<DateTimeString>,
+
+    /// Group that a user is a member of.
+    pub group: Option<Group>,
+
+    /// ID of the member.
+    pub id: IdString,
+
+    /// Group notification email for user. Only available for admins.
+    pub notification_email: Option<String>,
+
+    /// Date and time the membership was last updated.
+    pub updated_at: Option<DateTimeString>,
+
+    /// User that is associated with the member object.
+    pub user: Option<UserCore>,
+
+    // Permissions for the current user on the resource.
+    // pub user_permissions: GroupPermissions,
+}
+
+// #[derive(cynic::QueryFragment, Debug, Clone)]
+// #[cynic(schema = "gitlab")]
+// pub struct AccessLevel {
+//     pub string_value: Option<String>,
+//     pub integer_value: Option<i32>,
+// }
+
+
+// #[derive(cynic::QueryFragment, Debug, Clone)]
+// #[cynic(schema = "gitlab")]
+// pub struct GroupPermissions {
+
+// }
+
+
 #[derive(cynic::QueryFragment)]
 #[cynic(schema = "gitlab", graphql_type = "Query", variables = "MultiGroupQueryArguments")]
 pub struct MultiGroupQuery {
@@ -112,6 +163,7 @@ pub struct Project {
     pub last_activity_at: Option<DateTimeString>,
     pub group: Option<Group>
 }
+
 #[derive(cynic::QueryFragment, Debug, Clone,  Deserialize, Serialize, Archive)]
 #[cynic(schema = "gitlab")]
 pub struct ProjectEdge {
@@ -203,6 +255,7 @@ pub struct UserCore {
     pub bot: bool,
     pub username: Option<String>,
     pub name: String,
+    pub groups: Option<GroupConnection>,
     // status: Option<schema::UserStatus>,
     pub state: UserState,
     // last_activity_on: Option<schema::Date>,

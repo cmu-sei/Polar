@@ -109,6 +109,7 @@ impl Actor for GitlabUserObserver {
                         //forwrard to client
                         match response.json::<GraphQlResponse<MultiUserQuery>>().await {
                             Ok(deserialized) => {
+
                                 if let Some(query) = deserialized.data {
 
                                     if let Some(connection) = query.users {
@@ -146,7 +147,7 @@ impl Actor for GitlabUserObserver {
                                                 }   
                                         } 
                                     }
-                                }    
+                                } else { debug!("No data found!")}   
                             }
                             Err(e) => {
                                 error!("{e}");
