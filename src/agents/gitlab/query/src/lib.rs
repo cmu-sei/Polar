@@ -71,7 +71,7 @@ pub struct MultiGroupQueryArguments {
 pub struct GroupConnection {
     pub edges: Option<Vec<Option<GroupEdge>>>,
     pub nodes: Option<Vec<Option<Group>>>,
-    pub pageInfo: PageInfo,
+    pub page_info: PageInfo,
 }
 
 #[derive(cynic::QueryFragment, Debug, Clone, Deserialize, Serialize, rkyv::Archive)]
@@ -177,7 +177,7 @@ pub struct ProjectConnection {
     pub count: i32, 	  //Int! 	Total count of collection.
     pub edges: Option<Vec<Option<ProjectEdge>>>,	  
     pub nodes: Option<Vec<Option<Project>>>,	  //[UserCore] 	A list of nodes.
-    pub pageInfo: PageInfo, // 	PageInfo! 	Information to aid in pagination. 
+    pub page_info: PageInfo, // 	PageInfo! 	Information to aid in pagination. 
 }
 
 /// Arguments type for the User Observer. Akin to the query.users parameters in the schema
@@ -225,10 +225,10 @@ pub struct MultiProjectQuery {
 #[derive(cynic::QueryFragment)]
 #[cynic(schema = "gitlab")]
 pub struct UserCoreConnection {
-    pub count: i32, 	  //Int! 	Total count of collection.
-    pub edges: Option<Vec<Option<UserCoreEdge>>>,	  
-    pub nodes: Option<Vec<Option<UserCore>>>,	  //[UserCore] 	A list of nodes.
-    pub pageInfo: PageInfo, // 	PageInfo! 	Information to aid in pagination. 
+    pub count: i32,
+    // pub edges: Option<Vec<Option<UserCoreEdge>>>,	  
+    pub nodes: Option<Vec<Option<UserCore>>>,
+    // pub page_info: PageInfo, 
 }
 
 #[derive(cynic::QueryFragment, Debug, Clone, Deserialize, Serialize, rkyv::Archive)]
@@ -255,7 +255,8 @@ pub struct UserCore {
     pub bot: bool,
     pub username: Option<String>,
     pub name: String,
-    pub groups: Option<GroupConnection>,
+    //TODO: looks like this overcomplicates the query (literally, the test instance has a complexity limit of 300, this brings it over 310)
+    // pub groups: Option<GroupConnection>,
     // status: Option<schema::UserStatus>,
     pub state: UserState,
     // last_activity_on: Option<schema::Date>,
@@ -275,7 +276,7 @@ pub struct UserCoreEdge {
 #[derive(cynic::QueryFragment)]
 #[cynic(schema = "gitlab", graphql_type = "Query", variables = "MultiUserQueryArguments")]
 pub struct MultiUserQuery {
-    #[arguments(ids: $ids, usernames: $usernames)]
+    #[arguments(ids: $ids, usernames: $usernames, admins: $admins)]
     pub users: Option<UserCoreConnection>
 }
 

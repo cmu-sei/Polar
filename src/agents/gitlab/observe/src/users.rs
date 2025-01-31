@@ -78,7 +78,15 @@ impl Actor for GitlabUserObserver {
         myself.send_interval(Duration::from_secs(10), || { 
             //TODO: get query arguments from config params
             //build query
-            let op = MultiUserQuery::build(MultiUserQueryArguments{ after: None, admins: Some(true), active: None, ids: None, usernames: None, humans: Some(true) });
+            let op = MultiUserQuery::build( 
+                MultiUserQueryArguments{
+                    after: None,
+                    admins: Some(true),
+                    active: Some(true),
+                    ids: None,
+                    usernames: None,
+                    humans: None
+                });
 
             // pass query in message
             GitlabObserverMessage::GetUsers(op) 
@@ -96,7 +104,7 @@ impl Actor for GitlabUserObserver {
         match message {
             GitlabObserverMessage::GetUsers(op) =>  {
 
-                debug!("Sending query: {op:?}");
+                debug!("Sending query: {}", op.query);
 
                 match state.web_client
                 .post(state.gitlab_endpoint.clone())
@@ -109,7 +117,11 @@ impl Actor for GitlabUserObserver {
                         //forwrard to client
                         match response.json::<GraphQlResponse<MultiUserQuery>>().await {
                             Ok(deserialized) => {
-
+                                if let Some(errors) = deserialized.errors {
+                                    for error in errors {
+                                        warn!("Received error, {error:?}");
+                                    }
+                                }
                                 if let Some(query) = deserialized.data {
 
                                     if let Some(connection) = query.users {
@@ -135,10 +147,14 @@ impl Actor for GitlabUserObserver {
                                                 let bytes = rkyv::to_bytes::<Error>(&data).unwrap();
                                                 
 
-                                                let msg = ClientMessage::PublishRequest { topic: USER_CONSUMER_TOPIC.to_string(), payload: bytes.to_vec(), registration_id: Some(state.registration_id.clone()) };
+                                                let msg = ClientMessage::PublishRequest {
+                                                    topic: USER_CONSUMER_TOPIC.to_string(),
+                                                    payload: bytes.to_vec(),
+                                                    registration_id: Some(state.registration_id.clone())
+                                                };
+
                                                 client.send_message(TcpClientMessage::Send(msg)).expect("Expected to send message");
 
-                                                
                                             }
                                             None => {
                                                 let err_msg = "Failed to locate tcp client";

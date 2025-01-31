@@ -73,56 +73,152 @@ impl Actor for GitlabUserConsumer {
                 match state.graph.start_txn().await {
                     Ok(transaction)  => {
                         
-                        let cypher_query: String = users.iter()
-                            .map(|user|{ 
-                            //create new nodes
-                            
-                            let merge_user = format!("
-                                    MERGE (n:GitlabUser {{ 
-                                        username: \"{}\",
-                                        user_id: \"{}\" ,
-                                        created_at: \"{}\",
-                                        state: \"{}\"
-                                    }})\n",
-                                    user.username.clone().unwrap_or_default(),
-                                    user.id,
-                                    user.created_at.clone().unwrap_or_default(),
-                                    user.state
-                            );
-                            // get projects
-                            let merge_projects: String = {
-                                if let Some(project_connection) = &user.contributed_projects {       
-                                    if let Some(nodes) = &project_connection.nodes {
-                                        nodes.iter().map(|node| {
-                                            match node {
-                                                Some(project) => format!("{0} WITH user, project MERGE (user)-[:contributedTo]->)project)", merge_project_query(project.clone())),
-                                                None => String::default()
-                                            }
-                                        }).collect::<Vec<_>>().join("\n")
+                        let mut_cypher_query = String::new();
 
-                                    } else { String::default() }
-                                } else { String::default() }
-                            };
-
-                            let merge_groups: String = {
-                                // get user group connections
-                                if let Some(group_connection) = &user.groups {
-                                    if let Some(nodes) = &group_connection.nodes {
-                                        nodes.iter().map(|node| {
-                                            match node {
-                                                Some(group) => format!(" {0} WITH user, group MERGE (user)-[:InGroup]->)group)", merge_group_query(group.clone())),
-                                                None => String::default()
-                                            }
-                                        }).collect::<Vec<_>>().join("\n")
-                                    } else { String::default() }
-                                } else { String::default() }
-                            };
-                            format!("{merge_user} \n {merge_projects} \n {merge_groups}")
+                        let users_data = users
+                        .iter()
+                        .map(|user| {
+                            format!(
+                                "{{ username: \"{}\", user_id: \"{}\", created_at: \"{}\", state: \"{}\" }}",
+                                user.username.clone().unwrap_or_default(),
+                                user.id,
+                                user.created_at.clone().unwrap_or_default(),
+                                user.state
+                            )
                         })
                         .collect::<Vec<_>>()
-                        .join("\n");
+                        .join(",\n");
 
-                        transaction.run(Query::new(cypher_query)).await.expect("Expected to run query.");
+
+                        let projects_data = users
+                        .iter()
+                        .filter_map(|user| user.contributed_projects.as_ref())
+                        .flat_map(|connection| connection.nodes.iter().flatten())
+                        .map(|node| {
+                            match node {
+                                Some(project) => {
+                                    format!(
+                                        "{{ project_id: \"{}\", name: \"{}\", full_path: \"{}\", created_at: \"{}\", last_activity_at: \"{}\" }}",
+                                        project.id,
+                                        project.name,
+                                        project.full_path,
+                                        project.created_at.clone().unwrap_or_default(),
+                                        project.last_activity_at.clone().unwrap_or_default()
+                                    )
+                                }
+                                None => String::default()
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                        .join(",\n");
+
+                        // let groups_data = users
+                        // .iter()
+                        // .filter_map(|user| user.groups.as_ref())
+                        // .flat_map(|connection| connection.nodes.iter().flatten())
+                        // .map(|node| {
+                        //     match node {
+                        //         Some(group) => {
+                        //             format!(
+                        //                 r#"
+                        //                 {{
+                        //                     group_id: "{group_id}",
+                        //                     full_name: "{full_name}",
+                        //                     full_path: "{group_full_path}",
+                        //                     created_at: "{group_created_at}",
+                        //                     member_count: "{group_members_count}"
+                        //                 }}
+                        //                 "#,
+                        //                 group_id = group.id, 
+                        //                 full_name = group.full_name, 
+                        //                 group_full_path = group.full_path,
+                        //                 group_created_at = group.created_at.clone().unwrap_or_default(), 
+                        //                 group_members_count = group.group_members_count,
+                        //             )
+                        //         }
+                        //         None => String::default()
+                        //     }
+                        // })
+                        // .collect::<Vec<_>>()
+                        // .join(",\n");
+                        //TODO: We can't query groups here because of the complexity score when groups are returned. Make these connections from the groups observer?
+                        // UNWIND [{groups_data}] AS group_data
+                        //     MERGE (group: GitlabGroupGitlabGroup {{ group_id: group_data.group_id }})
+                        //     SET full_name: group_data.full_name,
+                        //         full_path: group_data.full_path,
+                        //         created_at: group_data.created_at,
+                        //         member_count: group_data.group_member_count
+                            
+                        //     MERGE (user)-[:IN_GROUP]->(group);
+
+
+                        // Final query string with `UNWIND`
+                        let cypher_query = format!(
+                            "
+                            UNWIND [{users_data}] AS user_data
+                            MERGE (user:GitlabUser {{ user_id: user_data.user_id }})
+                            SET user.username = user_data.username,
+                                user.created_at = user_data.created_at,
+                                user.state = user_data.state
+                            WITH user
+                            UNWIND [{projects_data}] AS project_data
+                            MERGE (project:GitlabProject {{ project_id: project_data.project_id }})
+                            SET project.name = project_data.name,
+                                project.full_path = project_data.full_path,
+                                project.created_at = project_data.created_at,
+                                project.last_activity_at = project_data.last_activity_at
+                            
+                            MERGE (user)-[:CONTRIBUTED_TO]->(project);
+                            
+                            "
+                        );
+
+                        
+
+                        //TODO: Do the same for groups
+                                               // let cypher_query: String = users.iter()
+                        //     .map(|user|{ 
+                            
+                        //     // get projects
+                        //     // let merge_projects: String = {
+                        //     //     if let Some(project_connection) = &user.contributed_projects {       
+                        //     //         if let Some(nodes) = &project_connection.nodes {
+                        //     //             nodes.iter().map(|node| {
+                        //     //                 match node {
+                        //     //                     Some(project) => format!("{0} WITH user, project MERGE (user)-[:contributedTo]->(project)", merge_project_query(project.clone())),
+                        //     //                     None => String::default()
+                        //     //                 }
+                        //     //             }).collect::<Vec<_>>().join("\n")
+
+                        //     //         } else { String::default() }
+                        //     //     } else { String::default() }
+                        //     // };
+
+                        //     // let merge_groups: String = {
+                        //     //     // get user group connections
+                        //     //     if let Some(group_connection) = &user.groups {
+                        //     //         if let Some(nodes) = &group_connection.nodes {
+                        //     //             nodes.iter().map(|node| {
+                        //     //                 match node {
+                        //     //                     Some(group) => format!(" {0} WITH user, group MERGE (user)-[:InGroup]->)group)", merge_group_query(group.clone())),
+                        //     //                     None => String::d0efault()
+                        //     //                 }
+                        //     //             }).collect::<Vec<_>>().join("\n")
+                        //     //         } else { String::default() }
+                        //     //     } else { String::default() }
+                        //     //{merge_groups}
+                        //     // };
+
+                        // })
+                        // .collect::<Vec<_>>()
+                        // .join("\n");
+
+
+                        debug!(cypher_query);
+
+                        transaction.run(Query::new(cypher_query)).await.expect("Expected to run query."); 
+ 
+                        
                         if let Err(e) = transaction.commit().await {
                             let err_msg = format!("Error committing transaction to graph: {e}");
                             error!("{err_msg}");

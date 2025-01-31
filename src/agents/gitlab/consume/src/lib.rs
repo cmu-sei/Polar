@@ -152,7 +152,7 @@ pub fn merge_project_query(project: Project) -> String {
         //connect group if presenet
         Some(namespace) =>  {
             //if namespace exists, compose a query to create a node for it and a draw a relationship
-            format!( "{0}\n{1}", merge_namespace_query(namespace), "WITH project, namespace MERGE (p)-[:inNamespace]->(n)")
+            format!( "{0}\n{1}", merge_namespace_query(namespace), "WITH project, namespace MERGE (project)-[:inNamespace]->(namespace)")
         },
         None => String::default()
     };
