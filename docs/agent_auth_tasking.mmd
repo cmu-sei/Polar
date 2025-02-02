@@ -1,0 +1,32 @@
+sequenceDiagram
+    autonumber
+    participant CA as Certificate Authority (PKI)
+    participant PubSub as Pub/Sub Messaging System
+    participant PolicyAgent as Policy Agent
+    participant Observer as Observer (or Processor)
+
+    note right of Observer: Process contains two contexts:<br/> - **Startup Context** (Initializing & retrieving plan)<br/> - **Operational Context** (Executing tasks)
+
+    %% Step 1: Obtain mTLS Certificate (Startup Context)
+    Observer->>+CA: Request mTLS certificate
+    CA-->>-Observer: Issue mTLS certificate (includes topic permissions)
+
+    note right of CA: Certificate includes:<br/> - Agent ID (CN=Observer1, OU=Polar, O=Org)<br/> - Allowed Pub/Sub actions (read/write to topics)<br/> - Expiration & revocation details
+
+    %% Step 2: Authenticate with Pub/Sub Broker (Startup Context)
+    Observer->>+PubSub: Authenticate using mTLS certificate
+    PubSub-->>-Observer: Authentication successful (verify permissions)
+
+    note right of PubSub: The broker verifies the certificate contains:<br/> - Valid agent identity<br/> - Allowed actions (read/write to topics)<br/> - Expiry & revocation checks
+
+    %% Step 3: Request Observation Plan from Policy Agent (Startup Context)
+    Observer->>+PubSub: Publish request for observation plan
+    PubSub->>+PolicyAgent: Deliver request
+    PolicyAgent->>+PubSub: Publish observation plan response
+    PubSub->>+Observer: Deliver observation plan
+
+    note right of PolicyAgent: Observation plan defines:<br/> - What data the Observer should collect<br/> - Collection frequency & thresholds<br/> - Any policy-based restrictions
+
+    %% Step 4: Observer Begins Execution (Operational Context)
+    Observer->>+PubSub: Start reading/writing to authorized topics
+    PubSub-->>-Observer: Messages exchanged successfully

@@ -1,0 +1,12 @@
+sequenceDiagram
+    autonumber
+    participant Admin as Administrator
+    participant GitLab as Version Control System (GitLab)
+    participant PolicyAgent as Policy Agent
+    participant PubSub as Pub/Sub Messaging System
+    participant Observer
+
+    Admin->>+GitLab: Update policy document
+    GitLab->>+PolicyAgent: Trigger update event
+    PolicyAgent->>+PubSub: Publish policy update event
+    PubSub->>+Observer: Deliver policy update event
