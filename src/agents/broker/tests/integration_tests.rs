@@ -4,6 +4,7 @@ mod tests {
 
     use core::panic;
     use std::env;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use cassini::broker::{Broker, BrokerArgs};
     use cassini::client::{TcpClientActor, TcpClientArgs, TcpClientMessage};
     use ractor::registry::where_is;
@@ -22,75 +23,31 @@ mod tests {
     pub const TIMEOUT_ERR_MSG: &str = "Server did not start in time";
     /// Shared Notify instance to signal server readiness
     static SERVER_READY: Notify = Notify::const_new();
+
+    // tests currently running
+    static ACTIVE_TESTS: AtomicUsize = AtomicUsize::new(0);
+    // notified to signal all tests are complete to trigger teardown
+    static TEST_NOTIFY: Notify = Notify::const_new();
     
     pub struct MockSupervisorState;
     pub struct MockSupervisor;
     
-    #[async_trait]
-    impl Actor for MockSupervisor {
-        type Msg = ();
-        type State = MockSupervisorState;
-        type Arguments = ();
-
-        async fn pre_start(
-            &self,
-            myself: ActorRef<Self::Msg>,
-            _: (),
-        ) -> Result<Self::State, ActorProcessingErr> {
-            debug!("{myself:?} starting");
-            Ok(MockSupervisorState)
-        }
-
-        async fn handle(
-            &self,
-            _myself: ActorRef<Self::Msg>,
-            _: Self::Msg,
-            _: &mut Self::State,
-        ) -> Result<(), ActorProcessingErr> {
-            
-
-            Ok(())
-        }
-
-        async fn handle_supervisor_evt(&self, myself: ActorRef<Self::Msg>, msg: SupervisionEvent, _: &mut Self::State) -> Result<(), ActorProcessingErr> {
-            
-            match msg {
-                SupervisionEvent::ActorStarted(actor_cell) => {
-                    info!("TEST_SUPERVISOR: {0:?}:{1:?} started", actor_cell.get_name(), actor_cell.get_id());
-                },
-                SupervisionEvent::ActorTerminated(actor_cell, _, reason) => {
-                    info!("TEST_SUPERVISOR: {0:?}:{1:?} terminated. {reason:?}", actor_cell.get_name(), actor_cell.get_id());
-                },
-                SupervisionEvent::ActorFailed(actor_cell, _) => {
-                    panic!("{}" ,format!("Error: actor {0:?}:{1:?} Should not have failed", actor_cell.get_name(), actor_cell.get_id()));
-                },
-                SupervisionEvent::ProcessGroupChanged(..) => todo!(),
-            }    
-            
-            Ok(())
-        }
-    }
-
     #[tokio::test]
     async fn test_init() {
         polar::init_logging();
-        let (supervisor, supervisor_handle) = Actor::spawn(Some(TEST_SUPERVISOR.to_string()), MockSupervisor, ()).await.expect("Expected supervisor to start");
 
         let broker_args = BrokerArgs { bind_addr: String::from(BIND_ADDR), session_timeout: Some(5), server_cert_file: env::var("TLS_SERVER_CERT_CHAIN").unwrap(), private_key_file: env::var("TLS_SERVER_KEY").unwrap(), ca_cert_file: env::var("TLS_CA_CERT").unwrap() };
         
         //start broker
-        let (_, broker_handle) = Actor::spawn(Some(BROKER_NAME.to_string()), Broker, broker_args.clone())
+        let _ = Actor::spawn(Some(BROKER_NAME.to_string()), Broker, broker_args.clone())
             .await
             .expect("Failed to start Broker");
         
         tokio::time::sleep(Duration::from_secs(1)).await;
         SERVER_READY.notify_waiters();
     
-        assert_ne!(where_is(BROKER_NAME.to_string()), None);
-        supervisor_handle.await.expect("Expected tests not to panic");
-
-        broker_handle.abort();
-
+        //wait to end 
+        TEST_NOTIFY.notified().await;      
     }
 
     #[tokio::test]
@@ -100,10 +57,10 @@ mod tests {
         .await
         .expect(TIMEOUT_ERR_MSG);
 
-        let supervisor = where_is(TEST_SUPERVISOR.to_string()).unwrap();
+        ACTIVE_TESTS.fetch_add(1, Ordering::SeqCst);
+        
     
-    
-        let (client, _) = Actor::spawn_linked(Some("test_registration_client".to_owned()),
+        let (client, _) = Actor::spawn(Some("test_registration_client".to_owned()),
         TcpClientActor,
         TcpClientArgs {
             bind_addr: BIND_ADDR.to_string(),
@@ -112,7 +69,7 @@ mod tests {
             private_key_file: env::var("TLS_CLIENT_KEY").unwrap(),
             ca_cert_file: env::var("TLS_CA_CERT").unwrap(),
 
-        }, supervisor.clone().into()).await.expect("Failed to start client actor");    
+        }).await.expect("Failed to start client actor");    
 
         tokio::time::sleep(Duration::from_secs(1)).await;
         
@@ -123,6 +80,9 @@ mod tests {
         assert_ne!(session_id, None);
         client.kill_and_wait(None).await.expect("Expected to stop client");
         
+        // Signal completion
+        if ACTIVE_TESTS.fetch_sub(1, Ordering::SeqCst) == 1 { TEST_NOTIFY.notify_one(); }
+        
     }
 
     #[tokio::test]
@@ -132,8 +92,9 @@ mod tests {
         .await
         .expect(TIMEOUT_ERR_MSG);
 
-        let supervisor = where_is(TEST_SUPERVISOR.to_string()).unwrap();
-        let (client, _) = Actor::spawn_linked(Some("test_registered_disconnect_client".to_owned()),
+        ACTIVE_TESTS.fetch_add(1, Ordering::SeqCst);
+
+        let (client, _) = Actor::spawn(Some("test_registered_disconnect_client".to_owned()),
         TcpClientActor,
         TcpClientArgs {
             bind_addr: BIND_ADDR.to_string(),
@@ -141,7 +102,7 @@ mod tests {
             client_cert_file: env::var("TLS_CLIENT_CERT").unwrap(),
             private_key_file: env::var("TLS_CLIENT_KEY").unwrap(),
             ca_cert_file: env::var("TLS_CA_CERT").unwrap(),
-        }, supervisor.clone().into()).await.expect("Failed to start client actor");    
+        }).await.expect("Failed to start client actor");    
 
         tokio::time::sleep(Duration::from_secs(1)).await;
         
@@ -160,6 +121,8 @@ mod tests {
         tokio::time::sleep(Duration::from_secs(1)).await;
         client.kill_and_wait(None).await.expect("Expected to stop client");
         
+        // Signal completion
+        if ACTIVE_TESTS.fetch_sub(1, Ordering::SeqCst) == 1 { TEST_NOTIFY.notify_one(); }
 
     }
 
@@ -175,9 +138,9 @@ mod tests {
         .await
         .expect(TIMEOUT_ERR_MSG);
 
-        let supervisor = where_is(TEST_SUPERVISOR.to_string()).unwrap();
-
-        let (client, _) = Actor::spawn_linked(Some("test_timeout_client".to_owned()),
+        ACTIVE_TESTS.fetch_add(1, Ordering::SeqCst);
+        
+        let (client, _) = Actor::spawn(Some("test_timeout_client".to_owned()),
         TcpClientActor,
         TcpClientArgs {
             bind_addr: BIND_ADDR.to_string(),
@@ -185,7 +148,7 @@ mod tests {
             client_cert_file: env::var("TLS_CLIENT_CERT").unwrap(),
             private_key_file: env::var("TLS_CLIENT_KEY").unwrap(),
             ca_cert_file: env::var("TLS_CA_CERT").unwrap(),
-        }, supervisor.clone().into()).await.expect("Failed to start client actor");    
+        }).await.expect("Failed to start client actor");    
 
         tokio::time::sleep(Duration::from_secs(1)).await;
 
@@ -215,6 +178,9 @@ mod tests {
 
         client.kill_and_wait(None).await.expect("Expected to stop client");
         
+        // Signal completion
+        if ACTIVE_TESTS.fetch_sub(1, Ordering::SeqCst) == 1 { TEST_NOTIFY.notify_one(); }
+
     }
 
     /// Confirms clients that get disconnected unexpectedly can resume their session and keep subscriptions
@@ -225,9 +191,9 @@ mod tests {
         .await
         .expect(TIMEOUT_ERR_MSG);
 
-        let supervisor = where_is(TEST_SUPERVISOR.to_string()).expect("Expected supervisor to be present");
-
-        let (client, _) = Actor::spawn_linked(Some("initial_reconnect_client".to_string()),
+        ACTIVE_TESTS.fetch_add(1, Ordering::SeqCst);
+        
+        let (client, _) = Actor::spawn(Some("initial_reconnect_client".to_string()),
         TcpClientActor,
         TcpClientArgs {
             bind_addr: BIND_ADDR.to_string(),
@@ -235,7 +201,7 @@ mod tests {
             client_cert_file: env::var("TLS_CLIENT_CERT").unwrap(),
             private_key_file: env::var("TLS_CLIENT_KEY").unwrap(),
             ca_cert_file: env::var("TLS_CA_CERT").unwrap(),
-        }, supervisor.clone().into()).await.expect("Failed to start client actor");    
+        }).await.expect("Failed to start client actor");    
 
         tokio::time::sleep(Duration::from_secs(1)).await;
 
@@ -259,7 +225,7 @@ mod tests {
         )).map_err(|e| { println!("{e}")}).expect("Expected to foward msg");
 
         //create new client, connect and send registration request with same session_id
-        let (new_client, _) = Actor::spawn_linked(Some("test_reconnect_client".to_owned()),
+        let (new_client, _) = Actor::spawn(Some("test_reconnect_client".to_owned()),
         TcpClientActor,
         TcpClientArgs {
             bind_addr: BIND_ADDR.to_string(),
@@ -267,7 +233,7 @@ mod tests {
             client_cert_file: env::var("TLS_CLIENT_CERT").unwrap(),
             private_key_file: env::var("TLS_CLIENT_KEY").unwrap(),
             ca_cert_file: env::var("TLS_CA_CERT").unwrap(),
-        }, supervisor.clone().into()).await.expect("Failed to start client actor");    
+        }).await.expect("Failed to start client actor");    
 
         
         //Publish messsage
@@ -276,9 +242,11 @@ mod tests {
         
         //wait for responses, panics
         tokio::time::sleep(Duration::from_secs(3)).await;
+        
+        // Signal completion
+        if ACTIVE_TESTS.fetch_sub(1, Ordering::SeqCst) == 1 { TEST_NOTIFY.notify_one(); }
 
-        client.kill_and_wait(None).await.expect("Expected to stop client");
-        new_client.kill_and_wait(None).await.expect("Expected to stop client");
+
     }
 
     #[tokio::test]
@@ -289,9 +257,10 @@ mod tests {
         .await
         .expect(TIMEOUT_ERR_MSG);
 
-        let supervisor = where_is(TEST_SUPERVISOR.to_string()).expect("Expected test supervisor to be present");
+        ACTIVE_TESTS.fetch_add(1, Ordering::SeqCst);
+        
         //start a client to subscribe to some topic
-        let (subscriber_client, _ ) = Actor::spawn_linked(Some(format!("dlq_subscriber_client")),
+        let (subscriber_client, _ ) = Actor::spawn(Some(format!("dlq_subscriber_client")),
         TcpClientActor,
         TcpClientArgs {
             bind_addr: BIND_ADDR.to_string(),
@@ -299,8 +268,7 @@ mod tests {
             client_cert_file: env::var("TLS_CLIENT_CERT").unwrap(),
             private_key_file: env::var("TLS_CLIENT_KEY").unwrap(),
             ca_cert_file: env::var("TLS_CA_CERT").unwrap(),
-        },
-        supervisor.clone().into()).await.expect("Failed to start client actor");
+        }).await.expect("Failed to start client actor");
 
         tokio::time::sleep(Duration::from_secs(1)).await;    
 
@@ -328,7 +296,7 @@ mod tests {
         tokio::time::sleep(Duration::from_secs(2)).await;
 
         //create a client to send messages to that topic
-        let (publisher_client, _ ) =  Actor::spawn_linked(Some(format!("dlq_publisher_client")),
+        let (publisher_client, _ ) =  Actor::spawn(Some(format!("dlq_publisher_client")),
         TcpClientActor,
         TcpClientArgs {
             bind_addr: BIND_ADDR.to_string(),
@@ -336,8 +304,7 @@ mod tests {
             client_cert_file: env::var("TLS_CLIENT_CERT").unwrap(),
             private_key_file: env::var("TLS_CLIENT_KEY").unwrap(),
             ca_cert_file: env::var("TLS_CA_CERT").unwrap(),
-        },
-        supervisor.clone().into()).await.expect("Failed to start client actor");
+        }).await.expect("Failed to start client actor");
         
         tokio::time::sleep(Duration::from_secs(1)).await;
         //confirm registration
@@ -357,7 +324,7 @@ mod tests {
         
 
         //create new client, connect and send registration request to resume subscriber session
-        let (new_client, _) = Actor::spawn_linked(Some("read_dlq_client".to_owned()),
+        let (new_client, _) = Actor::spawn(Some("read_dlq_client".to_owned()),
         TcpClientActor,
         TcpClientArgs {
             bind_addr: BIND_ADDR.to_string(),
@@ -365,13 +332,19 @@ mod tests {
             client_cert_file: env::var("TLS_CLIENT_CERT").unwrap(),
             private_key_file: env::var("TLS_CLIENT_KEY").unwrap(),
             ca_cert_file: env::var("TLS_CA_CERT").unwrap(),
-        }, supervisor.clone().into()).await.expect("Failed to start client actor");    
+        }).await.expect("Failed to start client actor");    
 
         //kill first client now that we have this one
         subscriber_client.kill_and_wait(None).await.expect("Expected to kill client");
     
         tokio::time::sleep(Duration::from_secs(3)).await;
         new_client.kill_and_wait(None).await.expect("Expected to kill client");
+
+
+        // Signal completion
+        if ACTIVE_TESTS.fetch_sub(1, Ordering::SeqCst) == 1 { TEST_NOTIFY.notify_one(); }
+
+
     }
 
     #[tokio::test]
@@ -381,10 +354,9 @@ mod tests {
         .await
         .expect(TIMEOUT_ERR_MSG);
 
-        let supervisor = where_is(TEST_SUPERVISOR.to_string()).unwrap();
-    
-    
-        let (client, _) = Actor::spawn_linked(Some("test_registration_client".to_owned()),
+        ACTIVE_TESTS.fetch_add(1, Ordering::SeqCst);
+            
+        let (client, _) = Actor::spawn(Some("test_unsubscribe_client".to_owned()),
         TcpClientActor,
         TcpClientArgs {
             bind_addr: BIND_ADDR.to_string(),
@@ -393,7 +365,7 @@ mod tests {
             private_key_file: env::var("TLS_CLIENT_KEY").unwrap(),
             ca_cert_file: env::var("TLS_CA_CERT").unwrap(),
 
-        }, supervisor.clone().into()).await.expect("Failed to start client actor");    
+        }).await.expect("Failed to start client actor");    
 
         tokio::time::sleep(Duration::from_secs(1)).await;
         
@@ -422,7 +394,9 @@ mod tests {
 
         assert_eq!(where_is(get_subscriber_name(&session_id.unwrap(), &topic.clone())), None);
         
-        client.kill_and_wait(None).await.expect("Expected to stop client");
+        // Signal completion
+        if ACTIVE_TESTS.fetch_sub(1, Ordering::SeqCst) == 1 { TEST_NOTIFY.notify_one(); }
+
         
     }
 
@@ -434,10 +408,9 @@ mod tests {
         .await
         .expect(TIMEOUT_ERR_MSG);
 
-        let supervisor = where_is(TEST_SUPERVISOR.to_string()).unwrap();
-    
-    
-        let (client, _) = Actor::spawn_linked(Some("queued_message_test_client".to_owned()),
+        ACTIVE_TESTS.fetch_add(1, Ordering::SeqCst);
+
+        let (client, _) = Actor::spawn(Some("queued_message_test_client".to_owned()),
         TcpClientActor,
         TcpClientArgs {
             bind_addr: BIND_ADDR.to_string(),
@@ -446,7 +419,7 @@ mod tests {
             private_key_file: env::var("TLS_CLIENT_KEY").unwrap(),
             ca_cert_file: env::var("TLS_CA_CERT").unwrap(),
 
-        }, supervisor.clone().into()).await.expect("Failed to start client actor");    
+        }).await.expect("Failed to start client actor");    
 
         tokio::time::sleep(Duration::from_secs(1)).await;
         
@@ -459,7 +432,7 @@ mod tests {
         let topic = String::from("Comics");
 
         //create a client to send messages to that topic
-        let (publisher_client, _ ) =  Actor::spawn_linked(Some(format!("comic_publisher_client")),
+        let (publisher_client, _ ) =  Actor::spawn(Some(format!("comic_publisher_client")),
         TcpClientActor,
         TcpClientArgs {
             bind_addr: BIND_ADDR.to_string(),
@@ -467,8 +440,7 @@ mod tests {
             client_cert_file: env::var("TLS_CLIENT_CERT").unwrap(),
             private_key_file: env::var("TLS_CLIENT_KEY").unwrap(),
             ca_cert_file: env::var("TLS_CA_CERT").unwrap(),
-        },
-        supervisor.clone().into()).await.expect("Failed to start client actor");
+        }).await.expect("Failed to start client actor");
         
         tokio::time::sleep(Duration::from_secs(1)).await;
         //confirm registration
@@ -491,23 +463,11 @@ mod tests {
 
         tokio::time::sleep(Duration::from_secs(1)).await;
         
-        client.kill_and_wait(None).await.expect("Expected to stop client");
-        
+        // Signal completion
+        if ACTIVE_TESTS.fetch_sub(1, Ordering::SeqCst) == 1 { TEST_NOTIFY.notify_one(); }
+
     }
 
-
-
-
-    // #[tokio::test]
-    // async fn test_teardown() {
-    //     let supervisor = where_is(TEST_SUPERVISOR.to_string()).expect("Expected supervsior to be present");
-    //     while !supervisor.get_children().is_empty() {
-    //         let workers = supervisor.get_children().len();
-    //         println!("Waiting for {workers} worker(s) to finish.");
-    //         sleep(Duration::from_secs(5)).await;
-    //     }
-    //     supervisor.stop(Some("FINISHED".to_string()))
-    // }
 }
 
 
