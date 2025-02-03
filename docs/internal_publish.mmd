@@ -1,0 +1,50 @@
+sequenceDiagram
+    participant Publisher (SessionAgent)
+    participant Broker
+    participant TopicManager
+    participant TopicAgent
+    participant SubscriberManager
+    participant SubscriberAgent
+    participant Client (Listener)
+
+    autonumber
+
+    Note over Publisher (SessionAgent): A session agent publishes a message<br/>to a topic already known to the system.
+
+    Publisher (SessionAgent)->>Broker: PublishRequest(topic, payload)
+    Broker->>TopicManager: Lookup TopicAgent for topic
+
+    alt Topic Exists
+        TopicManager-->>Broker: Return TopicAgent
+        Broker->>TopicAgent: PublishRequest(topic, payload)
+        TopicAgent->>SubscriberManager: Notify subscribers
+        SubscriberManager->>SubscriberAgent: Push message
+        SubscriberAgent->>Client (Listener): Deliver message
+        Client (Listener)->>Client: Notify client of received message
+    else Topic Does Not Exist
+        Broker->>Publisher (SessionAgent): ❗ Error: Topic not found
+        Note right of Broker: ⚠️ No automatic topic creation.<br/>Client must create the topic first.
+    end
+
+    %% Error handling annotations
+    alt TopicManager Unavailable
+        Broker->>Publisher (SessionAgent): ❗ Error: TopicManager unavailable
+        Note right of Broker: ⚠️ No retry or failover logic for TopicManager failures.
+    end
+
+    alt TopicAgent Unavailable
+        TopicManager-->>Broker: ❗ Error: No TopicAgent found
+        Broker->>Publisher (SessionAgent): ❗ Error: Topic is not registered
+        Note right of TopicManager: ⚠️ No automated recovery for missing topics.<br/>If a topic agent crashes, messages will fail until manually restarted.
+    end
+
+    alt SubscriberManager Unavailable
+        TopicAgent-->>Broker: ❗ Error: Cannot notify subscribers
+        Broker->>Publisher (SessionAgent): ❗ Error: Message delivery failed
+        Note right of TopicAgent: ⚠️ No fallback for subscriber notifications.
+    end
+
+    alt No Active Subscribers
+        SubscriberManager-->>Broker: ❗ Warning: No active subscribers
+        Note right of SubscriberManager: ⚠️ Messages sent to a topic with no subscribers<br/>are discarded without acknowledgment.
+    end

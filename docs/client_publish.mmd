@@ -1,0 +1,79 @@
+sequenceDiagram
+    participant Client
+    participant TcpClientActor
+    participant Listener
+    participant Broker
+    participant SessionManager
+    participant TopicManager
+    participant SubscriberManager
+    participant SubscriberAgent
+    participant TopicAgent
+
+    autonumber
+    Client->>TcpClientActor: PublishRequest(topic, payload)
+    TcpClientActor->>Listener: Forward PublishRequest(topic, payload)
+
+    alt Listener Exists
+        Listener->>Broker: Forward PublishRequest(topic, payload)
+    else Listener Missing
+        Listener-->>Client: Error("Listener not found")
+    end
+
+    alt Broker Exists
+        activate Broker
+        Broker->>SessionManager: Validate Session
+        deactivate Broker
+    else Broker Missing
+        Broker-->>Client: Error("Broker not found")
+    end
+
+    alt Session Exists
+        activate SessionManager
+        SessionManager-->>Broker: OK
+        deactivate SessionManager
+    else Session Missing
+        SessionManager-->>Broker: Error("Session not found")
+        Broker-->>Client: Error("Publish Failed")
+    end
+
+    Broker->>TopicManager: Locate Topic
+
+    alt Topic Exists
+        TopicManager-->>Broker: OK
+    else Topic Missing
+        activate TopicManager
+        TopicManager->>TopicAgent: Create Topic
+        deactivate TopicManager
+        TopicAgent-->>Broker: OK
+    end
+
+    activate Broker
+    Broker->>TopicAgent: Forward PublishRequest(topic, payload)
+    deactivate Broker
+
+    alt TopicAgent Exists
+        activate TopicAgent
+        TopicAgent->>SubscriberManager: Notify Subscribers
+        deactivate TopicAgent
+    else TopicAgent Missing
+        TopicManager-->>Broker: Error("Topic Not Found")
+        Broker-->>Client: Error("Publish Failed")
+    end
+
+    alt Subscribers Exist
+        activate SubscriberManager
+        SubscriberManager->>SubscriberAgent: Deliver Message
+        deactivate SubscriberManager
+        SubscriberAgent-->>SubscriberManager: OK
+        SubscriberManager-->>Broker: Delivery Successful
+    else No Subscribers
+        SubscriberManager-->>Broker: No active subscribers
+    end
+
+    Broker-->>Listener: Publish Ack
+    Listener-->>TcpClientActor: Publish Ack
+    TcpClientActor-->>Client: Publish Ack
+
+    note over Broker, SubscriberManager: If no subscribers, message is ignored
+    note over SessionManager: If session is missing, error is logged and returned
+    note over TopicManager: New topics are created dynamically

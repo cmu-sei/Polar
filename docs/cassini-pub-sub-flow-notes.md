@@ -1,87 +1,76 @@
-## Subscription flow
+## **Subscription Flow**
+1. Client **connects**.
+2. **ListenerManager** creates a new **Listener** actor.
+3. **Client sends a registration request** to the Listener.
+4. **Listener forwards registration request** to the **Broker**.
+5. **Broker performs authentication**.
+   - If **auth fails**, Broker sends a **403 error** back to the **Listener**, which forwards it to the **Client**.
+   - If **auth succeeds**, proceed.
+6. **Broker looks for an existing session**.
+   - If no session exists:
+     1. **Broker requests SessionManager to create a new session**.
+     2. **SessionAgent is created and linked to the Client Listener**.
+     3. **SessionAgent sends a registration ACK to the Client via the Listener**.
+7. **Client sends a request to subscribe to a topic**.
+8. **Listener forwards subscription request** to **SessionAgent**.
+9. **SessionAgent forwards request to Broker**.
+10. **Broker performs subscription authorization**.
+    - If **auth fails**, Broker sends a **403 error** back to **SessionAgent**, which sends it to the **Client**.
+    - If **auth succeeds**, proceed.
+11. **Broker looks for an existing SubscriberAgent for the session and topic**.
+    - If **SubscriberAgent exists**, send ACK back to **SessionAgent**, then to **Listener**, and then to **Client**.
+    - Else, **SubscriberManager creates a new SubscriberAgent**.
+12. **SubscriberAgent registers itself with the TopicManager**.
+    - If **TopicAgent for the requested topic exists**, it adds the new subscriber.
+    - If **TopicAgent does not exist**, request **TopicManager to create one**.
+      - ⚠️ **Potential abuse case**: Prevent malicious users from sending rapid publish requests with random topic names.
+13. **SubscriberAgent sends ACK to SessionAgent**.
+14. **SessionAgent sends ACK to Client via Listener**.
+    - If **Listener exists**, send ACK.
+    - If **Listener does not exist**, log an error and wait for the listener to return or time out.
 
-client connects, listener created, 
+### **Error Handling**
+- If **SubscriberAgent crashes**, **inform the client to re-subscribe**.
+  - **Alternative**: Killing the session entirely is possible but **not ideal**.
+- **Potential abuse case**: Clients attempting to rapidly subscribe to non-existent topics to exhaust system resources.
 
-client registers
+---
 
-session is created
+## **Publishing Flow**
+1. **Client connects**.
+2. **ListenerManager creates a new Listener**.
+3. **Listener waits for a registration request**.
+4. **Client sends a registration request**.
+5. **Listener forwards registration request to Broker**.
+6. **Broker performs authentication**.
+   - If **auth fails**, send **403 error** back to the Listener, which forwards it to the Client.
+   - If **auth succeeds**, proceed.
+7. **SessionManager creates a new SessionAgent** and links it to the Listener.
+8. **SessionAgent sends a registration ACK** to the **Client** via the Listener.
+9. **Client sends a publish request** to the **SessionAgent**.
+10. **SessionAgent forwards the request to the Broker**.
+11. **Broker performs authorization**.
+    - If **auth fails**, send **403 error** to **SessionAgent**, which forwards it to the **Client**.
+    - If **auth succeeds**, proceed.
+12. **Broker looks for an existing TopicAgent**.
+    - If **TopicAgent exists**, Broker forwards the publish request.
+    - If **TopicAgent does not exist**, Broker requests **TopicManager to create one**.
+      - ⚠️ **Potential abuse case**: Malicious clients attempting to flood the system with publishes to fake topics.
+13. **TopicAgent receives the publish request**.
+    - **TopicAgent forwards notifications** to all registered **SubscriberAgents**.
+14. **Each SubscriberAgent calls the SessionAgent with the message payload**.
+15. **SessionAgent processes the message**:
+    - If **SessionAgent replies successfully**, SubscriberAgent is unblocked.
+    - If **SessionAgent does not reply in time**, it may be dead. Log an error and stop the SubscriberAgent.
+    - If **SessionAgent replies with a failure**, **add the message to a dead-letter queue**.
+16. **If Broker successfully forwards the publish request**:
+    - **Broker sends PublishAck** back to the SessionAgent that made the request.
+    - Otherwise, **send an error back to the SessionAgent**.
+17. **SessionAgent forwards the PublishAck to the Client**.
 
-client sends request to subscribe to session
-
-session forwards to broker
-broker performs auth
-if auth successful - broker looks for existing subscriber actor.
-    If no subscriber exists, forward subscribe request topic IF it exists
-        IF NOT, we should tell the topicmgr to create one, AND THEN subscribe by appending the subscriber_id ("session_id:topic") to the topic agent's list. (Consider abuse case of someone sending a bunch of publishes with random topic names)
-   
-        Forward subscribe request to sub mgr letting
-        sub mgr creates subscriber actor
-        new subscriber actor sends ACK directly to session with success
-
-    IF subscriber exists, send ACK back to session with success
-
-
-    session sends ACK to client via the listener IF it exists
-    
-    if not, log error and wait around to die OR for the listener to come back
-
-ELSE, send 403 error
-
-
-NOTE: if a subscriber *fails* i.e. panics, errors out, etc. Inform client to resend subscriptions
-Our only other recourse is to just kill the session entirely...not ideal
-
-
-
-## Publishing Flow
-
-client connects
-listener manager creates new listener
-listener waits for registration request
-client sends registration request
-listener forwards registration request to broker
-broker performs some auth
-if auth successful,
-    session is created
-    session sends ACK to client via listener
-    client sends request to subscribe to session
-
-    session forwards to broker
-    broker performs auth
-        if auth successful - broker looks for existing topic actor.
-
-            IF topic exists, 
-                sends publish request to topic
-                If any, topic actor forwards notifications to subscribers
-                subscriber actor will call the session with a message containing
-                the payload
-                session will reply, unblocking the sub
-                if session doesn't reply in time, it's probably dead
-                    log the error, stop subscriber
-                if session replies saying it failed to publish
-                    add to message dead letter queue
-
-
-            If no topic exists
-                expect to call topic manager to add a topic, await it's reponse\
-
-                if topicmgr succeeds in creating a new topic
-                    if broker succeeds forwarding a publish request to topic 
-                        broker sends PublishAck back to session that made the request
-                    else
-                        send error back to session
-
-        else, 
-            send 403 error
-else,
-    listener gets 403 type message
-
-
-
-NOTE: We can use RPC to wait for a reply from subscribers and block while we wait for a reply,
-If we timeout on any particular send, we can put the message back onto the queue 
-
-NOTE: if a subscriber *fails* i.e. panics, errors out, etc. Inform client to resend subscriptions
-Our only other recourse is to just kill the session entirely...not ideal
-
-
+### **Error Handling**
+- **Use RPC to block while waiting for a reply from subscribers**.
+  - If a **timeout** occurs, **requeue the message**.
+- If a **SubscriberAgent crashes**, **inform the client to re-subscribe**.
+  - **Alternative**: Killing the session entirely is possible but **not ideal**.
+- **Potential abuse case**: Clients sending massive publish requests to unregistered topics, attempting to DOS the system.

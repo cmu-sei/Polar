@@ -1,0 +1,69 @@
+sequenceDiagram
+    participant Client
+    participant TcpClientActor
+    participant Listener
+    participant Broker
+    participant SessionManager
+    participant SubscriberManager
+    participant TopicManager
+    participant SubscriberAgent
+    participant TopicAgent
+
+    autonumber
+    Client->>TcpClientActor: UnsubscribeRequest(topic)
+    TcpClientActor->>Listener: Forward UnsubscribeRequest(topic)
+
+    alt Listener Exists
+        Listener->>Broker: Forward UnsubscribeRequest(topic)
+    else Listener Missing
+        Listener-->>Client: Error("Listener not found")
+    end
+
+    alt Broker Exists
+        activate Broker
+        Broker->>SessionManager: Validate Session
+        deactivate Broker
+    else Broker Missing
+        Broker-->>Client: Error("Broker not found")
+    end
+
+    alt Session Exists
+        activate SessionManager
+        SessionManager-->>Broker: OK
+        deactivate SessionManager
+    else Session Missing
+        SessionManager-->>Broker: Error("Session not found")
+        Broker-->>Client: Error("Unsubscribe Failed")
+    end
+
+    Broker->>SubscriberManager: Locate Subscriber
+
+    alt Subscriber Exists
+        activate SubscriberManager
+        SubscriberManager->>SubscriberAgent: Terminate Subscription
+        SubscriberAgent-->>SubscriberManager: Acknowledgment
+        deactivate SubscriberManager
+    else Subscriber Missing
+        SubscriberManager-->>Broker: Error("Subscription not found")
+        Broker-->>Client: Error("Unsubscribe Failed")
+    end
+
+    SubscriberManager->>TopicManager: Remove Subscriber from Topic
+
+    alt Topic Exists
+        activate TopicManager
+        TopicManager->>TopicAgent: Remove Subscriber
+        deactivate TopicManager
+        TopicAgent-->>TopicManager: Acknowledgment
+    else Topic Missing
+        TopicManager-->>Broker: Error("Topic not found")
+        Broker-->>Client: Error("Unsubscribe Failed")
+    end
+
+    Broker-->>Listener: Unsubscribe Ack
+    Listener-->>TcpClientActor: Unsubscribe Ack
+    TcpClientActor-->>Client: Unsubscribe Ack
+
+    note over Broker, SubscriberManager: If no subscriber found, return error
+    note over SessionManager: If session is missing, error is logged and returned
+    note over TopicManager: Ensures the topic removes the subscriber correctly

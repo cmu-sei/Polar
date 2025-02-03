@@ -1,0 +1,65 @@
+sequenceDiagram
+    autonumber
+    participant Client as TcpClientActor
+    participant Listener as Listener
+    participant Broker as Broker
+    participant SessionMgr as SessionManager
+    participant Session as SessionAgent
+    participant SubscriberMgr as SubscriberManager
+
+    Note over Client: Client connection is active...
+    Client->>Listener: (No activity for configured timeout period)
+
+    alt Client is unresponsive
+        Listener->>Session: TimeoutMessage(client_id)
+
+        alt Session exists
+            activate Session
+            Session->>SessionMgr: Notify timeout(client_id)
+            deactivate Session
+
+            activate SessionMgr
+            SessionMgr->>Session: Mark session for cleanup
+            Note over SessionMgr: 🚨 **Issue:** What if session recovers before cleanup?
+            SessionMgr->>SubscriberMgr: Unsubscribe client from topics
+            deactivate SessionMgr
+
+            activate SubscriberMgr
+            SubscriberMgr-->>SessionMgr: Confirm unsubscribed
+            deactivate SubscriberMgr
+
+            activate SessionMgr
+            SessionMgr->>Broker: Notify broker of timeout
+            deactivate SessionMgr
+
+            activate Broker
+            Broker->>Listener: Close connection
+            deactivate Broker
+
+            activate Listener
+            Listener-->>Broker: Acknowledged
+            deactivate Listener
+        else Session not found
+            activate SessionMgr
+            Note over SessionMgr: 🚨 **Issue:** What if session was already cleaned up?
+            SessionMgr->>Listener: Unknown session ❌
+            deactivate SessionMgr
+
+            activate Listener
+            Note over Listener: 🔴 **Fix:** Should log and handle cases where session no longer exists.
+            deactivate Listener
+        end
+    else Client reconnects before timeout
+        activate Listener
+        Note over Listener: 🟢 Client reconnected, reset timeout.
+        Listener->>SessionMgr: Cancel session timeout
+        deactivate Listener
+
+        activate SessionMgr
+        SessionMgr->>Session: Resume session
+        deactivate SessionMgr
+
+        activate Session
+        Session-->>SessionMgr: Session resumed
+        deactivate Session
+    end
