@@ -21,7 +21,8 @@
    DM24-0470
 */
 
-use gitlab_queries::{Group, Project, UserCore};
+use gitlab_queries::{Group, Project, ProjectMemberConnection, UserCore};
+use gitlab_schema::IdString;
 
 use rkyv::{Serialize, Deserialize, Archive};
 
@@ -32,7 +33,7 @@ pub enum GitlabData {
     Users(Vec<UserCore>),
     Projects(Vec<Project>),
     Groups(Vec<Group>),
-    // ProjectUsers(ResourceLink<User>),
+    ProjectMembers(ResourceLink<ProjectMemberConnection>),
     // ProjectRunners(ResourceLink<Runner>),
     // GroupMembers(ResourceLink<User>),
     // GroupRunners(ResourceLink<Runner>),
@@ -44,6 +45,13 @@ pub enum GitlabData {
     // PipelineJobs(ResourceLink<Job>)
 }
 
+/// Helper type to link connection types to a resource's id
+/// For example, a user or group to projects, or a group to users, etc.
+#[derive (Serialize, Deserialize, Archive)]
+pub struct ResourceLink<T> {
+    pub resource_id: IdString,
+    pub connection: T
+}
 
 // #[derive (Serialize, Deserialize, Archive, Clone, PartialEq, Debug)]
 // pub struct Runner {

@@ -25,9 +25,10 @@
 use common::PROJECTS_CONSUMER_TOPIC;
 use common::types::{GitlabData};
 use neo4rs::Query;
+use tracing::field::debug;
 use tracing::{debug, error, info};
 use ractor::{async_trait, registry::where_is, Actor, ActorProcessingErr, ActorRef};
-use crate::{merge_group_query, merge_project_query, subscribe_to_topic, GitlabConsumerArgs, GitlabConsumerState, BROKER_CLIENT_NAME};
+use crate::{subscribe_to_topic, GitlabConsumerArgs, GitlabConsumerState, BROKER_CLIENT_NAME};
 
 pub struct GitlabProjectConsumer;
 
@@ -69,14 +70,39 @@ impl Actor for GitlabProjectConsumer {
     ) -> Result<(), ActorProcessingErr> {
 
         match message {
-            GitlabData::Projects(vec) => {
+            GitlabData::Projects(projects) => {
                 let transaction = state.graph.start_txn().await.expect("Expected to start a transaction with the graph.");
-                for p in vec {
-                    let query = merge_project_query(p);
-                    debug!(query);
+                // Create list of projects
+                let project_array = projects.iter()
+                    .map(|project| {
+                        format!(
+                            r#"{{ project_id: "{project_id}", name: "{name}", full_path: "{full_path}", created_at: "{created_at}", last_activity_at: "{last_activity_at}" }}"#,
+                            project_id = project.id,
+                            name = project.name,
+                            full_path = project.full_path,
+                            created_at = project.created_at.clone().unwrap_or_default(),
+                            last_activity_at = project.last_activity_at.clone().unwrap_or_default(),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(",\n");
 
-                    transaction.run(Query::new(query)).await.expect("Expected to run query on transaction.");
-                }
+                // Here, we write a query that creates additional nodes for the group and namespace of the project
+                let cypher_query = format!(
+                    "
+                    // Create projects
+                    UNWIND [{project_array}] AS project_data
+                    MERGE (project:GitlabProject {{ project_id: project_data.project_id }})
+                    SET project.name = project_data.name,
+                        project.full_path = project_data.full_path,
+                        project.created_at = project_data.created_at,
+                        project.last_activity_at = project_data.last_activity_at
+                    "
+                );
+                
+                debug!(cypher_query);
+                transaction.run(Query::new(cypher_query)).await.expect("Expected to run query.");
+
                 transaction.commit().await.expect("Expected to commit transaction");
                 info!("Transaction committed.");
             }

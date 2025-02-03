@@ -658,6 +658,7 @@ dependencies = [
  "cynic-codegen",
  "futures-lite 1.13.0",
  "gitlab-queries",
+ "gitlab-schema",
  "lapin",
  "polar",
  "ractor",

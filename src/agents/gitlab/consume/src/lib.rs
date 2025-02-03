@@ -135,44 +135,44 @@ pub fn merge_namespace_query(namespace: Namespace) -> String {
 
     )
 }
-/// Helper function to create project nodes and their relationships
-pub fn merge_project_query(project: Project) -> String {
-    let merge_group_query = match project.group {
-        //connect group if presenet
-        Some(group) =>  { 
-         //if namespace exists, compose a query to create a node for it and a draw a relationship
-         format!( "{0}\n{1}", merge_group_query(group), "WITH project, group MERGE (project)-[:inGroup]->(group);")    
-        }
-        None => String::default()
-    };
+//TODO: Helper function to create project nodes and their relationships
+// pub fn merge_project_query(project: Project) -> String {
+//     let merge_group_query = match project.group {
+//         //connect group if presenet
+//         Some(group) =>  { 
+//          //if namespace exists, compose a query to create a node for it and a draw a relationship
+//          format!( "{0}\n{1}", merge_group_query(group), "WITH project, group MERGE (project)-[:inGroup]->(group);")    
+//         }
+//         None => String::default()
+//     };
 
-    //NOTE: Not entirely sure its needed to match here, because all projects exist in either a user or group namespace
-    //better safe than sorry
-    let merge_namespace_query = match project.namespace {
-        //connect group if presenet
-        Some(namespace) =>  {
-            //if namespace exists, compose a query to create a node for it and a draw a relationship
-            format!( "{0}\n{1}", merge_namespace_query(namespace), "WITH project, namespace MERGE (project)-[:inNamespace]->(namespace)")
-        },
-        None => String::default()
-    };
+//     //NOTE: Not entirely sure its needed to match here, because all projects exist in either a user or group namespace
+//     //better safe than sorry
+//     let merge_namespace_query = match project.namespace {
+//         //connect group if presenet
+//         Some(namespace) =>  {
+//             //if namespace exists, compose a query to create a node for it and a draw a relationship
+//             format!( "{0}\n{1}", merge_namespace_query(namespace), "WITH project, namespace MERGE (project)-[:inNamespace]->(namespace)")
+//         },
+//         None => String::default()
+//     };
 
-    format!(
-        r#"
-            MERGE (project:GitlabProject {{ 
-                project_id: "{project_id}"
-            }})
-            SET project.name = "{name}",
-                project.full_path = "{full_path}",
-                project.created_at = "{created_at}",
-                project.last_activity_at = "{last_activity_at}"
-            {merge_namespace_query}
-            {merge_group_query}   
-        "#, 
-        project_id = project.id,
-        name = project.name,
-        full_path = project.full_path,
-        created_at = project.created_at.unwrap_or_default(),
-        last_activity_at = project.last_activity_at.unwrap_or_default(),
-    )
-}
+//     format!(
+//         r#"
+//             MERGE (project:GitlabProject {{ 
+//                 project_id: "{project_id}"
+//             }})
+//             SET project.name = "{name}",
+//                 project.full_path = "{full_path}",
+//                 project.created_at = "{created_at}",
+//                 project.last_activity_at = "{last_activity_at}"
+//             {merge_namespace_query}
+//             {merge_group_query}   
+//         "#, 
+//         project_id = project.id,
+//         name = project.name,
+//         full_path = project.full_path,
+//         created_at = project.created_at.unwrap_or_default(),
+//         last_activity_at = project.last_activity_at.unwrap_or_default(),
+//     )
+// }

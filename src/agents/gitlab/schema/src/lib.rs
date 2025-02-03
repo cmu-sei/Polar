@@ -20,7 +20,7 @@ impl fmt::Display for DateTimeString {
     }
 }
 
-#[derive (Debug, Serialize, Deserialize, serde::Deserialize, serde::Serialize, Archive, Clone)]
+#[derive (Debug, Serialize, Deserialize, serde::Deserialize, serde::Serialize, Archive, Clone, Default)]
 pub struct IdString(String);
 
 impl fmt::Display for IdString {

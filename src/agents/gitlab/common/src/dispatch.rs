@@ -60,6 +60,9 @@ impl Actor for MessageDispatcher {
                             if let Err(e) = consumer.send_message(message) {
                                 tracing::warn!("Error forwarding message. {e}");
                             }
+                        } else {
+                            //TODO: Implement DLQ for when consumers aren't present and may return.
+                            todo!("Failed to forward message to processor, implement DLQ");;
                         }
                     }
                     Err(err) => error!("Failed to deserialize message: {:?}", err),

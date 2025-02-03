@@ -45,10 +45,9 @@ impl fmt::Display for UserState {
 #[cynic(schema = "gitlab")]
 pub struct Namespace {
     pub id: IdString,
-    // pub parent_id: Option<u32>,
     pub full_name: String,
     pub full_path: IdString,
-
+    pub visibility: Option<String>,
 }
 
 #[derive(cynic::QueryVariables, Debug, Clone, Deserialize, Serialize, rkyv::Archive)]
@@ -94,39 +93,39 @@ pub struct Group {
 }
 
 /// Datatype representing a users's membership for a group
-#[derive(cynic::QueryFragment)]
-#[cynic(schema = "gitlab")]
-pub struct GroupMember {
-    /// GitLab::Access level.
-    // pub access_level: Option<AccessLevel>,
+// #[derive(cynic::QueryFragment)]
+// #[cynic(schema = "gitlab")]
+// pub struct GroupMember {
+//     /// GitLab::Access level.
+//     // pub access_level: Option<AccessLevel>,
 
-    /// Date and time the membership was created.
-    pub created_at: Option<DateTimeString>,
+//     /// Date and time the membership was created.
+//     pub created_at: Option<DateTimeString>,
 
-    /// User that authorized membership.
-    pub created_by: Option<UserCore>,
+//     /// User that authorized membership.
+//     pub created_by: Option<UserCore>,
 
-    /// Date and time the membership expires.
-    pub expires_at: Option<DateTimeString>,
+//     /// Date and time the membership expires.
+//     pub expires_at: Option<DateTimeString>,
 
-    /// Group that a user is a member of.
-    pub group: Option<Group>,
+//     /// Group that a user is a member of.
+//     pub group: Option<Group>,
 
-    /// ID of the member.
-    pub id: IdString,
+//     /// ID of the member.
+//     pub id: IdString,
 
-    /// Group notification email for user. Only available for admins.
-    pub notification_email: Option<String>,
+//     /// Group notification email for user. Only available for admins.
+//     pub notification_email: Option<String>,
 
-    /// Date and time the membership was last updated.
-    pub updated_at: Option<DateTimeString>,
+//     /// Date and time the membership was last updated.
+//     pub updated_at: Option<DateTimeString>,
 
-    /// User that is associated with the member object.
-    pub user: Option<UserCore>,
+//     /// User that is associated with the member object.
+//     pub user: Option<UserCore>,
 
-    // Permissions for the current user on the resource.
-    // pub user_permissions: GroupPermissions,
-}
+//     // Permissions for the current user on the resource.
+//     // pub user_permissions: GroupPermissions,
+// }
 
 // #[derive(cynic::QueryFragment, Debug, Clone)]
 // #[cynic(schema = "gitlab")]
@@ -161,7 +160,7 @@ pub struct Project {
     pub created_at: Option<DateTimeString>,
     pub namespace: Option<Namespace>,
     pub last_activity_at: Option<DateTimeString>,
-    pub group: Option<Group>
+    // pub group: Option<Group>
 }
 
 #[derive(cynic::QueryFragment, Debug, Clone,  Deserialize, Serialize, Archive)]
@@ -222,6 +221,77 @@ pub struct MultiProjectQuery {
     pub projects: Option<ProjectConnection>
 }
 
+#[derive(cynic::QueryFragment, Deserialize, Serialize, rkyv::Archive, Clone)]
+#[cynic(schema = "gitlab")]
+pub struct AccessLevel {
+    pub integer_value: Option<i32>,
+    pub string_value: Option<AccessLevelEnum>,
+}
+
+
+#[derive(cynic::Enum, Deserialize, Serialize, rkyv::Archive, Clone)]
+#[cynic(schema = "gitlab")]
+pub enum AccessLevelEnum {
+  NoAccess,
+  MinimalAccess,
+  Guest,
+  Reporter,
+  Developer,
+  Maintainer,
+  Owner,
+  Admin,
+}
+
+impl fmt::Display for AccessLevelEnum {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let s = match self {
+            AccessLevelEnum::NoAccess => "No Access",
+            AccessLevelEnum::MinimalAccess => "Minimal Access",
+            AccessLevelEnum::Guest => "Guest",
+            AccessLevelEnum::Reporter => "Reporter",
+            AccessLevelEnum::Developer => "Developer",
+            AccessLevelEnum::Maintainer => "Maintainer",
+            AccessLevelEnum::Owner => "Owner",
+            AccessLevelEnum::Admin => "Admin",
+        };
+        write!(f, "{}", s)
+    }
+}
+
+
+
+// 
+// Represents a Project Membership, and can be used as attributes for our relationships if supported in our graph db
+// 
+#[derive(cynic::QueryFragment, Deserialize, Serialize, rkyv::Archive, Clone)]
+#[cynic(schema = "gitlab")]
+pub struct ProjectMember {
+    // pub id: IdString,
+    pub access_level: Option<AccessLevel>,
+    pub created_at: Option<DateTimeString>,
+    // pub created_by: Option<UserCore>,
+    pub expires_at: Option<DateTimeString>,
+    pub updated_at: Option<DateTimeString>,
+    pub project: Option<Project>,
+    // pub user: Option<UserCore>,
+    // pub user_permissions: ProjectPermissions,
+}
+#[derive(cynic::QueryFragment, Deserialize, Serialize, rkyv::Archive, Clone)]
+#[cynic(schema = "gitlab")]
+pub struct ProjectMemberEdge {
+    cursor: String,
+    node: Option<ProjectMember>
+}
+
+#[derive(cynic::QueryFragment, Deserialize, Serialize, rkyv::Archive, Clone)]
+#[cynic(schema = "gitlab")]
+pub struct ProjectMemberConnection {
+    pub edges: Option<Vec<Option<ProjectMemberEdge>>>,
+    pub nodes:  Option<Vec<Option<ProjectMember>>>,
+    pub page_info: PageInfo
+}
+
+
 #[derive(cynic::QueryFragment)]
 #[cynic(schema = "gitlab")]
 pub struct UserCoreConnection {
@@ -241,12 +311,6 @@ pub struct PageInfo {
 }
 
 
-// #[derive(cynic::QueryVariables, serde::Deserialize)]
-// pub struct UserCoreQueryArguments {
-//     id: Option<String>,
-//     username: Option<String>
-// }
-
 /// Gitlab's core user representation. Add fields here to get more data back.
 #[derive(cynic::QueryFragment, Deserialize, Serialize, rkyv::Archive)]
 #[cynic(schema = "gitlab")]
@@ -255,14 +319,15 @@ pub struct UserCore {
     pub bot: bool,
     pub username: Option<String>,
     pub name: String,
-    //TODO: looks like this overcomplicates the query (literally, the test instance has a complexity limit of 300, this brings it over 310)
+    // NOTE: Our test gitlab instance has a complexity limit of 300, trying to get groups breaches this limit
     // pub groups: Option<GroupConnection>,
-    // status: Option<schema::UserStatus>,
     pub state: UserState,
     // last_activity_on: Option<schema::Date>,
     pub location: Option<String>,
     pub created_at: Option<gitlab_schema::DateTimeString>,
-    pub contributed_projects: Option<ProjectConnection>
+    // pub contributed_projects: Option<ProjectConnection>,
+    //TODO: enable project memebrships instead
+    pub project_memberships: Option<ProjectMemberConnection>
 }
 
 #[derive(cynic::QueryFragment)]

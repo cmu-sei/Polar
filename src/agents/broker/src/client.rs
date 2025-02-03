@@ -145,7 +145,7 @@ impl Actor for TcpClientActor {
                                                     }
                                                 },
                                                 ClientMessage::PublishRequestAck(topic) => {
-                                                    info!("published msg to topic {topic}");
+                                                    debug!("published message to topic \"{topic}\"");
                                                 }
     
                                                 ClientMessage::SubscribeAcknowledgment { topic, result } => {

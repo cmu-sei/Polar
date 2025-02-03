@@ -34,9 +34,10 @@ use ractor::concurrency::Interval;
 use ractor::rpc::{call, CallResult};
 use ractor::RpcReplyPort;
 use ractor::{async_trait, registry::where_is, Actor, ActorProcessingErr, ActorRef};
+use reqwest::header::CONNECTION;
 use reqwest::{Client, Method, StatusCode};
 
-use common::types::{GitlabData};
+use common::types::{GitlabData, ResourceLink};
 use tokio::time;
 use tracing::{debug, info, warn, error};
 use gitlab_queries::*;
@@ -132,7 +133,34 @@ impl Actor for GitlabUserObserver {
 
                                         if let Some(users) = connection.nodes {
                                             // Append nodes to the result list.
-                                            read_users.extend(users.into_iter().map(|option| option.unwrap()));
+                                            read_users.extend(users.into_iter().filter_map(|option| {
+                                                option.map(|user| {
+                                                    //extract user information during iteration
+                                                    user.project_memberships.as_ref().map(|connection| {
+                                                        
+                                                    //send user project connection to project consumer
+                                                    let client = where_is(BROKER_CLIENT_NAME.to_string()).expect("Expected to find tcp client");
+                                                    
+                                                    let data = GitlabData::ProjectMembers( ResourceLink {
+                                                        resource_id: user.id.clone(),
+                                                        connection: connection.clone()
+                                                    });
+                                                    // Serializing is as easy as a single function call
+                                                    let bytes = rkyv::to_bytes::<Error>(&data).unwrap();
+                                                    
+    
+                                                    let msg = ClientMessage::PublishRequest {
+                                                        topic: USER_CONSUMER_TOPIC.to_string(),
+                                                        payload: bytes.to_vec(),
+                                                        registration_id: Some(state.registration_id.clone())
+                                                    };
+                                                    
+                                                    client.send_message(TcpClientMessage::Send(msg)).expect("Expected to send message");
+                                                    });
+
+                                                    user
+                                                })
+                                            }));
                                         }
 
                                         //TODO:                                            
