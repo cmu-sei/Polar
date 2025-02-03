@@ -35,7 +35,7 @@ use crate::{get_all_elements, GitlabObserverArgs, GitlabObserverMessage, GitlabO
 use tracing::{debug, info, warn, error};
 use reqwest::Client;
 use serde_json::to_string;
-use common::{types::{GitlabData}, GROUPS_CONSUMER_TOPIC, PROJECTS_CONSUMER_TOPIC, RUNNERS_CONSUMER_TOPIC, USER_CONSUMER_TOPIC};
+use common::{types::{GitlabData, ResourceLink}, GROUPS_CONSUMER_TOPIC, PROJECTS_CONSUMER_TOPIC, RUNNERS_CONSUMER_TOPIC, USER_CONSUMER_TOPIC};
 
 
 use crate::BROKER_CLIENT_NAME;
@@ -108,14 +108,48 @@ impl Actor for GitlabGroupObserver {
                 .send().await {
                     Ok(response) => {
                         if let Ok(deserialized) = response.json::<GraphQlResponse<MultiGroupQuery>>().await {
+                            if let Some(errors) = deserialized.errors {
+                                for error in errors {
+                                    warn!("Received errors, {error:?}");
+                                }
+                            }
                             if let Some(query) = deserialized.data {
                              if let Some(connection) =  query.groups {
                                 
                                 let mut read_groups = Vec::new();
 
                                 if let Some(groups) = connection.nodes {
-                                    read_groups.extend(groups.into_iter().map(|option| option.unwrap()));
+                                    read_groups.extend(groups.into_iter().filter_map(|option| {
+                                        option.map(|group| {
+                                            //process group
+                                            // group.group_members.as_ref().map(|connection| {
+                                            //    //send user group connection to groups consumer
+                                            //    let client = where_is(BROKER_CLIENT_NAME.to_string()).expect("Expected to find tcp client");
+                                                        
+                                            //    let data = GitlabData::GroupMembers( ResourceLink {
+                                            //        resource_id: group.id.clone(),
+                                            //        connection: connection.clone()
+                                            //    });
+                                               
+                                            //    let bytes = rkyv::to_bytes::<Error>(&data).unwrap();
+                                               
+
+                                            //    let msg = ClientMessage::PublishRequest {
+                                            //        topic: GROUPS_CONSUMER_TOPIC.to_string(),
+                                            //        payload: bytes.to_vec(),
+                                            //        registration_id: Some(state.registration_id.clone())
+                                            //    };
+                                               
+                                            //    client.send_message(TcpClientMessage::Send(msg)).expect("Expected to send message");  
+                                            // });
+
+                                            //return 
+                                            group
+                                        })
+                                    }))
                                 }
+
+                                info!("Observed {0} group(s)", read_groups.len());
 
                                 let client = where_is(BROKER_CLIENT_NAME.to_string()).expect("Expected to find tcp client!");
                                 

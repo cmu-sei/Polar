@@ -166,35 +166,3 @@ pub async fn get_all_elements<T: for<'a> Deserialize<'a>>(client: &Client, token
 
     return Some(elements)
 }
-
-/// TODO: Write a generic function to retrieve a list of a given capnproto message from an endpoint. 
-/// 
-/// The main problem with this at the moment is that I haven't yet figured out how to append additional elements onto the list after they're
-/// deserailized. SEE: get_all_elements() for the comparison using serde
-/// 
-// pub async fn fetch_all<'a, T>(
-//     client: &Client,
-//     token: String, 
-//     endpoint: String,
-// ) -> Result<TypedReader<OwnedSegments, T>, Box<dyn std::error::Error>>
-// where
-//     T: Owned + 'a
-// {}
-
-
-///TODO: Helper function to spawn a task that calls an actor in a loop over some given interval of time.
-/// Ideally, we'd be able to call and wait for a reply on an iterval, this is made difficult because RpcReplyPorts can't be moved.
-/// The motiviation here is to avoid usele
-// pub async fn call_every(observer: ActorRef<GitlabObserverMessage>, resource_type: GitlabResourceType, duration: Duration, timeout: Option<Duration>) -> Result<JoinHandle<()>, JoinError> {
-//    
-
-//     Ok(handle)
-
-// }
-
-// fn build_user_query(para)
-
-/// TODO: Helper function that retrieves a given resource type once
-pub fn get_once(observer: ActorRef<GitlabObserverMessage> ,message: GitlabObserverMessage) {
-    todo!()
-}

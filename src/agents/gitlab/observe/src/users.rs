@@ -92,7 +92,7 @@ impl Actor for GitlabUserObserver {
             // pass query in message
             GitlabObserverMessage::GetUsers(op) 
         });
-        
+
         Ok(())
     }
 
@@ -112,9 +112,7 @@ impl Actor for GitlabUserObserver {
                 .bearer_auth(state.token.clone().unwrap_or_default())
                 .json(&op)
                 .send().await {
-                    Ok(response) => {
-                    
-                        
+                    Ok(response) => {    
                         //forwrard to client
                         match response.json::<GraphQlResponse<MultiUserQuery>>().await {
                             Ok(deserialized) => {
@@ -138,24 +136,23 @@ impl Actor for GitlabUserObserver {
                                                     //extract user information during iteration
                                                     user.project_memberships.as_ref().map(|connection| {
                                                         
-                                                    //send user project connection to project consumer
-                                                    let client = where_is(BROKER_CLIENT_NAME.to_string()).expect("Expected to find tcp client");
-                                                    
-                                                    let data = GitlabData::ProjectMembers( ResourceLink {
-                                                        resource_id: user.id.clone(),
-                                                        connection: connection.clone()
-                                                    });
-                                                    // Serializing is as easy as a single function call
-                                                    let bytes = rkyv::to_bytes::<Error>(&data).unwrap();
-                                                    
-    
-                                                    let msg = ClientMessage::PublishRequest {
-                                                        topic: USER_CONSUMER_TOPIC.to_string(),
-                                                        payload: bytes.to_vec(),
-                                                        registration_id: Some(state.registration_id.clone())
-                                                    };
-                                                    
-                                                    client.send_message(TcpClientMessage::Send(msg)).expect("Expected to send message");
+                                                        //send user project connection to project consumer
+                                                        let client = where_is(BROKER_CLIENT_NAME.to_string()).expect("Expected to find tcp client");
+                                                        
+                                                        let data = GitlabData::ProjectMembers( ResourceLink {
+                                                            resource_id: user.id.clone(),
+                                                            connection: connection.clone()
+                                                        });
+                                                        
+                                                        let bytes = rkyv::to_bytes::<Error>(&data).unwrap();
+                                                        
+                                                        let msg = ClientMessage::PublishRequest {
+                                                            topic: USER_CONSUMER_TOPIC.to_string(),
+                                                            payload: bytes.to_vec(),
+                                                            registration_id: Some(state.registration_id.clone())
+                                                        };
+                                                        
+                                                        client.send_message(TcpClientMessage::Send(msg)).expect("Expected to send message");
                                                     });
 
                                                     user
@@ -202,8 +199,6 @@ impl Actor for GitlabUserObserver {
                     } Err(e) => error!("{e}")
                 }
                 
-                
-
             }
             _ => todo!()
         }

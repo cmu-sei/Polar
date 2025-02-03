@@ -81,11 +81,11 @@ impl Actor for GitlabUserConsumer {
                         .iter()
                         .map(|user| {
                             format!(
-                                "{{ username: \"{}\", user_id: \"{}\", created_at: \"{}\", state: \"{}\" }}",
-                                user.username.clone().unwrap_or_default(),
-                                user.id,
-                                user.created_at.clone().unwrap_or_default(),
-                                user.state
+                                "{{ username: \"{username}\", user_id: \"{user_id}\", created_at: \"{created_at}\", state: \"{state}\" }}",
+                                username = user.username.clone().unwrap_or_default(),
+                                user_id = user.id,
+                                created_at = user.created_at.clone().unwrap_or_default(),
+                                state = user.state
                             )
                         })
                         .collect::<Vec<_>>()
@@ -126,7 +126,8 @@ impl Actor for GitlabUserConsumer {
                         .iter()
                         .filter_map(|option| {
                             let membership = option.as_ref().unwrap();
-
+                            
+                            //create a list of attribute sets that will represent the relationship between a user and each project
                             membership.project.as_ref().map(|project| {
                                 format!(
                                     r#"{{
@@ -149,7 +150,7 @@ impl Actor for GitlabUserConsumer {
                         .join(",\n");
                         
 
-            
+                        //write a query that finds the given user, and create a relationship between it and every project we were given
                         let cypher_query = format!(
                             "
                             MATCH (user:GitlabUser {{ user_id: \"{}\" }})
