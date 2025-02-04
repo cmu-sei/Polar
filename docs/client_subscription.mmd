@@ -1,0 +1,70 @@
+sequenceDiagram
+    participant Client
+    participant TcpClientActor
+    participant Listener
+    participant Broker
+    participant SessionManager
+    participant TopicManager
+    participant SubscriberManager
+    participant SubscriberAgent
+
+    autonumber
+    Client->>TcpClientActor: SubscribeRequest(topic)
+    TcpClientActor->>Listener: Forward SubscribeRequest(topic)
+
+    alt Listener Exists
+        Listener->>Broker: Forward SubscribeRequest(topic)
+    else Listener Missing
+        Listener-->>Client: Error("Listener not found")
+    end
+
+    alt Broker Exists
+        activate Broker
+        Broker->>SessionManager: Validate Session
+        deactivate Broker
+    else Broker Missing
+        Broker-->>Client: Error("Broker not found")
+    end
+
+    alt Session Exists
+        activate SessionManager
+        SessionManager-->>Broker: OK
+        deactivate SessionManager
+    else Session Missing
+        SessionManager-->>Broker: Error("Session not found")
+        Broker-->>Client: Error("Subscription Failed")
+    end
+
+    Broker->>TopicManager: Ensure Topic Exists
+
+    alt Topic Exists
+        TopicManager-->>Broker: OK
+    else Topic Missing
+        activate TopicManager
+        TopicManager->>TopicAgent: Create Topic
+        deactivate TopicManager
+        TopicAgent-->>Broker: OK
+    end
+
+    activate Broker
+    Broker->>SubscriberManager: Create SubscriberAgent
+    deactivate Broker
+
+    alt Subscriber Creation Succeeds
+        activate SubscriberManager
+        SubscriberManager->>SubscriberAgent: Initialize Subscription
+        deactivate SubscriberManager
+        SubscriberAgent-->>SubscriberManager: OK
+        SubscriberManager-->>Broker: Subscription Successful
+    else Subscriber Creation Fails
+        SubscriberManager-->>Broker: Error("Subscriber Creation Failed")
+        Broker-->>Client: Error("Subscription Failed")
+    end
+
+    Broker-->>Listener: Subscription Ack
+    Listener-->>TcpClientActor: Subscription Ack
+    TcpClientActor-->>Client: Subscription Ack
+
+    note over Broker, SubscriberManager: If subscriber fails to initialize, error is returned
+    note over SessionManager: If session is missing, error should be logged and returned
+    note over TopicManager: New topics are created dynamically

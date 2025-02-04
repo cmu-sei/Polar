@@ -1,0 +1,45 @@
+sequenceDiagram
+    participant Client
+    participant Listener
+    participant Broker
+    participant TopicManager
+    participant TopicAgent
+
+    autonumber
+
+    Note over Client: Client attempts to publish or subscribe<br/>to a non-existent topic.
+
+    Client->>Listener: Publish/Subscribe Request
+    Listener->>Broker: Forward request
+
+    alt Topic Exists
+        Broker->>TopicManager: Request topic handle
+        TopicManager-->>Broker: Return existing TopicAgent
+        Broker->>Listener: Confirm operation success
+        Listener->>Client: Acknowledgment
+    else Topic Does Not Exist
+        Broker->>TopicManager: Request to create topic
+        TopicManager->>+TopicAgent: Create new TopicAgent
+        TopicManager-->>Broker: Return new TopicAgent
+        Broker->>Listener: Confirm topic creation
+        Listener->>Client: Acknowledgment
+    end
+
+    %% Error handling annotations
+    alt TopicManager Unavailable
+        Broker->>Listener: ❗ Error: TopicManager unavailable
+        Listener->>Client: ❗ Error: Unable to create topic
+        Note right of Broker: ⚠️ Missing retry logic or failover<br/>to another TopicManager instance.
+    end
+
+    alt Topic Creation Fails
+        TopicManager-->>Broker: ❗ Error: Failed to create TopicAgent
+        Broker->>Listener: ❗ Error: Unable to create topic
+        Listener->>Client: ❗ Error: Topic creation failed
+        Note right of TopicManager: ⚠️ No retry logic if topic creation fails.
+    end
+
+    alt Duplicate Topic Creation Request
+        TopicManager->>TopicAgent: ❗ Warning: Topic already exists
+        Note right of TopicManager: ⚠️ Potential race condition.<br/>Concurrent requests may create duplicate topics.
+    end

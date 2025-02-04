@@ -1,0 +1,17 @@
+sequenceDiagram
+    autonumber
+    participant Admin as Administrator
+    participant Orchestrator as Deployment Orchestrator (Kubernetes/Docker)
+    participant Observer
+    participant Processor
+    participant PubSub as Pub/Sub Messaging System
+
+    Admin->>+Orchestrator: Trigger deployment
+    Orchestrator->>+Observer: Deploy instance
+    Observer-->>-Orchestrator: Deployment successful
+    Orchestrator->>+Processor: Deploy instance
+    Processor-->>-Orchestrator: Deployment successful
+    Orchestrator->>+PubSub: Deploy messaging system
+    PubSub-->>-Orchestrator: Deployment successful
+    Orchestrator->>Orchestrator: Scale components dynamically
+

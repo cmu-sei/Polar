@@ -1,0 +1,46 @@
+sequenceDiagram
+    participant Client
+    participant TcpClientActor
+    participant Listener
+    participant Broker
+    participant SessionManager
+    participant SubscriberManager
+    participant SubscriberAgent
+
+    autonumber
+    Client->>TcpClientActor: DisconnectRequest(registration_id)
+    TcpClientActor->>Listener: Forward DisconnectRequest(registration_id)
+
+    alt Listener Exists
+        activate Listener
+        Listener->>Broker: Forward DisconnectRequest(registration_id)
+        deactivate Listener
+    else Listener Missing
+        Listener-->>Client: Error("Listener not found")
+    end
+
+    alt Broker Exists
+        activate Broker
+        Broker->>SessionManager: Validate and Terminate Session(registration_id)
+        deactivate Broker
+    else Broker Missing
+        Broker-->>Client: Error("Broker not found")
+    end
+
+    alt Session Exists
+        activate SessionManager
+        SessionManager->>SubscriberManager: Notify Disconnect(registration_id)
+        SubscriberManager->>SubscriberAgent: Terminate Subscriber(registration_id)
+        deactivate SessionManager
+    else Session Missing
+        SessionManager-->>Broker: Warning("Session not found")
+    end
+
+    Broker-->>Listener: Acknowledge Disconnect
+    Listener-->>TcpClientActor: Acknowledge Disconnect
+    TcpClientActor-->>Client: Acknowledge Disconnect
+
+    note over SessionManager: Ensures proper cleanup of the session
+    note over SubscriberManager: Notifies all subscriber agents of disconnection
+    note over SubscriberAgent: Terminates any active subscribers tied to the session
+    note over Broker: Central coordinator for the disconnect process

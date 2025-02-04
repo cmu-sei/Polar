@@ -1,0 +1,52 @@
+sequenceDiagram
+    participant SessionAgent
+    participant Broker
+    participant SubscriberManager
+    participant SubscriberAgent
+    participant TopicManager
+    participant TopicAgent
+
+    autonumber
+
+    Note over SessionAgent: A client requests a subscription to a topic.
+
+    SessionAgent->>Broker: SubscribeRequest(topic)
+    Broker->>SubscriberManager: Register new subscription (session, topic)
+
+    alt Subscription Successful
+        SubscriberManager->>SubscriberAgent: Create new SubscriberAgent
+        SubscriberAgent->>TopicManager: Request topic registration
+        TopicManager->>TopicAgent: Add subscriber
+        TopicAgent-->>SubscriberAgent: Subscription acknowledged
+        SubscriberAgent-->>SubscriberManager: Subscription confirmed
+        SubscriberManager-->>SessionAgent: SubscribeAcknowledgment(success)
+    else Subscription Failed
+        SubscriberManager-->>SessionAgent: ❗ Error: Subscription failed
+        Note right of SubscriberManager: ⚠️ Failure reason not detailed in response.
+    end
+
+    %% Error Handling Annotations
+    alt SubscriberManager Unavailable
+        Broker-->>SessionAgent: ❗ Error: SubscriberManager unavailable
+        Note right of Broker: ⚠️ No retry logic or alternate path.<br/>Subscription request is dropped.
+    end
+
+    alt Topic Does Not Exist
+        TopicManager-->>SubscriberAgent: ❗ Error: Topic does not exist
+        SubscriberAgent-->>SubscriberManager: ❗ Error: Cannot subscribe
+        SubscriberManager-->>SessionAgent: ❗ Error: Subscription failed
+        Note right of TopicManager: ⚠️ No automatic topic creation.<br/>Clients must ensure topic exists before subscribing.
+    end
+
+    alt TopicAgent Unavailable
+        TopicManager-->>SubscriberAgent: ❗ Error: No TopicAgent found
+        SubscriberAgent-->>SubscriberManager: ❗ Error: Subscription not possible
+        SubscriberManager-->>SessionAgent: ❗ Error: Subscription failed
+        Note right of TopicManager: ⚠️ No fallback if TopicAgent is missing.
+    end
+
+    alt SubscriberAgent Crashes
+        SubscriberManager-->>Broker: ❗ Error: Subscription lost
+        Broker-->>SessionAgent: ❗ Error: Client needs to resubscribe
+        Note right of SubscriberManager: ⚠️ No auto-recovery for lost subscriber agents.<br/>SessionAgent must manually retry.
+    end

@@ -1,0 +1,79 @@
+sequenceDiagram
+    autonumber
+    participant Host as Runtime Host (Running Container)
+    participant Service as Running Service (Inside Container)
+    participant Attestation as Attestation Service
+    participant PKI as PKI Server
+    participant Registry as Image Registry
+    participant Git as Git Repo (Trusted Build DB)
+
+    note over Service: Service starts inside the container
+
+    activate Service
+    Service->>Service: Read Build Hash from /etc/build-attestation
+    note right of Service: **Build Hash (BUILD_HASH):**<br>Hash of the build artifact from Git commit SHA.
+    
+    Service->>Service: Generate Runtime ID (e.g., container ID)
+    note right of Service: **Runtime ID (RUNTIME_ID):**<br>- Extracted from /proc/self/cgroup (container-specific)<br>- May also use namespaces or hostname.
+
+    Service->>Service: Get Host Identity (e.g., hostname)
+    note right of Service: **Host ID (HOST_ID):**<br>- The hostname or IP of the host running the container.<br>- Helps attestation service connect via SSH.
+
+    deactivate Service
+
+    note over Service: Request a challenge from the attestation service.
+
+    activate Service
+    Service->>+Attestation: Request Challenge (Build Hash, Host ID)
+    Attestation->>Attestation: Generate One-Time Challenge (Random Nonce)
+    note left of Attestation: **Challenge (CHALLENGE):**<br>- One-time nonce prevents replay attacks.<br>- Expires after a short time.
+    Attestation-->>-Service: Return Challenge
+    deactivate Service
+
+    note over Service: Request an ephemeral secret using the challenge.
+
+    activate Service
+    Service->>+Attestation: Request Ephemeral Secret (Build Hash, Host ID, Challenge)
+    Attestation->>Attestation: Derive Ephemeral Secret<br>SECRET_KEY = HMAC(MASTER_SECRET, INSTANCE_ID + CHALLENGE)
+    note left of Attestation: **Ephemeral Secret (SECRET_KEY):**<br>- Unique per container instance.<br>- Bound to runtime instance + challenge.<br>- Expires after a short time.
+    Attestation-->>-Service: Return Ephemeral Secret
+    deactivate Service
+
+    activate Service
+    Service->>Service: Compute Signed Payload (Build Hash + Runtime ID + Challenge)
+    note right of Service: **Signed Payload (SIGNATURE):**<br>- HMAC(SECRET_KEY, BUILD_HASH + RUNTIME_ID + CHALLENGE)<br>- Prevents tampering and ensures authenticity.
+
+    Service->>+Attestation: Send Attestation Request (Build Hash, Runtime ID, Host ID, Challenge, Signature)
+    deactivate Service
+
+    activate Attestation
+    Attestation->>Attestation: Verify Challenge is Valid (Check & Mark Used)
+    Attestation->>Attestation: Recompute Expected Secret<br>EXPECTED_SECRET = HMAC(MASTER_SECRET, INSTANCE_ID + CHALLENGE)
+    Attestation->>Attestation: Verify Expected Signature<br>EXPECTED_HMAC = HMAC(EXPECTED_SECRET, BUILD_HASH + RUNTIME_ID + CHALLENGE)
+
+    Attestation->>+Git: Lookup Build Hash in Trusted Registry
+    Git-->>-Attestation: Verify Build Hash Exists
+
+    Attestation->>+Registry: Check Image Registry for Build Hash
+    Registry-->>-Attestation: Verify Image Exists
+
+    note over Attestation: Attestation service must now verify that the service is running on the provided host.
+
+    Attestation->>+Host: SSH into Host and Run Validation Script
+    note left of Host: **Host Validation:**<br>- Attestation service introspects running containers.<br>- Verifies Runtime ID matches the actual process.
+
+    Host->>Host: Check Running Containers (Docker, Containerd, Podman, Kubernetes)
+    Host-->>-Attestation: Confirm Runtime State
+
+    note over Attestation: If the runtime state does not match, reject the attestation.
+
+    Attestation-->>Service: Validate Request (Pass/Fail)
+    deactivate Attestation
+
+    opt If Valid
+        activate Attestation
+        Attestation->>+PKI: Request Certificate for Service
+        PKI-->>-Attestation: Issue Short-Lived Certificate
+        Attestation-->>+Service: Return Signed Certificate
+        deactivate Attestation
+    end

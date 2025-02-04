@@ -93,11 +93,6 @@ impl Actor for Broker {
             myself.clone().into()
         ).await.expect("The Broker cannot initialize without the SessionManager. Panicking.");
 
-        // TODO: Read some topics from configuration based on services we want
-        // to observe/consume messages for
-
-        // Vaughn, can you explain a little more here what this TODO is about?
-        // Could probably use a doc comment.
         let topic_mgr_args = TopicManagerArgs {topics: None};
 
         // Topics Supervisor

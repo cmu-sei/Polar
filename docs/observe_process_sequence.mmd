@@ -1,0 +1,10 @@
+sequenceDiagram
+    autonumber
+    participant Observer
+    participant PubSub as Pub/Sub Messaging System
+    participant Processor as Information Processor
+    participant GraphDB as Graph Database
+
+    Observer->>+PubSub: Publish event (observed change)
+    PubSub->>+Processor: Deliver event
+    Processor->>+GraphDB: Insert structured data

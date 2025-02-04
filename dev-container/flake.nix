@@ -193,6 +193,11 @@
             pkg-config
             trunk
             util-linux
+            
+            # Put any extra packages or libraries you need here. For example,
+            # if working on a Rust project that requires a linear algebra
+            # package:
+            #openblas
 
             # -- Static Analysis Tools --
             staticanalysis.packages.${system}.default
@@ -282,7 +287,7 @@
               "LOCALE_ARCHIVE=${pkgs.glibcLocalesUtf8}/lib/locale/locale-archive"
 
               # stdenv.cc is clang-based now, so this is fine:
-              "LD_LIBRARY_PATH=${pkgs.stdenv.cc.cc.lib}/lib"
+              "LD_LIBRARY_PATH=${pkgs.lib.makeLibraryPath [ myEnv pkgs.stdenv.cc.cc.lib ]}"
 
               #"LIBCLANG_PATH=${pkgs.libclang.lib}/lib/"
 

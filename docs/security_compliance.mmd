@@ -1,0 +1,29 @@
+sequenceDiagram
+    autonumber
+    participant Keycloak as Auth Server (Token-based Auth)
+    participant Admin as Administrator
+    participant GitLab as Version Control System (GitLab)
+    participant PolicyAgent as Policy Agent
+    participant PubSub as Pub/Sub Messaging System
+    participant Observer as Observer (or Processor)
+
+    %% Step 1: Admin Authenticates to Git
+    Admin->>+Keycloak: Request access token
+    Keycloak-->>-Admin: Issue access token
+    Admin->>+GitLab: Access security policy repo (using token)
+    GitLab-->>-Admin: Policy document retrieved
+
+    %% Step 2: Admin Updates Security Policy
+    Admin->>+GitLab: Modify policy document (commit & push)
+    GitLab-->>-PolicyAgent: Trigger change notification
+
+    %% Step 3: Policy Agent Detects Change and Reconciles
+    PolicyAgent->>+GitLab: Fetch latest policy changes (if needed)
+    GitLab-->>-PolicyAgent: Return updated policy (only if changed)
+    PolicyAgent->>+PolicyAgent: Reconcile new policy with current state
+
+    %% Step 4: Notify Affected Observers/Processors
+    PolicyAgent->>+PubSub: Publish policy update event
+    PubSub->>+Observer: Deliver policy update
+    Observer-->>-PubSub: Acknowledge policy update
+    PubSub-->>-PolicyAgent: Policy updates processed

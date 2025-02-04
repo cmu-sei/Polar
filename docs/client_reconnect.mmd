@@ -1,0 +1,62 @@
+sequenceDiagram
+    autonumber
+    participant Client as TcpClientActor
+    participant Listener as Listener
+    participant Broker as Broker
+    participant SessionMgr as SessionManager
+    participant Session as SessionAgent
+
+    Client->>Listener: RegistrationRequest(registration_id)
+    activate Listener
+
+    alt registration_id provided
+        Listener->>SessionMgr: Lookup session(registration_id)
+        activate SessionMgr
+
+        alt Session found and active
+            SessionMgr->>Session: Notify reconnect(registration_id)
+            activate Session
+            Session->>Listener: RegistrationResponse(success)
+            deactivate Session
+        else Session in timeout state
+            Note over SessionMgr: 🚨 **Problem:** Session exists but is marked for cleanup.  
+            SessionMgr->>Listener: Registration failed ❌
+            Note over Listener: 🔴 **Fix:** Should notify client why session is unavailable.
+        else Session not found
+            Note over SessionMgr: 🚨 **Problem:** No session found for the ID provided.  
+            SessionMgr->>Listener: Registration failed ❌
+            Note over Listener: 🔴 **Fix:** Should distinguish between "expired" and "never existed".
+        end
+
+        deactivate SessionMgr
+
+    else No registration_id
+        Note over Listener: 🟢 Client is new, start fresh session.
+        Listener->>Broker: Register new session
+        activate Broker
+
+        alt Broker is available
+            Broker->>SessionMgr: Create new session
+            SessionMgr->>Session: Start new session
+            activate Session
+            alt SessionAgent creation fails
+                Note over SessionMgr: 🚨 **Problem:** What happens if session startup fails?  
+                SessionMgr->>Listener: Registration failed ❌
+                Note over Listener: 🔴 **Fix:** Should notify client of session creation failure.
+            else Success
+                Session->>Listener: RegistrationResponse(success)
+            end
+            deactivate Session
+        else Broker is unreachable
+            Note over Broker: 🚨 **Problem:** Broker is down or unresponsive!  
+            Broker->>Listener: Registration failed ❌
+            Note over Listener: 🔴 **Fix:** Should return a specific error message to client.
+        end
+
+        deactivate Broker
+    end
+
+    Listener->>Client: RegistrationResponse(success/fail)
+    deactivate Listener
+
+    Note over Client: 🟢 Client proceeds based on response.

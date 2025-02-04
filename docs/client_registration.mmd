@@ -1,0 +1,63 @@
+sequenceDiagram
+    participant Client
+    participant Listener
+    participant Broker
+    participant SessionManager
+    participant SessionAgent
+    participant SubscriberManager
+
+    Note right of Client: Client sends a registration request
+    Client->>Listener: RegistrationRequest(registration_id)
+
+    Note right of Listener: Forwarding request to Broker
+    Listener->>Broker: RegistrationRequest(client_id, registration_id)
+    
+    activate Broker
+    Note right of Broker: Checking session existence
+    Broker->>SessionManager: Lookup session(registration_id)
+
+    alt Session exists
+        Broker->>SessionManager: Resume existing session
+        SessionManager->>Listener: RegistrationResponse(success)
+        Listener->>Client: RegistrationResponse(success)
+    else Session does not exist
+        Note right of Broker: Requesting new session creation
+        Broker->>SessionManager: Register new session(client_id)
+
+        activate SessionManager
+        Note right of SessionManager: Generating new registration ID
+        SessionManager->>SessionAgent: Spawn new SessionAgent(registration_id)
+        
+        alt SessionAgent starts successfully
+            Note right of SessionManager: Saving session reference
+            SessionManager->>Broker: Session created(registration_id)
+            Broker->>Listener: RegistrationResponse(success)
+
+            Note right of Listener: Sending registration response to Client
+            Listener->>Client: RegistrationResponse(success)
+        else SessionAgent creation fails
+            Note right of SessionManager: ❌ PROBLEM: No explicit handling if SessionAgent fails! <br> Should notify Broker or retry?
+            SessionManager->>Broker: Session creation failed
+            Broker->>Listener: RegistrationResponse(failure)
+            Listener->>Client: RegistrationResponse(failure)
+        end
+        deactivate SessionManager
+    end
+    deactivate Broker
+
+    alt Client disconnects before registration completes
+        Note right of Listener: ❌ PROBLEM: No guarantee that SessionManager will cancel session creation in time. <br> What happens if the SessionAgent is already partially initialized?
+        Listener->>SessionManager: DisconnectRequest(client_id)
+        Listener->>SubscriberManager: Cancel subscription restoration
+    end
+
+    alt SubscriberManager restoring subscriptions
+        Note right of SubscriberManager: Gathering existing subscriptions
+        SubscriberManager->>SubscriberManager: Restore subscriptions
+        Note right of SubscriberManager: ❌ PROBLEM: Possible race condition! <br> If the Client starts sending messages before restoration completes, messages could be lost.
+    end
+
+    alt SessionManager fails to notify Broker of session timeout
+        Note right of SessionManager: ❌ PROBLEM: If a session times out, Broker may not be notified correctly. <br> Possible session leak?
+        SessionManager->>Broker: TimeoutMessage(registration_id)
+    end
