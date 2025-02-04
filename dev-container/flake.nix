@@ -4,28 +4,63 @@
   inputs = {
     flake-utils.url = "github:numtide/flake-utils"; # Utility functions for Nix flakes
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable"; # Main Nix package repository
-    rust-overlay.url = "github:oxalica/rust-overlay?rev=260ff391290a2b23958d04db0d3e7015c8417401";
+
+    rust-overlay.url = "github:oxalica/rust-overlay";
     rust-overlay.inputs.nixpkgs.follows = "nixpkgs";
-    rust-overlay.inputs.flake-utils.follows = "flake-utils";
+
     myNeovimOverlay.url = "github:daveman1010221/nix-neovim";
     myNeovimOverlay.inputs.nixpkgs.follows = "nixpkgs";
     myNeovimOverlay.inputs.flake-utils.follows = "flake-utils";
+
     nix-vscode-extensions.url = "github:nix-community/nix-vscode-extensions";
     nix-vscode-extensions.inputs.nixpkgs.follows = "nixpkgs";
     nix-vscode-extensions.inputs.flake-utils.follows = "flake-utils";
+
     staticanalysis.url = "github:rmdettmar/polar-static-analysis";
     staticanalysis.inputs.nixpkgs.follows = "nixpkgs";
     staticanalysis.inputs.flake-utils.follows = "flake-utils";
     staticanalysis.inputs.rust-overlay.follows = "rust-overlay";
+
+    #openssl-fips.url = "github:daveman1010221/openssl-fips";
   };
 
-  outputs = { self, flake-utils, nixpkgs, rust-overlay, myNeovimOverlay, nix-vscode-extensions, staticanalysis, ... }:
+  outputs = { flake-utils, nixpkgs, rust-overlay, myNeovimOverlay, nix-vscode-extensions, staticanalysis, ... }:
     flake-utils.lib.eachDefaultSystem (system:
       let
+        #overlayNetSSLeay = import ./overlay-netssleay.nix;
+
         pkgs = import nixpkgs {
           inherit system;
-          overlays = [ rust-overlay.overlays.default myNeovimOverlay.overlays.default ];
+          config = {
+            cc = "clang";
+          };
+          documentation = {
+            dev.enable = true;
+            man = {
+              man-db.enable = true;
+              generateCaches = true;
+            };
+          };
+          overlays = [ 
+            rust-overlay.overlays.default
+            myNeovimOverlay.overlays.default
+
+            # Overlay replaces openssl with FIPS-compliant openssl
+            # (final: prev: {
+            #   openssl = (openssl-fips.packages.${prev.system}.default).override (old: old // {
+            #     meta = old.meta // {
+            #       description = "FIPS-compliant OpenSSL for Dev Container";
+            #     };
+            #   });
+            # })
+
+            #overlayNetSSLeay    # The FIPS OpenSSL is used by a package that
+                                # uses this perl package, which doesn't build right...
+
+            # 2) Directly use the prebuilt Clang-based stdenv from llvmPackages_19:
+          ];
         };
+
         # This is needed since VSCode Devcontainers need the following files in order to function.
         baseInfo = with pkgs; [
           # Set up shadow file with user information
@@ -72,10 +107,13 @@
             extensions.vscode-marketplace.dustypomerleau.rust-syntax
             extensions.vscode-marketplace.ms-vscode.test-adapter-converter
             extensions.vscode-marketplace.hbenl.vscode-test-explorer # dependency for rust test adapter
+            extensions.vscode-marketplace.connorshea.vscode-test-explorer-status-bar
+            extensions.vscode-marketplace.emilylilylime.vscode-test-explorer-diagnostics
             extensions.vscode-marketplace.swellaby.vscode-rust-test-adapter
             extensions.vscode-marketplace.vscodevim.vim
             extensions.vscode-marketplace.redhat.vscode-yaml
             extensions.vscode-marketplace.ms-azuretools.vscode-docker
+            extensions.vscode-marketplace.jdinhlife.gruvbox
           ];
         };
 
@@ -84,22 +122,22 @@
           paths = with pkgs; [
             # -- Basic Required Files --
             bash # Basic bash to run bare essential code
+            glibcLocalesUtf8
             uutils-coreutils-noprefix # Essential GNU utilities (ls, cat, etc.)
 
             # -- Needed for VSCode dev container --
-            gnutar # GNU version of tar for archiving 
-            gzip # Compression utility
             gnugrep # GNU version of grep for searching text
             gnused # GNU version of sed for text processing
-            pkgs.stdenv.cc.cc.lib # Standard C library needed for linking C++ programs
+            gnutar # GNU version of tar for archiving
+            gzip # Compression utility
 
             # -- FISH! --
+            figlet
             fish
             fishPlugins.bass
             fishPlugins.bobthefish
             fishPlugins.foreign-env
             fishPlugins.grc
-            figlet
             lolcat
 
             # -- OpenSSL --
@@ -108,53 +146,53 @@
             openssl.dev
 
             # -- Development tools --
+            bat
             code-extended
-            rust-analyzer
-
-            which
-            nvim-pkg
             curl
+            delta
+            eza
+            fd
+            findutils
+            fzf
+            gawk
+            getent
+            git
+            gnugrep
+            jq
             lsof
-            strace
+            man-db
+            man-pages
+            man-pages-posix
+            ncurses
+            nix
+            nvim-pkg
+            ps
             ripgrep
+            rust-analyzer
+            rustlings
+            strace
             tree
             tree-sitter
-            nix
-            git
-            fzf
-            fd
-            eza
-            findutils
-            gnugrep
-            getent
-            gawk
-            jq
-            ps
-            ncurses
+            which
 
             # -- Compilers, Etc. --
-            gcc
-            grc
             cmake
             gnumake
-            libclang
+            # clang or clang-tools are not strictly needed if stdenv is clang-based
+            # but you can add them if you want the standalone `clang` CLI, e.g.:
+            pkgs.llvmPackages_19.clang
+            lld
             glibc
+            grc
 
             # -- Rust --
-            #(lib.meta.hiPrio rust-bin.nightly.latest.default)
+            (lib.meta.hiPrio rust-bin.nightly.latest.default)
 
-            # We need to support various WASM targets, possibly ARM64 targets.
-            # This allows us to select those. Also, by default, we should
-            # include the sources for Rust, so that the debugger works properly
-            # and can jump to definition.
-            (rust-bin.selectLatestNightlyWith (toolchain: toolchain.default.override {
-              extensions = [ "rust-src" ];
-              targets = [ "wasm32-unknown-unknown" "wasm32-wasip1" ];
-            }))
-            cargo-wasi
             cargo-leptos
+            cargo-wasi
             pkg-config
             trunk
+            util-linux
 
             # -- Static Analysis Tools --
             staticanalysis.packages.${system}.default
@@ -191,6 +229,12 @@
           text = builtins.readFile ./container-files/license.txt;
         };
 
+        gitconfig = pkgs.writeTextFile {
+          name = "container-files/.gitconfig";
+          destination = "/root/.gitconfig";
+          text = builtins.readFile ./container-files/.gitconfig;
+        };
+
         # User creation script
         createUserScript = pkgs.writeTextFile {
           name = "container-files/create-user.sh";
@@ -204,45 +248,71 @@
         packages.default = pkgs.dockerTools.buildImage {
           name = "polar-dev";
           tag = "latest";
-          copyToRoot = [ myEnv baseInfo fishConfig codeSettings license createUserScript fishPluginsFile ];
+          copyToRoot = [
+            myEnv
+            baseInfo
+            fishConfig
+            codeSettings
+            license
+            gitconfig
+            createUserScript
+            fishPluginsFile
+          ];
           config = {
             WorkingDir = "/workspace";
             Env = [
-              # Add certificates to allow for cargo to download files from the internet
-              "SSL_CERT_FILE=/etc/ssl/certs/ca-bundle.crt"
-              "SSL_CERT_DIR=/etc/ssl/certs"
               "CARGO_HTTP_CAINFO=/etc/ssl/certs/ca-bundle.crt"
-              "CC=gcc" # Set GCC as the default C compiler
-              "CXX=g++" # Set G++ as the default C++ compiler
-              # Library path for dynamic linking
-              "LD_LIBRARY_PATH=${pkgs.stdenv.cc.cc.lib}/lib"
-              # Add openssl to pkg config to ensure that it loads for cargo build
-              "PKG_CONFIG_PATH=${pkgs.openssl.dev}/lib/pkgconfig"
-              # Setting PATH to include essential binaries
-              "PATH=/bin:/usr/bin:${myEnv}/bin:/root/.cargo/bin"
-              "USER=root" # Setting user to root
-              "COREUTILS=${pkgs.uutils-coreutils-noprefix}"
-              "CMAKE=/bin/cmake"
-              "CMAKE_MAKE_PROGRAM=/bin/make"
-              "LIBCLANG_PATH=${pkgs.libclang.lib}/lib/"
-              "SHELL=/bin/fish"
 
               # Fish plugins
-              "FISH_GRC=${pkgs.fishPlugins.grc}"
-              "FISH_BASS=${pkgs.fishPlugins.bass}"
               "BOB_THE_FISH=${pkgs.fishPlugins.bobthefish}"
+              "FISH_BASS=${pkgs.fishPlugins.bass}"
+              "FISH_GRC=${pkgs.fishPlugins.grc}"
+
+              "CC=clang"
+              "CXX=clang++"
+              "LD=ld.lld"
+              "CMAKE=/bin/cmake"
+              "CMAKE_MAKE_PROGRAM=/bin/make"
+              "COREUTILS=${pkgs.uutils-coreutils-noprefix}"
+
+              "LANG=en_US.UTF-8"
+              "TZ=UTC"
+              "MANPAGER=sh -c 'col -bx | bat --language man --style plain'"
+              "MANPATH=${pkgs.man-db}/share/man:$MANPATH"
+              "LOCALE_ARCHIVE=${pkgs.glibcLocalesUtf8}/lib/locale/locale-archive"
+
+              # stdenv.cc is clang-based now, so this is fine:
+              "LD_LIBRARY_PATH=${pkgs.stdenv.cc.cc.lib}/lib"
+
+              #"LIBCLANG_PATH=${pkgs.libclang.lib}/lib/"
+
+              "RUSTFLAGS=-Clinker=clang"
+
+              "PATH=/bin:/usr/bin:${myEnv}/bin:/root/.cargo/bin"
+
+              # Add openssl to pkg config to ensure that it loads for cargo build
+              "PKG_CONFIG_PATH=${pkgs.openssl.dev}/lib/pkgconfig"
+
+              "SHELL=/bin/fish"
+              "SSL_CERT_DIR=/etc/ssl/certs"
+
+              # Add certificates to allow for cargo to download files from the
+              # internet. May have to adjust this for FIPS.
+              "SSL_CERT_FILE=/etc/ssl/certs/ca-bundle.crt"
+
+              "USER=root"
             ];
-            Volumes = { };
+            Volumes = {};
             Cmd = [ "/bin/fish" ]; # Runs fish
           };
           extraCommands = ''
             # Link the env binary (needed for the check requirements script)
             mkdir -p usr/bin/
-            ln -n bin/env usr/bin/env 
+            ln -n bin/env usr/bin/env
 
             # Link the dynamic linker/loader (needed for Node within vscode server)
-            mkdir -p lib64 
-            ln -s ${pkgs.glibc}/lib/ld-linux-x86-64.so.2 lib64/ld-linux-x86-64.so.2 
+            mkdir -p lib64
+            ln -s ${pkgs.stdenv.cc.cc}/lib/ld-linux-x86-64.so.2 lib64/ld-linux-x86-64.so.2
 
             # Create /tmp dir
             mkdir -p tmp

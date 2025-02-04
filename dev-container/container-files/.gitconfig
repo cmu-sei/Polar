@@ -1,0 +1,23 @@
+#[user]
+    #email = daveman1010220@gmail.com
+    #name = David Shepard
+[pull]
+	rebase = false
+[init]
+	defaultBranch = main
+[core]
+    pager = delta
+	autocrlf = false
+[interactive]
+    diffFilter = delta --color-only
+[delta]
+    navigate = true    # use n and N to move between diff sections
+    light = false      # set to true if you're in a terminal w/ a light background color (e.g. the default macOS terminal)
+    side-by-side = true
+    line-numbers = true
+    theme = gruvbox-dark
+
+[merge]
+    conflictstyle = diff3
+[diff]
+    colorMoved = default

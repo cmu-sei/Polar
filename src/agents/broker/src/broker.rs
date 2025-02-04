@@ -1,25 +1,47 @@
-use std::{iter::Successors, result};
-
-use tracing::{error, info, warn};
-use crate::{get_subscriber_name, listener::{ListenerManager, ListenerManagerArgs}, session::{SessionManager, SessionManagerArgs}, subscriber::SubscriberManager, topic::{TopicManager, TopicManagerArgs}, SUBSCRIBE_REQUEST_FAILED_TXT, UNEXPECTED_MESSAGE_STR};
-use crate::{BrokerMessage, LISTENER_MANAGER_NAME, SESSION_MANAGER_NAME,PUBLISH_REQ_FAILED_TXT, SUBSCRIBER_MANAGER_NAME, SUBSCRIBER_MGR_NOT_FOUND_TXT, TOPIC_MANAGER_NAME,REGISTRATION_REQ_FAILED_TXT, SESSION_NOT_FOUND_TXT, CLIENT_NOT_FOUND_TXT};
-use ractor::{async_trait, registry::where_is, rpc::{call, call_and_forward}, Actor, ActorProcessingErr, ActorRef, SupervisionEvent, rpc::CallResult::Success};
-
+use tracing::{debug, error, info, warn};
+use crate::{
+    get_subscriber_name, listener::{ ListenerManager, ListenerManagerArgs }, session::{ SessionManager, SessionManagerArgs }, subscriber::SubscriberManager, topic::{ TopicManager, TopicManagerArgs }, SUBSCRIBE_REQUEST_FAILED_TXT, UNEXPECTED_MESSAGE_STR
+};
+use crate::{
+    BrokerMessage,
+    CLIENT_NOT_FOUND_TXT,
+    LISTENER_MANAGER_NAME,
+    PUBLISH_REQ_FAILED_TXT,
+    REGISTRATION_REQ_FAILED_TXT,
+    SESSION_MANAGER_NAME,
+    SESSION_MGR_NOT_FOUND_TXT,
+    SESSION_NOT_FOUND_TXT,
+    SUBSCRIBER_MANAGER_NAME,
+    SUBSCRIBER_MGR_NOT_FOUND_TXT,
+    TOPIC_MANAGER_NAME
+};
+use ractor::{
+    async_trait,
+    Actor,
+    ActorProcessingErr,
+    ActorRef,
+    registry::where_is,
+    rpc::{call, CallResult::Success},
+    SupervisionEvent
+};
 
 // ============================== Broker Supervisor Actor Definition ============================== //
 
 pub struct Broker;
 
-//State object containing references to worker actors.
+// State object containing references to worker actors
 pub struct BrokerState;
+
 /// Would-be configurations for the broker actor itself, as well its workers
 #[derive(Clone)]
 pub struct BrokerArgs {
     /// Socket address to listen for connections on
     pub bind_addr: String,
+
     /// The amount of time (in seconds) before a session times out
     /// Should be between 10 and 300 seconds
     pub session_timeout: Option<u64>,
+
     pub server_cert_file: String,
     pub private_key_file: String,
     pub ca_cert_file: String
@@ -30,11 +52,13 @@ impl Actor for Broker {
     type Msg = BrokerMessage;
     type State = BrokerState;
     type Arguments = BrokerArgs;
+
     async fn pre_start(
         &self,
         myself: ActorRef<Self::Msg>,
         args: BrokerArgs
     ) -> Result<Self::State, ActorProcessingErr> {
+
         tracing::info!("Broker: Starting {myself:?}");
         
         let listener_manager_args =  ListenerManagerArgs {
@@ -44,43 +68,93 @@ impl Actor for Broker {
             ca_cert_file: args.ca_cert_file
         };
 
-        Actor::spawn_linked(Some(LISTENER_MANAGER_NAME.to_owned()), ListenerManager, listener_manager_args, myself.clone().into()).await.expect("Expected to start Listener Manager");
+        // The Broker is the Supervisor for all of the other Supervisors, including:
 
+        // Listeners Supervisor
+        Actor::spawn_linked(
+            Some(LISTENER_MANAGER_NAME.to_owned()),
+            ListenerManager,
+            listener_manager_args,
+            myself.clone().into()
+        ).await.expect("The Broker cannot initialize without the ListenerManager. Panicking.");
 
-        //set default timeout for sessions, or use args
+        // Set default timeout for sessions, or use args
         let mut session_timeout: u64 = 90;
+
         if let Some(timeout) = args.session_timeout {
             session_timeout = timeout;
         }
 
-        Actor::spawn_linked(Some(SESSION_MANAGER_NAME.to_string()), SessionManager, SessionManagerArgs { session_timeout: session_timeout }, myself.clone().into()).await.expect("Expected Session Manager to start");
+        // Sessions Supervisor
+        Actor::spawn_linked(
+            Some(SESSION_MANAGER_NAME.to_string()),
+            SessionManager,
+            SessionManagerArgs { session_timeout: session_timeout },
+            myself.clone().into()
+        ).await.expect("The Broker cannot initialize without the SessionManager. Panicking.");
 
-        //TODO: Read some topics from configuration based on services we want to observer/consumer messages for
+        // TODO: Read some topics from configuration based on services we want
+        // to observe/consume messages for
+
+        // Vaughn, can you explain a little more here what this TODO is about?
+        // Could probably use a doc comment.
         let topic_mgr_args = TopicManagerArgs {topics: None};
 
-        Actor::spawn_linked(Some(TOPIC_MANAGER_NAME.to_owned()), TopicManager, topic_mgr_args, myself.clone().into()).await.expect("Expected to start Topic Manager");    
+        // Topics Supervisor
+        Actor::spawn_linked(
+            Some(TOPIC_MANAGER_NAME.to_owned()),
+            TopicManager,
+            topic_mgr_args,
+            myself.clone().into()
+        ).await.expect("The Broker cannot initialize without the TopicManager. Panicking.");    
 
-        Actor::spawn_linked(Some(SUBSCRIBER_MANAGER_NAME.to_string()), SubscriberManager, (), myself.clone().into()).await.expect("Expected to start Subscriber Manager");
+        // Subscribers Supervisor
+        Actor::spawn_linked(
+            Some(SUBSCRIBER_MANAGER_NAME.to_string()),
+            SubscriberManager,
+            (),
+            myself.clone().into()
+        ).await.expect("The Broker cannot initialize without the SubscriberManager. Panicking.");
 
         let state = BrokerState;
         Ok(state)
     }
 
-    async fn handle_supervisor_evt(&self, _myself: ActorRef<Self::Msg>, msg: SupervisionEvent, _: &mut Self::State) -> Result<(), ActorProcessingErr> {
+    async fn handle_supervisor_evt(
+        &self,
+        _myself: ActorRef<Self::Msg>,
+        msg: SupervisionEvent,
+        _: &mut Self::State
+    ) -> Result<(), ActorProcessingErr> {
         match msg {
-            SupervisionEvent::ActorStarted(actor_cell) => info!("Worker agent: {0:?}:{1:?} started", actor_cell.get_name(), actor_cell.get_id()),
+            SupervisionEvent::ActorStarted(actor_cell) => {
+                info!("Worker agent: {0:?}:{1:?} started", actor_cell.get_name(), actor_cell.get_id())
+            },
             
-            SupervisionEvent::ActorTerminated(actor_cell, ..) => info!("Worker {0:?}:{1:?} terminated, restarting..", actor_cell.get_name(), actor_cell.get_id()),
+            SupervisionEvent::ActorTerminated(actor_cell, ..) => {
+                info!("Worker {0:?}:{1:?} terminated, restarting..", actor_cell.get_name(), actor_cell.get_id())
+            },
             
             SupervisionEvent::ActorFailed(actor_cell, e) => {
                 warn!("Worker agent: {0:?}:{1:?} failed! {e}", actor_cell.get_name(), actor_cell.get_id());
-                //determine type of actor that failed and restart
-                //NOTE: "Remote" actors can't have their types checked? But they do send serializable messages
-                // If we can deserialize them to a datatype here, that may be another acceptable means of determining type
-                //TODO: Figure out what panics/failures we can/can't recover from
-                // Missing certificate files and the inability to forward some messages count as bad states
+
+                // Determine type of actor that failed and restart
+
+                // NOTE: "Remote" actors can't have their types checked? But
+                // they do send serializable messages. If we can deserialize
+                // them to a datatype here, that may be another acceptable means
+                // of determining type.
+
+                // TODO: Figure out what panics/failures we can/can't recover
+                // from Missing certificate files and the inability to forward
+                // some messages count as bad states
                 _myself.stop(Some("ACTOR_FAILED".to_string()));
 
+                // Vaughn, this sounds like a whiteboarding session. These are
+                // top-level supervisors, so if they fail we definitely should
+                // _try_ to recover them, but each one may have a fairly hefty
+                // amount of stuff to recover. This may be akin to a full
+                // restart / re-init of the broker, if one of these fails.
             },
             SupervisionEvent::ProcessGroupChanged(_) => (),
         }
@@ -88,13 +162,25 @@ impl Actor for Broker {
         Ok(())
     }
     
-    async fn post_start(&self, myself: ActorRef<Self::Msg>, _: &mut Self::State) -> Result<(), ActorProcessingErr> {
-        info!("Broker: Started {myself:?}");
+    async fn post_start(
+        &self,
+        myself: ActorRef<Self::Msg>,
+        _: &mut Self::State
+    ) -> Result<(), ActorProcessingErr> {
+        // Vaughn, for these lifecycle events where we don't intend to do much
+        // (yet), maybe we could make these debug!(...), so we can cut down on
+        // some of the verbosity, unless someone has the logging turned up to
+        // eleven.
+        debug!("Broker: Started {myself:?}");
         Ok(())
     }
 
-    async fn post_stop(&self, myself: ActorRef<Self::Msg>, _: &mut Self::State) -> Result<(), ActorProcessingErr> {
-        info!("Broker: Stopped {myself:?}");
+    async fn post_stop(
+        &self,
+        myself: ActorRef<Self::Msg>,
+        _: &mut Self::State
+    ) -> Result<(), ActorProcessingErr> {
+        debug!("Broker: Stopped {myself:?}");
         Ok(())
     }
     
@@ -107,10 +193,10 @@ impl Actor for Broker {
         match message {
             
             BrokerMessage::RegistrationRequest { registration_id, client_id } => {                         
-                info!("Received Registration Request from client: {client_id:?}");
+                debug!("Received Registration Request from client: {client_id:?}");
                 match registration_id {
                     Some(id) => {
-                        //forward RegistrationRequest to the session and subscriber mgrs
+                        // Forward RegistrationRequest to the session and subscriber mgrs
                         let session_option = where_is(id.clone());
                         let sub_mgr_option = where_is(SUBSCRIBER_MANAGER_NAME.to_string());
                         
@@ -121,7 +207,9 @@ impl Actor for Broker {
                             
                             let client_id_clone = client_id.clone();
                             
-                            if let Err(e) = session.send_message(BrokerMessage::RegistrationRequest { registration_id: Some(id.clone()), client_id }){
+                            if let Err(e) = session.send_message(
+                                BrokerMessage::RegistrationRequest { registration_id: Some(id.clone()), client_id }
+                            ) {
                                 let err_msg = format!("{REGISTRATION_REQ_FAILED_TXT}: {SESSION_NOT_FOUND_TXT}: {e}");
                                 if let Some(listener) = where_is(id.clone()) {
                                     listener.send_message(BrokerMessage::RegistrationResponse { registration_id: Some(id.clone()), client_id: id.clone(), success: false, error: Some(err_msg) })
@@ -146,7 +234,8 @@ impl Actor for Broker {
                         
                         
                         } else {
-                            let err_msg = format!("{REGISTRATION_REQ_FAILED_TXT}: Couldn't locate session or subscribers!");
+                            let err_msg = format!(
+                                "{REGISTRATION_REQ_FAILED_TXT}: Couldn't locate session or subscribers!");
                             warn!("{err_msg}");  
                             match where_is(client_id.clone()) {
                                 Some(listener) => {
