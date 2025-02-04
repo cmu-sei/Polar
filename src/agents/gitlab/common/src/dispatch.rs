@@ -1,16 +1,40 @@
-use ractor::{async_trait, registry::where_is, Actor, ActorProcessingErr, ActorRef, Message};
-use rkyv::{rancor::Error, Deserialize, Serialize};
-use tracing::{error, info};
-use std::marker::PhantomData;
+use ractor::{async_trait, registry::where_is, Actor, ActorProcessingErr, ActorRef};
+use rkyv::rancor::Error;
+use tracing::{error, info, warn};
 use polar::DispatcherMessage;
-
 use crate::types::GitlabData;
 
 
 /// Dispatcher Definition
-/// 
+/// The Dispatcher is a core component of each agent. Its function is to deserialize data from it's binary
+/// format into strong rust datatypes, and forward it to any interested actors.
 pub struct MessageDispatcher;
 
+//TODO: Make Dispatcher a trait that forces the implementation of some serialization logic>
+impl MessageDispatcher {
+
+    /// Helper function - does as the name says.
+    /// It's pretty safe to assume whatever message comes in contains data for our Gitlab agent.
+    /// We can jsut discard any message that don't conform to our expectations as bad data.
+    /// The incoming topic string will inform us of which actor is responsible for handling the message.
+    pub fn deserailize_and_dispatch(message: Vec<u8>, topic: String) {
+        match rkyv::from_bytes::<GitlabData, Error>(&message) {
+            Ok(message) => {
+                if let Some(consumer) = where_is(topic.clone()) {
+                    
+                    if let Err(e) = consumer.send_message(message) {
+                        tracing::warn!("Error forwarding message. {e}");
+                    }
+                } else {
+                    //TODO: Implement DLQ for when consumers aren't present and may return?
+                    todo!("Failed to forward message to processor, implement DLQ");;
+                }
+            }
+            Err(err) => warn!("Failed to deserialize message: {:?}", err),
+        }
+        
+    }
+}
 
 pub struct DispatcherState;
 
@@ -44,36 +68,9 @@ impl Actor for MessageDispatcher {
         _: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
-            DispatcherMessage::Dispatch { message, topic } => {
-                //TODO: implement dispatch logic to determine what kind of message we got here, 
-                // safe to assume whatever message comes in contains data for our agent, we can discard any message that don't conform to our schema
-                // Recall the naming convention for actors 
-                // service:role:topic
-                // where possible topics are users, projects, groups, etc. + config
-                // Deserialize message data
-                info!("Received dispatch message");
-
-                match rkyv::from_bytes::<GitlabData, Error>(&message) {
-                    Ok(message) => {
-                        if let Some(consumer) = where_is(topic.clone()) {
-                            
-                            if let Err(e) = consumer.send_message(message) {
-                                tracing::warn!("Error forwarding message. {e}");
-                            }
-                        } else {
-                            //TODO: Implement DLQ for when consumers aren't present and may return.
-                            todo!("Failed to forward message to processor, implement DLQ");;
-                        }
-                    }
-                    Err(err) => error!("Failed to deserialize message: {:?}", err),
-                }
-                
-            }
-
-        
+            DispatcherMessage::Dispatch { message, topic } => { MessageDispatcher::deserailize_and_dispatch(message, topic); }        
         }
         Ok(())        
     }
-        
 }
 
