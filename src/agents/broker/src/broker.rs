@@ -123,11 +123,11 @@ impl Actor for Broker {
     ) -> Result<(), ActorProcessingErr> {
         match msg {
             SupervisionEvent::ActorStarted(actor_cell) => {
-                info!("Worker agent: {0:?}:{1:?} started", actor_cell.get_name(), actor_cell.get_id())
+                debug!("Worker agent: {0:?}:{1:?} started", actor_cell.get_name(), actor_cell.get_id())
             },
             
             SupervisionEvent::ActorTerminated(actor_cell, ..) => {
-                info!("Worker {0:?}:{1:?} terminated, restarting..", actor_cell.get_name(), actor_cell.get_id())
+                debug!("Worker {0:?}:{1:?} terminated, restarting..", actor_cell.get_name(), actor_cell.get_id())
             },
             
             SupervisionEvent::ActorFailed(actor_cell, e) => {
@@ -191,65 +191,32 @@ impl Actor for Broker {
                 debug!("Received Registration Request from client: {client_id:?}");
                 match registration_id {
                     Some(id) => {
-                        // Forward RegistrationRequest to the session and subscriber mgrs
-                        let session_option = where_is(id.clone());
-                        let sub_mgr_option = where_is(SUBSCRIBER_MANAGER_NAME.to_string());
+                        // We were provided some session id, find it and forward the request.
+                        let session = where_is(id.clone()).expect("Expected to find session. {id}");
                         
+                        if let Err(e) = session.send_message(
+                            BrokerMessage::RegistrationRequest { registration_id: Some(id.clone()), client_id: client_id.clone() }
+                        ) {
+                            let err_msg = format!("{REGISTRATION_REQ_FAILED_TXT}: {SESSION_NOT_FOUND_TXT}: {e}");
+                            if let Some(listener) = where_is(id.clone()) {
+                                listener.send_message(BrokerMessage::RegistrationResponse { registration_id: Some(id.clone()), client_id: client_id.clone(), success: false, error: Some(err_msg) }).unwrap();
 
-                        if session_option.is_some() && sub_mgr_option.is_some() {
-                            let sub_mgr = sub_mgr_option.unwrap();
-                            let session = session_option.unwrap();
-                            
-                            let client_id_clone = client_id.clone();
-                            
-                            if let Err(e) = session.send_message(
-                                BrokerMessage::RegistrationRequest { registration_id: Some(id.clone()), client_id }
-                            ) {
-                                let err_msg = format!("{REGISTRATION_REQ_FAILED_TXT}: {SESSION_NOT_FOUND_TXT}: {e}");
-                                if let Some(listener) = where_is(id.clone()) {
-                                    listener.send_message(BrokerMessage::RegistrationResponse { registration_id: Some(id.clone()), client_id: id.clone(), success: false, error: Some(err_msg) })
-                                    .map_err(|e| {
-                                        warn!("{e}");
-                                    }).unwrap()
-                                }
                             }
+                        }
 
-                           
-                            if let Err(e) = sub_mgr.send_message(BrokerMessage::RegistrationRequest { registration_id: Some(id.clone()), client_id: client_id_clone }){
-                                let err_msg = format!("{REGISTRATION_REQ_FAILED_TXT}: {SUBSCRIBER_MGR_NOT_FOUND_TXT}, messages may have been lost! {e}");
-                                error!("{err_msg}");
-                                if let Some(listener) = where_is(id.clone()) {
-                                    listener.send_message(BrokerMessage::RegistrationResponse { registration_id: Some(id.clone()), client_id: id.clone(), success: false, error: Some(err_msg) })
-                                    .map_err(|e| {
-                                        warn!("{e}");
-                                    }).unwrap()
-                                }
-                            }
-                        
-                        
-                        
-                        } else {
-                            let err_msg = format!(
-                                "{REGISTRATION_REQ_FAILED_TXT}: Couldn't locate session or subscribers!");
-                            warn!("{err_msg}");  
-                            match where_is(client_id.clone()) {
-                                Some(listener) => {
-                                    
-                                    listener.send_message(BrokerMessage::RegistrationResponse {
-                                        registration_id: Some(id.clone()),
-                                        client_id: id.clone(),
-                                        success: false,
-                                        error: Some(err_msg.clone())
-                                    })
-                                    .map_err(|e| {
-                                        warn!("{err_msg}: {CLIENT_NOT_FOUND_TXT}: {e}");
-                                    }).unwrap()
-                                } None => warn!("{err_msg}: {CLIENT_NOT_FOUND_TXT}")
+                        // Alert subscriber manager so that any waiting messages get sent
+                        let sub_mgr = where_is(SUBSCRIBER_MANAGER_NAME.to_string()).expect("Expected to find subscriber manager.");
+
+                        if let Err(e) = sub_mgr.send_message(BrokerMessage::RegistrationRequest { registration_id: Some(id.clone()), client_id: client_id.clone() }){
+                            let err_msg = format!("{REGISTRATION_REQ_FAILED_TXT}: {SUBSCRIBER_MGR_NOT_FOUND_TXT}, messages may have been lost! {e}");
+                            error!("{err_msg}");
+                            if let Some(listener) = where_is(id.clone()) {
+                                listener.send_message(BrokerMessage::RegistrationResponse { registration_id: Some(id.clone()), client_id:  client_id.clone(), success: false, error: Some(err_msg) }).unwrap();
                             }
                         }
                     }
                     None => {
-                        //tell start new session
+                        // start new session
                         let manager = where_is(SESSION_MANAGER_NAME.to_string()).expect("Expected to find SESSION_MANAGER");
                         manager.send_message(BrokerMessage::RegistrationRequest { registration_id: registration_id.clone(), client_id: client_id.clone() }).expect("Expected to send message to session manager.");
                     }

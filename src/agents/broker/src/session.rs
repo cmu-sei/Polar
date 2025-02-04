@@ -21,8 +21,10 @@ pub struct Session {
 /// Define the state for the actor
 pub struct SessionManagerState {
     /// Map of registration_id to Session ActorRefes
-    sessions: HashMap<String, Session>,           
+    sessions: HashMap<String, Session>,         
+    /// Amount of time (in seconds) that can pass before a session counts as expired
     session_timeout: u64,
+    /// Collection of tokens used to cancel the thread that cleans up expired sessions.
     cancellation_tokens: HashMap<String, CancellationToken>,
 }
 
@@ -75,88 +77,61 @@ impl Actor for SessionManager {
     ) -> Result<(), ActorProcessingErr>  {
         match message {
             BrokerMessage::RegistrationRequest { client_id, ..} => {
-                // Vaughn,
                 // Start a brand new session: Create an ID. Spawn a new session
                 // to store the ID. If for some reason we can't create a new
                 // session, we kick the failure back to the client's listener
-                // directly, so that they can handle the error. We don't appear
-                // to ever notify the broker, which is how we got into this
-                // code, from the RegistrationRequest handler in broker.
-                // The broker appears to find out about this failure in creating a new
-                // session, from the failure response?
+                // directly, so that they can handle the error.
                 let new_id = Uuid::new_v4().to_string();
 
                 info!("SessionManager: Starting session for client: {client_id} with registration ID {new_id}");
+                let broker_ref = myself.try_get_supervisor().expect("Expected to find broker supervisor.");
+                //find client, attach its reference to new session args
+                if let Some(listener_ref) = where_is(client_id.clone()) {
+                    let args = SessionAgentArgs {
+                        registration_id: new_id.clone(),
+                        client_ref: listener_ref.clone().into(),
+                        broker_ref: broker_ref.clone().into()
+                    };
+                    //start new session
+                    if let Ok((session_agent, _)) = Actor::spawn_linked(
+                        Some(new_id.clone()),
+                        SessionAgent,
+                        args,
+                        myself.clone().into()
+                    ).await {
+                        state.sessions.insert(
+                            new_id.clone(),
+                            Session { agent_ref: session_agent }
+                        );
+                    }
+                    else { 
+                        let err_msg = format!(
+                            "{REGISTRATION_REQ_FAILED_TXT} Couldn't start session agent!");
+                        warn!("{err_msg}");
 
-                match myself.try_get_supervisor() {
-                    Some(broker_ref) => {
-                        if let Some(listener_ref) = where_is(client_id.clone()) {
-                            let args = SessionAgentArgs {
-                                registration_id: new_id.clone(),
-                                client_ref: listener_ref.clone().into(),
-                                broker_ref: broker_ref.clone().into()
-                            };
-                            
-                            if let Ok((session_agent, _)) = Actor::spawn_linked(
-                                Some(new_id.clone()),
-                                SessionAgent,
-                                args,
-                                myself.clone().into()
-                            ).await {
-                                state.sessions.insert(
-                                    new_id.clone(),
-                                    Session { agent_ref: session_agent }
-                                );
+                        if let Err(e) = listener_ref.send_message(
+                            BrokerMessage::RegistrationResponse {
+                                registration_id: None,
+                                client_id: client_id.clone(),
+                                success: false,
+                                error: Some(err_msg.clone())
                             }
-                            else { 
-                                let err_msg = format!(
-                                    "{REGISTRATION_REQ_FAILED_TXT} Couldn't start session agent!");
-                                warn!("{err_msg}");
-
-                                // Vaughn,
-                                // After we inform the client listener of
-                                // the error, we don't ever return the error
-                                // to the broker? The broker additionally
-                                // has this same logic to send a failure
-                                // message to the client, but from what I
-                                // can tell, we can't ever get there, since the
-                                // default return here is Ok. Does the error ever get
-                                // returned to the caller? It doesn't appear so.
-                                // The broker has this same logic as below to
-                                // send a message to the listener. If we're not
-                                // ever going to use that logic, we should get
-                                // rid of it. Otherwise, we should use the
-                                // return value here and not send the listener
-                                // error here. In any event, I did some light
-                                // refactoring, in case we want to think about
-                                // returning error from here to the broker.
-                                if let Err(e) = listener_ref.send_message(
-                                    BrokerMessage::RegistrationResponse {
-                                        registration_id: None,
-                                        client_id: client_id.clone(),
-                                        success: false,
-                                        error: Some(err_msg.clone())
-                                    }
-                                ) {
-                                    error!("{err_msg}: {e}");
-                                }
-                            }
-                        } else {
-                            // LOL they didn't stick around very long!
-                            warn!("{REGISTRATION_REQ_FAILED_TXT} {CLIENT_NOT_FOUND_TXT}")
+                        ) {
+                            error!("{err_msg}: {e}");
                         }
                     }
-                    None => {
-                        // I am a rogue Actor now. The world will hear what I have to say.
-                        error!("Couldn't lookup root broker actor!");
-                    }
-                }   
+                } else {
+                    // LOL they didn't stick around very long!
+                    warn!("{REGISTRATION_REQ_FAILED_TXT} {CLIENT_NOT_FOUND_TXT}")
+                }
+
                 Ok(())
             }
             BrokerMessage::RegistrationResponse { registration_id, client_id, .. } => {
                 //A client has (re)registered. Cancel timeout thread
-                // debug!("SessionManager: Alerted of session registration");
+                
                 if let Some(registration_id) = registration_id {
+                    // Find the given session by its id and cancel the cleanup task for it
                     match where_is(registration_id.clone()) {
                         Some(_) => {
                             if let Some(token) = &state.cancellation_tokens.get(&registration_id) {
@@ -168,8 +143,6 @@ impl Actor for SessionManager {
                             warn!("No session found for id {registration_id}");   
                         }
                     }
-                } else {
-                    warn!("Received registration response from unknown client: {client_id}");
                 }
                 Ok(())
             }
@@ -210,6 +183,7 @@ impl Actor for SessionManager {
                                 }
                                 // wait before killing session
                                 _ = tokio::time::sleep(std::time::Duration::from_secs(timeout)) => {
+                                    //tell the broker a session has timed out so it let's other actors know
                                     match myself.try_get_supervisor() {
                                         Some(manager) => {
                                             info!("Ending session {ref_clone:?}");
@@ -222,8 +196,9 @@ impl Actor for SessionManager {
     
                                         None => warn!("Could not find broker supervisor!")
                                     }
+                                    // stop session
                                     ref_clone.stop(Some(TIMEOUT_REASON.to_string()));
-                                
+                                    
                                 }
                             }
                         });

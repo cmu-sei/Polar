@@ -55,7 +55,7 @@ impl Actor for TcpClientActor {
     async fn pre_start(&self,
         _: ActorRef<Self::Msg>,
         args: TcpClientArgs) -> Result<Self::State, ActorProcessingErr> {
-        info!("TCP Client Actor starting...");
+        info!("Starting TCP Client ");
         // install default crypto provider
         let provider = rustls::crypto::aws_lc_rs::default_provider().install_default();
         if let Err(_) = provider { debug!("Crypto provider configured"); }
@@ -82,7 +82,7 @@ impl Actor for TcpClientActor {
         state: &mut Self::State ) ->  Result<(), ActorProcessingErr> {
         
         let addr = state.bind_addr.clone();
-        info!("Connecting to {addr}...");
+        info!("Connecting to {addr}");
         let connector = TlsConnector::from(Arc::clone(&state.client_config));
         
         match TcpStream::connect(&addr).await {
@@ -92,7 +92,6 @@ impl Actor for TcpClientActor {
                 
                 match connector.connect(domain, tcp_stream).await {                  
                     Ok(tls_stream) => {
-                        info!("mTLS connection established. ");
                         let (reader, write_half) = split(tls_stream);
                         
                         let writer = tokio::io::BufWriter::new(write_half);
@@ -143,16 +142,12 @@ impl Actor for TcpClientActor {
                                                     } else {
                                                         warn!("Failed to publish message to topic: {topic}");
                                                     }
-                                                },
-                                                ClientMessage::PublishRequestAck(topic) => {
-                                                    debug!("published message to topic \"{topic}\"");
-                                                }
-    
+                                                },    
                                                 ClientMessage::SubscribeAcknowledgment { topic, result } => {
                                                     if result.is_ok() {
                                                         debug!("Successfully subscribed to topic: {topic}");
                                                     } else {
-                                                        warn!("Failed to subscribe to topic: {topic}");
+                                                        warn!("Failed to subscribe to topic: {topic}, {result:?}");
                                                     }
                                                 },
     

@@ -230,11 +230,3 @@ impl BrokerMessage {
 /// IF we wanted to support topics subscribing to topics e.g overloading the type of subscriber topics can have, we will want to reconsider this approach.
 pub fn get_subscriber_name(registration_id: &str, topic: &str) -> String { format!("{0}:{1}", registration_id, topic) }
 
-//TODO: Helper fn to send an error message back to the client
-// pub fn raise_error(msg) {
-// if let Some(session) = where_is(registration_id.clone()) {
-// if let Err(e) = session.send_message(BrokerMessage::SubscribeAcknowledgment { registration_id: registration_id, topic: topic.clone(), result: Err(e) }) {
-//     warn!("{SUBSCRIBE_REQUEST_FAILED_TXT} {SESSION_NOT_FOUND_TXT} {e}");
-// }
-// } else { warn!("{SUBSCRIBE_REQUEST_FAILED_TXT} {SESSION_NOT_FOUND_TXT} {e}"); }
-// }
