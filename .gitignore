@@ -14,6 +14,7 @@ result*
 report.json
 bin
 certs
+.vscode/settings.json
 open-vsx.nix.txt
 vscode-marketplace-nix.txt
 open-vsx-nix.txt

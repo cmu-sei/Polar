@@ -275,7 +275,6 @@ impl Actor for SessionAgent {
         myself: ActorRef<Self::Msg>,
         args: SessionAgentArgs
     ) -> Result<Self::State, ActorProcessingErr> {
-        info!("{myself:?} starting");
         //parse args. if any
         let state = SessionAgentState { client_ref: args.client_ref.clone(), broker: args.broker_ref};
 
@@ -286,7 +285,7 @@ impl Actor for SessionAgent {
         
         let client_id = state.client_ref.get_name().unwrap_or_default();
         let registration_id = myself.get_name().unwrap_or_default();
-        info!("Started session {myself:?} for client {client_id}. Contacting");      
+        info!("Started session {myself:?} for client {client_id}");      
 
         //send ack to client listener
        state.client_ref.send_message(BrokerMessage::RegistrationResponse { 
@@ -370,8 +369,9 @@ impl Actor for SessionAgent {
                     }
                     
                 } else {
-                    warn!("{}", format!("{PUBLISH_REQ_FAILED_TXT}: {CLIENT_NOT_FOUND_TXT}"));
-                    if let Err(e) = reply.send(Err(payload)) {
+                    let err_msg = format!("{PUBLISH_REQ_FAILED_TXT}: {CLIENT_NOT_FOUND_TXT}");
+                    warn!("{err_msg}");
+                    if let Err(e) = reply.send(Err(err_msg)) {
                         warn!("{}", format!("{PUBLISH_REQ_FAILED_TXT}: {CLIENT_NOT_FOUND_TXT}: {e}"))
                     }
                 }
@@ -398,8 +398,6 @@ impl Actor for SessionAgent {
             },
             BrokerMessage::UnsubscribeRequest { registration_id, topic } => {
                 if let Err(e) = state.broker.send_message(BrokerMessage::UnsubscribeRequest { registration_id, topic}) {
-                    // error!("{SUBSCRIBE_REQUEST_FAILED_TXT} {BROKER_NOT_FOUND_TXT}");
-
                     if let Err(fwd_err) = myself.send_message(BrokerMessage::TimeoutMessage { client_id: state.client_ref.get_name().unwrap_or_default(), registration_id: Some(myself.get_name().unwrap_or_default()), error: Some(format!("{e}")) }) {
                         error!("{e}: {fwd_err}");
                         myself.stop(Some("{err_msg}: {listener_err}: {fwd_err}".to_string()));

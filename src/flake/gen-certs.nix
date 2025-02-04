@@ -11,7 +11,7 @@ pkgs.stdenv.mkDerivation {
   src = builtins.fetchGit {
     url = "https://github.com/rabbitmq/tls-gen.git";
     name = "tls-gen";
-    rev = "efb3766277d99c6b8512f226351c7a62f492ef3f";
+    ref = "efb3766277d99c6b8512f226351c7a62f492ef3f";
   };
   
   #set build inputs, tls-gen requires python and cmake
@@ -37,10 +37,6 @@ pkgs.stdenv.mkDerivation {
 
   #copy out our files
   installPhase = ''
-
-  #use openssl to create p12 file
-  openssl pkcs12 -legacy -export -inkey result/client_rabbitmq_key.pem -in result/client_rabbitmq_certificate.pem -out client_rabbitmq.p12 -passout pass:""
-  
   mkdir -p $out/ca_certificates
   mkdir -p $out/client
   mkdir -p $out/server

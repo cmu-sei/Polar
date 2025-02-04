@@ -1,4 +1,4 @@
-# Polar (OSS)
+# ` (OSS)
 
 # Copyright 2024 Carnegie Mellon University.
 
@@ -23,13 +23,9 @@
 # DM24-0470
 
 [package]
-name = "gitlab_agent"
+name = "gitlab_observer"
 version = "0.1.0"
 edition = "2021"
-
-[lib]
-name = "gitlab_service"
-path = "src/gitlab_service.rs"
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
@@ -37,33 +33,26 @@ serde = {version = "1", features = ["derive"]}
 serde_json = "1.0"
 reqwest = {version = "0.11.17", features = ["json"]}
 url = "2.3.1"
-temp-env = "0.3.4"
-lapin = "2.2.1"
 parse_link_header = "0.3.3"
 common = {path = "../common"}
 serde_yaml = "0.9"
 clokwerk = "0.4.0"
-ctrlc = "3.4.1"
 log = "0.4.22"
-env_logger = "0.11.5"
-workspace-hack = { version = "0.1", path = "../workspace-hack" }
+tracing = "0.1.41"
+tracing-glog = "0.4.0"
+tracing-subscriber = { version ="0.3.19", features=["std", "env-filter"]}
+workspace-hack = { version = "0.1", path = "../../workspace-hack" }
+cassini = { path = "../../broker" }
+ractor = { version="0.14.1", features = ["async-trait"]}
+cynic = { version = "3.9.1" , features = ["rkyv"] }
+gitlab-queries = { path = "../query" }
+rkyv = "0.8.10"
+polar = {path = "../../lib"}
+[build-dependencies]
+cynic-codegen = "3.9.1"
+# capnpc = "0.20.1"
 
 [[bin]]
-name = "observer_entrypoint"
+name = "gitlab_observer"
 path = "src/entrypoint.rs"
 
-[[bin]]
-name = "gitlab_users"
-path = "src/gitlab_users.rs"
-
-[[bin]]
-name = "gitlab_projects"
-path = "src/gitlab_projects.rs"
-
-[[bin]]
-name = "gitlab_groups"
-path = "src/gitlab_groups.rs"
-
-[[bin]]
-name = "gitlab_runners"
-path = "src/gitlab_runners.rs"

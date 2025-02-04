@@ -26,11 +26,13 @@
 resolver = "2"
 
 members = [
-    "common",
-    "consume",
-    "observe",
-    "workspace-hack"
-]
+    "broker",
+    "lib",
+    "gitlab/common",
+    "gitlab/consume",
+    "gitlab/observe", 
+    "workspace-hack", "gitlab/schema", "gitlab/query",
+    ]
 
 [workspace.package]
 version = "0.1.0"

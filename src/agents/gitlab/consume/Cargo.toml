@@ -38,27 +38,13 @@ serde_json = "1.0"
 url = "2.3.1"
 neo4rs = "0.6.1"
 common = {path = "../common"}
-log = "0.4.22"
-env_logger = "0.11.5"
-workspace-hack = { version = "0.1", path = "../workspace-hack" }
-
+tracing = "0.1.41"
+workspace-hack = { version = "0.1", path = "../../workspace-hack" }
+cassini = { path = "../../broker" }
+ractor = { version="0.14.1", features = ["async-trait"]}
+polar = { path = "../../lib" }
+gitlab-queries = { path = "../query" }
 
 [[bin]]
-name = "consumer_entrypoint"
+name = "gitlab_consumer"
 path = "src/entrypoint.rs"
-
-[[bin]]
-name = "runners_consumer"
-path = "src/runners_consumer.rs"
-
-[[bin]]
-name = "projects_consumer"
-path = "src/projects_consumer.rs"
-
-[[bin]]
-name = "users_consumer"
-path = "src/users_consumer.rs"
-
-[[bin]]
-name = "groups_consumer"
-path = "src/groups_consumer.rs"

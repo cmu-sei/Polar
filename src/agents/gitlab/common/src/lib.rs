@@ -21,29 +21,22 @@ This Software includes and/or makes use of Third-Party Software each subject to 
 DM24-0470
 */
 
-
 use std::{env, fs::{self,File}, io::{Read, Write}};
 use std::process;
+use tracing::{error, info};
 use url::Url;
 use lapin::{Connection,ConnectionProperties, Channel, BasicProperties, publisher_confirm::Confirmation, options::BasicPublishOptions};
 use tcp_stream::OwnedTLSConfig;
 use sysinfo::{System, SystemExt, ProcessRefreshKind, Pid};
-use log::{error, info};
 
 pub mod types;
+pub mod dispatch;
 
-pub const GITLAB_EXCHANGE_STR: &str = "gitlab_exchange";
+pub const PROJECTS_CONSUMER_TOPIC: &str = "gitlab:consumer:projects";
+pub const GROUPS_CONSUMER_TOPIC: &str = "gitlab:consumer:groups";
+pub const USER_CONSUMER_TOPIC: &str = "gitlab:consumer:users";
+pub const RUNNERS_CONSUMER_TOPIC: &str = "gitlab:consumer:runners";
 
-pub const PROJECTS_ROUTING_KEY: &str = "projects";
-pub const PROJECTS_QUEUE_NAME : &str = "gitlab_projects";
-
-pub const GROUPS_ROUTING_KEY: &str = "groups";
-pub const GROUPS_QUEUE_NAME: &str = "gitlab_groups";
-
-pub const USERS_QUEUE_NAME: &str = "users";
-pub const USERS_ROUTING_KEY: &str = "gitlab_users";
-
-pub const RUNNERS_QUEUE_NAME: &str = "runners";
 pub const RUNNERS_ROUTING_KEY: &str = "gitlab_runners";
 
 // Checks for the existence of a lock file at the given path. Creates lock file if not found.
@@ -107,7 +100,7 @@ pub fn get_gitlab_token() -> String {
     //check length and prefix
     if token.chars().count() == 26 && token.starts_with("glpat-") {
         return token;
-    }else {
+    } else {
         error!("received invalid private token from environment.");
         process::exit(1)
     }
@@ -199,7 +192,6 @@ pub async fn publish_message(payload: &[u8], channel: &Channel, exchange: &str, 
     assert_eq!(confirmation, Confirmation::NotRequested);
 }
 
-//TODO: Review this fn, do we always want to exit when the environment isn't fully configured? Are any env vars optional?
 pub fn read_from_env(var_name: String) -> String {
     match env::var(var_name.clone()) {
         Ok(val) => val,
@@ -209,3 +201,4 @@ pub fn read_from_env(var_name: String) -> String {
         }
     }
 }
+

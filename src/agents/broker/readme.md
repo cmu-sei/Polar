@@ -56,6 +56,26 @@ The goal of the project is to provide a reliable, scalable, and secure messaging
 - **Dependencies**: Install the required Rust crates (`ractor`, `tokio`, `tokio-rustls`, `serde`, etc.).
 
 ---
+Ensure the following environment variables are set before trying to run cassini
+```bash
+# The absolute file path to the ca_certificates.pem file created by TLS_GEN.
+# Used by the Rust binaries to recognize eachother through TLS
+export TLS_CA_CERT=""
+
+# The absolute file path to the certificate chain containing the server certificate,followed by the root ca certificate used to sign it
+# optionally, followed by the server key, if one was set - MUST BE IN PEM FORMAT
+export TLS_SERVER_CERT_CHAIN=""
+# The server key file
+export TLS_SERVER_KEY=""
+
+### These must also be set anywhere the TcpClient actor is in use, for example, the cassini integration tests the TLS_CA_CERT must also be provided.
+#The absolute file path to the client certificate - MUST BE IN PEM FORMAT
+#export TLS_CLIENT_CERT=""
+# The absolute file path to the client key - MUST BE IN PEM FORMAT
+#export TLS_CLIENT_KEY=""
+```
+
+
 ## Example Usage
 
 1. **Publish a Message**:

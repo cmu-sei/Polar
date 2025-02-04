@@ -1,5 +1,5 @@
 use ractor::{ActorRef, RpcReplyPort};
-use serde::{Deserialize, Serialize};
+use rkyv::{Deserialize, Serialize, Archive};
 
 pub mod topic;
 pub mod listener;
@@ -26,8 +26,8 @@ pub const TOPIC_MGR_NOT_FOUND_TXT: &str = "Topic Manager not found!";
 pub const SUBSCRIBER_MGR_NOT_FOUND_TXT: &str = "Subscription Manager not found!";
 pub const SESSION_MGR_NOT_FOUND_TXT: &str = "Session Manager not found!";
 pub const BROKER_NOT_FOUND_TXT: &str = "Broker not found!";
-pub const SUBSCRIBE_REQUEST_FAILED_TXT: &str = "Failed to subscribe to topic: \"{topic}\"";
-pub const PUBLISH_REQ_FAILED_TXT: &str = "Failed to publish message to topic \"{topic}\"";
+pub const SUBSCRIBE_REQUEST_FAILED_TXT: &str = "Failed to subscribe to topic";
+pub const PUBLISH_REQ_FAILED_TXT: &str = "Failed to publish message to topic";
 pub const REGISTRATION_REQ_FAILED_TXT: &str = "Failed to register session!";
 pub const LISTENER_MGR_NOT_FOUND_TXT: & str = "Listener Manager not found!";
 pub const TIMEOUT_REASON: &str = "SESSION_TIMEDOUT";
@@ -56,31 +56,39 @@ pub enum BrokerMessage {
     PublishRequest {
         registration_id: Option<String>, //TODO: Reemove option, listener checks for registration_id before forwarding
         topic: String,
-        payload: String,
+        payload: Vec<u8>,
     },
     /// Publish response to the client.
     PublishResponse {
         topic: String,
-        payload: String,
+        payload: Vec<u8>,
         result: Result<(), String>, // Ok for success, Err with error message
     },
     PublishRequestAck(String),
     PublishResponseAck,
     /// Subscribe request from the client.
-    // This request originates externally, so a registration_id is not added until it is received by the session
     SubscribeRequest {
-        registration_id: Option<String>, //TODO: Remove option
+        registration_id: Option<String>,
         topic: String,
+    },
+    /// Sent to the subscriber manager to create a new subscriber actor to handle pushing messages to the client.
+    /// If successful, the associated topic actor is notified, adding the id of the new actor to it's subscriber list
+    Subscribe {
+        reply: RpcReplyPort<Result<String, String>>,
+        topic: String,
+        registration_id: String
     },
     AddTopic {
         reply: RpcReplyPort<Result<ActorRef<BrokerMessage>, String>>,
         registration_id: Option<String>,
         topic: String
         
-    },
+    }, 
+    /// Sent to session actors to forward messages to their clients.
+    /// Messages that fail to be delivered for some reason are kept in their queues.
     PushMessage {
         reply: RpcReplyPort<Result<(), String>>,
-        payload: String,
+        payload: Vec<u8>,
         topic: String,
     },
     /// Subscribe acknowledgment to the client.
@@ -91,7 +99,7 @@ pub enum BrokerMessage {
     },
     /// Unsubscribe request from the client.
     UnsubscribeRequest {
-        registration_id: Option<String>, //TODO: Remove option
+        registration_id: Option<String>,
         topic: String,
     },
     /// Unsubscribe acknowledgment to the client.
@@ -128,8 +136,8 @@ pub enum BrokerMessage {
 
 ///External Messages for client comms
 /// These messages are serialized/deserialized to/from JSON
-#[derive(Serialize, Deserialize, Debug, Clone)]
-#[serde(tag = "type", content = "data")]
+#[derive(Serialize, Deserialize, Archive, Debug, Clone)]
+// #[serde(tag = "type", content = "data")]
 pub enum ClientMessage {
         RegistrationRequest {
             registration_id: Option<String>,
@@ -142,11 +150,11 @@ pub enum ClientMessage {
         /// Publish request from the client.
         PublishRequest {
             topic: String,
-            payload: String,
+            payload: Vec<u8>,
             registration_id: Option<String>
         },
         /// Publish response to the client.
-        PublishResponse { topic: String, payload: String, result: Result<(), String> },
+        PublishResponse { topic: String, payload: Vec<u8>, result: Result<(), String> },
         /// Sent back to actor that made initial publish request
         PublishRequestAck(String),
         SubscribeRequest {
@@ -160,16 +168,13 @@ pub enum ClientMessage {
         },
         /// Unsubscribe request from the client.
         UnsubscribeRequest {
+            registration_id: Option<String>,
             topic: String,
         },
         UnsubscribeAcknowledgment {
             topic: String,
             result: Result<(), String>
        },
-        /// Ping message to the client to check connectivity.
-        PingMessage,
-        /// Pong message received from the client in response to a ping.
-        PongMessage,
         ///Disconnect, sending a session id to end, if any
         DisconnectRequest(Option<String>),
         ///Mostly for testing purposes, intentional timeout message with a client_id
@@ -199,7 +204,7 @@ impl BrokerMessage {
                     topic,
                 }
             },
-            ClientMessage::UnsubscribeRequest {  topic } => {
+            ClientMessage::UnsubscribeRequest {  registration_id, topic } => {
                 BrokerMessage::UnsubscribeRequest {
                     registration_id,
                     topic,
@@ -213,10 +218,6 @@ impl BrokerMessage {
                 }
             },
             ClientMessage::TimeoutMessage(registration_id) => BrokerMessage::TimeoutMessage { client_id, registration_id, error: None },
-            
-            // ClientMessage::PingMessage { client_id } => {
-            //     BrokerMessage::PingMessage { client_id }
-            // },
             // Handle unexpected messages
             _ => {
                 todo!()
@@ -225,43 +226,15 @@ impl BrokerMessage {
     }
 }
 
-pub fn init_logging() {
-    let dir = tracing_subscriber::filter::Directive::from(tracing::Level::DEBUG);
+///TODO: Consider a different naming convention for the subscribers, right now they're named directly after the session they represent and the topic they subscribe to
+/// IF we wanted to support topics subscribing to topics e.g overloading the type of subscriber topics can have, we will want to reconsider this approach.
+pub fn get_subscriber_name(registration_id: &str, topic: &str) -> String { format!("{0}:{1}", registration_id, topic) }
 
-    use std::io::stderr;
-    use std::io::IsTerminal;
-    use tracing_glog::Glog;
-    use tracing_glog::GlogFields;
-    use tracing_subscriber::filter::EnvFilter;
-    use tracing_subscriber::layer::SubscriberExt;
-    use tracing_subscriber::Registry;
-
-    let fmt = tracing_subscriber::fmt::Layer::default()
-        .with_ansi(stderr().is_terminal())
-        .with_writer(std::io::stderr)
-        .event_format(Glog::default().with_timer(tracing_glog::LocalTime::default()))
-        .fmt_fields(GlogFields::default().compact());
-
-    let filter = vec![dir]
-        .into_iter()
-        .fold(EnvFilter::from_default_env(), |filter, directive| {
-            filter.add_directive(directive)
-        });
-
-    let subscriber = Registry::default().with(filter).with(fmt);
-    tracing::subscriber::set_global_default(subscriber).expect("to set global subscriber");
-}
-
-pub fn get_subsciber_name(registration_id: &str, topic: &str) -> String { format!("{0}:{1}", registration_id, topic) }
-
-// pub fn try_get_session(registration_id: String) -> Option<ActorRef<BrokerMessage>> {
-//     match &where_is(registration_id.clone()) {
-//         Some(session) => {
-//             Some(ActorRef::from(session.to_owned()))
-//         }, 
-//         None => {
-//             warn!("Session {registration_id} not found!");
-//             None
-//         }
-//     }
+//TODO: Helper fn to send an error message back to the client
+// pub fn raise_error(msg) {
+// if let Some(session) = where_is(registration_id.clone()) {
+// if let Err(e) = session.send_message(BrokerMessage::SubscribeAcknowledgment { registration_id: registration_id, topic: topic.clone(), result: Err(e) }) {
+//     warn!("{SUBSCRIBE_REQUEST_FAILED_TXT} {SESSION_NOT_FOUND_TXT} {e}");
+// }
+// } else { warn!("{SUBSCRIBE_REQUEST_FAILED_TXT} {SESSION_NOT_FOUND_TXT} {e}"); }
 // }
