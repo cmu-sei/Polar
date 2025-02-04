@@ -90,7 +90,7 @@ pub struct Group {
     pub created_at: Option<DateTimeString>,
     pub marked_for_deletion_on: Option<DateTimeString>,
     pub group_members_count: i32,
-    // pub group_members: Option<GroupMemberConnection>
+    pub group_members: Option<GroupMemberConnection>
 }
 
 
@@ -133,7 +133,7 @@ pub struct GroupMember {
     pub updated_at: Option<DateTimeString>,
 
     // User that is associated with the member object.
-    // pub user: Option<UserCore>,
+    pub user: Option<UserCore>,
 
     // Permissions for the current user on the resource.
     // pub user_permissions: GroupPermissions,
@@ -301,6 +301,7 @@ pub struct ProjectMember {
     // pub user: Option<UserCore>,
     // pub user_permissions: ProjectPermissions,
 }
+
 #[derive(cynic::QueryFragment, Deserialize, Serialize, rkyv::Archive, Clone)]
 #[cynic(schema = "gitlab")]
 pub struct ProjectMemberEdge {

@@ -5,7 +5,7 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
-    rust-overlay.url = "github:oxalica/rust-overlay?rev=260ff391290a2b23958d04db0d3e7015c8417401";
+    rust-overlay.url = "github:oxalica/rust-overlay?rev=1ff8663cd75a11e61f8046c62f4dbb05d1907b44";
     rust-overlay.inputs.nixpkgs.follows = "nixpkgs";
     rust-overlay.inputs.flake-utils.follows = "flake-utils";
     crane.url = "github:ipetkov/crane";
@@ -30,10 +30,7 @@
         # pkgs (which would require rebuidling anything else which uses rust).
         # Instead, we just want to update the scope that crane will use by appending
         # our specific toolchain there.
-        craneLib = (crane.mkLib pkgs).overrideToolchain (p: p.rust-bin.stable.latest.default.override {
-          extensions = ["rust-src"];
-          targets = ["x86_64-unknown-linux-gnu" "x86_64-apple-darwin" ];
-        });
+        craneLib = (crane.mkLib pkgs).overrideToolchain (p: p.rust-bin.nightly."2025-01-06".default);
 
         src = craneLib.cleanCargoSource ./.;
 
@@ -44,9 +41,6 @@
 
           buildInputs = [
             # Add additional build inputs here
-          ] ++ lib.optionals pkgs.stdenv.isDarwin [
-            # Additional darwin specific inputs can be set here
-            pkgs.libiconv
           ];
 
           # TOOD: use FIPS compliant openssl
@@ -56,9 +50,21 @@
             pkgs.pkg-config
             pkgs.cmake
             pkgs.libgcc            
+            pkgs.libclang
+          ] ++ lib.optionals pkgs.stdenv.isDarwin [
+            # Additional darwin specific inputs can be set here
+            pkgs.llvmPackages_19.stdenv
+            pkgs.llvmPackages_19.libcxxClang
+            pkgs.libiconv
+            pkgs.darwin.apple_sdk.frameworks.Security
+            pkgs.darwin.apple_sdk.frameworks.CoreFoundation
           ];
 
-          PKG_CONFIG_PATH="${pkgs.openssl.dev}/lib/pkgconfig";
+
+          # CMAKE="/bin/cmake";
+          # CMAKE_MAKE_PROGRAM="/bin/make";
+          # LIBCLANG_PATH = "${pkgs.llvmPackages.clang}/lib";
+          PKG_CONFIG_PATH= "${pkgs.openssl.dev}/lib/pkgconfig";
         };
 
         # Build *just* the cargo dependencies (of the entire workspace),
@@ -107,12 +113,12 @@
         
         gitlabObserver = craneLib.buildPackage (individualCrateArgs // {
           pname = "gitlab_agent";
-          cargoExtraArgs = "-p gitlab_agent"; #build the binaries and all its dependencies, including common
+          cargoExtraArgs = "--locked"; #build the binaries and all its dependencies, including common
           src = fileSetForCrate ./gitlab/observe;
         });
         gitlabConsumer = craneLib.buildPackage (individualCrateArgs // {
           pname = "gitlab_consumer";
-          cargoExtraArgs = "-p gitlab_consumer"; 
+          cargoExtraArgs = "--locked"; 
           src = fileSetForCrate ./gitlab/consume;
         });
 
@@ -300,7 +306,7 @@
               };
             };
           
-          brokerImage = pkgs.dockerTools.buildImage {
+          cassiniImage = pkgs.dockerTools.buildImage {
             name = "cassini";
             tag = "latest";
             copyToRoot = [
