@@ -86,7 +86,7 @@
             ./Cargo.lock
             ./gitlab/schema/src/gitlab.graphql
             (craneLib.fileset.commonCargoSources ./broker)
-  	    (craneLib.fileset.commonCargoSources ./lib)
+  	        (craneLib.fileset.commonCargoSources ./lib)
             (craneLib.fileset.commonCargoSources ./gitlab/consume)
             (craneLib.fileset.commonCargoSources ./gitlab/observe)
             (craneLib.fileset.commonCargoSources ./gitlab/common)
@@ -128,8 +128,10 @@
 
         cassini = craneLib.buildPackage (commonArgs // {
           inherit cargoArtifacts;
-          cargoExtraArgs = "--locked"; 
-          src = ./broker;
+          cargoExtraArgs = "--locked -p cassini"; 
+          src = fileSetForCrate ./broker;
+          # Disable tests for now, We'll run them later with env vars and TlsCerts
+          doCheck = false;
         });
 
         # get certificates for mtls
@@ -173,7 +175,7 @@
             pkgs.bashInteractiveFHS 
             pkgs.busybox 
             cassini 
-          ];
+          ]; 
 
           pathsToLink = [ 
             "/bin"
@@ -306,6 +308,7 @@
                   # The absolute file path to the ca_certificates.pem file created by TLS_GEN.
                   # Used by the Rust binaries to auth with RabbitMQ via TLS.
                   "TLS_CA_CERT=/ca_certificate.pem"
+
                  ];
               };
             };
@@ -324,8 +327,8 @@
               Env = [ 
                 "BIND_ADDR=0.0.0.0:8080"
                 "TLS_CA_CERT=/ca_certificate.pem"
-                "TLS_SERVER_CERT_CHAIN=/server_polar_certificate_chain.pem"
-                "TLS_SERVER_KEY=broker/server_polar_key.pem"
+                "TLS_SERVER_CERT_CHAIN=/server_polar_certificate.pem"
+                "TLS_SERVER_KEY=/server_polar_key.pem"
               ];
             };
           };

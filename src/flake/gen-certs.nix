@@ -11,7 +11,8 @@ pkgs.stdenv.mkDerivation {
   src = builtins.fetchGit {
     url = "https://github.com/rabbitmq/tls-gen.git";
     name = "tls-gen";
-    ref = "efb3766277d99c6b8512f226351c7a62f492ef3f";
+    rev = "efb3766277d99c6b8512f226351c7a62f492ef3f";
+    ref = "HEAD";
   };
   
   #set build inputs, tls-gen requires python and cmake
@@ -26,7 +27,7 @@ pkgs.stdenv.mkDerivation {
   # REFERENCE: https://stackoverflow.com/questions/70513330/mkderivation-use-cmake-in-buildphase
   # REFERENCE: https://nixos.org/manual/nixpkgs/stable/#dont-use-cmake-configure
   dontUseCmakeConfigure = true;
-  
+
   #make ca certs with basic profile
   buildPhase = ''
     cd basic
