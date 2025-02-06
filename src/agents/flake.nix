@@ -84,10 +84,14 @@
           fileset = lib.fileset.unions [
             ./Cargo.toml
             ./Cargo.lock
+            ./gitlab/schema/src/gitlab.graphql
             (craneLib.fileset.commonCargoSources ./broker)
+  	    (craneLib.fileset.commonCargoSources ./lib)
             (craneLib.fileset.commonCargoSources ./gitlab/consume)
             (craneLib.fileset.commonCargoSources ./gitlab/observe)
             (craneLib.fileset.commonCargoSources ./gitlab/common)
+            (craneLib.fileset.commonCargoSources ./gitlab/query)
+            (craneLib.fileset.commonCargoSources ./gitlab/schema)
             (craneLib.fileset.commonCargoSources ./workspace-hack)
             (craneLib.fileset.commonCargoSources crate)
           ];
