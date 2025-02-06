@@ -14,6 +14,8 @@ async fn main() {
     let private_key_file = env::var("TLS_SERVER_KEY").unwrap();
     let ca_cert_file = env::var("TLS_CA_CERT").unwrap();
 
+    //TODO: Make bind address configurable so that we can provide an IP via config.
+    
     let args = BrokerArgs { 
         bind_addr: String::from("127.0.0.1:8080"),
         session_timeout: None,
