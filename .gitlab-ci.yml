@@ -1,0 +1,7 @@
+stages:
+  - test
+
+test_job:
+  stage: test
+  script:
+    - echo "Running CI on mirrored repo"
