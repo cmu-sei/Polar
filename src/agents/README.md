@@ -14,7 +14,7 @@ To build the project agents, you can simply run
 
 To build individual or multiple components
 
-```nix
+```sh
 ## Buiilds the cassini message broker and its dependnecies
 nix build .#cassiniImage
 
@@ -25,6 +25,20 @@ nix build .#gitlabConsumer
 
 # build multiple images
 nix build .#observerImage .#consumerImage
+
+# Run static analysis, unit tests via derivations in checks
+nix flake check
+
+### For the impure - Build on a remote host
+# nix build \
+# --builders "ssh://user@some-linux-host x86_64-linux" .#packages.x86_64-linux.default \
+# --eval-system x86_64-linux \
+# --show-trace \
+#--impure         
+
+# Impure remote checks
+# nix flake check --eval-system x86_64-linux --builders "ssh://user@some-linux-host x86_64-linux" --show-trace --impure   
+
 ```
 
 For additional information on using flakes please see the documentation.

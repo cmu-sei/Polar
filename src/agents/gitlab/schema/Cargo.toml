@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+workspace-hack = { path = "../../workspace-hack", version = "0.1.0" }
 cynic = { version = "3.9.1", features = ["rkyv"]}
 rkyv = "0.8.10"
 serde = { version = "1", features = ["derive"] }

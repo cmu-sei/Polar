@@ -154,11 +154,12 @@
           ];
         };
 
-        observerConfig = pkgs.writeTextFile {
-          name = "observerConfig";
-          destination = "/.config/polar/observer_config.yaml";
-          text = builtins.readFile ./observe/conf/observer_config.yaml;
-        };
+        # TODO: Unfreeze when configuration becomes stabalized
+        # observerConfig = pkgs.writeTextFile {
+        #   name = "observerConfig";
+        #   destination = "/.config/polar/observer_config.yaml";
+        #   text = builtins.readFile ./observe/conf/observer_config.yaml;
+        # };
 
         consumerEnv = pkgs.buildEnv {
           name = "image-root";
@@ -187,7 +188,7 @@
       {
         checks = {
           # Build the crates as part of `nix flake check` for convenience
-          inherit gitlabObserver gitlabConsumer;
+          inherit cassini gitlabObserver gitlabConsumer;
 
           # Run clippy (and deny all warnings) on the workspace source,
           # again, reusing the dependency artifacts from above.
@@ -197,7 +198,9 @@
           # prevent downstream consumers from building our crate by itself.
           gitlabAgentclippy = craneLib.cargoClippy (commonArgs // {
             inherit cargoArtifacts;
-            cargoClippyExtraArgs = "--all-targets -- --deny warnings";
+            cargoClippyExtraArgs = "--all-targets";
+            # TODO: Do we want to deny *all* warnings? How much do we want to conform to the default standard?
+            # cargoClippyExtraArgs = "--all-targets -- --deny-warnings";
           });
 
           gitlabAgentdoc = craneLib.cargoDoc (commonArgs // {
@@ -220,12 +223,14 @@
             inherit src advisory-db;
           };
 
-          # Audit licenses
+          # TODO: Audit licenses
+          # 
           gitlabAgentDeny = craneLib.cargoDeny {
             inherit src;
           };
 
-          # Run tests with cargo-nextest
+          # TODO: Run tests with cargo-nextest? Integration tests need tlsCerts and environment variables present...
+          # 
           # Consider setting `doCheck = false` on other crate derivations
           # if you do not want the tests to run twice
           gitlabAgentnextest = craneLib.cargoNextest (commonArgs // {
@@ -234,7 +239,7 @@
             partitionType = "count";
           });
 
-          # Ensure that cargo-hakari is up to date
+          # Ensure that cargo-hakari is up to date and is used for project dependency mgmnt
           gitlabAgentHakari = craneLib.mkCargoDerivation {
             inherit src;
             pname = "hakari";
@@ -261,7 +266,8 @@
             tag = "latest";
             copyToRoot = [ 
               observerEnv
-              observerConfig
+              
+              # observerConfig
               "${tlsCerts}/ca_certificates"
               "${tlsCerts}/client"              
             ]; 

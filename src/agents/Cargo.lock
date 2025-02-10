@@ -1264,6 +1264,7 @@ dependencies = [
  "cynic-codegen",
  "gitlab-schema",
  "rkyv 0.8.10",
+ "workspace-hack",
 ]
 
 [[package]]
@@ -1274,6 +1275,7 @@ dependencies = [
  "cynic-codegen",
  "rkyv 0.8.10",
  "serde",
+ "workspace-hack",
 ]
 
 [[package]]
