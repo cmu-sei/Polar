@@ -73,14 +73,12 @@ impl Actor for GitlabGroupConsumer {
                     MERGE (group: GitlabGroup {{ group_id: "{id}" }})
                     SET group.full_name = "{full_name}",
                         group.full_path = "{full_path}",
-                        group.created_at = "{created_at}",
-                        group.member_count = "{group_members_count}"
+                        group.created_at = "{created_at}"
                         "#, 
                         id = g.id, 
                         full_name = g.full_name, 
                         full_path = g.full_path,
                         created_at = g.created_at.unwrap_or_default(), 
-                        group_members_count = g.group_members_count
                     );
                     debug!(query);
                     transaction.run(Query::new(query)).await.expect("Expected to run query on transaction.");
@@ -88,61 +86,61 @@ impl Actor for GitlabGroupConsumer {
 
                 transaction.commit().await.expect("Expected to commit transaction");
             },
-            // GitlabData::GroupMembers(link) => {
-            //     let transaction = state.graph.start_txn().await.expect("expected transactio");
+            GitlabData::GroupMembers(link) => {
+                let transaction = state.graph.start_txn().await.expect("expected transaction");
                 
-            //     if let Some(vec)  =  link.connection.nodes {
-            //         let group_memberships = vec
-            //         .iter()
-            //         .map(|option| {
-            //             let membership = option.as_ref().unwrap();
+                if let Some(vec)  =  link.connection.nodes {
+                    let group_memberships = vec
+                    .iter()
+                    .map(|option| {
+                        let membership = option.as_ref().unwrap();
 
-            //             //create a list of attribute sets
-            //             format!(
-            //                 r#"{{
-            //                     user_id: "{user_id}"
-            //                     access_level: "{access_level}",
-            //                     created_at: "{created_at}",
-            //                     updated_at: "{updated_at}",
-            //                     expires_at: "{expires_at}",
-            //                 }}"#,
-            //                 user_id = membership.id,
-            //                 //TODO: Represent this as a string, Too annoying to get the string value of this right now
-            //                 access_level = membership.access_level.as_ref().map_or_else(|| String::default(), |al| {
-            //                     al.integer_value.unwrap_or_default().to_string()
-            //                 }),
-            //                 created_at = membership.created_at.as_ref().map_or_else(|| String::default(), |date| date.to_string()),
-            //                 updated_at = membership.updated_at.as_ref().map_or_else(|| String::default(), |date| date.to_string()),
-            //                 expires_at = membership.expires_at.as_ref().map_or_else(|| String::default(), |date| date.to_string()),
+                        //create a list of attribute sets
+                        format!(
+                            r#"{{
+                                user_id: "{user_id}",
+                                access_level: "{access_level}",
+                                created_at: "{created_at}",
+                                updated_at: "{updated_at}",
+                                expires_at: "{expires_at}"
+                            }}"#,
+                            user_id = membership.user.as_ref().map_or_else(|| String::default(), |user| user.id.to_string()),
+                            //TODO: Represent this as a string, Too annoying to get the string value of this right now
+                            access_level = membership.access_level.as_ref().map_or_else(|| String::default(), |al| {
+                                al.integer_value.unwrap_or_default().to_string()
+                            }),
+                            created_at = membership.created_at.as_ref().map_or_else(|| String::default(), |date| date.to_string()),
+                            updated_at = membership.updated_at.as_ref().map_or_else(|| String::default(), |date| date.to_string()),
+                            expires_at = membership.expires_at.as_ref().map_or_else(|| String::default(), |date| date.to_string()),
                             
-            //             )
-            //             })
-            //         .collect::<Vec<_>>()
-            //         .join(",\n");
+                        )
+                        })
+                    .collect::<Vec<_>>()
+                    .join(",\n");
         
-            //         let cypher_query = format!(
-            //             "
-            //             MATCH (user:GitlabGroup {{ group_id: \"{group_id}\" }})
-            //             UNWIND [{group_memberships}] AS membership
-            //             MATCH (project:GitlabUser {{ user_id: membership.user_id }})
-            //             MERGE (user)-[r:IN_GROUP]->(group)
-            //             SET r.access_level = group_data.access_level,
-            //                 r.created_at = membership.created_at,
-            //                 r.expires_at = membership.expires_at,
-            //                 r.updated_at = membership.updated_at,
-            //             ",
-            //             group_id = link.resource_id
-            //         );
+                    let cypher_query = format!(
+                        "
+                        MATCH (group:GitlabGroup {{ group_id: \"{group_id}\" }})
+                        UNWIND [{group_memberships}] AS membership
+                        MERGE (user:GitlabUser {{ user_id: membership.user_id }})
+                        MERGE (user)-[r:IN_GROUP]->(group)
+                        SET r.access_level = membership.access_level,
+                            r.created_at = membership.created_at,
+                            r.expires_at = membership.expires_at,
+                            r.updated_at = membership.updated_at
+                        ",
+                        group_id = link.resource_id
+                    );
         
-            //         debug!(cypher_query);
-            //         transaction.run(Query::new(cypher_query)).await.expect("Expected to run query.");
-            //         if let Err(e) = transaction.commit().await {
-            //             error!("Error committing transaction to graph: {e}");
-            //         }
-            //         info!("Committed transaction to database");
-            //     }
-            // }
-            _ => todo!()
+                    debug!(cypher_query);
+                    transaction.run(Query::new(cypher_query)).await.expect("Expected to run query.");
+                    if let Err(e) = transaction.commit().await {
+                        error!("Error committing transaction to graph: {e}");
+                    }
+                    info!("Committed transaction to database");
+                } else { todo!("no data?") }
+            }
+            _ => ()
         }
         Ok(())
     }

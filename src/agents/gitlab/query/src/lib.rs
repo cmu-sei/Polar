@@ -8,6 +8,7 @@ use rkyv::Archive;
 use rkyv::Serialize;
 use rkyv::Deserialize;
 
+//pub mod groups;
 
 // #[derive(cynic::Scalar,serde::Deserialize, Clone, Debug)]
 // #[cynic(schema = "gitlab", graphql_type = "UserID")]
@@ -69,7 +70,7 @@ pub struct MultiGroupQueryArguments {
 #[cynic(schema = "gitlab")]
 pub struct GroupConnection {
     pub edges: Option<Vec<Option<GroupEdge>>>,
-    pub nodes: Option<Vec<Option<Group>>>,
+    pub nodes: Option<Vec<Option<GroupData>>>,
     pub page_info: PageInfo,
 }
 
@@ -77,30 +78,34 @@ pub struct GroupConnection {
 #[cynic(schema = "gitlab")]
 pub struct GroupEdge {
     pub cursor: String,
-    pub node: Option<Group>,
+    pub node: Option<GroupData>,
 }
 
 #[derive(cynic::QueryFragment, Clone, Deserialize, Serialize, rkyv::Archive)]
-#[cynic(schema = "gitlab")]
-pub struct Group {
+#[cynic(schema = "gitlab", graphql_type="Group")]
+pub struct GroupData {
     pub id: IdString,
     pub full_name: String,
     pub full_path: IdString,
     pub description: Option<String>,
     pub created_at: Option<DateTimeString>,
     pub marked_for_deletion_on: Option<DateTimeString>,
-    pub group_members_count: i32,
-    pub group_members: Option<GroupMemberConnection>
 }
 
-
 #[derive(cynic::QueryFragment, Clone, Deserialize, Serialize, rkyv::Archive)]
-#[cynic(schema = "gitlab", graphql_type = "Group")]
-pub struct GroupMembers {
+#[cynic(schema = "gitlab", graphql_type="Group")]
+pub struct GroupMembersFragment {
     pub id: IdString,
     pub group_members_count: i32,
     pub group_members: Option<GroupMemberConnection>
 }
+
+// #[derive(cynic::QueryFragment, Clone, Deserialize, Serialize, rkyv::Archive)]
+// #[cynic(schema = "gitlab", graphql_type="Group")]
+// pub struct GroupRunnersFragment {
+//     pub id: IdString,
+// }
+
 
 
 /// Datatype representing a users's membership for a group
@@ -133,7 +138,7 @@ pub struct GroupMember {
     pub updated_at: Option<DateTimeString>,
 
     // User that is associated with the member object.
-    pub user: Option<UserCore>,
+    pub user: Option<UserCoreFragment>,
 
     // Permissions for the current user on the resource.
     // pub user_permissions: GroupPermissions,
@@ -169,10 +174,36 @@ pub struct GroupMemberEdge {
 
 // }
 
+#[derive(cynic::QueryVariables)]
+pub struct GroupPathVariable {
+    pub full_path: IdString,
+}
 
 #[derive(cynic::QueryFragment)]
 #[cynic(schema = "gitlab", graphql_type = "Query", variables = "MultiGroupQueryArguments")]
-pub struct MultiGroupQuery {
+pub struct AllGroupsQuery {
+    #[arguments(sort: $sort)]
+    pub groups: Option<GroupConnection>
+}
+
+#[derive(cynic::QueryFragment)]
+#[cynic(schema = "gitlab", graphql_type = "Query" , variables = "GroupPathVariable")]
+pub struct GroupMembersQuery {
+    #[arguments(fullPath: $full_path)]
+    pub group: Option<GroupMembersFragment>
+}
+//TODO: Unfreeze
+// #[derive(cynic::QueryFragment)]
+// #[cynic(schema = "gitlab", graphql_type = "Query" , variables = "GroupPathVariable")]
+// pub struct GroupRunnersQuery {
+//     #[arguments(fullPath: $full_path)]
+//     pub group: Option<GroupRunnersFragment>
+// }
+
+
+#[derive(cynic::QueryFragment)]
+#[cynic(schema = "gitlab", graphql_type = "Query", variables = "MultiGroupQueryArguments")]
+pub struct GroupRunnersQuery {
     #[arguments(sort: $sort)]
     pub groups: Option<GroupConnection>
 }
@@ -323,7 +354,7 @@ pub struct ProjectMemberConnection {
 pub struct UserCoreConnection {
     pub count: i32,
     // pub edges: Option<Vec<Option<UserCoreEdge>>>,	  
-    pub nodes: Option<Vec<Option<UserCore>>>,
+    pub nodes: Option<Vec<Option<UserCoreFragment>>>,
     // pub page_info: PageInfo, 
 }
 
@@ -359,7 +390,7 @@ pub struct PageInfo {
 /// Gitlab's core user representation. Add fields here to get more data back.
 #[derive(cynic::QueryFragment, Clone, Deserialize, Serialize, rkyv::Archive)]
 #[cynic(schema = "gitlab", graphql_type = "UserCore")]
-pub struct UserCore {
+pub struct UserCoreFragment {
     pub id: gitlab_schema::IdString,
     pub bot: bool,
     pub username: Option<String>,
@@ -374,6 +405,7 @@ pub struct UserCore {
     //TODO: enable project memebrships instead
     pub project_memberships: Option<ProjectMemberConnection>
 }
+
 
 #[derive(cynic::QueryFragment, Clone, Deserialize, Serialize, rkyv::Archive)]
 #[cynic(schema = "gitlab", graphql_type = "UserCore")]
@@ -393,7 +425,7 @@ pub struct UserCoreProjects {
 #[cynic(schema = "gitlab")]
 pub struct UserCoreEdge {
     cursor: String,
-    node: Option<UserCore>
+    node: Option<UserCoreFragment>
 }
 
 

@@ -127,7 +127,7 @@ impl Actor for GitlabUserObserver {
                                         
                                         info!("Found {} user(s)", connection.count);
 
-                                        let mut read_users: Vec<UserCore> = Vec::new();
+                                        let mut read_users: Vec<UserCoreFragment> = Vec::new();
 
                                         if let Some(users) = connection.nodes {
                                             // Append nodes to the result list.

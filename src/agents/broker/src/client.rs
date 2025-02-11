@@ -158,9 +158,7 @@ impl Actor for TcpClientActor {
                                                         warn!("Failed to unsubscribe from topic: {topic}");
                                                     }  
                                                 },
-                                                _ => {
-                                                    warn!("Unexpected message {message:?}");
-                                                }
+                                                _ => ()
                                             }
                                         }   
                                     }

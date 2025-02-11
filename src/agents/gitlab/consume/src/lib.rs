@@ -27,7 +27,7 @@ use std::error::Error;
 use cassini::{client::TcpClientMessage, ClientMessage};
 //TODO: Move to global consumer common lib
 use common::{read_from_env, types::GitlabData};
-use gitlab_queries::{Group, Namespace, Project};
+use gitlab_queries::{GroupData, Namespace, Project};
 use tracing::{debug, error, info};
 use neo4rs::{Config, ConfigBuilder, Query, Txn};
 use ractor::{registry::where_is, ActorProcessingErr, MessagingErr};
@@ -102,23 +102,23 @@ pub fn get_neo_config() -> Config {
     return config;
 }
 /// Helper function to create group nodes
-pub fn merge_group_query(group: Group) -> String {
-    format!(r#"
-        MERGE (group: GitlabGroupGitlabGroup {{
-            group_id: "{group_id}",
-            full_name: "{full_name}",
-            full_path: "{group_full_path}",
-            created_at: "{group_created_at}",
-            member_count: "{group_members_count}"
-        }})
-    "#,
-    group_id = group.id, 
-    full_name = group.full_name, 
-    group_full_path = group.full_path,
-    group_created_at = group.created_at.unwrap_or_default(), 
-    group_members_count = group.group_members_count,
-    )
-}
+// pub fn merge_group_query(group: Group) -> String {
+//     format!(r#"
+//         MERGE (group: GitlabGroupGitlabGroup {{
+//             group_id: "{group_id}",
+//             full_name: "{full_name}",
+//             full_path: "{group_full_path}",
+//             created_at: "{group_created_at}",
+//             member_count: "{group_members_count}"
+//         }})
+//     "#,
+//     group_id = group.id, 
+//     full_name = group.full_name, 
+//     group_full_path = group.full_path,
+//     group_created_at = group.created_at.unwrap_or_default(), 
+//     group_members_count = group.group_members_count,
+//     )
+// }
 
 pub fn merge_namespace_query(namespace: Namespace) -> String {
     

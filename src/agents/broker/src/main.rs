@@ -13,11 +13,12 @@ async fn main() {
     let server_cert_file = env::var("TLS_SERVER_CERT_CHAIN").unwrap();
     let private_key_file = env::var("TLS_SERVER_KEY").unwrap();
     let ca_cert_file = env::var("TLS_CA_CERT").unwrap();
+    let bind_addr = env::var("CASSINI_BIND_ADDR").unwrap();
 
     //TODO: Make bind address configurable so that we can provide an IP via config.
     
     let args = BrokerArgs { 
-        bind_addr: String::from("127.0.0.1:8080"),
+        bind_addr,
         session_timeout: None,
         server_cert_file,
         private_key_file,

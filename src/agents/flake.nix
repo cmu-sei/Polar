@@ -328,10 +328,10 @@
               "${tlsCerts}/server"     
             ]; 
             config = {
-              Cmd = [ "/broker/cassini" ];
+              Cmd = [ "cassini-server" ];
               WorkingDir = "/app";
               Env = [ 
-                "BIND_ADDR=0.0.0.0:8080"
+                "CASSINI_BIND_ADDR=0.0.0.0:8080"
                 "TLS_CA_CERT=/ca_certificate.pem"
                 "TLS_SERVER_CERT_CHAIN=/server_polar_certificate.pem"
                 "TLS_SERVER_KEY=/server_polar_key.pem"
@@ -341,3 +341,4 @@
           };
       });
 }
+

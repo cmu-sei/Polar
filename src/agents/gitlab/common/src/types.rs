@@ -21,7 +21,7 @@
    DM24-0470
 */
 
-use gitlab_queries::{Group, GroupMemberConnection, Project, ProjectMemberConnection, UserCore};
+use gitlab_queries::{GroupData, GroupMemberConnection, Project, ProjectMemberConnection, UserCoreFragment};
 use gitlab_schema::IdString;
 
 use rkyv::{Serialize, Deserialize, Archive};
@@ -30,9 +30,9 @@ use rkyv::{Serialize, Deserialize, Archive};
 /// The underlying byte vector contains a message meant for some consumer on a given topic
 #[derive (Serialize, Deserialize, Archive)]
 pub enum GitlabData {
-    Users(Vec<UserCore>),
+    Users(Vec<UserCoreFragment>),
     Projects(Vec<Project>),
-    Groups(Vec<Group>),
+    Groups(Vec<GroupData>),
     ProjectMembers(ResourceLink<ProjectMemberConnection>),
     // ProjectRunners(ResourceLink<Runner>),
     GroupMembers(ResourceLink<GroupMemberConnection>),

@@ -28,7 +28,9 @@ pub mod projects;
 pub mod groups;
 
 use cynic::Operation;
-use gitlab_queries::MultiGroupQuery;
+use gitlab_queries::AllGroupsQuery;
+use gitlab_queries::GroupMembersQuery;
+use gitlab_queries::GroupPathVariable;
 use gitlab_queries::MultiGroupQueryArguments;
 use gitlab_queries::MultiProjectQuery;
 use gitlab_queries::MultiProjectQueryArguments;
@@ -70,7 +72,8 @@ pub struct GitlabObserverArgs {
 pub enum GitlabObserverMessage {
     GetUsers(Operation<MultiUserQuery, MultiUserQueryArguments>),
     GetProjects(Operation<MultiProjectQuery, MultiProjectQueryArguments>),
-    GetGroups(Operation<MultiGroupQuery, MultiGroupQueryArguments>),
+    GetGroups(Operation<AllGroupsQuery, MultiGroupQueryArguments>),
+    GetGroupMembers(Operation<GroupMembersQuery, GroupPathVariable>)
 }
 
 pub async fn get_all_runners(client: &Client, token: String, endpoint_prefix: String) -> Result<Response, Error> {

@@ -1,7 +1,35 @@
 stages:
-  - test
+- build
+- test
 
-test_job:
-  stage: test
+default:
+  tags:
+    - kubernetes
+
+build-nix-flake:
+  image: registry.sandbox.labz.s-box.org/vcaaron/flaskr/nix:2.24.9
+  stage: build
+  variables:
+    VERSION: "0.1.0"
+    REGISTRY: registry.sandbox.labz.s-box.org/SEI/polar-mirror
+    IMAGE_NAME: $CI_PROJECT_NAME
+    
   script:
-    - echo "Running CI on mirrored repo"
+      #install needed tools
+    - nix-env --install --attr nixpkgs.skopeo
+    - |
+      echo "Configuring nix and the filesystem"
+      mkdir -p "$HOME/.config/nix"
+      mkdir -p "/etc/containers/"
+      #setup nixconfig
+      printf 'experimental-features = nix-command flakes' > "$HOME/.config/nix/nix.conf"
+      echo '{"default":[{"type":"insecureAcceptAnything"}]}' > /etc/containers/policy.json
+      git config --global --add safe.directory "$(pwd)"
+    - cd src/agents/
+    - 'nix build .#agentPkgs #cassiniImage'
+  
+    # - skopeo login --username "$CI_REGISTRY_USER" --password "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
+    - ls -lh ./result
+    # - 'skopeo inspect docker-archive://$(readlink -f ./result)'
+    # - 'skopeo copy docker-archive://$(readlink -f ./result) docker://$REGISTRY/$IMAGE_NAME-$ENV:$VERSION'
+

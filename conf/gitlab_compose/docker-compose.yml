@@ -38,35 +38,11 @@ services:
       - ../../var/neo4j_volumes/import:/var/lib/neo4j/import
       - ../../var/neo4j_volumes/plugins:/var/lib/neo4j/plugins
 
-  rabbitmq:
-    image: bitnami/rabbitmq:3.12
-    hostname: rabbitmq
-    restart: unless-stopped
-    ports:
-      - 5672:5672
-      - 5671:5671
-      - 15672:15672
-    volumes:
-      - ../../var/ssl/ca_certificate.pem:/tmp/ca_cert.pem:ro
-      - ../../var/ssl/server_rabbitmq_key.pem:/tmp/server_key.pem:ro
-      - ../../var/ssl/server_rabbitmq_certificate.pem:/tmp/server_cert.pem:ro
-      - ./rabbitmq.conf:/bitnami/rabbitmq/conf/custom.conf:ro 
-      - ./rabbitmq-docker-entrypoint/:/docker-entrypoint-initdb.d/:ro
-    healthcheck:
-      test: rabbitmq-diagnostics -q ping
-      interval: 30s
-      timeout: 30s
-      retries: 5
-      start_period: 1m
-
-  # gitlab-consumer:
-  #   image: gitlab_agent_consumer
-  #   build:
-  #     context: ../gitlab_agent
-  #     additional_contexts:
-  #       - polar=../polar
-  #     target: gitlab_agent_consumer
-
+  # cassini:
+  #   image: cassini:latest
+  #   ports:
+  #       - 8080:8080
+  
   # gitlab-observer:
   #   image: gitlab_agent_observer
   #   build:
@@ -76,6 +52,16 @@ services:
   #     target: gitlab_agent_observer
   #   env_file:
   #     - example.env
+
+  # gitlab-consumer:
+  #   image: gitlab_agent_consumer
+  #   build:
+  #     context: ../gitlab_agent
+  #     additional_contexts:
+  #       - polar=../polar
+  #     target: gitlab_agent_consumer
+
+
 
 volumes:
   neo4j-data:
