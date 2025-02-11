@@ -27,7 +27,7 @@ use std::{error::Error, time::Duration};
 
 use cassini::{client::TcpClientMessage, ClientMessage, UNEXPECTED_MESSAGE_STR};
 use cynic::{GraphQlResponse, Operation, QueryBuilder};
-use gitlab_queries::{AllGroupsQuery, GroupMember, GroupMembersQuery, GroupPathVariable, MultiGroupQueryArguments};
+use gitlab_queries::{AllGroupsQuery, GroupMember, GroupMembersQuery, GroupPathVariable, GroupProjectsQuery, MultiGroupQueryArguments};
 use ractor::{async_trait, registry::where_is, Actor, ActorProcessingErr, ActorRef};
 use crate::{get_all_elements, GitlabObserverArgs, GitlabObserverMessage, GitlabObserverState};
 use tracing::{debug, info, warn, error};
@@ -88,6 +88,54 @@ impl GitlabGroupObserver {
             Err(e) => Err(Box::new(e))
         }
     }
+
+         // helper to get a group memberships given a query operation
+         async fn get_group_projects(client: Client, token: String, registration_id: String , endpoint: String, op: Operation<GroupProjectsQuery, GroupPathVariable>) -> Result<(), Box<dyn Error>> {
+
+            debug!("Sending query: {:?}", op.query);
+                
+            match client
+            .post(endpoint)
+            .bearer_auth(token)
+            .json(&op)
+            .send().await {
+                Ok(response) =>  {
+    
+                    match response.json::<GraphQlResponse<GroupProjectsQuery>>().await {
+                        Ok(deserialized) => {
+                            if let Some(errors) = deserialized.errors {
+                                for error in errors {
+                                    warn!("Received errors, {error:?}");
+                                }
+                            }
+        
+                            let query = deserialized.data.expect("Expected there to be something here");
+                            query.group.map(|group| {
+        
+                                let conn = group.projects.unwrap();
+                                
+                                let client = where_is(BROKER_CLIENT_NAME.to_string()).expect("Expected to find tcp client");
+                                        
+                                let data = GitlabData::GroupProjects( ResourceLink {
+                                    resource_id: group.id.clone(),
+                                    connection: conn.clone()
+                                });
+                                
+                                let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&data).unwrap();
+                                
+                                let msg = ClientMessage::PublishRequest { topic: GROUPS_CONSUMER_TOPIC.to_string(), payload: bytes.to_vec(), registration_id: Some(registration_id) };
+                                client.send_message(TcpClientMessage::Send(msg)).expect("Expected to send message to tcp client!");
+                            });
+    
+                            Ok(())
+                            
+                        }Err(e) => Err(Box::new(e))
+                    }
+                },
+                Err(e) => Err(Box::new(e))
+            }
+        }
+
 }
 
 #[async_trait]
@@ -171,14 +219,24 @@ impl Actor for GitlabGroupObserver {
                                     for option in groups {
                                         if let Some(group) = option {
                                             // find this group's members
-                                            let op = GroupMembersQuery::build(GroupPathVariable { full_path: group.full_path.clone() });
+                                            let get_group_members = GroupMembersQuery::build(GroupPathVariable { full_path: group.full_path.clone() });
                                                     
                                             GitlabGroupObserver::get_group_members(
                                                 state.web_client.clone(),
                                                 state.token.clone().unwrap_or_default(),
                                                 state.registration_id.clone(),
                                                 state.gitlab_endpoint.clone(),
-                                                op).await.unwrap();
+                                                get_group_members).await.unwrap();
+
+                                            let get_group_projects = GroupProjectsQuery::build(GroupPathVariable { full_path: group.full_path.clone() });
+
+                                            GitlabGroupObserver::get_group_projects(
+                                                state.web_client.clone(),
+                                                state.token.clone().unwrap_or_default(),
+                                                state.registration_id.clone(),
+                                                state.gitlab_endpoint.clone(),
+                                                get_group_projects).await.unwrap();
+
                                             
                                             read_groups.push(group);
 
@@ -192,7 +250,6 @@ impl Actor for GitlabGroupObserver {
                                 
                                 let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&GitlabData::Groups(read_groups)).unwrap();
                                 
-
                                 let msg = ClientMessage::PublishRequest { topic: GROUPS_CONSUMER_TOPIC.to_string(), payload: bytes.to_vec(), registration_id: Some(state.registration_id.clone()) };
                                 client.send_message(TcpClientMessage::Send(msg)).expect("Expected to send message to tcp client!");
 

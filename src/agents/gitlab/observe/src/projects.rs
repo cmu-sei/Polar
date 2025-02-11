@@ -129,7 +129,10 @@ impl Actor for GitlabProjectObserver {
 
                                     if let Some(projects) = connection.nodes {
                                         // Append nodes to the result list.
-                                        read_projects.extend(projects.into_iter().map(|option| option.unwrap()));
+                                        read_projects.extend(projects.into_iter().map(|option| {
+                                            //TODO: Get project runners, issues, etc.
+                                            option.unwrap()
+                                        }));
                                     }
                                     
                                     let tcp_client = where_is(BROKER_CLIENT_NAME.to_string()).expect("Expected to find client");

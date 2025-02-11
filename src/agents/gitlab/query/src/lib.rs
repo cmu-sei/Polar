@@ -100,6 +100,15 @@ pub struct GroupMembersFragment {
     pub group_members: Option<GroupMemberConnection>
 }
 
+#[derive(cynic::QueryFragment, Clone, Deserialize, Serialize, rkyv::Archive)]
+#[cynic(schema = "gitlab", graphql_type="Group")]
+pub struct GroupProjectsFragment {
+    pub id: IdString,
+    pub projects: Option<ProjectConnection>,
+    pub projects_count: i32
+}
+
+
 // #[derive(cynic::QueryFragment, Clone, Deserialize, Serialize, rkyv::Archive)]
 // #[cynic(schema = "gitlab", graphql_type="Group")]
 // pub struct GroupRunnersFragment {
@@ -192,6 +201,15 @@ pub struct GroupMembersQuery {
     #[arguments(fullPath: $full_path)]
     pub group: Option<GroupMembersFragment>
 }
+
+#[derive(cynic::QueryFragment)]
+#[cynic(schema = "gitlab", graphql_type = "Query" , variables = "GroupPathVariable")]
+pub struct GroupProjectsQuery {
+    #[arguments(fullPath: $full_path)]
+    pub group: Option<GroupProjectsFragment>
+}
+
+
 //TODO: Unfreeze
 // #[derive(cynic::QueryFragment)]
 // #[cynic(schema = "gitlab", graphql_type = "Query" , variables = "GroupPathVariable")]
@@ -208,7 +226,7 @@ pub struct GroupRunnersQuery {
     pub groups: Option<GroupConnection>
 }
 
-#[derive(cynic::QueryFragment, Debug, Clone, Deserialize, Serialize, rkyv::Archive)]
+#[derive(cynic::QueryFragment, Clone, Deserialize, Serialize, rkyv::Archive)]
 #[cynic(schema = "gitlab")]
 pub struct Project {
     pub id: IdString,
@@ -218,17 +236,16 @@ pub struct Project {
     pub created_at: Option<DateTimeString>,
     pub namespace: Option<Namespace>,
     pub last_activity_at: Option<DateTimeString>,
-    // pub group: Option<Group>
 }
 
-#[derive(cynic::QueryFragment, Debug, Clone,  Deserialize, Serialize, Archive)]
+#[derive(cynic::QueryFragment, Clone,  Deserialize, Serialize, Archive)]
 #[cynic(schema = "gitlab")]
 pub struct ProjectEdge {
     pub cursor: String,
     pub node: Option<Project>
 }
 
-#[derive(cynic::QueryFragment, Debug, Clone, Deserialize, Serialize, rkyv::Archive)]
+#[derive(cynic::QueryFragment, Clone, Deserialize, Serialize, rkyv::Archive)]
 #[cynic(schema = "gitlab")]
 pub struct ProjectConnection {
     pub count: i32, 	  //Int! 	Total count of collection.
@@ -273,7 +290,7 @@ pub struct MultiProjectQueryArguments {
     pub last: Option<i32>,
 }
 
-#[derive(cynic::QueryFragment, Debug, Clone)]
+#[derive(cynic::QueryFragment, Clone)]
 #[cynic(schema = "gitlab", graphql_type = "Query", variables = "MultiProjectQueryArguments")]
 pub struct MultiProjectQuery {
     pub projects: Option<ProjectConnection>

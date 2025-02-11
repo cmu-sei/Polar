@@ -115,8 +115,6 @@ impl Actor for GitlabUserConsumer {
                 } 
             }
             GitlabData::ProjectMembers(link) => {
-
-
                 match state.graph.start_txn().await {
                     Ok(transaction) => {
                         let nodes = link.connection.nodes.unwrap();
@@ -155,7 +153,7 @@ impl Actor for GitlabUserConsumer {
                             "
                             MATCH (user:GitlabUser {{ user_id: \"{}\" }})
                             UNWIND [{}] AS project_data
-                            MATCH (project:GitlabProject {{ project_id: project_data.project_id }})
+                            MERGE (project:GitlabProject {{ project_id: project_data.project_id }})
                             MERGE (user)-[r:MEMBER_OF]->(project)
                             SET r.access_level = project_data.access_level,
                                 r.created_at = project_data.created_at,
