@@ -22,25 +22,27 @@
 */
 
 
+use std::time::Duration;
+
 use cassini::{client::TcpClientMessage, ClientMessage};
-use common::{types::{GitlabData, Runner}, RUNNERS_CONSUMER_TOPIC};
+use common::{types::{GitlabData}, RUNNERS_CONSUMER_TOPIC};
+use cynic::{GraphQlResponse, QueryBuilder};
+use gitlab_queries::runners::*;
 
 use tracing::{debug, info, warn, error};
 use reqwest::Client;
 use serde_json::to_string;
-use crate::{get_all_elements, GitlabObserverArgs, GitlabObserverState};
+use crate::{get_all_elements, GitlabObserverArgs, GitlabObserverMessage, GitlabObserverState};
 use ractor::{async_trait, registry::where_is, Actor, ActorProcessingErr, ActorRef};
 
 use crate::BROKER_CLIENT_NAME;
-
-const LOCK_FILE_PATH: &str = "/tmp/runners_observer.lock";
 
 
 pub struct GitlabRunnerObserver;
 
 #[async_trait]
 impl Actor for GitlabRunnerObserver {
-    type Msg = ();
+    type Msg = GitlabObserverMessage;
     type State = GitlabObserverState;
     type Arguments = GitlabObserverArgs;
 
@@ -71,33 +73,74 @@ impl Actor for GitlabRunnerObserver {
         myself: ActorRef<Self::Msg>,
         state: &mut Self::State ) ->  Result<(), ActorProcessingErr> {
 
-    
-        // //forwrard to client
-        // if let Some(client) = where_is(BROKER_CLIENT_NAME.to_string()) {
-        //     let client_ref: ActorRef<TcpClientMessage> = ActorRef::from(client);
-            
-        //     if let Some(runners) = get_all_elements::<Runner>(&state.web_client, state.token.clone().unwrap_or_default(), format!("{}{}", state.gitlab_endpoint, "/runners/all")).await {
-        //         let data = GitlabData::Runners(runners.clone());
-        //         match send(data, client_ref.clone(), state.registration_id.clone(), RUNNERS_QUEUE_NAME.to_string()) {
-        //             Ok(_) => {
-        //                 debug!("Successfully sent project data");
-        //             } Err(e) => todo!()
-        //         }
-        //     }
-        //     else { error!("Couldn't find runners!") }
-        // } else { error!("Couldn't locate client!") }
-        
-        // myself.stop(Some("FINISHED".to_string()));
-        
+        myself.send_interval(Duration::from_secs(10), || { 
+            //TODO: get query arguments from config params
+            //build query
+            let op = MultiRunnerQuery::build( 
+                MultiRunnerQueryArguments { paused: Some(false), status: None, tag_list: None, search: None, creator_id: None });
+
+            // pass query in message
+            GitlabObserverMessage::GetRunners(op) 
+        });
         Ok(())
     }
     async fn handle(
         &self,
-        _myself: ActorRef<Self::Msg>,
-        _: Self::Msg,
-        _: &mut Self::State,
+        myself: ActorRef<Self::Msg>,
+        message: Self::Msg,
+        state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         
+        match message {
+            GitlabObserverMessage::GetRunners(op) => {
+                debug!("Sending query: {:?}", op.query);
+
+                match state.web_client
+                .post(state.gitlab_endpoint.clone())
+                .bearer_auth(state.token.clone().unwrap_or_default())
+                .json(&op)
+                .send().await {
+                    Ok(response) => {
+                        if let Ok(deserialized) = response.json::<GraphQlResponse<MultiRunnerQuery>>().await {
+                            if let Some(errors) = deserialized.errors {
+                                for error in errors {
+                                    warn!("Received errors, {error:?}");
+                                }
+                            }
+                            if let Some(query) = deserialized.data {
+                             if let Some(connection) =  query.runners {
+                                
+                                let mut read_runners = Vec::new();
+
+                                if let Some(runners) = connection.nodes {
+                                    for option in runners {
+                                        if let Some(runner) = option {
+ 
+                                            read_runners.push(runner);
+
+                                        }
+                                    }
+                                }
+
+                                info!("Observed {0} runner(s)", read_runners.len());
+
+                                let client = where_is(BROKER_CLIENT_NAME.to_string()).expect("Expected to find tcp client!");
+                                
+                                let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&GitlabData::Runners(read_runners)).unwrap();
+                                
+                                let msg = ClientMessage::PublishRequest { topic: RUNNERS_CONSUMER_TOPIC.to_string(), payload: bytes.to_vec(), registration_id: Some(state.registration_id.clone()) };
+                                client.send_message(TcpClientMessage::Send(msg)).expect("Expected to send message to tcp client!");
+
+                             }
+                                
+                            }
+                        }
+                    },
+                    Err(e) => todo!()
+                }
+            }
+            _ => ()
+        }
 
         Ok(())
     }

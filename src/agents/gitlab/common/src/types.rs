@@ -21,7 +21,7 @@
    DM24-0470
 */
 
-use gitlab_queries::{GroupData, GroupMemberConnection, Project, ProjectConnection, ProjectMemberConnection, UserCoreFragment};
+use gitlab_queries::{runners::{CiRunner, CiRunnerConnection}, groups::GroupData, groups::GroupMemberConnection, Project, ProjectConnection, ProjectMemberConnection, UserCoreFragment};
 use gitlab_schema::IdString;
 
 use rkyv::{Serialize, Deserialize, Archive};
@@ -32,15 +32,13 @@ use rkyv::{Serialize, Deserialize, Archive};
 pub enum GitlabData {
     Users(Vec<UserCoreFragment>),
     Projects(Vec<Project>),
-    Groups(Vec<GroupData>),
-    GroupProjects(ResourceLink<ProjectConnection>),
     ProjectMembers(ResourceLink<ProjectMemberConnection>),
-    
-    // ProjectRunners(ResourceLink<Runner>),
+    ProjectRunners(ResourceLink<CiRunnerConnection>),
+    Groups(Vec<GroupData>),
     GroupMembers(ResourceLink<GroupMemberConnection>),
-    // GroupRunners(ResourceLink<Runner>),
-    
-    // Runners(Vec<Runner>),
+    GroupRunners(ResourceLink<CiRunnerConnection>),
+    GroupProjects(ResourceLink<ProjectConnection>),
+    Runners(Vec<CiRunner>),
     // RunnerJob((u32, Job)),
     // Jobs(Vec<Job>),
     // Pipelines(Vec<Pipeline>),

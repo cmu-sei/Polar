@@ -27,7 +27,7 @@ use std::error::Error;
 use cassini::{client::TcpClientMessage, ClientMessage};
 //TODO: Move to global consumer common lib
 use common::{read_from_env, types::GitlabData};
-use gitlab_queries::{GroupData, Namespace, Project};
+use gitlab_queries::{groups::GroupData, Namespace, Project};
 use tracing::{debug, error, info};
 use neo4rs::{Config, ConfigBuilder, Query, Txn};
 use ractor::{registry::where_is, ActorProcessingErr, MessagingErr};
@@ -39,7 +39,7 @@ pub mod users;
 //TODO: Uncomment when other actors are done
 pub mod projects;
 pub mod groups;
-// pub mod runners;
+pub mod runners;
 
 pub const BROKER_CLIENT_NAME: &str = "GITLAB_CONSUMER_CLIENT";
 pub const GITLAB_USER_CONSUMER: &str = "users";

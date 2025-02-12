@@ -173,7 +173,45 @@ impl Actor for GitlabGroupConsumer {
                     info!("Committed transaction to database");
                 }
             }
+            GitlabData::GroupRunners(link) => {
+                let transaction = state.graph.start_txn().await.expect("expected transaction");
+                
+                if let Some(vec)  =  link.connection.nodes {
+                    let runners = vec
+                    .iter()
+                    .map(|option| {
+                        let runner = option.as_ref().unwrap();
 
+                        //create a list of attribute sets
+                        format!(r#"{{ 
+                            runner_id: "{runner_id}",
+                            paused: "{paused}",
+                        }}"#,
+                        runner_id = runner.id.0,
+                        paused = runner.paused
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(",\n");
+        
+                    let cypher_query = format!(
+                        "
+                        MATCH (group:GitlabGroup {{ group_id: \"{group_id}\" }})
+                        UNWIND [{runners}] AS runner_data
+                        MERGE (runner:GitlabRunner {{ project_id: runner_data.runner_id }})
+                        MERGE (runner)-[r:IN_GROUP]->(group)
+                        ",
+                        group_id = link.resource_id
+                    );
+        
+                    debug!(cypher_query);
+                    transaction.run(Query::new(cypher_query)).await.expect("Expected to run query.");
+                    if let Err(e) = transaction.commit().await {
+                        error!("Error committing transaction to graph: {e}");
+                    }
+                    info!("Committed transaction to database");
+                }
+            }
             
             _ => ()
         }

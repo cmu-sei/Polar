@@ -15,6 +15,7 @@ use cassini::client::*;
 
 use crate::groups::GitlabGroupObserver;
 use crate::projects::GitlabProjectObserver;
+use crate::runners::GitlabRunnerObserver;
 use crate::users::GitlabUserObserver;
 use crate::GitlabObserverArgs;
 use crate::BROKER_CLIENT_NAME;
@@ -85,12 +86,12 @@ impl Actor for ObserverSupervisor {
                                 registration_id: registration_id.clone()
                             };
             
-                            //TODO: start observers based off of some configuration, and break
+                            //TODO: start observers based off of some configuration
                             if let Err(e) = Actor::spawn_linked(Some(GITLAB_USERS_OBSERVER.to_string()), GitlabUserObserver, args.clone(), myself.clone().into()).await { warn!( "failed to start users observer {e}") }
-                            //TODO: Unfreeze other observers
-                            // if let Err(e) = Actor::spawn_linked(Some("GITLAB_PROJECT_OBSERVER".to_string()), GitlabProjectObserver, args.clone(), myself.clone().into()).await { warn!( "failed to start project observer {e}") }
+                            if let Err(e) = Actor::spawn_linked(Some("GITLAB_PROJECT_OBSERVER".to_string()), GitlabProjectObserver, args.clone(), myself.clone().into()).await { warn!( "failed to start project observer {e}") }
                             if let Err(e) = Actor::spawn_linked(Some("GITLAB_GROUP_OBSERVER".to_string()), GitlabGroupObserver, args.clone(), myself.clone().into()).await { warn!( "failed to start group observer {e}") }
-                            // if let Err(e) = Actor::spawn_linked(Some("GITLAB_RUNNER_OBSERVER".to_string()), GitlabRunnerObserver, args.clone(), myself.clone().into()).await { warn!( "failed to start runner observer {e}") }
+                            if let Err(e) = Actor::spawn_linked(Some("GITLAB_RUNNER_OBSERVER".to_string()), GitlabRunnerObserver, args.clone(), myself.clone().into()).await { warn!( "failed to start runner observer {e}") }
+                            
                             break;
                         } else if attempts < state.max_registration_attempts {
                           warn!("Failed to get session data. Retrying.");

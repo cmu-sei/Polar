@@ -24,14 +24,13 @@
 pub mod supervisor;
 pub mod users;
 pub mod projects;
-// pub mod runners;
+pub mod runners;
 pub mod groups;
 
 use cynic::Operation;
-use gitlab_queries::AllGroupsQuery;
-use gitlab_queries::GroupMembersQuery;
-use gitlab_queries::GroupPathVariable;
-use gitlab_queries::MultiGroupQueryArguments;
+use gitlab_queries::groups::*;
+use gitlab_queries::runners::MultiRunnerQuery;
+use gitlab_queries::runners::MultiRunnerQueryArguments;
 use gitlab_queries::MultiProjectQuery;
 use gitlab_queries::MultiProjectQueryArguments;
 use gitlab_queries::MultiUserQuery;
@@ -73,7 +72,8 @@ pub enum GitlabObserverMessage {
     GetUsers(Operation<MultiUserQuery, MultiUserQueryArguments>),
     GetProjects(Operation<MultiProjectQuery, MultiProjectQueryArguments>),
     GetGroups(Operation<AllGroupsQuery, MultiGroupQueryArguments>),
-    GetGroupMembers(Operation<GroupMembersQuery, GroupPathVariable>)
+    GetGroupMembers(Operation<GroupMembersQuery, GroupPathVariable>),
+    GetRunners(Operation<MultiRunnerQuery, MultiRunnerQueryArguments>)
 }
 
 pub async fn get_all_runners(client: &Client, token: String, endpoint_prefix: String) -> Result<Response, Error> {
