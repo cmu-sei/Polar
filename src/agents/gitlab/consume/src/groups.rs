@@ -120,9 +120,11 @@ impl Actor for GitlabGroupConsumer {
         
                     let cypher_query = format!(
                         "
-                        MATCH (group:GitlabGroup {{ group_id: \"{group_id}\" }})
+                        MERGE (group:GitlabGroup {{ group_id: \"{group_id}\" }})
+                        WITH group
                         UNWIND [{group_memberships}] AS membership
                         MERGE (user:GitlabUser {{ user_id: membership.user_id }})
+                        WITH membership, user
                         MERGE (user)-[r:IN_GROUP]->(group)
                         SET r.access_level = membership.access_level,
                             r.created_at = membership.created_at,
@@ -157,9 +159,11 @@ impl Actor for GitlabGroupConsumer {
         
                     let cypher_query = format!(
                         "
-                        MATCH (group:GitlabGroup {{ group_id: \"{group_id}\" }})
+                        MERGE (group:GitlabGroup {{ group_id: \"{group_id}\" }})
+                        WITH group
                         UNWIND [{projects}] AS project_data
                         MERGE (project:GitlabProject {{ project_id: project_data.project_id }})
+                        with project, group
                         MERGE (project)-[r:IN_GROUP]->(group)
                         ",
                         group_id = link.resource_id
@@ -185,7 +189,7 @@ impl Actor for GitlabGroupConsumer {
                         //create a list of attribute sets
                         format!(r#"{{ 
                             runner_id: "{runner_id}",
-                            paused: "{paused}",
+                            paused: "{paused}"
                         }}"#,
                         runner_id = runner.id.0,
                         paused = runner.paused
@@ -196,9 +200,11 @@ impl Actor for GitlabGroupConsumer {
         
                     let cypher_query = format!(
                         "
-                        MATCH (group:GitlabGroup {{ group_id: \"{group_id}\" }})
+                        MERGE (group:GitlabGroup {{ group_id: \"{group_id}\" }})
+                        WITH group
                         UNWIND [{runners}] AS runner_data
                         MERGE (runner:GitlabRunner {{ project_id: runner_data.runner_id }})
+                        WITH runner, group
                         MERGE (runner)-[r:IN_GROUP]->(group)
                         ",
                         group_id = link.resource_id

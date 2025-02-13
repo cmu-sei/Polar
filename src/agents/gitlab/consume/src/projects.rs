@@ -90,7 +90,6 @@ impl Actor for GitlabProjectConsumer {
                 // Here, we write a query that creates additional nodes for the group and namespace of the project
                 let cypher_query = format!(
                     "
-                    // Create projects
                     UNWIND [{project_array}] AS project_data
                     MERGE (project:GitlabProject {{ project_id: project_data.project_id }})
                     SET project.name = project_data.name,

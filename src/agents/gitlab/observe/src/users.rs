@@ -82,7 +82,7 @@ impl Actor for GitlabUserObserver {
             let op = MultiUserQuery::build( 
                 MultiUserQueryArguments{
                     after: None,
-                    admins: Some(true),
+                    admins: None,
                     active: Some(true),
                     ids: None,
                     usernames: None,

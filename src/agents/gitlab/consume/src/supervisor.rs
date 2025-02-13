@@ -90,7 +90,7 @@ impl Actor for ConsumerSupervisor {
                             if let Err(e) = Actor::spawn_linked(Some(USER_CONSUMER_TOPIC.to_string()), GitlabUserConsumer, args.clone(), myself.clone().into()).await { warn!( "failed to start users consumer {e}") }
                             if let Err(e) = Actor::spawn_linked(Some(GROUPS_CONSUMER_TOPIC.to_string()), GitlabGroupConsumer, args.clone(), myself.clone().into()).await { warn!( "failed to start groups consumer {e}") }
                             if let Err(e) = Actor::spawn_linked(Some(RUNNERS_CONSUMER_TOPIC.to_string()), GitlabRunnerConsumer, args.clone(), myself.clone().into()).await { warn!( "failed to start runners consumer {e}") }
-                            // if let Err(e) = Actor::spawn_linked(Some(PROJECTS_CONSUMER_TOPIC.to_string()), GitlabProjectConsumer, args.clone(), myself.clone().into()).await { warn!( "failed to start projects consumer {e}") }
+                            if let Err(e) = Actor::spawn_linked(Some(PROJECTS_CONSUMER_TOPIC.to_string()), GitlabProjectConsumer, args.clone(), myself.clone().into()).await { warn!( "failed to start projects consumer {e}") }
 
                             break;
                         } else if attempts < state.max_registration_attempts {
