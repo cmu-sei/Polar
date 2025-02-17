@@ -23,7 +23,7 @@
 # DM24-0470
 
 [package]
-name = "gitlab_observer"
+name = "gitlab-observer"
 version = "0.1.0"
 edition = "2021"
 
@@ -53,6 +53,6 @@ cynic-codegen = "3.9.1"
 # capnpc = "0.20.1"
 
 [[bin]]
-name = "gitlab_observer"
+name = "gitlab-observer"
 path = "src/entrypoint.rs"
 

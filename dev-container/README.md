@@ -14,11 +14,8 @@ Before starting, ensure you have the following installed:
 
 ## Setup
 
-1. **Install NixOS:**
-
-    Follow the [NixOS installation
-    guide](https://nixos.org/manual/nixos/stable/#ch-installation) to install
-    NixOS on your system.
+1. **Install Nix and enable it to use flakes:**
+    Checout the instructions at https://nix.dev/ on how you can do this
 
 ## Building the Docker Image
 1. **Enter the project directory:**
@@ -33,7 +30,7 @@ Before starting, ensure you have the following installed:
     nix build --extra-experimental-features nix-command --extra-experimental-features flakes
     ```
 
-3. **Load the Docker image into Docker:**
+3. **Load the Docker image:**
 
     ```bash
     docker load < result

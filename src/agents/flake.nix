@@ -261,61 +261,30 @@
         packages = {
           inherit gitlabObserver gitlabConsumer cassini agentPkgs tlsCerts;
           default = agentPkgs;
+
           observerImage = pkgs.dockerTools.buildImage {
             name = "polar-gitlab-observer";
             tag = "latest";
-            copyToRoot = [ 
-              observerEnv
-              
-              # observerConfig
-              "${tlsCerts}/ca_certificates"
-              "${tlsCerts}/client"              
-            ]; 
-
-            # FIXME: certs get put in '/' which isn't bad but it's not great either, we'd rather have them in etc.
-            # the buildEnv creates the /etc/ssl/certs path but it doesn't exist when these comamnds are ran.
-            # extraCommands = ''
-            #  mv ca_ * /etc/ssl/certs
-            #  mv client_* /etc/ssl/certs
-            # '';
+            copyToRoot = [ observerEnv pkgs.cacert ]; 
 
             config = {
-              Cmd = [ "/app/observer-entrypoint" ];
-              WorkingDir = "/app";
+              Cmd = [ "gitlab-observer" ];
+              WorkingDir = "/";
               Env = [
-                # The absolute file path to the client .p12 file. This is used by the Rust
-                # binaries to auth with the broker via TLS.
-                "TLS_CLIENT_KEY=/client_rabbitmq.p12"
-                # If a password was set for the .p12 file, put it here.
-                # "TLS_KEY_PASSWORD=somepassword"
-                # The absolute file path to the ca_certificates.pem file created by TLS_GEN.
-                # Used by the Rust binaries to auth with RabbitMQ via TLS.
-                "TLS_CA_CERT=/ca_certificate.pem"
-               ];
+                "SSL_CERT_FILE=/etc/ssl/certs/ca-bundle.crt"
+                "SSL_CERT_DIR=/etc/ssl/certs"
+              ];
             };
           };
           consumerImage = pkgs.dockerTools.buildImage {
               name = "polar-gitlab-consumer";
               tag = "latest";
-              copyToRoot = [consumerEnv tlsCerts
-              "${tlsCerts}/ca_certificates"
-              "${tlsCerts}/client"              
-              ];
+              copyToRoot = [ consumerEnv ];
 
               config = {
-                Cmd = [ "/app/observer-entrypoint" ]; #TOOD: evaluate whether this is still the case
-                WorkingDir = "/app";
-                Env = [
-                  # The absolute file path to the client .p12 file. This is used by the Rust
-                  # binaries to auth with the broker via TLS.
-                  "TLS_CLIENT_KEY=/client_rabbitmq.p12"
-                  # If a password was set for the .p12 file, put it here.
-                  # "TLS_KEY_PASSWORD=somepassword"
-                  # The absolute file path to the ca_certificates.pem file created by TLS_GEN.
-                  # Used by the Rust binaries to auth with RabbitMQ via TLS.
-                  "TLS_CA_CERT=/ca_certificate.pem"
-
-                 ];
+                Cmd = [ "gitlab-consumer" ];
+                WorkingDir = "/";
+                Env = [ ];
               };
             };
           
@@ -323,18 +292,13 @@
             name = "cassini";
             tag = "latest";
             copyToRoot = [
-              cassiniEnv
-              "${tlsCerts}/ca_certificates"
-              "${tlsCerts}/server"     
+              cassiniEnv pkgs.cacert 
             ]; 
             config = {
               Cmd = [ "cassini-server" ];
               WorkingDir = "/app";
               Env = [ 
                 "CASSINI_BIND_ADDR=0.0.0.0:8080"
-                "TLS_CA_CERT=/ca_certificate.pem"
-                "TLS_SERVER_CERT_CHAIN=/server_polar_certificate.pem"
-                "TLS_SERVER_KEY=/server_polar_key.pem"
               ];
             };
           };

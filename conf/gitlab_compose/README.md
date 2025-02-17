@@ -23,81 +23,6 @@ to its own license.
 DM24-0470
 
 
-# Gitlab Agent Development Compose SetUp
-
-There are some first time components before the Gitlab agent can be ran. When doing local development, the rust binaries should be compiled and ran locally outside a container. More will be explained further down. 
-
-# Requirements
-
-## Operating System
-MacOS Monterrey or newer or modern Linux
-
-Instructions written and tested on an Intel Mac running MacOS Sonoma (14.5) and Ubuntu 22.04 (LTS) on an Amazon EC2 instance (t3.2xlarge). 
-
-## Hardware
-- Multi-core CPU
-- At least 8GB of RAM
-- 25GB Free Storage
-
-## Software
-- [Rust](https://doc.rust-lang.org/cargo/getting-started/installation.html)
-- GNU Make
-- Git
-- OpenSSL
-- Sudo
-- (Recommended, but not required, instructions written assuming Docker is installed) [Docker Engine](https://docs.docker.com/engine/install/) with [Docker Compose Plugin](https://docs.docker.com/compose/install/)
-
-## Install Commands
-
-### Fedora/CentOS/RHEL:
-If sudo is not installed: `dnf install sudo`
-```sh
-sudo dnf install make git openssl
-```
-
-### Debian/Ubuntu:
-If sudo is not installed: `apt-get install sudo`
-```sh
-sudo apt-get install make git openssl
-```
-
-### Arch:
-If sudo is not installed `pacman -S sudo` or `yay -S sudo`
-```sh
-sudo pacman -S make git openssl
-```
-or 
-```sh
-sudo yay -S make git openssl
-```
-
-### Alpine:
-If sudo is not installed: `apk add sudo`
-```sh
-sudo apk add make git openssl
-```
-
-### MacOS
-Brew required. Install if you are missing it: https://brew.sh/
-```sh
-brew install make git openssl
-```
-
-# Automated Setup
-Running the below set up script will create an environments file, creates the necessary certificates files and updates permissions to allow you to run the tool.
-```sh
-cd $PROJECT_ROOT/scripts
-chmod +x dev_stack.sh
-./dev_stack.sh
-```
-
-# Manual Setup
-[skip if you have already run the automated setup above]
-
-This tool requires the following values to be present in your environment as
-variables - some of which may contain sensitive data and should be stored
-securely. See your team about how to retrieve this information.
-1. Create an environments file named `conf/env_setup.sh` with the following template.
 ```sh
 # Generated Environment Configuration. If you edit this, do not re-run dev_stack.sh
 # script without backing up this file, first.
@@ -170,24 +95,11 @@ openssl pkcs12 -legacy -export -inkey client_rabbitmq_key.pem -in client_rabbitm
 
 # Running a Local Stack
 ## Running a Pub/Sub Broker and a Graph Data Store
-[We currently support Neo4j and RabbitMQ, but intend to expand support for other common infrastructure]
 
-1. Run `docker compose up` in the gitlab_compose directory [$PROJECT_ROOT/conf/gitlab_compose/](/conf/gitlab_compose/) and spawn the NEO4J and RabbitMQ servers. Make sure to auth with your private registry if you're using one.
-2. Access the NEO4J web UI via http://localhost:7474 to configure a password. The default user/pass combo is `neo4j:neo4j`. *This will need to be changed before running the rust binaries for the first time.*
+The docker compose file has been included to ease the setup stage for the development workflow.
 
-## Running the Rust Binaries (Using Gitlab Agent)
-0. Install a Rust toolchain, possibly using rustup...
-   * Refer here for instructions: https://doc.rust-lang.org/cargo/getting-started/installation.html
-1. Change into the project source directory.
-   * `cd $PROJECT_ROOT/src`
-2. Run `cargo build` to build all the workspace binaries. 
-3. To run the consumer and observer do the following:
-   1. Change into the `target/debug` directory. 
-   2. Remember to source the environment file created early FOR EACH shell. 
-      * `source $PROJECT_ROOT/conf/env_setup.sh`
-   3. Observer: `./observer_entrypoint`
-   4. Consumer: `./consumer_entrypoint`
-4. After some time, nodes should start to show up in the Neo4J instance. 
+**NOTE:** If you haven't already, ensure you''ve either downloaded or built the container images for the gitlab agent using the nix flake in the Cargo workspace, see [the README.md for details on how you can build and package the agents.](../../src/agents/gitlab/README.md)
 
-## Fun queries
-match (r:GitlabRunner) where r.runner_id = '304' with r  match p=(r)-[:hasJob]->(j:GitlabRunnerJob) where j.status = 'failed' return p as failedjob
+Once you have the associated images. You can simply run `docker compose up` to start the cassini mesasge broker and a neo4j instance. Keep in mind that you will still need to set a new password in the neo4j server to be used by the agent. 
+
+The default user/password combo is `neo4j:neo4j`. This will need to be changed **before** running the rust agent for the first time.

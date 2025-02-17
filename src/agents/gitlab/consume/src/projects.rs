@@ -56,15 +56,15 @@ impl Actor for GitlabProjectConsumer {
     async fn post_start(
         &self,
         myself: ActorRef<Self::Msg>,
-        state: &mut Self::State ) ->  Result<(), ActorProcessingErr> {
-        info!("[*] waiting to consume");
+        _: &mut Self::State ) ->  Result<(), ActorProcessingErr> {
+        info!("{:?} waiting to consume", myself.get_name());
         
         Ok(())
     }
     
     async fn handle(
         &self,
-        myself: ActorRef<Self::Msg>,
+        _myself: ActorRef<Self::Msg>,
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
