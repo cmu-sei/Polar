@@ -27,41 +27,65 @@ services:
     user: 7474:7474
     image: neo4j:5.10.0-community
     restart: unless-stopped
+    networks:
+      - polar
     ports:
       - '7474:7474'
       - '7687:7687'
     volumes:
-      - neo4j-data:/data
-      - ../../var/neo4j_volumes/data:/var/lib/neo4j/data
-      - ../../var/neo4j_volumes/logs:/var/lib/neo4j/logs
-      - ../../var/neo4j_volumes/conf:/var/lib/neo4j/conf
-      - ../../var/neo4j_volumes/import:/var/lib/neo4j/import
-      - ../../var/neo4j_volumes/plugins:/var/lib/neo4j/plugins
+      - ./var/neo4j_volumes/data:/var/lib/neo4j/data
+      - ./var/logs:/var/lib/neo4j/logs
+      # - ../neo4j_setup/conf:/var/lib/neo4j/conf
+      # - ../neo4j_setup/plugins:/var/lib/neo4j/plugins
 
-  # cassini:
-  #   image: cassini:latest
-  #   ports:
-  #       - 8080:8080
-  
+  cassini:
+    image: cassini:latest
+    networks:
+      - polar
+    ports:
+        - 8080:8080
+    environment:
+      - CASSINI_BIND_ADDR=0.0.0.0:8080
+      - TLS_CA_CERT=/etc/ssl/ca_certificate.pem
+      - TLS_SERVER_CERT_CHAIN=/etc/ssl/server_polar_certificate.pem
+      - TLS_SERVER_KEY=/etc/ssl/server_polar_key.pem
+    volumes:
+      - ../certs/ca_certificates/ca_certificate.pem:/etc/ssl/ca_certificate.pem:ro
+      - ../certs/server/server_polar_key.pem:/etc/ssl/server_polar_key.pem:ro
+      - ../certs/server/server_polar_certificate.pem:/etc/ssl/server_polar_certificate.pem:ro    
+  #
+  # If you want to test what running the gitlab agents look like in a containerized environment,
+  # you can unfreeze these services. Otherwise, the above will prime your environment for testing the agents
+  #
   # gitlab-observer:
-  #   image: gitlab_agent_observer
-  #   build:
-  #     context: ../gitlab_agent
-  #     additional_contexts:
-  #       - polar=../polar
-  #     target: gitlab_agent_observer
+  #   image: polar-gitlab-observer:latest
+  #   depends_on:
+  #     - cassini
   #   env_file:
-  #     - example.env
+  #     - observer.env
+  #   networks:
+  #     - polar
+  #   volumes:
+  #     - ../certs/ca_certificates/ca_certificate.pem:/etc/ssl/ca_certificate.pem:ro
+  #     - ../certs/client/client_polar_certificate.pem:/etc/ssl/client_polar_certificate.pem:ro
+  #     - ../certs/client/client_polar_key.pem:/etc/ssl/client_polar_key.pem:ro
 
   # gitlab-consumer:
-  #   image: gitlab_agent_consumer
-  #   build:
-  #     context: ../gitlab_agent
-  #     additional_contexts:
-  #       - polar=../polar
-  #     target: gitlab_agent_consumer
+  #   image: polar-gitlab-consumer:latest
+  #   depends_on:
+  #     - cassini
+  #     - neo4j
+  #   env_file:
+  #     - consumer.env
+  #   networks:
+  #     - polar
+  #   volumes:
+  #     - ../certs/ca_certificates/ca_certificate.pem:/etc/ssl/ca_certificate.pem:ro
+  #     - ../certs/client/client_polar_certificate.pem:/etc/ssl/client_polar_certificate.pem:ro
+  #     - ../certs/client/client_polar_key.pem:/etc/ssl/client_polar_key.pem:ro
 
+networks:
+  polar:
 
-
-volumes:
-  neo4j-data:
+# volumes:
+#   neo4j-data:

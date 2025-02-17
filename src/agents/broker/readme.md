@@ -58,6 +58,9 @@ The goal of the project is to provide a reliable, scalable, and secure messaging
 ---
 Ensure the following environment variables are set before trying to run cassini
 ```bash
+# The address the broker server will bind and listen for connections to
+# for example  127.0.0.1:8080 to listen on your host system's local port 8080
+export CASSINI_BIND_ADDR="" 
 # The absolute file path to the ca_certificates.pem file created by TLS_GEN.
 # Used by the Rust binaries to recognize eachother through TLS
 export TLS_CA_CERT=""

@@ -23,7 +23,7 @@
 # DM24-0470
 
 [package]
-name = "gitlab_consumer"
+name = "gitlab-consumer"
 version = "0.1.0"
 edition = "2021"
 
@@ -46,5 +46,5 @@ polar = { path = "../../lib" }
 gitlab-queries = { path = "../query" }
 
 [[bin]]
-name = "gitlab_consumer"
+name = "gitlab-consumer"
 path = "src/entrypoint.rs"
