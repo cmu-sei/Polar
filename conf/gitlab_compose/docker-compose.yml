@@ -61,8 +61,14 @@ services:
   #   image: polar-gitlab-observer:latest
   #   depends_on:
   #     - cassini
-  #   env_file:
-  #     - observer.env
+  #   environment:
+  #     - GITLAB_ENDPOINT=""
+  #     - GITLAB_TOKEN=""
+  #     - BROKER_ADDR="cassini:8080"
+  #     - TLS_CA_CERT=/etc/ssl/ca_certificate.pem
+  #     - TLS_CLIENT_CERT=/etc/ssl/client_polar_certificate.pem
+  #     - TLS_CLIENT_KEY=/etc/ssl/client_polar_key.pem
+  #     - RUST_LOG=info
   #   networks:
   #     - polar
   #   volumes:
@@ -75,8 +81,16 @@ services:
   #   depends_on:
   #     - cassini
   #     - neo4j
-  #   env_file:
-  #     - consumer.env
+    # environment:
+    #  - BROKER_ADDR="cassini:8080"
+    #  - GRAPH_USER="neo4j"
+    #  - GRAPH_PASSWORD=""
+    #  - GRAPH_DB="neo4j"
+    #  - GRAPH_ENDPOINT="neo4j://neo4j:7687"
+    #  - TLS_CA_CERT=/etc/ssl/ca_certificate.pem
+    #  - TLS_CLIENT_CERT=/etc/ssl/client_polar_certificate.pem
+    #  - TLS_CLIENT_KEY=/etc/ssl/client_polar_key.pem
+    #  - RUST_LOG=info
   #   networks:
   #     - polar
   #   volumes:

@@ -1,12 +1,27 @@
 stages:
+- antivirus
 - build
-- test
+- analysis
 
 default:
   tags:
     - kubernetes
 
-build-nix-flake:
+clamav-scan:
+  stage: antivirus
+  image:  registry.sandbox.labz.s-box.org/vcaaron/flaskr/nix:2.24.9
+  before_script:
+    - nix-env -iA nixpkgs.clamav
+  script:
+    - clamscan --version
+    - clamscan --recursive . > "clamav-scan-results-${CI_COMMIT_REF_NAME}.txt"
+  artifacts:
+    paths:
+      - "clamav-scan-results-*.txt"
+    expire_in: 1 week #TODO: confirm length of time to keep these results
+
+
+build-dev-enviornment:
   image: registry.sandbox.labz.s-box.org/vcaaron/flaskr/nix:2.24.9
   stage: build
   variables:
@@ -25,11 +40,119 @@ build-nix-flake:
       printf 'experimental-features = nix-command flakes' > "$HOME/.config/nix/nix.conf"
       echo '{"default":[{"type":"insecureAcceptAnything"}]}' > /etc/containers/policy.json
       git config --global --add safe.directory "$(pwd)"
-    - cd src/agents/
-    - 'nix build .#agentPkgs #cassiniImage'
-  
-    # - skopeo login --username "$CI_REGISTRY_USER" --password "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
-    - ls -lh ./result
-    # - 'skopeo inspect docker-archive://$(readlink -f ./result)'
-    # - 'skopeo copy docker-archive://$(readlink -f ./result) docker://$REGISTRY/$IMAGE_NAME-$ENV:$VERSION'
+    - cd dev-container
 
+    # TODO: run nix flake checks to run unit testing and other static analysis
+    # build workspace
+    - 'nix build --eval-system x86_64-linux --show-trace .#default'
+    # TODO: Use skopeo to inspect and upload our images
+    - skopeo login --username "$CI_REGISTRY_USER" --password "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
+    - ls -lh
+    - 'skopeo inspect docker-archive://$(readlink -f ./result)'
+    - 'skopeo copy docker-archive://$(readlink -f ./result) docker://$REGISTRY/polar-dev:latest'
+
+build-workspace:
+  image: registry.sandbox.labz.s-box.org/vcaaron/flaskr/nix:2.24.9
+  stage: build
+  variables:
+    VERSION: "0.1.0"
+    REGISTRY: registry.sandbox.labz.s-box.org/SEI/polar-mirror
+  script:
+      #install needed tools
+    - nix-env --install --attr nixpkgs.skopeo
+    - |
+      echo "Configuring nix and the filesystem"
+      mkdir -p "$HOME/.config/nix"
+      mkdir -p "/etc/containers/"
+      #setup nixconfig
+      printf 'experimental-features = nix-command flakes' > "$HOME/.config/nix/nix.conf"
+      echo '{"default":[{"type":"insecureAcceptAnything"}]}' > /etc/containers/policy.json
+      git config --global --add safe.directory "$(pwd)"
+    - cd src/agents/
+
+    # TODO: run nix flake checks to run unit testing and other static analysis
+    # build workspace
+    - 'nix build --eval-system x86_64-linux --show-trace .#default'
+
+    # using already built dependencies, package and containerize our components.
+    - 'nix build --eval-system x86_64-linux --show-trace .#cassiniImage -o caassini'
+    - 'nix build --eval-system x86_64-linux --show-trace .#observerImage -o observer'
+    - 'nix build --eval-system x86_64-linux --show-trace .#consumerImage -o consumer'
+    
+    # TODO: Use skopeo to inspect and upload our images
+    - skopeo login --username "$CI_REGISTRY_USER" --password "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
+    - ls -lh
+    - | 
+      'skopeo inspect docker-archive://$(readlink -f ./cassini)'
+      'skopeo copy docker-archive://$(readlink -f ./cassini) docker://$REGISTRY/cassini:latest'
+      'skopeo inspect docker-archive://$(readlink -f ./observer)'
+      'skopeo copy docker-archive://$(readlink -f ./observer) docker://$REGISTRY/polar-gitlab-observer:latest'
+      'skopeo inspect docker-archive://$(readlink -f ./consumer)'
+      'skopeo copy docker-archive://$(readlink -f ./consumer) docker://$REGISTRY/polar-gitlab-consumer:latest'
+
+
+.anchore-scan:
+  image: 
+  stage: analysis
+
+  script:
+    #set up docker creds
+    - DOCKER_CONFIG=/anchore/config.json && echo $DOCKER_AUTH_CONFIG > /anchore/config.json   
+    - grype $IMAGE_NAME:IMAGE_TAG
+    - syft ${IMAGE_PATH} -o json=$CI_PROJECT_NAME-sbom-$CI_COMMIT_REF_NAME-syft.json
+    - grype sbom:sbom.syft.json -o json > $SYFT_FILENAME
+  artifacts:
+    paths:
+      - sbom.syft.json
+      - $SYFT_FILENAME
+
+
+# Anchore Template to run Grype and Syft on Application Pipelines 
+# Grype will provide container scanning capabilities
+# Syft will provide an automated Software Bill of Materials
+.anchore:
+  image: registry.sandbox.labz.s-box.org/vcaaron/flaskr/nix:2.24.9
+  stage: analysis
+  variables:
+    SYFT_FILENAME: "$CI_JOB_NAME-sbom-$CI_COMMIT_REF_NAME-syft.json"
+  before_script:
+  - nix-env -iA nixpkgs.grype
+  - nix-env -iA nixpkgs.syft
+  script:
+    #check image path is provided, and do setup for production builds
+    - 'if [ -z "$IMAGE_PATH" ]; then echo "ERROR: IMAGE_PATH has not been provided. Please provide a full path to a docker image. (i.e. docker.io/somerepository/image:tag)"; exit 1; fi'
+    #set up docker creds
+    - DOCKER_CONFIG=/anchore/config.json && echo $DOCKER_AUTH_CONFIG > /anchore/config.json   
+    - grype ${IMAGE_PATH} --scope all-layers
+    - syft ${IMAGE_PATH} --scope all-layers -o json=$SYFT_FILENAME
+
+  artifacts:
+    paths:
+      - sbom.syft.json
+      - $SYFT_FILENAME
+
+acnhore-scan-cassini:
+  extends: .anchore
+  variables:
+    IMAGE_PATH: registry.sandbox.labz.s-box.org/sei/polar-mirror/cassini:latest
+
+acnhore-scan-gitlab-consumer:
+  extends: .anchore
+  variables:
+    IMAGE_PATH: registry.sandbox.labz.s-box.org/sei/polar-mirror/polar-gitlab-consumer:latest
+
+acnhore-scan-gitlab-observer:
+  extends: .anchore
+  variables:
+    IMAGE_PATH: registry.sandbox.labz.s-box.org/sei/polar-mirror/polar-gitlab-observer:latest
+
+trufflehog-scan:
+  stage: analysis
+  image: registry.sandbox.labz.s-box.org/vcaaron/flaskr/nix:2.24.9 
+  script:
+      - nix-env -iA nixpkgs.trufflehog
+      - trufflehog3 -f json -o trufflehog_results.json .
+  artifacts:
+      when: always
+      paths:
+          - trufflehog_results.json

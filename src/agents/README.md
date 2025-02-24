@@ -87,6 +87,7 @@ nix build \
 --show-trace \
 --impure         
 
+nix build --eval-system x86_64-linux --show-trace --impure .#packages.x86_64-linux.observerImage .#packages.x86_64-linux.consumerImage .#packages.x86_64-linux.cassiniImage           
 # Impure remote checks
 # nix flake check --eval-system x86_64-linux --builders "ssh://user@some-linux-host x86_64-linux" --show-trace --impure   
 ```
