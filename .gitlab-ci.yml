@@ -1,5 +1,4 @@
 stages:
-- antivirus
 - build
 - analysis
 
@@ -7,21 +6,7 @@ default:
   tags:
     - kubernetes
 
-clamav-scan:
-  stage: antivirus
-  image:  registry.sandbox.labz.s-box.org/vcaaron/flaskr/nix:2.24.9
-  before_script:
-    - nix-env -iA nixpkgs.clamav
-  script:
-    - clamscan --version
-    - clamscan --recursive . > "clamav-scan-results-${CI_COMMIT_REF_NAME}.txt"
-  artifacts:
-    paths:
-      - "clamav-scan-results-*.txt"
-    expire_in: 1 week #TODO: confirm length of time to keep these results
-
-
-build-dev-enviornment:
+build-enviornments:
   image: registry.sandbox.labz.s-box.org/vcaaron/flaskr/nix:2.24.9
   stage: build
   variables:
@@ -90,23 +75,6 @@ build-workspace:
       'skopeo inspect docker-archive://$(readlink -f ./consumer)'
       'skopeo copy docker-archive://$(readlink -f ./consumer) docker://$REGISTRY/polar-gitlab-consumer:latest'
 
-
-.anchore-scan:
-  image: 
-  stage: analysis
-
-  script:
-    #set up docker creds
-    - DOCKER_CONFIG=/anchore/config.json && echo $DOCKER_AUTH_CONFIG > /anchore/config.json   
-    - grype $IMAGE_NAME:IMAGE_TAG
-    - syft ${IMAGE_PATH} -o json=$CI_PROJECT_NAME-sbom-$CI_COMMIT_REF_NAME-syft.json
-    - grype sbom:sbom.syft.json -o json > $SYFT_FILENAME
-  artifacts:
-    paths:
-      - sbom.syft.json
-      - $SYFT_FILENAME
-
-
 # Anchore Template to run Grype and Syft on Application Pipelines 
 # Grype will provide container scanning capabilities
 # Syft will provide an automated Software Bill of Materials
@@ -118,6 +86,16 @@ build-workspace:
   before_script:
   - nix-env -iA nixpkgs.grype
   - nix-env -iA nixpkgs.syft
+  - mkdir -p ~/.docker
+  - | 
+    echo '{
+      "auths": {
+        "'$CI_REGISTRY'": {
+          "auth": "'$(echo -n "$CI_REGISTRY_USER:$CI_REGISTRY_PASSWORD" | base64)'"
+        }
+      }
+    }' > ~/.docker/config.json
+
   script:
     #check image path is provided, and do setup for production builds
     - 'if [ -z "$IMAGE_PATH" ]; then echo "ERROR: IMAGE_PATH has not been provided. Please provide a full path to a docker image. (i.e. docker.io/somerepository/image:tag)"; exit 1; fi'
