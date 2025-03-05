@@ -65,7 +65,7 @@ Three important parts of the framework implementation include:
 All credentials, endpoints, and the like should be read in as environment variables,possibly from an environment file. There is an example an environment file in the gitlab agent [README](./docs/README_gitlab.md) in the manual setup.
 
 ## Getting Started
-Please consult the [README](./docs/README_gitlab.md) in the docs folder 
+Please consult the [README](./docs/gitlab/README_gitlab.md) in the docs folder 
 
 ## Additional Resources
 * [Polar: Improving DevSecOps Observability](https://insights.sei.cmu.edu/blog/polar-improving-devsecops-observability/): Blog that provides comprehensive insights into Polar's architecture, components, and capabilities.
