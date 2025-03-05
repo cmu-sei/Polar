@@ -25,7 +25,7 @@ DM24-0470
 # Polar
 
 <p align="center">
-  <img width="300" height="300" src="docs/Polar-Logo.png">
+  <img width="300" height="300" src="docs/gitlab/Polar-Logo.png">
 </p>
 
 ## Background
