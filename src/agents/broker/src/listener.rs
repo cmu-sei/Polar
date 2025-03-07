@@ -92,6 +92,9 @@ impl Actor for ListenerManager {
                while let Ok((stream, _)) = server.accept().await {
 
                     let acceptor = acceptor.clone();
+
+                    // FIXME: Looks like this expect crashes whenever a client unexpectedly disconnects due to a crash, 
+                    // which I thought would be handled below, but I'm not so sure. We should probably handle this result, restarting the loop or something.
                     
                     let stream = acceptor.accept(stream).await.expect("Expected to complete tls handshake");
 
@@ -547,7 +550,6 @@ impl Actor for Listener {
                     //if we're registered, propagate to session agent
                      
                     let id = registration_id.unwrap();
-                    // TODO: Write error message back to client? If we get an error doing this, the client may not care since they're disconnecting anyway
                     match where_is(id.clone()) {
                         Some(session) => session.send_message(BrokerMessage::DisconnectRequest { client_id, registration_id: Some(id.to_string()) })
                         .map_err(|e| {

@@ -226,7 +226,7 @@ impl BrokerMessage {
     }
 }
 
-///TODO: Consider a different naming convention for the subscribers, right now they're named directly after the session they represent and the topic they subscribe to
+///Consider a different naming convention for the subscribers, right now they're named directly after the session they represent and the topic they subscribe to
 /// IF we wanted to support topics subscribing to topics e.g overloading the type of subscriber topics can have, we will want to reconsider this approach.
 pub fn get_subscriber_name(registration_id: &str, topic: &str) -> String { format!("{0}:{1}", registration_id, topic) }
 

@@ -12,7 +12,6 @@ use crate::UNEXPECTED_MESSAGE_STR;
 pub struct SessionManager;
 
 /// Our representation of a connected session, and how close it is to timing out
-/// TODO: What other fields might we want to have here?
 pub struct Session {
     agent_ref: ActorRef<BrokerMessage>,
 }
