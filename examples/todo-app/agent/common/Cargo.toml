@@ -1,0 +1,13 @@
+[package]
+name = "common"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+polar ={ path = "../../../../src/agents/lib" }
+ractor = { version="0.14.1", features = ["async-trait"]}
+rkyv = "0.8.10"
+serde = { version = "1.0.218", features = ["derive"] }
+tracing = "0.1.41"
+tracing-glog = "0.4.0"
+tracing-subscriber = { version ="0.3.19", features=["std", "env-filter"]}

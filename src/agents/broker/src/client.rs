@@ -84,7 +84,8 @@ impl Actor for TcpClientActor {
         let addr = state.bind_addr.clone();
         info!("Connecting to {addr}");
         let connector = TlsConnector::from(Arc::clone(&state.client_config));
-        
+
+        //TODO: Refactor, just expect this first connect to succeed and match the TLS connection result 
         match TcpStream::connect(&addr).await {
             Ok(tcp_stream) => {
                 //TODO: establish better "Common Name" for the broker server
@@ -134,11 +135,9 @@ impl Actor for TcpClientActor {
                                                     if result.is_ok() {
                                                         
                                                         //try to find dispatcher
-                                                        if let Some(dispatcher) = where_is("DISPATCH".to_string()) {
-                                                            if let Err(e) = dispatcher.send_message(DispatcherMessage::Dispatch { message: payload, topic }) {
-                                                                warn!("Failed to forward new message to agent");
-                                                            }
-                                                        }
+                                                        let dispatcher = where_is("DISPATCH".to_string()).expect("Expected to find dispatcher.");
+                                                        dispatcher.send_message(DispatcherMessage::Dispatch { message: payload, topic }).expect("Expected to send to dispatcher");
+                                                        
                                                     } else {
                                                         warn!("Failed to publish message to topic: {topic}");
                                                     }

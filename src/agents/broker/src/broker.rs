@@ -1,6 +1,6 @@
 use tracing::{debug, error, info, warn};
 use crate::{
-    get_subscriber_name, listener::{ ListenerManager, ListenerManagerArgs }, session::{ SessionManager, SessionManagerArgs }, subscriber::SubscriberManager, topic::{ TopicManager, TopicManagerArgs }, SUBSCRIBE_REQUEST_FAILED_TXT, UNEXPECTED_MESSAGE_STR
+    get_subscriber_name, listener::{ ListenerManager, ListenerManagerArgs }, session::{ SessionManager, SessionManagerArgs }, subscriber::SubscriberManager, topic::{ TopicManager, TopicManagerArgs }, LISTENER_MGR_NOT_FOUND_TXT, SUBSCRIBE_REQUEST_FAILED_TXT, UNEXPECTED_MESSAGE_STR
 };
 use crate::{
     BrokerMessage,
@@ -207,13 +207,8 @@ impl Actor for Broker {
                         // Alert subscriber manager so that any waiting messages get sent
                         let sub_mgr = where_is(SUBSCRIBER_MANAGER_NAME.to_string()).expect("Expected to find subscriber manager.");
 
-                        if let Err(e) = sub_mgr.send_message(BrokerMessage::RegistrationRequest { registration_id: Some(id.clone()), client_id: client_id.clone() }){
-                            let err_msg = format!("{REGISTRATION_REQ_FAILED_TXT}: {SUBSCRIBER_MGR_NOT_FOUND_TXT}, messages may have been lost! {e}");
-                            error!("{err_msg}");
-                            if let Some(listener) = where_is(id.clone()) {
-                                listener.send_message(BrokerMessage::RegistrationResponse { registration_id: Some(id.clone()), client_id:  client_id.clone(), success: false, error: Some(err_msg) }).unwrap();
-                            }
-                        }
+                        sub_mgr.send_message(BrokerMessage::RegistrationRequest { registration_id: Some(id.clone()), client_id: client_id.clone() }).expect("Expected to send message");
+
                     }
                     None => {
                         // start new session
@@ -247,125 +242,97 @@ impl Actor for Broker {
                         None => {
                             match where_is(topic.clone()) {
                                 Some(actor) => {
-                                    if let Some(manager) = where_is(SUBSCRIBER_MANAGER_NAME.to_string()) {
-                                        let t = topic.clone();
-                                        let id = registration_id .clone();
-                                        
-                                        // If no subscriber exists,
-                                        match call(&manager, |reply| { BrokerMessage::Subscribe { reply: reply, registration_id: id.clone(), topic: t.clone() } }, None)
-                                        .await.expect("Expected to call Subscriber Manager") { //TODO: Don't panic with expect, call .map_err and stop cleanly
-                                            Success(add_subscribeer) => {
-                                                match add_subscribeer {
-                                                    Ok(_) => {
-                                                        //  create one, then notify topic actor, subscribe to it on behalf of the session
-                                                        match call(&actor,|reply| { 
-                                                            BrokerMessage::Subscribe { reply, registration_id: registration_id.clone(), topic: topic.clone() } }, None)
-                                                            .await.expect("Expected to call topic actor") {
-                                                            Success(result) => {
-                                                                match result {
-                                                                    Ok(_) => {
-                                                                        //send ack to session
-                                                                        if let Some(session) = where_is(registration_id.clone()) {
-                                                                            if let Err(e) = session.send_message(BrokerMessage::SubscribeAcknowledgment { registration_id: registration_id.clone(), topic: topic.clone(), result: Ok(()) }) {
-                                                                                warn!("{SUBSCRIBE_REQUEST_FAILED_TXT} {e}");
-                                                                            }
-                                                                        } else {
-                                                                            warn!("{SUBSCRIBE_REQUEST_FAILED_TXT} {SESSION_NOT_FOUND_TXT}");
-                                                                            todo!("Send error message to client")
+                                    let subscriber_manager = where_is(SUBSCRIBER_MANAGER_NAME.to_string()).expect("Expected to find subscriber manager.");
+                                    let t = topic.clone();
+                                    let id = registration_id .clone();
+                                    
+                                    // If no subscriber exists,
+                                    match call(&subscriber_manager, |reply| { BrokerMessage::Subscribe { reply: reply, registration_id: id.clone(), topic: t.clone() } }, None)
+                                    .await.expect("Expected to call Subscriber Manager") {
+                                        Success(add_subscribeer) => {
+                                            match add_subscribeer {
+                                                Ok(_) => {
+                                                    //  create one, then notify topic actor, subscribe to it on behalf of the session
+                                                    match call(&actor,|reply| { 
+                                                        BrokerMessage::Subscribe { reply, registration_id: registration_id.clone(), topic: topic.clone() } }, None)
+                                                        .await.expect("Expected to call topic actor") {
+                                                        Success(result) => {
+                                                            match result {
+                                                                Ok(_) => {
+                                                                    //send ack to session
+                                                                    if let Some(session) = where_is(registration_id.clone()) {
+                                                                        if let Err(e) = session.send_message(BrokerMessage::SubscribeAcknowledgment { registration_id: registration_id.clone(), topic: topic.clone(), result: Ok(()) }) {
+                                                                            warn!("{SUBSCRIBE_REQUEST_FAILED_TXT} {e}");
                                                                         }
-                                                                    }
-                                                                    Err(e) => {
-                                                                        warn!("{SUBSCRIBE_REQUEST_FAILED_TXT} {e}");
-                                                                        //send error to client
+                                                                    } else {
+                                                                        warn!("{SUBSCRIBE_REQUEST_FAILED_TXT} {SESSION_NOT_FOUND_TXT}");
                                                                     }
                                                                 }
+                                                                Err(e) => {
+                                                                    warn!("{SUBSCRIBE_REQUEST_FAILED_TXT} {e}");
+                                                                }
                                                             }
-                                                            _ => todo!()
                                                         }
-                                                    }
-                                                    Err(e) => {
-                                                        warn!("{e}");
-                                                        todo!("Send error message")
+                                                        _ => ()
                                                     }
                                                 }
-                                            }
-                                            _ => {
-                                                // failed
-                                                todo!("Send error message")
-                                                //TODO: Stop broker we fail to communicate with critical actor
+                                                Err(e) => {
+                                                    warn!("{e}");
+                                                    todo!("Send error message")
+                                                }
                                             }
                                         }
-                                    } else {
-                                        // failed
-                                        todo!("Send error message")
-                                        //TODO: Stop broker we fail to communicate with critical actor
+                                        _ => panic!("Subscriber Manager failed to fulfill subscription. Likely because of failure")
                                     }
-
                                 },
                                 None => {
                                     //no topic actor exists, tell manager to make one
-                                    
-                                
-                                    let topic_mgr = where_is(TOPIC_MANAGER_NAME.to_owned());
-                                    let sub_mgr = where_is(SUBSCRIBER_MANAGER_NAME.to_owned());
+                                    let topic_mgr = where_is(TOPIC_MANAGER_NAME.to_owned()).expect("Expected to find topic manager.");
+                                    let sub_mgr = where_is(SUBSCRIBER_MANAGER_NAME.to_owned()).expect("Expected to find subscriber manager.");
 
                                     let t = topic.clone();
-                                    let id = registration_id.clone();
 
-                                    //TODO: Remove this if/else case, if we don't have either of these actor's present, the broker isn't in a sane state, just panic/fail
-                                    if topic_mgr.is_some() && sub_mgr.is_some() {
-
-                                        // create a topic on the session's behalf
-                                        match call(&topic_mgr.unwrap(), |reply| { BrokerMessage::AddTopic { reply: reply, registration_id: Some(registration_id.clone()), topic: t.clone() } }, None)
-                                        .await.expect("Expected to call Topic Manager") {
-                                            Success(result) => {
-                                                match result {
-                                                    Ok(_) => {
-                                                        // create subscriber
-                                                        match call(&sub_mgr.unwrap(), |reply| {
-                                                            BrokerMessage::Subscribe { reply, registration_id: registration_id.clone(), topic: topic.clone() }
-                                                        }, None).await.expect("Expected to communicate with subscriber manager")
-                                                        {
-                                                            Success(result) => {
-                                                                match result{
-                                                                    Ok(_) => {
-                                                                        //send ack to session
-                                                                        if let Some(session) = where_is(registration_id.clone()) {
-                                                                            if let Err(e) = session.send_message(BrokerMessage::SubscribeAcknowledgment { registration_id: registration_id, topic: topic.clone(), result: Ok(()) }) {
-                                                                                warn!("{SUBSCRIBE_REQUEST_FAILED_TXT} {SESSION_NOT_FOUND_TXT}");
-                                                                            }
-                                                                        } else { warn!("{SUBSCRIBE_REQUEST_FAILED_TXT} {SESSION_NOT_FOUND_TXT}"); }
-                                                                    }
-                                                                    Err(e) => {
-                                                                        //send err to session
-                                                                        if let Some(session) = where_is(registration_id.clone()) {
-                                                                            if let Err(e) = session.send_message(BrokerMessage::SubscribeAcknowledgment { registration_id: registration_id, topic: topic.clone(), result: Err(e) }) {
-                                                                                warn!("{SUBSCRIBE_REQUEST_FAILED_TXT} {SESSION_NOT_FOUND_TXT} {e}");
-                                                                            }
-                                                                        } else { warn!("{SUBSCRIBE_REQUEST_FAILED_TXT} {SESSION_NOT_FOUND_TXT} {e}"); }
-                                                                    }
+                                    // create a topic on the session's behalf
+                                    match call(&topic_mgr, |reply| { BrokerMessage::AddTopic { reply: reply, registration_id: Some(registration_id.clone()), topic: t.clone() } }, None)
+                                    .await.expect("Expected to call Topic Manager") {
+                                        Success(result) => {
+                                            match result {
+                                                Ok(_) => {
+                                                    // create subscriber
+                                                    match call(&sub_mgr, |reply| {
+                                                        BrokerMessage::Subscribe { reply, registration_id: registration_id.clone(), topic: topic.clone() }
+                                                    }, None).await.expect("Expected to communicate with subscriber manager")
+                                                    {
+                                                        Success(result) => {
+                                                            match result{
+                                                                Ok(_) => {
+                                                                    //send ack to session
+                                                                    if let Some(session) = where_is(registration_id.clone()) {
+                                                                        if let Err(e) = session.send_message(BrokerMessage::SubscribeAcknowledgment { registration_id: registration_id, topic: topic.clone(), result: Ok(()) }) {
+                                                                            warn!("{SUBSCRIBE_REQUEST_FAILED_TXT} {SESSION_NOT_FOUND_TXT}");
+                                                                        }
+                                                                    } else { warn!("{SUBSCRIBE_REQUEST_FAILED_TXT} {SESSION_NOT_FOUND_TXT}"); }
                                                                 }
-                                                            },
-                                                            _ => todo!("Failed to communicate with critical worker")
-                                                        }      
-                                                    }
-                                                    Err(e) => {
-                                                        warn!("{e}");
-                                                        todo!("Send error message")
-                                                    }
+                                                                Err(e) => {
+                                                                    //send err to session
+                                                                    if let Some(session) = where_is(registration_id.clone()) {
+                                                                        if let Err(e) = session.send_message(BrokerMessage::SubscribeAcknowledgment { registration_id: registration_id, topic: topic.clone(), result: Err(e) }) {
+                                                                            warn!("{SUBSCRIBE_REQUEST_FAILED_TXT} {SESSION_NOT_FOUND_TXT} {e}");
+                                                                        }
+                                                                    } else { warn!("{SUBSCRIBE_REQUEST_FAILED_TXT} {SESSION_NOT_FOUND_TXT} {e}"); }
+                                                                }
+                                                            }
+                                                        },
+                                                        _ => todo!("Failed to communicate with critical worker")
+                                                    }      
+                                                }
+                                                Err(e) => {
+                                                    warn!("{e}");
+                                                    todo!("Send error message")
                                                 }
                                             }
-                                            _ => {
-                                                // failed
-                                                todo!("Send error message")
-                                                //TODO: Stop broker we fail to communicate with critical actor
-                                            }
                                         }
-
-                                        
-                                    } else {
-                                        error!("{}", format!("{SUBSCRIBE_REQUEST_FAILED_TXT}: Failed to locate one or more managers!"));
-                                        todo!("What to do here?");
+                                        _ => panic!("Topic Manager failed to add a topic.")   
                                     }
                                 },
                             }
@@ -383,27 +350,9 @@ impl Actor for Broker {
                             warn!("Failed to find topic to unsubscribe to")
                         }
                         // tell subscriber manager to cleanup subscribers
-                        if let Some(subscriber_mgr) = where_is(SUBSCRIBER_MANAGER_NAME.to_string()) {
-                            if let Err(e) = subscriber_mgr.send_message(BrokerMessage::UnsubscribeRequest { registration_id: Some(registration_id.clone()), topic: topic.clone() }) {
-                                error!("{e}");
-                                if let Some(session) = where_is(registration_id.clone()) {
-                                    if let Err(e) = session.send_message(BrokerMessage::UnsubscribeAcknowledgment { registration_id, topic: topic.clone(), result: Err(e.to_string()) }) {
-                                        error!("{e}");
-                                    }
-                                }
-                                //TODO: Stop self here?
-                            }
-                        } else {
-                            let msg = "Failed to unsubscribe from topic".to_string();
-    
-                            error!("{msg}");
-                            if let Some(session) = where_is(registration_id.clone()) {
-                                if let Err(e) = session.send_message(BrokerMessage::UnsubscribeAcknowledgment { registration_id, topic: topic.clone(), result: Err(msg) }) {
-                                    error!("{e}");
-                                }
-                            }
-                            //TODO: Stop self here?
-                        }
+                        let subscriber_mgr = where_is(SUBSCRIBER_MANAGER_NAME.to_string()).expect(SUBSCRIBER_MGR_NOT_FOUND_TXT);
+                        subscriber_mgr.send_message(BrokerMessage::UnsubscribeRequest { registration_id: Some(registration_id.clone()), topic: topic.clone() }).expect("Error sending message to subscriber manager.");
+
                     }
                 }
                                 
@@ -486,32 +435,30 @@ impl Actor for Broker {
             BrokerMessage::DisconnectRequest { client_id, registration_id } => {
                 //start cleanup
                 info!("Cleaning up session {registration_id:?}");
-                if let Some(manager) = where_is(SUBSCRIBER_MANAGER_NAME.to_string()) {
-                    manager.send_message(BrokerMessage::DisconnectRequest {
-                        client_id: client_id.clone(),
-                        registration_id: registration_id.clone(),
-                    }).expect("Expected to forward message");
-                    
-                }
+                let subscriber_mgr = where_is(SUBSCRIBER_MANAGER_NAME.to_string()).expect(SUBSCRIBER_MGR_NOT_FOUND_TXT);
+                subscriber_mgr.send_message(BrokerMessage::DisconnectRequest {
+                    client_id: client_id.clone(),
+                    registration_id: registration_id.clone(),
+                }).expect("Expected to forward message"); 
+                
                 // Tell listener manager to kill listener, it's not coming back
-                if let Some(manager) = where_is(LISTENER_MANAGER_NAME.to_string()) {
-                    manager.send_message(BrokerMessage::DisconnectRequest {
-                        client_id: client_id.clone(),
-                        registration_id,
-                    }).expect("Expected to forward message");
-                }
+                let listener_mgr = where_is(LISTENER_MANAGER_NAME.to_string()).expect(LISTENER_MGR_NOT_FOUND_TXT);
+
+                listener_mgr.send_message(BrokerMessage::DisconnectRequest {
+                    client_id: client_id.clone(),
+                    registration_id,
+                }).expect("Expected to forward message");
+            
             }
             BrokerMessage::TimeoutMessage { client_id, registration_id, error } => {
                 //cleanup subscribers
                 
-                if let Some(manager) = where_is(SUBSCRIBER_MANAGER_NAME.to_string()) {
-                    manager.send_message(BrokerMessage::TimeoutMessage {
-                        client_id: client_id.clone(),
-                        registration_id: registration_id.clone(),
-                        error: error.clone()
-                    }).expect("Expected to forward message");
-                    
-                }
+                let manager = where_is(SUBSCRIBER_MANAGER_NAME.to_string()).expect(SUBSCRIBER_MGR_NOT_FOUND_TXT);
+                manager.send_message(BrokerMessage::TimeoutMessage {
+                    client_id: client_id.clone(),
+                    registration_id: registration_id.clone(),
+                    error: error.clone()
+                }).expect("Expected to forward message");                
             }
             _ => warn!(UNEXPECTED_MESSAGE_STR)
         }
