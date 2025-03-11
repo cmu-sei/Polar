@@ -1,6 +1,6 @@
 use rkyv::{deserialize, rancor::{self, Error, Source}};
 use rustls::{pki_types::{pem::PemObject, CertificateDer, PrivateKeyDer}, server::WebPkiClientVerifier, RootCertStore, ServerConfig};
-use tokio::{io::{split, AsyncReadExt, AsyncWriteExt, BufWriter, ReadHalf, WriteHalf}, net::{TcpListener, TcpStream}, sync::Mutex};
+use tokio::{io::{split, AsyncReadExt, AsyncWriteExt, BufWriter, ReadHalf, WriteHalf}, net::{unix::SocketAddr, TcpListener, TcpStream}, sync::Mutex};
 use tokio_rustls::{server::TlsStream, TlsAcceptor};
 use tracing::{debug, error, info, warn};
 use std::sync::Arc;
@@ -86,36 +86,42 @@ impl Actor for ListenerManager {
         let server = TcpListener::bind(bind_addr.clone()).await.expect("could not start tcp listener");
         
         info!("ListenerManager: Server running on {bind_addr}");
-
+        
+        // Handle incoming connections on a seperate thread so the listener manager doesn't get blocked
         let _ = tokio::spawn(async move {
             
-               while let Ok((stream, _)) = server.accept().await {
+            while let Ok((stream, peer_addr)) = server.accept().await {
 
-                    let acceptor = acceptor.clone();
+                match acceptor.accept(stream).await {
+                    Ok(stream) => {
+                        // Generate a unique client ID
+                        let client_id = uuid::Uuid::new_v4().to_string();
+                                            
+                        // Create and start a new Listener actor for this connection
+                        
+                        let (reader, writer) = split(stream);
 
-                    // FIXME: Looks like this expect crashes whenever a client unexpectedly disconnects due to a crash, 
-                    // which I thought would be handled below, but I'm not so sure. We should probably handle this result, restarting the loop or something.
-                    
-                    let stream = acceptor.accept(stream).await.expect("Expected to complete tls handshake");
+                        let writer = tokio::io::BufWriter::new(writer);
+                        
+                        let listener_args = ListenerArguments {
+                            writer: Arc::new(Mutex::new(writer)),
+                            reader: Some(reader),
+                            client_id: client_id.clone(),
+                            registration_id: None
+                        };
 
-                    // Generate a unique client ID
-                    let client_id = uuid::Uuid::new_v4().to_string();
-                    
-                    // Create and start a new Listener actor for this connection
-                    
-                    let (reader, writer) = split(stream);
-
-                    let writer = tokio::io::BufWriter::new(writer);
-                    
-                    let listener_args = ListenerArguments {
-                        writer: Arc::new(Mutex::new(writer)),
-                        reader: Some(reader),
-                        client_id: client_id.clone(),
-                        registration_id: None
-                    };
-        
-                    //start listener actor to handle connection
-                    let _ = Actor::spawn_linked(Some(client_id.clone()), Listener, listener_args, myself.clone().into()).await.expect("Failed to start listener for new connection");
+                        //start listener actor to handle connection
+                        let _ = Actor::spawn_linked(Some(client_id.clone()), Listener, listener_args, myself.clone().into()).await.expect("Failed to start listener for new connection");
+                    }
+                    Err(e) => {
+                        //We probably got pinged or something, ignore but log the attempt.
+                        tracing::warn!(
+                            "TLS handshake failed from {}: {}",
+                            peer_addr,
+                            e
+                        );
+                    }
+                }
             }
         });
 
