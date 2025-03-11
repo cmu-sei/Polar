@@ -40,6 +40,7 @@ pub const RUNNERS_CONSUMER_TOPIC: &str = "gitlab:consumer:runners";
 pub const RUNNERS_ROUTING_KEY: &str = "gitlab_runners";
 
 // Checks for the existence of a lock file at the given path. Creates lock file if not found.
+#[deprecated]
 pub fn create_lock(filepath: &str) -> Result<bool, std::io::Error> {
     let file_path = std::path::Path::new(filepath);
     let exists = file_path.exists();
@@ -95,32 +96,6 @@ pub fn create_lock(filepath: &str) -> Result<bool, std::io::Error> {
     }
 }
 
-pub fn get_gitlab_token() -> String {
-    let token = read_from_env("GITLAB_TOKEN".to_owned());
-    //check length and prefix
-    if token.chars().count() == 26 && token.starts_with("glpat-") {
-        return token;
-    } else {
-        error!("received invalid private token from environment.");
-        process::exit(1)
-    }
-}
-
-pub fn get_gitlab_endpoint()-> String {
-    //verify URL is a valid format
-    let endpoint = read_from_env("GITLAB_ENDPOINT".to_owned());
-    match Url::parse(endpoint.as_str()) {
-        Ok(url) => {
-            return url.to_string()
-        }
-        Err(e) => {
-            error!("error parsing Gitlab Endpoint read from environment, {}", e);
-            process::exit(1)
-        }
-    }
-}
-
-
 /// Helper function to parse a file at a given path and return the raw bytes as a vector
 fn get_file_as_byte_vec(filename: &String) -> Vec<u8> {
     let mut f = match File::open(&filename) {
@@ -143,62 +118,5 @@ fn get_file_as_byte_vec(filename: &String) -> Vec<u8> {
     buffer
 }
 
-/// Get's a connection to rabbitmq using mutual TLS and no credentials, EXTERNAL authentication mechanisms
-/// Ensure valid certificates are present
-pub async fn connect_to_rabbitmq() -> Result<Connection, String> {
-    // You need to use amqp:// scheme here to handle the TLS part manually as it's automatic when you use amqps://
-    let rabbit_endpoint = read_from_env("BROKER_ENDPOINT".to_owned());
-    let cert_chain = read_from_env("TLS_CA_CERT".to_owned());
-    let client_key_file= read_from_env("TLS_CLIENT_KEY".to_owned());
-    let client_key_pwd = read_from_env("TLS_KEY_PASSWORD".to_owned());
 
-    let cert_chain = match std::fs::read_to_string(cert_chain) {
-        Ok(chain) => chain,
-        Err(e) => {
-            error!("Could not parse cert chain file as string: {}",e);
-            process::exit(1)
-        },
-    };
-
-   let tls_config = OwnedTLSConfig {
-        identity: Some(tcp_stream::OwnedIdentity {
-            der: get_file_as_byte_vec(&client_key_file),
-            password: client_key_pwd
-        }),
-        cert_chain: Some(cert_chain)
-
-    };
-
-   info!("connecting to: {}", rabbit_endpoint);
-    //TODO: confirm whether we wish to exit when we can't connect to the broker, do we want to keep retrying?
-   let conn = match Connection::connect_with_config(&rabbit_endpoint, ConnectionProperties::default() ,tls_config).await {
-    Ok(conn) => conn,
-    Err(e) => {
-        error!("Could not connect to rabbitmq! {}",e);
-        process::exit(1)
-    }
-   };
-   Ok(conn)
-}
-
-/// Publish a message to the rabbitmq instance at a given exchange, using the channel and routing key for a desired queue.
-pub async fn publish_message(payload: &[u8], channel: &Channel, exchange: &str, routing_key: &str){
-    
-    let confirmation = channel.basic_publish(exchange, routing_key, 
-    BasicPublishOptions::default(),
-        payload,
-        BasicProperties::default()).await.unwrap().await.unwrap();
-    
-    assert_eq!(confirmation, Confirmation::NotRequested);
-}
-
-pub fn read_from_env(var_name: String) -> String {
-    match env::var(var_name.clone()) {
-        Ok(val) => val,
-        Err(_) => {
-            error!("Can't read {} from environment", var_name);
-            process::exit(1)
-        }
-    }
-}
 

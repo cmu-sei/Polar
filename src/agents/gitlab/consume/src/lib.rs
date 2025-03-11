@@ -23,20 +23,15 @@
 
 
 use std::error::Error;
-
 use cassini::{client::TcpClientMessage, ClientMessage};
-//TODO: Move to global consumer common lib
-use common::{read_from_env, types::GitlabData};
 use gitlab_queries::{groups::GroupData, Namespace, Project};
 use tracing::{debug, error, info};
 use neo4rs::{Config, ConfigBuilder, Query, Txn};
 use ractor::{registry::where_is, ActorProcessingErr, MessagingErr};
 use url::Url;
 
-
 pub mod supervisor;
 pub mod users;
-//TODO: Uncomment when other actors are done
 pub mod projects;
 pub mod groups;
 pub mod runners;
@@ -77,23 +72,17 @@ pub async fn subscribe_to_topic(registration_id: String, topic: String) -> Resul
     }
 }
 
-pub fn get_neo4j_endpoint() -> String {
-    let endpoint = read_from_env("GRAPH_ENDPOINT".to_owned());
-    match Url::parse(endpoint.as_str()) {
-
-        Ok(url) => return url.to_string(),
-
-        Err(e) => panic!("error: {}, the  provided neo4j endpoint is not valid.", e)
-    }
-}
-
 pub fn get_neo_config() -> Config {
-    let database_name = read_from_env("GRAPH_DB".to_owned());
-    let neo_user = read_from_env("GRAPH_USER".to_owned());
-    let neo_password = read_from_env("GRAPH_PASSWORD".to_owned());
-    
+    let database_name = std::env::var("GRAPH_DB".to_owned()).expect("Expected to get a neo4j database. GRAPH_DB variable not set.");
+    let neo_user = std::env::var("GRAPH_USER".to_owned()).expect("No GRAPH_USER value set for Neo4J.");
+    let neo_password = std::env::var("GRAPH_PASSWORD".to_owned()).expect("No GRAPH_PASSWORD provided for Neo4J.");
+    let endpoint =  Url::parse(&std::env::var("GRAPH_ENDPOINT".to_owned())
+    .expect("No GRAPH_ENDPOINT provided."))
+    .expect("Please provide a valid url to a Neo4J instance.")
+    .to_string();
+
     let config = ConfigBuilder::new()
-    .uri(get_neo4j_endpoint())
+    .uri(endpoint)
     .user(&neo_user)
     .password(&neo_password)
     .db(&database_name)
