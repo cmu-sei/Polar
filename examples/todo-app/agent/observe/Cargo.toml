@@ -17,3 +17,5 @@ rkyv = "0.8.10"
 
 # Fix a vulnerability in a transitive dependency.
 ring = { version = "=0.17.14" }
+
+native-tls = { version = "=0.2.14" }
