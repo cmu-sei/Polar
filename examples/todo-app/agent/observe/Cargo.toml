@@ -14,3 +14,6 @@ cassini = { path = "../../../../src/agents/broker/" }
 common = { path = "../common"}
 ractor = { version="0.14.1", features = ["async-trait"]}
 rkyv = "0.8.10"
+
+# Fix a vulnerability in a transitive dependency.
+ring = { version = "=0.17.14" }

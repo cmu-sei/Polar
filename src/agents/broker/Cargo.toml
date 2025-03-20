@@ -20,6 +20,9 @@ tokio-rustls = "0.26.1"
 polar = { path = "../lib" }
 workspace-hack = { version = "0.1", path = "../workspace-hack" }
 
+# Fix a vulnerability in a transitive dependency.
+ring = { version = "=0.17.14" }
+
 [[bin]]
 name = "cassini-server"
 path = "src/main.rs"
