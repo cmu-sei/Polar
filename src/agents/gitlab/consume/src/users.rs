@@ -73,7 +73,7 @@ impl Actor for GitlabUserConsumer {
             GitlabData::Users(users) => {
                 //TODO: Expect transaction to start, panic if it doesn't
                 match state.graph.start_txn().await {
-                    Ok(transaction)  => {
+                    Ok(mut transaction)  => {
                         
                         let mut_cypher_query = String::new();
 
@@ -116,7 +116,7 @@ impl Actor for GitlabUserConsumer {
             }
             GitlabData::ProjectMembers(link) => {
                 match state.graph.start_txn().await {
-                    Ok(transaction) => {
+                    Ok(mut transaction) => {
                         let nodes = link.connection.nodes.unwrap();
                         
 

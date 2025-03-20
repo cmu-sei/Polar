@@ -73,7 +73,7 @@ impl Actor for GitlabRunnerConsumer {
             GitlabData::Runners(runners) => {
                                 //TODO: Expect transaction to start, panic if it doesn't
                 match state.graph.start_txn().await {
-                    Ok(transaction)  => {
+                    Ok(mut transaction)  => {
                         
                         let mut_cypher_query = String::new();
 

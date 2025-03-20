@@ -66,7 +66,7 @@ impl Actor for GitlabGroupConsumer {
 
         match message {
             GitlabData::Groups(vec) => {
-                let transaction = state.graph.start_txn().await.expect("Expected to start a transaction with the graph.");
+                let mut transaction = state.graph.start_txn().await.expect("Expected to start a transaction with the graph.");
 
                 for g in vec {
                     let query = format!(r#"
@@ -87,7 +87,7 @@ impl Actor for GitlabGroupConsumer {
                 transaction.commit().await.expect("Expected to commit transaction");
             },
             GitlabData::GroupMembers(link) => {
-                let transaction = state.graph.start_txn().await.expect("expected transaction");
+                let mut transaction = state.graph.start_txn().await.expect("expected transaction");
                 
                 if let Some(vec)  =  link.connection.nodes {
                     let group_memberships = vec
@@ -143,7 +143,7 @@ impl Actor for GitlabGroupConsumer {
                 }
             }
             GitlabData::GroupProjects(link) => {
-                let transaction = state.graph.start_txn().await.expect("expected transaction");
+                let mut transaction = state.graph.start_txn().await.expect("expected transaction");
                 
                 if let Some(vec)  =  link.connection.nodes {
                     let projects = vec
@@ -178,7 +178,7 @@ impl Actor for GitlabGroupConsumer {
                 }
             }
             GitlabData::GroupRunners(link) => {
-                let transaction = state.graph.start_txn().await.expect("expected transaction");
+                let mut transaction = state.graph.start_txn().await.expect("expected transaction");
                 
                 if let Some(vec)  =  link.connection.nodes {
                     let runners = vec

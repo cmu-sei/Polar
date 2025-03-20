@@ -73,22 +73,22 @@ pub async fn subscribe_to_topic(registration_id: String, topic: String) -> Resul
 }
 
 pub fn get_neo_config() -> Config {
-    let database_name = std::env::var("GRAPH_DB".to_owned()).expect("Expected to get a neo4j database. GRAPH_DB variable not set.");
-    let neo_user = std::env::var("GRAPH_USER".to_owned()).expect("No GRAPH_USER value set for Neo4J.");
-    let neo_password = std::env::var("GRAPH_PASSWORD".to_owned()).expect("No GRAPH_PASSWORD provided for Neo4J.");
-    let endpoint =  Url::parse(&std::env::var("GRAPH_ENDPOINT".to_owned())
-    .expect("No GRAPH_ENDPOINT provided."))
-    .expect("Please provide a valid url to a Neo4J instance.")
-    .to_string();
+    let database_name = std::env::var("GRAPH_DB").expect("Expected to get a neo4j database. GRAPH_DB variable not set.");
+    let neo_user = std::env::var("GRAPH_USER").expect("No GRAPH_USER value set for Neo4J.");
+    let neo_password = std::env::var("GRAPH_PASSWORD").expect("No GRAPH_PASSWORD provided for Neo4J.");
+    let neo4j_endpoint = std::env::var("GRAPH_ENDPOINT").expect("No GRAPH_ENDPOINT provided.");
 
-    let config = ConfigBuilder::new()
-    .uri(endpoint)
-    .user(&neo_user)
-    .password(&neo_password)
-    .db(&database_name)
-    .fetch_size(500).max_connections(10).build().unwrap();
-    
-    return config;
+    let config = ConfigBuilder::default() // Change from `new()` to `default()` if required
+        .uri(neo4j_endpoint)
+        .user(neo_user) // `.user(&str)` now takes ownership
+        .password(neo_password) // `.password(&str)` now takes ownership
+        .db(database_name) // `.db(&str)` now takes ownership
+        .fetch_size(500)
+        .max_connections(10)
+        .build()
+        .expect("Failed to build Neo4j configuration");
+
+    config
 }
 /// Helper function to create group nodes
 // pub fn merge_group_query(group: Group) -> String {

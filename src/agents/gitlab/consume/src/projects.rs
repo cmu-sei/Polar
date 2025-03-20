@@ -71,7 +71,7 @@ impl Actor for GitlabProjectConsumer {
 
         match message {
             GitlabData::Projects(projects) => {
-                let transaction = state.graph.start_txn().await.expect("Expected to start a transaction with the graph.");
+                let mut transaction = state.graph.start_txn().await.expect("Expected to start a transaction with the graph.");
                 // Create list of projects
                 let project_array = projects.iter()
                     .map(|project| {
