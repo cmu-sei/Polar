@@ -15,7 +15,7 @@
     };
   };
 
-  outputs = { self, nixpkgs, crane, rust-overlay, flake-utils, advisory-db, ... }:
+  outputs = { self, nixpkgs, crane, rust-overlay, flake-utils, advisory-db }:
     flake-utils.lib.eachDefaultSystem (system:
       let
         overlays = [ (import rust-overlay) ];
@@ -24,6 +24,19 @@
         };
         
         inherit (pkgs) lib;
+
+        # Define the devShell
+        devShell = pkgs.mkShell {
+          nativeBuildInputs = [ pkgs.pkg-config ];
+          buildInputs = [ pkgs.openssl ];
+
+          shellHook = ''
+            export OPENSSL_DIR="${pkgs.openssl.dev}"
+            export OPENSSL_LIB_DIR="${pkgs.openssl.out}/lib"
+            export OPENSSL_INCLUDE_DIR="${pkgs.openssl.dev}/include"
+            export PKG_CONFIG_PATH="${pkgs.openssl.dev}/lib/pkgconfig"
+          '';
+        };
 
         # NB: we don't need to overlay our custom toolchain for the *entire*
         # pkgs (which would require rebuidling anything else which uses rust).
@@ -301,7 +314,9 @@
               ];
             };
           };
-          };
+        };
+
+        devShells.default = devShell;
       });
 }
 
