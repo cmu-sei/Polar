@@ -28,8 +28,8 @@ percent-encoding = { version = "2" }
 regex = { version = "1" }
 regex-automata = { version = "0.4", default-features = false, features = ["dfa-onepass", "hybrid", "meta", "nfa-backtrack", "perf-inline", "perf-literal", "unicode"] }
 regex-syntax = { version = "0.8" }
-rustls = { version = "0.23", features = ["ring"] }
-rustls-webpki = { version = "0.102", default-features = false, features = ["aws_lc_rs", "ring", "std"] }
+rustls = { version = "=0.23.25", features = ["ring"] }
+rustls-webpki = { version = "=0.103.0", default-features = false, features = ["aws-lc-rs", "ring", "std"] }
 simdutf8 = { version = "0.1", default-features = false, features = ["std"] }
 smallvec = { version = "1", default-features = false, features = ["const_generics"] }
 tokio = { version = "1", features = ["full", "tracing"] }
