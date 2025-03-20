@@ -15,7 +15,7 @@ uuid = { version = "1.11.0", features = ["v4"] }
 tokio-util = "0.7.13"
 #TODO: Consider using FIPS cryptography features?
 # REFERENCE: https://docs.rs/rustls/latest/rustls/index.html#crate-features
-rustls = { version = "0.23.20", features = ["aws_lc_rs"]}
+rustls = { version = "=0.23.25", features = ["aws-lc-rs"] }
 tokio-rustls = "0.26.1"
 polar = { path = "../lib" }
 workspace-hack = { version = "0.1", path = "../workspace-hack" }
