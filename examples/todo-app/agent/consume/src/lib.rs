@@ -16,14 +16,18 @@ pub fn get_neo_config() -> Config {
     let neo_user = env::var("GRAPH_USER").unwrap();
     let neo_password = env::var("GRAPH_PASSWORD").unwrap();
     let neo4j_endpoint = env::var("GRAPH_ENDPOINT").unwrap();
-    let config = ConfigBuilder::new()
-    .uri(neo4j_endpoint)
-    .user(&neo_user)
-    .password(&neo_password)
-    .db(&database_name)
-    .fetch_size(500).max_connections(10).build().unwrap();
-    
-    return config;
+
+    let config = ConfigBuilder::default() // Change from `new()` to `default()` if required
+        .uri(neo4j_endpoint)
+        .user(neo_user) // `.user(&str)` now takes ownership
+        .password(neo_password) // `.password(&str)` now takes ownership
+        .db(database_name) // `.db(&str)` now takes ownership
+        .fetch_size(500)
+        .max_connections(10)
+        .build()
+        .expect("Failed to build Neo4j configuration");
+
+    config
 }
 
 /// Helper fn to setup consumer state, subscribe to a given topic, and connect to the graph database

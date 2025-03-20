@@ -180,7 +180,7 @@ impl Actor for TodoConsumer {
         match message {
             TodoData::Todo(vec) => {
       
-                let transaction = state.graph.start_txn().await.expect("Expected to start transaction");
+                let mut transaction = state.graph.start_txn().await.expect("Expected to start transaction");
 
                 for todo in vec as Vec<Todo> {
                     let mut query = format!("CREATE (n: Todo {{id: \"{}\", value: \"{}\", done: \"{}\" }}) return n ", todo.id, todo.value, todo.done);
@@ -197,7 +197,7 @@ impl Actor for TodoConsumer {
             },
             // TODO: Implement putting the api spec within the graph, represent each endpoint as a node?
             TodoData::OpenApiSpec(json) => {
-                let transaction = state.graph.start_txn().await.expect("Expected to start transaction");
+                let mut transaction = state.graph.start_txn().await.expect("Expected to start transaction");
                 
                 let spec = serde_json::from_str::<OpenApi>(&json).expect("Expected to deserialize JSON string");
 
