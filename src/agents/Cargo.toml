@@ -31,7 +31,7 @@ members = [
     "gitlab/common",
     "gitlab/consume",
     "gitlab/observe", 
-    "workspace-hack", "gitlab/schema", "gitlab/query",
+    "workspace-hack", "gitlab/schema", "gitlab/query", "policy-config",
     ]
 
 [workspace.package]

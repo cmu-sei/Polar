@@ -1,0 +1,7 @@
+[package]
+name = "policy-config"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+git2 = "0.20.0"

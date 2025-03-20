@@ -197,7 +197,7 @@
             # Put any extra packages or libraries you need here. For example,
             # if working on a Rust project that requires a linear algebra
             # package:
-            #openblas
+            # openblas
 
             # -- Static Analysis Tools --
             staticanalysis.packages.${system}.default
