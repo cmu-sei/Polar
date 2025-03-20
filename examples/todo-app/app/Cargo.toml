@@ -3,11 +3,16 @@ name = "example-todo"
 version = "0.1.0"
 edition = "2021"
 
+
+
 [dependencies]
 axum = "0.8.0"
 hyper = { version = "1.0.1", features = ["full"] }
 tokio = { version = "1.17", features = ["full"] }
 tower = "0.5"
+
+# Fix a vulnerability in a transitive dependency.
+zip = { version = "=2.4.0" }
 
 serde = { version = "1.0.217", features = ["derive"] }
 uuid = { version = "1.13.1", features = ["v4"] }
