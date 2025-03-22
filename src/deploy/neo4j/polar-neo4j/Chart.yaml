@@ -1,0 +1,7 @@
+### CAUTION! THIS CHART AND THE TEMPLATES WITHIN IT ARE PRE-GENERATED AND ARE NOT INTENDED TO BE MANUALLY EDITED ###
+apiVersion: v2
+name: polar-neo4j
+description: A Helm chart for deploying Neo4j
+type: application
+version: 0.1.0
+appVersion: "4.4"
