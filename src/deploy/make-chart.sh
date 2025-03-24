@@ -1,8 +1,21 @@
 #!/bin/bash
-#TODO: Move to root of the deploy folder to generate an umbrella chart
-# Set the directory containing the Dhall files
-DIR="${1:-.}"  # Defaults to the current directory if no argument is given
-CHART_NAME="${2:-polar-neo4j}"
+
+# Function to print usage information
+usage() {
+    echo "Usage: $0 <directory> <chart-name>"
+    echo "  <directory>   Path to the directory containing Dhall files"
+    echo "  <chart-name>  Name of the Helm chart to be created"
+    exit 1
+}
+
+# Ensure both arguments are provided
+if [ $# -lt 2 ]; then
+    echo "Error: Missing required arguments."
+    usage
+fi
+
+DIR="$1"
+CHART_NAME="$2"
 HELM_DIR="$DIR/$CHART_NAME"
 
 # Ensure necessary tools are installed
@@ -14,6 +27,7 @@ for cmd in dhall-to-yaml kubectl helm; do
 done
 
 # Create Helm chart structure if it doesn’t exist
+
 if [ ! -d "$HELM_DIR" ]; then
     echo "🔧 Creating Helm chart directory: $HELM_DIR"
     mkdir -p "$HELM_DIR/templates"
@@ -25,10 +39,10 @@ if [ ! -f "$HELM_DIR/Chart.yaml" ]; then
 ### CAUTION! THIS CHART AND THE TEMPLATES WITHIN IT ARE PRE-GENERATED AND ARE NOT INTENDED TO BE MANUALLY EDITED ###
 apiVersion: v2
 name: $CHART_NAME
-description: A Helm chart for deploying Neo4j
+description: A pre-generated helm chart for deploying a Polar service.
 type: application
 version: 0.1.0
-appVersion: "4.4"
+appVersion: "0.1.0"
 EOF
     echo "✅ Created $HELM_DIR/Chart.yaml"
 fi

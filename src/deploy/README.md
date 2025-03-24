@@ -1,17 +1,21 @@
 # Polar Helm Charts
 
-This directory contains Helm charts for deploying Polar services for testing, please keep in mind that they are a work in progress and that they are **not ready for production use!** Expect breaking changes as we continue to improve them.
+This directory contains dhall configurations to generate Helm charts for Polar services, please keep in mind that they are a work in progress and that they are **not ready for production use!** Expect breaking changes as we continue to improve them.
 
-Each chart is designed to be deployed independently or as part of the larger system, although cassini and the neo4j database are currently required for operation.
+## Overview
+The `make-chart.sh` script automates the conversion of **Dhall configuration files** into a helm chart for a deployment. It ensures:
+- **Repeatable, Immutable Helm Charts** for GitOps workflows.
+- **Validation of Kubernetes Manifests** using `kubectl apply --dry-run=client`.
+- **Linting and Template Verification** with Helm.
+- **Safe GitOps Deployments** by generating Helm artifacts that can be stored and deployed consistently.
 
 ## Prerequisites
-
-Before deploying the charts, ensure you have access to the following:
-
-- [Helm](https://helm.sh/docs/intro/install/)
-- [Kubectl](https://kubernetes.io/docs/tasks/tools/)
+Ensure the following tools are installed:
+- **Dhall-to-YAML** (`dhall-to-yaml`): Converts Dhall configurations into Kubernetes YAML.
+- **kubectl**: Validates generated Kubernetes manifests.
+- **Helm**: Lints and renders the Helm chart for deployment.
+- A `neo4j.conf` file to configure neo4j.
 - [Minikube](https://minikube.sigs.k8s.io/docs/start/) (Or whatever kubernetes cluster you'd like to test on)
-- [Neo4j Helm Charts](https://neo4j.com/docs/operations-manual/current/kubernetes/)
 - Some client and server certificates from a trusted authroity. For testing, consider [generating your own](../agents/README.md)
 
 ## Setting Up
@@ -20,83 +24,87 @@ Create some secrets to use for testing
 
 ```sh
 kubectl create secret generic cassini-mtls \
-    --from-file=ca_certificate.pem=/path/to/ca_certificate.pem \
-    --from-file=server_polar_certificate.pem=/path/to/polar_server_certificate.pem \
-    --from-file=server_polar_key.pem=/path/to/server_polar_key.pem
+    --from-file=ca_certificate.pem=conf/certs/ca_certificates/ca_certificate.pem \
+    --from-file=server_polar_certificate.pem=conf/certs/server/server_polar_certificate.pem \
+    --from-file=server_polar_key.pem=conf/certs/server/server_polar_key.pem
 
 kubectl create secret generic client-mtls \
-    --from-file=ca_certificate.pem=/path/to/ca_certificate.pem \
-    --from-file=client_polar_certificate.pem=/path/to/client_polar_certificate.pem \
-    --from-file=server_polar_key.pem=/path/to/client_polar_key.pem
+    --from-file=ca_certificate.pem=conf/certs/ca_certificates/ca_certificate.pem \
+    --from-file=client_polar_certificate.pem=conf/certs/client/client_polar_certificate.pem \
+    --from-file=server_polar_key.pem=conf/certs/client/client_polar_key.pem
 
-kubectl create secret generic gitlab-secret  --from-literal=token=$GITLAB_TOKEN
+kubectl create secret generic gitlab-secret --from-literal=token=$GITLAB_TOKEN
 
+kubectl create secret generic neo4j-secret --from-literal=token=$NEO4J_SECRET
 ```
 
-To test the Helm charts locally, start a Minikube cluster:
 
-```sh
-# Start Minikube with enough resources
-minikube start --cpus=4 --memory=8192 --driver=docker
 
-# Verify Minikube status
-minikube status
+## Known Issues
 
-# Point kubectl to Minikube's context
-kubectl config use-context minikube
+Macos Users testing using tools like minikube and podman have to deal with some additonal constraints that necessitate
+additional layers of absctraction between the podman VM and minikube container.
+
+Unfortunately, the `minikube mount` command seems to only work for linux systems, so it's best to use the `minikube cp` command to copy files into the minikube container to be used using `hostPath` volumes during testing. 
+
+For example, to copy a configuration for neo4j to minikube's `/data` directiory, you can run
+
+```bash
+    minikube cp var/lib/neo4j/conf/neo4j.conf /data/conf/neo4j.conf      
 ```
 
-## Deploying a Microservice
+It does not seem to support copying directories at this time. So some scripting may be implemented to assist this.
 
-Each microservice has its own Helm chart under the `charts/` directory. To deploy a specific microservice, run:
+Finally, when exposing the neo4j service with minikube, remmeber to update the bolt port to use the port neo4j forwards for you, for example when running `minikube service -n polar neo4j --url`,
 
-```sh
-helm install <release-name> charts/<microservice-name>
+You may see output similar to the below:
+
+```shell
+http://127.0.0.1:57084 # This will be the url of your web UI
+http://127.0.0.1:57085 # This will be your bolt port
+❗  Because you are using a Docker driver on darwin, the terminal needs to be open to run it.
 ```
 
-For example, to deploy the `cassini` broker:
+## Expected Output
+The script will:
+1. **Convert Dhall files** into Kubernetes YAML.
+2. **Validate YAML** using `kubectl apply --dry-run=client`.
+3. **Generate a Helm chart** within the given directory.
+4. **Run Helm linting and rendering** to validate the chart.
 
-```sh
-helm install cassini cassini
+## Usage
+Run the script to generate a Helm chart from Dhall configurations
+
+### Deploying with Helm
+Once the chart is generated. You can run something like
+
+```bash
+helm install polar-neo4j ./polar-neo4j -n polar --create-namespace    
 ```
 
-## Deploying All Microservices
-    TODO
+### GitOps & Immutability
+To maintain immutability and ensure **safe GitOps practices**:
+1. **Commit the Helm chart to a versioned repository**:
+   ```bash
+   git add neo4j-helm-release/
+   git commit -m "Generated immutable Helm chart from Dhall configs"
+   git push origin main
+   ```
+2. **Use Helm package versioning** to store the chart as an immutable artifact:
+   ```bash
+   helm package neo4j-helm-release/
+   helm push neo4j-helm-release-0.1.0.tgz oci://my-helm-repo
+   ```
+3. TODO: How to Deploy using GitOps tools** like ArgoCD or Flux
 
-## Listing Installed Releases
 
-To see all installed Helm releases:
+### Why Immutability Matters
+By ensuring the Helm chart is generated **before deployment and committed to Git**, we:
+- Avoid deployment drift caused by manual `helm install` changes.
+- Ensure the same configuration is deployed across environments.
+- Enable rollbacks to previous **known-good** Helm chart versions.
+- Improve auditability and traceability of deployments.
 
-```sh
-helm list
-```
 
-## Uninstalling a Microservice
-
-To remove a deployed microservice:
-
-```sh
-helm uninstall <release-name>
-```
-
-```sh
-helm uninstall cassini
-```
-
-## Stopping and Cleaning Up Minikube
-
-To stop Minikube and clean up resources:
-
-```sh
-minikube stop
-minikube delete
-```
-
-## Notes
-- Ensure your Minikube has sufficient resources allocated.
-- Modify `values.yaml` files as needed before deploying.
-- Consider using `helm upgrade` to update a running deployment.
-
-For further details, refer to the individual Helm charts under `charts/`.
 
 
