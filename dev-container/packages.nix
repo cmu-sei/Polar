@@ -96,16 +96,7 @@
   # Set up the packages we want to include in our CI and testing environments,
   # on top of the official nix image which can facilitate most operations
   ciPkgs = with pkgs; [
-    bash # Basic bash to run bare essential code
-    glibcLocalesUtf8
-    uutils-coreutils-noprefix # Essential GNU utilities (ls, cat, etc.)
-    
-    # -- OpenSSL --
-    cacert
-    openssl
-    openssl.dev
-
-    nix
+    dhall
     dhall-yaml
     dhall-json
     jq

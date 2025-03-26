@@ -121,8 +121,8 @@
           ];
         };
 
-        myEnv = pkgs.buildEnv {
-          name = "my-env";
+        devEnv = pkgs.buildEnv {
+          name = "dev-env";
           paths = with pkgs; [
             # -- Basic Required Files --
             bash # Basic bash to run bare essential code
@@ -179,6 +179,9 @@
             tree-sitter
             which
 
+            dhall-yaml
+            dhall-json
+
             # -- Compilers, Etc. --
             cmake
             gnumake
@@ -206,6 +209,17 @@
             # -- Static Analysis Tools --
             staticanalysis.packages.${system}.default
           ];
+          pathsToLink = [
+            "/bin"
+            "/lib"
+            "/inc"
+            "/etc/ssl/certs"
+          ];
+        };
+
+        ciEnv = pkgs.buildEnv {
+          name = "ci-env";
+          paths = packageSets.ciPkgs;
           pathsToLink = [
             "/bin"
             "/lib"
@@ -256,7 +270,7 @@
           name = "polar-dev";
           tag = "latest";
           copyToRoot = [
-            myEnv
+            devEnv
             baseInfo
             fishConfig
             codeSettings
@@ -289,13 +303,13 @@
               "LOCALE_ARCHIVE=${pkgs.glibcLocalesUtf8}/lib/locale/locale-archive"
 
               # stdenv.cc is clang-based now, so this is fine:
-              "LD_LIBRARY_PATH=${pkgs.lib.makeLibraryPath [ myEnv pkgs.stdenv.cc.cc.lib ]}"
+              "LD_LIBRARY_PATH=${pkgs.lib.makeLibraryPath [ devEnv pkgs.stdenv.cc.cc.lib ]}"
 
               #"LIBCLANG_PATH=${pkgs.libclang.lib}/lib/"
 
               "RUSTFLAGS=-Clinker=clang"
 
-              "PATH=/bin:/usr/bin:${myEnv}/bin:/root/.cargo/bin"
+              "PATH=/bin:/usr/bin:${devEnv}/bin:/root/.cargo/bin"
 
               # Add openssl to pkg config to ensure that it loads for cargo build
               "PKG_CONFIG_PATH=${pkgs.openssl.dev}/lib/pkgconfig"
@@ -328,30 +342,36 @@
 
         ciContainer = pkgs.dockerTools.buildImage {
           name = "polar-ci";
+          fromImage = pkgs.dockerTools.pullImage {
+            imageName = "nixos/nix";
+            imageDigest = "sha256:088c97f6f08320de53080138d595dda29226f8bc76b2ca8f617e4a739aefa8d7";
+            hash = "sha256-5LpLRfMAVpMh03eAxocPAhLgi/klQlPiMAGSZwhUZr8=";
+            finalImageName = "nixos/nix";
+            finalImageTag = "2.24.13";
+          };
           tag = "0.1.0";
           copyToRoot = [
             license
-            packageSets.ciPkgs    
-            staticanalysis.packages.${system}.default
+            ciEnv
           ];
           config = {
             WorkingDir = "/workspace";
             Env = [
-              "LANG=en_US.UTF-8"
-              "TZ=UTC"
-              "MANPAGER=sh -c 'col -bx | bat --language man --style plain'"
-              "USER=root"
+              # Add our tools to the path
+              # CAUTION: This path value is taken directly from the base nix image and should not be overwritten, just appended to.
+              # Whenever we bump to later versions of the nix image, this should be updated this as needed.
+              "PATH=/root/.nix-profile/bin:/nix/var/nix/profiles/default/bin:/nix/var/nix/profiles/default/sbin:${ciEnv}/bin"
             ];
           };
-          extraCommands = ''
-            # Link the env binary (needed for the check requirements script)
-            mkdir -p usr/bin/
+          # extraCommands = ''
+          #   # Link the env binary (needed for the check requirements script)
+          #   mkdir -p usr/bin/
 
-            ln -n bin/env usr/bin/env
+          #   ln -n bin/env usr/bin/env
             
-            # Create /tmp dir
-            mkdir -p tmp
-          '';
+          #   # Create /tmp dir
+          #   mkdir -p tmp
+          # '';
         };
 
       in
