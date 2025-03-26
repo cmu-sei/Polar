@@ -113,7 +113,5 @@
     vulnix
     kubernetes-helm
     skopeo
-    
-    l
   ];
 }
