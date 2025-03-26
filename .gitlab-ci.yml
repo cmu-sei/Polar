@@ -1,6 +1,6 @@
 stages:
 - build
-- analysis
+- charts
 
 default:
   tags:
@@ -27,24 +27,24 @@ build-enviornments:
       git config --global --add safe.directory "$(pwd)"
     - cd dev-container
 
-    # TODO: run nix flake checks to run unit testing and other static analysis
     # build workspace
-    - 'nix build --eval-system x86_64-linux --show-trace .#default'
-    # TODO: Use skopeo to inspect and upload our images
+    - 'nix build --eval-system x86_64-linux --show-trace .#devContainer -o polar-dev'
+    - 'nix build --eval-system x86_64-linux --show-trace .#ciContainer -o polar-ci'
+    
+    #  Use skopeo to inspect and upload our images
     - skopeo login --username "$CI_REGISTRY_USER" --password "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
-    - ls -lh
-    - 'skopeo inspect docker-archive://$(readlink -f ./result)'
-    - 'skopeo copy docker-archive://$(readlink -f ./result) docker://$REGISTRY/polar-dev:latest'
+    - 'skopeo inspect docker-archive://$(readlink -f ./polar-dev)'
+    - 'skopeo copy docker-archive://$(readlink -f ./polar-dev) docker://$REGISTRY/polar-dev:0.1.0'
+    - 'skopeo inspect docker-archive://$(readlink -f ./polar-ci)'
+    - 'skopeo copy docker-archive://$(readlink -f ./polar-ci) docker://$REGISTRY/polar-ci:0.1.0'
+
 
 build-workspace:
-  image: registry.sandbox.labz.s-box.org/vcaaron/flaskr/nix:2.24.9
+  image: registry.sandbox.labz.s-box.org/SEI/polar-mirror/polar-ci:0.1.0
   stage: build
   variables:
-    VERSION: "0.1.0"
     REGISTRY: registry.sandbox.labz.s-box.org/SEI/polar-mirror
   script:
-      #install needed tools
-    - nix-env --install --attr nixpkgs.skopeo
     - |
       echo "Configuring nix and the filesystem"
       mkdir -p "$HOME/.config/nix"
@@ -64,73 +64,33 @@ build-workspace:
     - 'nix build --eval-system x86_64-linux --show-trace .#observerImage -o observer'
     - 'nix build --eval-system x86_64-linux --show-trace .#consumerImage -o consumer'
     
-    # TODO: Use skopeo to inspect and upload our images
+    # Vulnerability analysis on our store
+    # TODO: Move this to another job?
+    - vulnix --system --json > vulnix-results.json
+
+    # Use skopeo to inspect and upload our images
     - skopeo login --username "$CI_REGISTRY_USER" --password "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
     - ls -lh
     - | 
       'skopeo inspect docker-archive://$(readlink -f ./cassini)'
       'skopeo copy docker-archive://$(readlink -f ./cassini) docker://$REGISTRY/cassini:latest'
       'skopeo inspect docker-archive://$(readlink -f ./observer)'
-      'skopeo copy docker-archive://$(readlink -f ./observer) docker://$REGISTRY/polar-gitlab-observer:latest'
+      'skopeo copy docker-archive://$(readlink -f ./observer) docker://$REGISTRY/polar-gitlab-observer:0.1.0'
       'skopeo inspect docker-archive://$(readlink -f ./consumer)'
-      'skopeo copy docker-archive://$(readlink -f ./consumer) docker://$REGISTRY/polar-gitlab-consumer:latest'
-
-# Anchore Template to run Grype and Syft on Application Pipelines 
-# Grype will provide container scanning capabilities
-# Syft will provide an automated Software Bill of Materials
-.anchore:
-  image: registry.sandbox.labz.s-box.org/vcaaron/flaskr/nix:2.24.9
-  stage: analysis
-  variables:
-    SYFT_FILENAME: "$CI_JOB_NAME-sbom-$CI_COMMIT_REF_NAME-syft.json"
-  before_script:
-  - nix-env -iA nixpkgs.grype
-  - nix-env -iA nixpkgs.syft
-  - mkdir -p ~/.docker
-  - | 
-    echo '{
-      "auths": {
-        "'$CI_REGISTRY'": {
-          "auth": "'$(echo -n "$CI_REGISTRY_USER:$CI_REGISTRY_PASSWORD" | base64)'"
-        }
-      }
-    }' > ~/.docker/config.json
-
-  script:
-    #check image path is provided, and do setup for production builds
-    - 'if [ -z "$IMAGE_PATH" ]; then echo "ERROR: IMAGE_PATH has not been provided. Please provide a full path to a docker image. (i.e. docker.io/somerepository/image:tag)"; exit 1; fi'
-    #set up docker creds
-    - DOCKER_CONFIG=/anchore/config.json && echo $DOCKER_AUTH_CONFIG > /anchore/config.json   
-    - grype ${IMAGE_PATH} --scope all-layers
-    - syft ${IMAGE_PATH} --scope all-layers -o json=$SYFT_FILENAME
-
+      'skopeo copy docker-archive://$(readlink -f ./consumer) docker://$REGISTRY/polar-gitlab-consumer:0.1.0'
   artifacts:
     paths:
-      - sbom.syft.json
-      - $SYFT_FILENAME
+      - src/agents/vulnix-results.json
 
-acnhore-scan-cassini:
-  extends: .anchore
+make-charts:
+  image: registry.sandbox.labz.s-box.org/SEI/polar-mirror/polar-ci:0.1.0
+  stage: charts
   variables:
-    IMAGE_PATH: registry.sandbox.labz.s-box.org/sei/polar-mirror/cassini:latest
-
-acnhore-scan-gitlab-consumer:
-  extends: .anchore
-  variables:
-    IMAGE_PATH: registry.sandbox.labz.s-box.org/sei/polar-mirror/polar-gitlab-consumer:latest
-
-acnhore-scan-gitlab-observer:
-  extends: .anchore
-  variables:
-    IMAGE_PATH: registry.sandbox.labz.s-box.org/sei/polar-mirror/polar-gitlab-observer:latest
-
-trufflehog-scan:
-  stage: analysis
-  image: registry.sandbox.labz.s-box.org/vcaaron/flaskr/nix:2.24.9 
+    REGISTRY: registry.sandbox.labz.s-box.org/SEI/polar-mirror
   script:
-      - nix-env -iA nixpkgs.trufflehog
-      - trufflehog3 -f json -o trufflehog_results.json .
-  artifacts:
-      when: always
-      paths:
-          - trufflehog_results.json
+  #TODO: Generate helm charts and push them to a hosted repository
+    - cd src/deploy/ 
+    - chmod +x ./make-chart.sh
+    - sh ./make-chart.sh cassini polar-cassini
+    - sh ./make-chart.sh neo4j polar-neo4j
+    - sh ./make-chart.sh gitlab polar-gitlab-agent

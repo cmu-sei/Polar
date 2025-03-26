@@ -5,14 +5,12 @@ This directory contains dhall configurations to generate Helm charts for Polar s
 ## Overview
 The `make-chart.sh` script automates the conversion of **Dhall configuration files** into a helm chart for a deployment. It ensures:
 - **Repeatable, Immutable Helm Charts** for GitOps workflows.
-- **Validation of Kubernetes Manifests** using `kubectl apply --dry-run=client`.
 - **Linting and Template Verification** with Helm.
 - **Safe GitOps Deployments** by generating Helm artifacts that can be stored and deployed consistently.
 
 ## Prerequisites
 Ensure the following tools are installed:
 - **Dhall-to-YAML** (`dhall-to-yaml`): Converts Dhall configurations into Kubernetes YAML.
-- **kubectl**: Validates generated Kubernetes manifests.
 - **Helm**: Lints and renders the Helm chart for deployment.
 - A `neo4j.conf` file to configure neo4j.
 - [Minikube](https://minikube.sigs.k8s.io/docs/start/) (Or whatever kubernetes cluster you'd like to test on)
@@ -68,9 +66,8 @@ http://127.0.0.1:57085 # This will be your bolt port
 ## Expected Output
 The script will:
 1. **Convert Dhall files** into Kubernetes YAML.
-2. **Validate YAML** using `kubectl apply --dry-run=client`.
-3. **Generate a Helm chart** within the given directory.
-4. **Run Helm linting and rendering** to validate the chart.
+2. **Generate a Helm chart** within the given directory.
+3. **Run Helm linting and rendering** to validate the chart.
 
 ## Usage
 Run the script to generate a Helm chart from Dhall configurations

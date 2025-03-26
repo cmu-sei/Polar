@@ -61,6 +61,10 @@
           ];
         };
 
+        #import package sets 
+
+        packageSets = import ./packages.nix {inherit pkgs; };
+
         # This is needed since VSCode Devcontainers need the following files in order to function.
         baseInfo = with pkgs; [
           # Set up shadow file with user information
@@ -248,9 +252,7 @@
           executable = true;
         };
 
-      in
-      {
-        packages.default = pkgs.dockerTools.buildImage {
+        devContainer = pkgs.dockerTools.buildImage {
           name = "polar-dev";
           tag = "latest";
           copyToRoot = [
@@ -323,6 +325,41 @@
             mkdir -p tmp
           '';
         };
+
+        ciContainer = pkgs.dockerTools.buildImage {
+          name = "polar-ci";
+          tag = "0.1.0";
+          copyToRoot = [
+            license
+            packageSets.ciPkgs    
+            staticanalysis.packages.${system}.default
+          ];
+          config = {
+            WorkingDir = "/workspace";
+            Env = [
+              "LANG=en_US.UTF-8"
+              "TZ=UTC"
+              "MANPAGER=sh -c 'col -bx | bat --language man --style plain'"
+              "USER=root"
+            ];
+          };
+          extraCommands = ''
+            # Link the env binary (needed for the check requirements script)
+            mkdir -p usr/bin/
+
+            ln -n bin/env usr/bin/env
+            
+            # Create /tmp dir
+            mkdir -p tmp
+          '';
+        };
+
+      in
+      {
+        inherit devContainer ciContainer;
+
+        packages.default = devContainer;
+        packages.ciContainer = ciContainer;
       }
     );
 }
