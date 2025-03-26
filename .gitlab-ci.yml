@@ -38,19 +38,14 @@ build-enviornments:
     - 'skopeo inspect docker-archive://$(readlink -f ./polar-ci)'
     - 'skopeo copy docker-archive://$(readlink -f ./polar-ci) docker://$REGISTRY/polar-ci:0.1.0'
 
-
 build-workspace:
   image: registry.sandbox.labz.s-box.org/SEI/polar-mirror/polar-ci:0.1.0
   stage: build
   variables:
-    REGISTRY: registry.sandbox.labz.s-box.org/SEI/polar-mirror
   script:
     - |
-      echo "Configuring nix and the filesystem"
-      mkdir -p "$HOME/.config/nix"
       mkdir -p "/etc/containers/"
       #setup nixconfig
-      printf 'experimental-features = nix-command flakes' > "$HOME/.config/nix/nix.conf"
       echo '{"default":[{"type":"insecureAcceptAnything"}]}' > /etc/containers/policy.json
       git config --global --add safe.directory "$(pwd)"
     - cd src/agents/
@@ -58,26 +53,25 @@ build-workspace:
     # TODO: run nix flake checks to run unit testing and other static analysis
     # build workspace
     - 'nix build --eval-system x86_64-linux --show-trace .#default'
-
+    
+    # Vulnerability analysis on our store
+    - vulnix --json result > vulnix-results.json
+    
     # using already built dependencies, package and containerize our components.
-    - 'nix build --eval-system x86_64-linux --show-trace .#cassiniImage -o caassini'
+    - 'nix build --eval-system x86_64-linux --show-trace .#cassiniImage -o cassini'
     - 'nix build --eval-system x86_64-linux --show-trace .#observerImage -o observer'
     - 'nix build --eval-system x86_64-linux --show-trace .#consumerImage -o consumer'
     
-    # Vulnerability analysis on our store
-    # TODO: Move this to another job?
-    - vulnix --system --json > vulnix-results.json
-
     # Use skopeo to inspect and upload our images
     - skopeo login --username "$CI_REGISTRY_USER" --password "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
     - ls -lh
     - | 
       'skopeo inspect docker-archive://$(readlink -f ./cassini)'
-      'skopeo copy docker-archive://$(readlink -f ./cassini) docker://$REGISTRY/cassini:latest'
+      'skopeo copy docker-archive://$(readlink -f ./cassini) docker://$CI_REGISTRY/cassini:latest'
       'skopeo inspect docker-archive://$(readlink -f ./observer)'
-      'skopeo copy docker-archive://$(readlink -f ./observer) docker://$REGISTRY/polar-gitlab-observer:0.1.0'
+      'skopeo copy docker-archive://$(readlink -f ./observer) docker://$CI_REGISTRY/polar-gitlab-observer:0.1.0'
       'skopeo inspect docker-archive://$(readlink -f ./consumer)'
-      'skopeo copy docker-archive://$(readlink -f ./consumer) docker://$REGISTRY/polar-gitlab-consumer:0.1.0'
+      'skopeo copy docker-archive://$(readlink -f ./consumer) docker://$CI_REGISTRY/polar-gitlab-consumer:0.1.0'
   artifacts:
     paths:
       - src/agents/vulnix-results.json
@@ -90,6 +84,7 @@ make-charts:
   script:
   #TODO: Generate helm charts and push them to a hosted repository
     - cd src/deploy/ 
+    # TODO: See about how we can avoid this step, we probably have to edit some security context for the k8s pod
     - chmod +x ./make-chart.sh
     - sh ./make-chart.sh cassini polar-cassini
     - sh ./make-chart.sh neo4j polar-neo4j
