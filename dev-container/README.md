@@ -1,6 +1,6 @@
 # Flake-based Docker Build Environment for Polar
 
-This repository provides a secure, resilient, and repeatable build environment 
+This repository provides secure, resilient, and repeatable build environments 
 for Polar using NixOS and Docker. The setup ensures that the same process used 
 for local development builds can also be utilized for CI/CD pipeline builds, 
 providing consistency and isolation.
@@ -10,24 +10,32 @@ providing consistency and isolation.
 Before starting, ensure you have the following installed:
 
 - [Nix package manager](https://nixos.org/download.html)
-- [Docker](https://docs.docker.com/get-docker/)
+- [Docker](https://docs.docker.com/get-docker/) 
 
 ## Setup
 
 1. **Install Nix and enable it to use flakes:**
-    Checout the instructions at https://nix.dev/ on how you can do this
+    Checkout the instructions at https://nix.dev/ on how you can do this.
+    Chances are you can run the following command once you have nix installed to configure it
+    ```sh
+    printf 'experimental-features = nix-command flakes' > "$HOME/.config/nix/nix.conf"
+    ```
 
-## Building the Docker Image
+## Building the Docker Images
 1. **Enter the project directory:**
 
     ```bash
     cd /path/to/your/project/dev-container
     ```
 
-2. **Build the Docker image using Nix:**
+2. **Build one of the images using Nix:**
 
     ```bash
-    nix build --extra-experimental-features nix-command --extra-experimental-features flakes
+    # Builds a full rust development environment for the project
+    nix build .#devContainer
+    
+    # build the CI/CD container for a more lean testing environment
+    nix build .#ciContainer
     ```
 
 3. **Load the Docker image:**
@@ -36,12 +44,12 @@ Before starting, ensure you have the following installed:
     docker load < result
     ```
 
-    The Docker image will be tagged as `polar-dev:latest`. To change the tag,
+    The development image will be tagged as `polar-dev:latest`. To change the tag,
     use the Docker `tag` command specifying the new tag.
 
 ## Running the Docker Container
 
-1. **Run the Docker container with your project directory mounted:**
+1. **Run the Docker containers with your project directory mounted:**
     ```bash
     docker run -it -v /path/to/your/project:/workspace -p 8080:8080 polar-dev:latest bash -c "/create-user.sh $(whoami) $(id -u) $(id -g)"
     ```
