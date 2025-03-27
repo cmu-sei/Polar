@@ -62,16 +62,14 @@ If desired for testing, you can also use it to generate a self-signed client/ser
 It is possible to build individual or multiple components at a time. Below are some examples of how.
 
 ```sh
-## Builds only the cassini message broker and its dependnecies, then constructs an OCI image
-nix build .#cassiniImage
 
 # Build only the observer or consumer agents
 nix build .#gitlabObserver
 
 nix build .#gitlabConsumer
 
-# build multiple components and their images
-nix build .#observerImage .#consumerImage
+# build all images as tar.gz archives to be loaded into a container runtime
+nix build .#cassiniImage .#observerImage .#consumerImage
 
 # Generate TLS Certificates
 nix build .#tlsCerts

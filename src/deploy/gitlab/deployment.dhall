@@ -11,7 +11,7 @@ let gitlabAgentPod = {
                     , env = Some [
                         kubernetes.EnvVar::{
                             name = "TLS_CA_CERT"
-                            , value = Some "/etc/cassini/tls/ca_certificate.pem"
+                            , value = Some "/etc/tls/ca_certificate.pem"
                         }
                         , kubernetes.EnvVar::{
                             name = "TLS_CLIENT_CERT"

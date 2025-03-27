@@ -27,8 +27,8 @@ build-enviornments:
       git config --global --add safe.directory "$(pwd)"
     - cd dev-container
 
-    # build workspace
-    - 'nix build --eval-system x86_64-linux --show-trace .#devContainer -o polar-dev'
+    # build dev and testing environments
+    - 'nix build --eval-system x86_64-linux --show-trace .#default -o polar-dev' 
     - 'nix build --eval-system x86_64-linux --show-trace .#ciContainer -o polar-ci'
     
     #  Use skopeo to inspect and upload our images

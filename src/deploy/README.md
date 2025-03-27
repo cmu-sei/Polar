@@ -15,28 +15,29 @@ Ensure the following tools are installed:
 - A `neo4j.conf` file to configure neo4j.
 - [Minikube](https://minikube.sigs.k8s.io/docs/start/) (Or whatever kubernetes cluster you'd like to test on)
 - Some client and server certificates from a trusted authroity. For testing, consider [generating your own](../agents/README.md)
-
+- Container images for neo4j, cassini, and the gitlab agent should also be present. [See the documentation for info on building them](../agents/README.md). You can use your own preferred neo4j container image.
 ## Setting Up
 
-Create some secrets to use for testing
+Create some resources needed to test.
 
 ```sh
-kubectl create secret generic cassini-mtls \
+kubectl create namespace polar
+
+kubectl create secret generic cassini-mtls -n polar \
     --from-file=ca_certificate.pem=conf/certs/ca_certificates/ca_certificate.pem \
     --from-file=server_polar_certificate.pem=conf/certs/server/server_polar_certificate.pem \
     --from-file=server_polar_key.pem=conf/certs/server/server_polar_key.pem
 
-kubectl create secret generic client-mtls \
+kubectl create secret generic client-mtls -n polar \
     --from-file=ca_certificate.pem=conf/certs/ca_certificates/ca_certificate.pem \
     --from-file=client_polar_certificate.pem=conf/certs/client/client_polar_certificate.pem \
     --from-file=server_polar_key.pem=conf/certs/client/client_polar_key.pem
 
-kubectl create secret generic gitlab-secret --from-literal=token=$GITLAB_TOKEN
+kubectl create secret generic gitlab-secret -n polar --from-literal=token=$GITLAB_TOKEN
 
-kubectl create secret generic neo4j-secret --from-literal=token=$NEO4J_SECRET
+# AFTER you deploy neo4j to your cluster and set a new password, you can add it as a secret for the agents to use.
+kubectl create secret generic neo4j-secret -n polar --from-literal=token=$NEO4J_SECRET
 ```
-
-
 
 ## Known Issues
 
@@ -64,7 +65,7 @@ http://127.0.0.1:57085 # This will be your bolt port
 ```
 
 ## Expected Output
-The script will:
+The make-chart script will:
 1. **Convert Dhall files** into Kubernetes YAML.
 2. **Generate a Helm chart** within the given directory.
 3. **Run Helm linting and rendering** to validate the chart.
@@ -72,11 +73,13 @@ The script will:
 ## Usage
 Run the script to generate a Helm chart from Dhall configurations
 
+`sh make-chart.sh neo4j polar-neo4j`
+
 ### Deploying with Helm
 Once the chart is generated. You can run something like
 
 ```bash
-helm install polar-neo4j ./polar-neo4j -n polar --create-namespace    
+helm install polar-neo4j ./polar-neo4j -n polar
 ```
 
 ### GitOps & Immutability

@@ -105,7 +105,7 @@
 
         nixConfig = pkgs.writeTextFile {
           name = "nix.conf";
-          destination = "/root/.config/nix/nix.conf";
+          destination = "/etc/nix/nix.conf";
           text = builtins.readFile ./container-files/nix.conf;
         };
 
