@@ -91,6 +91,8 @@
           doCheck = false;
         };
 
+        # CAUTION! This represents crane's understanding of our cargo workspace.
+        # Whenever new crates are added/removed from the workspace, the change should be reflected here as well.
         fileSetForCrate = crate: lib.fileset.toSource {
           root = ./.;
           fileset = lib.fileset.unions [
@@ -98,6 +100,7 @@
             ./Cargo.lock
             ./gitlab/schema/src/gitlab.graphql
             (craneLib.fileset.commonCargoSources ./broker)
+            (craneLib.fileset.commonCargoSources ./policy-config)
   	        (craneLib.fileset.commonCargoSources ./lib)
             (craneLib.fileset.commonCargoSources ./gitlab/consume)
             (craneLib.fileset.commonCargoSources ./gitlab/observe)
@@ -115,7 +118,6 @@
           cargoExtraArgs = "--workspace --locked";
           src = fileSetForCrate ./.;
         });
-
 
         # Build the top-level crates of the workspace as individual derivations.
         # This allows consumers to only depend on (and build) only what they need.
@@ -153,7 +155,7 @@
         
         #set up service environments
         observerEnv = pkgs.buildEnv {
-          name = "image-root";
+          name = "gitlab-observer-env";
           paths =  [ 
             pkgs.bashInteractiveFHS 
             pkgs.busybox 
@@ -166,15 +168,8 @@
           ];
         };
 
-        # TODO: Unfreeze when configuration becomes stabalized
-        # observerConfig = pkgs.writeTextFile {
-        #   name = "observerConfig";
-        #   destination = "/.config/polar/observer_config.yaml";
-        #   text = builtins.readFile ./observe/conf/observer_config.yaml;
-        # };
-
         consumerEnv = pkgs.buildEnv {
-          name = "image-root";
+          name = "gitlab-consumer-env";
           paths = [ pkgs.bashInteractiveFHS pkgs.busybox gitlabConsumer ];
           pathsToLink = [ 
             "/bin"
@@ -183,7 +178,7 @@
         };
 
         cassiniEnv = pkgs.buildEnv {
-          name = "image-root";
+          name = "cassini-env";
           paths =  [ 
             pkgs.bashInteractiveFHS 
             pkgs.busybox 
@@ -276,7 +271,7 @@
 
           observerImage = pkgs.dockerTools.buildImage {
             name = "polar-gitlab-observer";
-            tag = "latest";
+            tag = "0.1.0";
             copyToRoot = [ observerEnv pkgs.cacert ]; 
 
             config = {
@@ -290,7 +285,7 @@
           };
           consumerImage = pkgs.dockerTools.buildImage {
               name = "polar-gitlab-consumer";
-              tag = "latest";
+              tag = "0.1.0";
               copyToRoot = [ consumerEnv ];
 
               config = {
@@ -302,7 +297,7 @@
           
           cassiniImage = pkgs.dockerTools.buildImage {
             name = "cassini";
-            tag = "latest";
+            tag = "0.1.0";
             copyToRoot = [
               cassiniEnv pkgs.cacert 
             ]; 
