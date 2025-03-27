@@ -1,4 +1,5 @@
 stages:
+- setup
 - build
 - charts
 
@@ -8,7 +9,7 @@ default:
 
 build-enviornments:
   image: registry.sandbox.labz.s-box.org/vcaaron/flaskr/nix:2.24.9
-  stage: build
+  stage: setup
   variables:
     VERSION: "0.1.0"
     REGISTRY: registry.sandbox.labz.s-box.org/SEI/polar-mirror
