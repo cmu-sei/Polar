@@ -1,5 +1,4 @@
 stages:
-- setup
 - build
 - charts
 
@@ -9,7 +8,7 @@ default:
 
 build-dev-environment:
   image: registry.sandbox.labz.s-box.org/vcaaron/flaskr/nix:2.24.9
-  stage: setup
+  stage: build
   allow_failure: true # TODO: disallow failure whenever we sort out how to build behind our airgapped environment
   rules:
     - changes:
@@ -36,9 +35,10 @@ build-dev-environment:
     - 'skopeo copy docker-archive://$(readlink -f ./polar-dev) docker://$CI_REGISTRY/polar-dev:0.1.0'
 
 # TODO: Unfreeze whenever we settle how to build the ci container.
+# SEE: https://github.com/cmu-sei/Polar/issues/33
 # build-ci-environment:
 #   image: registry.sandbox.labz.s-box.org/vcaaron/flaskr/nix:2.24.9
-#   stage: setup
+#   stage: build
 #   rules:
 #     - changes:
 #       - dev-container/flake.nix
@@ -61,7 +61,6 @@ build-dev-environment:
 #     - 'skopeo inspect docker-archive://$(readlink -f ./polar-ci)'
 #     - 'skopeo copy docker-archive://$(readlink -f ./polar-ci) docker://$CI_REGISTRY/polar-ci:0.1.0'
 
-
 build-workspace:
   image: registry.sandbox.labz.s-box.org/sei/polar-mirror/polar-ci:0.1.0
   stage: build
@@ -75,7 +74,23 @@ build-workspace:
     - 'nix build --eval-system x86_64-linux --show-trace .#default'
     
     # Vulnerability analysis on our store
-    - vulnix --json result > vulnix-results.json
+    # vulnix returns nonzero exit codes when it finds things, so we need to get around this.
+    # SEE: https://github.com/nix-community/vulnix/issues/79
+    - vulnix --json > vulnix-report.json || export VULNIX_EXIT=$?
+    - |
+      if [[ "$VULNIX_EXIT" -eq 2 ]]; then
+        echo "Non-whitelisted vulnerabilities found!"
+        exit 1  # Fail the job
+      elif [[ "$VULNIX_EXIT" -eq 1 ]]; then
+        echo "Only whitelisted vulnerabilities found, continuing..."
+        exit 0  # Continue without failing
+      elif [[ "$VULNIX_EXIT" -eq 0 ]]; then
+        echo "No vulnerabilities found, all good."
+        exit 0
+      else
+        echo "Unexpected error occurred!"
+        exit $VULNIX_EXIT  # Fail the job with original exit code
+      fi
     
     # using already built dependencies, package and containerize our components.
     - 'nix build --eval-system x86_64-linux --show-trace .#cassiniImage -o cassini'
