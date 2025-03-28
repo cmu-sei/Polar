@@ -54,12 +54,12 @@ impl Actor for ListenerManager {
         .collect();
 
         let mut root_store = RootCertStore::empty();
-        let root_cert = CertificateDer::from_pem_file(args.ca_cert_file).expect("Expected to read server cert as PEM");
+        let root_cert = CertificateDer::from_pem_file(args.ca_cert_file.clone()).expect(&format!("Expected to read CA cert as a PEM file from {}", args.ca_cert_file));
         root_store.add(root_cert).expect("Expected to add root cert to server store");
     
         let verifier = WebPkiClientVerifier::builder(Arc::new(root_store)).build().expect("Expected to build server verifier");
 
-        let private_key = PrivateKeyDer::from_pem_file(args.private_key_file).expect("Expected to load private key from file");
+        let private_key = PrivateKeyDer::from_pem_file(args.private_key_file.clone()).expect(&format!("Expected to load private key as a PEM file from {}", args.private_key_file));
         
         tracing::debug!("ListenerManager: Building configuration for mTLS ");
         

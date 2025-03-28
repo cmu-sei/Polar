@@ -103,3 +103,8 @@ There are instructions in the `basic` directory in that repo for how to do so, b
    `
       1. `mkdir $PROJECT_ROOT/conf/gitlab_compose/ssl`
       2. `cp results/* $PROJECT_ROOT/conf/certs`
+
+## Adding/Removing Agents
+As mentioned earlier, we use the crane library to handle various packaging and testing tasks. When adding or removing crates from the project, be sure to update the fileset in the `flake.nix` file, as it represents crane's understanding of our project workspace. 
+
+When crane copies the project into it's build environment, it uses the list there to know which crates to take, if one is missing, cargo will **fail to build the workspace!**

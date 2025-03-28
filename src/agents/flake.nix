@@ -72,10 +72,6 @@
             pkgs.darwin.apple_sdk.frameworks.CoreFoundation
           ];
 
-
-          # CMAKE="/bin/cmake";
-          # CMAKE_MAKE_PROGRAM="/bin/make";
-          # LIBCLANG_PATH = "${pkgs.llvmPackages.clang}/lib";
           PKG_CONFIG_PATH= "${pkgs.openssl.dev}/lib/pkgconfig";
         };
 

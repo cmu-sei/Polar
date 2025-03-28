@@ -10,6 +10,7 @@ default:
 build-dev-environment:
   image: registry.sandbox.labz.s-box.org/vcaaron/flaskr/nix:2.24.9
   stage: setup
+  allow_failure: true # TODO: disallow failure whenever we sort out how to build behind our airgapped environment
   rules:
     - changes:
       - dev-container/flake.nix
@@ -32,41 +33,39 @@ build-dev-environment:
     - 'skopeo inspect docker-archive://$(readlink -f ./polar-dev)'
     - 'skopeo copy docker-archive://$(readlink -f ./polar-dev) docker://$CI_REGISTRY/polar-dev:0.1.0'
 
-build-ci-environment:
-  image: registry.sandbox.labz.s-box.org/vcaaron/flaskr/nix:2.24.9
-  stage: setup
-  rules:
-    - changes:
-      - dev-container/flake.nix
-      - dev-container/flake.lock
-      - .gitlab-ci.yml
-  script:
-      #install needed tools
-    - nix-env --install --attr nixpkgs.skopeo
-    - |
-      mkdir -p "$HOME/.config/nix"
-      printf 'experimental-features = nix-command flakes' > "$HOME/.config/nix/nix.conf"
-      git config --global --add safe.directory "$(pwd)"
-    - cd dev-container
+# TODO: Unfreeze whenever we settle how to build the ci container.
+# build-ci-environment:
+#   image: registry.sandbox.labz.s-box.org/vcaaron/flaskr/nix:2.24.9
+#   stage: setup
+#   rules:
+#     - changes:
+#       - dev-container/flake.nix
+#       - dev-container/flake.lock
+#       - .gitlab-ci.yml
+#   script:
+#       #install needed tools
+#     - nix-env --install --attr nixpkgs.skopeo
+#     - |
+#       mkdir -p "$HOME/.config/nix"
+#       printf 'experimental-features = nix-command flakes' > "$HOME/.config/nix/nix.conf"
+#       git config --global --add safe.directory "$(pwd)"
+#     - cd dev-container
 
-    # build dev and testing environments
-    - 'nix build --eval-system x86_64-linux --show-trace .#ciContainer -o polar-ci'
+#     # build dev and testing environments
+#     - 'nix build --eval-system x86_64-linux --show-trace .#ciContainer -o polar-ci'
     
-    #  Use skopeo to inspect and upload our images
-    - skopeo login --username "$CI_REGISTRY_USER" --password "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
-    - 'skopeo inspect docker-archive://$(readlink -f ./polar-ci)'
-    - 'skopeo copy docker-archive://$(readlink -f ./polar-ci) docker://$CI_REGISTRY/polar-ci:0.1.0'
+#     #  Use skopeo to inspect and upload our images
+#     - skopeo login --username "$CI_REGISTRY_USER" --password "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
+#     - 'skopeo inspect docker-archive://$(readlink -f ./polar-ci)'
+#     - 'skopeo copy docker-archive://$(readlink -f ./polar-ci) docker://$CI_REGISTRY/polar-ci:0.1.0'
 
 
 build-workspace:
-  image: registry.sandbox.labz.s-box.org/SEI/polar-mirror/polar-ci:0.1.0
+  image: registry.sandbox.labz.s-box.org/sei/polar-mirror/polar-ci:0.1.0
   stage: build
   variables:
   script:
-    - |
-      mkdir -p "/etc/containers/"
-      echo '{"default":[{"type":"insecureAcceptAnything"}]}' > /etc/containers/policy.json
-      git config --global --add safe.directory "$(pwd)"
+    - git config --global --add safe.directory "$(pwd)"
     - cd src/agents/
 
     # TODO: run nix flake checks to run unit testing and other static analysis
@@ -85,7 +84,7 @@ build-workspace:
     - skopeo login --username "$CI_REGISTRY_USER" --password "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
     - | 
       'skopeo inspect docker-archive://$(readlink -f ./cassini)'
-      'skopeo copy docker-archive://$(readlink -f ./cassini) docker://$CI_REGISTRY/cassini:latest'
+      'skopeo copy docker-archive://$(readlink -f ./cassini) docker://$CI_REGISTRY/cassini:0.1.0'
       'skopeo inspect docker-archive://$(readlink -f ./observer)'
       'skopeo copy docker-archive://$(readlink -f ./observer) docker://$CI_REGISTRY/polar-gitlab-observer:0.1.0'
       'skopeo inspect docker-archive://$(readlink -f ./consumer)'
@@ -95,10 +94,8 @@ build-workspace:
       - src/agents/vulnix-results.json
 
 make-charts:
-  image: registry.sandbox.labz.s-box.org/SEI/polar-mirror/polar-ci:0.1.0
+  image: registry.sandbox.labz.s-box.org/sei/polar-mirror/polar-ci:0.1.0
   stage: charts
-  variables:
-    REGISTRY: registry.sandbox.labz.s-box.org/SEI/polar-mirror
   script:
   #TODO: Generate helm charts and push them to a hosted repository
     - cd src/deploy/ 

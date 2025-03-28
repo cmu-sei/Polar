@@ -61,10 +61,10 @@ impl Actor for TcpClientActor {
         if let Err(_) = provider { debug!("Crypto provider configured"); }
                         
         let mut root_cert_store = rustls::RootCertStore::empty();
-        let _ = root_cert_store.add(CertificateDer::from_pem_file(args.ca_cert_file).expect("Expected to read CA cert as pem"));
+        let _ = root_cert_store.add(CertificateDer::from_pem_file(args.ca_cert_file.clone()).expect(&format!("Expected to read CA cert as a PEM file from {}", args.ca_cert_file)));
     
-        let client_cert = CertificateDer::from_pem_file(args.client_cert_file).expect("Expected to read client cert as pem");
-        let private_key = PrivateKeyDer::from_pem_file(args.private_key_file).expect("Expected to read client cert as pem");
+        let client_cert = CertificateDer::from_pem_file(args.client_cert_file.clone()).expect(&format!("Expected to read client cert as a PEM file from {}", args.client_cert_file));
+        let private_key = PrivateKeyDer::from_pem_file(args.private_key_file.clone()).expect(&format!("Expected to read client key as a PEM file from {}", args.private_key_file));
         let verifier = WebPkiServerVerifier::builder(Arc::new(root_cert_store)).build().expect("Expected to build client verifier");
         let mut certs = Vec::new();
         certs.push(client_cert);
