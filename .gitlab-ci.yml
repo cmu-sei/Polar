@@ -22,6 +22,8 @@ build-dev-environment:
     - |
       mkdir -p "$HOME/.config/nix"
       printf 'experimental-features = nix-command flakes' > "$HOME/.config/nix/nix.conf"
+      mkdir -p "/etc/containers"
+      echo '{"default":[{"type":"insecureAcceptAnything"}]}' > /etc/containers/policy.json
       git config --global --add safe.directory "$(pwd)"
     - cd dev-container
 

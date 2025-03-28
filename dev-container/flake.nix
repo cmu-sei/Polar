@@ -109,6 +109,12 @@
           text = builtins.readFile ./container-files/nix.conf;
         };
 
+        containerPolicyConfig = pkgs.writeTextFile {
+          name = "nix.conf";
+          destination = "/etc/containers/policy.json";
+          text = builtins.readFile ./container-files/policy.json;
+        }; 
+
         fishConfig = pkgs.writeTextFile {
           name = "container-files/config.fish";
           destination = "/root/.config/fish/config.fish";
@@ -236,6 +242,7 @@
             license
             ciEnv
             nixConfig
+            containerPolicyConfig
           ];
           config = {
             WorkingDir = "/workspace";
