@@ -7,37 +7,56 @@ default:
   tags:
     - kubernetes
 
-build-enviornments:
+build-dev-environment:
   image: registry.sandbox.labz.s-box.org/vcaaron/flaskr/nix:2.24.9
   stage: setup
-  variables:
-    VERSION: "0.1.0"
-    REGISTRY: registry.sandbox.labz.s-box.org/SEI/polar-mirror
-    IMAGE_NAME: $CI_PROJECT_NAME
-    
+  rules:
+    - changes:
+      - dev-container/flake.nix
+      - dev-container/flake.lock
+      - .gitlab-ci.yml
   script:
       #install needed tools
     - nix-env --install --attr nixpkgs.skopeo
     - |
-      echo "Configuring nix and the filesystem"
       mkdir -p "$HOME/.config/nix"
-      mkdir -p "/etc/containers/"
-      #setup nixconfig
       printf 'experimental-features = nix-command flakes' > "$HOME/.config/nix/nix.conf"
-      echo '{"default":[{"type":"insecureAcceptAnything"}]}' > /etc/containers/policy.json
       git config --global --add safe.directory "$(pwd)"
     - cd dev-container
 
     # build dev and testing environments
     - 'nix build --eval-system x86_64-linux --show-trace .#default -o polar-dev' 
-    - 'nix build --eval-system x86_64-linux --show-trace .#ciContainer -o polar-ci'
     
     #  Use skopeo to inspect and upload our images
     - skopeo login --username "$CI_REGISTRY_USER" --password "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
     - 'skopeo inspect docker-archive://$(readlink -f ./polar-dev)'
-    - 'skopeo copy docker-archive://$(readlink -f ./polar-dev) docker://$REGISTRY/polar-dev:0.1.0'
+    - 'skopeo copy docker-archive://$(readlink -f ./polar-dev) docker://$CI_REGISTRY/polar-dev:0.1.0'
+
+build-ci-environment:
+  image: registry.sandbox.labz.s-box.org/vcaaron/flaskr/nix:2.24.9
+  stage: setup
+  rules:
+    - changes:
+      - dev-container/flake.nix
+      - dev-container/flake.lock
+      - .gitlab-ci.yml
+  script:
+      #install needed tools
+    - nix-env --install --attr nixpkgs.skopeo
+    - |
+      mkdir -p "$HOME/.config/nix"
+      printf 'experimental-features = nix-command flakes' > "$HOME/.config/nix/nix.conf"
+      git config --global --add safe.directory "$(pwd)"
+    - cd dev-container
+
+    # build dev and testing environments
+    - 'nix build --eval-system x86_64-linux --show-trace .#ciContainer -o polar-ci'
+    
+    #  Use skopeo to inspect and upload our images
+    - skopeo login --username "$CI_REGISTRY_USER" --password "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
     - 'skopeo inspect docker-archive://$(readlink -f ./polar-ci)'
-    - 'skopeo copy docker-archive://$(readlink -f ./polar-ci) docker://$REGISTRY/polar-ci:0.1.0'
+    - 'skopeo copy docker-archive://$(readlink -f ./polar-ci) docker://$CI_REGISTRY/polar-ci:0.1.0'
+
 
 build-workspace:
   image: registry.sandbox.labz.s-box.org/SEI/polar-mirror/polar-ci:0.1.0
@@ -46,7 +65,6 @@ build-workspace:
   script:
     - |
       mkdir -p "/etc/containers/"
-      #setup nixconfig
       echo '{"default":[{"type":"insecureAcceptAnything"}]}' > /etc/containers/policy.json
       git config --global --add safe.directory "$(pwd)"
     - cd src/agents/
@@ -65,7 +83,6 @@ build-workspace:
     
     # Use skopeo to inspect and upload our images
     - skopeo login --username "$CI_REGISTRY_USER" --password "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
-    - ls -lh
     - | 
       'skopeo inspect docker-archive://$(readlink -f ./cassini)'
       'skopeo copy docker-archive://$(readlink -f ./cassini) docker://$CI_REGISTRY/cassini:latest'
