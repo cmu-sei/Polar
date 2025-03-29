@@ -73,28 +73,21 @@ The make-chart script will:
 ## Usage
 Run the script to generate a Helm chart from Dhall configurations
 
-`sh make-chart.sh dhall polar`
+`sh make-chart.sh dhall chart`
 
 ### Deploying with Helm
 Once the chart is generated. You can run something like
 
 ```bash
-helm install polar-neo4j ./polar-neo4j -n polar
+helm install polar chart -n polar
 ```
 
 ### GitOps & Immutability
 To maintain immutability and ensure **safe GitOps practices**:
-1. **Commit the Helm chart to a versioned repository**:
-   ```bash
-   git add neo4j-helm-release/
-   git commit -m "Generated immutable Helm chart from Dhall configs"
-   git push origin main
-   ```
-2. **Use Helm package versioning** to store the chart as an immutable artifact:
-   ```bash
-   helm package neo4j-helm-release/
-   helm push neo4j-helm-release-0.1.0.tgz oci://my-helm-repo
-   ```
+1. TODO: Document how to commit the Helm chart to a versioned repository
+   
+2. TODO: Document how to use Helm package versioning to store the chart as an immutable artifact:
+
 3. TODO: How to Deploy using GitOps tools** like ArgoCD or Flux
 
 
