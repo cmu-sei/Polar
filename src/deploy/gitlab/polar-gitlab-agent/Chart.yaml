@@ -1,7 +1,0 @@
-### CAUTION! THIS CHART AND THE TEMPLATES WITHIN IT ARE PRE-GENERATED AND ARE NOT INTENDED TO BE MANUALLY EDITED ###
-apiVersion: v2
-name: polar-gitlab-agent
-description: A pre-generated helm chart for deploying a Polar service.
-type: application
-version: 0.1.0
-appVersion: "0.1.0"

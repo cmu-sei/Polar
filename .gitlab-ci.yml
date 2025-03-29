@@ -110,8 +110,6 @@ make-charts:
   script:
   #TODO: Generate helm charts and push them to a hosted repository
     - cd src/deploy/ 
-    # TODO: See about how we can avoid this step, we probably have to edit some security context for the k8s pod
     - chmod +x ./make-chart.sh
-    - sh ./make-chart.sh cassini polar-cassini
-    - sh ./make-chart.sh neo4j polar-neo4j
-    - sh ./make-chart.sh gitlab polar-gitlab-agent
+    - sh make-chart.sh dhall polar
+    

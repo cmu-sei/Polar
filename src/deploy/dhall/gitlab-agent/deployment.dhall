@@ -2,12 +2,14 @@ let kubernetes =
       https://raw.githubusercontent.com/dhall-lang/dhall-kubernetes/refs/heads/master/1.31/package.dhall
       sha256:1a0d599eabb9dd154957edc59bb8766ea59b4a245ae45bdd55450654c12814b0
 
+let values = ../values.dhall
+
 let gitlabAgentPod = {
             , containers =
               [ 
                 kubernetes.Container::{
-                    , name = "gitlab-observer"
-                    , image = Some "localhost/polar-gitlab-observer:0.1.0"
+                    , name = values.gitlab.observer.name
+                    , image = Some  values.gitlab.observer.image
                     , env = Some [
                         kubernetes.EnvVar::{
                             name = "TLS_CA_CERT"
@@ -23,11 +25,11 @@ let gitlabAgentPod = {
                         }
                         , kubernetes.EnvVar::{
                             name = "BROKER_ADDR"
-                            , value = Some "cassini-ip-svc.polar.svc.cluster.local:8080"
+                            , value = Some values.cassiniAddr
                         }
                         , kubernetes.EnvVar::{
                             name = "GITLAB_ENDPOINT"
-                            , value = Some "https://gitlab.sandbox.labz.s-box.org/api/graphql"
+                            , value = Some values.gitlab.observer.gitlabEndpoint
                         }
                         , kubernetes.EnvVar::{
                             name = "GITLAB_TOKEN"
@@ -48,8 +50,8 @@ let gitlabAgentPod = {
                     ]
                 }
                 , kubernetes.Container::{
-                    name = "gitlab-consumer"
-                    , image = Some "localhost/polar-gitlab-consumer:0.1.0"
+                    name = values.gitlab.consumer.name
+                    , image = Some values.gitlab.consumer.image
                     , env = Some [
                         kubernetes.EnvVar::{
                             name = "TLS_CA_CERT"
@@ -65,27 +67,24 @@ let gitlabAgentPod = {
                         }
                         , kubernetes.EnvVar::{
                             name = "BROKER_ADDR"
-                            , value = Some "cassini-ip-svc.polar.svc.cluster.local:8080"
+                            , value = Some values.cassiniAddr
                         }
                         , kubernetes.EnvVar::{
                             name = "GRAPH_ENDPOINT"
-                            , value = Some "neo4j-svc.polar.svc.cluster.local:7474"
+                            , value = Some values.neo4jAddr
                         }
                         , kubernetes.EnvVar::{
                             name = "GRAPH_DB"
-                            , value = Some "neo4j"
+                            , value = Some values.gitlab.consumer.graph.graphDB
                         }
                         , kubernetes.EnvVar::{
                             name = "GRAPH_USERNAME"
-                            , value = Some "neo4j"                        
+                            , value = Some values.gitlab.consumer.graph.graphUsername                       
                         }
                         , kubernetes.EnvVar::{
                             name = "GRAPH_PASSWORD"
                             , valueFrom = Some kubernetes.EnvVarSource::{
-                                secretKeyRef = Some kubernetes.SecretKeySelector::{
-                                    key = "token"
-                                    , name = Some "neo4j-secret"
-                                }
+                                secretKeyRef = Some kubernetes.SecretKeySelector::values.gitlab.consumer.graph.graphSecret
                             }
                         }
                     ]
@@ -108,30 +107,26 @@ let gitlabAgentPod = {
             ]
 }
 
-let podTemplate = {
-          , metadata = Some kubernetes.ObjectMeta::{
-                name = Some "gitlab-agent"
-            ,   labels = Some [ { mapKey = "name", mapValue = "gitlab-agent" } ]
-            }
-          , spec = Some kubernetes.PodSpec::gitlabAgentPod
-          }
-
-let deploymentSpec = {
-        , selector = kubernetes.LabelSelector::{
-          , matchLabels = Some (toMap { name = "gitlab-agent" })
-          }
-        , replicas = Some 1
-        , template = kubernetes.PodTemplateSpec::podTemplate
-        }
-
 let 
     deployment =
       kubernetes.Deployment::{
       , metadata = kubernetes.ObjectMeta::{
-        name = Some "gitlab-agent"
+        name = Some values.gitlab.name
         , namespace = Some "polar"
        }
-      , spec = Some kubernetes.DeploymentSpec::deploymentSpec
+      , spec = Some kubernetes.DeploymentSpec::{
+        , selector = kubernetes.LabelSelector::{
+          , matchLabels = Some (toMap { name = values.gitlab.name })
+          }
+        , replicas = Some 1
+        , template = kubernetes.PodTemplateSpec::{
+          , metadata = Some kubernetes.ObjectMeta::{
+                name = Some values.gitlab.name
+            ,   labels = Some [ { mapKey = "name", mapValue = values.gitlab.name } ]
+            }
+          , spec = Some kubernetes.PodSpec::gitlabAgentPod
+          }
+        }
       }
     
 in  deployment

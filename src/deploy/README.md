@@ -67,13 +67,13 @@ http://127.0.0.1:57085 # This will be your bolt port
 ## Expected Output
 The make-chart script will:
 1. **Convert Dhall files** into Kubernetes YAML.
-2. **Generate a Helm chart** within the given directory.
+2. **Generate an Umbrella Helm chart** within the given directory.
 3. **Run Helm linting and rendering** to validate the chart.
 
 ## Usage
 Run the script to generate a Helm chart from Dhall configurations
 
-`sh make-chart.sh neo4j polar-neo4j`
+`sh make-chart.sh dhall polar`
 
 ### Deploying with Helm
 Once the chart is generated. You can run something like
