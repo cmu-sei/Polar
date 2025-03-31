@@ -20,19 +20,19 @@ build-dev-environment:
     - nix-env --install --attr nixpkgs.skopeo
     - |
       mkdir -p "$HOME/.config/nix"
-      printf 'experimental-features = nix-command flakes' > "$HOME/.config/nix/nix.conf"
+      printf "experimental-features = nix-command flakes" > "$HOME/.config/nix/nix.conf"
       mkdir -p "/etc/containers"
       echo '{"default":[{"type":"insecureAcceptAnything"}]}' > /etc/containers/policy.json
       git config --global --add safe.directory "$(pwd)"
     - cd dev-container
 
     # build dev and testing environments
-    - 'nix build --eval-system x86_64-linux --show-trace .#default -o polar-dev' 
+    - nix build --eval-system x86_64-linux --show-trace .#default -o polar-dev 
     
     #  Use skopeo to inspect and upload our images
     - skopeo login --username "$CI_REGISTRY_USER" --password "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
-    - 'skopeo inspect docker-archive://$(readlink -f ./polar-dev)'
-    - 'skopeo copy docker-archive://$(readlink -f ./polar-dev) docker://$CI_REGISTRY_IMAGE/polar-dev:0.1.0'
+    - skopeo inspect docker-archive://$(readlink -f ./polar-dev)
+    - skopeo copy docker-archive://$(readlink -f ./polar-dev) docker://$CI_REGISTRY_IMAGE/polar-dev:0.1.0
 
 # TODO: Unfreeze whenever we settle how to build the ci container.
 # SEE: https://github.com/cmu-sei/Polar/issues/33
@@ -49,17 +49,17 @@ build-dev-environment:
 #     - nix-env --install --attr nixpkgs.skopeo
 #     - |
 #       mkdir -p "$HOME/.config/nix"
-#       printf 'experimental-features = nix-command flakes' > "$HOME/.config/nix/nix.conf"
+#       printf experimental-features = nix-command flakes > "$HOME/.config/nix/nix.conf"
 #       git config --global --add safe.directory "$(pwd)"
 #     - cd dev-container
 
 #     # build dev and testing environments
-#     - 'nix build --eval-system x86_64-linux --show-trace .#ciContainer -o polar-ci'
+#     - nix build --eval-system x86_64-linux --show-trace .#ciContainer -o polar-ci
     
 #     #  Use skopeo to inspect and upload our images
 #     - skopeo login --username "$CI_REGISTRY_USER" --password "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
-#     - 'skopeo inspect docker-archive://$(readlink -f ./polar-ci)'
-#     - 'skopeo copy docker-archive://$(readlink -f ./polar-ci) docker://$CI_REGISTRY/polar-ci:0.1.0'
+#     - skopeo inspect docker-archive://$(readlink -f ./polar-ci)
+#     - skopeo copy docker-archive://$(readlink -f ./polar-ci) docker://$CI_REGISTRY/polar-ci:0.1.0
 
 build-workspace:
   image: registry.sandbox.labz.s-box.org/sei/polar-mirror/polar-ci:0.1.0
@@ -71,7 +71,7 @@ build-workspace:
 
     # TODO: run nix flake checks to run unit testing and other static analysis
     # build workspace
-    - 'nix build --eval-system x86_64-linux --show-trace .#default'
+    - nix build --eval-system x86_64-linux --show-trace .#default
     
     # Vulnerability analysis on our store
     # vulnix returns nonzero exit codes, so we need to get around this.
@@ -87,19 +87,19 @@ build-workspace:
       fi
     
     # using already built dependencies, package and containerize our components.
-    - 'nix build --eval-system x86_64-linux --show-trace .#cassiniImage -o cassini'
-    - 'nix build --eval-system x86_64-linux --show-trace .#observerImage -o observer'
-    - 'nix build --eval-system x86_64-linux --show-trace .#consumerImage -o consumer'
+    - nix build --eval-system x86_64-linux --show-trace .#cassiniImage -o cassini
+    - nix build --eval-system x86_64-linux --show-trace .#observerImage -o observer
+    - nix build --eval-system x86_64-linux --show-trace .#consumerImage -o consumer
     - ls -lh
     # Use skopeo to inspect and upload our images
     - skopeo login --username "$CI_REGISTRY_USER" --password "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
     - | 
-      'skopeo inspect docker-archive://$(readlink -f cassini)'
-      'skopeo copy docker-archive://$(readlink -f cassini) docker://$CI_REGISTRY_IMAGE/cassini:0.1.0'
-      'skopeo inspect docker-archive://$(readlink -f observer)'
-      'skopeo copy docker-archive://$(readlink -f observer) docker://$CI_REGISTRY_IMAGE/polar-gitlab-observer:0.1.0'
-      'skopeo inspect docker-archive://$(readlink -f consumer)'
-      'skopeo copy docker-archive://$(readlink -f consumer) docker://$CI_REGISTRY_IMAGE/polar-gitlab-consumer:0.1.0'
+      skopeo inspect docker-archive://$(readlink -f cassini)
+      skopeo copy docker-archive://$(readlink -f cassini) docker://$CI_REGISTRY_IMAGE/cassini:0.1.0
+      skopeo inspect docker-archive://$(readlink -f observer)
+      skopeo copy docker-archive://$(readlink -f observer) docker://$CI_REGISTRY_IMAGE/polar-gitlab-observer:0.1.0
+      skopeo inspect docker-archive://$(readlink -f consumer)
+      skopeo copy docker-archive://$(readlink -f consumer) docker://$CI_REGISTRY_IMAGE/polar-gitlab-consumer:0.1.0
   artifacts:
     paths:
       - src/agents/vulnix-results.json
