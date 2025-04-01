@@ -134,7 +134,8 @@ geneate-charts:
     
     # Commit and push if there are changes
     - git add .
-    - if git diff --quiet; then
+    - |
+      if git diff --quiet; then
         echo "No changes detected, skipping commit."
       else
         echo "Detected changes to polar helm chart, pushing upstream..."
