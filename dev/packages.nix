@@ -135,6 +135,6 @@ in
       skopeo
       grype
       syft
-      
+      kubeconform 
     ];
   }

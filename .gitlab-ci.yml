@@ -14,6 +14,7 @@ build-dev-environment:
     - changes:
       - dev-container/flake.nix
       - dev-container/flake.lock
+      - dev-container/packages.nix
       - .gitlab-ci.yml
   script:
       #install needed tools
@@ -43,6 +44,7 @@ build-dev-environment:
 #     - changes:
 #       - dev-container/flake.nix
 #       - dev-container/flake.lock
+#       - dev-container/packages.nix
 #       - .gitlab-ci.yml
 #   script:
 #       #install needed tools
@@ -53,7 +55,7 @@ build-dev-environment:
 #       git config --global --add safe.directory "$(pwd)"
 #     - cd dev-container
 
-#     # build dev and testing environments
+#     # build test environment for usage in the remainder of the pipeline
 #     - nix build --eval-system x86_64-linux --show-trace .#ciContainer -o polar-ci
     
 #     #  Use skopeo to inspect and upload our images
@@ -102,14 +104,42 @@ build-workspace:
       skopeo copy docker-archive://$(readlink -f consumer) docker://$CI_REGISTRY_IMAGE/polar-gitlab-consumer:0.1.0
   artifacts:
     paths:
-      - src/agents/vulnix-results.json
+      - src/agents/vulnix-report.json
 
-make-charts:
+geneate-charts:
   image: registry.sandbox.labz.s-box.org/sei/polar-mirror/polar-ci:0.1.0
-  stage: charts
+  stage: deploy
   script:
-  #TODO: Generate helm charts and push them to a hosted repository
-    - cd src/deploy/ 
-    - chmod +x ./make-chart.sh
-    - sh make-chart.sh dhall polar
+    # Clone the chart repo
+    - git clone --depth 1 "https://gitlab-ci-token:${CI_JOB_TOKEN}@https://gitlab.sandbox.labz.s-box.org/sei/polar-deploy.git
+
+    # Generate helm charts and push them to a hosted repository 
+    - chmod +x ./scripts/make-chart.sh
+    - rm -rf polar-deploy/polar 
+    - sh scripts/make-chart.sh src/deploy/dhall polar-deploy/polar
+    - cd polar-deploy
+    # We might want to commit to other environment-specific branchhes.
+    # If we do, we should probably make a template for this job and parameterize it
+    # - git checkout -B "$CI_COMMIT_BRANCH"
+
+    # Generate structured metadata to include as part of the commit
+    - |
+      cat <<EOF > polar/metadata.yaml
+      source_commit: "$CI_COMMIT_SHA"
+      source_repo: "$CI_REPOSITORY_URL"
+      created_at: "$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+      ci_pipeline:
+        id: "$CI_PIPELINE_ID"
+        url: "$CI_PIPELINE_URL"
+      environment: "sandbox"
+      EOF
     
+    # Commit and push if there are changes
+    - git add .
+    - if git diff --cached --quiet; then
+        echo "No changes detected, skipping commit.";
+      else
+        echo "Detected changes to polar helm chart, pushing upstream..."
+        git commit -m "Update manifests from source commit $CI_COMMIT_SHA"
+        git push origin "sandbox"
+      fi

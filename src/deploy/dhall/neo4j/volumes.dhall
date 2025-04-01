@@ -2,6 +2,7 @@ let kubernetes =
       https://raw.githubusercontent.com/dhall-lang/dhall-kubernetes/refs/heads/master/1.31/package.dhall
       sha256:1a0d599eabb9dd154957edc59bb8766ea59b4a245ae45bdd55450654c12814b0
 
+let values = ../values.dhall
 
 let neo4jDataVolume = kubernetes.PersistentVolume::{ 
     apiVersion = "v1"
@@ -11,13 +12,15 @@ let neo4jDataVolume = kubernetes.PersistentVolume::{
         , namespace = Some "polar"
     }
     , spec = Some kubernetes.PersistentVolumeSpec::{
-        accessModes = Some [ "ReadWriteOnce" ]
+        accessModes = Some values.neo4j.volumes.data.selector.accessModes
         , capacity = 
             Some ([
-                { mapKey = "storage" , mapValue = "10Gi" }
+                { mapKey = "storage"
+                , mapValue = values.neo4j.volumes.data.selector.requests.storage
+                }
             ])
         , hostPath = Some kubernetes.HostPathVolumeSource:: { path = "/data/conf" }
-        , storageClassName = Some "standard"
+        , storageClassName = Some values.neo4j.volumes.data.selector.storageClassName
     }    
 }
 

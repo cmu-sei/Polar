@@ -42,6 +42,14 @@ fi
 DHALL_ROOT="$1"
 UMBRELLA_CHART_NAME="$2"
 
+# Ensure necessary tools are installed
+for cmd in dhall-to-yaml kubeconform helm; do
+    if ! command -v "$cmd" &> /dev/null; then
+        echo "Error: $cmd is not installed. Install it and try again." >&2
+        exit 1
+    fi
+done
+
 # Ensure the provided Dhall directory exists
 if [[ ! -d "$DHALL_ROOT" ]]; then
     echo "Error: '$DHALL_ROOT' is not a valid directory." >&2
@@ -150,11 +158,15 @@ for SERVICE_DIR in "$DHALL_ROOT"/*/; do
     find "$SERVICE_DIR" -maxdepth 1 -type f -name "*.dhall" ! -name "chart.dhall" | while read -r dhall_file; do
         yaml_file="$CHILD_CHART_DIR/templates/$(basename "${dhall_file%.dhall}.yaml")"
         
-        echo "   [INFO] Converting: $dhall_file -> $yaml_file"
+        echo "   [INFO] Converting: $dhall_file -> $yaml_file"        
         if ! dhall-to-yaml --file "$dhall_file" > "$yaml_file"; then
             echo "[ERROR] Error: Failed to convert $dhall_file" >&2
             exit 1
         fi
+        echo "  [INFO] Checking $yaml_file with kubeconform"
+        #confirm whether the generated yaml fits k8s' expectations
+        kubeconform -strict -summary $yaml_file
+    
     done
 
     echo "[SUCCESS] Finished processing $CHILD_CHART_NAME."
