@@ -186,6 +186,4 @@ if ! helm template "$UMBRELLA_CHART_NAME"; then
     echo "[ERROR] Helm template rendering failed!" >&2
 fi
 
-echo "🎉 Helm chart setup complete!"
-echo "You can now install the chart using:"
-echo "helm install $UMBRELLA_CHART_NAME $UMBRELLA_CHART_NAME"
+echo "Helm chart setup complete!"

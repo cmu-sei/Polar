@@ -76,9 +76,10 @@ build-workspace:
     paths:
       - src/agents/vulnix-report.json
 
-geneate-charts:
+generate-charts:
   image: registry.sandbox.labz.s-box.org/sei/polar-mirror/polar-ci:0.1.0
   stage: charts
+  
   script:
     # Clone the chart repo
     - git clone --depth 1 "https://gitlab-ci-token:${CI_JOB_TOKEN}@gitlab.sandbox.labz.s-box.org/sei/polar-deploy.git"
@@ -106,6 +107,8 @@ geneate-charts:
     
     # Commit and push if there are changes
     - |
+      git config user.email $GITLAB_USER_EMAIL
+      git config user.name "${GITLAB_USER_LOGIN}-ci-job-${CI_JOB_NAME}-${CI_JOB_ID}"
       git add chart/metadata.yaml
       git add .
       echo "Updated files:"
