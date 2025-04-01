@@ -1,4 +1,6 @@
-use git2::{Cred, Error, FetchOptions, RemoteCallbacks, Repository, StatusOptions, StatusShow, BranchType};
+use git2::{
+    BranchType, Cred, Error, FetchOptions, RemoteCallbacks, Repository, StatusOptions, StatusShow,
+};
 use std::fs;
 use std::path::Path;
 
@@ -13,7 +15,12 @@ fn get_auth_repo_url(repo_url: &str, username: &str, token: &str) -> String {
 }
 
 /// Clones the repository from the given URL to the specified path
-fn clone_repo(repo_url: &str, repo_path: &str, username: &str, token: &str) -> Result<Repository, Error> {
+fn clone_repo(
+    repo_url: &str,
+    repo_path: &str,
+    username: &str,
+    token: &str,
+) -> Result<Repository, Error> {
     println!("Cloning repository...");
     Repository::clone(&get_auth_repo_url(repo_url, username, token), repo_path)
 }
@@ -21,7 +28,9 @@ fn clone_repo(repo_url: &str, repo_path: &str, username: &str, token: &str) -> R
 /// Checks if the repository has local uncommitted changes or untracked files
 fn has_local_changes(repo: &Repository) -> Result<bool, Error> {
     let mut status_opts = StatusOptions::new();
-    status_opts.include_untracked(true).show(StatusShow::IndexAndWorkdir);
+    status_opts
+        .include_untracked(true)
+        .show(StatusShow::IndexAndWorkdir);
     let statuses = repo.statuses(Some(&mut status_opts))?;
     Ok(!statuses.is_empty()) // True if there are changes
 }
@@ -29,13 +38,17 @@ fn has_local_changes(repo: &Repository) -> Result<bool, Error> {
 /// Checks if the local branch has diverged from the remote
 fn has_diverged_commits(repo: &Repository) -> Result<bool, Error> {
     let head = repo.head()?.resolve()?; // Get current HEAD
-    let head_commit = head.target().ok_or_else(|| Error::from_str("HEAD has no target"))?;
+    let head_commit = head
+        .target()
+        .ok_or_else(|| Error::from_str("HEAD has no target"))?;
 
     let branch = repo.find_branch("main", BranchType::Local)?; // Assumes 'main' branch
     let binding = branch.upstream()?;
     let upstream = binding.get(); // Get remote tracking branch
 
-    let upstream_commit = upstream.target().ok_or_else(|| Error::from_str("No upstream target"))?;
+    let upstream_commit = upstream
+        .target()
+        .ok_or_else(|| Error::from_str("No upstream target"))?;
 
     let base = repo.merge_base(head_commit, upstream_commit)?; // Find common ancestor
 
@@ -44,14 +57,17 @@ fn has_diverged_commits(repo: &Repository) -> Result<bool, Error> {
 }
 
 /// Ensures the repository exists, is clean, and is up to date
-fn get_latest_commit(repo_url: &str, repo_path: &str, username: &str, token: &str) -> Result<String, Error> {
+fn get_latest_commit(
+    repo_url: &str,
+    repo_path: &str,
+    username: &str,
+    token: &str,
+) -> Result<String, Error> {
     let repo_dir = Path::new(repo_path);
 
     // Set up authentication callbacks
     let mut callbacks = RemoteCallbacks::new();
-    callbacks.credentials(move |_, _, _| {
-        Cred::userpass_plaintext(username, token)
-    });
+    callbacks.credentials(move |_, _, _| Cred::userpass_plaintext(username, token));
 
     let mut fetch_options = FetchOptions::new();
     fetch_options.remote_callbacks(callbacks);

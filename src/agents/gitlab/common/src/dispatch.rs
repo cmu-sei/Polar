@@ -1,9 +1,8 @@
+use crate::types::GitlabData;
+use polar::DispatcherMessage;
 use ractor::{async_trait, registry::where_is, Actor, ActorProcessingErr, ActorRef};
 use rkyv::rancor::Error;
 use tracing::{error, info, warn};
-use polar::DispatcherMessage;
-use crate::types::GitlabData;
-
 
 /// Dispatcher Definition
 /// The Dispatcher is a core component of each agent. Its function is to deserialize data from it's binary
@@ -12,7 +11,6 @@ pub struct MessageDispatcher;
 
 //TODO: Make Dispatcher a trait that forces the implementation of some serialization logic>
 impl MessageDispatcher {
-
     /// Helper function - does as the name says.
     /// It's pretty safe to assume whatever message comes in contains data for our Gitlab agent.
     /// We can jsut discard any message that don't conform to our expectations as bad data.
@@ -21,23 +19,20 @@ impl MessageDispatcher {
         match rkyv::from_bytes::<GitlabData, Error>(&message) {
             Ok(message) => {
                 if let Some(consumer) = where_is(topic.clone()) {
-                    
                     if let Err(e) = consumer.send_message(message) {
                         tracing::warn!("Error forwarding message. {e}");
                     }
                 } else {
                     //TODO: Implement DLQ for when consumers aren't present and may return?
-                    todo!("Failed to forward message to processor, implement DLQ");;
+                    todo!("Failed to forward message to processor, implement DLQ");
                 }
             }
             Err(err) => warn!("Failed to deserialize message: {:?}", err),
         }
-        
     }
 }
 
 pub struct DispatcherState;
-
 
 #[async_trait]
 impl Actor for MessageDispatcher {
@@ -48,7 +43,7 @@ impl Actor for MessageDispatcher {
     async fn pre_start(
         &self,
         myself: ActorRef<Self::Msg>,
-        args: ()
+        args: (),
     ) -> Result<Self::State, ActorProcessingErr> {
         Ok(DispatcherState)
     }
@@ -56,7 +51,8 @@ impl Actor for MessageDispatcher {
     async fn post_start(
         &self,
         myself: ActorRef<Self::Msg>,
-        _: &mut Self::State ) ->  Result<(), ActorProcessingErr> {
+        _: &mut Self::State,
+    ) -> Result<(), ActorProcessingErr> {
         info!("{myself:?} started");
         Ok(())
     }
@@ -68,9 +64,10 @@ impl Actor for MessageDispatcher {
         _: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
-            DispatcherMessage::Dispatch { message, topic } => { MessageDispatcher::deserailize_and_dispatch(message, topic); }        
+            DispatcherMessage::Dispatch { message, topic } => {
+                MessageDispatcher::deserailize_and_dispatch(message, topic);
+            }
         }
-        Ok(())        
+        Ok(())
     }
 }
-

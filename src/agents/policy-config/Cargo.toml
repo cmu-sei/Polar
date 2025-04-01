@@ -5,3 +5,4 @@ edition.workspace = true
 
 [dependencies]
 git2 = "0.20.0"
+workspace-hack = { version = "0.1", path = "../workspace-hack" }

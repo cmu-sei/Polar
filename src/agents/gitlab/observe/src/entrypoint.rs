@@ -21,11 +21,11 @@
    DM24-0470
 */
 
-use std::{error::Error, time::Duration};
-use std::{env, thread};
 use gitlab_observer::*;
-use ractor::Actor;
 use polar::init_logging;
+use ractor::Actor;
+use std::{env, thread};
+use std::{error::Error, time::Duration};
 
 // enum ChildMessage {
 //     Terminate,
@@ -62,7 +62,7 @@ use polar::init_logging;
 //                 let frequency = mapping.get(resource_type.clone()).unwrap()
 //                 .get("frequency").unwrap()
 //                 .as_u64().unwrap();
-                
+
 //                 if resource_type == "projects" {
 //                     let my_tx = tx.clone();
 //                     let my_ctrl_c = ctrl_c.clone();
@@ -148,23 +148,21 @@ use polar::init_logging;
 //     });
 // }
 
-
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn Error> > {
+async fn main() -> Result<(), Box<dyn Error>> {
     init_logging();
-    
-    
+
     // let config_path = read_from_env("GITLAB_OBSERVER_CONFIG".to_owned());
 
     // let config = get_scheduler_config(config_path);
     // debug!("using provided config:\n {:#?}", config);
 
     // info!("Scheduling observers");
-    // TODO: Pass in values from config through args  
+    // TODO: Pass in values from config through args
     let client_cert_file = env::var("TLS_CLIENT_CERT").unwrap();
     let client_private_key_file = env::var("TLS_CLIENT_KEY").unwrap();
-    let ca_cert_file =  env::var("TLS_CA_CERT").unwrap();   
-    
+    let ca_cert_file = env::var("TLS_CA_CERT").unwrap();
+
     let gitlab_endpoint = env::var("GITLAB_ENDPOINT").unwrap();
     let broker_addr = env::var("BROKER_ADDR").unwrap();
     let gitlab_token = env::var("GITLAB_TOKEN").unwrap();
@@ -178,9 +176,14 @@ async fn main() -> Result<(), Box<dyn Error> > {
         gitlab_token: Some(gitlab_token),
     };
 
-    let (supervisor, handle) = Actor::spawn(Some("GITLAB_OBSERVER_SUPERVISOR".to_string()), supervisor::ObserverSupervisor,args).await.expect("Expected to start observer agent");
+    let (supervisor, handle) = Actor::spawn(
+        Some("GITLAB_OBSERVER_SUPERVISOR".to_string()),
+        supervisor::ObserverSupervisor,
+        args,
+    )
+    .await
+    .expect("Expected to start observer agent");
     let _ = handle.await;
 
-    
     Ok(())
 }

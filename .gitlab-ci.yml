@@ -9,12 +9,11 @@ default:
 build-dev-environment:
   image: registry.sandbox.labz.s-box.org/vcaaron/flaskr/nix:2.24.9
   stage: build
-  allow_failure: true # TODO: disallow failure whenever we sort out how to build behind our airgapped environment
   rules:
     - changes:
-      - dev-container/flake.nix
-      - dev-container/flake.lock
-      - dev-container/packages.nix
+      - dev/flake.nix
+      - dev/flake.lock
+      - dev/packages.nix
       - .gitlab-ci.yml
   script:
       #install needed tools
@@ -25,7 +24,7 @@ build-dev-environment:
       mkdir -p "/etc/containers"
       echo '{"default":[{"type":"insecureAcceptAnything"}]}' > /etc/containers/policy.json
       git config --global --add safe.directory "$(pwd)"
-    - cd dev-container
+    - cd dev
 
     # build dev and testing environments
     - nix build --eval-system x86_64-linux --show-trace .#default -o polar-dev 
@@ -42,9 +41,9 @@ build-dev-environment:
 #   stage: build
 #   rules:
 #     - changes:
-#       - dev-container/flake.nix
-#       - dev-container/flake.lock
-#       - dev-container/packages.nix
+#       - dev/flake.nix
+#       - dev/flake.lock
+#       - dev/packages.nix
 #       - .gitlab-ci.yml
 #   script:
 #       #install needed tools
@@ -69,9 +68,7 @@ build-workspace:
   variables:
   script:
     - git config --global --add safe.directory "$(pwd)"
-    - cd src/agents/
-
-    # TODO: run nix flake checks to run unit testing and other static analysis
+    
     # build workspace
     - nix build --eval-system x86_64-linux --show-trace .#default
     
@@ -111,7 +108,7 @@ geneate-charts:
   stage: charts
   script:
     # Clone the chart repo
-    - git clone --depth 1 "https://gitlab-ci-token:${CI_JOB_TOKEN}@https://gitlab.sandbox.labz.s-box.org/sei/polar-deploy.git
+    - git clone --depth 1 "https://gitlab-ci-token:${CI_JOB_TOKEN}@https://gitlab.sandbox.labz.s-box.org/sei/polar-deploy.git"
 
     # Generate helm charts and push them to a hosted repository 
     - chmod +x ./scripts/make-chart.sh

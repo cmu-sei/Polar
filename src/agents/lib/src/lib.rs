@@ -1,11 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 pub enum DispatcherMessage {
-    Dispatch {
-        message: Vec<u8>,
-        topic: String
-    }
-    // Serialize()
+    Dispatch { message: Vec<u8>, topic: String }, // Serialize()
 }
 
 pub fn init_logging() {
@@ -34,5 +30,3 @@ pub fn init_logging() {
     let subscriber = Registry::default().with(filter).with(fmt);
     tracing::subscriber::set_global_default(subscriber).expect("to set global subscriber");
 }
-
-

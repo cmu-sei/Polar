@@ -21,14 +21,13 @@
    DM24-0470
 */
 
-use common::types::GitlabData;
-use neo4rs::Query;
 use crate::{subscribe_to_topic, GitlabConsumerArgs, GitlabConsumerState};
-use common::{RUNNERS_CONSUMER_TOPIC};
+use common::types::GitlabData;
+use common::RUNNERS_CONSUMER_TOPIC;
+use neo4rs::Query;
 
-use tracing::{debug, error, info};
 use ractor::{async_trait, registry::where_is, Actor, ActorProcessingErr, ActorRef};
-
+use tracing::{debug, error, info};
 
 pub struct GitlabRunnerConsumer;
 
@@ -41,14 +40,15 @@ impl Actor for GitlabRunnerConsumer {
     async fn pre_start(
         &self,
         myself: ActorRef<Self::Msg>,
-        args: GitlabConsumerArgs
+        args: GitlabConsumerArgs,
     ) -> Result<Self::State, ActorProcessingErr> {
         debug!("{myself:?} starting, connecting to broker");
         //subscribe to topic
         match subscribe_to_topic(args.registration_id, RUNNERS_CONSUMER_TOPIC.to_string()).await {
             Ok(state) => Ok(state),
             Err(e) => {
-                let err_msg = format!("Error subscribing to topic \"{RUNNERS_CONSUMER_TOPIC}\" {e}");
+                let err_msg =
+                    format!("Error subscribing to topic \"{RUNNERS_CONSUMER_TOPIC}\" {e}");
                 Err(ActorProcessingErr::from(err_msg))
             }
         }
@@ -57,9 +57,10 @@ impl Actor for GitlabRunnerConsumer {
     async fn post_start(
         &self,
         myself: ActorRef<Self::Msg>,
-        _: &mut Self::State ) ->  Result<(), ActorProcessingErr> {
-            info!("{:?} waiting to consume", myself.get_name());
-        
+        _: &mut Self::State,
+    ) -> Result<(), ActorProcessingErr> {
+        info!("{:?} waiting to consume", myself.get_name());
+
         Ok(())
     }
     async fn handle(
@@ -68,20 +69,18 @@ impl Actor for GitlabRunnerConsumer {
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-
         match message {
             GitlabData::Runners(runners) => {
-                                //TODO: Expect transaction to start, panic if it doesn't
+                //TODO: Expect transaction to start, panic if it doesn't
                 match state.graph.start_txn().await {
-                    Ok(mut transaction)  => {
-                        
+                    Ok(mut transaction) => {
                         let mut_cypher_query = String::new();
 
                         let runner_data = runners
-                        .iter()
-                        .map(|runner| {
-                            format!(
-                                r#"{{
+                            .iter()
+                            .map(|runner| {
+                                format!(
+                                    r#"{{
                                 runner_id: '{runner_id}',
                                 paused: '{paused}',
                                 runner_type: '{runner_type:?}',
@@ -90,17 +89,17 @@ impl Actor for GitlabRunnerConsumer {
                                 run_untagged: '{run_untagged}',
                                 tag_list: '{tag_list:?}' 
                                 }}"#,
-                                runner_id = runner.id.0,
-                                paused = runner.paused,
-                                runner_type = runner.runner_type,
-                                status = runner.status,
-                                access_level = runner.access_level,
-                                run_untagged = runner.run_untagged,
-                                tag_list = runner.tag_list.clone().unwrap_or_default()
-                            )
-                        })
-                        .collect::<Vec<_>>()
-                        .join(",\n");
+                                    runner_id = runner.id.0,
+                                    paused = runner.paused,
+                                    runner_type = runner.runner_type,
+                                    status = runner.status,
+                                    access_level = runner.access_level,
+                                    run_untagged = runner.run_untagged,
+                                    tag_list = runner.tag_list.clone().unwrap_or_default()
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                            .join(",\n");
 
                         let cypher_query = format!(
                             "
@@ -115,7 +114,10 @@ impl Actor for GitlabRunnerConsumer {
                             "
                         );
                         debug!(cypher_query);
-                        transaction.run(Query::new(cypher_query)).await.expect("Expected to run query."); 
+                        transaction
+                            .run(Query::new(cypher_query))
+                            .await
+                            .expect("Expected to run query.");
                         if let Err(e) = transaction.commit().await {
                             let err_msg = format!("Error committing transaction to graph: {e}");
                             error!("{err_msg}");
@@ -126,9 +128,9 @@ impl Actor for GitlabRunnerConsumer {
                         error!("Could not open transaction with graph! {e}");
                         todo!("What to do when we can't access the graph")
                     }
-                } 
+                }
             }
-            _ => ()
+            _ => (),
         }
         //TODO: Implement message type for consumers to handle new messages
         // match message {
@@ -153,7 +155,7 @@ impl Actor for GitlabRunnerConsumer {
         //             }
         //             Err(e) => todo!()
         //         }
-                
+
         //     },
 
         //     _ => todo!("Gitlab consumer shouldn't get anything but gitlab data")
@@ -164,11 +166,11 @@ impl Actor for GitlabRunnerConsumer {
 
 // #[tokio::main]
 // async fn main() -> Result<()> {
-    
+
 //     //get mq connection
 //     let conn = connect_to_rabbitmq().await.unwrap();
 
-//     //create channels, exchange, 
+//     //create channels, exchange,
 //     let consumer_channel = conn.create_channel().await?;
 
 //     //bind to queue
@@ -206,9 +208,9 @@ impl Actor for GitlabRunnerConsumer {
 //                     continue
 //                 }
 //             };
-            
+
 //             debug!("{:?}", message);
-            
+
 //             let transaction = match graph_conn.start_txn().await {
 //                 Ok(t) => t,
 //                 Err(e) => {
@@ -216,12 +218,12 @@ impl Actor for GitlabRunnerConsumer {
 //                     continue
 //                 }
 //             };
-            
+
 //                 match message {
 //                     gitlabDa::Runners(vec) => {
 //                         for runner in vec{
 //                             let query = format!("MERGE (n:GitlabRunner {{runner_id: '{}', ip_address: '{}', name: '{}' , runner_type: '{}', status: '{}', is_shared: '{}'}}) return n",
-//                             runner.id, runner.ip_address.unwrap_or_default(), runner.name.unwrap_or_default(), 
+//                             runner.id, runner.ip_address.unwrap_or_default(), runner.name.unwrap_or_default(),
 //                             runner.runner_type, runner.status, runner.is_shared.unwrap_or(false));
 //                             if !run_query(&transaction, query).await {
 //                                 continue;
@@ -247,12 +249,12 @@ impl Actor for GitlabRunnerConsumer {
 //                         info!("[*] Transaction Committed")
 //                     },
 //                     Err(e) => panic!("Error updating graph {}", e)
-//                 }        
+//                 }
 //             }Err(e) => {
 //                 error!("Error getting message Delivery!{}", e );
 //                 continue
 //             }
-//         }           
+//         }
 //     } //end consume looopa
 
 //     Ok(())

@@ -15,54 +15,65 @@ publish = false
 
 ### BEGIN HAKARI SECTION
 [dependencies]
+bitflags = { version = "2", default-features = false, features = ["std"] }
+bytes = { version = "1", features = ["serde"] }
+chrono = { version = "0.4", features = ["serde"] }
 form_urlencoded = { version = "1" }
 futures-core = { version = "0.3" }
 futures-io = { version = "0.3" }
 futures-sink = { version = "0.3" }
-getrandom = { version = "0.2", default-features = false, features = ["std"] }
+getrandom-6f8ce4dd05d13bba = { package = "getrandom", version = "0.2", default-features = false, features = ["std"] }
 log = { version = "0.4", default-features = false, features = ["std"] }
 memchr = { version = "2" }
 num-traits = { version = "0.2", features = ["i128"] }
 once_cell = { version = "1" }
 percent-encoding = { version = "2" }
+phf_shared = { version = "0.11" }
+rand = { version = "0.8", features = ["small_rng"] }
+rand_core = { version = "0.6", default-features = false, features = ["std"] }
 regex = { version = "1" }
 regex-automata = { version = "0.4", default-features = false, features = ["dfa-onepass", "hybrid", "meta", "nfa-backtrack", "perf-inline", "perf-literal", "unicode"] }
 regex-syntax = { version = "0.8" }
-rustls = { version = "=0.23.25", features = ["ring"] }
-rustls-webpki = { version = "=0.103.0", default-features = false, features = ["aws-lc-rs", "ring", "std"] }
+rustls = { version = "0.23", features = ["ring"] }
+rustls-webpki = { version = "0.103", default-features = false, features = ["aws-lc-rs", "ring", "std"] }
+serde = { version = "1", features = ["alloc", "derive"] }
 simdutf8 = { version = "0.1", default-features = false, features = ["std"] }
 smallvec = { version = "1", default-features = false, features = ["const_generics"] }
 tokio = { version = "1", features = ["full", "tracing"] }
+tokio-rustls = { version = "0.26", features = ["ring"] }
 
 [build-dependencies]
+displaydoc = { version = "0.2" }
+getrandom-6f8ce4dd05d13bba = { package = "getrandom", version = "0.2", default-features = false, features = ["std"] }
+memchr = { version = "2" }
 once_cell = { version = "1" }
-proc-macro2 = { version = "1" }
-quote = { version = "1" }
+phf_shared = { version = "0.11" }
+rand = { version = "0.8", features = ["small_rng"] }
+rand_core = { version = "0.6", default-features = false, features = ["std"] }
+regex = { version = "1" }
+regex-automata = { version = "0.4", default-features = false, features = ["dfa-onepass", "hybrid", "meta", "nfa-backtrack", "perf-inline", "perf-literal", "unicode"] }
 regex-syntax = { version = "0.8" }
 simdutf8 = { version = "0.1", default-features = false, features = ["std"] }
-syn-dff4ba8e3ae991db = { package = "syn", version = "1", features = ["extra-traits", "full"] }
+syn-dff4ba8e3ae991db = { package = "syn", version = "1", features = ["full", "visit-mut"] }
 syn-f595c2ba2a3f28df = { package = "syn", version = "2", features = ["extra-traits", "fold", "full", "visit", "visit-mut"] }
 
 [target.x86_64-unknown-linux-gnu.dependencies]
 futures-channel = { version = "0.3", features = ["sink"] }
+getrandom-468e82937335b1c9 = { package = "getrandom", version = "0.3", default-features = false, features = ["std"] }
 libc = { version = "0.2" }
-spin = { version = "0.9" }
 tokio-util = { version = "0.7", features = ["codec", "io"] }
 
 [target.x86_64-unknown-linux-gnu.build-dependencies]
-getrandom = { version = "0.2", default-features = false, features = ["std"] }
 libc = { version = "0.2" }
 
 [target.x86_64-apple-darwin.dependencies]
 futures-channel = { version = "0.3", features = ["sink"] }
+getrandom-468e82937335b1c9 = { package = "getrandom", version = "0.3", default-features = false, features = ["std"] }
 libc = { version = "0.2", features = ["extra_traits"] }
-rustix = { version = "0.38", features = ["event", "fs", "net", "pipe", "process", "time"] }
 security-framework-sys = { version = "2" }
-spin = { version = "0.9" }
 tokio-util = { version = "0.7", features = ["codec", "io"] }
 
 [target.x86_64-apple-darwin.build-dependencies]
-getrandom = { version = "0.2", default-features = false, features = ["std"] }
 libc = { version = "0.2", features = ["extra_traits"] }
 
 ### END HAKARI SECTION

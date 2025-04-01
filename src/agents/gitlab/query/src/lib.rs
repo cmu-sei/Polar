@@ -1,33 +1,32 @@
 use std::fmt;
 
-use gitlab_schema::gitlab::{self as schema};
 use cynic::*;
+use gitlab_schema::gitlab::{self as schema};
 use gitlab_schema::DateTimeString;
 use gitlab_schema::IdString;
 use rkyv::Archive;
-use rkyv::Serialize;
 use rkyv::Deserialize;
+use rkyv::Serialize;
 
-pub mod runners;
 pub mod groups;
+pub mod runners;
 
 // #[derive(cynic::Scalar,serde::Deserialize, Clone, Debug)]
 // #[cynic(schema = "gitlab", graphql_type = "UserID")]
 // pub struct UserID(Id);
 
-
-/// NOTE: Cynic matches rust variants up to their equivalent SCREAMING_SNAKE_CASE GraphQL variants. 
+/// NOTE: Cynic matches rust variants up to their equivalent SCREAMING_SNAKE_CASE GraphQL variants.
 /// This behaviour is disabled because the gitlab schema goes against this
 /// TODO: Disable warnings on this datatype
 #[derive(cynic::Enum, Clone, Copy, Deserialize, Serialize, rkyv::Archive, Debug)]
 #[cynic(schema = "gitlab", rename_all = "None")]
 pub enum UserState {
-    active, 
-    banned, 
+    active,
+    banned,
     blocked,
     blocked_pending_approval,
     deactivated,
-    ldap_blocked
+    ldap_blocked,
 }
 
 impl fmt::Display for UserState {
@@ -52,7 +51,6 @@ pub struct Namespace {
     pub visibility: Option<String>,
 }
 
-
 #[derive(cynic::QueryFragment, Clone, Deserialize, Serialize, rkyv::Archive)]
 #[cynic(schema = "gitlab")]
 pub struct Project {
@@ -65,24 +63,24 @@ pub struct Project {
     pub last_activity_at: Option<DateTimeString>,
 }
 
-#[derive(cynic::QueryFragment, Clone,  Deserialize, Serialize, Archive)]
+#[derive(cynic::QueryFragment, Clone, Deserialize, Serialize, Archive)]
 #[cynic(schema = "gitlab")]
 pub struct ProjectEdge {
     pub cursor: String,
-    pub node: Option<Project>
+    pub node: Option<Project>,
 }
 
 #[derive(cynic::QueryFragment, Clone, Deserialize, Serialize, rkyv::Archive)]
 #[cynic(schema = "gitlab")]
 pub struct ProjectConnection {
-    pub count: i32, 	  //Int! 	Total count of collection.
-    pub edges: Option<Vec<Option<ProjectEdge>>>,	  
-    pub nodes: Option<Vec<Option<Project>>>,	  //[UserCore] 	A list of nodes.
-    pub page_info: PageInfo, // 	PageInfo! 	Information to aid in pagination. 
+    pub count: i32, //Int! 	Total count of collection.
+    pub edges: Option<Vec<Option<ProjectEdge>>>,
+    pub nodes: Option<Vec<Option<Project>>>, //[UserCore] 	A list of nodes.
+    pub page_info: PageInfo,                 // 	PageInfo! 	Information to aid in pagination.
 }
 
 /// Arguments type for the User Observer. Akin to the query.users parameters in the schema
-/// 
+///
 /// This datatype represents the arguments that will populate the query to the graphql database.
 #[derive(cynic::QueryVariables, Debug, Clone)]
 pub struct MultiUserQueryArguments {
@@ -92,8 +90,6 @@ pub struct MultiUserQueryArguments {
     pub ids: Option<Vec<Id>>,
     pub usernames: Option<Vec<String>>,
     pub humans: Option<bool>,
-    
-
 }
 
 #[derive(cynic::QueryVariables, Debug, Clone)]
@@ -118,9 +114,13 @@ pub struct MultiProjectQueryArguments {
 }
 
 #[derive(cynic::QueryFragment, Clone)]
-#[cynic(schema = "gitlab", graphql_type = "Query", variables = "MultiProjectQueryArguments")]
+#[cynic(
+    schema = "gitlab",
+    graphql_type = "Query",
+    variables = "MultiProjectQueryArguments"
+)]
 pub struct MultiProjectQuery {
-    pub projects: Option<ProjectConnection>
+    pub projects: Option<ProjectConnection>,
 }
 
 #[derive(cynic::QueryFragment, Deserialize, Serialize, rkyv::Archive, Clone)]
@@ -130,18 +130,17 @@ pub struct AccessLevel {
     pub string_value: Option<AccessLevelEnum>,
 }
 
-
 #[derive(cynic::Enum, Deserialize, Serialize, rkyv::Archive, Clone)]
 #[cynic(schema = "gitlab")]
 pub enum AccessLevelEnum {
-  NoAccess,
-  MinimalAccess,
-  Guest,
-  Reporter,
-  Developer,
-  Maintainer,
-  Owner,
-  Admin,
+    NoAccess,
+    MinimalAccess,
+    Guest,
+    Reporter,
+    Developer,
+    Maintainer,
+    Owner,
+    Admin,
 }
 
 impl fmt::Display for AccessLevelEnum {
@@ -160,9 +159,9 @@ impl fmt::Display for AccessLevelEnum {
     }
 }
 
-// 
+//
 // Represents a Project Membership, and can be used as attributes for our relationships if supported in our graph db
-// 
+//
 #[derive(cynic::QueryFragment, Deserialize, Serialize, rkyv::Archive, Clone)]
 #[cynic(schema = "gitlab")]
 pub struct ProjectMember {
@@ -181,45 +180,43 @@ pub struct ProjectMember {
 #[cynic(schema = "gitlab")]
 pub struct ProjectMemberEdge {
     cursor: String,
-    node: Option<ProjectMember>
+    node: Option<ProjectMember>,
 }
 
 #[derive(cynic::QueryFragment, Deserialize, Serialize, rkyv::Archive, Clone)]
 #[cynic(schema = "gitlab")]
 pub struct ProjectMemberConnection {
     pub edges: Option<Vec<Option<ProjectMemberEdge>>>,
-    pub nodes:  Option<Vec<Option<ProjectMember>>>,
-    pub page_info: PageInfo
+    pub nodes: Option<Vec<Option<ProjectMember>>>,
+    pub page_info: PageInfo,
 }
-
 
 #[derive(cynic::QueryFragment)]
 #[cynic(schema = "gitlab")]
 pub struct UserCoreConnection {
     pub count: i32,
-    // pub edges: Option<Vec<Option<UserCoreEdge>>>,	  
+    // pub edges: Option<Vec<Option<UserCoreEdge>>>,
     pub nodes: Option<Vec<Option<UserCoreFragment>>>,
-    // pub page_info: PageInfo, 
+    // pub page_info: PageInfo,
 }
 
 // #[derive(cynic::QueryFragment)]
 // #[cynic(schema = "gitlab")]
 // pub struct UserCoreConnection {
 //     pub count: i32,
-//     // pub edges: Option<Vec<Option<UserCoreEdge>>>,	  
+//     // pub edges: Option<Vec<Option<UserCoreEdge>>>,
 //     pub nodes: Option<Vec<Option<UserCore>>>,
-//     pub page_info: PageInfo, 
+//     pub page_info: PageInfo,
 // }
 
 #[derive(cynic::QueryFragment)]
 #[cynic(schema = "gitlab", graphql_type = "UserCoreConnection")]
 pub struct UserCoreGroupsConnection {
     pub count: i32,
-    pub edges: Option<Vec<Option<UserCoreEdge>>>,	  
+    pub edges: Option<Vec<Option<UserCoreEdge>>>,
     pub nodes: Option<Vec<Option<UserCoreGroups>>>,
-    pub page_info: PageInfo, 
+    pub page_info: PageInfo,
 }
-
 
 #[derive(cynic::QueryFragment, Debug, Clone, Deserialize, Serialize, rkyv::Archive)]
 #[cynic(schema = "gitlab")]
@@ -227,9 +224,8 @@ pub struct PageInfo {
     pub end_cursor: Option<String>,
     pub has_next_page: bool,
     pub has_previous_page: bool,
-    pub start_cursor: Option<String>
+    pub start_cursor: Option<String>,
 }
-
 
 /// Gitlab's core user representation. Add fields here to get more data back.
 #[derive(cynic::QueryFragment, Clone, Deserialize, Serialize, rkyv::Archive)]
@@ -247,9 +243,8 @@ pub struct UserCoreFragment {
     pub created_at: Option<gitlab_schema::DateTimeString>,
     // pub contributed_projects: Option<ProjectConnection>,
     //TODO: enable project memebrships instead
-    pub project_memberships: Option<ProjectMemberConnection>
+    pub project_memberships: Option<ProjectMemberConnection>,
 }
-
 
 #[derive(cynic::QueryFragment, Clone, Deserialize, Serialize, rkyv::Archive)]
 #[cynic(schema = "gitlab", graphql_type = "UserCore")]
@@ -269,15 +264,16 @@ pub struct UserCoreProjects {
 #[cynic(schema = "gitlab")]
 pub struct UserCoreEdge {
     cursor: String,
-    node: Option<UserCoreFragment>
+    node: Option<UserCoreFragment>,
 }
-
 
 #[derive(cynic::QueryFragment)]
-#[cynic(schema = "gitlab", graphql_type = "Query", variables = "MultiUserQueryArguments")]
+#[cynic(
+    schema = "gitlab",
+    graphql_type = "Query",
+    variables = "MultiUserQueryArguments"
+)]
 pub struct MultiUserQuery {
     #[arguments(ids: $ids, usernames: $usernames, admins: $admins)]
-    pub users: Option<UserCoreConnection>
+    pub users: Option<UserCoreConnection>,
 }
-
-

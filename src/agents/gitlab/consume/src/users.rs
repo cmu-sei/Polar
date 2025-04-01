@@ -23,13 +23,12 @@
 
 use std::fmt::Display;
 
-use common::types::GitlabData;
-use neo4rs::Query;
 use crate::{subscribe_to_topic, GitlabConsumerArgs, GitlabConsumerState};
-use common::{USER_CONSUMER_TOPIC};
-use tracing::{debug, error, field::debug, info, warn};
+use common::types::GitlabData;
+use common::USER_CONSUMER_TOPIC;
+use neo4rs::Query;
 use ractor::{async_trait, registry::where_is, Actor, ActorProcessingErr, ActorRef};
-
+use tracing::{debug, error, field::debug, info, warn};
 
 pub struct GitlabUserConsumer;
 
@@ -42,7 +41,7 @@ impl Actor for GitlabUserConsumer {
     async fn pre_start(
         &self,
         myself: ActorRef<Self::Msg>,
-        args: GitlabConsumerArgs
+        args: GitlabConsumerArgs,
     ) -> Result<Self::State, ActorProcessingErr> {
         debug!("{myself:?} starting, connecting to broker");
         //subscribe to topic
@@ -58,9 +57,10 @@ impl Actor for GitlabUserConsumer {
     async fn post_start(
         &self,
         myself: ActorRef<Self::Msg>,
-        _: &mut Self::State ) ->  Result<(), ActorProcessingErr> {
-            info!("{:?} waiting to consume", myself.get_name());
-        
+        _: &mut Self::State,
+    ) -> Result<(), ActorProcessingErr> {
+        info!("{:?} waiting to consume", myself.get_name());
+
         Ok(())
     }
     async fn handle(
@@ -73,8 +73,7 @@ impl Actor for GitlabUserConsumer {
             GitlabData::Users(users) => {
                 //TODO: Expect transaction to start, panic if it doesn't
                 match state.graph.start_txn().await {
-                    Ok(mut transaction)  => {
-                        
+                    Ok(mut transaction) => {
                         let mut_cypher_query = String::new();
 
                         let users_data = users
@@ -101,7 +100,10 @@ impl Actor for GitlabUserConsumer {
                             "
                         );
                         debug!(cypher_query);
-                        transaction.run(Query::new(cypher_query)).await.expect("Expected to run query."); 
+                        transaction
+                            .run(Query::new(cypher_query))
+                            .await
+                            .expect("Expected to run query.");
                         if let Err(e) = transaction.commit().await {
                             let err_msg = format!("Error committing transaction to graph: {e}");
                             error!("{err_msg}");
@@ -112,41 +114,48 @@ impl Actor for GitlabUserConsumer {
                         error!("Could not open transaction with graph! {e}");
                         todo!("What to do when we can't access the graph")
                     }
-                } 
+                }
             }
             GitlabData::ProjectMembers(link) => {
                 match state.graph.start_txn().await {
                     Ok(mut transaction) => {
                         let nodes = link.connection.nodes.unwrap();
-                        
 
                         let project_memberships = nodes
-                        .iter()
-                        .filter_map(|option| {
-                            let membership = option.as_ref().unwrap();
-                            
-                            //create a list of attribute sets that will represent the relationship between a user and each project
-                            membership.project.as_ref().map(|project| {
-                                format!(
-                                    r#"{{
+                            .iter()
+                            .filter_map(|option| {
+                                let membership = option.as_ref().unwrap();
+
+                                //create a list of attribute sets that will represent the relationship between a user and each project
+                                membership.project.as_ref().map(|project| {
+                                    format!(
+                                        r#"{{
                                         project_id: "{}",
                                         access_level: "{}",
                                         created_at: "{}",
                                         expires_at: "{}"
                                     }}"#,
-                                    project.id,
-                                    //TODO: Represent this as a string, Too annoying to get the string value of this right now
-                                    membership.access_level.as_ref().map_or_else(|| String::default(), |al| {
-                                        al.integer_value.unwrap_or_default().to_string()
-                                    }),
-                                    membership.created_at.as_ref().map_or_else(|| String::default(), |date| date.to_string()),
-                                    membership.expires_at.as_ref().map_or_else(|| String::default(), |date| date.to_string()),
-                                )
+                                        project.id,
+                                        //TODO: Represent this as a string, Too annoying to get the string value of this right now
+                                        membership.access_level.as_ref().map_or_else(
+                                            || String::default(),
+                                            |al| {
+                                                al.integer_value.unwrap_or_default().to_string()
+                                            }
+                                        ),
+                                        membership.created_at.as_ref().map_or_else(
+                                            || String::default(),
+                                            |date| date.to_string()
+                                        ),
+                                        membership.expires_at.as_ref().map_or_else(
+                                            || String::default(),
+                                            |date| date.to_string()
+                                        ),
+                                    )
+                                })
                             })
-                        })
-                        .collect::<Vec<_>>()
-                        .join(",\n");
-                        
+                            .collect::<Vec<_>>()
+                            .join(",\n");
 
                         //write a query that finds the given user, and create a relationship between it and every project we were given
                         let cypher_query = format!(
@@ -161,9 +170,12 @@ impl Actor for GitlabUserConsumer {
                             ",
                             link.resource_id, project_memberships
                         );
-            
+
                         debug!(cypher_query);
-                        transaction.run(Query::new(cypher_query)).await.expect("Expected to run query.");
+                        transaction
+                            .run(Query::new(cypher_query))
+                            .await
+                            .expect("Expected to run query.");
                         if let Err(e) = transaction.commit().await {
                             error!("Error committing transaction to graph: {e}");
                         }
@@ -174,8 +186,8 @@ impl Actor for GitlabUserConsumer {
                     }
                 }
             }
-            
-            _ => todo!("Gitlab consumer shouldn't get anything but gitlab data")
+
+            _ => todo!("Gitlab consumer shouldn't get anything but gitlab data"),
         }
         Ok(())
     }

@@ -21,61 +21,73 @@
    DM24-0470
 */
 
-
-use std::error::Error;
 use cassini::{client::TcpClientMessage, ClientMessage};
 use gitlab_queries::{groups::GroupData, Namespace, Project};
-use tracing::{debug, error, info};
 use neo4rs::{Config, ConfigBuilder, Query, Txn};
 use ractor::{registry::where_is, ActorProcessingErr, MessagingErr};
+use std::error::Error;
+use tracing::{debug, error, info};
 use url::Url;
 
+pub mod groups;
+pub mod projects;
+pub mod runners;
 pub mod supervisor;
 pub mod users;
-pub mod projects;
-pub mod groups;
-pub mod runners;
 
 pub const BROKER_CLIENT_NAME: &str = "GITLAB_CONSUMER_CLIENT";
 pub const GITLAB_USER_CONSUMER: &str = "users";
 //TODO: Give consumer state info about neo4j, and eventually, a graph adapter to work with
 pub struct GitlabConsumerState {
     pub registration_id: String,
-    graph: neo4rs::Graph
+    graph: neo4rs::Graph,
 }
 #[derive(Clone, Debug)]
 pub struct GitlabConsumerArgs {
-    pub registration_id: String
+    pub registration_id: String,
 }
 
 ///
 /// Helper fn to setup consumer state, subscribe to a given topic, and connect to the graph database
 /// TODO: Consider updating this function in the future to leverage a grpah adapter should support alternatives to neo4j
-pub async fn subscribe_to_topic(registration_id: String, topic: String) -> Result<GitlabConsumerState, Box<dyn Error>> {
+pub async fn subscribe_to_topic(
+    registration_id: String,
+    topic: String,
+) -> Result<GitlabConsumerState, Box<dyn Error>> {
     match where_is(BROKER_CLIENT_NAME.to_string()) {
         Some(client) => {
-            if let Err(e) = client.send_message(TcpClientMessage::Send(ClientMessage::SubscribeRequest { registration_id: Some(registration_id.clone()), topic })) {
-                return Err(e.into())
+            if let Err(e) =
+                client.send_message(TcpClientMessage::Send(ClientMessage::SubscribeRequest {
+                    registration_id: Some(registration_id.clone()),
+                    topic,
+                }))
+            {
+                return Err(e.into());
             }
             //load neo config and connect to graph db
             match neo4rs::Graph::connect(get_neo_config()).await {
-                Ok(graph) => Ok(GitlabConsumerState { registration_id: registration_id, graph }),
-                 Err(e) => {
-                    Err(e.into())
-                }
+                Ok(graph) => Ok(GitlabConsumerState {
+                    registration_id: registration_id,
+                    graph,
+                }),
+                Err(e) => Err(e.into()),
             }
         }
-        None =>  {
+        None => {
             error!("Couldn't locate tcp client!");
-            Err(ActorProcessingErr::from("Couldn't locate tcp client!".to_string()))
+            Err(ActorProcessingErr::from(
+                "Couldn't locate tcp client!".to_string(),
+            ))
         }
     }
 }
 
 pub fn get_neo_config() -> Config {
-    let database_name = std::env::var("GRAPH_DB").expect("Expected to get a neo4j database. GRAPH_DB variable not set.");
+    let database_name = std::env::var("GRAPH_DB")
+        .expect("Expected to get a neo4j database. GRAPH_DB variable not set.");
     let neo_user = std::env::var("GRAPH_USER").expect("No GRAPH_USER value set for Neo4J.");
-    let neo_password = std::env::var("GRAPH_PASSWORD").expect("No GRAPH_PASSWORD provided for Neo4J.");
+    let neo_password =
+        std::env::var("GRAPH_PASSWORD").expect("No GRAPH_PASSWORD provided for Neo4J.");
     let neo4j_endpoint = std::env::var("GRAPH_ENDPOINT").expect("No GRAPH_ENDPOINT provided.");
 
     let config = ConfigBuilder::default() // Change from `new()` to `default()` if required
@@ -101,38 +113,36 @@ pub fn get_neo_config() -> Config {
 //             member_count: "{group_members_count}"
 //         }})
 //     "#,
-//     group_id = group.id, 
-//     full_name = group.full_name, 
+//     group_id = group.id,
+//     full_name = group.full_name,
 //     group_full_path = group.full_path,
-//     group_created_at = group.created_at.unwrap_or_default(), 
+//     group_created_at = group.created_at.unwrap_or_default(),
 //     group_members_count = group.group_members_count,
 //     )
 // }
 
 pub fn merge_namespace_query(namespace: Namespace) -> String {
-    
-    format!(r#"
+    format!(
+        r#"
     MERGE (namespace: GitlabNamespace {{
         namespace_id: "{namespace_id}",
         full_name: "{full_name}",
         full_path: "{full_path}"
     }})
     "#,
-    namespace_id = namespace.id,
-    full_name = namespace.full_name,
-    full_path = namespace.full_path,
-
+        namespace_id = namespace.id,
+        full_name = namespace.full_name,
+        full_path = namespace.full_path,
     )
 }
-
 
 //TODO: Helper function to create project nodes and their relationships
 // pub fn merge_project_query(project: Project) -> String {
 //     let merge_group_query = match project.group {
 //         //connect group if presenet
-//         Some(group) =>  { 
+//         Some(group) =>  {
 //          //if namespace exists, compose a query to create a node for it and a draw a relationship
-//          format!( "{0}\n{1}", merge_group_query(group), "WITH project, group MERGE (project)-[:inGroup]->(group);")    
+//          format!( "{0}\n{1}", merge_group_query(group), "WITH project, group MERGE (project)-[:inGroup]->(group);")
 //         }
 //         None => String::default()
 //     };
@@ -150,7 +160,7 @@ pub fn merge_namespace_query(namespace: Namespace) -> String {
 
 //     format!(
 //         r#"
-//             MERGE (project:GitlabProject {{ 
+//             MERGE (project:GitlabProject {{
 //                 project_id: "{project_id}"
 //             }})
 //             SET project.name = "{name}",
@@ -158,8 +168,8 @@ pub fn merge_namespace_query(namespace: Namespace) -> String {
 //                 project.created_at = "{created_at}",
 //                 project.last_activity_at = "{last_activity_at}"
 //             {merge_namespace_query}
-//             {merge_group_query}   
-//         "#, 
+//             {merge_group_query}
+//         "#,
 //         project_id = project.id,
 //         name = project.name,
 //         full_path = project.full_path,

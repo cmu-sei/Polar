@@ -21,20 +21,20 @@ This Software includes and/or makes use of Third-Party Software each subject to 
 DM24-0470
 */
 
-use std::{env, error::Error};
-use ractor::Actor;
 use gitlab_consumer::supervisor;
 use polar::init_logging;
+use ractor::Actor;
+use std::{env, error::Error};
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn Error> > {
+async fn main() -> Result<(), Box<dyn Error>> {
     init_logging();
 
     //TODO: Start consumer supervisor
 
     let client_cert_file = env::var("TLS_CLIENT_CERT").unwrap();
     let client_private_key_file = env::var("TLS_CLIENT_KEY").unwrap();
-    let ca_cert_file =  env::var("TLS_CA_CERT").unwrap();   
+    let ca_cert_file = env::var("TLS_CA_CERT").unwrap();
     let broker_addr = env::var("BROKER_ADDR").unwrap();
 
     let args = supervisor::ConsumerSupervisorArgs {
@@ -44,7 +44,13 @@ async fn main() -> Result<(), Box<dyn Error> > {
         ca_cert_file: ca_cert_file,
     };
 
-    let (supervisor, handle) = Actor::spawn(Some("GITLAB_CONSUMER_SUPERVISOR".to_string()), supervisor::ConsumerSupervisor ,args).await.expect("Expected to start observer agent");
+    let (supervisor, handle) = Actor::spawn(
+        Some("GITLAB_CONSUMER_SUPERVISOR".to_string()),
+        supervisor::ConsumerSupervisor,
+        args,
+    )
+    .await
+    .expect("Expected to start observer agent");
     let _ = handle.await;
 
     Ok(())

@@ -1,24 +1,25 @@
 #!/bin/bash
 
 # Define directories
-src_dir="src"
-#TODO: add base dir variable, and change output_dir to be relative to base
-output_dir="../output" 
-datastore_path="$output_dir/noseyparker_datastore"
+
+MANIFEST_PATH="src/default-manifest"  # Set default path
+
+OUTPUT_DIR="./output" 
+
+datastore_path="$OUTPUT_DIR/noseyparker_datastore"
 skip_summary=false
 show_progress=true
 
 # Define output files
-cargo_deny_output="$output_dir/cargo_deny_output.txt"
-spellcheck_output="$output_dir/spellcheck_output.txt"
-cargo_clippy_output="$output_dir/cargo_clippy_output.txt"
-cargo_udeps_output="$output_dir/cargo_udeps_output.txt"
-cargo_semver_output="$output_dir/cargo_semver_output.txt"
-cargo_unused_features_output="$output_dir/cargo_unused_features_output.txt"
-cargo_bloat_all_output="$output_dir/cargo_bloat_all.txt"
-noseyparker_output="$output_dir/noseyparker_output.txt"
-noseyparker_report="$output_dir/noseyparker_report.txt"
-summary_file="$output_dir/summary.txt"
+cargo_deny_output="$OUTPUT_DIR/cargo_deny_output.json"
+cargo_clippy_output="$OUTPUT_DIR/cargo_clippy_output.txt"
+cargo_udeps_output="$OUTPUT_DIR/cargo_udeps_output.txt"
+cargo_semver_output="$OUTPUT_DIR/cargo_semver_output.txt"
+cargo_unused_features_output="$OUTPUT_DIR/cargo_unused_features_output.txt"
+cargo_bloat_all_output="$OUTPUT_DIR/cargo_bloat_all.txt"
+noseyparker_output="$OUTPUT_DIR/noseyparker_output.txt"
+noseyparker_report="$OUTPUT_DIR/noseyparker_report.txt"
+summary_file="$OUTPUT_DIR/summary.txt"
 
 # Helper function to print messages in color
 print_color() {
@@ -69,6 +70,8 @@ display_help() {
     echo "Options:"
     echo "  --skip-summary    Skip generation of the summary report"
     echo "  --no-progress     Do not display the progress indicators"
+    echo "  --manifest-path   A path to a workspace or crate Cargo.toml. Looks in current directory by default."
+    echo "  --output-path     A path to write output to. Defaults to current working directory."
     echo "  -h, --help        Display this help and exit"
     exit 0
 }
@@ -99,27 +102,11 @@ generate_summary() {
     echo "Summary: $(grep -oP 'Summary semver requires.*' "$cargo_semver_output")"  >> "$summary_file"
     echo "" >> "$summary_file"
 
-    # Cargo Unused Features Check Summary
-    echo "Cargo Unused Features Check Summary:" >> "$summary_file"
-    grep 'Prune' "$cargo_unused_features_output" | echo "Number of unused features: $(wc -l)" >> "$summary_file"
-    echo "" >> "$summary_file"
-
-    # Cargo Bloat Summary
-    echo "Cargo Bloat Summary:" >> "$summary_file"
-    local binary_count=$(grep -c 'Analyzing Cargo Bloat for' "$cargo_bloat_all_output")/2
-    echo "Number of binaries scanned: $binary_count" >> "$summary_file"
-    echo "" >> "$summary_file"
-
     # Nosey Parker Scan Summary
     echo "Nosey Parker Scan Summary:" >> "$summary_file"
     awk '/Rule/,0' "$noseyparker_output" | head -n -1 >> "$summary_file"
     echo "" >> "$summary_file"
 
-    # Spellcheck Summary
-    echo "Spellcheck Summary:" >> "$summary_file"
-    local misspelled_count=$(grep -c '\^' "$spellcheck_output")
-    echo "Number of misspelled words: $misspelled_count" >> "$summary_file"
-    echo "" >> "$summary_file"
 }
 
 # Function to analyze bloat for all binaries
@@ -140,6 +127,19 @@ analyze_bloat_for_all_binaries() {
 # Parse command-line options
 while [ "$#" -gt 0 ]; do
     case "$1" in
+        --manifest-path)
+            MANIFEST_PATH="$2"
+            shift 2
+            ;;
+        --output-path)
+            if [[ -n "$2" && "$2" != --* ]]; then
+                OUTPUT_PATH="$2"
+                shift 2
+            else
+                echo "Error: --output-path requires a value."
+                exit 1
+            fi
+            ;;
         --skip-summary)
             skip_summary=true
             shift
@@ -154,20 +154,14 @@ while [ "$#" -gt 0 ]; do
         *)
             echo "Unknown option: $1"
             display_help
-            ;;
+            ;;            
     esac
 done
 
 
-# Navigate to source directory
-cd "$src_dir" || { print_color "31" "Failed to change directory to $src_dir"; exit 1; }
-
-# Setup output directory
-rm -rf "$output_dir"
-mkdir -p "$output_dir" || { print_color "31" "Failed to create directory structure."; exit 1; }
 
 # Check tools before running
-required_tools=("cargo" "cargo-deny" "cargo-spellcheck" "cargo-clippy" "cargo-udeps" "cargo-semver-checks")
+required_tools=("cargo" "cargo-deny" "cargo-clippy" "cargo-udeps" "cargo-semver-checks")
 for tool in "${required_tools[@]}"; do
     if ! command -v "$tool" &> /dev/null; then
         print_color "31" "Error: $tool is not installed."
@@ -176,27 +170,29 @@ for tool in "${required_tools[@]}"; do
 done
 
 # Operations
-run_with_progress "cargo deny check --show-stats > $cargo_deny_output 2>&1" "Cargo Deny Check"
-run_with_progress "cargo spellcheck check > $spellcheck_output 2>&1" "Cargo Spellcheck"
-run_with_progress "cargo clippy > $cargo_clippy_output 2>&1" "Cargo Clippy"
-run_with_progress "cargo udeps > $cargo_udeps_output 2>&1" "Cargo Udeps"
-run_with_progress "cargo-semver-checks semver-checks > $cargo_semver_output 2>&1" "Cargo Semver Checks"
-run_with_progress "analyze_bloat_for_all_binaries" "Cargo Bloat Analysis"
+run_with_progress "cargo deny --manifest-path $MANIFEST_PATH --format json check --show-stats > $cargo_deny_output 2>&1" "Cargo Deny Check"
+# run_with_progress "cargo spellcheck check > $spellcheck_output 2>&1" "Cargo Spellcheck"
+run_with_progress "cargo clippy --manifest-path $MANIFEST_PATH> $cargo_clippy_output 2>&1" "Cargo Clippy"
+run_with_progress "cargo udeps --manifest-path $MANIFEST_PATH > $cargo_udeps_output 2>&1" "Cargo Udeps"
+run_with_progress "cargo-semver-checks semver-checks --manifest-path $MANIFEST_PATH > $cargo_semver_output 2>&1" "Cargo Semver Checks"
+# cargo bloat is unmaintained, SEE: https://github.com/RazrFalcon/cargo-bloat/issues/107#issuecomment-2483438706
+# run_with_progress "analyze_bloat_for_all_binaries" "Cargo Bloat Analysis"
+
 
 # Create the output directory and get a start time for reports
-mkdir -p $output_dir/unused-reports
+mkdir -p $OUTPUT_DIR/unused-reports
 START_TIME=$(date +%s)
 
-run_with_progress "unused-features analyze > $cargo_unused_features_output 2>&1" "Cargo Unused Features Check"
+# run_with_progress "unused-features analyze > $cargo_unused_features_output 2>&1" "Cargo Unused Features Check"
 
 # Find JSON reports created after the start time
-find /workspace/src -name "report.json" -newermt "@$START_TIME" | while read file; do
+find /workspace/src/agents -name "report.json" -newermt "@$START_TIME" | while read file; do
     # Remove the first part up to and including the first slash
     remaining_part="${file#*/}"
     # Replace all remaining slashes in the path with underscores
     new_filename=$(echo "$remaining_part" | tr '/' '_')
     # Move the file to the output directory with the new name
-    mv "$file" "$output_dir/unused-reports/${new_filename}_report.json"
+    mv "$file" "$OUTPUT_DIR/unused-reports/${new_filename}_report.json"
 done
 
 # Nosey Parker Operations

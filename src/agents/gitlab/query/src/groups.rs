@@ -1,14 +1,13 @@
 use std::fmt;
 
+use cynic::*;
 use gitlab_schema::gitlab::CiRunnerConnection;
 use gitlab_schema::gitlab::{self as schema};
-use cynic::*;
 use gitlab_schema::DateTimeString;
 use gitlab_schema::IdString;
 use rkyv::Archive;
-use rkyv::Serialize;
 use rkyv::Deserialize;
-
+use rkyv::Serialize;
 
 #[derive(cynic::QueryVariables, Debug, Clone, Deserialize, Serialize, rkyv::Archive)]
 pub struct MultiGroupQueryArguments {
@@ -41,7 +40,7 @@ pub struct GroupEdge {
 }
 
 #[derive(cynic::QueryFragment, Clone, Deserialize, Serialize, rkyv::Archive)]
-#[cynic(schema = "gitlab", graphql_type="Group")]
+#[cynic(schema = "gitlab", graphql_type = "Group")]
 pub struct GroupData {
     pub id: IdString,
     pub full_name: String,
@@ -52,27 +51,26 @@ pub struct GroupData {
 }
 
 #[derive(cynic::QueryFragment, Clone, Deserialize, Serialize, rkyv::Archive)]
-#[cynic(schema = "gitlab", graphql_type="Group")]
+#[cynic(schema = "gitlab", graphql_type = "Group")]
 pub struct GroupMembersFragment {
     pub id: IdString,
     pub group_members_count: i32,
-    pub group_members: Option<GroupMemberConnection>
+    pub group_members: Option<GroupMemberConnection>,
 }
 
 #[derive(cynic::QueryFragment, Clone, Deserialize, Serialize, rkyv::Archive)]
-#[cynic(schema = "gitlab", graphql_type="Group")]
+#[cynic(schema = "gitlab", graphql_type = "Group")]
 pub struct GroupProjectsFragment {
     pub id: IdString,
     pub projects: Option<crate::ProjectConnection>,
-    pub projects_count: i32
+    pub projects_count: i32,
 }
 
-
 #[derive(cynic::QueryFragment, Clone, Deserialize, Serialize, rkyv::Archive)]
-#[cynic(schema = "gitlab", graphql_type="Group")]
+#[cynic(schema = "gitlab", graphql_type = "Group")]
 pub struct GroupRunnersFragment {
     pub id: IdString,
-    pub runners: Option<crate::runners::CiRunnerConnection>
+    pub runners: Option<crate::runners::CiRunnerConnection>,
 }
 
 /// Datatype representing a users's membership for a group
@@ -88,7 +86,6 @@ pub struct GroupMember {
     // User that authorized membership.
     // TODO: This would be useful to know
     // pub created_by: Option<UserCore>,
-
     /// Date and time the membership expires.
     pub expires_at: Option<DateTimeString>,
 
@@ -106,7 +103,6 @@ pub struct GroupMember {
 
     // User that is associated with the member object.
     pub user: Option<crate::UserCoreFragment>,
-
     // Permissions for the current user on the resource.
     // pub user_permissions: GroupPermissions,
 }
@@ -126,14 +122,12 @@ pub struct GroupMemberEdge {
     pub node: Option<GroupMember>,
 }
 
-
 // #[derive(cynic::QueryFragment, Debug, Clone)]
 // #[cynic(schema = "gitlab")]
 // pub struct AccessLevel {
 //     pub string_value: Option<String>,
 //     pub integer_value: Option<i32>,
 // }
-
 
 // #[derive(cynic::QueryFragment, Debug, Clone)]
 // #[cynic(schema = "gitlab")]
@@ -147,30 +141,45 @@ pub struct GroupPathVariable {
 }
 
 #[derive(cynic::QueryFragment)]
-#[cynic(schema = "gitlab", graphql_type = "Query", variables = "MultiGroupQueryArguments")]
+#[cynic(
+    schema = "gitlab",
+    graphql_type = "Query",
+    variables = "MultiGroupQueryArguments"
+)]
 pub struct AllGroupsQuery {
     #[arguments(sort: $sort)]
-    pub groups: Option<GroupConnection>
+    pub groups: Option<GroupConnection>,
 }
 
 #[derive(cynic::QueryFragment)]
-#[cynic(schema = "gitlab", graphql_type = "Query" , variables = "GroupPathVariable")]
+#[cynic(
+    schema = "gitlab",
+    graphql_type = "Query",
+    variables = "GroupPathVariable"
+)]
 pub struct GroupMembersQuery {
     #[arguments(fullPath: $full_path)]
-    pub group: Option<GroupMembersFragment>
+    pub group: Option<GroupMembersFragment>,
 }
 
 #[derive(cynic::QueryFragment)]
-#[cynic(schema = "gitlab", graphql_type = "Query" , variables = "GroupPathVariable")]
+#[cynic(
+    schema = "gitlab",
+    graphql_type = "Query",
+    variables = "GroupPathVariable"
+)]
 pub struct GroupProjectsQuery {
     #[arguments(fullPath: $full_path)]
-    pub group: Option<GroupProjectsFragment>
+    pub group: Option<GroupProjectsFragment>,
 }
 
 #[derive(cynic::QueryFragment)]
-#[cynic(schema = "gitlab", graphql_type = "Query" , variables = "GroupPathVariable")]
+#[cynic(
+    schema = "gitlab",
+    graphql_type = "Query",
+    variables = "GroupPathVariable"
+)]
 pub struct GroupRunnersQuery {
     #[arguments(fullPath: $full_path)]
-    pub group: Option<GroupRunnersFragment>
+    pub group: Option<GroupRunnersFragment>,
 }
-

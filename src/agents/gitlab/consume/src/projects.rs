@@ -21,14 +21,13 @@
    DM24-0470
 */
 
-
+use crate::{subscribe_to_topic, GitlabConsumerArgs, GitlabConsumerState, BROKER_CLIENT_NAME};
+use common::types::GitlabData;
 use common::PROJECTS_CONSUMER_TOPIC;
-use common::types::{GitlabData};
 use neo4rs::Query;
+use ractor::{async_trait, registry::where_is, Actor, ActorProcessingErr, ActorRef};
 use tracing::field::debug;
 use tracing::{debug, error, info};
-use ractor::{async_trait, registry::where_is, Actor, ActorProcessingErr, ActorRef};
-use crate::{subscribe_to_topic, GitlabConsumerArgs, GitlabConsumerState, BROKER_CLIENT_NAME};
 
 pub struct GitlabProjectConsumer;
 
@@ -41,13 +40,14 @@ impl Actor for GitlabProjectConsumer {
     async fn pre_start(
         &self,
         myself: ActorRef<Self::Msg>,
-        args: GitlabConsumerArgs
+        args: GitlabConsumerArgs,
     ) -> Result<Self::State, ActorProcessingErr> {
         debug!("{myself:?} starting, connecting to broker");
         match subscribe_to_topic(args.registration_id, PROJECTS_CONSUMER_TOPIC.to_string()).await {
             Ok(state) => Ok(state),
             Err(e) => {
-                let err_msg = format!("Error subscribing to topic \"{PROJECTS_CONSUMER_TOPIC}\" {e}");
+                let err_msg =
+                    format!("Error subscribing to topic \"{PROJECTS_CONSUMER_TOPIC}\" {e}");
                 Err(ActorProcessingErr::from(err_msg))
             }
         }
@@ -56,22 +56,26 @@ impl Actor for GitlabProjectConsumer {
     async fn post_start(
         &self,
         myself: ActorRef<Self::Msg>,
-        _: &mut Self::State ) ->  Result<(), ActorProcessingErr> {
+        _: &mut Self::State,
+    ) -> Result<(), ActorProcessingErr> {
         info!("{:?} waiting to consume", myself.get_name());
-        
+
         Ok(())
     }
-    
+
     async fn handle(
         &self,
         _myself: ActorRef<Self::Msg>,
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-
         match message {
             GitlabData::Projects(projects) => {
-                let mut transaction = state.graph.start_txn().await.expect("Expected to start a transaction with the graph.");
+                let mut transaction = state
+                    .graph
+                    .start_txn()
+                    .await
+                    .expect("Expected to start a transaction with the graph.");
                 // Create list of projects
                 let project_array = projects.iter()
                     .map(|project| {
@@ -98,14 +102,20 @@ impl Actor for GitlabProjectConsumer {
                         project.last_activity_at = project_data.last_activity_at
                     "
                 );
-                
-                debug!(cypher_query);
-                transaction.run(Query::new(cypher_query)).await.expect("Expected to run query.");
 
-                transaction.commit().await.expect("Expected to commit transaction");
+                debug!(cypher_query);
+                transaction
+                    .run(Query::new(cypher_query))
+                    .await
+                    .expect("Expected to run query.");
+
+                transaction
+                    .commit()
+                    .await
+                    .expect("Expected to commit transaction");
                 info!("Transaction committed.");
             }
-            _ => todo!()
+            _ => todo!(),
         }
         Ok(())
     }

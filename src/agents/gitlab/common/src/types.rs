@@ -21,14 +21,19 @@
    DM24-0470
 */
 
-use gitlab_queries::{runners::{CiRunner, CiRunnerConnection}, groups::GroupData, groups::GroupMemberConnection, Project, ProjectConnection, ProjectMemberConnection, UserCoreFragment};
+use gitlab_queries::{
+    groups::GroupData,
+    groups::GroupMemberConnection,
+    runners::{CiRunner, CiRunnerConnection},
+    Project, ProjectConnection, ProjectMemberConnection, UserCoreFragment,
+};
 use gitlab_schema::IdString;
 
-use rkyv::{Serialize, Deserialize, Archive};
+use rkyv::{Archive, Deserialize, Serialize};
 
 /// This enum mostly serves as a way to inform the deserializer what datatype to map the bytes into.
 /// The underlying byte vector contains a message meant for some consumer on a given topic
-#[derive (Serialize, Deserialize, Archive)]
+#[derive(Serialize, Deserialize, Archive)]
 pub enum GitlabData {
     Users(Vec<UserCoreFragment>),
     Projects(Vec<Project>),
@@ -47,10 +52,10 @@ pub enum GitlabData {
 
 /// Helper type to link connection types to a resource's id
 /// For example, a user or group to projects, or a group to users, etc.
-#[derive (Serialize, Deserialize, Archive)]
+#[derive(Serialize, Deserialize, Archive)]
 pub struct ResourceLink<T> {
     pub resource_id: IdString,
-    pub connection: T
+    pub connection: T,
 }
 
 // #[derive (Serialize, Deserialize, Archive, Clone, PartialEq, Debug)]
@@ -70,7 +75,7 @@ pub struct ResourceLink<T> {
 // }
 
 // #[derive (Serialize, Deserialize, Archive, Clone, PartialEq, Debug)]
-// pub struct Pipeline { 
+// pub struct Pipeline {
 //     pub id: u32,
 //     pub project_id: Option<u32>,
 //     pub status: String,

@@ -21,16 +21,23 @@ This Software includes and/or makes use of Third-Party Software each subject to 
 DM24-0470
 */
 
-use std::{env, fs::{self,File}, io::{Read, Write}};
+use lapin::{
+    options::BasicPublishOptions, publisher_confirm::Confirmation, BasicProperties, Channel,
+    Connection, ConnectionProperties,
+};
 use std::process;
+use std::{
+    env,
+    fs::{self, File},
+    io::{Read, Write},
+};
+use sysinfo::{Pid, ProcessRefreshKind, System, SystemExt};
+use tcp_stream::OwnedTLSConfig;
 use tracing::{error, info};
 use url::Url;
-use lapin::{Connection,ConnectionProperties, Channel, BasicProperties, publisher_confirm::Confirmation, options::BasicPublishOptions};
-use tcp_stream::OwnedTLSConfig;
-use sysinfo::{System, SystemExt, ProcessRefreshKind, Pid};
 
-pub mod types;
 pub mod dispatch;
+pub mod types;
 
 pub const PROJECTS_CONSUMER_TOPIC: &str = "gitlab:consumer:projects";
 pub const GROUPS_CONSUMER_TOPIC: &str = "gitlab:consumer:groups";
@@ -57,10 +64,13 @@ pub fn create_lock(filepath: &str) -> Result<bool, std::io::Error> {
                 let my_pid = u32::from_le_bytes(bytes_buf);
 
                 let mut s = System::new_all();
-                let result = s.refresh_process_specifics(Pid::from(usize::try_from(my_pid).unwrap()), ProcessRefreshKind::new());
+                let result = s.refresh_process_specifics(
+                    Pid::from(usize::try_from(my_pid).unwrap()),
+                    ProcessRefreshKind::new(),
+                );
                 if result {
                     // println!("[*] An instance of this observer is still running. No further scheduler action taken at this time. Yielding.");
-                    return Ok(false)
+                    return Ok(false);
                 } else {
                     // println!("[*] A lock file was found, but the PID was invalid. Deleting lock file and creating a new one.");
                     fs::remove_file(file_path)?;
@@ -85,10 +95,10 @@ pub fn create_lock(filepath: &str) -> Result<bool, std::io::Error> {
                 Ok(_) => println!("New lock file created with PID: {}", pid),
                 Err(e) => {
                     println!("Failed to create new lock file.");
-                    return Err(e)
+                    return Err(e);
                 }
             }
-            return Ok(true)
+            return Ok(true);
         }
         Err(e) => {
             panic!("[*] Problem creating lock file: {}", e.to_string());
@@ -106,7 +116,7 @@ fn get_file_as_byte_vec(filename: &String) -> Vec<u8> {
         }
     };
     let metadata = match std::fs::metadata(&filename) {
-        Ok(metadata) => metadata, 
+        Ok(metadata) => metadata,
         Err(e) => {
             error!("Could not get metadata for file {}, {}", filename, e);
             process::exit(1);
@@ -117,6 +127,3 @@ fn get_file_as_byte_vec(filename: &String) -> Vec<u8> {
 
     buffer
 }
-
-
-

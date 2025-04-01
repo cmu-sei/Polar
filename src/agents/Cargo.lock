@@ -2516,6 +2516,7 @@ name = "policy-config"
 version = "0.1.0"
 dependencies = [
  "git2",
+ "workspace-hack",
 ]
 
 [[package]]
@@ -4214,33 +4215,39 @@ dependencies = [
 name = "workspace-hack"
 version = "0.1.0"
 dependencies = [
+ "bitflags 2.9.0",
+ "bytes",
+ "chrono",
+ "displaydoc",
  "form_urlencoded",
  "futures-channel",
  "futures-core",
  "futures-io",
  "futures-sink",
  "getrandom 0.2.15",
+ "getrandom 0.3.2",
  "libc",
  "log",
  "memchr",
  "num-traits",
  "once_cell",
  "percent-encoding",
- "proc-macro2",
- "quote",
+ "phf_shared",
+ "rand 0.8.5",
+ "rand_core 0.6.4",
  "regex",
  "regex-automata 0.4.9",
  "regex-syntax 0.8.5",
- "rustix 0.38.44",
  "rustls",
  "rustls-webpki 0.103.0",
  "security-framework-sys",
+ "serde",
  "simdutf8",
  "smallvec",
- "spin",
  "syn 1.0.109",
  "syn 2.0.100",
  "tokio",
+ "tokio-rustls",
  "tokio-util",
 ]
 
