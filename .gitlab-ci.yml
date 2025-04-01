@@ -69,6 +69,7 @@ build-workspace:
   script:
     - git config --global --add safe.directory "$(pwd)"
     
+    - cd src/agents
     # build workspace
     - nix build --eval-system x86_64-linux --show-trace .#default
     
