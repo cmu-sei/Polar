@@ -109,7 +109,7 @@ geneate-charts:
   stage: charts
   script:
     # Clone the chart repo
-    - git clone --depth 1 "https://gitlab-ci-token:${CI_JOB_TOKEN}@https://gitlab.sandbox.labz.s-box.org/sei/polar-deploy.git"
+    - git clone --depth 1 "https://gitlab-ci-token:${CI_JOB_TOKEN}@gitlab.sandbox.labz.s-box.org/sei/polar-deploy.git"
 
     # Generate helm charts and push them to a hosted repository 
     - chmod +x ./scripts/make-chart.sh
