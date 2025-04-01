@@ -34,34 +34,6 @@ build-dev-environment:
     - skopeo inspect docker-archive://$(readlink -f ./polar-dev)
     - skopeo copy docker-archive://$(readlink -f ./polar-dev) docker://$CI_REGISTRY_IMAGE/polar-dev:0.1.0
 
-# TODO: Unfreeze whenever we settle how to build the ci container.
-# SEE: https://github.com/cmu-sei/Polar/issues/33
-# build-ci-environment:
-#   image: registry.sandbox.labz.s-box.org/vcaaron/flaskr/nix:2.24.9
-#   stage: build
-#   rules:
-#     - changes:
-#       - dev/flake.nix
-#       - dev/flake.lock
-#       - dev/packages.nix
-#       - .gitlab-ci.yml
-#   script:
-#       #install needed tools
-#     - nix-env --install --attr nixpkgs.skopeo
-#     - |
-#       mkdir -p "$HOME/.config/nix"
-#       printf experimental-features = nix-command flakes > "$HOME/.config/nix/nix.conf"
-#       git config --global --add safe.directory "$(pwd)"
-#     - cd dev-container
-
-#     # build test environment for usage in the remainder of the pipeline
-#     - nix build --eval-system x86_64-linux --show-trace .#ciContainer -o polar-ci
-    
-#     #  Use skopeo to inspect and upload our images
-#     - skopeo login --username "$CI_REGISTRY_USER" --password "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
-#     - skopeo inspect docker-archive://$(readlink -f ./polar-ci)
-#     - skopeo copy docker-archive://$(readlink -f ./polar-ci) docker://$CI_REGISTRY/polar-ci:0.1.0
-
 build-workspace:
   image: registry.sandbox.labz.s-box.org/sei/polar-mirror/polar-ci:0.1.0
   stage: build
@@ -113,16 +85,16 @@ geneate-charts:
 
     # Generate helm charts and push them to a hosted repository 
     - chmod +x ./scripts/make-chart.sh
-    - rm -rf polar-deploy/polar 
-    - sh scripts/make-chart.sh src/deploy/dhall polar-deploy/polar
+    - sh scripts/make-chart.sh src/deploy/dhall polar-deploy/chart
     - cd polar-deploy
+    
     # We might want to commit to other environment-specific branchhes.
     # If we do, we should probably make a template for this job and parameterize it
     # - git checkout -B "$CI_COMMIT_BRANCH"
 
     # Generate structured metadata to include as part of the commit
     - |
-      cat <<EOF > polar/metadata.yaml
+      cat <<EOF > chart/metadata.yaml
       source_commit: "$CI_COMMIT_SHA"
       source_repo: "$CI_REPOSITORY_URL"
       created_at: "$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
@@ -133,9 +105,12 @@ geneate-charts:
       EOF
     
     # Commit and push if there are changes
-    - git add .
     - |
-      if git diff --quiet; then
+      git add chart/metadata.yaml
+      git add .
+      echo "Updated files:"
+      git diff --name-only --cached
+      if git diff --cached --quiet && ! git ls-files --others --exclude-standard | grep .; then
         echo "No changes detected, skipping commit."
       else
         echo "Detected changes to polar helm chart, pushing upstream..."
