@@ -85,7 +85,7 @@ generate-charts:
     # NOTE: A deploy key should be used used to enable read/write perms,
     # and it would be made available to the runner
     # An access token will do in the meantime
-    - git clone --depth 1 "https://{POLAR_DEPLOY_USER}:${CHART_REPO_TOKEN}@gitlab.sandbox.labz.s-box.org/sei/polar-deploy.git"
+    - git clone --depth 1 "https://${POLAR_DEPLOY_USER}:${CHART_REPO_TOKEN}@gitlab.sandbox.labz.s-box.org/sei/polar-deploy.git"
 
     # Generate helm charts and push them to a hosted repository 
     - chmod +x ./scripts/make-chart.sh
