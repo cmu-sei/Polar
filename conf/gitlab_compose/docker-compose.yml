@@ -25,7 +25,7 @@
 services:
   neo4j:
     user: 7474:7474
-    image: neo4j:5.26.4
+    image: neo4j:5.10.0-community
     restart: unless-stopped
     networks:
       - polar
@@ -33,9 +33,9 @@ services:
       - '7474:7474'
       - '7687:7687'
     volumes:
-      - ../../var/neo4j_volumes/data:/var/lib/neo4j/data
-      - ../../var/logs:/var/lib/neo4j/logs
-      - ../../var/lib/neo4j/conf:/var/lib/neo4j/conf
+      - ./var/neo4j_volumes/data:/var/lib/neo4j/data
+      - ./var/logs:/var/lib/neo4j/logs
+      - ../neo4j_setup/conf:/var/lib/neo4j/conf
       # - ../neo4j_setup/plugins:/var/lib/neo4j/plugins
 
   cassini:

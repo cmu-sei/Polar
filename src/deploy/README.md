@@ -3,7 +3,7 @@
 This directory contains dhall configurations to generate Helm charts for Polar services, please keep in mind that they are a work in progress and that they are **not ready for production use!** Expect breaking changes as we continue to improve them.
 
 ## Overview
-The `make-chart.sh` script automates the conversion of **Dhall configuration files** into a helm chart for a deployment. It ensures:
+The `make-chart.sh` script (located under the `scripts` folder) automates the conversion of **Dhall configuration files** into a helm chart for a deployment. It ensures:
 - **Repeatable, Immutable Helm Charts** for GitOps workflows.
 - **Linting and Template Verification** with Helm.
 - **Safe GitOps Deployments** by generating Helm artifacts that can be stored and deployed consistently.

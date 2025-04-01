@@ -5,4 +5,5 @@ The scripts in this directory are as follows:
   not your use-case, you will need to follow the instructions in the various
   documentation. If you're comfortable reading source code, this script will
   explain a lot.
-* Other...
+* `make-chart.sh` is a script that generates an umbrella helm chart from our dhall configurations.
+* `static-tools.sh` is a script that runs various rust static analysis tools on a given crate or workspace.
