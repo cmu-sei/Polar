@@ -108,7 +108,7 @@ build-workspace:
 
 geneate-charts:
   image: registry.sandbox.labz.s-box.org/sei/polar-mirror/polar-ci:0.1.0
-  stage: deploy
+  stage: charts
   script:
     # Clone the chart repo
     - git clone --depth 1 "https://gitlab-ci-token:${CI_JOB_TOKEN}@https://gitlab.sandbox.labz.s-box.org/sei/polar-deploy.git
