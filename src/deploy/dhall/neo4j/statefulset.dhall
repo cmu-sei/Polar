@@ -16,11 +16,11 @@ let statefulSet =
       selector = kubernetes.LabelSelector::{
         matchLabels = Some (toMap { name = values.neo4j.name })
       }
-      , serviceName = "neo4j-svc"
+      , serviceName = values.neo4j.service.name
       , template = kubernetes.PodTemplateSpec::{
           , metadata = Some kubernetes.ObjectMeta::{
                 name = Some "neo4j"
-            ,   labels = Some [ { mapKey = "name", mapValue = "neo4j" } ]
+            ,   labels = Some [ { mapKey = "name", mapValue = values.neo4j.name } ]
             }
           , spec = Some kubernetes.PodSpec::{
             , containers =
@@ -35,7 +35,7 @@ let statefulSet =
                 , volumeMounts = Some [
                     kubernetes.VolumeMount::{
                         name  = "neo4j-data"
-                        , mountPath = "/var/lib/neo4j/conf"
+                        , mountPath = "/var"
                         
                     }
                 ]

@@ -57,7 +57,7 @@ let neo4jPorts = {http = 7474, bolt = 7687 }
 -- Expand and add parameters as desired.
 let neo4j = {
     name = "polar-neo4j"
-,   image = "docker.io/library/neo4j:4.4.42"
+,   image = "docker.io/library/neo4j:5.26.4"
 ,   containerPorts =
     [ 
         kubernetes.ContainerPort::{ containerPort = neo4jPorts.http }
