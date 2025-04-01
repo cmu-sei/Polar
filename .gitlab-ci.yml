@@ -82,7 +82,10 @@ generate-charts:
   
   script:
     # Clone the chart repo
-    - git clone --depth 1 "https://gitlab-ci-token:${CI_JOB_TOKEN}@gitlab.sandbox.labz.s-box.org/sei/polar-deploy.git"
+    # NOTE: A deploy key should be used used to enable read/write perms,
+    # and it would be made available to the runner
+    # An access token will do in the meantime
+    - git clone --depth 1 "https://{POLAR_DEPLOY_USER}:${CHART_REPO_TOKEN}@gitlab.sandbox.labz.s-box.org/sei/polar-deploy.git"
 
     # Generate helm charts and push them to a hosted repository 
     - chmod +x ./scripts/make-chart.sh
@@ -108,7 +111,7 @@ generate-charts:
     # Commit and push if there are changes
     - |
       git config user.email $GITLAB_USER_EMAIL
-      git config user.name "${GITLAB_USER_LOGIN}-ci-job-${CI_JOB_NAME}-${CI_JOB_ID}"
+      git config user.name "gitlab-ci-job"
       git add chart/metadata.yaml
       git add .
       echo "Updated files:"
