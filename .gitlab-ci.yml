@@ -83,18 +83,15 @@ generate-charts:
   variables:
     TARGET_ENV: sandbox
   script:
-    - echo "https://$POLAR_DEPLOY_USER:$CHART_REPO_TOKEN@gitlab.sandbox.labz.s-box.org/sei/polar-deploy.git"
-
     # Clone the chart repo
     # NOTE: A deploy key should be used used to enable read/write perms
     # An access token will do in the meantime
-    - git clone --depth 1 "https://gitlab-ci-token:$CI_JOB_TOKEN@gitlab.sandbox.labz.s-box.org/sei/polar-deploy.git"
+    - git clone --depth 1 "https://$POLAR_DEPLOY_USER:$CHART_REPO_TOKEN@gitlab.sandbox.labz.s-box.org/sei/polar-deploy.git"
 
     # Generate helm charts and push them to a hosted repository 
     - chmod +x ./scripts/make-chart.sh
     - sh scripts/make-chart.sh src/deploy/dhall polar-deploy/chart
     - cd polar-deploy
-    - cat .git/config
     
     # We might want to commit to other environment-specific branchhes.
     # If we do, we should probably make a template for this job and parameterize it
@@ -115,9 +112,7 @@ generate-charts:
     # Commit and push if there are changes
     - |
       git config user.email $GITLAB_USER_EMAIL
-      git config user.name gitlab-ci-token
-      cat .git/config
-    
+      git config user.name ci-job-$CI_JOB_NAME-$CI_JOB_ID
       git add chart/metadata.yaml
       git add .
       echo "Updated files:"
