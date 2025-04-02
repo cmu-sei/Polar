@@ -5,6 +5,7 @@ stages:
 default:
   tags:
     - kubernetes
+
 # TODO: Reenable after we're finished testing chart generation
 # build-dev-environment:
 #   image: registry.sandbox.labz.s-box.org/vcaaron/flaskr/nix:2.24.9
@@ -80,10 +81,6 @@ generate-charts:
   image: registry.sandbox.labz.s-box.org/sei/polar-mirror/polar-ci:0.1.0
   stage: charts
   script:
-    -  pwd && ls -alh
-    -  git config user.email $GITLAB_USER_EMAIL
-    -  git config user.name "gitlab-ci-job"
-
     - echo "https://$POLAR_DEPLOY_USER:$CHART_REPO_TOKEN@gitlab.sandbox.labz.s-box.org/sei/polar-deploy.git" > ~/.git-credentials
 
     # Clone the chart repo
@@ -114,6 +111,8 @@ generate-charts:
     
     # Commit and push if there are changes
     - |
+      git config user.email $GITLAB_USER_EMAIL
+      git config user.name $POLAR_DEPLOY_USER
       git add chart/metadata.yaml
       git add .
       echo "Updated files:"
