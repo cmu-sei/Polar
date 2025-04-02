@@ -80,9 +80,10 @@ generate-charts:
   image: registry.sandbox.labz.s-box.org/sei/polar-mirror/polar-ci:0.1.0
   stage: charts
   script:
-    - |
-      git config user.email $GITLAB_USER_EMAIL
-      git config user.name "gitlab-ci-job"
+    -  pwd && ls -alh
+    -  cd Polar/    
+    -  git config user.email $GITLAB_USER_EMAIL
+    -  git config user.name "gitlab-ci-job"
 
     - echo "https://$POLAR_DEPLOY_USER:$CHART_REPO_TOKEN@gitlab.sandbox.labz.s-box.org/sei/polar-deploy.git" > ~/.git-credentials
 
