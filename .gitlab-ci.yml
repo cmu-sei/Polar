@@ -81,7 +81,6 @@ generate-charts:
   stage: charts
   script:
     -  pwd && ls -alh
-    -  cd Polar/    
     -  git config user.email $GITLAB_USER_EMAIL
     -  git config user.name "gitlab-ci-job"
 
