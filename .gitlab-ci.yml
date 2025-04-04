@@ -86,14 +86,16 @@ generate-charts:
     # NOTE: A deploy key should be used used to enable read/write perms
     # An access token will do in the meantime
     - git clone --depth 1 "https://$POLAR_DEPLOY_USER:$CHART_REPO_TOKEN@gitlab.sandbox.labz.s-box.org/sei/polar-deploy.git"
-
+  
     # Generate helm charts and push them to a hosted repository 
     - chmod +x ./scripts/make-chart.sh
+    # delete old charts
+    - rm -rf polar-deploy/chart/
+
+    # write new charts
     - sh scripts/make-chart.sh src/deploy/dhall polar-deploy/chart
     - cd polar-deploy
-
-    # delete old charts
-    - rm -rf chart/
+    
     # We might want to commit to other environment-specific branchhes.
     # If we do, we should probably make a template for this job and parameterize it
     # - git checkout -B "$CI_COMMIT_BRANCH"
