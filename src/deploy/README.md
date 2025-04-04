@@ -42,7 +42,12 @@ NEO4J_AUTH="${GRAPH_USERNAME}/${GRAPH_PASSWORD}"
 kubectl create secret generic neo4j-secret -n polar --from-literal=secret=$NEO4J_AUTH
 # create a a secret for just the password to be passed to the gitlab-observer
 kubectl create secret generic polar-graph-pw -n polar --from-literal=secret=$GRAPH_PASSWORD
+
+# For those testing behind corporate proxies, create a secret for your proxy CA
+kubectl create secret generic proxy-ca-cert -n polar \
+    --from-file=proxy_ca_certificate.pem=conf/certs/host/zscaler.pem
 ```
+
 
 ## Known Issues
 

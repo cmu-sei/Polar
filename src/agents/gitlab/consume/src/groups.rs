@@ -20,7 +20,7 @@
 
    DM24-0470
 */
-use crate::{subscribe_to_topic, GitlabConsumerArgs, GitlabConsumerState};
+use crate::{subscribe_to_topic, GitlabConsumerArgs, GitlabConsumerState, TRANSACTION_FAILED_ERROR};
 use common::types::GitlabData;
 use common::GROUPS_CONSUMER_TOPIC;
 use neo4rs::Query;
@@ -70,7 +70,7 @@ impl Actor for GitlabGroupConsumer {
                     .graph
                     .start_txn()
                     .await
-                    .expect("Expected to start a transaction with the graph.");
+                    .expect(TRANSACTION_FAILED_ERROR);
 
                 for g in vec {
                     let query = format!(
@@ -98,7 +98,7 @@ impl Actor for GitlabGroupConsumer {
                     .expect("Expected to commit transaction");
             }
             GitlabData::GroupMembers(link) => {
-                let mut transaction = state.graph.start_txn().await.expect("expected transaction");
+                let mut transaction = state.graph.start_txn().await.expect(TRANSACTION_FAILED_ERROR);
 
                 if let Some(vec) = link.connection.nodes {
                     let group_memberships = vec
@@ -169,7 +169,7 @@ impl Actor for GitlabGroupConsumer {
                 }
             }
             GitlabData::GroupProjects(link) => {
-                let mut transaction = state.graph.start_txn().await.expect("expected transaction");
+                let mut transaction = state.graph.start_txn().await.expect(TRANSACTION_FAILED_ERROR);
 
                 if let Some(vec) = link.connection.nodes {
                     let projects = vec
@@ -210,7 +210,7 @@ impl Actor for GitlabGroupConsumer {
                 }
             }
             GitlabData::GroupRunners(link) => {
-                let mut transaction = state.graph.start_txn().await.expect("expected transaction");
+                let mut transaction = state.graph.start_txn().await.expect(TRANSACTION_FAILED_ERROR);
 
                 if let Some(vec) = link.connection.nodes {
                     let runners = vec

@@ -7,6 +7,8 @@ mod tests {
     use ractor::registry::where_is;
     use ractor::rpc::call;
     use ractor::Actor;
+    use reqwest::Client;
+    use supervisor::ObserverSupervisor;
     use std::env;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::{error::Error, time::Duration};
@@ -79,7 +81,7 @@ mod tests {
         let gitlab_endpoint = env::var("GITLAB_ENDPOINT").unwrap();
         let broker_addr = env::var("BROKER_ADDR").unwrap();
         let gitlab_token = env::var("GITLAB_TOKEN").unwrap();
-
+        
         let client =
             where_is(BROKER_CLIENT_NAME.to_string()).expect("Expected client to be present");
 
@@ -100,6 +102,7 @@ mod tests {
             registration_id: session_id,
             gitlab_endpoint,
             token: Some(gitlab_token),
+            web_client: Client::new()
         };
 
         //start users observer

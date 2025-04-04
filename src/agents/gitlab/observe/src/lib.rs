@@ -63,6 +63,7 @@ pub struct GitlabObserverArgs {
     pub gitlab_endpoint: String,
     pub token: Option<String>,
     pub registration_id: String,
+    pub web_client: Client
 }
 
 /// Messages that observers send themselves to prompt the retrieval of resources

@@ -24,6 +24,10 @@ let gitlabAgentPod = kubernetes.PodSpec::{
                             , value = Some "/etc/tls/client_polar_key.pem"
                         }
                         , kubernetes.EnvVar::{
+                            name = "PROXY_CA_CERT"
+                            , value = Some "/etc/ssl/proxy_ca_certificate.pem"
+                        }
+                        , kubernetes.EnvVar::{
                             name = "BROKER_ADDR"
                             , value = Some values.cassiniAddr
                         }
@@ -46,6 +50,11 @@ let gitlabAgentPod = kubernetes.PodSpec::{
                             name  = "client-mtls"
                             , mountPath = "/etc/tls/"
                             
+                        }
+                        , kubernetes.VolumeMount::{
+                            name  = "proxy-ca-cert"
+                            , mountPath = "/etc/ssl/"
+                            , readOnly = Some True
                         }
                     ]
                 }
@@ -71,14 +80,14 @@ let gitlabAgentPod = kubernetes.PodSpec::{
                         }
                         , kubernetes.EnvVar::{
                             name = "GRAPH_ENDPOINT"
-                            , value = Some values.neo4jAddr
+                            , value = Some values.neo4jBoltAddr
                         }
                         , kubernetes.EnvVar::{
                             name = "GRAPH_DB"
                             , value = Some values.gitlab.consumer.graph.graphDB
                         }
                         , kubernetes.EnvVar::{
-                            name = "GRAPH_USERNAME"
+                            name = "GRAPH_USER"
                             , value = Some values.gitlab.consumer.graph.graphUsername                       
                         }
                         , kubernetes.EnvVar::{
@@ -102,6 +111,12 @@ let gitlabAgentPod = kubernetes.PodSpec::{
                     , name = "client-mtls"
                     , secret = Some kubernetes.SecretVolumeSource::{
                         secretName = Some "client-mtls"
+                    }
+                }
+                , kubernetes.Volume::{
+                    , name = "proxy-ca-cert"
+                    , secret = Some kubernetes.SecretVolumeSource::{
+                        secretName = Some "proxy-ca-cert"
                     }
                 }
             ]

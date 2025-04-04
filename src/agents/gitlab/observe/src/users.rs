@@ -26,18 +26,14 @@ use std::time::Duration;
 
 use crate::{
     GitlabObserverArgs, GitlabObserverMessage, GitlabObserverState, BROKER_CLIENT_NAME,
-    PRIVATE_TOKEN_HEADER_STR,
 };
 use cassini::client::TcpClientMessage;
 use cassini::ClientMessage;
-use common::USER_CONSUMER_TOPIC;
-use cynic::{GraphQlResponse, Id, Operation, QueryFragment, QueryVariables};
-use ractor::concurrency::Interval;
-use ractor::rpc::{call, CallResult};
+use common::{get_file_as_byte_vec, USER_CONSUMER_TOPIC};
+use cynic::GraphQlResponse;
 use ractor::RpcReplyPort;
 use ractor::{async_trait, registry::where_is, Actor, ActorProcessingErr, ActorRef};
-use reqwest::header::CONNECTION;
-use reqwest::{Client, Method, StatusCode};
+use reqwest::{Certificate, Client, ClientBuilder};
 
 use common::types::{GitlabData, ResourceLink};
 use cynic::QueryBuilder;
@@ -61,12 +57,10 @@ impl Actor for GitlabUserObserver {
     ) -> Result<Self::State, ActorProcessingErr> {
         debug!("{myself:?} starting");
 
-        let client = Client::new();
-
         let state = GitlabObserverState {
             gitlab_endpoint: args.gitlab_endpoint,
             token: args.token,
-            web_client: client,
+            web_client: args.web_client,
             registration_id: args.registration_id,
         };
         Ok(state)

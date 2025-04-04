@@ -51,18 +51,13 @@ impl Actor for GitlabRunnerObserver {
     ) -> Result<Self::State, ActorProcessingErr> {
         debug!("{myself:?} starting, connecting to instance");
 
-        match Client::builder().build() {
-            Ok(client) => {
-                let state = GitlabObserverState {
-                    gitlab_endpoint: args.gitlab_endpoint,
-                    token: args.token,
-                    web_client: client.clone(),
-                    registration_id: args.registration_id,
-                };
-                Ok(state)
-            }
-            Err(e) => Err(Box::new(e)),
-        }
+        let state = GitlabObserverState {
+            gitlab_endpoint: args.gitlab_endpoint,
+            token: args.token,
+            web_client: args.web_client,
+            registration_id: args.registration_id,
+        };
+        Ok(state)
     }
 
     async fn post_start(

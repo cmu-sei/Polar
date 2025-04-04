@@ -166,6 +166,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let gitlab_endpoint = env::var("GITLAB_ENDPOINT").unwrap();
     let broker_addr = env::var("BROKER_ADDR").unwrap();
     let gitlab_token = env::var("GITLAB_TOKEN").unwrap();
+    let proxy_ca_cert_file = match env::var("PROXY_CA_CERT") { Ok(path) => Some(path), Err(_) => None };
+
 
     let args = supervisor::ObserverSupervisorArgs {
         broker_addr,
@@ -174,6 +176,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         ca_cert_file: ca_cert_file,
         gitlab_endpoint,
         gitlab_token: Some(gitlab_token),
+        proxy_ca_cert_file
     };
 
     let (supervisor, handle) = Actor::spawn(

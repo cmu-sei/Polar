@@ -37,6 +37,8 @@ pub mod users;
 
 pub const BROKER_CLIENT_NAME: &str = "GITLAB_CONSUMER_CLIENT";
 pub const GITLAB_USER_CONSUMER: &str = "users";
+pub const TRANSACTION_FAILED_ERROR: &str = "Expected to start a transaction with the graph";
+
 //TODO: Give consumer state info about neo4j, and eventually, a graph adapter to work with
 pub struct GitlabConsumerState {
     pub registration_id: String,

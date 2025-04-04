@@ -107,23 +107,13 @@ pub fn create_lock(filepath: &str) -> Result<bool, std::io::Error> {
 }
 
 /// Helper function to parse a file at a given path and return the raw bytes as a vector
-fn get_file_as_byte_vec(filename: &String) -> Vec<u8> {
-    let mut f = match File::open(&filename) {
-        Ok(file) => file,
-        Err(e) => {
-            error!("Could not read file {}, {}", filename, e);
-            process::exit(1);
-        }
-    };
-    let metadata = match std::fs::metadata(&filename) {
-        Ok(metadata) => metadata,
-        Err(e) => {
-            error!("Could not get metadata for file {}, {}", filename, e);
-            process::exit(1);
-        }
-    };
+pub fn get_file_as_byte_vec(filename: &String) -> Result<Vec<u8>, std::io::Error> {
+    let mut f = File::open(&filename)?;
+
+    let metadata = std::fs::metadata(&filename)?;
+
     let mut buffer = vec![0; metadata.len() as usize];
     f.read(&mut buffer).expect("buffer overflow");
 
-    buffer
+    Ok(buffer)
 }

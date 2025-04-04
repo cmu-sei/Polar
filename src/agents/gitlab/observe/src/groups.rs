@@ -235,12 +235,10 @@ impl Actor for GitlabGroupObserver {
     ) -> Result<Self::State, ActorProcessingErr> {
         debug!("{myself:?} starting, connecting to instance");
 
-        let client = Client::new();
-
         let state = GitlabObserverState {
             gitlab_endpoint: args.gitlab_endpoint,
             token: args.token,
-            web_client: client,
+            web_client: args.web_client,
             registration_id: args.registration_id,
         };
         Ok(state)

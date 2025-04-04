@@ -124,7 +124,9 @@ let neo4j = {
   }
 }
 
-let neo4jAddr = "${neo4j.service.name}.${namespace}.svc.cluster.local:${Natural/show neo4jPorts.http}"
+let neo4jBoltAddr = "${neo4j.service.name}.${namespace}.svc.cluster.local:${Natural/show neo4jPorts.bolt}"
+let neo4jUiAddr = "${neo4j.service.name}.${namespace}.svc.cluster.local:${Natural/show neo4jPorts.http}"
+
 in
 
 {   namespace
@@ -133,6 +135,7 @@ in
 ,   cassiniAddr
 ,   neo4jPorts
 ,   neo4j
-,   neo4jAddr
+,   neo4jUiAddr
+,   neo4jBoltAddr
 ,   gitlab
 }

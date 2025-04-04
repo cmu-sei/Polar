@@ -21,13 +21,12 @@
    DM24-0470
 */
 
-use crate::{subscribe_to_topic, GitlabConsumerArgs, GitlabConsumerState, BROKER_CLIENT_NAME};
+use crate::{subscribe_to_topic, GitlabConsumerArgs, GitlabConsumerState, TRANSACTION_FAILED_ERROR};
 use common::types::GitlabData;
 use common::PROJECTS_CONSUMER_TOPIC;
 use neo4rs::Query;
-use ractor::{async_trait, registry::where_is, Actor, ActorProcessingErr, ActorRef};
-use tracing::field::debug;
-use tracing::{debug, error, info};
+use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef};
+use tracing::{debug, info};
 
 pub struct GitlabProjectConsumer;
 
@@ -75,7 +74,7 @@ impl Actor for GitlabProjectConsumer {
                     .graph
                     .start_txn()
                     .await
-                    .expect("Expected to start a transaction with the graph.");
+                    .expect(TRANSACTION_FAILED_ERROR);
                 // Create list of projects
                 let project_array = projects.iter()
                     .map(|project| {
@@ -115,7 +114,7 @@ impl Actor for GitlabProjectConsumer {
                     .expect("Expected to commit transaction");
                 info!("Transaction committed.");
             }
-            _ => todo!(),
+            _ => (),
         }
         Ok(())
     }
