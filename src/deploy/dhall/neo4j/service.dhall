@@ -5,7 +5,7 @@ let kubernetes =
 let values = ../values.dhall
 
 let spec =
-      { selector = Some (toMap { name = "neo4j" })
+      { selector = Some (toMap { name = values.neo4j.name })
       , type = Some "NodePort"
       , ports = Some
         [ kubernetes.ServicePort::{

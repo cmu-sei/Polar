@@ -19,24 +19,34 @@ let statefulSet =
       , serviceName = values.neo4j.service.name
       , template = kubernetes.PodTemplateSpec::{
           , metadata = Some kubernetes.ObjectMeta::{
-                name = Some "neo4j"
+                name = Some values.neo4j.name
             ,   labels = Some [ { mapKey = "name", mapValue = values.neo4j.name } ]
             }
           , spec = Some kubernetes.PodSpec::{
             , containers =
               [ 
                 kubernetes.Container::{
-                , name = "neo4j"
+                , name = values.neo4j.name
                 , image = Some values.neo4j.image
+                , env = Some values.neo4j.env
+                , securityContext = Some values.neo4j.containerSecurityContext
                 , ports = Some
                   [ kubernetes.ContainerPort::{ containerPort = 7474 },
                     kubernetes.ContainerPort::{ containerPort = 7687 }
                   ]
                 , volumeMounts = Some [
                     kubernetes.VolumeMount::{
-                        name  = "neo4j-data"
-                        , mountPath = "/var"
-                        
+                        name  = values.neo4j.volumes.data.name
+                        , mountPath = values.neo4j.volumes.data.mountPath
+                    }
+                    ,kubernetes.VolumeMount::{
+                        name  = values.neo4j.config.name
+                        , mountPath = values.neo4j.config.path
+                        , readOnly = Some True 
+                    }
+                    ,kubernetes.VolumeMount::{
+                        name  = values.neo4j.volumes.logs.name
+                        , mountPath = values.neo4j.volumes.logs.mountPath
                     }
                 ]
                 },
@@ -45,7 +55,20 @@ let statefulSet =
                 , kubernetes.Volume::{
                     , name = "neo4j-data"
                     , persistentVolumeClaim = Some kubernetes.PersistentVolumeClaimVolumeSource::{
-                        claimName = "neo4j-pvc"
+                        claimName = "neo4j-data-pvc"
+                    }
+                }
+                , kubernetes.Volume::{
+                    , name = "neo4j-logs"
+                    , persistentVolumeClaim = Some kubernetes.PersistentVolumeClaimVolumeSource::{
+                        claimName = "neo4j-logs-pvc"
+                    }
+                }
+                ,kubernetes.Volume::{
+                  , name = values.neo4j.config.name 
+                  , configMap = Some kubernetes.ConfigMapVolumeSource::{
+                    name = Some values.neo4j.config.name
+                    , items = Some [ kubernetes.KeyToPath::{ key = "neo4j.conf", path = "neo4j.conf" } ]
                     }
                 }
             ]

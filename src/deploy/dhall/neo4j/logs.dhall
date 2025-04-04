@@ -8,8 +8,8 @@ let neo4jDataVolume = kubernetes.PersistentVolume::{
     apiVersion = "v1"
     , kind = "PersistentVolume"
     , metadata = kubernetes.ObjectMeta::{
-        name = Some "neo4j-data"
-        , namespace = Some "polar"
+        name = Some values.neo4j.volumes.logs.name
+        , namespace = Some values.namespace
     }
     , spec = Some kubernetes.PersistentVolumeSpec::{
         accessModes = Some values.neo4j.volumes.data.selector.accessModes
@@ -19,7 +19,7 @@ let neo4jDataVolume = kubernetes.PersistentVolume::{
                 , mapValue = values.neo4j.volumes.data.selector.requests.storage
                 }
             ])
-        , hostPath = Some kubernetes.HostPathVolumeSource:: { path = "/data/conf" }
+        , hostPath = Some kubernetes.HostPathVolumeSource:: { path = "/data/neo4j/logs" }
         , storageClassName = Some values.neo4j.volumes.data.selector.storageClassName
     }    
 }

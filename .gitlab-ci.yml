@@ -7,7 +7,7 @@ default:
     - kubernetes
 
 build-dev-environment:
-  image: registry.sandbox.labz.s-box.org/vcaaron/flaskr/nix:2.24.9
+  image: registry.sandbox.labz.s-box.org/sei/polar-mirror/nix:2.24.13
   stage: build
   rules:
     - changes:
@@ -91,7 +91,9 @@ generate-charts:
     - chmod +x ./scripts/make-chart.sh
     - sh scripts/make-chart.sh src/deploy/dhall polar-deploy/chart
     - cd polar-deploy
-    
+
+    # delete old charts
+    - rm -rf chart/
     # We might want to commit to other environment-specific branchhes.
     # If we do, we should probably make a template for this job and parameterize it
     # - git checkout -B "$CI_COMMIT_BRANCH"

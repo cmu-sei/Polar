@@ -35,8 +35,7 @@ kubectl create secret generic client-mtls -n polar \
 
 kubectl create secret generic gitlab-secret -n polar --from-literal=token=$GITLAB_TOKEN
 
-# AFTER you deploy neo4j to your cluster and set a new password, you can add it as a secret for the agents to use.
-kubectl create secret generic neo4j-secret -n polar --from-literal=token=$NEO4J_SECRET
+kubectl create secret generic neo4j-secret -n polar --from-literal=secret=$GRAPH_PASSWORD
 ```
 
 ## Known Issues

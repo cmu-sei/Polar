@@ -58,37 +58,39 @@ let neo4jPorts = {http = 7474, bolt = 7687 }
 let neo4j = {
     name = "polar-neo4j"
 ,   image = "docker.io/library/neo4j:5.10.0-community"
+,   config = { name = "neo4j-config" , path = "/var/lib/neo4j/neo4j.conf" }
+,   env =  [
+      -- load in a default password from secret
+      , kubernetes.EnvVar::{
+          name = "NEO4J_AUTH"
+          , valueFrom = Some kubernetes.EnvVarSource::{
+              secretKeyRef = Some kubernetes.SecretKeySelector::{
+                  key = "secret"
+                  , name = Some "neo4j-secret"
+              }
+          }
+      }           
+  ]
 ,   containerPorts =
     [ 
         kubernetes.ContainerPort::{ containerPort = neo4jPorts.http }
       , kubernetes.ContainerPort::{ containerPort = neo4jPorts.bolt }
     ]
-,   service = { name = "neo4j-svc" }
+, service = { name = "polar-db-svc" }
 , logging = { serverLogsXml = "", userLogsXml = "" }
 , resources = { cpu = "1000m", memory = "2Gi" }
-, securityContext =
-  { fsGroup = 7474
-  , fsGroupChangePolicy = "Always"
-  , runAsGroup = 7474
-  , runAsNonRoot = True
-  , runAsUser = 7474
-  }
 , containerSecurityContext =
-  { capabilities.drop = [ "ALL" ]
-  , runAsGroup = 7474
-  , runAsNonRoot = True
-  , runAsUser = 7474
+  kubernetes.SecurityContext::{
+  , runAsGroup = Some 7474
+  , runAsNonRoot = Some True
+  , runAsUser = Some 7474
   }
+  
 , volumes =
-  { backups =
-    { disableSubPathExpr = False
-    , labels = {=}
-    , mode = "share"
-    , share.name = "data"
-    }
+  { backups = {=}
   , data =
-    { defaultStorageClass =
-      { accessModes = [ "ReadWriteOnce" ], requests.storage = "10Gi" }
+    { name = "neo4j-data"
+    , defaultStorageClass = { accessModes = [ "ReadWriteOnce" ], requests.storage = "10Gi" }
     , disableSubPathExpr = False
     , dynamic =
       { accessModes = [ "ReadWriteOnce" ]
@@ -97,6 +99,7 @@ let neo4j = {
       }
     , labels = {=}
     , mode = ""
+    , mountPath = "/var/lib/neo4j/data"
     , selector =
       { accessModes = [ "ReadWriteOnce" ]
       , requests.storage = "10Gi"
@@ -110,13 +113,12 @@ let neo4j = {
     , volume.setOwnerAndGroupWritableFilePermissions = False
     , volumeClaimTemplate = {=}
     }
-  , import =
-    {=}
-  , licenses =
-    {=}
   , logs =
-    {=}
-  , metrics = {=}
+    {
+      name = "neo4j-logs"
+      , pvcName = "neo4j-logs-pvc"
+      , mountPath = "/var/lib/neo4j/logs"
+    }
   }
 }
 
