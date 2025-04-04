@@ -31,7 +31,7 @@ kubectl create secret generic cassini-mtls -n polar \
 kubectl create secret generic client-mtls -n polar \
     --from-file=ca_certificate.pem=conf/certs/ca_certificates/ca_certificate.pem \
     --from-file=client_polar_certificate.pem=conf/certs/client/client_polar_certificate.pem \
-    --from-file=server_polar_key.pem=conf/certs/client/client_polar_key.pem
+    --from-file=client_polar_key.pem=conf/certs/client/client_polar_key.pem
 
 kubectl create secret generic gitlab-secret -n polar --from-literal=token=$GITLAB_TOKEN
 

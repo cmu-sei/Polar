@@ -4,10 +4,10 @@ let kubernetes =
 
 let values = ../values.dhall
 
-let gitlabAgentPod = {
+let gitlabAgentPod = kubernetes.PodSpec::{
             , containers =
               [ 
-                kubernetes.Container::{
+                , kubernetes.Container::{
                     , name = values.gitlab.observer.name
                     , image = Some  values.gitlab.observer.image
                     , env = Some [
@@ -44,7 +44,7 @@ let gitlabAgentPod = {
                     , volumeMounts = Some [
                         kubernetes.VolumeMount::{
                             name  = "client-mtls"
-                            , mountPath = "/etc/tls"
+                            , mountPath = "/etc/tls/"
                             
                         }
                     ]
@@ -55,7 +55,7 @@ let gitlabAgentPod = {
                     , env = Some [
                         kubernetes.EnvVar::{
                             name = "TLS_CA_CERT"
-                            , value = Some "/etc/cassini/tls/ca_certificate.pem"
+                            , value = Some "/etc/tls/ca_certificate.pem"
                         }
                         , kubernetes.EnvVar::{
                             name = "TLS_CLIENT_CERT"
@@ -91,7 +91,7 @@ let gitlabAgentPod = {
                     , volumeMounts = Some [
                         kubernetes.VolumeMount::{
                             name  = "client-mtls"
-                            , mountPath = "/etc/tls"
+                            , mountPath = "/etc/tls/"
                             , readOnly = Some True
                         }
                     ]
@@ -112,7 +112,7 @@ let
       kubernetes.Deployment::{
       , metadata = kubernetes.ObjectMeta::{
         name = Some values.gitlab.name
-        , namespace = Some "polar"
+        , namespace = Some values.namespace
        }
       , spec = Some kubernetes.DeploymentSpec::{
         , selector = kubernetes.LabelSelector::{
