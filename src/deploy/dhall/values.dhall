@@ -29,10 +29,11 @@ let cassini =
 
 let cassiniAddr = "${cassini.service.name}.${namespace}.svc.cluster.local:${Natural/show cassini.port}"
 
-let graphSecret = kubernetes.SecretKeySelector::{
-                  key = "secret"
-                  , name = Some "neo4j-secret"
-                }  
+let graphSecret = 
+      kubernetes.SecretKeySelector::{
+        key = "secret"
+        , name = Some "neo4j-secret"
+      }  
 let gitlab = {
     name = "gitlab-agent"
     , observer = {
@@ -47,7 +48,11 @@ let gitlab = {
         , graph = {
              graphDB = "neo4j"
           ,  graphUsername = "neo4j"
-          ,  graphSecret = graphSecret
+          ,  graphPassword = 
+              kubernetes.SecretKeySelector::{
+                name = Some "polar-graph-pw"
+                , key = "secret"
+              }
         }
     }
     }

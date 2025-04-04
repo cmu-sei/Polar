@@ -84,7 +84,7 @@ let gitlabAgentPod = kubernetes.PodSpec::{
                         , kubernetes.EnvVar::{
                             name = "GRAPH_PASSWORD"
                             , valueFrom = Some kubernetes.EnvVarSource::{
-                                secretKeyRef = Some kubernetes.SecretKeySelector::values.gitlab.consumer.graph.graphSecret
+                                secretKeyRef = Some values.gitlab.consumer.graph.graphPassword
                             }
                         }
                     ]
