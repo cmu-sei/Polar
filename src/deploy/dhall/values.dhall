@@ -9,11 +9,13 @@ let imagePullSecrets = [
     { name = "sandbox-registry" }
 ]
 
+-- This returns a "record" in dhall-speak. The record type is effectively
+-- key-value pairs, where the value can be a string, a list, or another record.
 let cassini = 
   {
     name = "cassini"
   , namespace = "polar"
-  , image = "localhost/cassini:${chart.appVersion}"
+  , image = "docker.io/cassini:${chart.appVersion}"
   , port = 8080
   , service = { name = "cassini-ip-svc", type = "ClusterIP" }
   , volumes = 
@@ -27,24 +29,29 @@ let cassini =
     ]
   }
 
+-- Dot notation to traverse a record,${...} variable expansion, the last part
+-- is a function call that formats a natural into a string.
 let cassiniAddr = "${cassini.service.name}.${namespace}.svc.cluster.local:${Natural/show cassini.port}"
 
+-- kubernetes namespace definitions for DHall allow us to directly use their
+-- defined types.
 let graphSecret = 
       kubernetes.SecretKeySelector::{
         key = "secret"
         , name = Some "neo4j-secret"
       }  
+
 let gitlab = {
     name = "gitlab-agent"
     , observer = {
         name = "polar-gitlab-observer"
-        , image = "localhost/polar-gitlab-observer:${chart.appVersion}"
+        , image = "docker.io/polar-gitlab-observer:${chart.appVersion}"
         , gitlabEndpoint = "https://gitlab.sandbox.labz.s-box.org/api/graphql"
-        , gitalbSecret = { key = "token" , name = Some "gitlab-secret" }
+        , gitlabSecret = { key = "token" , name = Some "gitlab-secret" }
     }
     , consumer = {
         name = "polar-gitlab-consumer"
-        , image = "localhost/polar-gitlab-consumer:${chart.appVersion}"
+        , image = "docker.io/polar-gitlab-consumer:${chart.appVersion}"
         , graph = {
              graphDB = "neo4j"
           ,  graphUsername = "neo4j"
@@ -56,6 +63,7 @@ let gitlab = {
         }
     }
     }
+
 let neo4jPorts = {http = 7474, bolt = 7687 }
 
 -- TODO: Neo4j has various configurations we can add to our own values here
