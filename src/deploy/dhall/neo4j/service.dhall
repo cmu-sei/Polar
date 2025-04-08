@@ -10,9 +10,9 @@ let spec =
       , ports = Some
         [ kubernetes.ServicePort::{
             name = Some "http-ui"
-          , targetPort = Some (kubernetes.NatOrString.Nat values.neo4jPorts.http)
-          , port = values.neo4jPorts.http
-          , nodePort = Some 30074
+          , targetPort = Some (kubernetes.NatOrString.Nat values.neo4jPorts.https)
+          , port = values.neo4jPorts.https
+          , nodePort = Some 30073
           },
           kubernetes.ServicePort::{
             name = Some "bolt"

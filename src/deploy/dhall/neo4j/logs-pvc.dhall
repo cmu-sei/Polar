@@ -7,8 +7,8 @@ let values = ../values.dhall
 
 let neo4jVolumeClaim = kubernetes.PersistentVolumeClaim::{
     metadata = kubernetes.ObjectMeta::{
-        name = Some values.neo4j.volumes.logs.pvcName
-        , namespace = Some values.namespace
+        name = Some values.neo4j.volumes.logs.name
+        , namespace = Some values.neo4j.namespace
     }
     , spec = Some kubernetes.PersistentVolumeClaimSpec::{ 
         selector = Some kubernetes.LabelSelector::{ matchLabels = Some (toMap { name = "neo4j" }) }
@@ -16,10 +16,10 @@ let neo4jVolumeClaim = kubernetes.PersistentVolumeClaim::{
         , volumeName = Some values.neo4j.volumes.logs.name
         , resources = Some kubernetes.VolumeResourceRequirements::{
             requests = Some ([
-               { mapKey = "storage", mapValue = "5Gi"}
+               { mapKey = "storage", mapValue = values.neo4j.volumes.logs.storageSize}
             ])
           }
-        , storageClassName = Some "standard"
+        , storageClassName = values.neo4j.volumes.logs.storageClassName
 
     }
 }

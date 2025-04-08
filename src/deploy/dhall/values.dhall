@@ -9,32 +9,53 @@ let imagePullSecrets = [
     { name = "sandbox-registry" }
 ]
 
--- This returns a "record" in dhall-speak. The record type is effectively
--- key-value pairs, where the value can be a string, a list, or another record.
+let RejectSidecarAnnotation = { mapKey = "sidecar.istio.io/inject", mapValue = "false" }
+
+-- Settings for Polar's mTLS configurations
+let mtls = {
+,   commonName = "polar" -- TODO: This value is hard-coded into the listenerManager. Time we changed that?
+,   caCertificateIssuerName = "polar-ca-issuer"
+,   caCertName = "polar-ca-cert"
+,   leafIssuerName = "polar-leaf-issuer"
+,   cassini.secretName = "cassini-tls"
+,   gitlab.secretName = "gitlab-agent-tls"
+}
+
+let cassiniPort = 8080
+let cassiniService = { name = "cassini-ip-svc", type = "ClusterIP" }
+
+-- Predidcted DNS name for cassini once given a service
+let cassiniAddr = "${cassiniService.name}.${namespace}.svc.cluster.local:${Natural/show cassiniPort}"
+
 let cassini = 
   {
     name = "cassini"
   , namespace = "polar"
-  , image = "docker.io/cassini:${chart.appVersion}"
-  , port = 8080
-  , service = { name = "cassini-ip-svc", type = "ClusterIP" }
+  , image = "localhost/cassini:${chart.appVersion}"
+  , podAnnotations = [ RejectSidecarAnnotation ]
+  , port = cassiniPort
+  , service = cassiniService
+  , mtls.certificateSpec = { 
+        commonName = mtls.commonName
+        , dnsNames = [ cassiniAddr ]
+        , duration = "2160h" -- 90 days by default
+        , issuerRef = { kind = "ClusterIssuer", name = mtls.leafIssuerName }
+        , renewBefore = "360h" -- 15 days
+        , secretName = mtls.cassini.secretName
+        }
   , volumes = 
     [
     , kubernetes.Volume::{
         , name = "mtls-secrets"
         , secret = Some kubernetes.SecretVolumeSource::{
-            secretName = Some "cassini-mtls"
+            secretName = Some mtls.cassini.secretName
         }
       }
     ]
   }
 
--- Dot notation to traverse a record,${...} variable expansion, the last part
--- is a function call that formats a natural into a string.
-let cassiniAddr = "${cassini.service.name}.${namespace}.svc.cluster.local:${Natural/show cassini.port}"
 
--- kubernetes namespace definitions for DHall allow us to directly use their
--- defined types.
+
 let graphSecret = 
       kubernetes.SecretKeySelector::{
         key = "secret"
@@ -43,15 +64,31 @@ let graphSecret =
 
 let gitlab = {
     name = "gitlab-agent"
+    , serviceAccountName = "gitlab-agent-sa"
+    , podAnnotations = [ RejectSidecarAnnotation ]
+    -- Optionally provide the name of a proxy CA secret
+    -- , ProxyCertificate = None Text
+    , proxyCertificate = Some "istio-ca-root-cert"
+
+
+    , mtls.certificateSpec = 
+      { commonName = mtls.commonName
+        , dnsNames = [ cassiniAddr ]
+        , duration = "2160h"
+        , issuerRef = { kind = "ClusterIssuer", name = mtls.leafIssuerName }
+        , renewBefore = "360h"
+        , secretName = mtls.gitlab.secretName
+        }
+    
     , observer = {
         name = "polar-gitlab-observer"
-        , image = "docker.io/polar-gitlab-observer:${chart.appVersion}"
+        , image = "localhost/polar-gitlab-observer:${chart.appVersion}"
         , gitlabEndpoint = "https://gitlab.sandbox.labz.s-box.org/api/graphql"
-        , gitlabSecret = { key = "token" , name = Some "gitlab-secret" }
+        , gitalbSecret = { key = "token" , name = Some "gitlab-secret" }
     }
     , consumer = {
         name = "polar-gitlab-consumer"
-        , image = "docker.io/polar-gitlab-consumer:${chart.appVersion}"
+        , image = "localhost/polar-gitlab-consumer:${chart.appVersion}"
         , graph = {
              graphDB = "neo4j"
           ,  graphUsername = "neo4j"
@@ -64,80 +101,63 @@ let gitlab = {
     }
     }
 
-let neo4jPorts = {http = 7474, bolt = 7687 }
+
+
+let neo4jPorts = {https = 7473, bolt = 7687 }
 
 -- TODO: Neo4j has various configurations we can add to our own values here
 -- Expand and add parameters as desired.
-let neo4j = {
-    name = "polar-neo4j"
-,   image = "docker.io/library/neo4j:5.10.0-community"
-,   config = { name = "neo4j-config" , path = "/var/lib/neo4j/neo4j.conf" }
-,   env =  [
-      -- load in a default password from secret
-      , kubernetes.EnvVar::{
-          name = "NEO4J_AUTH"
-          , valueFrom = Some kubernetes.EnvVarSource::{
-              secretKeyRef = Some graphSecret
-          }
-      }           
-  ]
-,   containerPorts =
-    [ 
-        kubernetes.ContainerPort::{ containerPort = neo4jPorts.http }
-      , kubernetes.ContainerPort::{ containerPort = neo4jPorts.bolt }
-    ]
-, service = { name = "polar-db-svc" }
-, logging = { serverLogsXml = "", userLogsXml = "" }
-, resources = { cpu = "1000m", memory = "2Gi" }
-, containerSecurityContext =
-  kubernetes.SecurityContext::{
-  , runAsGroup = Some 7474
-  , runAsNonRoot = Some True
-  , runAsUser = Some 7474
-  }
-  
-, volumes =
-  { backups = {=}
-  , data =
-    { name = "neo4j-data"
-    , defaultStorageClass = { accessModes = [ "ReadWriteOnce" ], requests.storage = "10Gi" }
-    , disableSubPathExpr = False
-    , dynamic =
-      { accessModes = [ "ReadWriteOnce" ]
-      , requests.storage = "100Gi"
-      , storageClassName = "neo4j"
-      }
-    , labels = {=}
-    , mode = ""
-    , mountPath = "/var/lib/neo4j/data"
-    , selector =
-      { accessModes = [ "ReadWriteOnce" ]
-      , requests.storage = "10Gi"
-      , selectorTemplate.matchLabels
-        =
-        { app = "polar-neo4j"
-        , 
-        }
-      , storageClassName = "standard"
-      }
-    , volume.setOwnerAndGroupWritableFilePermissions = False
-    , volumeClaimTemplate = {=}
-    }
-  , logs =
-    {
-      name = "neo4j-logs"
-      , pvcName = "neo4j-logs-pvc"
-      , mountPath = "/var/lib/neo4j/logs"
-    }
-  }
-}
 
-let neo4jBoltAddr = "${neo4j.service.name}.${namespace}.svc.cluster.local:${Natural/show neo4jPorts.bolt}"
-let neo4jUiAddr = "${neo4j.service.name}.${namespace}.svc.cluster.local:${Natural/show neo4jPorts.http}"
+let neo4j =
+      { name = "polar-neo4j"
+      , hostName = "graph-db.sandbox.labz.s-box.org"
+      , namespace = "polar-graph-db"
+      , image = "docker.io/library/neo4j:5.10.0-community"
+      , podAnnotations = [ RejectSidecarAnnotation ]
+      , config = { name = "neo4j-config" , path = "/var/lib/neo4j/neo4j.conf" }
+      , env =
+          [ kubernetes.EnvVar::{
+              name = "NEO4J_AUTH"
+              , valueFrom = Some kubernetes.EnvVarSource::{ secretKeyRef = Some graphSecret }
+            }
+          ]
+      , containerPorts =
+          [ kubernetes.ContainerPort::{ containerPort = neo4jPorts.https }
+          , kubernetes.ContainerPort::{ containerPort = neo4jPorts.bolt }
+          ]
+      , service = { name = "polar-db-svc" }
+      , gateway = { name = "polar-gb-gateway"}
+      , logging = { serverLogsXml = "", userLogsXml = "" }
+      , resources = { cpu = "1000m", memory = "2Gi" }
+      , containerSecurityContext =
+          kubernetes.SecurityContext::{
+          , runAsGroup = Some 7474
+          , runAsNonRoot = Some True
+          , runAsUser = Some 7474
+          }
+      , volumes =
+          { data =
+              { name = "polar-db-data"
+              , storageClassName = Some "standard"
+              , storageSize = "100Gi"
+              , mountPath = "/var/lib/neo4j/data"
+              }
+          , logs =
+              { name = "polar-db-logs"
+              , storageClassName = Some "standard"
+              , storageSize = "10Gi"
+              , mountPath = "/var/lib/neo4j/logs"
+              }
+          }
+      }
+
+let neo4jBoltAddr = "${neo4j.service.name}.${neo4j.namespace}.svc.cluster.local:${Natural/show neo4jPorts.bolt}"
+let neo4jUiAddr = "${neo4j.service.name}.${neo4j.namespace}.svc.cluster.local:${Natural/show neo4jPorts.https}"
 
 in
 
 {   namespace
+,   mtls
 ,   imagePullSecrets
 ,   cassini
 ,   cassiniAddr

@@ -15,6 +15,7 @@ Ensure the following tools are installed:
 - A `neo4j.conf` file to configure neo4j.
 - [Minikube](https://minikube.sigs.k8s.io/docs/start/) (Or whatever kubernetes cluster you'd like to test on)
 - Some client and server certificates from a trusted authroity. For testing, consider [generating your own](../agents/README.md)
+- A Personal Access Token for a Gitlab instance with, at minimum, read permissions for apis, registries, and repositories.
 - Container images for neo4j, cassini, and the gitlab agent should also be present. [See the documentation for info on building them](../agents/README.md). You can use your own preferred neo4j container image.
 ## Setting Up
 
@@ -63,6 +64,17 @@ For example, to copy a configuration for neo4j to minikube's `/data` directiory,
 ```
 
 It does not seem to support copying directories at this time. So some scripting may be implemented to assist this.
+
+**Container Images**
+Tools like minikube and kind require images to be accessible directly by worker nodes. This means that commands like `minikube image load localhost/cassini:0.1.0` need to be ran before minikube can use it.
+
+
+**On file permissions**
+If you're using hostPath volumes, you'll need to be sure that neo4j's default user `7474` can read and write to the given path. For example `/data/neo4j/` on the host.
+
+You can do this using `chown -R 7474:7474 /data`
+
+**Exposing Services**
 
 Finally, when exposing the neo4j service with minikube, remmeber to update the bolt port to use the port neo4j forwards for you, for example when running `minikube service -n polar neo4j --url`,
 

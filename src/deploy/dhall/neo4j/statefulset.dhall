@@ -10,7 +10,7 @@ let statefulSet =
     , kind = "StatefulSet"
     , metadata = kubernetes.ObjectMeta::{
         name = Some values.neo4j.name
-        , namespace = Some values.namespace
+        , namespace = Some values.neo4j.namespace
       }
     , spec = Some kubernetes.StatefulSetSpec::{ 
       selector = kubernetes.LabelSelector::{

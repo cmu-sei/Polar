@@ -47,14 +47,33 @@ let
                 ]
                 , ports = Some
                   [ kubernetes.ContainerPort::{ containerPort = values.cassini.port } ]
+                -- By default, Cert Manager creates Kubernetes TLS secrets with the standard key names:
+                  --     tls.crt – the certificate
+                  --     tls.key – the private key
+                  --     ca.crt – the CA certificate (only if available)
+                -- These key names cannot be customized directly by Cert Manager. 
+                -- But we can control how they're mounted in the pod by using Kubernetes volumeMounts and subPath tricks.
                 , volumeMounts = Some [
                     kubernetes.VolumeMount::{
-                        name  = "mtls-secrets"
-                        , mountPath = "/etc/cassini/tls"
-                        , readOnly = Some True
-                        
+                      name = values.mtls.cassini.secretName
+                      , mountPath = "/etc/cassini/tls/ca_certificate.pem"
+                      , subPath = Some "ca.crt"
+                      , readOnly = Some True
+                    }
+                  , kubernetes.VolumeMount::{
+                      name = values.mtls.cassini.secretName
+                      , mountPath = "/etc/cassini/tls/server_polar_certificate.pem"
+                      , subPath = Some "tls.crt"
+                      , readOnly = Some True
+                    }
+                  , kubernetes.VolumeMount::{
+                      name = values.mtls.cassini.secretName
+                      , mountPath = "/etc/cassini/tls/server_polar_key.pem"
+                      , subPath = Some "tls.key"
+                      , readOnly = Some True
                     }
                 ]
+
                 },
               ]
             , volumes = Some values.cassini.volumes

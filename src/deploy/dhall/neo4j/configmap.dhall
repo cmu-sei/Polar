@@ -10,7 +10,7 @@ let configContent = ../../../../conf/neo4j_setup/conf/neo4j.conf as Text  -- Rea
 let neo4jConfig = kubernetes.ConfigMap::{ 
     apiVersion = "v1"
     , kind = "ConfigMap"
-    , metadata = kubernetes.ObjectMeta::{ name = Some values.neo4j.config.name, namespace = Some values.namespace }
+    , metadata = kubernetes.ObjectMeta::{ name = Some values.neo4j.config.name, namespace = Some values.neo4j.namespace }
     , data = Some [ { mapKey = "neo4j.conf", mapValue = configContent  } ]
 }
 

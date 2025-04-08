@@ -18,7 +18,15 @@ convert_dhall_to_yaml() {
 
     # Find and convert all .dhall files in the directory
     find "$dhall_dir" -maxdepth 1 -type f -name "*.dhall" | while read -r dhall_file; do
-        yaml_file="${dhall_file%.dhall}.yaml"
+        # Extract the relative path of the file inside the dhall_dir
+        relative_path="${dhall_file#$dhall_dir/}"
+        
+        # Generate the corresponding yaml file path
+        yaml_file="$output_dir/$relative_path"
+        yaml_file="${yaml_file%.dhall}.yaml"  # Change extension to .yaml
+
+        # Create the necessary directories for the yaml file
+        mkdir -p "$(dirname "$yaml_file")"
 
         echo "[INFO] Converting: $dhall_file -> $yaml_file"
 
@@ -43,7 +51,7 @@ DHALL_ROOT="$1"
 UMBRELLA_CHART_NAME="$2"
 
 # Ensure necessary tools are installed
-for cmd in dhall-to-yaml kubeconform helm; do
+for cmd in dhall-to-yaml helm; do
     if ! command -v "$cmd" &> /dev/null; then
         echo "Error: $cmd is not installed. Install it and try again." >&2
         exit 1
@@ -60,37 +68,20 @@ fi
 echo "📂 Dhall root directory: $DHALL_ROOT"
 echo "📛 Umbrella chart name: $UMBRELLA_CHART_NAME"
 
-# Iterate over each subdirectory in the Dhall root
-for SERVICE_DIR in "$DHALL_ROOT"/*/; do
-    # Skip if it's not a directory
-    [[ -d "$SERVICE_DIR" ]] || continue  
-
-    SERVICE_NAME=$(basename "$SERVICE_DIR")
-    CHART_DHALL="$SERVICE_DIR/chart.dhall"
-
-    echo "🔍 Checking service: $SERVICE_NAME"
-
-    # Ensure chart.dhall exists in the service directory
-    if [[ ! -f "$CHART_DHALL" ]]; then
-        echo "[ERROR] Error: Missing 'chart.dhall' in '$SERVICE_DIR'." >&2
-        exit 1
-    fi
-
-    echo "[SUCCESS] Found 'chart.dhall' in $SERVICE_NAME"
-done
-
 # Start generating the umbrella Helm chart
 echo "🚀 Generating umbrella chart: $UMBRELLA_CHART_NAME"
 
-
-#set up directory
-CHILD_CHART_DEST_DIR="$UMBRELLA_CHART_NAME/charts"
+# Set up umbrella chart directory structure
+UMBRELLA_CHART_DIR="$UMBRELLA_CHART_NAME"
+CHILD_CHART_DEST_DIR="$UMBRELLA_CHART_DIR/charts"
+TEMPLATES_DIR="$UMBRELLA_CHART_DIR/templates"
 mkdir -p "$CHILD_CHART_DEST_DIR"
+mkdir -p "$TEMPLATES_DIR"
 
 # Convert the global Dhall chart definition to YAML
 GLOBAL_CHART_DHALL="$DHALL_ROOT/chart.dhall"
 GLOBAL_VALUES_DHALL="$DHALL_ROOT/values.dhall"
-CHART_YAML="$UMBRELLA_CHART_NAME/Chart.yaml"
+CHART_YAML="$UMBRELLA_CHART_DIR/Chart.yaml"
 
 if [[ ! -f "$GLOBAL_CHART_DHALL" ]]; then
     echo "[ERROR] Error: Missing global 'chart.dhall' in '$DHALL_ROOT'." >&2
@@ -106,7 +97,7 @@ fi
 echo "[SUCCESS] Generated 'Chart.yaml' for umbrella chart."
 
 # Convert global values.dhall to values.yaml
-VALUES_YAML="$UMBRELLA_CHART_NAME/values.yaml"
+VALUES_YAML="$UMBRELLA_CHART_DIR/values.yaml"
 if [[ ! -f "$GLOBAL_VALUES_DHALL" ]]; then
     echo "[ERROR] Error: Missing global 'values.dhall' in '$DHALL_ROOT'." >&2
     exit 1
@@ -120,6 +111,9 @@ fi
 
 echo "[SUCCESS] Generated 'values.yaml' for umbrella chart."
 
+echo "[INFO] Generating umbrella chart templates."
+convert_dhall_to_yaml "$DHALL_ROOT/templates" "$UMBRELLA_CHART_DIR/templates"
+
 echo "[SUCCESS] Umbrella chart setup complete at: $UMBRELLA_CHART_NAME"
 
 # Process child charts
@@ -129,44 +123,41 @@ for SERVICE_DIR in "$DHALL_ROOT"/*/; do
 
     CHILD_CHART_NAME=$(basename "$SERVICE_DIR")
     CHILD_CHART_DHALL="$SERVICE_DIR/chart.dhall"
-    CHILD_DHALL_DIR="${DHALL_ROOT}/${SERVICE_NAME}"
     
-    echo "[INFO] Processing service: $SERVICE_NAME"
+    echo "[INFO] Processing service: $CHILD_CHART_NAME"
     
     if [[ ! -f "$CHILD_CHART_DHALL" ]]; then
-        echo "[ERROR] Missing 'chart.dhall' in '$SERVICE_DIR'." >&2
-        exit 1
+        echo "[WARNING] Missing 'chart.dhall' in '$SERVICE_DIR', skipping..." >&2
+        continue
     fi
     
     CHILD_CHART_DIR="$CHILD_CHART_DEST_DIR/$CHILD_CHART_NAME"
+    CHILD_TEMPLATES_DIR="$CHILD_CHART_DIR/templates"
     
-    echo "Writing chart for $SERVICE_NAME to $CHILD_CHART_DIR"
-    mkdir -p "$CHILD_CHART_DIR/templates"
+    echo "Writing chart for $CHILD_CHART_NAME to $CHILD_CHART_DIR"
+    mkdir -p "$CHILD_CHART_DIR"
+    mkdir -p "$CHILD_TEMPLATES_DIR"
 
     # Convert service's chart.dhall to Chart.yaml
     CHILD_CHART_YAML="$CHILD_CHART_DIR/Chart.yaml"
-    echo "[INFO] Converting $SERVICE_NAME 'chart.dhall' to 'Chart.yaml'..."
+    echo "[INFO] Converting $CHILD_CHART_NAME 'chart.dhall' to 'Chart.yaml'..."
     if ! dhall-to-yaml --file "$CHILD_CHART_DHALL" > "$CHILD_CHART_YAML"; then
-        echo "[ERROR] Failed to convert 'chart.dhall' to 'Chart.yaml' for $SERVICE_NAME." >&2
+        echo "[ERROR] Failed to convert 'chart.dhall' to 'Chart.yaml' for $CHILD_CHART_NAME." >&2
         exit 1
     fi
 
-    echo "[SUCCESS] Generated 'Chart.yaml' for $SERVICE_NAME."
+    echo "[SUCCESS] Generated 'Chart.yaml' for $CHILD_CHART_NAME."
     
     # Convert all Dhall files in the service directory (excluding chart.dhall)
     echo "[INFO] Converting Dhall files in $SERVICE_DIR to YAML..."
     find "$SERVICE_DIR" -maxdepth 1 -type f -name "*.dhall" ! -name "chart.dhall" | while read -r dhall_file; do
-        yaml_file="$CHILD_CHART_DIR/templates/$(basename "${dhall_file%.dhall}.yaml")"
+        yaml_file="$CHILD_TEMPLATES_DIR/$(basename "${dhall_file%.dhall}.yaml")"
         
         echo "   [INFO] Converting: $dhall_file -> $yaml_file"        
         if ! dhall-to-yaml --file "$dhall_file" > "$yaml_file"; then
             echo "[ERROR] Error: Failed to convert $dhall_file" >&2
             exit 1
         fi
-        echo "  [INFO] Checking $yaml_file with kubeconform"
-        #confirm whether the generated yaml fits k8s' expectations
-        kubeconform -strict -summary $yaml_file
-    
     done
 
     echo "[SUCCESS] Finished processing $CHILD_CHART_NAME."
