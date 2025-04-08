@@ -99,15 +99,21 @@ in
       gnumake
       # clang or clang-tools are not strictly needed if stdenv is clang-based
       # but you can add them if you want the standalone `clang` CLI, e.g.:
-      pkgs.llvmPackages_19.clang
+      #pkgs.llvmPackages_19.clang
+      pkgs.llvmPackages_19.clang-unwrapped
       lld
       glibc
       grc
 
       # -- Rust --
-      (lib.meta.hiPrio rust-bin.nightly.latest.default)
+      (lib.meta.hiPrio (rust-bin.nightly.latest.default.override {
+        extensions = [ "rust-src" ];
+        targets = [ "wasm32-unknown-unknown" ];
+      }))
+
 
       cargo-leptos
+      cargo-binutils
       cargo-wasi
       pkg-config
       trunk
