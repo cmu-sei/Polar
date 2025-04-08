@@ -39,16 +39,26 @@ convert_dhall_to_yaml() {
     echo "[SUCCESS] All Dhall files in '$dhall_dir' converted successfully."
     return 0
 }
+# Function to print usage information
+usage() {
+    echo "Usage: $0 <dhall_root_directory> <umbrella_chart_path> [--render-template]"
+    exit 1
+}
 
-# Ensure both arguments are provided
+# Ensure at least two arguments are provided
 if [ $# -lt 2 ]; then
     echo "Error: Missing required arguments."
     usage
 fi
 
-# Assign arguments to variables
+# Assign arguments
 DHALL_ROOT="$1"
 UMBRELLA_CHART_NAME="$2"
+RENDER_TEMPLATE=false
+
+if [ "$3" == "--render-templates" ]; then
+    RENDER_TEMPLATE=true
+fi
 
 # Ensure necessary tools are installed
 for cmd in dhall-to-yaml helm; do
@@ -171,10 +181,16 @@ fi
 
 echo "[SUCCESS] Helm linting passed."
 
-# Render Helm template
-echo "🛠️ Rendering Helm template..."
-if ! helm template "$UMBRELLA_CHART_NAME"; then
-    echo "[ERROR] Helm template rendering failed!" >&2
+if [ "$RENDER_TEMPLATE" = true ]; then
+    echo "🛠️ Rendering Helm template..."
+    if ! helm template "$UMBRELLA_CHART_NAME"; then
+        echo "[ERROR] Helm template rendering failed!" >&2
+        exit 1
+    fi
+    echo "[SUCCESS] Helm template rendered."
+else
+    echo "[INFO] Skipping Helm template rendering."
 fi
+
 
 echo "Helm chart setup complete!"

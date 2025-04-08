@@ -1,0 +1,230 @@
+
+let kubernetes =
+      https://raw.githubusercontent.com/dhall-lang/dhall-kubernetes/refs/heads/master/1.31/package.dhall
+      sha256:1a0d599eabb9dd154957edc59bb8766ea59b4a245ae45bdd55450654c12814b0
+let chart = ./chart.dhall
+let namespace = "polar"
+
+
+
+let sandboxRegistry 
+  = {
+    url = "registry.sandbox.labz.s-box.org/sei/polar-mirror"
+    , imagePullSecrets = [
+        "registry-secret"
+    ]
+  }
+let RejectSidecarAnnotation = { mapKey = "sidecar.istio.io/inject", mapValue = "false" }
+let tlsPath = "/etc/tls"
+-- Settings for Polar's mTLS configurations
+let mtls = {
+,   commonName = "polar" -- TODO: This value is hard-coded into the listenerManager. Time we changed that?
+,   caCertificateIssuerName = "ca-issuer"
+,   caCertificateRequest ="ca-certificate"
+,   caCertName = "ca-cert"
+,   leafIssuerName = "polar-leaf-issuer"
+-- define shared ca cert paths for convnience
+,   caCertPath = "${tlsPath}/ca.crt"
+,   serverCertPath = "${tlsPath}/tls.crt"
+,   serverKeyPath = "${tlsPath}/tls.key"
+}
+
+
+let cassiniPort = 8080
+let cassiniService = { name = "cassini-ip-svc", type = "ClusterIP" }
+
+-- Predidcted DNS name for cassini once given a service
+let cassiniDNSName = "${cassiniService.name}.${namespace}.svc.cluster.local"
+let cassiniAddr = "${cassiniDNSName}:${Natural/show cassiniPort}"
+
+let cassiniServerCertificateSecret = "cassini-tls"
+
+let cassini = 
+  {
+    name = "cassini"
+  , namespace = "polar"
+  , image = "${sandboxRegistry.url}/cassini:${chart.appVersion}"
+  , imagePullSecrets = sandboxRegistry.imagePullSecrets
+  , podAnnotations = [ RejectSidecarAnnotation ]
+  , port = cassiniPort
+  , service = cassiniService
+  , tls = {
+      certificateRequestName = "cassini-certificate"
+      , certificateSpec = { 
+          , commonName = mtls.commonName
+          , dnsNames = [ cassiniDNSName ]
+          , duration = "2160h" -- 90 days by default
+          , issuerRef = { kind = "Issuer", name = mtls.leafIssuerName }
+          , renewBefore = "360h" -- 15 days
+          , secretName = cassiniServerCertificateSecret
+        }
+  }
+  , environment 
+    = [
+        kubernetes.EnvVar::{
+            name = "TLS_CA_CERT"
+            , value = Some mtls.caCertPath
+        }
+        , kubernetes.EnvVar::{
+            name = "TLS_SERVER_CERT_CHAIN"
+            , value = Some mtls.serverCertPath
+        }
+        , kubernetes.EnvVar::{
+            name = "TLS_SERVER_KEY"
+            , value = Some mtls.serverKeyPath
+        }
+        , kubernetes.EnvVar::{
+            name = "CASSINI_BIND_ADDR"
+            , value = Some "0.0.0.0:${Natural/show cassiniPort}"
+        }
+      ]
+  , volumes = 
+    [
+      kubernetes.Volume::{
+        , name = cassiniServerCertificateSecret
+        , secret = Some kubernetes.SecretVolumeSource::{
+            secretName = Some cassiniServerCertificateSecret
+        }
+      }
+    ]
+    , volumeMounts
+       = [
+        , kubernetes.VolumeMount::{
+          name = cassiniServerCertificateSecret
+          , mountPath = tlsPath
+          , readOnly = Some True
+        }
+    ]
+  }
+
+
+
+let graphSecret = 
+      kubernetes.SecretKeySelector::{
+        key = "secret"
+        , name = Some "neo4j-secret"
+      }  
+
+let gitlabSecret = kubernetes.SecretKeySelector::{ key = "token" , name = Some "gitlab-secret" }
+let gitlabClientCertificateSecret = "client-tls"
+let gitlabAgentCertificateSpec 
+    = { commonName = mtls.commonName
+      , dnsNames = [ cassiniDNSName ]
+      , duration = "2160h"
+      , issuerRef = { kind = "Issuer", name = mtls.leafIssuerName }
+      , renewBefore = "360h"
+      , secretName = gitlabClientCertificateSecret
+      }
+
+let gitlab = {
+    name = "gitlab-agent"
+    , serviceAccountName = "gitlab-agent-sa"
+    , podAnnotations = [ RejectSidecarAnnotation ]
+    , imagePullSecrets = sandboxRegistry.imagePullSecrets
+    -- Optionally provide the name of a proxy CA secret that'll be loaded into the pod
+    -- IF you're working in Kubernetes + Istio world, dealing with its mTLS, routing, observability, and policy layers
+    -- or just dealing with some other MITM situation, You'll need to trust the proxies certificates    
+    , tls = {
+      , proxyCertificate = Some "proxy-ca-cert"
+      , certificateRequestName = "gitlab-agent-certificate"
+      , certificateSpec = gitlabAgentCertificateSpec
+
+    }    
+    , observer = {
+        name = "polar-gitlab-observer"
+        , image = "${sandboxRegistry.url}/polar-gitlab-observer:${chart.appVersion}"
+        , gitlabEndpoint = "https://gitlab.sandbox.labz.s-box.org/api/graphql"
+        , gitlabSecret = gitlabSecret
+    }
+    , consumer = {
+        name = "polar-gitlab-consumer"
+        , image = "${sandboxRegistry.url}/polar-gitlab-consumer:${chart.appVersion}"
+        , graph = {
+             graphDB = "neo4j"
+          ,  graphUsername = "neo4j"
+          ,  graphPassword = 
+              kubernetes.SecretKeySelector::{
+                name = Some "polar-graph-pw"
+                , key = "secret"
+              }
+        }
+    }
+    }
+
+
+
+let neo4jPorts = {https = 7473, bolt = 7687 }
+
+-- TODO: Neo4j has various configurations we can add to our own values here
+-- Expand and add parameters as desired.
+
+let neo4jHomePath = "/var/lib/neo4j"
+
+let neo4j =
+      { name = "polar-neo4j"
+      , hostName = "graph-db.sandbox.labz.s-box.org"
+      , namespace = "polar-graph-db"
+      -- TODO: make configurable, we'll want to use private registries
+      , image = "docker.io/neo4j:5.10.0-community"
+      -- , imagePullSecrets = []
+      , podAnnotations = [ RejectSidecarAnnotation ]
+      , config = { name = "neo4j-config" , path = "/var/lib/neo4j/neo4j.conf" }
+      , env =
+          [ kubernetes.EnvVar::{
+              name = "NEO4J_AUTH"
+              , valueFrom = Some kubernetes.EnvVarSource::{ secretKeyRef = Some graphSecret }
+            }
+          ]
+      , containerPorts =
+          [ kubernetes.ContainerPort::{ containerPort = neo4jPorts.https }
+          , kubernetes.ContainerPort::{ containerPort = neo4jPorts.bolt }
+          ]
+      , service = { name = "polar-db-svc" }
+      , gateway = { name = "polar-gb-gateway"}
+      , logging = { serverLogsXml = "", userLogsXml = "" }
+      , resources = { cpu = "1000m", memory = "2Gi" }
+      , containerSecurityContext =
+          kubernetes.SecurityContext::{
+          , runAsGroup = Some 7474
+          , runAsNonRoot = Some True
+          , runAsUser = Some 7474
+          }
+      , tls = {
+        certificateIssuer = "db-ca-issuer"
+        , secretName = "neo4j-keypair"
+        , boltMountPath = "${neo4jHomePath}/certificates/bolt"
+        , httpsMountPath = "${neo4jHomePath}/certificates/https"
+      }
+      , volumes =
+          { data =
+              { name = "polar-db-data"
+              , storageClassName = Some "standard"
+              , storageSize = "100Gi"
+              , mountPath = "/var/lib/neo4j/data"
+              }
+          , logs =
+              { name = "polar-db-logs"
+              , storageClassName = Some "standard"
+              , storageSize = "10Gi"
+              , mountPath = "/var/lib/neo4j/logs"
+              }
+          }
+      }
+let neo4jDNSName = "${neo4j.service.name}.${neo4j.namespace}.svc.cluster.local"
+let neo4jBoltAddr = "${neo4jDNSName}:${Natural/show neo4jPorts.bolt}"
+let neo4jUiAddr = "${neo4jDNSName}:${Natural/show neo4jPorts.https}"
+
+in
+
+{   namespace
+,   mtls
+,   tlsPath
+,   cassini
+,   cassiniAddr
+,   neo4jPorts
+,   neo4j
+,   neo4jDNSName
+,   neo4jUiAddr
+,   neo4jBoltAddr
+,   gitlab
+}

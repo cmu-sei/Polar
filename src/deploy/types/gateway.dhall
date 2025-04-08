@@ -1,6 +1,6 @@
 let values = ../values.dhall
 
-let GraphGateWay = { apiVersion = "networking.istio.io/v1beta1"
+let GraphGateWay = { apiVersion = "networking.istio.io/v1"
 , kind = "Gateway"
 , metadata = { name = "graph-db-gateway"
   , namespace = values.neo4j.namespace }

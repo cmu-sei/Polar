@@ -33,7 +33,7 @@ let rules : List Rule =
   ]
 
 let AllowPolicy =
-  { apiVersion = "security.istio.io/v1beta1"
+  { apiVersion = "security.istio.io/v1"
   , kind = "AuthorizationPolicy"
   , metadata =
       { name = "graph-db-restrict-bolt"

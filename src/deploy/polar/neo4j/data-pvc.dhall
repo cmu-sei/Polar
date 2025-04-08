@@ -11,7 +11,7 @@ let neo4jVolumeClaim = kubernetes.PersistentVolumeClaim::{
         , namespace = Some values.neo4j.namespace
     }
     , spec = Some kubernetes.PersistentVolumeClaimSpec::{ 
-        selector = Some kubernetes.LabelSelector::{ matchLabels = Some (toMap { name = "neo4j" }) }
+        selector = Some kubernetes.LabelSelector::{ matchLabels = Some (toMap { name = values.neo4j.name }) }
         , accessModes = Some [ "ReadWriteOnce" ]
         , volumeName = Some values.neo4j.volumes.data.name
         , resources = Some kubernetes.VolumeResourceRequirements::{

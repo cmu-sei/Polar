@@ -93,7 +93,7 @@ generate-charts:
     - rm -rf polar-deploy/chart/
 
     # write new charts
-    - sh scripts/make-chart.sh src/deploy/dhall polar-deploy/chart
+    - sh scripts/make-chart.sh src/deploy/polar polar-deploy/chart --render-templates
     - cd polar-deploy
     
     # We might want to commit to other environment-specific branchhes.

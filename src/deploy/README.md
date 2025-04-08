@@ -19,7 +19,7 @@ Ensure the following tools are installed:
 - Container images for neo4j, cassini, and the gitlab agent should also be present. [See the documentation for info on building them](../agents/README.md). You can use your own preferred neo4j container image.
 ## Setting Up
 
-Create some resources needed to test.
+Create some resources needed to test, in the future, these will be handled by something like the external secrets manager.
 
 ```sh
 kubectl create namespace polar
@@ -36,6 +36,10 @@ kubectl create secret generic client-mtls -n polar \
 
 kubectl create secret generic gitlab-secret -n polar --from-literal=token=$GITLAB_TOKEN
 
+kubectl create secret generic regcred \
+  --from-file=.dockerconfigjson=~/.config/containers/auth.json \
+  --type=kubernetes.io/dockerconfigjson
+
 GRAPH_USERNAME=neo4j
 GRAPH_PASSWORD="somepassword"
 NEO4J_AUTH="${GRAPH_USERNAME}/${GRAPH_PASSWORD}"
@@ -46,9 +50,8 @@ kubectl create secret generic polar-graph-pw -n polar --from-literal=secret=$GRA
 
 # For those testing behind corporate proxies, create a secret for your proxy CA
 kubectl create secret generic proxy-ca-cert -n polar \
-    --from-file=proxy_ca_certificate.pem=conf/certs/host/zscaler.pem
+    --from-file=proxy.crt=conf/certs/host/zscaler.pem
 ```
-
 
 ## Known Issues
 
@@ -95,13 +98,13 @@ The make-chart script will:
 ## Usage
 Run the script to generate a Helm chart from Dhall configurations
 
-`sh make-chart.sh dhall chart`
+`sh scripts/make-chart.sh polar polar-deploy/chart`
 
 ### Deploying with Helm
 Once the chart is generated. You can run something like
 
 ```bash
-helm install polar chart -n polar
+helm install polar polar-deploy/chart -n polar --create-namespace
 ```
 
 ### GitOps & Immutability

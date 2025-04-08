@@ -28,7 +28,7 @@ let service
     = kubernetes.Service::{
       , metadata = kubernetes.ObjectMeta::{
         , name = Some values.neo4j.service.name
-        , namespace = Some values.namespace
+        , namespace = Some values.neo4j.namespace
         }
       , spec = Some kubernetes.ServiceSpec::spec
       }

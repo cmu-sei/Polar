@@ -69,7 +69,7 @@ nix build .#gitlabObserver
 nix build .#gitlabConsumer
 
 # build all images as tar.gz archives to be loaded into a container runtime
-nix build .#cassiniImage .#observerImage .#consumerImage
+nix build packages.x84_64.#cassiniImage .#observerImage .#consumerImage
 
 # Generate TLS Certificates
 nix build .#tlsCerts

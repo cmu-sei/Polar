@@ -25,10 +25,10 @@ let ProxyMount =
       λ(cert : Optional Text) →
         merge
           { Some =
-              λ(_ : Text) →
+              λ(cert : Text) →
                 [ kubernetes.VolumeMount::{
-                    , name = "proxy-ca-cert"
-                    , mountPath = "/etc/ssl/"
+                    , name = cert
+                    , mountPath = "/etc/tls/proxy"
                     , readOnly = Some True
                   }
                 ]
@@ -43,7 +43,7 @@ let ProxyEnv =
               λ(_ : Text) →
                 [ kubernetes.EnvVar::{
                     , name = "PROXY_CA_CERT"
-                    , value = Some "/etc/ssl/proxy_ca_certificate.pem"
+                    , value = Some "${values.tlsPath}/proxy/proxy.crt"
                   }
                 ]
           , None = [] : List kubernetes.EnvVar.Type
@@ -53,19 +53,19 @@ let ProxyEnv =
 -- Volumes accessible to our gitlab agent
 let volumes =
       [ kubernetes.Volume::{
-          , name = "client-mtls"
+          , name = values.gitlab.tls.certificateSpec.secretName
           , secret = Some kubernetes.SecretVolumeSource::{
-              secretName = Some "client-mtls"
+              secretName = Some values.gitlab.tls.certificateSpec.secretName
             }
         }
       ]
-    # ProxyVolume values.gitlab.proxyCertificate
+    # ProxyVolume values.gitlab.tls.proxyCertificate
 
 let observerEnv =
       [ -- static env vars - required for operation...
-        , kubernetes.EnvVar::{ name = "TLS_CA_CERT", value = Some "/etc/tls/ca_certificate.pem" }
-        , kubernetes.EnvVar::{ name = "TLS_CLIENT_CERT", value = Some "/etc/tls/client_polar_certificate.pem" }
-        , kubernetes.EnvVar::{ name = "TLS_CLIENT_KEY", value = Some "/etc/tls/client_polar_key.pem" }
+        , kubernetes.EnvVar::{ name = "TLS_CA_CERT", value = Some values.mtls.caCertPath }
+        , kubernetes.EnvVar::{ name = "TLS_CLIENT_CERT", value = Some values.mtls.serverCertPath }
+        , kubernetes.EnvVar::{ name = "TLS_CLIENT_KEY", value = Some values.mtls.serverKeyPath }
         , kubernetes.EnvVar::{ name = "BROKER_ADDR", value = Some values.cassiniAddr }
         , kubernetes.EnvVar::{ name = "GITLAB_ENDPOINT", value = Some values.gitlab.observer.gitlabEndpoint }
         , kubernetes.EnvVar::{
@@ -78,11 +78,11 @@ let observerEnv =
             }
           }
       ]
-    # ProxyEnv values.gitlab.proxyCertificate
+    # ProxyEnv values.gitlab.tls.proxyCertificate
 
 let observerVolumeMounts =
-      [ kubernetes.VolumeMount::{ name = "client-mtls", mountPath = "/etc/tls/" } ]
-    # ProxyMount values.gitlab.proxyCertificate
+      [ kubernetes.VolumeMount::{ name = values.gitlab.tls.certificateSpec.secretName, mountPath = values.tlsPath } ]
+    # ProxyMount values.gitlab.tls.proxyCertificate
 
 
 
@@ -101,15 +101,15 @@ let gitlabAgentPod = kubernetes.PodSpec::{
                     , env = Some [
                         kubernetes.EnvVar::{
                             name = "TLS_CA_CERT"
-                            , value = Some "/etc/tls/ca_certificate.pem"
+                            , value = Some values.mtls.caCertPath
                         }
                         , kubernetes.EnvVar::{
                             name = "TLS_CLIENT_CERT"
-                            , value = Some "/etc/tls/client_polar_certificate.pem"
+                            , value = Some values.mtls.serverCertPath
                         }
                         , kubernetes.EnvVar::{
                             name = "TLS_CLIENT_KEY"
-                            , value = Some "/etc/tls/client_polar_key.pem"
+                            , value = Some values.mtls.serverKeyPath
                         }
                         , kubernetes.EnvVar::{
                             name = "BROKER_ADDR"
@@ -136,27 +136,14 @@ let gitlabAgentPod = kubernetes.PodSpec::{
                     ]
                     , volumeMounts = Some [
                         kubernetes.VolumeMount::{
-                            name  = "client-mtls"
-                            , mountPath = "/etc/tls/"
+                            name  = values.gitlab.tls.certificateSpec.secretName
+                            , mountPath = values.tlsPath
                             , readOnly = Some True
                         }
                     ]
                 }
               ]
-            , volumes = Some [
-                kubernetes.Volume::{
-                    , name = "client-mtls"
-                    , secret = Some kubernetes.SecretVolumeSource::{
-                        secretName = Some "client-mtls"
-                    }
-                }
-                , kubernetes.Volume::{
-                    , name = "proxy-ca-cert"
-                    , secret = Some kubernetes.SecretVolumeSource::{
-                        secretName = values.gitlab.proxyCertificate
-                    }
-                }
-            ]
+            , volumes = Some volumes
 }
 
 let 

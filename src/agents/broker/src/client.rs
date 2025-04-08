@@ -114,7 +114,7 @@ impl Actor for TcpClientActor {
         //TODO: Refactor, just expect this first connect to succeed and match the TLS connection result
         match TcpStream::connect(&addr).await {
             Ok(tcp_stream) => {
-                //TODO: establish better "Common Name" for the broker server
+                //TODO: Read this value from the environment should be something closer to cassini-ip-svc.polar.svc.cluster.local
                 let domain = ServerName::try_from("polar").expect("invalid DNS name");
 
                 match connector.connect(domain, tcp_stream).await {
