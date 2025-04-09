@@ -8,7 +8,7 @@ let neo4jDataVolume = kubernetes.PersistentVolume::{
     apiVersion = "v1"
     , kind = "PersistentVolume"
     , metadata = kubernetes.ObjectMeta::{
-        name = Some "neo4j-data"
+        name = Some values.neo4j.volumes.data.name
         , namespace = Some values.neo4j.namespace
     }
     , spec = Some kubernetes.PersistentVolumeSpec::{

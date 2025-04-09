@@ -568,6 +568,7 @@ dependencies = [
  "tracing",
  "tracing-glog",
  "tracing-subscriber",
+ "url",
  "uuid",
  "workspace-hack",
 ]

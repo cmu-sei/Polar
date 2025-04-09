@@ -46,6 +46,7 @@ pub const RUNNERS_CONSUMER_TOPIC: &str = "gitlab:consumer:runners";
 
 pub const RUNNERS_ROUTING_KEY: &str = "gitlab_runners";
 
+
 // Checks for the existence of a lock file at the given path. Creates lock file if not found.
 #[deprecated]
 pub fn create_lock(filepath: &str) -> Result<bool, std::io::Error> {

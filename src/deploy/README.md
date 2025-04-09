@@ -44,7 +44,7 @@ GRAPH_USERNAME=neo4j
 GRAPH_PASSWORD="somepassword"
 NEO4J_AUTH="${GRAPH_USERNAME}/${GRAPH_PASSWORD}"
 # Set some default credentials for neo4j in the format USERNAME/PASSWORD
-kubectl create secret generic neo4j-secret -n polar --from-literal=secret=$NEO4J_AUTH
+kubectl create secret generic neo4j-secret -n polar-graph-db --from-literal=secret=$NEO4J_AUTH
 # create a a secret for just the password to be passed to the gitlab-observer
 kubectl create secret generic polar-graph-pw -n polar --from-literal=secret=$GRAPH_PASSWORD
 

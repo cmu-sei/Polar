@@ -244,3 +244,26 @@ impl BrokerMessage {
 pub fn get_subscriber_name(registration_id: &str, topic: &str) -> String {
     format!("{0}:{1}", registration_id, topic)
 }
+
+pub fn parse_host_and_port(endpoint: &str) -> Result<(String, u16), String> {
+    // Add scheme if missing so Url::parse works
+    let formatted = if endpoint.contains("://") {
+        endpoint.to_string()
+    } else {
+        format!("https://{}", endpoint) // dummy scheme
+    };
+
+    let url = url::Url::parse(&formatted)
+        .map_err(|e| format!("Invalid endpoint URL: {}", e))?;
+
+    let host = url
+        .host_str()
+        .ok_or_else(|| "No host found in endpoint".to_string())?
+        .to_string();
+
+    let port = url
+        .port_or_known_default()
+        .ok_or_else(|| "No port found and no default for scheme".to_string())?;
+
+    Ok((host, port))
+}

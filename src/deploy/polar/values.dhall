@@ -6,19 +6,22 @@ let chart = ./chart.dhall
 let namespace = "polar"
 
 
-
+-- Values for pulling from a potentially private registry
 let sandboxRegistry 
   = {
-    url = "registry.sandbox.labz.s-box.org/sei/polar-mirror"
+    url = "docker.io/library"
     , imagePullSecrets = [
         "registry-secret"
     ]
   }
+--  Annotation for disabling istio sidecar injection
 let RejectSidecarAnnotation = { mapKey = "sidecar.istio.io/inject", mapValue = "false" }
-let tlsPath = "/etc/tls"
+
 -- Settings for Polar's mTLS configurations
+let tlsPath = "/etc/tls"
+
 let mtls = {
-,   commonName = "polar" -- TODO: This value is hard-coded into the listenerManager. Time we changed that?
+,   commonName = "polar" -- TODO: Ascertain whether this is a desireable default CN
 ,   caCertificateIssuerName = "ca-issuer"
 ,   caCertificateRequest ="ca-certificate"
 ,   caCertName = "ca-cert"
@@ -98,15 +101,17 @@ let cassini =
   }
 
 
-
+-- The name of the secret containing the neo4j default credentials
 let graphSecret = 
       kubernetes.SecretKeySelector::{
         key = "secret"
         , name = Some "neo4j-secret"
       }  
-
+-- The secret used by the observers to contact gitlab
 let gitlabSecret = kubernetes.SecretKeySelector::{ key = "token" , name = Some "gitlab-secret" }
+-- The name of the secret containign the tls keypair
 let gitlabClientCertificateSecret = "client-tls"
+--  Certificate request spec for creating a client keypair
 let gitlabAgentCertificateSpec 
     = { commonName = mtls.commonName
       , dnsNames = [ cassiniDNSName ]
@@ -115,15 +120,15 @@ let gitlabAgentCertificateSpec
       , renewBefore = "360h"
       , secretName = gitlabClientCertificateSecret
       }
-
+--  General settings for the gitlab agent components
 let gitlab = {
     name = "gitlab-agent"
     , serviceAccountName = "gitlab-agent-sa"
     , podAnnotations = [ RejectSidecarAnnotation ]
     , imagePullSecrets = sandboxRegistry.imagePullSecrets
-    -- Optionally provide the name of a proxy CA secret that'll be loaded into the pod
-    -- IF you're working in Kubernetes + Istio world, dealing with its mTLS, routing, observability, and policy layers
-    -- or just dealing with some other MITM situation, You'll need to trust the proxies certificates    
+    -- Here, you can provide the name of a proxy CA secret that'll be loaded into the pod using the proxyCertificate field.
+    -- If you're working in Kubernetes + Istio world, dealing with its mTLS, routing, observability, and policy layers
+    -- or just dealing with some other MITM situation, You'll need to trust the proxies certificates 
     , tls = {
       , proxyCertificate = Some "proxy-ca-cert"
       , certificateRequestName = "gitlab-agent-certificate"
@@ -139,9 +144,13 @@ let gitlab = {
     , consumer = {
         name = "polar-gitlab-consumer"
         , image = "${sandboxRegistry.url}/polar-gitlab-consumer:${chart.appVersion}"
+        -- Settings to configure the consumer's connection to the graph database
+        
         , graph = {
              graphDB = "neo4j"
           ,  graphUsername = "neo4j"
+          -- The secret containing JUST the password string used by the consumer to authenticate
+          -- Not to be confused with the full crednetial string, which is formatted like  <username>/<password>
           ,  graphPassword = 
               kubernetes.SecretKeySelector::{
                 name = Some "polar-graph-pw"
@@ -151,19 +160,14 @@ let gitlab = {
     }
     }
 
-
-
 let neo4jPorts = {https = 7473, bolt = 7687 }
-
--- TODO: Neo4j has various configurations we can add to our own values here
--- Expand and add parameters as desired.
 
 let neo4jHomePath = "/var/lib/neo4j"
 
 let neo4j =
       { name = "polar-neo4j"
       , hostName = "graph-db.sandbox.labz.s-box.org"
-      , namespace = "polar-graph-db"
+      , namespace = "polar-db"
       -- TODO: make configurable, we'll want to use private registries
       , image = "docker.io/neo4j:5.10.0-community"
       -- , imagePullSecrets = []
@@ -199,7 +203,7 @@ let neo4j =
           { data =
               { name = "polar-db-data"
               , storageClassName = Some "standard"
-              , storageSize = "100Gi"
+              , storageSize = "10Gi"
               , mountPath = "/var/lib/neo4j/data"
               }
           , logs =

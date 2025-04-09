@@ -35,13 +35,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let client_cert_file = env::var("TLS_CLIENT_CERT").unwrap();
     let client_private_key_file = env::var("TLS_CLIENT_KEY").unwrap();
     let ca_cert_file = env::var("TLS_CA_CERT").unwrap();
-    let broker_addr = env::var("BROKER_ADDR").unwrap();
-
+    let broker_endpoint = env::var("BROKER_ADDR").expect("Expected a valid socket address for BROKER_ADDR");
+    
     let args = supervisor::ConsumerSupervisorArgs {
-        broker_addr,
+        broker_endpoint,
         client_cert_file,
         client_private_key_file,
-        ca_cert_file: ca_cert_file,
+        ca_cert_file: ca_cert_file, 
     };
 
     let (supervisor, handle) = Actor::spawn(

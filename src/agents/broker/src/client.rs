@@ -1,4 +1,4 @@
-use crate::{ArchivedClientMessage, ClientMessage};
+use crate::{parse_host_and_port, ArchivedClientMessage, ClientMessage};
 use polar::DispatcherMessage;
 use ractor::registry::where_is;
 use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef, RpcReplyPort};
@@ -27,10 +27,12 @@ pub enum TcpClientMessage {
 /// Actor state for the TCP client
 pub struct TcpClientState {
     bind_addr: String,
+    server_name: String,
     writer: Option<Arc<Mutex<BufWriter<WriteHalf<TlsStream<TcpStream>>>>>>,
     reader: Option<ReadHalf<TlsStream<TcpStream>>>, // Use Option to allow taking ownership
     registration_id: Option<String>,
     client_config: Arc<ClientConfig>,
+    
 }
 
 pub struct TcpClientArgs {
@@ -90,9 +92,13 @@ impl Actor for TcpClientActor {
             .with_webpki_verifier(verifier)
             .with_client_auth_cert(certs, private_key)
             .unwrap();
+        // parse DNS name
+
+        let (server_name, _) = parse_host_and_port(&args.bind_addr).expect("Expected to get valid DNS server_name.");
 
         let state = TcpClientState {
             bind_addr: args.bind_addr,
+            server_name,
             reader: None,
             writer: None,
             registration_id: args.registration_id,
@@ -114,8 +120,8 @@ impl Actor for TcpClientActor {
         //TODO: Refactor, just expect this first connect to succeed and match the TLS connection result
         match TcpStream::connect(&addr).await {
             Ok(tcp_stream) => {
-                //TODO: Read this value from the environment should be something closer to cassini-ip-svc.polar.svc.cluster.local
-                let domain = ServerName::try_from("polar").expect("invalid DNS name");
+                
+                let domain = ServerName::try_from(state.server_name.clone()).expect("invalid DNS name");
 
                 match connector.connect(domain, tcp_stream).await {
                     Ok(tls_stream) => {

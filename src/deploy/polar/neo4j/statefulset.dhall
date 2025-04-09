@@ -44,19 +44,19 @@ let spec
       ]
     , volumes = Some [
         , kubernetes.Volume::{
-            , name = "neo4j-data"
+            , name = values.neo4j.volumes.data.name
             , persistentVolumeClaim = Some kubernetes.PersistentVolumeClaimVolumeSource::{
-                claimName = "neo4j-data-pvc"
+                claimName = values.neo4j.volumes.data.name
             }
         }
         , kubernetes.Volume::{
-            , name = "neo4j-logs"
+            , name = values.neo4j.volumes.logs.name
             , persistentVolumeClaim = Some kubernetes.PersistentVolumeClaimVolumeSource::{
-                claimName = "neo4j-logs-pvc"
+                claimName = values.neo4j.volumes.logs.name
             }
         }
         , kubernetes.Volume::{
-            , name = "neo4j-tls"
+            , name = values.neo4j.tls.secretName
             , secret = Some kubernetes.SecretVolumeSource::{
                 secretName = Some values.neo4j.tls.secretName
             }
