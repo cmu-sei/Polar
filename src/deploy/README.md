@@ -21,9 +21,7 @@ Ensure the following tools are installed:
 ## Setting Up
 
 **Generating certificates**
- for now. So it 
-Create some resources needed to test, in the future, these will be handled by something like the external secrets manager.
-
+For local testing, we reccomend creating some certificates yourself and uploading them as secrets, otherwise, you can use cert-manager.
 ```sh
 kubectl create namespace polar
 
@@ -52,6 +50,7 @@ kubectl create secret generic neo4j-secret -n polar-db --from-literal=secret=$NE
 kubectl create secret generic polar-graph-pw -n polar --from-literal=secret=$GRAPH_PASSWORD
 
 # For those testing behind corporate proxies, create a secret for your proxy CA
+# This can also come in handy when dealing with services sitting behind a service mesh like Istio.
 kubectl create secret generic proxy-ca-cert -n polar \
     --from-file=proxy.crt=conf/certs/host/zscaler.pem
 ```

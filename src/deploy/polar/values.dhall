@@ -47,9 +47,18 @@ let cassini =
   {
     name = "cassini"
   , namespace = namespace
-  , image = "${sandboxRegistry.url}/cassini:${chart.appVersion}"
+  , image = "${sandboxRegistry.url}/polar/cassini:${chart.appVersion}"
   , imagePullSecrets = sandboxRegistry.imagePullSecrets
-  , podAnnotations = [ RejectSidecarAnnotation ]
+  , containerSecurityContext 
+    = kubernetes.SecurityContext::{
+      , runAsGroup = Some 1000
+      , runAsNonRoot = Some True
+      , runAsUser = Some 1000
+      , capabilities = Some kubernetes.Capabilities::{
+        drop = Some [ "ALL" ]
+      }
+    }
+    , podAnnotations = [ RejectSidecarAnnotation ]
   , port = cassiniPort
   , service = cassiniService
   , tls = {
@@ -127,6 +136,15 @@ let gitlab = {
     , serviceAccountName = "gitlab-agent-sa"
     , podAnnotations = [ RejectSidecarAnnotation ]
     , imagePullSecrets = sandboxRegistry.imagePullSecrets
+    , containerSecurityContext 
+      = kubernetes.SecurityContext::{
+        , runAsGroup = Some 1000
+        , runAsNonRoot = Some True
+        , runAsUser = Some 1000
+        , capabilities = Some kubernetes.Capabilities::{
+          drop = Some [ "ALL" ]
+        }
+      }
     -- Here, you can provide the name of a proxy CA secret that'll be loaded into the pod using the proxyCertificate field.
     -- If you're working in Kubernetes + Istio world, dealing with its mTLS, routing, observability, and policy layers
     -- or just dealing with some other MITM situation, You'll need to trust the proxies certificates 
@@ -138,13 +156,13 @@ let gitlab = {
     }    
     , observer = {
         name = "polar-gitlab-observer"
-        , image = "${sandboxRegistry.url}/polar-gitlab-observer:${chart.appVersion}"
+        , image = "${sandboxRegistry.url}/polar/polar-gitlab-observer:${chart.appVersion}"
         , gitlabEndpoint = "https://gitlab.sandbox.labz.s-box.org/api/graphql"
         , gitlabSecret = gitlabSecret
     }
     , consumer = {
         name = "polar-gitlab-consumer"
-        , image = "${sandboxRegistry.url}/polar-gitlab-consumer:${chart.appVersion}"
+        , image = "${sandboxRegistry.url}/polar/polar-gitlab-consumer:${chart.appVersion}"
         -- Settings to configure the consumer's connection to the graph database
         
         , graph = {
@@ -161,7 +179,7 @@ let gitlab = {
     }
     }
 
-let neo4jPorts = {https = 7473, bolt = 7687 }
+let neo4jPorts = { https = 7473, bolt = 7687 }
 
 let neo4jHomePath = "/var/lib/neo4j"
 
@@ -195,11 +213,16 @@ let neo4j =
       -- We can probbaly adjust up or down, later.
       -- REFERENCE: https://neo4j.com/docs/operations-manual/current/installation/requirements/
       , resources = { cpu = "2000m", memory = "2Gi" }
+      , podSecurityContext = kubernetes.PodSecurityContext::{
+        , fsGroup = Some 7474
+        , fsGroupChangePolicy = Some "OnRootMismatch"
+      }
       , containerSecurityContext =
           kubernetes.SecurityContext::{
           , runAsGroup = Some 7474
           , runAsNonRoot = Some True
           , runAsUser = Some 7474
+          , capabilities = Some kubernetes.Capabilities::{ drop = Some [ "ALL" ] }
           }
       , tls = {
         certificateIssuer = "db-ca-issuer"
@@ -239,8 +262,10 @@ in
 ,   cassiniAddr
 ,   neo4jPorts
 ,   neo4j
+,   graphSecret
 ,   neo4jDNSName
 ,   neo4jUiAddr
 ,   neo4jBoltAddr
 ,   gitlab
+,   gitlabSecret
 }

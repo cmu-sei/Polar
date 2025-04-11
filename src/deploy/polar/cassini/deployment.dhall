@@ -29,6 +29,7 @@ let
                 kubernetes.Container::{
                 , name = "cassini"
                 , image = Some values.cassini.image
+                , securityContext = Some values.cassini.containerSecurityContext
                 , env = Some values.cassini.environment 
                 , ports = Some
                   [ kubernetes.ContainerPort::{ containerPort = values.cassini.port } ]

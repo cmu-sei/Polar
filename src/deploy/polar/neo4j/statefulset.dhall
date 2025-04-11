@@ -6,6 +6,7 @@ let values = ../values.dhall
 
 let spec 
   = kubernetes.PodSpec::{
+    , securityContext = Some values.neo4j.podSecurityContext
     , imagePullSecrets = Some values.sandboxRegistry.imagePullSecrets
     , containers =
       [ 

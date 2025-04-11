@@ -94,12 +94,14 @@ let gitlabAgentPod
       , kubernetes.Container::{
           , name = values.gitlab.observer.name
           , image = Some  values.gitlab.observer.image
+          , securityContext = Some values.gitlab.containerSecurityContext
           , env = Some observerEnv
           , volumeMounts = Some observerVolumeMounts
       }
       , kubernetes.Container::{
           name = values.gitlab.consumer.name
           , image = Some values.gitlab.consumer.image
+          , securityContext = Some values.gitlab.containerSecurityContext
           , env = Some [
               kubernetes.EnvVar::{
                   name = "TLS_CA_CERT"

@@ -55,7 +55,7 @@ if [ "$3" == "--render-templates" ]; then
 fi
 
 # Ensure necessary tools are installed
-for cmd in dhall-to-yaml helm; do
+for cmd in dhall-to-yaml helm sops; do
     if ! command -v "$cmd" &> /dev/null; then
         echo "Error: $cmd is not installed. Install it and try again." >&2
         exit 1
@@ -162,6 +162,16 @@ for SERVICE_DIR in "$DHALL_ROOT"/*/; do
             echo "[ERROR] Error: Failed to convert $dhall_file" >&2
             exit 1
         fi
+        # TODO: Enable SOPS encryption w/ Azure key vault
+        # If the file looks like a secret, encrypt it with SOPS
+        # if [[ "$dhall_file" =~ -secret\.dhall$ ]]; then
+        #     echo "   [INFO] Encrypting secret YAML with SOPS: $yaml_file"            
+        #     if ! sops --encrypt --in-place "$yaml_file"; then
+        #         echo "[ERROR] Failed to encrypt $yaml_file with SOPS" >&2
+        #         exit 1
+        #     fi
+        # fi
+
     done
 
     echo "[SUCCESS] Finished processing $CHILD_CHART_NAME."
