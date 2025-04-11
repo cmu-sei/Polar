@@ -25,8 +25,8 @@
 services:
   neo4j:
     # user: 7474:7474
-    image: neo4j:5.10.0-community
-    restart: unless-stopped
+    image: neo4j:5.26.2-community
+    restart: never
     environment:
       - NEO4J_AUTH=neo4j/somepassword
     networks:
@@ -34,52 +34,52 @@ services:
     ports:
       - '7473:7473'
       - '7687:7687'
+    # volumes:
+    #   - ../neo4j_setup/conf/neo4j.conf:/var/lib/neo4j/conf/neo4j.conf
+    #   - ../certs/neo4j/server_neo4j_certificate.pem:/var/lib/neo4j/certificates/https/tls.crt
+    #   - ../certs/neo4j/server_neo4j_key.pem:/var/lib/neo4j/certificates/https/tls.key
+  cassini:
+    image: cassini:0.1.0
+    networks:
+      - polar
+    ports:
+        - 8080:8080
+    environment:
+      - CASSINI_BIND_ADDR=0.0.0.0:8080
+      - TLS_CA_CERT=/etc/ssl/ca_certificate.pem
+      - TLS_SERVER_CERT_CHAIN=/etc/ssl/server_cassini_certificate.pem
+      - TLS_SERVER_KEY=/etc/ssl/server_cassini_key.pem
     volumes:
-      - ../neo4j_setup/conf/neo4j.conf:/var/lib/neo4j/conf/neo4j.conf
-      - ../certs/neo4j/server_neo4j_certificate.pem:/var/lib/neo4j/certificates/https/tls.crt
-      - ../certs/neo4j/server_neo4j_key.pem:/var/lib/neo4j/certificates/https/tls.key
-#   cassini:
-#     image: cassini:latest
-#     networks:
-#       - polar
-#     ports:
-#         - 8080:8080
-#     environment:
-#       - CASSINI_BIND_ADDR=0.0.0.0:8080
-#       - TLS_CA_CERT=/etc/ssl/ca_certificate.pem
-#       - TLS_SERVER_CERT_CHAIN=/etc/ssl/server_polar_certificate.pem
-#       - TLS_SERVER_KEY=/etc/ssl/server_polar_key.pem
-#     volumes:
-#       - ../certs/ca_certificates/ca_certificate.pem:/etc/ssl/ca_certificate.pem:ro
-#       - ../certs/server/server_polar_key.pem:/etc/ssl/server_polar_key.pem:ro
-#       - ../certs/server/server_polar_certificate.pem:/etc/ssl/server_polar_certificate.pem:ro    
+      - ../certs/ca_certificates/ca_certificate.pem:/etc/ssl/ca_certificate.pem:ro
+      - ../certs/server/server_cassini_key.pem:/etc/ssl/server_cassini_key.pem:ro
+      - ../certs/server/server_cassini_certificate.pem:/etc/ssl/server_cassini_certificate.pem:ro    
 
-#   gitlab-observer:
-#     image: polar-gitlab-observer:0.1.0
-#     depends_on:
-#       - cassini
-#     env_file:
-#       - observer.env
-#     networks:
-#       - polar
-#     volumes:
-#       - ../certs/ca_certificates/ca_certificate.pem:/etc/ssl/ca_certificate.pem:ro
-#       - ../certs/client/client_polar_certificate.pem:/etc/ssl/client_polar_certificate.pem:ro
-#       - ../certs/client/client_polar_key.pem:/etc/ssl/client_polar_key.pem:ro
-#       - ../certs/host/zscaler.pem:/etc/ssl/proxy_ca.pem:ro
-#   gitlab-consumer:
-#     image: polar-gitlab-consumer:0.1.0
-#     depends_on:
-#       - cassini
-#       - neo4j
-#     env_file:
-#       - consumer.env
-#     networks:
-#       - polar
-#     volumes:
-#       - ../certs/ca_certificates/ca_certificate.pem:/etc/ssl/ca_certificate.pem:ro
-#       - ../certs/client/client_polar_certificate.pem:/etc/ssl/client_polar_certificate.pem:ro
-#       - ../certs/client/client_polar_key.pem:/etc/ssl/client_polar_key.pem:ro
+  gitlab-observer:
+    image: polar-gitlab-observer:0.1.0
+    depends_on:
+      - cassini
+    env_file:
+      - observer.env
+    networks:
+      - polar
+    volumes:
+      - ../certs/ca_certificates/ca_certificate.pem:/etc/ssl/ca_certificate.pem:ro
+      - ../certs/client/client_cassini_certificate.pem:/etc/ssl/client_cassini_certificate.pem:ro
+      - ../certs/client/client_cassini_key.pem:/etc/ssl/client_cassini_key.pem:ro
+      - ../certs/host/zscaler.pem:/etc/ssl/proxy_ca.pem:ro
+  gitlab-consumer:
+    image: polar-gitlab-consumer:0.1.0
+    depends_on:
+      - cassini
+      - neo4j
+    env_file:
+      - consumer.env
+    networks:
+      - polar
+    volumes:
+      - ../certs/ca_certificates/ca_certificate.pem:/etc/ssl/ca_certificate.pem:ro
+      - ../certs/client/client_cassini_certificate.pem:/etc/ssl/client_cassini_certificate.pem:ro
+      - ../certs/client/client_cassini_key.pem:/etc/ssl/client_cassini_key.pem:ro
 
 networks:
   polar:

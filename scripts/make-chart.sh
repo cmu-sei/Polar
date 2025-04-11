@@ -1,11 +1,5 @@
 #!/bin/bash
 
-# Function to print usage information
-usage() {
-    echo "Usage: $0 <dhall_root_directory> <umbrella_chart_path>"
-    exit 1
-}
-
 convert_dhall_to_yaml() {
     local dhall_dir="$1"
     local output_dir="$2"

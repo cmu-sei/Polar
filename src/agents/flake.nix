@@ -187,6 +187,26 @@
           ];
         };
 
+      # define a common uid/gid for use in the images
+      commonUser = {
+        name = "polar";
+        uid = "1000";
+        gid = "1000";
+      };
+
+      # Create passwd/group/shadow files
+      etc = pkgs.runCommand "polar-etc" {
+        buildInputs = [ pkgs.shadow ];
+      } ''
+        mkdir -p $out/etc $out/home/${commonUser.name}
+
+        echo "${commonUser.name}:x:${commonUser.uid}:${commonUser.gid}::/home/${commonUser.name}:/bin/bash" > $out/etc/passwd
+        echo "${commonUser.name}:x:${commonUser.gid}:" > $out/etc/group
+        echo "${commonUser.name}:!x:::::::" > $out/etc/shadow
+        chmod -R 755 $out/home/${commonUser.name}
+      '';
+      
+
       in
       {
         packages = {
@@ -196,38 +216,47 @@
           observerImage = pkgs.dockerTools.buildImage {
             name = "polar-gitlab-observer";
             tag = "0.1.0";
-            copyToRoot = [ observerEnv pkgs.cacert ]; 
+            copyToRoot = [ etc observerEnv ]; 
+            uid = commonUser.uid;
+            gid = commonUser.gid;
 
             config = {
+              User = "${commonUser.uid}:${commonUser.gid}";
               Cmd = [ "gitlab-observer" ];
               WorkingDir = "/";
-              Env = [
-                "SSL_CERT_FILE=/etc/ssl/certs/ca-bundle.crt"
-                "SSL_CERT_DIR=/etc/ssl/certs"
-              ];
+              Env = [ ];
             };
           };
+ 
           consumerImage = pkgs.dockerTools.buildImage {
-              name = "polar-gitlab-consumer";
-              tag = "0.1.0";
-              copyToRoot = [ consumerEnv ];
+            name = "polar-gitlab-consumer";
+            tag = "0.1.0";
+            copyToRoot = [ etc consumerEnv ];
+            uid = commonUser.uid;
+            gid = commonUser.gid;
 
-              config = {
-                Cmd = [ "gitlab-consumer" ];
-                WorkingDir = "/";
-                Env = [ ];
-              };
+            config = {
+              User = "${commonUser.uid}:${commonUser.gid}";
+              Cmd = [ "gitlab-consumer" ];
+              WorkingDir = "/";
+              Env = [ ];
             };
+          };
           
           cassiniImage = pkgs.dockerTools.buildImage {
             name = "cassini";
             tag = "0.1.0";
             copyToRoot = [
-              cassiniEnv pkgs.cacert 
+              etc
+              cassiniEnv
             ]; 
+            uid = commonUser.uid;
+            gid = commonUser.gid;
+
             config = {
+              User = "${commonUser.uid}:${commonUser.gid}";
               Cmd = [ "cassini-server" ];
-              WorkingDir = "/app";
+              WorkingDir = "/";
               Env = [ 
                 "CASSINI_BIND_ADDR=0.0.0.0:8080"
               ];
