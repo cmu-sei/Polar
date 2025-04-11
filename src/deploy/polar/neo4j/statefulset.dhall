@@ -6,6 +6,7 @@ let values = ../values.dhall
 
 let spec 
   = kubernetes.PodSpec::{
+    , imagePullSecrets = Some values.sandboxRegistry.imagePullSecrets
     , containers =
       [ 
         kubernetes.Container::{
@@ -87,6 +88,7 @@ let statefulSet =
           , metadata = Some kubernetes.ObjectMeta::{
                 name = Some values.neo4j.name
             ,   labels = Some [ { mapKey = "name", mapValue = values.neo4j.name } ]
+            , annotations = Some values.neo4j.podAnnotations
             }
           , spec = Some spec 
       }

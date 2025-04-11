@@ -5,16 +5,18 @@ let kubernetes =
 let chart = ./chart.dhall
 let namespace = "polar"
 
-
 -- Values for pulling from a potentially private registry
 let sandboxRegistry 
   = {
-    url = "docker.io/library"
+    url = "sandboxaksacr.azurecr.us"
     , imagePullSecrets = [
-        "registry-secret"
+        kubernetes.LocalObjectReference::{ name = Some "sandbox-registry" }
     ]
   }
---  Annotation for disabling istio sidecar injection
+-- Our test cluster has services that sit behind a service mesh. So we add an annotation to disable istio sidecar injection for our deployment.
+-- Why? Polar is a self-contained framework desinged to operate without interference to ensure total privacy and minimum trust.
+-- A service mesh runs against these goals. To work around this, we disable it and decide to instead treat it like any other proxy
+-- in order to observe services behind it.
 let RejectSidecarAnnotation = { mapKey = "sidecar.istio.io/inject", mapValue = "false" }
 
 -- Settings for Polar's mTLS configurations
@@ -32,7 +34,6 @@ let mtls = {
 ,   serverKeyPath = "${tlsPath}/tls.key"
 }
 
-
 let cassiniPort = 8080
 let cassiniService = { name = "cassini-ip-svc", type = "ClusterIP" }
 
@@ -45,7 +46,7 @@ let cassiniServerCertificateSecret = "cassini-tls"
 let cassini = 
   {
     name = "cassini"
-  , namespace = "polar"
+  , namespace = namespace
   , image = "${sandboxRegistry.url}/cassini:${chart.appVersion}"
   , imagePullSecrets = sandboxRegistry.imagePullSecrets
   , podAnnotations = [ RejectSidecarAnnotation ]
@@ -164,13 +165,16 @@ let neo4jPorts = {https = 7473, bolt = 7687 }
 
 let neo4jHomePath = "/var/lib/neo4j"
 
+-- Configurations for our neo4j database statefulset
 let neo4j =
       { name = "polar-neo4j"
       , hostName = "graph-db.sandbox.labz.s-box.org"
+      -- neo4j is going to get some of its own resources, like volumes, certificates, policies, etc.
+      -- so we're gonna seperate it.
       , namespace = "polar-db"
       -- TODO: make configurable, we'll want to use private registries
-      , image = "docker.io/neo4j:5.10.0-community"
-      -- , imagePullSecrets = []
+      , image = "${sandboxRegistry.url}/ironbank/opensource/neo4j/neo4j:5.26.2"
+      , imagePullSecrets = sandboxRegistry.imagePullSecrets
       , podAnnotations = [ RejectSidecarAnnotation ]
       , config = { name = "neo4j-config" , path = "/var/lib/neo4j/neo4j.conf" }
       , env =
@@ -186,7 +190,11 @@ let neo4j =
       , service = { name = "polar-db-svc" }
       , gateway = { name = "polar-gb-gateway"}
       , logging = { serverLogsXml = "", userLogsXml = "" }
-      , resources = { cpu = "1000m", memory = "2Gi" }
+      -- Hardware resource requirements
+      -- neo4j reccommends at least 2 vCPU cores and 2 GiB of memory for cloud deployments
+      -- We can probbaly adjust up or down, later.
+      -- REFERENCE: https://neo4j.com/docs/operations-manual/current/installation/requirements/
+      , resources = { cpu = "2000m", memory = "2Gi" }
       , containerSecurityContext =
           kubernetes.SecurityContext::{
           , runAsGroup = Some 7474
@@ -199,21 +207,24 @@ let neo4j =
         , boltMountPath = "${neo4jHomePath}/certificates/bolt"
         , httpsMountPath = "${neo4jHomePath}/certificates/https"
       }
+      -- Here we define some volume configurations
+      -- We're targeting an azure k8s cluster, so we'll use default managed-csi storage for now
       , volumes =
           { data =
               { name = "polar-db-data"
-              , storageClassName = Some "standard"
+              , storageClassName = Some "managed-csi"
               , storageSize = "10Gi"
               , mountPath = "/var/lib/neo4j/data"
               }
           , logs =
               { name = "polar-db-logs"
-              , storageClassName = Some "standard"
+              , storageClassName = Some "managed-csi"
               , storageSize = "10Gi"
               , mountPath = "/var/lib/neo4j/logs"
               }
           }
       }
+
 let neo4jDNSName = "${neo4j.service.name}.${neo4j.namespace}.svc.cluster.local"
 let neo4jBoltAddr = "${neo4jDNSName}:${Natural/show neo4jPorts.bolt}"
 let neo4jUiAddr = "${neo4jDNSName}:${Natural/show neo4jPorts.https}"
@@ -221,6 +232,7 @@ let neo4jUiAddr = "${neo4jDNSName}:${Natural/show neo4jPorts.https}"
 in
 
 {   namespace
+,   sandboxRegistry
 ,   mtls
 ,   tlsPath
 ,   cassini

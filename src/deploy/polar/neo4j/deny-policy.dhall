@@ -4,7 +4,8 @@ let values = ../values.dhall
 let DenyPolicy = { apiVersion = "security.istio.io/v1"
 , kind = "AuthorizationPolicy"
 , metadata = { name = "deny-all-neo4j", namespace = values.neo4j.namespace }
-, spec = { action = "DENY", selector.matchLabels.app = values.neo4j.name }
+--  Deny every request not covered by exclusions in the allow policy
+, spec = { action = "DENY", selector.matchLabels.app = values.neo4j.name, rules = [ {=} ] }
 }
 
 in DenyPolicy

@@ -86,64 +86,66 @@ let observerVolumeMounts =
 
 
 
-let gitlabAgentPod = kubernetes.PodSpec::{
-            , containers =
-              [ 
-                , kubernetes.Container::{
-                    , name = values.gitlab.observer.name
-                    , image = Some  values.gitlab.observer.image
-                    , env = Some observerEnv
-                    , volumeMounts = Some observerVolumeMounts
-                }
-                , kubernetes.Container::{
-                    name = values.gitlab.consumer.name
-                    , image = Some values.gitlab.consumer.image
-                    , env = Some [
-                        kubernetes.EnvVar::{
-                            name = "TLS_CA_CERT"
-                            , value = Some values.mtls.caCertPath
-                        }
-                        , kubernetes.EnvVar::{
-                            name = "TLS_CLIENT_CERT"
-                            , value = Some values.mtls.serverCertPath
-                        }
-                        , kubernetes.EnvVar::{
-                            name = "TLS_CLIENT_KEY"
-                            , value = Some values.mtls.serverKeyPath
-                        }
-                        , kubernetes.EnvVar::{
-                            name = "BROKER_ADDR"
-                            , value = Some values.cassiniAddr
-                        }
-                        , kubernetes.EnvVar::{
-                            name = "GRAPH_ENDPOINT"
-                            , value = Some values.neo4jBoltAddr
-                        }
-                        , kubernetes.EnvVar::{
-                            name = "GRAPH_DB"
-                            , value = Some values.gitlab.consumer.graph.graphDB
-                        }
-                        , kubernetes.EnvVar::{
-                            name = "GRAPH_USER"
-                            , value = Some values.gitlab.consumer.graph.graphUsername                       
-                        }
-                        , kubernetes.EnvVar::{
-                            name = "GRAPH_PASSWORD"
-                            , valueFrom = Some kubernetes.EnvVarSource::{
-                                secretKeyRef = Some values.gitlab.consumer.graph.graphPassword
-                            }
-                        }
-                    ]
-                    , volumeMounts = Some [
-                        kubernetes.VolumeMount::{
-                            name  = values.gitlab.tls.certificateSpec.secretName
-                            , mountPath = values.tlsPath
-                            , readOnly = Some True
-                        }
-                    ]
-                }
-              ]
-            , volumes = Some volumes
+let gitlabAgentPod 
+  = kubernetes.PodSpec::{
+  , imagePullSecrets = Some values.sandboxRegistry.imagePullSecrets
+  , containers =
+    [ 
+      , kubernetes.Container::{
+          , name = values.gitlab.observer.name
+          , image = Some  values.gitlab.observer.image
+          , env = Some observerEnv
+          , volumeMounts = Some observerVolumeMounts
+      }
+      , kubernetes.Container::{
+          name = values.gitlab.consumer.name
+          , image = Some values.gitlab.consumer.image
+          , env = Some [
+              kubernetes.EnvVar::{
+                  name = "TLS_CA_CERT"
+                  , value = Some values.mtls.caCertPath
+              }
+              , kubernetes.EnvVar::{
+                  name = "TLS_CLIENT_CERT"
+                  , value = Some values.mtls.serverCertPath
+              }
+              , kubernetes.EnvVar::{
+                  name = "TLS_CLIENT_KEY"
+                  , value = Some values.mtls.serverKeyPath
+              }
+              , kubernetes.EnvVar::{
+                  name = "BROKER_ADDR"
+                  , value = Some values.cassiniAddr
+              }
+              , kubernetes.EnvVar::{
+                  name = "GRAPH_ENDPOINT"
+                  , value = Some values.neo4jBoltAddr
+              }
+              , kubernetes.EnvVar::{
+                  name = "GRAPH_DB"
+                  , value = Some values.gitlab.consumer.graph.graphDB
+              }
+              , kubernetes.EnvVar::{
+                  name = "GRAPH_USER"
+                  , value = Some values.gitlab.consumer.graph.graphUsername                       
+              }
+              , kubernetes.EnvVar::{
+                  name = "GRAPH_PASSWORD"
+                  , valueFrom = Some kubernetes.EnvVarSource::{
+                      secretKeyRef = Some values.gitlab.consumer.graph.graphPassword
+                  }
+              }
+          ]
+          , volumeMounts = Some [
+              kubernetes.VolumeMount::{
+                  name  = values.gitlab.tls.certificateSpec.secretName
+                  , mountPath = values.tlsPath
+                  , readOnly = Some True
+              }
+          ]
+      }
+    ]
+  , volumes = Some volumes
 }
 
 let 
@@ -162,7 +164,7 @@ let
         , template = kubernetes.PodTemplateSpec::{
           , metadata = Some kubernetes.ObjectMeta::{
                 name = Some values.gitlab.name
-            ,   labels = Some [ { mapKey = "name", mapValue = values.gitlab.name } ]
+                , labels = Some [ { mapKey = "name", mapValue = values.gitlab.name } ]
             }
           , spec = Some kubernetes.PodSpec::gitlabAgentPod
           }

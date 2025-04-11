@@ -17,22 +17,25 @@ Ensure the following tools are installed:
 - Some client and server certificates from a trusted authroity. For testing, consider [generating your own](../agents/README.md)
 - A Personal Access Token for a Gitlab instance with, at minimum, read permissions for apis, registries, and repositories.
 - Container images for neo4j, cassini, and the gitlab agent should also be present. [See the documentation for info on building them](../agents/README.md). You can use your own preferred neo4j container image.
+- [cert-manager ](https://cert-manager.io/docs/installation/)
 ## Setting Up
 
+**Generating certificates**
+ for now. So it 
 Create some resources needed to test, in the future, these will be handled by something like the external secrets manager.
 
 ```sh
 kubectl create namespace polar
 
-kubectl create secret generic cassini-mtls -n polar \
-    --from-file=ca_certificate.pem=conf/certs/ca_certificates/ca_certificate.pem \
-    --from-file=server_polar_certificate.pem=conf/certs/server/server_polar_certificate.pem \
-    --from-file=server_polar_key.pem=conf/certs/server/server_polar_key.pem
+# kubectl create secret generic cassini-mtls -n polar \
+#     --from-file=ca_certificate.pem=conf/certs/ca_certificates/ca_certificate.pem \
+#     --from-file=server_polar_certificate.pem=conf/certs/server/server_polar_certificate.pem \
+#     --from-file=server_polar_key.pem=conf/certs/server/server_polar_key.pem
 
-kubectl create secret generic client-mtls -n polar \
-    --from-file=ca_certificate.pem=conf/certs/ca_certificates/ca_certificate.pem \
-    --from-file=client_polar_certificate.pem=conf/certs/client/client_polar_certificate.pem \
-    --from-file=client_polar_key.pem=conf/certs/client/client_polar_key.pem
+# kubectl create secret generic client-mtls -n polar \
+#     --from-file=ca_certificate.pem=conf/certs/ca_certificates/ca_certificate.pem \
+#     --from-file=client_polar_certificate.pem=conf/certs/client/client_polar_certificate.pem \
+#     --from-file=client_polar_key.pem=conf/certs/client/client_polar_key.pem
 
 kubectl create secret generic gitlab-secret -n polar --from-literal=token=$GITLAB_TOKEN
 
@@ -44,7 +47,7 @@ GRAPH_USERNAME=neo4j
 GRAPH_PASSWORD="somepassword"
 NEO4J_AUTH="${GRAPH_USERNAME}/${GRAPH_PASSWORD}"
 # Set some default credentials for neo4j in the format USERNAME/PASSWORD
-kubectl create secret generic neo4j-secret -n polar-graph-db --from-literal=secret=$NEO4J_AUTH
+kubectl create secret generic neo4j-secret -n polar-db --from-literal=secret=$NEO4J_AUTH
 # create a a secret for just the password to be passed to the gitlab-observer
 kubectl create secret generic polar-graph-pw -n polar --from-literal=secret=$GRAPH_PASSWORD
 

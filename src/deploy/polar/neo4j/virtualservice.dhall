@@ -16,7 +16,7 @@ let VirtualService = { apiVersion = "networking.istio.io/v1"
     [ { match = [ { uri.prefix = "/" } ]
       , route =
         [ { destination =
-            { host = values.neo4jUiAddr, port.number = values.neo4jPorts.https }
+            { host = values.neo4jDNSName, port.number = values.neo4jPorts.https }
           }
         ]
       }

@@ -20,9 +20,10 @@ let
         , template = kubernetes.PodTemplateSpec::{
           , metadata = Some kubernetes.ObjectMeta::{
                 name = Some values.cassini.name
-            ,   labels = Some [ { mapKey = "name", mapValue = values.cassini.name } ]
+                , labels = Some [ { mapKey = "name", mapValue = values.cassini.name } ]
             }
           , spec = Some kubernetes.PodSpec::{
+            , imagePullSecrets = Some values.sandboxRegistry.imagePullSecrets
             , containers =
               [ 
                 kubernetes.Container::{
