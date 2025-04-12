@@ -4,6 +4,16 @@ let kubernetes =
 
 let values = ../values.dhall
 
+-- static env vars - required by both services for operation
+-- When we add agents, this should be broken out to be shared
+let CommonEnv = [
+  kubernetes.EnvVar::{ name = "TLS_CA_CERT", value = Some values.mtls.caCertPath }
+, kubernetes.EnvVar::{ name = "TLS_CLIENT_CERT", value = Some values.mtls.serverCertPath }
+, kubernetes.EnvVar::{ name = "TLS_CLIENT_KEY", value = Some values.mtls.serverKeyPath }
+, kubernetes.EnvVar::{ name = "BROKER_ADDR", value = Some values.cassiniAddr }
+, kubernetes.EnvVar::{ name = "CASSINI_SERVER_NAME", value = Some values.cassiniDNSName }
+]
+
 -- Define a volume to load a proxy CA cert if one is provided
 let ProxyVolume =
       λ(cert : Optional Text) →
@@ -62,11 +72,8 @@ let volumes =
     # ProxyVolume values.gitlab.tls.proxyCertificate
 
 let observerEnv =
-      [ -- static env vars - required for operation...
-        , kubernetes.EnvVar::{ name = "TLS_CA_CERT", value = Some values.mtls.caCertPath }
-        , kubernetes.EnvVar::{ name = "TLS_CLIENT_CERT", value = Some values.mtls.serverCertPath }
-        , kubernetes.EnvVar::{ name = "TLS_CLIENT_KEY", value = Some values.mtls.serverKeyPath }
-        , kubernetes.EnvVar::{ name = "BROKER_ADDR", value = Some values.cassiniAddr }
+      CommonEnv
+      # [
         , kubernetes.EnvVar::{ name = "GITLAB_ENDPOINT", value = Some values.gitlab.observer.gitlabEndpoint }
         , kubernetes.EnvVar::{
             name = "GITLAB_TOKEN"
@@ -79,7 +86,27 @@ let observerEnv =
           }
       ]
     # ProxyEnv values.gitlab.tls.proxyCertificate
-
+let consumerEnv = CommonEnv # 
+              [
+              , kubernetes.EnvVar::{
+                  name = "GRAPH_ENDPOINT"
+                  , value = Some values.neo4jBoltAddr
+              }
+              , kubernetes.EnvVar::{
+                  name = "GRAPH_DB"
+                  , value = Some values.gitlab.consumer.graph.graphDB
+              }
+              , kubernetes.EnvVar::{
+                  name = "GRAPH_USER"
+                  , value = Some values.gitlab.consumer.graph.graphUsername                       
+              }
+              , kubernetes.EnvVar::{
+                  name = "GRAPH_PASSWORD"
+                  , valueFrom = Some kubernetes.EnvVarSource::{
+                      secretKeyRef = Some values.gitlab.consumer.graph.graphPassword
+                  }
+              }
+          ]
 let observerVolumeMounts =
       [ kubernetes.VolumeMount::{ name = values.gitlab.tls.certificateSpec.secretName, mountPath = values.tlsPath } ]
     # ProxyMount values.gitlab.tls.proxyCertificate
@@ -102,42 +129,7 @@ let gitlabAgentPod
           name = values.gitlab.consumer.name
           , image = Some values.gitlab.consumer.image
           , securityContext = Some values.gitlab.containerSecurityContext
-          , env = Some [
-              kubernetes.EnvVar::{
-                  name = "TLS_CA_CERT"
-                  , value = Some values.mtls.caCertPath
-              }
-              , kubernetes.EnvVar::{
-                  name = "TLS_CLIENT_CERT"
-                  , value = Some values.mtls.serverCertPath
-              }
-              , kubernetes.EnvVar::{
-                  name = "TLS_CLIENT_KEY"
-                  , value = Some values.mtls.serverKeyPath
-              }
-              , kubernetes.EnvVar::{
-                  name = "BROKER_ADDR"
-                  , value = Some values.cassiniAddr
-              }
-              , kubernetes.EnvVar::{
-                  name = "GRAPH_ENDPOINT"
-                  , value = Some values.neo4jBoltAddr
-              }
-              , kubernetes.EnvVar::{
-                  name = "GRAPH_DB"
-                  , value = Some values.gitlab.consumer.graph.graphDB
-              }
-              , kubernetes.EnvVar::{
-                  name = "GRAPH_USER"
-                  , value = Some values.gitlab.consumer.graph.graphUsername                       
-              }
-              , kubernetes.EnvVar::{
-                  name = "GRAPH_PASSWORD"
-                  , valueFrom = Some kubernetes.EnvVarSource::{
-                      secretKeyRef = Some values.gitlab.consumer.graph.graphPassword
-                  }
-              }
-          ]
+          , env = Some consumerEnv
           , volumeMounts = Some [
               kubernetes.VolumeMount::{
                   name  = values.gitlab.tls.certificateSpec.secretName

@@ -21,6 +21,7 @@ This Software includes and/or makes use of Third-Party Software each subject to 
 DM24-0470
 */
 
+use cassini::TCPClientConfig;
 use gitlab_consumer::supervisor;
 use polar::init_logging;
 use ractor::Actor;
@@ -30,18 +31,10 @@ use std::{env, error::Error};
 async fn main() -> Result<(), Box<dyn Error>> {
     init_logging();
 
-    //TODO: Start consumer supervisor
+    let client_config = TCPClientConfig::new();
 
-    let client_cert_file = env::var("TLS_CLIENT_CERT").unwrap();
-    let client_private_key_file = env::var("TLS_CLIENT_KEY").unwrap();
-    let ca_cert_file = env::var("TLS_CA_CERT").unwrap();
-    let broker_endpoint = env::var("BROKER_ADDR").expect("Expected a valid socket address for BROKER_ADDR");
-    
     let args = supervisor::ConsumerSupervisorArgs {
-        broker_endpoint,
-        client_cert_file,
-        client_private_key_file,
-        ca_cert_file: ca_cert_file, 
+        client_config
     };
 
     let (supervisor, handle) = Actor::spawn(

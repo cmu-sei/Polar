@@ -21,6 +21,7 @@
    DM24-0470
 */
 
+use cassini::TCPClientConfig;
 use gitlab_observer::*;
 use polar::init_logging;
 use ractor::Actor;
@@ -157,11 +158,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // let config = get_scheduler_config(config_path);
     // debug!("using provided config:\n {:#?}", config);
 
-    // info!("Scheduling observers");
-    // TODO: Pass in values from config through args
-    let client_cert_file = env::var("TLS_CLIENT_CERT").unwrap();
-    let client_private_key_file = env::var("TLS_CLIENT_KEY").unwrap();
-    let ca_cert_file = env::var("TLS_CA_CERT").unwrap();
+    let client_config = TCPClientConfig::new();
 
     let gitlab_endpoint = env::var("GITLAB_ENDPOINT").unwrap();
     let broker_addr = env::var("BROKER_ADDR").unwrap();
@@ -170,10 +167,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
 
     let args = supervisor::ObserverSupervisorArgs {
-        broker_addr,
-        client_cert_file,
-        client_private_key_file,
-        ca_cert_file: ca_cert_file,
+        client_config,
         gitlab_endpoint,
         gitlab_token: Some(gitlab_token),
         proxy_ca_cert_file

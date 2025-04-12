@@ -52,11 +52,7 @@ mod tests {
             Some(BROKER_CLIENT_NAME.to_string()),
             TcpClientActor,
             TcpClientArgs {
-                bind_addr: BIND_ADDR.to_string(),
-                registration_id: None,
-                client_cert_file: env::var("TLS_CLIENT_CERT").unwrap(),
-                private_key_file: env::var("TLS_CLIENT_KEY").unwrap(),
-                ca_cert_file: env::var("TLS_CA_CERT").unwrap(),
+                config: TCPClientConfig::new(), registration_id: None
             },
         )
         .await

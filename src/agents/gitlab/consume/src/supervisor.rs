@@ -37,10 +37,7 @@ pub enum ConsumerSupervisorMessage {
 }
 
 pub struct ConsumerSupervisorArgs {
-    pub broker_endpoint: String,
-    pub client_cert_file: String,
-    pub client_private_key_file: String,
-    pub ca_cert_file: String,
+    pub client_config: cassini::TCPClientConfig
 }
 
 #[async_trait]
@@ -72,10 +69,7 @@ impl Actor for ConsumerSupervisor {
             Some(BROKER_CLIENT_NAME.to_string()),
             TcpClientActor,
             TcpClientArgs {
-                bind_addr: args.broker_endpoint.clone(),
-                ca_cert_file: args.ca_cert_file,
-                client_cert_file: args.client_cert_file,
-                private_key_file: args.client_private_key_file,
+                config: args.client_config,
                 registration_id: None,
             },
             myself.clone().into(),

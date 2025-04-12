@@ -1,4 +1,3 @@
--- A local service definiiton for neo4j, useful for testing on local minikube or kind clusters.
 let kubernetes =
       https://raw.githubusercontent.com/dhall-lang/dhall-kubernetes/master/package.dhall
         sha256:263ee915ef545f2d771fdcd5cfa4fbb7f62772a861b5c197f998e5b71219112c
@@ -7,19 +6,17 @@ let values = ../values.dhall
 
 let spec =
       { selector = Some (toMap { name = values.neo4j.name })
-      , type = Some "NodePort"
+      , type = Some "ClusterIP"
       , ports = Some
         [ kubernetes.ServicePort::{
             name = Some "http-ui"
           , targetPort = Some (kubernetes.NatOrString.Nat values.neo4jPorts.https)
           , port = values.neo4jPorts.https
-          , nodePort = Some 30073
           },
           kubernetes.ServicePort::{
             name = Some "bolt"
           , targetPort = Some (kubernetes.NatOrString.Nat values.neo4jPorts.bolt)
           , port = values.neo4jPorts.bolt
-          , nodePort = Some 30087
           }
         ]
       }

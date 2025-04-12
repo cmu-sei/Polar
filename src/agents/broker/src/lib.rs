@@ -1,3 +1,5 @@
+use std::env;
+
 use ractor::{ActorRef, RpcReplyPort};
 use rkyv::{Archive, Deserialize, Serialize};
 
@@ -32,6 +34,34 @@ pub const REGISTRATION_REQ_FAILED_TXT: &str = "Failed to register session!";
 pub const LISTENER_MGR_NOT_FOUND_TXT: &str = "Listener Manager not found!";
 pub const TIMEOUT_REASON: &str = "SESSION_TIMEDOUT";
 pub const DISCONNECTED_REASON: &str = "CLIENT_DISCONNECTED";
+///
+/// A basse configuration for a TCP Client actor
+pub struct TCPClientConfig {
+    pub broker_endpoint: String,
+    pub server_name: String,
+    pub ca_certificate_path: String,
+    pub client_certificate_path: String,
+    pub client_key_path: String
+}
+
+impl TCPClientConfig {
+    /// Read filepaths from the environment and return. If we can't read these, we can't start
+    pub fn new() -> Self {
+        let client_certificate_path = env::var("TLS_CLIENT_CERT").expect("Expected a value for TLS_CLIENT_CERT.");
+        let client_key_path = env::var("TLS_CLIENT_KEY").expect("Expected a value for TLS_CLIENT_KEY.");
+        let ca_certificate_path = env::var("TLS_CA_CERT").expect("Expected a value for TLS_CA_CERT.");
+        let broker_endpoint = env::var("BROKER_ADDR").expect("Expected a valid socket address for BROKER_ADDR");
+        let server_name = env::var("CASSINI_SERVER_NAME").expect("Expected a value for CASSINI_SERVER_NAME");
+    
+       TCPClientConfig {
+            broker_endpoint,
+            server_name,
+            ca_certificate_path,
+            client_certificate_path,
+            client_key_path
+        }
+    }
+}
 /// Internal messagetypes for the Broker.
 ///
 #[derive(Debug)]

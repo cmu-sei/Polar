@@ -13,6 +13,18 @@ let sandboxRegistry
         kubernetes.LocalObjectReference::{ name = Some "sandbox-registry" }
     ]
   }
+let gitRepoSecret = kubernetes.SecretReference::{ name = Some "flux-repo-secret", namespace = Some namespace }
+-- The git repository FluxCD will look in for the latest version of the rendered chart.
+let deployRepository = {
+  name = "polar-deploy-repo"
+  , spec 
+    = { interval = "5m0s"
+    , ref.branch = "sandbox"
+    , url = "https://gitlab.sandbox.labz.s-box.org/sei/polar-deploy"
+    , secretRef = gitRepoSecret
+    }
+}
+
 -- Our test cluster has services that sit behind a service mesh. So we add an annotation to disable istio sidecar injection for our deployment.
 -- Why? Polar is a self-contained framework desinged to operate without interference to ensure total privacy and minimum trust.
 -- A service mesh runs against these goals. To work around this, we disable it and decide to instead treat it like any other proxy
@@ -33,6 +45,8 @@ let mtls = {
 ,   serverCertPath = "${tlsPath}/tls.crt"
 ,   serverKeyPath = "${tlsPath}/tls.key"
 }
+
+
 
 let cassiniPort = 8080
 let cassiniService = { name = "cassini-ip-svc", type = "ClusterIP" }
@@ -259,6 +273,7 @@ in
 ,   mtls
 ,   tlsPath
 ,   cassini
+,   cassiniDNSName
 ,   cassiniAddr
 ,   neo4jPorts
 ,   neo4j

@@ -57,6 +57,8 @@ export GRAPH_ENDPOINT=""
 # The service endpoint of the broker instance.
 # For the development container, the name could be "cassini" or default to 127.0.0.1:PORT
 export BROKER_ADDR=""
+#The "identity" the clients will expect the broker to have
+export SERVER_NAME=""
 # For the development container, this should be "neo4j"
 export GRAPH_USER=""
 # For the development container, this will be whatever you set it to be when

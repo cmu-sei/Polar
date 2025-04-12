@@ -2,6 +2,7 @@ use core::error;
 use std::time::Duration;
 
 use cassini::client::*;
+use cassini::TCPClientConfig;
 use common::get_file_as_byte_vec;
 use ractor::async_trait;
 use ractor::call;
@@ -32,10 +33,7 @@ pub struct ObserverSupervisorState {
 }
 
 pub struct ObserverSupervisorArgs {
-    pub broker_addr: String,
-    pub client_cert_file: String,
-    pub client_private_key_file: String,
-    pub ca_cert_file: String,
+    pub client_config: TCPClientConfig,
     pub gitlab_endpoint: String,
     pub gitlab_token: Option<String>,
     pub proxy_ca_cert_file: Option<String>
@@ -46,8 +44,8 @@ impl ObserverSupervisor {
     fn get_client(proxy_ca_cert_path: Option<String>) -> Client {
         match proxy_ca_cert_path {
             Some(path) => {   
-                let cert_data = get_file_as_byte_vec(&path).expect("Expected to proxy CA cert from path.");
-                let root_cert = Certificate::from_pem(&cert_data).expect("Expected proxy CA cert to be in PEM format.");
+                let cert_data = get_file_as_byte_vec(&path).expect("Expected to find a proxy CA certificate at {path}");
+                let root_cert = Certificate::from_pem(&cert_data).expect("Expected {path} to be in PEM format.");
 
                 info!("Found PROXY_CA_CERT at: {path}, Configuring web client...");
 
@@ -84,13 +82,7 @@ impl Actor for ObserverSupervisor {
         let client_started_result = Actor::spawn_linked(
             Some(BROKER_CLIENT_NAME.to_string()),
             TcpClientActor,
-            TcpClientArgs {
-                bind_addr: args.broker_addr.clone(),
-                ca_cert_file: args.ca_cert_file,
-                client_cert_file: args.client_cert_file,
-                private_key_file: args.client_private_key_file,
-                registration_id: None,
-            },
+            TcpClientArgs { config: args.client_config, registration_id: None },
             myself.clone().into(),
         )
         .await;
