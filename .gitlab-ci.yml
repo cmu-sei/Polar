@@ -76,7 +76,7 @@ build-workspace:
 
     # upload to ACR
     - skopeo copy --dest-creds "$ACR_USERNAME:$ACR_TOKEN" docker-archive://$(readlink -f cassini) docker://$AZURE_REGISTRY/cassini:0.1.0
-    - skopeo copy --dest-creds "$ACR_USERNAME:$ACR_TOKEN" docker-archive://$(readlink -f obnserver) docker://$AZURE_REGISTRY/polar-gitlab-observer:0.1.0
+    - skopeo copy --dest-creds "$ACR_USERNAME:$ACR_TOKEN" docker-archive://$(readlink -f observer) docker://$AZURE_REGISTRY/polar-gitlab-observer:0.1.0
     - skopeo copy --dest-creds "$ACR_USERNAME:$ACR_TOKEN" docker-archive://$(readlink -f consumer) docker://$AZURE_REGISTRY/polar-gitlab-consumer:0.1.0
 
   artifacts:

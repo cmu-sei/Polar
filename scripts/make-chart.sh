@@ -55,7 +55,7 @@ if [ "$3" == "--render-templates" ]; then
 fi
 
 # Ensure necessary tools are installed
-for cmd in dhall-to-yaml helm sops; do
+for cmd in dhall-to-yaml helm; do
     if ! command -v "$cmd" &> /dev/null; then
         echo "Error: $cmd is not installed. Install it and try again." >&2
         exit 1

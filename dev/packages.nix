@@ -136,5 +136,6 @@ in
       grype
       syft
       kubeconform 
+      sops
     ];
   }
