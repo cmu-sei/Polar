@@ -4,10 +4,33 @@ let kubernetes =
 
 let values = ../values.dhall
 
+let emptyDirVolumeName = "neo4j-conf-copy"
+
 let spec 
   = kubernetes.PodSpec::{
     , securityContext = Some values.neo4j.podSecurityContext
     , imagePullSecrets = Some values.sandboxRegistry.imagePullSecrets
+    , initContainers = Some [
+      kubernetes.Container::{
+        name = "copy-neo4j-config"
+        , image = Some "${values.sandboxRegistry.url}/busybox:1.35.0"
+        , command = Some [ "/bin/sh", "-c" ]
+        , args = Some [ "cp /config/neo4j.conf /var/lib/neo4j/conf/neo4j.conf" ]
+        , securityContext = Some values.neo4j.containerSecurityContext
+        , volumeMounts = Some [
+          -- mount the read-only config
+          , kubernetes.VolumeMount::{
+              name  = values.neo4j.config.name
+              , mountPath = "/config"
+            }
+            -- Mount empty dir to copy into
+          , kubernetes.VolumeMount::{
+            name  = emptyDirVolumeName
+            , mountPath = values.neo4j.config.path
+          } 
+        ]
+      }
+    ]
     , containers =
       [ 
         kubernetes.Container::{
@@ -15,30 +38,27 @@ let spec
         , image = Some values.neo4j.image
         , env = Some values.neo4j.env
         , securityContext = Some values.neo4j.containerSecurityContext
-        , ports = Some
-          [ kubernetes.ContainerPort::{ containerPort = 7474 },
-            kubernetes.ContainerPort::{ containerPort = 7687 }
-          ]
+        , ports = Some values.neo4j.containerPorts
         , volumeMounts = Some [
             kubernetes.VolumeMount::{
                 name  = values.neo4j.volumes.data.name
                 , mountPath = values.neo4j.volumes.data.mountPath
             }
+            -- mount populated dir with writeable config
             ,kubernetes.VolumeMount::{
-                name  = values.neo4j.config.name
+                name  = emptyDirVolumeName
                 , mountPath = values.neo4j.config.path
-                , readOnly = Some True 
             }
             ,kubernetes.VolumeMount::{
                 name  = values.neo4j.volumes.logs.name
                 , mountPath = values.neo4j.volumes.logs.mountPath
             }
             ,kubernetes.VolumeMount::{
-                name  = values.neo4j.tls.secretName
+                name  = values.neo4j.tls.leafSecretName
                 , mountPath = values.neo4j.tls.httpsMountPath
             }
             ,kubernetes.VolumeMount::{
-                name  = values.neo4j.tls.secretName
+                name  = values.neo4j.tls.leafSecretName
                 , mountPath = values.neo4j.tls.boltMountPath
             }
         ]
@@ -58,17 +78,23 @@ let spec
             }
         }
         , kubernetes.Volume::{
-            , name = values.neo4j.tls.secretName
+            , name = values.neo4j.tls.leafSecretName
             , secret = Some kubernetes.SecretVolumeSource::{
-                secretName = Some values.neo4j.tls.secretName
+                secretName = Some values.neo4j.tls.leafSecretName
             }
-        }            
-        ,kubernetes.Volume::{
+        } 
+        -- Our initial read-only neo4j configmap 
+        , kubernetes.Volume::{
           , name = values.neo4j.config.name 
           , configMap = Some kubernetes.ConfigMapVolumeSource::{
             name = Some values.neo4j.config.name
             , items = Some [ kubernetes.KeyToPath::{ key = "neo4j.conf", path = "neo4j.conf" } ]
             }
+        }
+        -- Our shared, writeable emptyDir volume to copy the config to so neo4j can write to it
+        , kubernetes.Volume::{
+          name = emptyDirVolumeName
+          , emptyDir = Some kubernetes.EmptyDirVolumeSource::{=}
         }
     ]
   }

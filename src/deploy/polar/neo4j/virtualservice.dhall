@@ -10,7 +10,8 @@ let VirtualService = { apiVersion = "networking.istio.io/v1"
   , namespace = values.neo4j.namespace
 }
 , spec =
-  { gateways = [ values.neo4j.gateway.name ]
+  -- Always use the istio public gateway for now
+  { gateways = [ "istio-system/public" ]
   , hosts = [ values.neo4j.hostName ]
   , http =
     [ { match = [ { uri.prefix = "/" } ]

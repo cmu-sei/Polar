@@ -153,6 +153,9 @@
           executable = true;
         };
 
+        # get helm charts
+        charts = pkgs.callPackage ./make-chart.nix { inherit pkgs; };
+        
         devContainer = pkgs.dockerTools.buildImage {
           name = "polar-dev";
           tag = "latest";
@@ -266,10 +269,11 @@
 
       in
       {
-        inherit devContainer ciContainer;
+        inherit devContainer ciContainer charts;
 
         packages.default = devContainer;
         packages.ciContainer = ciContainer;
+        packages.charts = charts;
       }
     );
 }

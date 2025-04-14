@@ -208,7 +208,7 @@ let neo4j =
       , image = "${sandboxRegistry.url}/ironbank/opensource/neo4j/neo4j:5.26.2"
       , imagePullSecrets = sandboxRegistry.imagePullSecrets
       , podAnnotations = [ RejectSidecarAnnotation ]
-      , config = { name = "neo4j-config" , path = "/var/lib/neo4j/neo4j.conf" }
+      , config = { name = "neo4j-config" , path = "/var/lib/neo4j/conf" }
       , env =
           [ kubernetes.EnvVar::{
               name = "NEO4J_AUTH"
@@ -219,8 +219,7 @@ let neo4j =
           [ kubernetes.ContainerPort::{ containerPort = neo4jPorts.https }
           , kubernetes.ContainerPort::{ containerPort = neo4jPorts.bolt }
           ]
-      , service = { name = "polar-db-svc" }
-      , gateway = { name = "polar-gb-gateway"}
+      , service = { name = "polar-db-svc" }      
       , logging = { serverLogsXml = "", userLogsXml = "" }
       -- Hardware resource requirements
       -- neo4j reccommends at least 2 vCPU cores and 2 GiB of memory for cloud deployments
@@ -239,8 +238,10 @@ let neo4j =
           , capabilities = Some kubernetes.Capabilities::{ drop = Some [ "ALL" ] }
           }
       , tls = {
-        certificateIssuer = "db-ca-issuer"
-        , secretName = "neo4j-keypair"
+        caIssuerName = "selfsigned-root"
+        , leafIssuer = "db-ca-issuer"
+        , caSecretName = "root-ca-secret"
+        , leafSecretName = "neo4j-keypair"
         , boltMountPath = "${neo4jHomePath}/certificates/bolt"
         , httpsMountPath = "${neo4jHomePath}/certificates/https"
       }
