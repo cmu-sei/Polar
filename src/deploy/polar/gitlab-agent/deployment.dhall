@@ -68,6 +68,12 @@ let volumes =
               secretName = Some values.gitlab.tls.certificateSpec.secretName
             }
         }
+        , kubernetes.Volume::{
+          , name = values.neo4j.tls.caSecretName
+          , secret = Some kubernetes.SecretVolumeSource::{
+            secretName = Some values.neo4j.tls.caSecretName
+          }
+        }
       ]
     # ProxyVolume values.gitlab.tls.proxyCertificate
 
@@ -86,6 +92,7 @@ let observerEnv =
           }
       ]
     # ProxyEnv values.gitlab.tls.proxyCertificate
+
 let consumerEnv = CommonEnv # 
               [
               , kubernetes.EnvVar::{
@@ -106,11 +113,23 @@ let consumerEnv = CommonEnv #
                       secretKeyRef = Some values.gitlab.consumer.graph.graphPassword
                   }
               }
+              -- TODO: Write some logic to provide this optional value.
+              , kubernetes.EnvVar::{
+                  name = "GRAPH_CA_CERT"
+                  , valueFrom = Some kubernetes.EnvVarSource::{
+                      secretKeyRef = Some 
+              kubernetes.SecretKeySelector::{
+                name = Some values.neo4j.tls.caSecretName
+                , key = "ca.crt"
+              }
+                      
+                  }
+              }
+                            
           ]
 let observerVolumeMounts =
       [ kubernetes.VolumeMount::{ name = values.gitlab.tls.certificateSpec.secretName, mountPath = values.tlsPath } ]
     # ProxyMount values.gitlab.tls.proxyCertificate
-
 
 
 let gitlabAgentPod 
@@ -135,6 +154,10 @@ let gitlabAgentPod
                   name  = values.gitlab.tls.certificateSpec.secretName
                   , mountPath = values.tlsPath
                   , readOnly = Some True
+              }
+              , kubernetes.VolumeMount::{
+                name = values.neo4j.tls.caSecretName
+                , mountPath = values.mtls.caCertPath
               }
           ]
       }

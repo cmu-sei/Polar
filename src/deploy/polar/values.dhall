@@ -264,7 +264,7 @@ let neo4j =
       }
 
 let neo4jDNSName = "${neo4j.service.name}.${neo4j.namespace}.svc.cluster.local"
-let neo4jBoltAddr = "${neo4jDNSName}:${Natural/show neo4jPorts.bolt}"
+let neo4jBoltAddr = "neo4j+s://${neo4jDNSName}:${Natural/show neo4jPorts.bolt}"
 let neo4jUiAddr = "${neo4jDNSName}:${Natural/show neo4jPorts.https}"
 
 in

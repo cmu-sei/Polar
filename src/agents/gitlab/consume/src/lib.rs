@@ -67,7 +67,7 @@ pub async fn subscribe_to_topic(
                 return Err(e.into());
             }
             //load neo config and connect to graph db
-            match neo4rs::Graph::connect(get_neo_config()).await {
+        match neo4rs::Graph::connect(get_neo_config()).await {
                 Ok(graph) => Ok(GitlabConsumerState {
                     registration_id: registration_id,
                     graph,
@@ -91,37 +91,34 @@ pub fn get_neo_config() -> Config {
     let neo_password =
         std::env::var("GRAPH_PASSWORD").expect("No GRAPH_PASSWORD provided for Neo4J.");
     let neo4j_endpoint = std::env::var("GRAPH_ENDPOINT").expect("No GRAPH_ENDPOINT provided.");
-
-    let config = ConfigBuilder::default() // Change from `new()` to `default()` if required
-        .uri(neo4j_endpoint)
-        .user(neo_user) // `.user(&str)` now takes ownership
-        .password(neo_password) // `.password(&str)` now takes ownership
-        .db(database_name) // `.db(&str)` now takes ownership
-        .fetch_size(500)
-        .max_connections(10)
-        .build()
-        .expect("Failed to build Neo4j configuration");
+    
+    let config = match std::env::var("GRAPH_CA_CERT") {
+        Ok(client_certificate) => {
+            ConfigBuilder::default() // Change from `new()` to `default()` if required
+            .uri(neo4j_endpoint)
+            .user(neo_user) // `.user(&str)` now takes ownership
+            .password(neo_password) // `.password(&str)` now takes ownership
+            .db(database_name) // `.db(&str)` now takes ownership
+            .fetch_size(500)
+            .with_client_certificate(client_certificate)        
+            .max_connections(10)
+            .build().expect("Expected to build neo4rs configuration")
+        }
+        Err(_) => {
+            ConfigBuilder::default() // Change from `new()` to `default()` if required
+            .uri(neo4j_endpoint)
+            .user(neo_user) // `.user(&str)` now takes ownership
+            .password(neo_password) // `.password(&str)` now takes ownership
+            .db(database_name) // `.db(&str)` now takes ownership
+            .fetch_size(500)
+            .max_connections(10)
+            .build().expect("Expected to build neo4rs configuration")
+        }
+    
+    };
 
     config
 }
-/// Helper function to create group nodes
-// pub fn merge_group_query(group: Group) -> String {
-//     format!(r#"
-//         MERGE (group: GitlabGroupGitlabGroup {{
-//             group_id: "{group_id}",
-//             full_name: "{full_name}",
-//             full_path: "{group_full_path}",
-//             created_at: "{group_created_at}",
-//             member_count: "{group_members_count}"
-//         }})
-//     "#,
-//     group_id = group.id,
-//     full_name = group.full_name,
-//     group_full_path = group.full_path,
-//     group_created_at = group.created_at.unwrap_or_default(),
-//     group_members_count = group.group_members_count,
-//     )
-// }
 
 pub fn merge_namespace_query(namespace: Namespace) -> String {
     format!(

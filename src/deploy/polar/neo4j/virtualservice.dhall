@@ -21,6 +21,14 @@ let VirtualService = { apiVersion = "networking.istio.io/v1"
           }
         ]
       }
+      ,
+      { match = [ { uri.prefix = "/ws" } ]
+      , route =
+        [ { destination =
+            { host = values.neo4jDNSName, port.number = values.neo4jPorts.bolt }
+          }
+        ]
+      }
     ]
   }
 }

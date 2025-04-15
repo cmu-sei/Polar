@@ -9,9 +9,15 @@ let Rule = {
     ,spec = {
         host = values.neo4jDNSName
         , trafficPolicy = {
-            tls.mode = "SIMPLE"
+            tls = {
+                mode = "SIMPLE"
+                -- Istio's gateway needs to have access to our CA cert, unfortunately we don't really control it
+                --  TODO: In the future, something like the following should be added.
+                -- caCertificates = /etc/tls/neo-ca.crt
+                , insecureSkipVerify = True
+                
+            }
         }
-        , credentialName = values.neo4j.tls.leafSecretName
     }
 }
 
