@@ -116,14 +116,7 @@ let consumerEnv = CommonEnv #
               -- TODO: Write some logic to provide this optional value.
               , kubernetes.EnvVar::{
                   name = "GRAPH_CA_CERT"
-                  , valueFrom = Some kubernetes.EnvVarSource::{
-                      secretKeyRef = Some 
-              kubernetes.SecretKeySelector::{
-                name = Some values.neo4j.tls.caSecretName
-                , key = "ca.crt"
-              }
-                      
-                  }
+                  , value = Some "/graph/tls/ca.crt"
               }
                             
           ]
@@ -157,7 +150,7 @@ let gitlabAgentPod
               }
               , kubernetes.VolumeMount::{
                 name = values.neo4j.tls.caSecretName
-                , mountPath = values.mtls.caCertPath
+                , mountPath = "/graph/tls/"
               }
           ]
       }

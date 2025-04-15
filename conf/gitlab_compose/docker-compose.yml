@@ -24,8 +24,8 @@
 
 services:
   neo4j:
-    # user: 7474:7474
-    image: neo4j:5.26.2-community
+    user: 7474:7474
+    image: registry1.dso.mil/ironbank/opensource/neo4j/neo4j:5.26.2
     restart: never
     environment:
       - NEO4J_AUTH=neo4j/somepassword
@@ -34,12 +34,14 @@ services:
     ports:
       - '7473:7473'
       - '7687:7687'
-    # volumes:
-    #   - ../neo4j_setup/conf/neo4j.conf:/var/lib/neo4j/conf/neo4j.conf
-    #   - ../certs/neo4j/server_neo4j_certificate.pem:/var/lib/neo4j/certificates/https/tls.crt
-    #   - ../certs/neo4j/server_neo4j_key.pem:/var/lib/neo4j/certificates/https/tls.key
+    volumes:
+      - ../neo4j_setup/conf:/var/lib/neo4j/conf
+      - ../certs/neo4j/server_neo4j_certificate.pem:/var/lib/neo4j/certificates/https/tls.crt
+      - ../certs/neo4j/server_neo4j_key.pem:/var/lib/neo4j/certificates/https/tls.key
+      - ../certs/neo4j/server_neo4j_certificate.pem:/var/lib/neo4j/certificates/bolt/tls.crt
+      - ../certs/neo4j/server_neo4j_key.pem:/var/lib/neo4j/certificates/bolt/tls.key
   cassini:
-    image: cassini:0.1.0
+    image: registry.sandbox.labz.s-box.org/sei/polar-mirror/cassini:0.1.0
     networks:
       - polar
     ports:
@@ -55,7 +57,7 @@ services:
       - ../certs/server/server_cassini_certificate.pem:/etc/ssl/server_cassini_certificate.pem:ro    
 
   gitlab-observer:
-    image: polar-gitlab-observer:0.1.0
+    image: registry.sandbox.labz.s-box.org/sei/polar-mirror/polar-gitlab-observer:0.1.0
     depends_on:
       - cassini
     env_file:
@@ -67,8 +69,9 @@ services:
       - ../certs/client/client_cassini_certificate.pem:/etc/ssl/client_cassini_certificate.pem:ro
       - ../certs/client/client_cassini_key.pem:/etc/ssl/client_cassini_key.pem:ro
       - ../certs/host/zscaler.pem:/etc/ssl/proxy_ca.pem:ro
+      
   gitlab-consumer:
-    image: polar-gitlab-consumer:0.1.0
+    image: registry.sandbox.labz.s-box.org/sei/polar-mirror/polar-gitlab-consumer:0.1.0
     depends_on:
       - cassini
       - neo4j
@@ -80,6 +83,7 @@ services:
       - ../certs/ca_certificates/ca_certificate.pem:/etc/ssl/ca_certificate.pem:ro
       - ../certs/client/client_cassini_certificate.pem:/etc/ssl/client_cassini_certificate.pem:ro
       - ../certs/client/client_cassini_key.pem:/etc/ssl/client_cassini_key.pem:ro
+      - ../certs/neo4j/ca_certificate.pem:/etc/graph/ca.crt:ro
 
 networks:
   polar:

@@ -94,22 +94,24 @@ pub fn get_neo_config() -> Config {
     
     let config = match std::env::var("GRAPH_CA_CERT") {
         Ok(client_certificate) => {
-            ConfigBuilder::default() // Change from `new()` to `default()` if required
+
+            info!("Found GRAPH_CA_CERT at {client_certificate}. Configuring graph client.");
+            ConfigBuilder::default() 
             .uri(neo4j_endpoint)
-            .user(neo_user) // `.user(&str)` now takes ownership
-            .password(neo_password) // `.password(&str)` now takes ownership
-            .db(database_name) // `.db(&str)` now takes ownership
+            .user(neo_user) 
+            .password(neo_password) 
+            .db(database_name)
             .fetch_size(500)
             .with_client_certificate(client_certificate)        
             .max_connections(10)
             .build().expect("Expected to build neo4rs configuration")
         }
         Err(_) => {
-            ConfigBuilder::default() // Change from `new()` to `default()` if required
+            ConfigBuilder::default() 
             .uri(neo4j_endpoint)
-            .user(neo_user) // `.user(&str)` now takes ownership
-            .password(neo_password) // `.password(&str)` now takes ownership
-            .db(database_name) // `.db(&str)` now takes ownership
+            .user(neo_user)
+            .password(neo_password)
+            .db(database_name)
             .fetch_size(500)
             .max_connections(10)
             .build().expect("Expected to build neo4rs configuration")
