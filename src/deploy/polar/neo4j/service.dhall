@@ -7,14 +7,19 @@ let values = ../values.dhall
 let spec =
       { selector = Some (toMap { name = values.neo4j.name })
       , type = Some "ClusterIP"
+      
       , ports = Some
         [ kubernetes.ServicePort::{
             name = Some "http-ui"
+          , protocol = Some "TCP"
           , targetPort = Some (kubernetes.NatOrString.Nat values.neo4jPorts.https)
           , port = values.neo4jPorts.https
           },
+          -- Specify a port for accepting bolt WSS connections
           kubernetes.ServicePort::{
             name = Some "bolt"
+          , protocol = Some "TCP"
+          , appProtocol = Some "kubernetes.io/wss"
           , targetPort = Some (kubernetes.NatOrString.Nat values.neo4jPorts.bolt)
           , port = values.neo4jPorts.bolt
           }

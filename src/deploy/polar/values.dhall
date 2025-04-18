@@ -4,6 +4,7 @@ let kubernetes =
       sha256:1a0d599eabb9dd154957edc59bb8766ea59b4a245ae45bdd55450654c12814b0
 let chart = ./chart.dhall
 let namespace = "polar"
+let sandboxHostSuffix = "sandbox.labz.s-box.org"
 
 -- Values for pulling from a potentially private registry
 let sandboxRegistry 
@@ -44,6 +45,8 @@ let mtls = {
 ,   caCertPath = "${tlsPath}/ca.crt"
 ,   serverCertPath = "${tlsPath}/tls.crt"
 ,   serverKeyPath = "${tlsPath}/tls.key"
+-- We're dealing with a service mesh, so we need to re-import a CA certificate to trust
+,   proxyCertificate = "proxy-ca-cert"
 }
 
 
@@ -163,7 +166,6 @@ let gitlab = {
     -- If you're working in Kubernetes + Istio world, dealing with its mTLS, routing, observability, and policy layers
     -- or just dealing with some other MITM situation, You'll need to trust the proxies certificates 
     , tls = {
-      , proxyCertificate = Some "proxy-ca-cert"
       , certificateRequestName = "gitlab-agent-certificate"
       , certificateSpec = gitlabAgentCertificateSpec
 
@@ -207,7 +209,6 @@ let neo4j =
       -- TODO: make configurable, we'll want to use private registries
       , image = "${sandboxRegistry.url}/ironbank/opensource/neo4j/neo4j:5.26.2"
       , imagePullSecrets = sandboxRegistry.imagePullSecrets
-      , podAnnotations = [ RejectSidecarAnnotation ]
       , config = { name = "neo4j-config" , path = "/var/lib/neo4j/conf" }
       , env =
           [ kubernetes.EnvVar::{
@@ -242,8 +243,8 @@ let neo4j =
         , leafIssuer = "db-ca-issuer"
         , caSecretName = "root-ca-secret"
         , leafSecretName = "neo4j-keypair"
-        , boltMountPath = "${neo4jHomePath}/certificates/bolt"
-        , httpsMountPath = "${neo4jHomePath}/certificates/https"
+        -- , boltMountPath = "${neo4jHomePath}/certificates/bolt"
+        -- , httpsMountPath = "${neo4jHomePath}/certificates/https"
       }
       -- Here we define some volume configurations
       -- We're targeting an azure k8s cluster, so we'll use default managed-csi storage for now
@@ -264,12 +265,14 @@ let neo4j =
       }
 
 let neo4jDNSName = "${neo4j.service.name}.${neo4j.namespace}.svc.cluster.local"
-let neo4jBoltAddr = "neo4j+s://${neo4jDNSName}:${Natural/show neo4jPorts.bolt}"
+-- Point to the istio sidecar's VS
+let neo4jBoltAddr = "neo4j://${neo4jDNSName}:7687"
 let neo4jUiAddr = "${neo4jDNSName}:${Natural/show neo4jPorts.https}"
 
 in
 
 {   namespace
+,   sandboxHostSuffix
 ,   sandboxRegistry
 ,   mtls
 ,   tlsPath

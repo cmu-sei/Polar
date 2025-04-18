@@ -52,6 +52,7 @@ pub struct GitlabConsumerArgs {
 ///
 /// Helper fn to setup consumer state, subscribe to a given topic, and connect to the graph database
 /// TODO: Consider updating this function in the future to leverage a grpah adapter should support alternatives to neo4j
+/// TODO: Pass in the neo configuration as a parameter so we don't introspect the environment every time
 pub async fn subscribe_to_topic(
     registration_id: String,
     topic: String,

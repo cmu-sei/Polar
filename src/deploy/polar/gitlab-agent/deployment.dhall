@@ -4,6 +4,9 @@ let kubernetes =
 
 let values = ../values.dhall
 
+-- define an optional type for the CA cert it may or may not be provided in the future
+let proxyCACert = Some values.mtls.proxyCertificate
+
 -- static env vars - required by both services for operation
 -- When we add agents, this should be broken out to be shared
 let CommonEnv = [
@@ -21,7 +24,7 @@ let ProxyVolume =
           { Some =
               λ(certName : Text) →
                 [ kubernetes.Volume::{
-                    , name = "proxy-ca-cert"
+                    , name = certName
                     , secret = Some kubernetes.SecretVolumeSource::{
                         secretName = Some certName
                     }
@@ -62,20 +65,16 @@ let ProxyEnv =
 
 -- Volumes accessible to our gitlab agent
 let volumes =
-      [ kubernetes.Volume::{
+      [ 
+        -- our root-ca-secret for communicating with cassini 
+        kubernetes.Volume::{
           , name = values.gitlab.tls.certificateSpec.secretName
           , secret = Some kubernetes.SecretVolumeSource::{
               secretName = Some values.gitlab.tls.certificateSpec.secretName
             }
         }
-        , kubernetes.Volume::{
-          , name = values.neo4j.tls.caSecretName
-          , secret = Some kubernetes.SecretVolumeSource::{
-            secretName = Some values.neo4j.tls.caSecretName
-          }
-        }
       ]
-    # ProxyVolume values.gitlab.tls.proxyCertificate
+    # ProxyVolume proxyCACert
 
 let observerEnv =
       CommonEnv
@@ -91,7 +90,7 @@ let observerEnv =
             }
           }
       ]
-    # ProxyEnv values.gitlab.tls.proxyCertificate
+    # ProxyEnv proxyCACert
 
 let consumerEnv = CommonEnv # 
               [
@@ -114,15 +113,16 @@ let consumerEnv = CommonEnv #
                   }
               }
               -- TODO: Write some logic to provide this optional value.
-              , kubernetes.EnvVar::{
-                  name = "GRAPH_CA_CERT"
-                  , value = Some "/graph/tls/ca.crt"
-              }
+              -- If the graph is behind a proxy or service mesh, we have to set this
+              -- , kubernetes.EnvVar::{
+              --     name = "GRAPH_CA_CERT"
+              --     , value = Some "/graph/tls/proxy.crt"
+              -- }
                             
           ]
 let observerVolumeMounts =
       [ kubernetes.VolumeMount::{ name = values.gitlab.tls.certificateSpec.secretName, mountPath = values.tlsPath } ]
-    # ProxyMount values.gitlab.tls.proxyCertificate
+    # ProxyMount proxyCACert
 
 
 let gitlabAgentPod 
@@ -143,15 +143,16 @@ let gitlabAgentPod
           , securityContext = Some values.gitlab.containerSecurityContext
           , env = Some consumerEnv
           , volumeMounts = Some [
+              -- mount cassini secret
               kubernetes.VolumeMount::{
                   name  = values.gitlab.tls.certificateSpec.secretName
                   , mountPath = values.tlsPath
                   , readOnly = Some True
               }
-              , kubernetes.VolumeMount::{
-                name = values.neo4j.tls.caSecretName
-                , mountPath = "/graph/tls/"
-              }
+              -- , kubernetes.VolumeMount::{
+              --   name = values.mtls.proxyCertificate
+              --   , mountPath = "/graph/tls/"
+              -- }
           ]
       }
     ]

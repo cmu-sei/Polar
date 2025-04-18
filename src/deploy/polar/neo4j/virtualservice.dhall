@@ -1,31 +1,24 @@
 let values = ../values.dhall
 
--- This only exposes ports for HTTPS traffic, 
--- so external users can hit the HTTP API
--- but can’t reach Bolt (7687) because it’s not routed at all.
 let VirtualService = { apiVersion = "networking.istio.io/v1"
 , kind = "VirtualService"
-, metadata = {
-  name = values.neo4j.service.name
+, metadata =
+  {
+  , name = "polar-db-vs"
   , namespace = values.neo4j.namespace
-}
+  }
 , spec =
-  -- Always use the istio public gateway for now
   { gateways = [ "istio-system/public" ]
-  , hosts = [ values.neo4j.hostName ]
+  , hosts = [ "graph-db.${values.sandboxHostSuffix}" ]
   , http =
-    [ { match = [ { uri.prefix = "/" } ]
+    [ 
+     { match = [ { uri.prefix = "/" } ]
+      -- , rewrite = None { uri : Text }
       , route =
         [ { destination =
-            { host = values.neo4jDNSName, port.number = values.neo4jPorts.https }
-          }
-        ]
-      }
-      ,
-      { match = [ { uri.prefix = "/ws" } ]
-      , route =
-        [ { destination =
-            { host = values.neo4jDNSName, port.number = values.neo4jPorts.bolt }
+            { host = values.neo4jDNSName
+            , port.number = values.neo4jPorts.https
+            }
           }
         ]
       }
