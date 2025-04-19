@@ -25,7 +25,7 @@ use cassini::{client::TcpClientMessage, ClientMessage};
 use gitlab_queries::{groups::GroupData, Namespace, Project};
 use neo4rs::{Config, ConfigBuilder, Query, Txn};
 use ractor::{registry::where_is, ActorProcessingErr, MessagingErr};
-use std::error::Error;
+use std::{collections::VecDeque, error::Error};
 use tracing::{debug, error, info};
 use url::Url;
 
@@ -38,6 +38,8 @@ pub mod users;
 pub const BROKER_CLIENT_NAME: &str = "GITLAB_CONSUMER_CLIENT";
 pub const GITLAB_USER_CONSUMER: &str = "users";
 pub const TRANSACTION_FAILED_ERROR: &str = "Expected to start a transaction with the graph";
+pub const QUERY_COMMIT_FAILED: &str = "Error committing transaction to graph";
+pub const QUERY_RUN_FAILED: &str = "Error running query on the graph.";
 
 //TODO: Give consumer state info about neo4j, and eventually, a graph adapter to work with
 pub struct GitlabConsumerState {
@@ -47,42 +49,30 @@ pub struct GitlabConsumerState {
 #[derive(Clone, Debug)]
 pub struct GitlabConsumerArgs {
     pub registration_id: String,
+    pub graph_config:  neo4rs::Config
 }
 
 ///
 /// Helper fn to setup consumer state, subscribe to a given topic, and connect to the graph database
 /// TODO: Consider updating this function in the future to leverage a grpah adapter should support alternatives to neo4j
-/// TODO: Pass in the neo configuration as a parameter so we don't introspect the environment every time
 pub async fn subscribe_to_topic(
     registration_id: String,
     topic: String,
+    config: neo4rs::Config
 ) -> Result<GitlabConsumerState, Box<dyn Error>> {
-    match where_is(BROKER_CLIENT_NAME.to_string()) {
-        Some(client) => {
-            if let Err(e) =
-                client.send_message(TcpClientMessage::Send(ClientMessage::SubscribeRequest {
-                    registration_id: Some(registration_id.clone()),
-                    topic,
-                }))
-            {
-                return Err(e.into());
-            }
-            //load neo config and connect to graph db
-        match neo4rs::Graph::connect(get_neo_config()).await {
-                Ok(graph) => Ok(GitlabConsumerState {
-                    registration_id: registration_id,
-                    graph,
-                }),
-                Err(e) => Err(e.into()),
-            }
-        }
-        None => {
-            error!("Couldn't locate tcp client!");
-            Err(ActorProcessingErr::from(
-                "Couldn't locate tcp client!".to_string(),
-            ))
-        }
-    }
+    let client = where_is(BROKER_CLIENT_NAME.to_string()).expect("Expected to find TCP client.");
+        
+    client.send_message(TcpClientMessage::Send(ClientMessage::SubscribeRequest {
+        registration_id: Some(registration_id.clone()),
+        topic,
+    }))?;
+
+    //load neo config and connect to graph db
+    
+    let graph = neo4rs::Graph::connect(config).await?;
+
+    Ok(GitlabConsumerState { registration_id, graph })
+
 }
 
 pub fn get_neo_config() -> Config {
@@ -92,6 +82,7 @@ pub fn get_neo_config() -> Config {
     let neo_password =
         std::env::var("GRAPH_PASSWORD").expect("No GRAPH_PASSWORD provided for Neo4J.");
     let neo4j_endpoint = std::env::var("GRAPH_ENDPOINT").expect("No GRAPH_ENDPOINT provided.");
+    info!("Using Neo4j database at {neo4j_endpoint}");
     
     let config = match std::env::var("GRAPH_CA_CERT") {
         Ok(client_certificate) => {
@@ -119,63 +110,14 @@ pub fn get_neo_config() -> Config {
         }
     
     };
-
+    
+    
     config
 }
 
-pub fn merge_namespace_query(namespace: Namespace) -> String {
-    format!(
-        r#"
-    MERGE (namespace: GitlabNamespace {{
-        namespace_id: "{namespace_id}",
-        full_name: "{full_name}",
-        full_path: "{full_path}"
-    }})
-    "#,
-        namespace_id = namespace.id,
-        full_name = namespace.full_name,
-        full_path = namespace.full_path,
-    )
+#[derive(Debug)]
+pub enum CrashReason {
+    CaCertReadError(String), // error when reading CA cert
+    SubscriptionError(String), // error when subscribing to the topic
+    // Add other error types as necessary
 }
-
-//TODO: Helper function to create project nodes and their relationships
-// pub fn merge_project_query(project: Project) -> String {
-//     let merge_group_query = match project.group {
-//         //connect group if presenet
-//         Some(group) =>  {
-//          //if namespace exists, compose a query to create a node for it and a draw a relationship
-//          format!( "{0}\n{1}", merge_group_query(group), "WITH project, group MERGE (project)-[:inGroup]->(group);")
-//         }
-//         None => String::default()
-//     };
-
-//     //NOTE: Not entirely sure its needed to match here, because all projects exist in either a user or group namespace
-//     //better safe than sorry
-//     let merge_namespace_query = match project.namespace {
-//         //connect group if presenet
-//         Some(namespace) =>  {
-//             //if namespace exists, compose a query to create a node for it and a draw a relationship
-//             format!( "{0}\n{1}", merge_namespace_query(namespace), "WITH project, namespace MERGE (project)-[:inNamespace]->(namespace)")
-//         },
-//         None => String::default()
-//     };
-
-//     format!(
-//         r#"
-//             MERGE (project:GitlabProject {{
-//                 project_id: "{project_id}"
-//             }})
-//             SET project.name = "{name}",
-//                 project.full_path = "{full_path}",
-//                 project.created_at = "{created_at}",
-//                 project.last_activity_at = "{last_activity_at}"
-//             {merge_namespace_query}
-//             {merge_group_query}
-//         "#,
-//         project_id = project.id,
-//         name = project.name,
-//         full_path = project.full_path,
-//         created_at = project.created_at.unwrap_or_default(),
-//         last_activity_at = project.last_activity_at.unwrap_or_default(),
-//     )
-// }

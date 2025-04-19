@@ -22,7 +22,7 @@ DM24-0470
 */
 
 use cassini::TCPClientConfig;
-use gitlab_consumer::supervisor;
+use gitlab_consumer::{get_neo_config, supervisor};
 use polar::init_logging;
 use ractor::Actor;
 use std::{env, error::Error};
@@ -32,10 +32,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
     init_logging();
 
     let client_config = TCPClientConfig::new();
+    
 
     let args = supervisor::ConsumerSupervisorArgs {
-        client_config
+        client_config, graph_config: get_neo_config()
     };
+    
 
     let (supervisor, handle) = Actor::spawn(
         Some("GITLAB_CONSUMER_SUPERVISOR".to_string()),

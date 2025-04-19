@@ -101,8 +101,7 @@ impl Actor for TcpClientActor {
 
         Ok(state)
     }
-
-    async fn post_start(
+     async fn post_start(
         &self,
         myself: ActorRef<Self::Msg>,
         state: &mut Self::State,
@@ -227,6 +226,8 @@ impl Actor for TcpClientActor {
                 }
             }
             Err(e) => {
+                // Given that the gitlab consumer recently got an upgrade using an exponential backoff, 
+                // perhaps it's time the client actor got one too? Stopping the client causes the agent to crash.
                 error!("Failed to connect to server: {e}");
                 myself.stop(Some("Failed to connect to server: {e}".to_string()));
             }
@@ -244,7 +245,6 @@ impl Actor for TcpClientActor {
 
         Ok(())
     }
-
     async fn post_stop(
         &self,
         myself: ActorRef<Self::Msg>,

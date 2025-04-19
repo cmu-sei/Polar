@@ -219,7 +219,7 @@ impl BrokerMessage {
     pub fn from_client_message(
         msg: ClientMessage,
         client_id: String,
-        registration_id: Option<String>,
+        _: Option<String>,
     ) -> Self {
         match msg {
             ClientMessage::RegistrationRequest { registration_id } => {

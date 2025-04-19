@@ -44,6 +44,7 @@ cassini = { path = "../../broker" }
 ractor = { version="0.14.1", features = ["async-trait"]}
 polar = { path = "../../lib" }
 gitlab-queries = { path = "../query" }
+exponential-backoff = "2.1.0"
 
 [[bin]]
 name = "gitlab-consumer"

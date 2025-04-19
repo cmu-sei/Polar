@@ -23,24 +23,25 @@
 # DM24-0470
 
 services:
-  # neo4j:
-  #   user: 7474:7474
-  #   image: registry1.dso.mil/ironbank/opensource/neo4j/neo4j:5.26.2
-  #   restart: never
-  #   environment:
-  #     - NEO4J_AUTH=neo4j/somepassword
-  #   networks:
-  #     - polar
-  #   ports:
-  #     - '7473:7473'
-  #     - '7687:7687'
-  #   volumes:
-  #     - ../neo4j_setup/conf:/var/lib/neo4j/conf
-  #     - ../certs/neo4j/ca_certificate.pem:/var/lib/neo4j/certificates/bolt/trusted/ca.crt
-  #     - ../certs/neo4j/cert_chain.pem:/var/lib/neo4j/certificates/https/tls.crt
-  #     - ../certs/neo4j/server_neo4j_key.pem:/var/lib/neo4j/certificates/https/tls.key
-  #     - ../certs/neo4j/cert_chain.pem:/var/lib/neo4j/certificates/bolt/tls.crt
-  #     - ../certs/neo4j/server_neo4j_key.pem:/var/lib/neo4j/certificates/bolt/tls.key
+  neo4j:
+    user: 7474:7474
+    image: registry1.dso.mil/ironbank/opensource/neo4j/neo4j:5.26.2
+    restart: never
+    environment:
+      - NEO4J_AUTH=neo4j/somepassword
+    networks:
+      - polar
+    ports:
+      - '7474:7474'
+      - '7687:7687'
+    volumes:
+      - ../neo4j_setup/conf:/var/lib/neo4j/conf
+      # If you want to run neo4j with TLS, you should mount some certificates
+      # - ../certs/neo4j/ca_certificate.pem:/var/lib/neo4j/certificates/bolt/trusted/ca.crt
+      # - ../certs/neo4j/cert_chain.pem:/var/lib/neo4j/certificates/https/tls.crt
+      # - ../certs/neo4j/server_neo4j_key.pem:/var/lib/neo4j/certificates/https/tls.key
+      # - ../certs/neo4j/cert_chain.pem:/var/lib/neo4j/certificates/bolt/tls.crt
+      # - ../certs/neo4j/server_neo4j_key.pem:/var/lib/neo4j/certificates/bolt/tls.key
   cassini:
     image: registry.sandbox.labz.s-box.org/sei/polar-mirror/cassini:0.1.0
     networks:
@@ -71,20 +72,21 @@ services:
       - ../certs/client/client_cassini_key.pem:/etc/ssl/client_cassini_key.pem:ro
       - ../certs/host/zscaler.pem:/etc/ssl/proxy_ca.pem:ro
       
-  # gitlab-consumer:
-  #   image: registry.sandbox.labz.s-box.org/sei/polar-mirror/polar-gitlab-consumer:0.1.0
-  #   depends_on:
-  #     - cassini
-  #     - neo4j
-  #   env_file:
-  #     - consumer.env
-  #   networks:
-  #     - polar
-  #   volumes:
-  #     - ../certs/ca_certificates/ca_certificate.pem:/etc/ssl/ca_certificate.pem:ro
-  #     - ../certs/client/client_cassini_certificate.pem:/etc/ssl/client_cassini_certificate.pem:ro
-  #     - ../certs/client/client_cassini_key.pem:/etc/ssl/client_cassini_key.pem:ro
-  #     - ../certs/neo4j/ca_certificate.pem:/etc/graph/ca.crt:ro
+  gitlab-consumer:
+    image: registry.sandbox.labz.s-box.org/sei/polar-mirror/polar-gitlab-consumer:0.1.0
+    depends_on:
+      - cassini
+      - neo4j
+    env_file:
+      - consumer.env
+    networks:
+      - polar
+    volumes:
+      - ../certs/ca_certificates/ca_certificate.pem:/etc/ssl/ca_certificate.pem:ro
+      - ../certs/client/client_cassini_certificate.pem:/etc/ssl/client_cassini_certificate.pem:ro
+      - ../certs/client/client_cassini_key.pem:/etc/ssl/client_cassini_key.pem:ro
+      # if you want to configure neo for TLS, uncomment this and configure your environment variables
+      # - ../certs/neo4j/ca_certificate.pem:/etc/graph/ca.crt:ro
 
 networks:
   polar:

@@ -5,7 +5,7 @@ let kubernetes =
 
 let values = ../values.dhall
 
-let configContent = ../../../../conf/neo4j_setup/conf/neo4j.conf as Text  -- Reads the file as raw text
+let configContent = ../../../conf/neo4j.conf as Text  -- Reads the file as raw text
 
 let neo4jConfig = kubernetes.ConfigMap::{ 
     apiVersion = "v1"

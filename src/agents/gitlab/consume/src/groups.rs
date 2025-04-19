@@ -20,7 +20,7 @@
 
    DM24-0470
 */
-use crate::{subscribe_to_topic, GitlabConsumerArgs, GitlabConsumerState, TRANSACTION_FAILED_ERROR};
+use crate::{subscribe_to_topic, GitlabConsumerArgs, GitlabConsumerState, QUERY_COMMIT_FAILED, QUERY_RUN_FAILED, TRANSACTION_FAILED_ERROR};
 use common::types::GitlabData;
 use common::GROUPS_CONSUMER_TOPIC;
 use neo4rs::Query;
@@ -41,10 +41,10 @@ impl Actor for GitlabGroupConsumer {
         args: GitlabConsumerArgs,
     ) -> Result<Self::State, ActorProcessingErr> {
         //subscribe to topic
-        match subscribe_to_topic(args.registration_id, GROUPS_CONSUMER_TOPIC.to_string()).await {
+        match subscribe_to_topic(args.registration_id, GROUPS_CONSUMER_TOPIC.to_string(), args.graph_config).await {
             Ok(state) => Ok(state),
             Err(e) => {
-                let err_msg = format!("Error subscribing to topic {GROUPS_CONSUMER_TOPIC} {e}");
+                let err_msg = format!("Error starting actor: {GROUPS_CONSUMER_TOPIC} {e}");
                 Err(ActorProcessingErr::from(err_msg))
             }
         }
@@ -60,203 +60,207 @@ impl Actor for GitlabGroupConsumer {
     }
     async fn handle(
         &self,
-        _: ActorRef<Self::Msg>,
+        myself: ActorRef<Self::Msg>,
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        match message {
-            GitlabData::Groups(vec) => {
-                let mut transaction = state
-                    .graph
-                    .start_txn()
-                    .await
-                    .expect(TRANSACTION_FAILED_ERROR);
 
-                for g in vec {
-                    let query = format!(
-                        r#"
-                    MERGE (group: GitlabGroup {{ group_id: "{id}" }})
-                    SET group.full_name = "{full_name}",
-                        group.full_path = "{full_path}",
-                        group.created_at = "{created_at}"
-                        "#,
-                        id = g.id,
-                        full_name = g.full_name,
-                        full_path = g.full_path,
-                        created_at = g.created_at.unwrap_or_default(),
-                    );
-                    debug!(query);
-                    transaction
-                        .run(Query::new(query))
-                        .await
-                        .expect("Expected to run query on transaction.");
-                }
+        match state.graph.start_txn().await {
+            Ok(mut transaction) => {
+                match message {
+                    GitlabData::Groups(vec) => {
 
-                transaction
-                    .commit()
-                    .await
-                    .expect("Expected to commit transaction");
-            }
-            GitlabData::GroupMembers(link) => {
-                let mut transaction = state.graph.start_txn().await.expect(TRANSACTION_FAILED_ERROR);
-
-                if let Some(vec) = link.connection.nodes {
-                    let group_memberships = vec
-                        .iter()
-                        .map(|option| {
-                            let membership = option.as_ref().unwrap();
-
-                            //create a list of attribute sets
-                            format!(
-                                r#"{{
-                                user_id: "{user_id}",
-                                access_level: "{access_level}",
-                                created_at: "{created_at}",
-                                updated_at: "{updated_at}",
-                                expires_at: "{expires_at}"
-                            }}"#,
-                                user_id = membership
-                                    .user
-                                    .as_ref()
-                                    .map_or_else(|| String::default(), |user| user.id.to_string()),
-                                //TODO: Represent this as a string, Too annoying to get the string value of this right now
-                                access_level = membership.access_level.as_ref().map_or_else(
-                                    || String::default(),
-                                    |al| { al.integer_value.unwrap_or_default().to_string() }
-                                ),
-                                created_at = membership
-                                    .created_at
-                                    .as_ref()
-                                    .map_or_else(|| String::default(), |date| date.to_string()),
-                                updated_at = membership
-                                    .updated_at
-                                    .as_ref()
-                                    .map_or_else(|| String::default(), |date| date.to_string()),
-                                expires_at = membership
-                                    .expires_at
-                                    .as_ref()
-                                    .map_or_else(|| String::default(), |date| date.to_string()),
-                            )
-                        })
-                        .collect::<Vec<_>>()
-                        .join(",\n");
-
-                    let cypher_query = format!(
-                        "
-                        MERGE (group:GitlabGroup {{ group_id: \"{group_id}\" }})
-                        WITH group
-                        UNWIND [{group_memberships}] AS membership
-                        MERGE (user:GitlabUser {{ user_id: membership.user_id }})
-                        WITH membership, user
-                        MERGE (user)-[r:IN_GROUP]->(group)
-                        SET r.access_level = membership.access_level,
-                            r.created_at = membership.created_at,
-                            r.expires_at = membership.expires_at,
-                            r.updated_at = membership.updated_at
-                        ",
-                        group_id = link.resource_id
-                    );
-
-                    debug!(cypher_query);
-                    transaction
-                        .run(Query::new(cypher_query))
-                        .await
-                        .expect("Expected to run query.");
-                    if let Err(e) = transaction.commit().await {
-                        error!("Error committing transaction to graph: {e}");
+                        for g in vec {
+                            let query = format!(
+                                r#"
+                            MERGE (group: GitlabGroup {{ group_id: "{id}" }})
+                            SET group.full_name = "{full_name}",
+                                group.full_path = "{full_path}",
+                                group.created_at = "{created_at}"
+                                "#,
+                                id = g.id,
+                                full_name = g.full_name,
+                                full_path = g.full_path,
+                                created_at = g.created_at.unwrap_or_default(),
+                            );
+                            debug!(query);
+                            transaction
+                                .run(Query::new(query))
+                                .await
+                                .expect("Expected to run query on transaction.");
+                        }
+        
+                        transaction
+                            .commit()
+                            .await
+                            .expect("Expected to commit transaction");
                     }
-                    info!("Committed transaction to database");
-                }
-            }
-            GitlabData::GroupProjects(link) => {
-                let mut transaction = state.graph.start_txn().await.expect(TRANSACTION_FAILED_ERROR);
-
-                if let Some(vec) = link.connection.nodes {
-                    let projects = vec
-                        .iter()
-                        .map(|option| {
-                            let project = option.as_ref().unwrap();
-
-                            //create a list of attribute sets
-                            format!(
-                                r#"{{ project_id: "{project_id}" }}"#,
-                                project_id = project.id
-                            )
-                        })
-                        .collect::<Vec<_>>()
-                        .join(",\n");
-
-                    let cypher_query = format!(
-                        "
-                        MERGE (group:GitlabGroup {{ group_id: \"{group_id}\" }})
-                        WITH group
-                        UNWIND [{projects}] AS project_data
-                        MERGE (project:GitlabProject {{ project_id: project_data.project_id }})
-                        with project, group
-                        MERGE (project)-[r:IN_GROUP]->(group)
-                        ",
-                        group_id = link.resource_id
-                    );
-
-                    debug!(cypher_query);
-                    transaction
-                        .run(Query::new(cypher_query))
-                        .await
-                        .expect("Expected to run query.");
-                    if let Err(e) = transaction.commit().await {
-                        error!("Error committing transaction to graph: {e}");
+                    GitlabData::GroupMembers(link) => {
+        
+                        if let Some(vec) = link.connection.nodes {
+                            let group_memberships = vec
+                                .iter()
+                                .map(|option| {
+                                    let membership = option.as_ref().unwrap();
+        
+                                    //create a list of attribute sets
+                                    format!(
+                                        r#"{{
+                                        user_id: "{user_id}",
+                                        access_level: "{access_level}",
+                                        created_at: "{created_at}",
+                                        updated_at: "{updated_at}",
+                                        expires_at: "{expires_at}"
+                                    }}"#,
+                                        user_id = membership
+                                            .user
+                                            .as_ref()
+                                            .map_or_else(|| String::default(), |user| user.id.to_string()),
+                                        //TODO: Represent this as a string, Too annoying to get the string value of this right now
+                                        access_level = membership.access_level.as_ref().map_or_else(
+                                            || String::default(),
+                                            |al| { al.integer_value.unwrap_or_default().to_string() }
+                                        ),
+                                        created_at = membership
+                                            .created_at
+                                            .as_ref()
+                                            .map_or_else(|| String::default(), |date| date.to_string()),
+                                        updated_at = membership
+                                            .updated_at
+                                            .as_ref()
+                                            .map_or_else(|| String::default(), |date| date.to_string()),
+                                        expires_at = membership
+                                            .expires_at
+                                            .as_ref()
+                                            .map_or_else(|| String::default(), |date| date.to_string()),
+                                    )
+                                })
+                                .collect::<Vec<_>>()
+                                .join(",\n");
+        
+                            let cypher_query = format!(
+                                "
+                                MERGE (group:GitlabGroup {{ group_id: \"{group_id}\" }})
+                                WITH group
+                                UNWIND [{group_memberships}] AS membership
+                                MERGE (user:GitlabUser {{ user_id: membership.user_id }})
+                                WITH membership, user
+                                MERGE (user)-[r:IN_GROUP]->(group)
+                                SET r.access_level = membership.access_level,
+                                    r.created_at = membership.created_at,
+                                    r.expires_at = membership.expires_at,
+                                    r.updated_at = membership.updated_at
+                                ",
+                                group_id = link.resource_id
+                            );
+        
+                            debug!(cypher_query);
+                            transaction
+                                .run(Query::new(cypher_query))
+                                .await
+                                .expect("Expected to run query.");
+                            
+                            if let Err(e) = transaction.commit().await {
+                                myself.stop(Some(QUERY_COMMIT_FAILED.to_string()))
+                            }
+                            info!("Committed transaction to database");
+                        }
                     }
-                    info!("Committed transaction to database");
-                }
-            }
-            GitlabData::GroupRunners(link) => {
-                let mut transaction = state.graph.start_txn().await.expect(TRANSACTION_FAILED_ERROR);
-
-                if let Some(vec) = link.connection.nodes {
-                    let runners = vec
-                        .iter()
-                        .map(|option| {
-                            let runner = option.as_ref().unwrap();
-
-                            //create a list of attribute sets
-                            format!(
-                                r#"{{ 
-                            runner_id: "{runner_id}",
-                            paused: "{paused}"
-                        }}"#,
-                                runner_id = runner.id.0,
-                                paused = runner.paused
-                            )
-                        })
-                        .collect::<Vec<_>>()
-                        .join(",\n");
-
-                    let cypher_query = format!(
-                        "
-                        MERGE (group:GitlabGroup {{ group_id: \"{group_id}\" }})
-                        WITH group
-                        UNWIND [{runners}] AS runner_data
-                        MERGE (runner:GitlabRunner {{ project_id: runner_data.runner_id }})
-                        WITH runner, group
-                        MERGE (runner)-[r:IN_GROUP]->(group)
-                        ",
-                        group_id = link.resource_id
-                    );
-
-                    debug!(cypher_query);
-                    transaction
-                        .run(Query::new(cypher_query))
-                        .await
-                        .expect("Expected to run query.");
-                    if let Err(e) = transaction.commit().await {
-                        error!("Error committing transaction to graph: {e}");
+                    GitlabData::GroupProjects(link) => {
+        
+                        if let Some(vec) = link.connection.nodes {
+                            let projects = vec
+                                .iter()
+                                .map(|option| {
+                                    let project = option.as_ref().unwrap();
+        
+                                    //create a list of attribute sets
+                                    format!(
+                                        r#"{{ project_id: "{project_id}" }}"#,
+                                        project_id = project.id
+                                    )
+                                })
+                                .collect::<Vec<_>>()
+                                .join(",\n");
+        
+                            let cypher_query = format!(
+                                "
+                                MERGE (group:GitlabGroup {{ group_id: \"{group_id}\" }})
+                                WITH group
+                                UNWIND [{projects}] AS project_data
+                                MERGE (project:GitlabProject {{ project_id: project_data.project_id }})
+                                with project, group
+                                MERGE (project)-[r:IN_GROUP]->(group)
+                                ",
+                                group_id = link.resource_id
+                            );
+        
+                            debug!(cypher_query);
+                            if let Err(e) = transaction.run(Query::new(cypher_query)).await {
+                                myself.stop(Some(QUERY_RUN_FAILED.to_string()));
+                                
+                            }
+                            
+                            if let Err(e) = transaction.commit().await {
+                                myself.stop(Some(QUERY_COMMIT_FAILED.to_string()));
+                            }
+                            info!("Committed transaction to database");
+                        }
                     }
-                    info!("Committed transaction to database");
+                    GitlabData::GroupRunners(link) => {
+                        let mut transaction = state.graph.start_txn().await.expect(TRANSACTION_FAILED_ERROR);
+        
+                        if let Some(vec) = link.connection.nodes {
+                            let runners = vec
+                                .iter()
+                                .map(|option| {
+                                    let runner = option.as_ref().unwrap();
+        
+                                    //create a list of attribute sets
+                                    format!(
+                                        r#"{{ 
+                                    runner_id: "{runner_id}",
+                                    paused: "{paused}"
+                                }}"#,
+                                        runner_id = runner.id.0,
+                                        paused = runner.paused
+                                    )
+                                })
+                                .collect::<Vec<_>>()
+                                .join(",\n");
+        
+                            let cypher_query = format!(
+                                "
+                                MERGE (group:GitlabGroup {{ group_id: \"{group_id}\" }})
+                                WITH group
+                                UNWIND [{runners}] AS runner_data
+                                MERGE (runner:GitlabRunner {{ project_id: runner_data.runner_id }})
+                                WITH runner, group
+                                MERGE (runner)-[r:IN_GROUP]->(group)
+                                ",
+                                group_id = link.resource_id
+                            );
+        
+                            debug!(cypher_query);
+                            if let Err(e) = transaction.run(Query::new(cypher_query)).await {
+                                myself.stop(Some(QUERY_RUN_FAILED.to_string()));
+                                
+                            }
+                            
+                            if let Err(e) = transaction.commit().await {
+                                myself.stop(Some(QUERY_COMMIT_FAILED.to_string()));
+                            }
+                            info!("Committed transaction to database");
+                        }
+                    }
+        
+                    _ => (),
                 }
+                
             }
-
-            _ => (),
+            Err(e) => myself.stop(Some(format!("{TRANSACTION_FAILED_ERROR}. {e}")))
         }
+        
         Ok(())
     }
 }

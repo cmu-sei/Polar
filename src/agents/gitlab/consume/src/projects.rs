@@ -21,7 +21,7 @@
    DM24-0470
 */
 
-use crate::{subscribe_to_topic, GitlabConsumerArgs, GitlabConsumerState, TRANSACTION_FAILED_ERROR};
+use crate::{subscribe_to_topic, GitlabConsumerArgs, GitlabConsumerState, QUERY_COMMIT_FAILED, QUERY_RUN_FAILED, TRANSACTION_FAILED_ERROR};
 use common::types::GitlabData;
 use common::PROJECTS_CONSUMER_TOPIC;
 use neo4rs::Query;
@@ -42,11 +42,11 @@ impl Actor for GitlabProjectConsumer {
         args: GitlabConsumerArgs,
     ) -> Result<Self::State, ActorProcessingErr> {
         debug!("{myself:?} starting, connecting to broker");
-        match subscribe_to_topic(args.registration_id, PROJECTS_CONSUMER_TOPIC.to_string()).await {
+        match subscribe_to_topic(args.registration_id, PROJECTS_CONSUMER_TOPIC.to_string(), args.graph_config).await {
             Ok(state) => Ok(state),
             Err(e) => {
                 let err_msg =
-                    format!("Error subscribing to topic \"{PROJECTS_CONSUMER_TOPIC}\" {e}");
+                    format!("Error starting actor: \"{PROJECTS_CONSUMER_TOPIC}\" {e}");
                 Err(ActorProcessingErr::from(err_msg))
             }
         }
@@ -64,57 +64,61 @@ impl Actor for GitlabProjectConsumer {
 
     async fn handle(
         &self,
-        _myself: ActorRef<Self::Msg>,
+        myself: ActorRef<Self::Msg>,
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        match message {
-            GitlabData::Projects(projects) => {
-                let mut transaction = state
-                    .graph
-                    .start_txn()
-                    .await
-                    .expect(TRANSACTION_FAILED_ERROR);
-                // Create list of projects
-                let project_array = projects.iter()
-                    .map(|project| {
-                        format!(
-                            r#"{{ project_id: "{project_id}", name: "{name}", full_path: "{full_path}", created_at: "{created_at}", last_activity_at: "{last_activity_at}" }}"#,
-                            project_id = project.id,
-                            name = project.name,
-                            full_path = project.full_path,
-                            created_at = project.created_at.clone().unwrap_or_default(),
-                            last_activity_at = project.last_activity_at.clone().unwrap_or_default(),
-                        )
-                    })
-                    .collect::<Vec<_>>()
-                    .join(",\n");
 
-                // Here, we write a query that creates additional nodes for the group and namespace of the project
-                let cypher_query = format!(
-                    "
-                    UNWIND [{project_array}] AS project_data
-                    MERGE (project:GitlabProject {{ project_id: project_data.project_id }})
-                    SET project.name = project_data.name,
-                        project.full_path = project_data.full_path,
-                        project.created_at = project_data.created_at,
-                        project.last_activity_at = project_data.last_activity_at
-                    "
-                );
+        match state.graph.start_txn().await {
+            Ok(mut transaction) => {
+                match message {
+                    GitlabData::Projects(projects) => {
 
-                debug!(cypher_query);
-                transaction
-                    .run(Query::new(cypher_query))
-                    .await
-                    .expect("Expected to run query.");
-
-                transaction
-                    .commit()
-                    .await
-                    .expect("Expected to commit transaction");
-                info!("Transaction committed.");
+                        // Create list of projects
+                        let project_array = projects.iter()
+                            .map(|project| {
+                                format!(
+                                    r#"{{ project_id: "{project_id}", name: "{name}", full_path: "{full_path}", created_at: "{created_at}", last_activity_at: "{last_activity_at}" }}"#,
+                                    project_id = project.id,
+                                    name = project.name,
+                                    full_path = project.full_path,
+                                    created_at = project.created_at.clone().unwrap_or_default(),
+                                    last_activity_at = project.last_activity_at.clone().unwrap_or_default(),
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                            .join(",\n");
+        
+                        // Here, we write a query that creates additional nodes for the group and namespace of the project
+                        let cypher_query = format!(
+                            "
+                            UNWIND [{project_array}] AS project_data
+                            MERGE (project:GitlabProject {{ project_id: project_data.project_id }})
+                            SET project.name = project_data.name,
+                                project.full_path = project_data.full_path,
+                                project.created_at = project_data.created_at,
+                                project.last_activity_at = project_data.last_activity_at
+                            "
+                        );
+        
+                        debug!(cypher_query);
+                        if let Err(e) = transaction.run(Query::new(cypher_query)).await {
+                            myself.stop(Some(QUERY_RUN_FAILED.to_string()));
+                            
+                        }
+                        
+                        if let Err(e) = transaction.commit().await {
+                            myself.stop(Some(QUERY_COMMIT_FAILED.to_string()));
+                        }
+                        info!("Transaction committed.");
+                    }
+                    _ => (),
+                }
+         
             }
-            _ => (),
+            Err(e) => {
+                myself.stop(Some(format!("{TRANSACTION_FAILED_ERROR}. {e}")))
+            }
         }
         Ok(())
     }
