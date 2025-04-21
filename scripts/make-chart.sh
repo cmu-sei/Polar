@@ -50,6 +50,7 @@ DHALL_ROOT="$1"
 UMBRELLA_CHART_NAME="$2"
 RENDER_TEMPLATE=false
 
+
 if [ "$3" == "--render-templates" ]; then
     RENDER_TEMPLATE=true
 fi
@@ -86,11 +87,21 @@ mkdir -p "$TEMPLATES_DIR"
 GLOBAL_CHART_DHALL="$DHALL_ROOT/chart.dhall"
 GLOBAL_VALUES_DHALL="$DHALL_ROOT/values.dhall"
 CHART_YAML="$UMBRELLA_CHART_DIR/Chart.yaml"
+HELMIGNORE_FILE="$UMBRELLA_CHART_DIR/.helmignore"
 
 if [[ ! -f "$GLOBAL_CHART_DHALL" ]]; then
     echo "[ERROR] Error: Missing global 'chart.dhall' in '$DHALL_ROOT'." >&2
     exit 1
 fi
+
+echo "[INFO] Writing .helmignore file."
+cat <<EOF > $HELMIGNORE_FILE
+
+# Ignore any SOPS-encrypted secret manifests
+*-secret.yaml
+*-secrets.yaml
+.helmignore
+EOF
 
 echo "[INFO] Converting global 'chart.dhall' to 'Chart.yaml'..."
 if ! dhall-to-yaml --file "$GLOBAL_CHART_DHALL" > "$CHART_YAML"; then
@@ -106,14 +117,6 @@ if [[ ! -f "$GLOBAL_VALUES_DHALL" ]]; then
     echo "[ERROR] Error: Missing global 'values.dhall' in '$DHALL_ROOT'." >&2
     exit 1
 fi
-
-echo "[INFO] Converting 'values.dhall' to 'values.yaml'..."
-if ! dhall-to-yaml --file "$GLOBAL_VALUES_DHALL" > "$VALUES_YAML"; then
-    echo "[ERROR] Error: Failed to convert 'values.dhall' to 'values.yaml'." >&2
-    exit 1
-fi
-
-echo "[SUCCESS] Generated 'values.yaml' for umbrella chart."
 
 echo "[INFO] Generating umbrella chart templates."
 convert_dhall_to_yaml "$DHALL_ROOT/templates" "$UMBRELLA_CHART_DIR/templates"
@@ -157,29 +160,33 @@ for SERVICE_DIR in "$DHALL_ROOT"/*/; do
     find "$SERVICE_DIR" -maxdepth 1 -type f -name "*.dhall" ! -name "chart.dhall" | while read -r dhall_file; do
         yaml_file="$CHILD_TEMPLATES_DIR/$(basename "${dhall_file%.dhall}.yaml")"
         
-        echo "   [INFO] Converting: $dhall_file -> $yaml_file"        
-        if ! dhall-to-yaml --file "$dhall_file" > "$yaml_file"; then
-            echo "[ERROR] Error: Failed to convert $dhall_file" >&2
-            exit 1
+        # If the file looks like a secret, encrypt it with SOPS before we write it
+        if [[ "$dhall_file" =~ -secret\.dhall$ ]]; then
+            echo "[INFO] Encrypting secret from $dhall_file"
+            
+            # So, yes, we'd rather use a .sops.yaml, but SOPS just doesn't work when I define one, even when passed a --config flag. So here we are.
+            # If we get to a point where we need to define more speicifc configs, we should make one.
+            if ! dhall-to-yaml --file "$dhall_file" | sops -encrypt --verbose --azure-kv https://sandboxakssopskeyvault.vault.usgovcloudapi.net/keys/polar-ci-key/d33eb084f2b54014b01c224165c7f268 --output-type yaml /dev/stdin > "$yaml_file"; then
+                echo "[ERROR] Failed to encrypt $yaml_file with SOPS" >&2
+                exit 1
+            fi
+        else
+            echo "[INFO] Converting: $dhall_file -> $yaml_file"
+            
+            if ! dhall-to-yaml --file "$dhall_file" > "$yaml_file"; then
+                echo "[ERROR] Error: Failed to convert $dhall_file" >&2
+                exit 1
+            fi
         fi
-        # TODO: Enable SOPS encryption w/ Azure key vault
-        # If the file looks like a secret, encrypt it with SOPS
-        # if [[ "$dhall_file" =~ -secret\.dhall$ ]]; then
-        #     echo "   [INFO] Encrypting secret YAML with SOPS: $yaml_file"            
-        #     if ! sops --encrypt --in-place "$yaml_file"; then
-        #         echo "[ERROR] Failed to encrypt $yaml_file with SOPS" >&2
-        #         exit 1
-        #     fi
-        # fi
-
     done
+
 
     echo "[SUCCESS] Finished processing $CHILD_CHART_NAME."
 done
 
 # Run Helm linting
 echo "Running Helm lint check on the umbrella chart..."
-if ! helm lint "$UMBRELLA_CHART_NAME"; then
+if ! helm lint "$UMBRELLA_CHART_NAME" --with-subcharts ; then
     echo "[ERROR] Helm linting failed!" >&2
 fi
 

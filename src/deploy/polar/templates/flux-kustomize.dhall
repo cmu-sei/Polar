@@ -7,7 +7,7 @@ let Kustomization = { apiVersion = "kustomize.toolkit.fluxcd.io/v1"
   { interval = "10m"
   , path = "./chart"
   , prune = True
-  , sourceRef = { kind = "GitRepository", name = values;.deployRepository.name }
+  , sourceRef = { kind = "GitRepository", name = values.deployRepository.name }
   , targetNamespace = values.namespace
   , timeout = "1m"
   }

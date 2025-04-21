@@ -243,8 +243,6 @@ let neo4j =
         , leafIssuer = "db-ca-issuer"
         , caSecretName = "root-ca-secret"
         , leafSecretName = "neo4j-keypair"
-        -- , boltMountPath = "${neo4jHomePath}/certificates/bolt"
-        -- , httpsMountPath = "${neo4jHomePath}/certificates/https"
       }
       -- Here we define some volume configurations
       -- We're targeting an azure k8s cluster, so we'll use default managed-csi storage for now
@@ -272,6 +270,7 @@ let neo4jUiAddr = "${neo4jDNSName}:${Natural/show neo4jPorts.https}"
 in
 
 {   namespace
+,   deployRepository
 ,   sandboxHostSuffix
 ,   sandboxRegistry
 ,   mtls
