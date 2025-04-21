@@ -108,18 +108,6 @@ generate-charts:
     # If we do, we should probably make a template for this job and parameterize it
     # - git checkout -B "$CI_COMMIT_BRANCH"
 
-    # Generate structured metadata to include as part of the commit
-    - |
-      cat <<EOF > chart/metadata.yaml
-      source_commit: "$CI_COMMIT_SHA"
-      source_repo: "$CI_REPOSITORY_URL"
-      created_at: "$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
-      ci_pipeline:
-        id: "$CI_PIPELINE_ID"
-        url: "$CI_PIPELINE_URL"
-      environment: "$TARGET_ENV"
-      EOF
-    
     # Commit and push if there are changes
     - |
       git config user.email $GITLAB_USER_EMAIL
@@ -131,7 +119,18 @@ generate-charts:
       if git diff --cached --quiet && ! git ls-files --others --exclude-standard | grep .; then
         echo "No changes detected, skipping commit."
       else
-        echo "Detected changes to polar helm chart, pushing upstream..."
+        echo "Detected changes to polar helm chart, writing metadata and pushing upstream..."
+
+        cat <<EOF > chart/metadata.yaml
+        source_commit: "$CI_COMMIT_SHA"
+        source_repo: "$CI_REPOSITORY_URL"
+        created_at: "$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+        ci_pipeline:
+          id: "$CI_PIPELINE_ID"
+          url: "$CI_PIPELINE_URL"
+        environment: "$TARGET_ENV"
+        EOF
+        git add chart/metadata.yaml
         git commit -m "Update manifests from source commit $CI_COMMIT_SHA"
         git push origin "sandbox"
       fi

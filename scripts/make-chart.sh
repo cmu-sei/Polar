@@ -87,21 +87,11 @@ mkdir -p "$TEMPLATES_DIR"
 GLOBAL_CHART_DHALL="$DHALL_ROOT/chart.dhall"
 GLOBAL_VALUES_DHALL="$DHALL_ROOT/values.dhall"
 CHART_YAML="$UMBRELLA_CHART_DIR/Chart.yaml"
-HELMIGNORE_FILE="$UMBRELLA_CHART_DIR/.helmignore"
 
 if [[ ! -f "$GLOBAL_CHART_DHALL" ]]; then
     echo "[ERROR] Error: Missing global 'chart.dhall' in '$DHALL_ROOT'." >&2
     exit 1
 fi
-
-echo "[INFO] Writing .helmignore file."
-cat <<EOF > $HELMIGNORE_FILE
-
-# Ignore any SOPS-encrypted secret manifests
-*-secret.yaml
-*-secrets.yaml
-.helmignore
-EOF
 
 echo "[INFO] Converting global 'chart.dhall' to 'Chart.yaml'..."
 if ! dhall-to-yaml --file "$GLOBAL_CHART_DHALL" > "$CHART_YAML"; then
