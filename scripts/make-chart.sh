@@ -98,6 +98,11 @@ TEMPLATES_DIR="$UMBRELLA_CHART_DIR/templates"
 mkdir -p "$CHILD_CHART_DEST_DIR"
 mkdir -p "$TEMPLATES_DIR"
 
+#add helm ignore, don't look at metadata
+cat << EOF > "$UMBRELLA_CHART_DIR/.helmignore"
+metadata.yaml
+EOF
+
 # Convert the global Dhall chart definition to YAML
 GLOBAL_CHART_DHALL="$DHALL_ROOT/chart.dhall"
 GLOBAL_VALUES_DHALL="$DHALL_ROOT/values.dhall"

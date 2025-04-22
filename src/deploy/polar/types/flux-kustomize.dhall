@@ -12,4 +12,5 @@ let Kustomization = { apiVersion = "kustomize.toolkit.fluxcd.io/v1"
   , timeout = "1m"
   }
 }
+
 in Kustomization
