@@ -35,6 +35,42 @@ build-dev-environment:
     - skopeo inspect docker-archive://$(readlink -f ./polar-dev)
     - skopeo copy docker-archive://$(readlink -f ./polar-dev) docker://$CI_REGISTRY_IMAGE/polar-dev:0.1.0
 
+build-ci-environment:
+  image: registry.sandbox.labz.s-box.org/sei/polar-mirror/nix:2.24.13
+  stage: build
+  rules:
+    - changes:
+      - dev/flake.nix
+      - dev/flake.lock
+      - dev/packages.nix
+      - .gitlab-ci.yml
+  script:
+      #install needed tools
+    - nix-env --install --attr nixpkgs.skopeo
+
+    - |
+      mkdir -p "$HOME/.config/nix"
+      printf "experimental-features = nix-command flakes" > "$HOME/.config/nix/nix.conf"
+      mkdir -p "/etc/containers"
+      echo '{"default":[{"type":"insecureAcceptAnything"}]}' > /etc/containers/policy.json
+      git config --global --add safe.directory "$(pwd)"
+    - cd dev
+    # So, nix's container tooling doesn't easily support pulling from private registries very well, luckily, skopeo works just fine.
+    # This is a workaround for now, since our registires sit behind a proxy and there's no nice way of providing CA certificates.
+    # Our CI image is based on the official nix image used to build it,
+    # So we need our own local copy of it, for the flake to see it
+    # 
+    - skopeo login --username "$CI_REGISTRY_USER" --password "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
+    - skopeo copy docker://registry.sandbox.labz.s-box.org/sei/polar-mirror/nix:2.24.13 oci:nix.tar
+    # git add or else nix won't see the downloaded image
+    - git add nix.tar
+    # build ci environment
+    - nix build --eval-system x86_64-linux --show-trace .#ciContainer -o polar-ci 
+    
+    # Use skopeo to inspect and upload our images
+    - skopeo inspect docker-archive://$(readlink -f ./polar-ci )
+    - skopeo copy docker-archive://$(readlink -f ./polar-ci ) docker://$CI_REGISTRY_IMAGE/polar-ci:0.1.0
+
 build-workspace:
   image: registry.sandbox.labz.s-box.org/sei/polar-mirror/polar-ci:0.1.0
   stage: build
@@ -89,6 +125,8 @@ generate-charts:
   stage: charts
   variables:
     TARGET_ENV: sandbox
+    # Point SOPS at the azure gov login URL
+    AZURE_CLOUD_NAME: AzureUSGovernment
   script:
     # Clone the chart repo
     # NOTE: A deploy key should be used used to enable read/write perms
@@ -121,13 +159,13 @@ generate-charts:
         echo "Detected changes to polar helm chart, writing metadata and pushing upstream..."
 
         cat <<EOF > chart/metadata.yaml
-        source_commit: "$CI_COMMIT_SHA"
-        source_repo: "$CI_REPOSITORY_URL"
-        created_at: "$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
-        ci_pipeline:
-          id: "$CI_PIPELINE_ID"
-          url: "$CI_PIPELINE_URL"
-        environment: "$TARGET_ENV"
+          source_commit: "$CI_COMMIT_SHA"
+          source_repo: "$CI_REPOSITORY_URL"
+          created_at: "$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+          ci_pipeline:
+            id: "$CI_PIPELINE_ID"
+            url: "$CI_PIPELINE_URL"
+          environment: "$TARGET_ENV"
         EOF
         git add chart/metadata.yaml
         git commit -m "Update manifests from source commit $CI_COMMIT_SHA"
