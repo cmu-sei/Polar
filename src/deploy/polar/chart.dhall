@@ -1,6 +1,6 @@
 { apiVersion = "v2"
 , name = "polar"
-, description = "A Helm chart for deploying the Polar application"
+, description = "A Helm chart for deploying the Polar framework"
 , type = "application"
 , version = "0.1.0"
 , appVersion = "0.1.0"

@@ -14,6 +14,7 @@ let sandboxRegistry
         kubernetes.LocalObjectReference::{ name = Some "sandbox-registry" }
     ]
   }
+
 let gitRepoSecret = kubernetes.SecretReference::{ name = Some "flux-repo-secret", namespace = Some namespace }
 -- The git repository FluxCD will look in for the latest version of the rendered chart.
 let deployRepository = {
@@ -22,7 +23,7 @@ let deployRepository = {
     = { interval = "5m0s"
     , ref.branch = "sandbox"
     , url = "https://gitlab.sandbox.labz.s-box.org/sei/polar-deploy"
-    , secretRef = gitRepoSecret
+    , secretRef.name = gitRepoSecret.name
     }
 }
 

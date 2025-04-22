@@ -1,5 +1,14 @@
 #!/bin/bash
 
+convert_and_encrypt() {        
+    # So, yes, we'd rather use a .sops.yaml, but SOPS just doesn't work when I define one, even when passed a --config flag. So here we are.
+    # If we get to a point where we need to define more speicifc configs, we should make one.
+    if ! dhall-to-yaml --file "$1" | sops -encrypt --verbose --azure-kv https://sandboxakssopskeyvault.vault.usgovcloudapi.net/keys/polar-ci-key/d33eb084f2b54014b01c224165c7f268 --output-type yaml /dev/stdin > "$2"; then
+        echo "[ERROR] Failed to encrypt $2 with SOPS" >&2
+        exit 1
+    fi
+}
+
 convert_dhall_to_yaml() {
     local dhall_dir="$1"
     local output_dir="$2"
@@ -22,11 +31,17 @@ convert_dhall_to_yaml() {
         # Create the necessary directories for the yaml file
         mkdir -p "$(dirname "$yaml_file")"
 
-        echo "[INFO] Converting: $dhall_file -> $yaml_file"
-
-        if ! dhall-to-yaml --file "$dhall_file" > "$yaml_file"; then
-            echo "[ERROR] Error converting $dhall_file" >&2
-            return 1
+        # If the file looks like a secret, encrypt it with SOPS before we write it
+        if [[ "$dhall_file" =~ -secret\.dhall$ ]]; then
+            echo "[INFO] Encrypting secret from $dhall_file"
+            convert_and_encrypt $dhall_file $yaml_file
+        else
+            echo "[INFO] Converting: $dhall_file -> $yaml_file"
+            
+            if ! dhall-to-yaml --file "$dhall_file" > "$yaml_file"; then
+                echo "[ERROR] Error: Failed to convert $dhall_file" >&2
+                exit 1
+            fi
         fi
     done
 
@@ -153,13 +168,7 @@ for SERVICE_DIR in "$DHALL_ROOT"/*/; do
         # If the file looks like a secret, encrypt it with SOPS before we write it
         if [[ "$dhall_file" =~ -secret\.dhall$ ]]; then
             echo "[INFO] Encrypting secret from $dhall_file"
-            
-            # So, yes, we'd rather use a .sops.yaml, but SOPS just doesn't work when I define one, even when passed a --config flag. So here we are.
-            # If we get to a point where we need to define more speicifc configs, we should make one.
-            if ! dhall-to-yaml --file "$dhall_file" | sops -encrypt --verbose --azure-kv https://sandboxakssopskeyvault.vault.usgovcloudapi.net/keys/polar-ci-key/d33eb084f2b54014b01c224165c7f268 --output-type yaml /dev/stdin > "$yaml_file"; then
-                echo "[ERROR] Failed to encrypt $yaml_file with SOPS" >&2
-                exit 1
-            fi
+            convert_and_encrypt $dhall_file $yaml_file
         else
             echo "[INFO] Converting: $dhall_file -> $yaml_file"
             
