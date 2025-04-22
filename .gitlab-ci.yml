@@ -126,8 +126,6 @@ generate-charts:
   stage: charts
   variables:
     TARGET_ENV: sandbox
-    # Point SOPS at the azure gov login URL
-    AZURE_ENVIRONMENT: "AzureUSGovernmentCloud"
   script:
     # Clone the chart repo
     # NOTE: A deploy key should be used used to enable read/write perms
@@ -159,16 +157,16 @@ generate-charts:
       else
         echo "Detected changes to polar helm chart, writing metadata and pushing upstream..."
 
-        cat <<EOF > chart/metadata.yaml
-          source_commit: "$CI_COMMIT_SHA"
-          source_repo: "$CI_REPOSITORY_URL"
-          created_at: "$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
-          ci_pipeline:
-            id: "$CI_PIPELINE_ID"
-            url: "$CI_PIPELINE_URL"
-          environment: "$TARGET_ENV"
-        EOF
+        cat <<'EOF' > chart/metadata.yaml
+source_commit: "$CI_COMMIT_SHA"
+source_repo: "$CI_REPOSITORY_URL"
+created_at: "$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+ci_pipeline:
+  id: "$CI_PIPELINE_ID"
+  url: "$CI_PIPELINE_URL"
+environment: "$TARGET_ENV"
+EOF
         git add chart/metadata.yaml
         git commit -m "Update manifests from source commit $CI_COMMIT_SHA"
         git push origin "sandbox"
-      fi
+
