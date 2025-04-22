@@ -6,12 +6,13 @@ let release = { apiVersion = "helm.toolkit.fluxcd.io/v2"
 , spec =
   { chart.spec
     =
-    { chart = "polar"
+    { chart = "chart" -- Path to the chart, not the name
     , sourceRef =
       { kind = "GitRepository"
       , name = values.deployRepository.name
       , namespace = values.namespace
       }
+      releaseName = "polar"
     }
   , interval = "5m"
   }
