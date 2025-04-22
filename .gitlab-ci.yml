@@ -150,14 +150,16 @@ generate-charts:
       git config user.email $GITLAB_USER_EMAIL
       git config user.name ci-job-$CI_JOB_NAME-$CI_JOB_ID
       git add .
+    
       echo "Updated files:"
       git diff --name-only --cached
+    
       if git diff --cached --quiet && ! git ls-files --others --exclude-standard | grep .; then
         echo "No changes detected, skipping commit."
       else
         echo "Detected changes to polar helm chart, writing metadata and pushing upstream..."
+        export TIMESTAMP=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
         envsubst < ../scripts/chart-metadata.yaml.tpl > chart/metadata.yaml
         git add chart/metadata.yaml
         git commit -m "Update manifests from source commit $CI_COMMIT_SHA"
-        git push origin "sandbox"
-
+        git push origin "$TARGET_ENV"
