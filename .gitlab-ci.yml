@@ -1,5 +1,5 @@
 stages:
-- build
+- environment-setup
 - test
 - charts
 
@@ -9,7 +9,7 @@ default:
 
 build-dev-environment:
   image: registry.sandbox.labz.s-box.org/sei/polar-mirror/nix:2.24.13
-  stage: build
+  stage: environment-setup
   rules:
     - changes:
       - dev/flake.nix
@@ -37,7 +37,8 @@ build-dev-environment:
 
 build-ci-environment:
   image: registry.sandbox.labz.s-box.org/sei/polar-mirror/nix:2.24.13
-  stage: build
+  stage: environment-setup
+  allow_failure: true # we can always push it up ourselves, remove once this is stable.
   rules:
     - changes:
       - dev/flake.nix
@@ -61,7 +62,7 @@ build-ci-environment:
     # So we need our own local copy of it, for the flake to see it
     # 
     - skopeo login --username "$CI_REGISTRY_USER" --password "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
-    - skopeo copy docker://registry.sandbox.labz.s-box.org/sei/polar-mirror/nix:2.24.13 oci:nix.tar
+    - skopeo copy docker://registry.sandbox.labz.s-box.org/sei/polar-mirror/nix:2.24.13 docker-archive:nix.tar:nix:24.13
     # git add or else nix won't see the downloaded image
     - git add nix.tar
     # build ci environment
