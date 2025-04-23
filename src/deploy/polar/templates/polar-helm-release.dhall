@@ -4,7 +4,7 @@ let release = { apiVersion = "helm.toolkit.fluxcd.io/v2"
 , kind = "HelmRelease"
 , metadata = { name = "polar", namespace = values.namespace }
 , spec =
-  { chart.spec
+  { chart.spec 
     =
     { chart = "chart" -- Path to the chart, not the name
     , sourceRef =
@@ -12,7 +12,7 @@ let release = { apiVersion = "helm.toolkit.fluxcd.io/v2"
       , name = values.deployRepository.name
       , namespace = values.namespace
       }
-      releaseName = "polar"
+    , releaseName = "polar"
     }
   , interval = "5m"
   }
