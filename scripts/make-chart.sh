@@ -1,13 +1,24 @@
 #!/bin/bash
 
-convert_and_encrypt() {        
-    # So, yes, we'd rather use a .sops.yaml, but SOPS just doesn't work when I define one, even when passed a --config flag. So here we are.
-    # If we get to a point where we need to define more speicifc configs, we should make one.
-    if ! dhall-to-yaml --file "$1" | sops -encrypt --verbose --output-type yaml /dev/stdin > "$2"; then
-        echo "[ERROR] Failed to encrypt $2 with SOPS" >&2
+convert_and_encrypt() {
+    input_dhall="$1"
+    output_yaml="$2"
+
+    # Convert Dhall to YAML
+    if ! dhall-to-yaml --file "$input_dhall" > "$output_yaml"; then
+        echo "[ERROR] Failed to convert $input_dhall to YAML" >&2
+        rm -f "$output_yaml"
+        exit 1
+    fi
+
+    # Encrypt the YAML using SOPS with local .sops.yaml config
+    if ! sops -e --config .sops.yaml --in-place --output-type yaml "$output_yaml"; then
+        echo "[ERROR] Failed to encrypt $output_yaml with SOPS" >&2
+        rm -f "$output_yaml"
         exit 1
     fi
 }
+
 
 convert_dhall_to_yaml() {
     local dhall_dir="$1"
