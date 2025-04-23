@@ -54,3 +54,24 @@ helm install polar polar-deploy/chart -n polar --create-namespace
 
 Flux sits on the cluster constantly watching our Git repository and detects every change we make to the helm chart.
 If the GitRepository or Kustomization manifests are updated, Flux will automatically pick up those changes and deploy them to the Kubernetes cluster, closing the loop to ensure continuous deployment!
+
+At this time, many environment variables need to be present within our CI/CD environment. 
+Particularly those related to our Azure cloud environment.
+
+Firstly, a service principal had to be created to maintain read access to our key vaults. So we need some of the follwing vars.
+
+`AZURE_CLIENT_ID` – The client ID of the Azure service principal
+`AZURE_TENANT_ID` – The Azure tenant ID where the application is registered.
+`ACR_USERNAME` - the username associated with the ACR token
+`ACR_TOKEN` – The token used to authenticate with the azure container registry so we can upload our images.
+`AZURE_CLIENT_SECRET` – Token used to authenticate with azure.
+`AZURE_ENVIRONMENT` - Should be "AzureUsGovernment" since that's what we're using
+`AZURE_AUTHORITY_HOST` - Should point to the Azure Gov login (.us suffix)
+
+Then there are the variables needed for actually deploying Polar's services.
+
+`GITLAB_USER` - A username for authenticating with gitlab, particularly for flux's uses
+`GITLAB_TOKEN` - A token for authenticating with gitlab.
+`NEO4J_AUTH` - The default credentials for the Neo4J instance.
+
+Each of Polar's services will also need environment variables of their own when deployed. See their README files for details.

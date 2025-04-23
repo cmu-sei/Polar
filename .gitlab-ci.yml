@@ -8,118 +8,113 @@ default:
   tags:
     - kubernetes
 
-# TODO: The pipeline takes too long. Reenable once the pipeline stablizes for continuous deployment
-# build-dev-environment:
-#   image: registry.sandbox.labz.s-box.org/sei/polar-mirror/nix:2.24.13
-#   stage: environment-setup
-#   rules:
-#     - changes:
-#       - dev/flake.nix
-#       - dev/flake.lock
-#       - dev/packages.nix
-#       - .gitlab-ci.yml
-#   script:
-#       #install needed tools
-#     - nix-env --install --attr nixpkgs.skopeo
-#     - |
-#       mkdir -p "$HOME/.config/nix"
-#       printf "experimental-features = nix-command flakes" > "$HOME/.config/nix/nix.conf"
-#       mkdir -p "/etc/containers"
-#       echo '{"default":[{"type":"insecureAcceptAnything"}]}' > /etc/containers/policy.json
-#       git config --global --add safe.directory "$(pwd)"
-#     - cd dev
+build-dev-environment:
+  image: registry.sandbox.labz.s-box.org/sei/polar-mirror/nix:2.24.13
+  stage: environment-setup
+  rules:
+    - changes:
+      - dev/flake.nix
+      - dev/flake.lock
+      - dev/packages.nix
+      - .gitlab-ci.yml
+  script:
+      #install needed tools
+    - nix-env --install --attr nixpkgs.skopeo
+    - |
+      mkdir -p "$HOME/.config/nix"
+      printf "experimental-features = nix-command flakes" > "$HOME/.config/nix/nix.conf"
+      mkdir -p "/etc/containers"
+      echo '{"default":[{"type":"insecureAcceptAnything"}]}' > /etc/containers/policy.json
+      git config --global --add safe.directory "$(pwd)"
+    - cd dev
 
-#     # build dev and testing environments
-#     - nix build --eval-system x86_64-linux --show-trace .#default -o polar-dev 
+    # build dev and testing environments
+    - nix build --eval-system x86_64-linux --show-trace .#default -o polar-dev 
     
-#     #  Use skopeo to inspect and upload our images
-#     - skopeo login --username "$CI_REGISTRY_USER" --password "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
-#     - skopeo inspect docker-archive://$(readlink -f ./polar-dev)
-#     - skopeo copy docker-archive://$(readlink -f ./polar-dev) docker://$CI_REGISTRY_IMAGE/polar-dev:0.1.0
-# build-ci-environment:
-#   image: registry.sandbox.labz.s-box.org/sei/polar-mirror/nix:2.24.13
-#   stage: environment-setup
-#   rules:
-#     - changes:
-#       - dev/flake.nix
-#       - dev/flake.lock
-#       - dev/packages.nix
-#       - .gitlab-ci.yml
-#   script:
-#       #install needed tools
-#     - nix-env --install --attr nixpkgs.skopeo
+    #  Use skopeo to inspect and upload our images
+    - skopeo login --username "$CI_REGISTRY_USER" --password "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
+    - skopeo inspect docker-archive://$(readlink -f ./polar-dev)
+    - skopeo copy docker-archive://$(readlink -f ./polar-dev) docker://$CI_REGISTRY_IMAGE/polar-dev:0.1.0
+build-ci-environment:
+  image: registry.sandbox.labz.s-box.org/sei/polar-mirror/nix:2.24.13
+  stage: environment-setup
+  rules:
+    - changes:
+      - dev/flake.nix
+      - dev/flake.lock
+      - dev/packages.nix
+      - .gitlab-ci.yml
+  script:
+      #install needed tools
+    - nix-env --install --attr nixpkgs.skopeo
 
-#     - |
-#       mkdir -p "$HOME/.config/nix"
-#       printf "experimental-features = nix-command flakes" > "$HOME/.config/nix/nix.conf"
-#       mkdir -p "/etc/containers"
-#       echo '{"default":[{"type":"insecureAcceptAnything"}]}' > /etc/containers/policy.json
-#       git config --global --add safe.directory "$(pwd)"
-#     - cd dev
-#     # So, nix's container tooling doesn't easily support pulling from private registries very well, luckily, skopeo works just fine.
-#     # This is a workaround for now, since our registires sit behind a proxy and there's no nice way of providing CA certificates.
-#     # Our CI image is based on the official nix image used to build it,
-#     # So we need our own local copy of it, for the flake to see it
-#     # 
-#     - skopeo login --username "$CI_REGISTRY_USER" --password "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
-#     - skopeo copy docker://registry.sandbox.labz.s-box.org/sei/polar-mirror/nix:2.24.13 docker-archive:nix.tar:nix:24.13
-#     # git add or else nix won't see the downloaded image
-#     - git add nix.tar
-#     # build ci environment
-#     - nix build --eval-system x86_64-linux --show-trace .#ciContainer -o polar-ci 
+    - |
+      mkdir -p "$HOME/.config/nix"
+      printf "experimental-features = nix-command flakes" > "$HOME/.config/nix/nix.conf"
+      mkdir -p "/etc/containers"
+      echo '{"default":[{"type":"insecureAcceptAnything"}]}' > /etc/containers/policy.json
+      git config --global --add safe.directory "$(pwd)"
+    - cd dev
+    # So, nix's container tooling doesn't support pulling from private registries very well, luckily, skopeo works just fine.
+    - skopeo login --username "$CI_REGISTRY_USER" --password "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
+    - skopeo copy docker://registry.sandbox.labz.s-box.org/sei/polar-mirror/nix:2.24.13 docker-archive:nix.tar:nix:24.13
+    # git add or else nix won't see the downloaded image
+    - git add nix.tar
+    # build ci environment
+    - nix build --eval-system x86_64-linux --show-trace .#ciContainer -o polar-ci 
     
-#     # Use skopeo to inspect and upload our images
-#     - skopeo inspect docker-archive://$(readlink -f ./polar-ci )
-#     - skopeo copy docker-archive://$(readlink -f ./polar-ci ) docker://$CI_REGISTRY_IMAGE/polar-ci:0.1.0
+    # Use skopeo to inspect and upload our images
+    - skopeo inspect docker-archive://$(readlink -f ./polar-ci )
+    - skopeo copy docker-archive://$(readlink -f ./polar-ci ) docker://$CI_REGISTRY_IMAGE/polar-ci:0.1.0
 
-# build-workspace:
-#   image: registry.sandbox.labz.s-box.org/sei/polar-mirror/polar-ci:0.1.0
-#   stage: build
-#   variables:
-#     AZURE_REGISTRY: sandboxaksacr.azurecr.us/polar
-#   script:
-#     - git config --global --add safe.directory "$(pwd)"
+build-workspace:
+  image: registry.sandbox.labz.s-box.org/sei/polar-mirror/polar-ci:0.1.0
+  stage: build
+  variables:
+    AZURE_REGISTRY: sandboxaksacr.azurecr.us/polar
+  script:
+    - git config --global --add safe.directory "$(pwd)"
     
-#     - cd src/agents
-#     # build workspace
-#     - nix build --eval-system x86_64-linux --show-trace .#default
+    - cd src/agents
+    # build workspace
+    - nix build --eval-system x86_64-linux --show-trace .#default
     
-#     # Vulnerability analysis on our store
-#     # vulnix returns nonzero exit codes, so we need to get around this.
-#     # SEE: https://github.com/nix-community/vulnix/issues/79
-#     - vulnix --json result > vulnix-report.json || export VULNIX_EXIT=$?
-#     - |
-#       if [[ "$VULNIX_EXIT" -eq 2 ]]; then
-#         echo "Non-whitelisted vulnerabilities found!"
-#       elif [[ "$VULNIX_EXIT" -eq 1 ]]; then
-#         echo "Only whitelisted vulnerabilities found."
-#       elif [[ "$VULNIX_EXIT" -eq 0 ]]; then
-#         echo "Nothing found, is the store empty?"  
-#       fi
+    # Vulnerability analysis on our store
+    # vulnix returns nonzero exit codes, so we need to get around this.
+    # SEE: https://github.com/nix-community/vulnix/issues/79
+    - vulnix --json result > vulnix-report.json || export VULNIX_EXIT=$?
+    - |
+      if [[ "$VULNIX_EXIT" -eq 2 ]]; then
+        echo "Non-whitelisted vulnerabilities found!"
+      elif [[ "$VULNIX_EXIT" -eq 1 ]]; then
+        echo "Only whitelisted vulnerabilities found."
+      elif [[ "$VULNIX_EXIT" -eq 0 ]]; then
+        echo "Nothing found, is the store empty?"  
+      fi
     
-#     # using already built dependencies, package and containerize our components.
-#     - nix build --eval-system x86_64-linux --show-trace .#cassiniImage -o cassini
-#     - nix build --eval-system x86_64-linux --show-trace .#observerImage -o observer
-#     - nix build --eval-system x86_64-linux --show-trace .#consumerImage -o consumer
-#     - ls -lh
-#     # Use skopeo to inspect and upload our images
-#     - skopeo login --username "$CI_REGISTRY_USER" --password "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
-#     - | 
-#       skopeo inspect docker-archive://$(readlink -f cassini)
-#       skopeo copy docker-archive://$(readlink -f cassini) docker://$CI_REGISTRY_IMAGE/cassini:0.1.0
-#       skopeo inspect docker-archive://$(readlink -f observer)
-#       skopeo copy docker-archive://$(readlink -f observer) docker://$CI_REGISTRY_IMAGE/polar-gitlab-observer:0.1.0
-#       skopeo inspect docker-archive://$(readlink -f consumer)
-#       skopeo copy docker-archive://$(readlink -f consumer) docker://$CI_REGISTRY_IMAGE/polar-gitlab-consumer:0.1.0
+    # using already built dependencies, package and containerize our components.
+    - nix build --eval-system x86_64-linux --show-trace .#cassiniImage -o cassini
+    - nix build --eval-system x86_64-linux --show-trace .#observerImage -o observer
+    - nix build --eval-system x86_64-linux --show-trace .#consumerImage -o consumer
+    - ls -lh
+    # Use skopeo to inspect and upload our images
+    - skopeo login --username "$CI_REGISTRY_USER" --password "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
+    - | 
+      skopeo inspect docker-archive://$(readlink -f cassini)
+      skopeo copy docker-archive://$(readlink -f cassini) docker://$CI_REGISTRY_IMAGE/cassini:0.1.0
+      skopeo inspect docker-archive://$(readlink -f observer)
+      skopeo copy docker-archive://$(readlink -f observer) docker://$CI_REGISTRY_IMAGE/polar-gitlab-observer:0.1.0
+      skopeo inspect docker-archive://$(readlink -f consumer)
+      skopeo copy docker-archive://$(readlink -f consumer) docker://$CI_REGISTRY_IMAGE/polar-gitlab-consumer:0.1.0
 
-#     # upload to ACR
-#     - skopeo copy --dest-creds "$ACR_USERNAME:$ACR_TOKEN" docker-archive://$(readlink -f cassini) docker://$AZURE_REGISTRY/cassini:0.1.0
-#     - skopeo copy --dest-creds "$ACR_USERNAME:$ACR_TOKEN" docker-archive://$(readlink -f observer) docker://$AZURE_REGISTRY/polar-gitlab-observer:0.1.0
-#     - skopeo copy --dest-creds "$ACR_USERNAME:$ACR_TOKEN" docker-archive://$(readlink -f consumer) docker://$AZURE_REGISTRY/polar-gitlab-consumer:0.1.0
+    # upload to ACR
+    - skopeo copy --dest-creds "$ACR_USERNAME:$ACR_TOKEN" docker-archive://$(readlink -f cassini) docker://$AZURE_REGISTRY/cassini:0.1.0
+    - skopeo copy --dest-creds "$ACR_USERNAME:$ACR_TOKEN" docker-archive://$(readlink -f observer) docker://$AZURE_REGISTRY/polar-gitlab-observer:0.1.0
+    - skopeo copy --dest-creds "$ACR_USERNAME:$ACR_TOKEN" docker-archive://$(readlink -f consumer) docker://$AZURE_REGISTRY/polar-gitlab-consumer:0.1.0
 
-#   artifacts:
-#     paths:
-#       - src/agents/vulnix-report.json
+  artifacts:
+    paths:
+      - src/agents/vulnix-report.json
 
 generate-charts:
   image: registry.sandbox.labz.s-box.org/sei/polar-mirror/polar-ci:0.1.0
@@ -134,7 +129,7 @@ generate-charts:
   
     # Generate helm charts and push them to a hosted repository 
     - chmod +x ./scripts/make-chart.sh
-    # delete old charts
+    # delete old charts to make room for new configurations
     - rm -rf polar-deploy/chart/
 
     # write new charts
@@ -145,11 +140,6 @@ generate-charts:
     # If we do, we should probably make a template for this job and parameterize it
     # - git checkout -B "$CI_COMMIT_BRANCH"
 
-    # Commit and push if there are changes
-
-    -  git config user.email $GITLAB_USER_EMAIL
-    -  git config user.name ci-job-$CI_JOB_NAME-$CI_JOB_ID
-    -  git add .
     # Commit and push if there are changes
     - |
       git config user.email $GITLAB_USER_EMAIL
