@@ -1,0 +1,3 @@
+creation_rules:
+- encrypted_regex: '^(data|stringData)$'
+  azure_keyvault: https://sandboxakssopskeyvault.vault.usgovcloudapi.net/keys/sandboxAks-sops-keys/d2e9a50321c947ba8f556def39788b78

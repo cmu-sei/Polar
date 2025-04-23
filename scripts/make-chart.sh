@@ -3,7 +3,7 @@
 convert_and_encrypt() {        
     # So, yes, we'd rather use a .sops.yaml, but SOPS just doesn't work when I define one, even when passed a --config flag. So here we are.
     # If we get to a point where we need to define more speicifc configs, we should make one.
-    if ! dhall-to-yaml --file "$1" | sops -encrypt --verbose --azure-kv https://sandboxakssopskeyvault.vault.usgovcloudapi.net/keys/polar-ci-key/d33eb084f2b54014b01c224165c7f268 --output-type yaml /dev/stdin > "$2"; then
+    if ! dhall-to-yaml --file "$1" | sops -encrypt --verbose --output-type yaml /dev/stdin > "$2"; then
         echo "[ERROR] Failed to encrypt $2 with SOPS" >&2
         exit 1
     fi

@@ -33,10 +33,26 @@ Before starting, ensure you have the following installed:
     ```bash
     # Builds a full rust development environment for the project
     nix build .#devContainer
-    
-    # build the CI/CD container for a more lean testing environment
-    nix build .#ciContainer
     ```
+
+    **The CI Container**    
+    
+    To build the CI/CD container for a more lean testing environment, we first need to download the base nix image.
+
+    ```sh
+    skopeo copy docker://nixos/nix:2.24.13 docker-archive:nix.tar:nix:24.13
+    ```
+
+    This is because of limiations within the nix ecosystem. The nixpkgs dockertools don't natively sujpport pulling images from private repositories, and nix2container, a library for managing containers with nix, 
+    doesn't support configuring CA certificates to pull images from our private, proxied registries. 
+    
+    (At least, not at time of writing!)
+     
+    So we're kindof stuck when working in more regulated environments.
+
+    Once you have the nix image downloaded and present as a tarfile, you can run the build command for the derivation.
+
+    nix build .#ciContainer
 
 3. **Load the Docker image:**
 
