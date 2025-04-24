@@ -130,6 +130,12 @@ if ! dhall-to-yaml --file "$GLOBAL_CHART_DHALL" > "$CHART_YAML"; then
     exit 1
 fi
 
+echo "[INFO] Converting global 'values.dhall' to 'values.yaml'..."
+if ! dhall-to-yaml --file "$DHALL_ROOT/values.dhall" > "$UMBRELLA_CHART_DIR/values.yaml"; then
+    echo "[ERROR] Error: Failed to convert 'chart.dhall' to 'Chart.yaml'." >&2
+    exit 1
+fi
+
 echo "[SUCCESS] Generated 'Chart.yaml' for umbrella chart."
 
 # Convert global values.dhall to values.yaml
