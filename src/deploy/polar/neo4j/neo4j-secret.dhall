@@ -9,7 +9,7 @@ let token = kubernetes.Secret::{
 apiVersion = "v1"
 , kind = "Secret"
 , metadata = kubernetes.ObjectMeta::{
-    name = Some values.neo4j.name
+    name = Some "neo4j-secret"
     , namespace = Some values.neo4j.namespace
     }
 -- , data : Optional (List { mapKey : Text, mapValue : Text })
