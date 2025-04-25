@@ -36,6 +36,7 @@ default:
 #     - skopeo login --username "$CI_REGISTRY_USER" --password "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
 #     - skopeo inspect docker-archive://$(readlink -f ./polar-dev)
 #     - skopeo copy docker-archive://$(readlink -f ./polar-dev) docker://$CI_REGISTRY_IMAGE/polar-dev:0.1.0
+
 build-ci-environment:
   image: registry.sandbox.labz.s-box.org/sei/polar-mirror/nix:2.24.13
   stage: environment-setup
@@ -131,16 +132,12 @@ generate-charts:
     # Generate helm charts and push them to a hosted repository 
     - chmod +x ./scripts/make-chart.sh
     # delete old charts to make room for new configurations
-    - rm -rf polar-deploy/chart/
+    - rm -rf polar-deploy/manifests/
 
     # write new charts
-    - sh scripts/make-chart.sh src/deploy/polar polar-deploy/chart
+    - sh scripts/render-manifests.sh src/deploy/polar polar-deploy/manifests
     - cd polar-deploy
     
-    # We might want to commit to other environment-specific branchhes.
-    # If we do, we should probably make a template for this job and parameterize it
-    # - git checkout -B "$CI_COMMIT_BRANCH"
-
     # Commit and push if there are changes
     - |
       git config user.email $GITLAB_USER_EMAIL
@@ -149,14 +146,10 @@ generate-charts:
     
       echo "Updated files:"
       git diff --name-only --cached
-    
-      if git diff --cached --quiet && ! git ls-files --others --exclude-standard | grep .; then
-        echo "No changes detected, skipping commit."
-      else
-        echo "Detected changes to polar helm chart, writing metadata and pushing upstream..."
-        export TIMESTAMP=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
-        envsubst < ../scripts/metadata.yaml.tpl > chart/metadata.yaml
-        git add chart/metadata.yaml
-        git commit -m "Update manifests from source commit $CI_COMMIT_SHA"
-        git push origin "sandbox"
-      fi
+      
+      echo "Writing metadata and pushing upstream..."
+      export TIMESTAMP=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
+      envsubst < ../scripts/metadata.yaml.tpl > manifests/metadata.yaml
+      git add manifests/metadata.yaml
+      git commit -m "Update manifests from source commit $CI_COMMIT_SHA"
+      git push origin "sandbox"

@@ -1,8 +1,5 @@
 
-let kubernetes =
-      https://raw.githubusercontent.com/dhall-lang/dhall-kubernetes/refs/heads/master/1.31/package.dhall
-      sha256:1a0d599eabb9dd154957edc59bb8766ea59b4a245ae45bdd55450654c12814b0
-let chart = ./chart.dhall
+let kubernetes = ../types/kubernetes.dhall
 let namespace = "polar"
 let sandboxHostSuffix = "sandbox.labz.s-box.org"
 
@@ -65,7 +62,7 @@ let cassini =
   {
     name = "cassini"
   , namespace = namespace
-  , image = "${sandboxRegistry.url}/polar/cassini:${chart.appVersion}"
+  , image = "${sandboxRegistry.url}/polar/cassini:0.1.0"
   , imagePullSecrets = sandboxRegistry.imagePullSecrets
   , containerSecurityContext 
     = kubernetes.SecurityContext::{
@@ -173,13 +170,13 @@ let gitlab = {
     }    
     , observer = {
         name = "polar-gitlab-observer"
-        , image = "${sandboxRegistry.url}/polar/polar-gitlab-observer:${chart.appVersion}"
+        , image = "${sandboxRegistry.url}/polar/polar-gitlab-observer:0.1.0"
         , gitlabEndpoint = "https://gitlab.sandbox.labz.s-box.org/api/graphql"
         , gitlabSecret = gitlabSecret
     }
     , consumer = {
         name = "polar-gitlab-consumer"
-        , image = "${sandboxRegistry.url}/polar/polar-gitlab-consumer:${chart.appVersion}"
+        , image = "${sandboxRegistry.url}/polar/polar-gitlab-consumer:0.1.0"
         -- Settings to configure the consumer's connection to the graph database
         
         , graph = {
