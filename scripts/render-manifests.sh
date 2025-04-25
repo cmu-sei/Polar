@@ -88,7 +88,7 @@ echo "Writing manifests into $OUTPUT_DIR"
 
 mkdir -p "$OUTPUT_DIR"
 
-convert_dhall_to_yaml "$DHALL_ROOT/global" "$UMBRELLA_CHART_DIR/global"
+convert_dhall_to_yaml "$DHALL_ROOT/global" "$OUTPUT_DIR"
 
 
 # Process child charts
@@ -96,13 +96,11 @@ echo "🔍 Discovering and generating child charts..."
 for SERVICE_DIR in "$DHALL_ROOT"/*/; do
     [[ -d "$SERVICE_DIR" ]] || continue  # Skip non-directories
 
-
     SERVICE_NAME=$(basename "$SERVICE_DIR")
 
-    mkdir -p "$OUTPUT_DIR/$SERVICE_NAME" 
     echo "[INFO] Processing service: $SERVICE_NAME"    
 
-    convert_dhall_to_yaml "$DHALL_ROOT/$SERVICE_NAME" "$OUTPUT_DIR/$SERVICE_NAME"
+    convert_dhall_to_yaml "$DHALL_ROOT/$SERVICE_NAME" "$OUTPUT_DIR/"
 
     echo "[SUCCESS] Finished processing $SERVICE_NAME."
 done
