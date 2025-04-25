@@ -130,7 +130,7 @@ generate-charts:
     - git clone --depth 1 "https://$POLAR_DEPLOY_USER:$CHART_REPO_TOKEN@gitlab.sandbox.labz.s-box.org/sei/polar-deploy.git"
   
     # Generate helm charts and push them to a hosted repository 
-    - chmod +x ./scripts/make-chart.sh
+    - chmod +x ./scripts/render-manifests.sh
     # delete old charts to make room for new configurations
     - rm -rf polar-deploy/manifests/
 
@@ -146,7 +146,7 @@ generate-charts:
     
       echo "Updated files:"
       git diff --name-only --cached
-      
+
       echo "Writing metadata and pushing upstream..."
       export TIMESTAMP=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
       envsubst < ../scripts/metadata.yaml.tpl > manifests/metadata.yaml
