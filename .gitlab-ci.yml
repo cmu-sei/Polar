@@ -149,7 +149,7 @@ generate-charts:
 
       echo "Writing metadata and pushing upstream..."
       export TIMESTAMP=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
-      envsubst < ../scripts/metadata.yaml.tpl > manifests/metadata.yaml
-      git add manifests/metadata.yaml
+      envsubst < ../scripts/metadata.yaml.tpl > metadata.yaml
+      git add metadata.yaml
       git commit -m "Update manifests from source commit $CI_COMMIT_SHA"
       git push origin "sandbox"

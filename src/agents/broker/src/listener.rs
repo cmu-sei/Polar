@@ -338,24 +338,29 @@ impl Actor for Listener {
         let _ = tokio::spawn(async move {
             let mut buf_reader = tokio::io::BufReader::new(reader);
 
+            // parse incoming message length, this tells us what size of a message to expect.
             while let Ok(incoming_msg_length) = buf_reader.read_u32().await {
                 if incoming_msg_length > 0 {
+                    // createa buffer of exact size, and read data in.
                     let mut buffer = vec![0; incoming_msg_length as usize];
                     if let Ok(_) = buf_reader.read_exact(&mut buffer).await {
                         // use unsafe API for maximum performance
-                        let archived =
-                            rkyv::access::<ArchivedClientMessage, Error>(&buffer[..]).unwrap();
-
-                        // deserialize back to the original type
-                        if let Ok(deserialized) = deserialize::<ClientMessage, Error>(archived) {
-                            //convert datatype to broker_meessage, fields will be populated during message handling
-                            let converted_msg =
-                                BrokerMessage::from_client_message(deserialized, id.clone(), None);
-                            //debug!("Received message: {converted_msg:?}");
-                            myself
-                                .send_message(converted_msg)
-                                .expect("Could not forward message to handler");
+                        match rkyv::access::<ArchivedClientMessage, Error>(&buffer[..]) { 
+                            Ok(archived) =>  {
+                                // deserialize back to the original type
+                                if let Ok(deserialized) = deserialize::<ClientMessage, Error>(archived) {
+                                    //convert datatype to broker_meessage, fields will be populated during message handling
+                                    let converted_msg =
+                                        BrokerMessage::from_client_message(deserialized, id.clone(), None);
+                                    
+                                    myself
+                                        .send_message(converted_msg)
+                                        .expect("Could not forward message to handler");
+                                }
+                            }
+                            Err(e) => warn!("Failed to parse message: {e}")
                         }
+
                     }
                 }
             }
