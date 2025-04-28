@@ -37,7 +37,7 @@ use reqwest::{Certificate, Client, ClientBuilder};
 
 use common::types::{GitlabData, ResourceLink};
 use cynic::QueryBuilder;
-use gitlab_queries::*;
+use gitlab_queries::users::*;
 use rkyv::rancor::Error;
 use tokio::time;
 use tracing::{debug, error, info, warn};

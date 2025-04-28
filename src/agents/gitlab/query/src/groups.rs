@@ -5,6 +5,9 @@ use gitlab_schema::gitlab::CiRunnerConnection;
 use gitlab_schema::gitlab::{self as schema};
 use gitlab_schema::DateTimeString;
 use gitlab_schema::IdString;
+use crate::projects::ProjectConnection;
+use crate::users::UserCoreFragment;
+
 use rkyv::Archive;
 use rkyv::Deserialize;
 use rkyv::Serialize;
@@ -62,7 +65,7 @@ pub struct GroupMembersFragment {
 #[cynic(schema = "gitlab", graphql_type = "Group")]
 pub struct GroupProjectsFragment {
     pub id: IdString,
-    pub projects: Option<crate::ProjectConnection>,
+    pub projects: Option<ProjectConnection>,
     pub projects_count: i32,
 }
 
@@ -102,7 +105,7 @@ pub struct GroupMember {
     pub updated_at: Option<DateTimeString>,
 
     // User that is associated with the member object.
-    pub user: Option<crate::UserCoreFragment>,
+    pub user: Option<UserCoreFragment>,
     // Permissions for the current user on the resource.
     // pub user_permissions: GroupPermissions,
 }
@@ -122,12 +125,6 @@ pub struct GroupMemberEdge {
     pub node: Option<GroupMember>,
 }
 
-// #[derive(cynic::QueryFragment, Debug, Clone)]
-// #[cynic(schema = "gitlab")]
-// pub struct AccessLevel {
-//     pub string_value: Option<String>,
-//     pub integer_value: Option<i32>,
-// }
 
 // #[derive(cynic::QueryFragment, Debug, Clone)]
 // #[cynic(schema = "gitlab")]

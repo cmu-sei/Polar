@@ -25,7 +25,13 @@ impl fmt::Display for DateTimeString {
 #[derive(
     Debug, Serialize, Deserialize, serde::Deserialize, serde::Serialize, Archive, Clone, Default,
 )]
-pub struct IdString(String);
+pub struct IdString(pub String);
+
+impl IdString {
+    pub fn new<S: Into<String>>(s: S) -> Self {
+        IdString(s.into())
+    }
+}
 
 impl fmt::Display for IdString {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

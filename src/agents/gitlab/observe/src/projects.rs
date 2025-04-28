@@ -20,12 +20,12 @@
 
    DM24-0470
 */
-use crate::{GitlabObserverArgs, GitlabObserverMessage, GitlabObserverState, BROKER_CLIENT_NAME};
+use crate::{GitlabObserverArgs, GitlabObserverMessage, GitlabObserverState, BROKER_CLIENT_NAME, GITLAB_PIPELINE_OBSERVER};
 use cassini::{client::TcpClientMessage, ClientMessage};
 use common::types::GitlabData;
 use common::PROJECTS_CONSUMER_TOPIC;
 use cynic::{GraphQlResponse, QueryBuilder};
-use gitlab_queries::{MultiProjectQuery, MultiProjectQueryArguments};
+use gitlab_queries::projects::{MultiProjectQuery, MultiProjectQueryArguments};
 use ractor::{async_trait, registry::where_is, Actor, ActorProcessingErr, ActorRef};
 use reqwest::Client;
 use rkyv::rancor::Error;
@@ -122,16 +122,15 @@ impl Actor for GitlabProjectObserver {
                                     if let Some(projects) = connection.nodes {
                                         // Append nodes to the result list.
                                         read_projects.extend(projects.into_iter().map(|option| {
-                                            //TODO: Get project runners, issues, etc.
                                             option.unwrap()
                                         }));
                                     }
-
+                                    
                                     let tcp_client = where_is(BROKER_CLIENT_NAME.to_string())
                                         .expect("Expected to find client");
 
-                                    let data = GitlabData::Projects(read_projects);
-                                    // Serializing is as easy as a single function call
+                                    let data = GitlabData::Projects(read_projects.clone());
+                                    
                                     let bytes = rkyv::to_bytes::<Error>(&data).unwrap();
 
                                     let msg = ClientMessage::PublishRequest {
@@ -142,6 +141,18 @@ impl Actor for GitlabProjectObserver {
                                     tcp_client
                                         .send_message(TcpClientMessage::Send(msg))
                                         .expect("Expected to send message");
+
+
+                                    // inform the Pipeline Observer
+                                    if let Some(pipeline_observer) = where_is(GITLAB_PIPELINE_OBSERVER.to_string()) {
+                                        for project in read_projects {
+                                            let observe_msg = GitlabObserverMessage::GetProjectPipelines(project.full_path.clone());
+                                            pipeline_observer
+                                                .send_message(observe_msg)
+                                                .expect("Expected to send message to pipeline observer");
+                                        }
+                                    }
+
                                 }
                             }
                             Err(e) => todo!(),

@@ -4,6 +4,7 @@ use cassini::client::*;
 use common::dispatch::MessageDispatcher;
 use common::types::GitlabData;
 use common::GROUPS_CONSUMER_TOPIC;
+use common::PIPELINE_CONSUMER_TOPIC;
 use common::PROJECTS_CONSUMER_TOPIC;
 use common::RUNNERS_CONSUMER_TOPIC;
 use common::USER_CONSUMER_TOPIC;
@@ -24,6 +25,7 @@ use tracing::warn;
 
 use crate::get_neo_config;
 use crate::groups::GitlabGroupConsumer;
+use crate::pipelines::GitlabPipelineConsumer;
 use crate::projects::GitlabProjectConsumer;
 use crate::runners::GitlabRunnerConsumer;
 use crate::users::GitlabUserConsumer;
@@ -258,7 +260,17 @@ impl Actor for ConsumerSupervisor {
                                 error!("failed to start projects consumer. {e}");
                                 myself.stop(None);
                             }
-
+                            if let Err(e) = Actor::spawn_linked(
+                                Some(PIPELINE_CONSUMER_TOPIC.to_string()),
+                                GitlabPipelineConsumer,
+                                args.clone(),
+                                myself.clone().into(),
+                            )
+                            .await
+                            {
+                                error!("failed to start projects consumer. {e}");
+                                myself.stop(None);
+                            }
                             break;
                         } else if attempts < state.max_registration_attempts {
                             warn!("Failed to get session data. Retrying.");

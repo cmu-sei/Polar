@@ -26,15 +26,15 @@ pub mod projects;
 pub mod runners;
 pub mod supervisor;
 pub mod users;
+pub mod pipelines;
 
 use cynic::Operation;
 use gitlab_queries::groups::*;
 use gitlab_queries::runners::MultiRunnerQuery;
 use gitlab_queries::runners::MultiRunnerQueryArguments;
-use gitlab_queries::MultiProjectQuery;
-use gitlab_queries::MultiProjectQueryArguments;
-use gitlab_queries::MultiUserQuery;
-use gitlab_queries::MultiUserQueryArguments;
+use gitlab_queries::projects::{MultiProjectQuery, MultiProjectQueryArguments};
+use gitlab_queries::users::{MultiUserQuery, MultiUserQueryArguments};
+use gitlab_schema::IdString;
 use parse_link_header::parse_with_rel;
 use ractor::ActorRef;
 use reqwest::header::LINK;
@@ -47,6 +47,8 @@ use tracing::{debug, error};
 
 pub const GITLAB_USERS_OBSERVER: &str = "GITLAB_USERS_OBSERVER";
 pub const BROKER_CLIENT_NAME: &str = "gitlab_web_client";
+pub const GITLAB_PIPELINE_OBSERVER: &str = "GITLAB_PIPELINE_OBSERVER";
+
 const PRIVATE_TOKEN_HEADER_STR: &str = "PRIVATE-TOKEN";
 
 /// General state for all gitlab observers
@@ -73,7 +75,9 @@ pub enum GitlabObserverMessage {
     GetProjects(Operation<MultiProjectQuery, MultiProjectQueryArguments>),
     GetGroups(Operation<AllGroupsQuery, MultiGroupQueryArguments>),
     GetGroupMembers(Operation<GroupMembersQuery, GroupPathVariable>),
-    GetRunners(Operation<MultiRunnerQuery, MultiRunnerQueryArguments>),
+    GetRunners(Operation<MultiRunnerQuery, MultiRunnerQueryArguments>), 
+    GetProjectPipelines(IdString)
+    
 }
 
 pub async fn get_all_runners(

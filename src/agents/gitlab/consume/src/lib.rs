@@ -22,7 +22,7 @@
 */
 
 use cassini::{client::TcpClientMessage, ClientMessage};
-use gitlab_queries::{groups::GroupData, Namespace, Project};
+use gitlab_queries::{groups::GroupData, Namespace, projects::Project};
 use neo4rs::{Config, ConfigBuilder, Query, Txn};
 use ractor::{registry::where_is, ActorProcessingErr, MessagingErr};
 use std::{collections::VecDeque, error::Error};
@@ -34,6 +34,7 @@ pub mod projects;
 pub mod runners;
 pub mod supervisor;
 pub mod users;
+pub mod pipelines;
 
 pub const BROKER_CLIENT_NAME: &str = "GITLAB_CONSUMER_CLIENT";
 pub const GITLAB_USER_CONSUMER: &str = "users";

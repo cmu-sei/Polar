@@ -160,9 +160,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let client_config = TCPClientConfig::new();
 
-    let gitlab_endpoint = env::var("GITLAB_ENDPOINT").unwrap();
-    let broker_addr = env::var("BROKER_ADDR").unwrap();
-    let gitlab_token = env::var("GITLAB_TOKEN").unwrap();
+    let gitlab_endpoint = env::var("GITLAB_ENDPOINT").expect("Expected to find a value for GITLAB_ENDPOINT. Please provide a valid endpoint to a gitlab graphql endpoint.");
+    let broker_addr = env::var("BROKER_ADDR").expect("Expected to find a value for BROKER_ADDR. Please provide a valid DNS name for the cassini broker.");
+    let gitlab_token = env::var("GITLAB_TOKEN").expect("Expected to find a value for GITLAB_TOKEN.");
     let proxy_ca_cert_file = match env::var("PROXY_CA_CERT") { Ok(path) => Some(path), Err(_) => None };
 
 

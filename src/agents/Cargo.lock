@@ -1382,6 +1382,7 @@ dependencies = [
  "cynic",
  "cynic-codegen",
  "gitlab-queries",
+ "gitlab-schema",
  "log",
  "parse_link_header",
  "polar",

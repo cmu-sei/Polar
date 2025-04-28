@@ -166,12 +166,12 @@ impl Actor for GitlabUserConsumer {
         
                         debug!(cypher_query);
 
-                        if let Err(e) = transaction.run(Query::new(cypher_query)).await {
+                        if let Err(_) = transaction.run(Query::new(cypher_query)).await {
                             myself.stop(Some(QUERY_RUN_FAILED.to_string()));
                             
                         }
                         
-                        if let Err(e) = transaction.commit().await {
+                        if let Err(_) = transaction.commit().await {
                             myself.stop(Some(QUERY_COMMIT_FAILED.to_string()));
                         }
                         

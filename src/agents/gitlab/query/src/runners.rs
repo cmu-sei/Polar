@@ -1,4 +1,5 @@
-use crate::UserCoreFragment;
+use crate::users::UserCoreFragment;
+
 use gitlab_schema::{
     gitlab::{self as schema},
     DateTimeString, IdString,
@@ -40,7 +41,7 @@ pub struct CiRunner {
     pub status: CiRunnerStatus,
     pub contacted_at: Option<DateTimeString>,
     pub created_at: Option<DateTimeString>,
-    pub created_by: Option<UserCoreFragment>,
+    pub created_by: Option<crate::users::UserCoreFragment>,
     pub tag_list: Option<Vec<String>>,
 }
 
