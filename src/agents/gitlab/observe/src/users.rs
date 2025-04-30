@@ -222,10 +222,10 @@ impl Actor for GitlabUserObserver {
                             }
                         }
                     }
-                    Err(e) => error!("{e}"),
+                    Err(e) => warn!("Error observing data: {e}")
                 }
             }
-            _ => todo!(),
+            _ => (),
         }
         Ok(())
     }

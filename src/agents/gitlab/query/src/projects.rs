@@ -5,7 +5,7 @@ use gitlab_schema::gitlab::{self as schema};
 use gitlab_schema::{CiJobArtifactID, DateTimeString};
 use gitlab_schema::IdString;
 use gitlab_schema::JobIdString;
-use crate::runners::CiRunner;
+use crate::runners::CiRunnerIdFragment;
 use crate::PageInfo;
 use crate::Namespace;
 
@@ -39,11 +39,26 @@ pub struct ProjectPipelineFragment {
 }
 
 #[derive(cynic::QueryFragment, Clone, Deserialize, Serialize, rkyv::Archive)]
+#[cynic(schema = "gitlab", graphql_type = "Project")]
+pub struct ProjectPipelineJobsragment {
+    pub pipelines: Option<PipelineJobsConnection>
+}
+
+
+#[derive(cynic::QueryFragment, Clone, Deserialize, Serialize, rkyv::Archive)]
 #[cynic(schema = "gitlab", graphql_type = "Query", variables = "SingleProjectQueryArguments")]
 pub struct ProjectPipelineQuery {
     #[arguments(fullPath: $full_path)]
     pub project: Option<ProjectPipelineFragment>
 }
+
+#[derive(cynic::QueryFragment, Clone, Deserialize, Serialize, rkyv::Archive)]
+#[cynic(schema = "gitlab", graphql_type = "Query", variables = "SingleProjectQueryArguments")]
+pub struct ProjectPipelineJobsQuery {
+    #[arguments(fullPath: $full_path)]
+    pub project: Option<ProjectPipelineJobsragment>
+}
+
 
 #[derive(cynic::QueryFragment, Clone, Deserialize, Serialize, Archive)]
 #[cynic(schema = "gitlab")]
@@ -161,6 +176,14 @@ pub struct PipelineConnection {
   pub nodes: Option<Vec<Option<Pipeline>>>,
   pub page_info: PageInfo
 }
+
+#[derive(cynic::QueryFragment, Deserialize, Serialize, rkyv::Archive, Clone)]
+#[cynic(schema = "gitlab", graphql_type = "PipelineConnection")]
+pub struct PipelineJobsConnection {  
+  pub nodes: Option<Vec<Option<PipelineJobsFragment>>>,
+  pub page_info: PageInfo
+}
+
 #[derive(cynic::Enum, Deserialize, Serialize, rkyv::Archive, Clone)]
 #[cynic(schema = "gitlab")]
 pub enum CiJobStatus {
@@ -177,6 +200,27 @@ pub enum CiJobStatus {
     Skipped,
     Manual,
     Scheduled
+}
+
+impl fmt::Display for CiJobStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let status_str = match self {
+            CiJobStatus::Created => "created",
+            CiJobStatus::WaitingForResource => "waiting_for_resource",
+            CiJobStatus::Preparing => "preparing",
+            CiJobStatus::WaitingForCallback => "waiting_for_callback",
+            CiJobStatus::Pending => "pending",
+            CiJobStatus::Running => "running",
+            CiJobStatus::Success => "success",
+            CiJobStatus::Failed => "failed",
+            CiJobStatus::Canceling => "canceling",
+            CiJobStatus::Canceled => "canceled",
+            CiJobStatus::Skipped => "skipped",
+            CiJobStatus::Manual => "manual",
+            CiJobStatus::Scheduled => "scheduled",
+        };
+        write!(f, "{}", status_str)
+    }
 }
 
 #[derive(cynic::Enum, Deserialize, Serialize, rkyv::Archive, Clone)]
@@ -211,6 +255,52 @@ enum JobArtifactFileType {
     ClusterApplications, Cobertura, Dotenv, LoadPerformance, NetworkReferee
 }
 
+impl fmt::Display for JobArtifactFileType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let s = match self {
+            JobArtifactFileType::Archive => "archive",
+            JobArtifactFileType::Metadata => "metadata",
+            JobArtifactFileType::Trace => "trace",
+            JobArtifactFileType::Junit => "junit",
+            JobArtifactFileType::Metrics => "metrics",
+            JobArtifactFileType::MetricsReferee => "metrics_referee",
+            JobArtifactFileType::Lsif => "lsif",
+            JobArtifactFileType::Cyclonedx => "cyclonedx",
+            JobArtifactFileType::Annotations => "annotations",
+            JobArtifactFileType::RepositoryXray => "repository_xray",
+            JobArtifactFileType::Sast => "sast",
+            JobArtifactFileType::SecretDetection => "secret_detection",
+            JobArtifactFileType::DependencyScanning => "dependency_scanning",
+            JobArtifactFileType::ContainerScanning => "container_scanning",
+            JobArtifactFileType::ClusterImageScanning => "cluster_image_scanning",
+            JobArtifactFileType::Dast => "dast",
+            JobArtifactFileType::LicenseScanning => "license_scanning",
+            JobArtifactFileType::Accessibility => "accessibility",
+            JobArtifactFileType::Codequality => "codequality",
+            JobArtifactFileType::Performance => "performance",
+            JobArtifactFileType::BrowserPerformance => "browser_performance",
+            JobArtifactFileType::Terraform => "terraform",
+            JobArtifactFileType::Requirements => "requirements",
+            JobArtifactFileType::RequirementsV2 => "requirements_v2",
+            JobArtifactFileType::CoverageFuzzing => "coverage_fuzzing",
+            JobArtifactFileType::ApiFuzzing => "api_fuzzing",
+            JobArtifactFileType::ClusterApplications => "cluster_applications",
+            JobArtifactFileType::Cobertura => "cobertura",
+            JobArtifactFileType::Dotenv => "dotenv",
+            JobArtifactFileType::LoadPerformance => "load_performance",
+            JobArtifactFileType::NetworkReferee => "network_referee",
+        };
+        write!(f, "{}", s)
+    }
+}
+
+#[derive(cynic::QueryFragment, Deserialize, Serialize, rkyv::Archive, Clone)]
+#[cynic(schema = "gitlab")]
+pub struct CiJobConnection {
+    pub nodes: Option<Vec<Option<GitlabCiJob>>>,
+    pub page_info: PageInfo
+}
+
 /// A shallow pipeline query fragment, gets pipeline metadata
 #[derive(cynic::QueryFragment, Deserialize, Serialize, rkyv::Archive, Clone)]
 #[cynic(schema = "gitlab")]
@@ -232,6 +322,15 @@ pub struct Pipeline {
     // pub status: PipelineStatusEnum,
     pub trigger: bool,
     pub total_jobs: i32,
+    //TODO: This makes us break the complexity limit, write another fragement or query to get pipeline jobs
+    // pub jobs: Option<CiJobConnection>
+}
+
+#[derive(cynic::QueryFragment, Deserialize, Serialize, rkyv::Archive, Clone)]
+#[cynic(schema = "gitlab", graphql_type = "Pipeline")]
+pub struct PipelineJobsFragment {
+    pub id: IdString,
+    pub jobs: Option<CiJobConnection>
 }
 
 #[derive(cynic::QueryFragment, Deserialize, Serialize, rkyv::Archive, Clone)]
@@ -239,7 +338,8 @@ pub struct Pipeline {
 pub struct GitlabCiJob {
     pub id: Option<JobIdString>,
     pub status: Option<CiJobStatus>,
-    pub runner: Option<CiRunner>,
+    
+    pub runner: Option<CiRunnerIdFragment>,
     pub name: Option<String>,
     pub short_sha: String,
     pub tags: Option<Vec<String>>,

@@ -103,7 +103,9 @@ impl Actor for GitlabPipelineObserver {
                         match response.json::<GraphQlResponse<ProjectPipelineQuery>>().await {
                             Ok(deserialized) => {
                                 if let Some(errors) = deserialized.errors {
-                                    todo!()
+                                    for error in errors {
+                                        warn!("Received errors, {error:?}");
+                                    }
                                 }
                                 else if let Some(resp) = deserialized.data {
                                     
@@ -143,6 +145,151 @@ impl Actor for GitlabPipelineObserver {
                                                 }
 
                                                 }
+                                            None => ()
+                                        }
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                warn!("Failed to deserialize response: {e}")
+                            }
+                        }
+                    }
+                    Err(e) => {}
+                }
+
+            }
+            _ => todo!()
+        }
+        Ok(())
+    }
+}
+
+pub struct GitlabJobObserver;
+
+#[async_trait]
+impl Actor for GitlabJobObserver {
+    type Msg = GitlabObserverMessage;
+    type State = GitlabObserverState;
+    type Arguments = GitlabObserverArgs;
+
+    async fn pre_start(
+        &self,
+        myself: ActorRef<Self::Msg>,
+        args: GitlabObserverArgs,
+    ) -> Result<Self::State, ActorProcessingErr> {
+        debug!("{myself:?} starting");
+
+        let state = GitlabObserverState {
+            gitlab_endpoint: args.gitlab_endpoint,
+            token: args.token,
+            web_client: args.web_client,
+            registration_id: args.registration_id,
+        };
+        Ok(state)
+    }
+
+    async fn post_start(
+        &self,
+        myself: ActorRef<Self::Msg>,
+        state: &mut Self::State,
+    ) -> Result<(), ActorProcessingErr> {
+        info!("{myself:?} Started");
+        Ok(())
+    }
+
+    async fn handle(
+        &self,
+        myself: ActorRef<Self::Msg>,
+        message: Self::Msg,
+        state: &mut Self::State,
+    ) -> Result<(), ActorProcessingErr> {
+       
+        match message {
+            // So, this hanlder get's a little messy very quickly.
+            // GitLab's GraphQL API enforces a complexity limit, so querying deeply nested structures (like project → pipelines → jobs → artifacts) often requires splitting into smaller queries.
+            // This is simple, but keeping the code clean becomes cumbersome since cynic requires very explicit queries be made.
+            // As a result, I've split the logic such that:
+            // Our pipeline observer queries a project and returns its pipelines.
+            // Our job observer performs a narrower query: given a project, only fetch pipelines with their jobs, not full pipeline objects.
+
+            GitlabObserverMessage::GetPipelineJobs(full_path) => {
+                debug!("Getting pipelines for project: {full_path:?}");
+
+                // Gitlab's Jobs API will only return empty results for non admin users, since it'ls unlikey people will give admin level tokens
+                // we can instead rely on a project-level query and use a modified version of our pipelines query
+                let op = ProjectPipelineJobsQuery::build(SingleProjectQueryArguments { full_path: full_path.clone() } );
+
+                debug!("Sending query: {}", op.query);
+
+                match state
+                    .web_client
+                    .post(state.gitlab_endpoint.clone())
+                    .bearer_auth(state.token.clone().unwrap_or_default())
+                    .json(&op)
+                    .send()
+                    .await
+                {
+                    Ok(response) => {
+                        match response.json::<GraphQlResponse<ProjectPipelineJobsQuery>>().await {
+                            // Handle successful data response
+                            Ok(deserialized) => {
+                                if let Some(errors) = deserialized.errors {
+                                    for error in errors {
+                                        warn!("Received errors, {error:?}");
+                                    }
+                                }
+                                // sift through and dig down to find the jobs list. 
+                                
+                                else if let Some(resp) = deserialized.data {
+                                    if let Some(project) = resp.project {
+                                        match project.pipelines {
+                                            Some(connection) => {
+                                                if let Some(pipelines) = connection.nodes {
+                                                    if !pipelines.is_empty() {
+                                                        for p in pipelines {
+                                                            match p {
+                                                                Some(pipeline) => {
+
+                                                                    if let Some(conn) = pipeline.jobs {
+                                                                        // If pipeline has jobs, extract them
+                                                                        if let Some(jobs) = conn.nodes {
+                                                                            
+                                                                            let mut read_jobs: Vec<GitlabCiJob> = Vec::new();
+
+                                                                            // the meat of everything happens here
+                                                                            // wrap up job and add it to the vec
+
+                                                                            read_jobs.extend(jobs.into_iter().map(|option| {
+                                                                                let job = option.unwrap();
+                                                                                job
+                                                                            }));
+
+                                                                            let tcp_client = where_is(BROKER_CLIENT_NAME.to_string())
+                                                                            .expect("Expected to find client");
+                    
+                                                                            let data = GitlabData::Jobs((pipeline.id.0, read_jobs));
+                    
+                                                                            let bytes = rkyv::to_bytes::<Error>(&data).unwrap();
+                    
+                                                                            let msg = ClientMessage::PublishRequest {
+                                                                                topic: PIPELINE_CONSUMER_TOPIC.to_string(),
+                                                                                payload: bytes.to_vec(),
+                                                                                registration_id: Some(state.registration_id.clone()),
+                                                                            };
+                    
+                                                                            tcp_client
+                                                                                .send_message(TcpClientMessage::Send(msg))
+                                                                                .expect("Expected to send message");
+                                                                        }
+                                                                    }
+                                                                }
+                                                                None => ()
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
                                             None => ()
                                         }
                                     }

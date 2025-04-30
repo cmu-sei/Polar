@@ -20,7 +20,7 @@
 
    DM24-0470
 */
-use crate::{GitlabObserverArgs, GitlabObserverMessage, GitlabObserverState, BROKER_CLIENT_NAME, GITLAB_PIPELINE_OBSERVER};
+use crate::{GitlabObserverArgs, GitlabObserverMessage, GitlabObserverState, BROKER_CLIENT_NAME, GITLAB_JOBS_OBSERVER, GITLAB_PIPELINE_OBSERVER};
 use cassini::{client::TcpClientMessage, ClientMessage};
 use common::types::GitlabData;
 use common::PROJECTS_CONSUMER_TOPIC;
@@ -30,7 +30,7 @@ use ractor::{async_trait, registry::where_is, Actor, ActorProcessingErr, ActorRe
 use reqwest::Client;
 use rkyv::rancor::Error;
 use std::time::Duration;
-use tracing::debug;
+use tracing::{debug, warn};
 
 pub struct GitlabProjectObserver;
 
@@ -124,12 +124,23 @@ impl Actor for GitlabProjectObserver {
                                         read_projects.extend(projects.into_iter().map(|option| {
                                             let project = option.unwrap();
 
+                                            // get this project's pipeline runs
                                             let observe_msg = GitlabObserverMessage::GetProjectPipelines(project.full_path.clone());
                                             if let Some(pipeline_observer) = where_is(GITLAB_PIPELINE_OBSERVER.to_string()) {
                                                 pipeline_observer
                                                     .send_message(observe_msg)
                                                     .expect("Expected to send message to pipeline observer");
                                             }
+
+                                            // get jobs from this project's pipelines
+                                            let observe_msg = GitlabObserverMessage::GetPipelineJobs(project.full_path.clone());
+                                            if let Some(jobs_observer) = where_is(GITLAB_JOBS_OBSERVER.to_string()) {
+                                                jobs_observer
+                                                    .send_message(observe_msg)
+                                                    .expect("Expected to send message to pipeline observer");
+                                            }
+
+                                            //return the projects
                                             project
                                         }));
                                     }
@@ -153,10 +164,10 @@ impl Actor for GitlabProjectObserver {
 
                                 }
                             }
-                            Err(e) => todo!(),
+                            Err(e) => warn!("Error deserializing response from server: {e}"),
                         }
                     }
-                    Err(e) => todo!(),
+                    Err(e) => warn!("Error observing data: {e}")
                 }
             }
             _ => todo!(),

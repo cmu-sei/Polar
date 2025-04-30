@@ -19,12 +19,14 @@ use tracing::error;
 use tracing::{debug, info, warn};
 
 use crate::groups::GitlabGroupObserver;
+use crate::pipelines::GitlabJobObserver;
 use crate::pipelines::GitlabPipelineObserver;
 use crate::projects::GitlabProjectObserver;
 use crate::runners::GitlabRunnerObserver;
 use crate::users::GitlabUserObserver;
 use crate::GitlabObserverArgs;
 use crate::BROKER_CLIENT_NAME;
+use crate::GITLAB_JOBS_OBSERVER;
 use crate::GITLAB_PIPELINE_OBSERVER;
 use crate::GITLAB_USERS_OBSERVER;
 
@@ -139,6 +141,16 @@ impl Actor for ObserverSupervisor {
                             if let Err(e) = Actor::spawn_linked(
                                 Some(GITLAB_PIPELINE_OBSERVER.to_string()),
                                 GitlabPipelineObserver,
+                                args.clone(),
+                                myself.clone().into(),
+                            )
+                            .await
+                            {
+                                warn!("failed to start project observer {e}")
+                            }
+                            if let Err(e) = Actor::spawn_linked(
+                                Some(GITLAB_JOBS_OBSERVER.to_string()),
+                                GitlabJobObserver,
                                 args.clone(),
                                 myself.clone().into(),
                             )

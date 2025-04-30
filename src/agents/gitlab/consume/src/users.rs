@@ -21,13 +21,12 @@
    DM24-0470
 */
 
-
 use crate::{subscribe_to_topic, GitlabConsumerArgs, GitlabConsumerState, QUERY_COMMIT_FAILED, QUERY_RUN_FAILED, TRANSACTION_FAILED_ERROR};
 use common::types::GitlabData;
 use common::USER_CONSUMER_TOPIC;
 use neo4rs::Query;
-use ractor::{async_trait, registry::where_is, Actor, ActorProcessingErr, ActorRef};
-use tracing::{debug, error, field::debug, info, warn};
+use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef};
+use tracing::{debug, error, info};
 
 pub struct GitlabUserConsumer;
 

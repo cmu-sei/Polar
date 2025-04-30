@@ -45,6 +45,13 @@ pub struct CiRunner {
     pub tag_list: Option<Vec<String>>,
 }
 
+#[derive(cynic::QueryFragment, Deserialize, Serialize, Archive, Clone)]
+#[cynic(graphql_type = "CiRunner")]
+pub struct CiRunnerIdFragment {
+    pub id: CiRunnerID,
+    
+}
+
 #[derive(cynic::Enum, Clone, Copy, Debug, Deserialize, Serialize, Archive)]
 pub enum CiRunnerAccessLevel {
     NotProtected,

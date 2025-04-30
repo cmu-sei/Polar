@@ -25,6 +25,7 @@
 use crate::{subscribe_to_topic, GitlabConsumerArgs, GitlabConsumerState, TRANSACTION_FAILED_ERROR};
 use common::types::GitlabData;
 use common::PIPELINE_CONSUMER_TOPIC;
+use gitlab_queries::projects::GitlabCiJob;
 use gitlab_queries::projects::CiJobArtifact;
 use neo4rs::Query;
 use ractor::{async_trait, registry::where_is, Actor, ActorProcessingErr, ActorRef};
@@ -51,6 +52,70 @@ impl GitlabPipelineConsumer {
             .collect::<Vec<_>>()
             .join(", ")
     }
+
+    pub fn format_jobs(jobs: &Vec<GitlabCiJob>) -> String {
+        jobs.iter()
+            .map(|job| {
+                
+                let id = job.id.as_ref().map_or(String::new(), |v| v.0.clone());
+                let status = job.status.as_ref().map_or(String::new(), |v| format!("{v}"));
+                let runner = match &job.runner {
+                    Some(runner) => &runner.id.0,
+                    None => &String::default()
+                };                
+                let name = job.name.clone().unwrap_or_default();
+                let short_sha = &job.short_sha;
+                let tags = job
+                    .tags
+                    .as_ref()
+                    .map(|tags| {
+                        format!(
+                            "[{}]",
+                            tags.iter()
+                                .map(|tag| format!(r#""{}""#, tag))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        )
+                    })
+                    .unwrap_or_else(|| "[]".to_string());
+                let created_at = job.created_at.clone().unwrap_or_default();
+                let started_at = job.started_at.clone().unwrap_or_default();
+                let finished_at = job.finished_at.clone().unwrap_or_default();
+                let duration = job.duration.unwrap_or(0).to_string();
+                let failure_message = job.failure_message.clone().unwrap_or_default();
+    
+                format!(
+                    r#"{{
+                        id: "{id}",
+                        status: "{status}",
+                        name: "{name}",
+                        short_sha: "{short_sha}",
+                        tags: {tags},
+                        created_at: "{created_at}",
+                        started_at: "{started_at}",
+                        finished_at: "{finished_at}",
+                        duration: "{duration}",
+                        failure_message: "{failure_message}",
+                        runner: "{runner}"
+                    }}"#,
+                    id = id,
+                    status = status,
+                    name = name,
+                    short_sha = short_sha,
+                    tags = tags,
+                    created_at = created_at,
+                    started_at = started_at,
+                    finished_at = finished_at,
+                    duration = duration,
+                    failure_message = failure_message,
+                    runner = runner
+                )
+                
+            })
+            .collect::<Vec<_>>()
+            .join(",\n")
+    }
+    
 }
 #[async_trait]
 impl Actor for GitlabPipelineConsumer {
@@ -98,12 +163,12 @@ impl Actor for GitlabPipelineConsumer {
                         let pipelines_data = pipelines
                         .iter()
                         .map(|pipeline| {
-                            
+                            // if this pipeline produced artifacts, add them
                             let artifacts = match &pipeline.job_artifacts {
                                 Some(artifacts) => GitlabPipelineConsumer::format_artifacts(&artifacts),
                                 None => String::default()
                             };
-                    
+                            
                             format!(
                                 r#"{{
                                     id: "{id}",
@@ -115,6 +180,7 @@ impl Actor for GitlabPipelineConsumer {
                                     duration: "{duration}",
                                     total_jobs: "{total_jobs}",
                                     artifacts: [ {artifacts} ]
+                                    
                                 }}"#,
                                 id = pipeline.id.0,
                                 active = pipeline.active,
@@ -124,7 +190,8 @@ impl Actor for GitlabPipelineConsumer {
                                 complete = pipeline.complete,
                                 duration = pipeline.duration.unwrap_or_default(),
                                 total_jobs = pipeline.total_jobs,
-                                artifacts = artifacts
+                                artifacts = artifacts,
+                                // jobs = jobs
                             )
                         })
                         .collect::<Vec<_>>()
@@ -156,8 +223,7 @@ impl Actor for GitlabPipelineConsumer {
                             MERGE (p)-[:HAS_ARTIFACT]->(a)
                             "
                         );
-                        
-            
+
                     
                         debug!("Executing Cypher: {}", cypher_query);
                     
@@ -172,6 +238,51 @@ impl Actor for GitlabPipelineConsumer {
                         }
 
                     }
+                   GitlabData::Jobs((pipeline_id, jobs)) => {
+                    
+                        let cypher_job_list = GitlabPipelineConsumer::format_jobs(&jobs);
+                    
+                        let cypher_query = format!(r#"
+                        
+                        MERGE (p: GitlabPipeline {{id: "{pipeline_id}" }})
+                        WITH p
+                        UNWIND [{cypher_job_list}] AS job
+                        MERGE (j:GitlabCiJob {{id: job.id }})
+                        SET j.status = job.status,
+                            j.name = job.name,
+                            j.short_sha = job.short_sha,
+                            j.tags = job.tags,
+                            j.created_at = job.created_at,
+                            j.started_at = job.started_at,
+                            j.finished_at = job.finished_at,
+                            j.duration = job.duration,
+                            j.failure_message = job.failure_message,
+                            j.runner = job.runner
+                        MERGE (p)-[:HAS_JOB]->(j)
+
+                        WITH j
+
+                        WITH j
+                        FOREACH (_ IN CASE WHEN j.runner IS NOT NULL THEN [1] ELSE [] END |
+                            MERGE (r:GitlabRunner { runner_id: j.runner })
+                            MERGE (r)-[:HAS_JOB]-(j)
+                        )
+
+                        "#);
+
+                        debug!("Executing Cypher: {}", cypher_query);
+                    
+                        transaction.run(Query::new(cypher_query)).await?;
+
+                    
+                        if let Err(e) = transaction.commit().await {
+                            error!("Failed to commit pipelines transaction: {:?}", e);
+                            // Up to you if you want to stop the actor or recover
+                        } else {
+                            info!("Committed pipelines batch transaction to database");
+                        }
+
+                   }
                     _ => (),
                 }        
             }

@@ -142,7 +142,7 @@ impl Actor for GitlabRunnerObserver {
                             }
                         }
                     }
-                    Err(e) => todo!(),
+                    Err(e) => warn!("Error observing data: {e}")
                 }
             }
             _ => (),

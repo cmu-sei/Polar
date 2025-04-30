@@ -48,7 +48,7 @@ use tracing::{debug, error};
 pub const GITLAB_USERS_OBSERVER: &str = "GITLAB_USERS_OBSERVER";
 pub const BROKER_CLIENT_NAME: &str = "gitlab_web_client";
 pub const GITLAB_PIPELINE_OBSERVER: &str = "GITLAB_PIPELINE_OBSERVER";
-
+pub const GITLAB_JOBS_OBSERVER: &str = "GITLAB_JOBS_OBSERVER";
 const PRIVATE_TOKEN_HEADER_STR: &str = "PRIVATE-TOKEN";
 
 /// General state for all gitlab observers
@@ -76,8 +76,8 @@ pub enum GitlabObserverMessage {
     GetGroups(Operation<AllGroupsQuery, MultiGroupQueryArguments>),
     GetGroupMembers(Operation<GroupMembersQuery, GroupPathVariable>),
     GetRunners(Operation<MultiRunnerQuery, MultiRunnerQueryArguments>), 
-    GetProjectPipelines(IdString)
-    
+    GetProjectPipelines(IdString),
+    GetPipelineJobs(IdString),
 }
 
 pub async fn get_all_runners(

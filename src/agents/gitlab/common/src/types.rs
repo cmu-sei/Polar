@@ -25,7 +25,7 @@ use gitlab_queries::{
     groups::GroupData,
     groups::GroupMemberConnection,
     runners::{CiRunner, CiRunnerConnection},
-    projects::{Project, ProjectConnection, ProjectMemberConnection, Pipeline},
+    projects::{Project, ProjectConnection, ProjectMemberConnection, Pipeline, GitlabCiJob},
     users::UserCoreFragment
 };
 use gitlab_schema::IdString;
@@ -46,7 +46,7 @@ pub enum GitlabData {
     GroupProjects(ResourceLink<ProjectConnection>),
     Runners(Vec<CiRunner>),
     // RunnerJob((u32, Job)),
-    // Jobs(Vec<Job>),
+    Jobs((String, Vec<GitlabCiJob>)),
     Pipelines((String, Vec<Pipeline>)),
     // PipelineJobs(ResourceLink<Job>)
 }

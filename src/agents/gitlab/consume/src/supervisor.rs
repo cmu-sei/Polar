@@ -268,7 +268,7 @@ impl Actor for ConsumerSupervisor {
                             )
                             .await
                             {
-                                error!("failed to start projects consumer. {e}");
+                                error!("failed to start pipeline consumer. {e}");
                                 myself.stop(None);
                             }
                             break;
