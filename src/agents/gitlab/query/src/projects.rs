@@ -1,10 +1,11 @@
 
 
 use std::fmt;
-use cynic::*;
 use gitlab_schema::gitlab::{self as schema};
-use gitlab_schema::DateTimeString;
+use gitlab_schema::{CiJobArtifactID, DateTimeString};
 use gitlab_schema::IdString;
+use gitlab_schema::JobIdString;
+use crate::runners::CiRunner;
 use crate::PageInfo;
 use crate::Namespace;
 
@@ -158,7 +159,56 @@ pub struct ProjectMemberConnection {
 #[cynic(schema = "gitlab")]
 pub struct PipelineConnection {  
   pub nodes: Option<Vec<Option<Pipeline>>>,
-  pub pageInfo: PageInfo
+  pub page_info: PageInfo
+}
+#[derive(cynic::Enum, Deserialize, Serialize, rkyv::Archive, Clone)]
+#[cynic(schema = "gitlab")]
+pub enum CiJobStatus {
+    Created,
+    WaitingForResource,
+    Preparing,
+    WaitingForCallback,
+    Pending,
+    Running,
+    Success,
+    Failed,
+    Canceling,
+    Canceled,
+    Skipped,
+    Manual,
+    Scheduled
+}
+
+#[derive(cynic::Enum, Deserialize, Serialize, rkyv::Archive, Clone)]
+#[cynic(schema = "gitlab")]
+enum JobArtifactFileType {
+    Archive,
+    Metadata,
+    Trace,
+    Junit,
+    Metrics,
+    MetricsReferee,
+    Lsif,
+    Cyclonedx,
+    Annotations,
+    RepositoryXray,
+    Sast,
+    SecretDetection,
+    DependencyScanning,
+    ContainerScanning,
+    ClusterImageScanning,
+    Dast,
+    LicenseScanning,
+    Accessibility,
+    Codequality,
+    Performance,
+    BrowserPerformance,
+    Terraform,
+    Requirements,
+    RequirementsV2,
+    CoverageFuzzing,
+    ApiFuzzing,
+    ClusterApplications, Cobertura, Dotenv, LoadPerformance, NetworkReferee
 }
 
 /// A shallow pipeline query fragment, gets pipeline metadata
@@ -169,7 +219,7 @@ pub struct Pipeline {
     pub active: bool,
     pub sha: Option<String>,
     pub child: bool,
-    // pub commit: Option<GitCommit>,
+    pub commit: Option<Commit>,
     pub complete: bool,
     pub compute_minutes: Option<f64>,
     pub created_at: DateTimeString,
@@ -177,9 +227,76 @@ pub struct Pipeline {
     pub duration: Option<i32>,
     pub failure_reason: Option<String>,
     pub finished_at: Option<DateTimeString>,
-    // pub job_artifacts: Option<CiJobArtifact>,
+    pub job_artifacts: Option<Vec<CiJobArtifact>>,
     pub latest: bool,
     // pub status: PipelineStatusEnum,
     pub trigger: bool,
     pub total_jobs: i32,
+}
+
+#[derive(cynic::QueryFragment, Deserialize, Serialize, rkyv::Archive, Clone)]
+#[cynic(schema = "gitlab", graphql_type = "CiJob")]
+pub struct GitlabCiJob {
+    pub id: Option<JobIdString>,
+    pub status: Option<CiJobStatus>,
+    pub runner: Option<CiRunner>,
+    pub name: Option<String>,
+    pub short_sha: String,
+    pub tags: Option<Vec<String>>,
+    // pub kind: CiJobKind,
+    pub created_at: Option<DateTimeString>,
+    pub started_at: Option<DateTimeString>,
+    pub finished_at: Option<DateTimeString>,
+    pub duration: Option<i32>, 
+    pub failure_message: Option<String>,
+    pub artifacts: Option<CiJobArtifactConnection>
+}
+
+
+#[derive(cynic::QueryFragment, Deserialize, Serialize, rkyv::Archive, Clone)]
+#[cynic(
+    schema = "gitlab",
+    graphql_type = "Commit"
+)]
+pub struct Commit {
+    pub author: Option<crate::users::UserCoreFragment>,
+    pub author_email: Option<String>,
+    pub author_gravatar: Option<String>,
+    pub author_name: Option<String>,
+    pub authored_date: Option<DateTimeString>,
+    pub committed_date: Option<DateTimeString>,
+    pub committer_email: Option<String>,
+    pub committer_name: Option<String>,
+    pub description: Option<String>,
+    pub description_html: Option<String>,
+    // pub diffs: Option<Vec<Diff>>,
+    pub full_title: Option<String>,
+    pub full_title_html: Option<String>,
+    pub id: IdString,
+    pub message: Option<String>,
+    pub sha: String,
+    pub short_id: String,
+    // pub signature: Option<CommitSignature>,
+    pub signature_html: Option<String>,
+    pub title: Option<String>,
+    pub title_html: Option<String>,
+    pub web_path: String,
+    pub web_url: String,
+}
+#[derive(cynic::QueryFragment, Deserialize, Serialize, rkyv::Archive, Clone)]
+#[cynic(schema = "gitlab")]
+pub struct CiJobArtifact {
+    pub download_path: Option<String>,
+    pub expire_at: Option<DateTimeString>,
+    pub file_type: Option<JobArtifactFileType>,
+    pub id: CiJobArtifactID,
+    pub name: Option<String>,
+    pub size: gitlab_schema::BigInt,
+}
+
+#[derive(cynic::QueryFragment, Deserialize, Serialize, rkyv::Archive, Clone)]
+#[cynic(schema = "gitlab")]
+pub struct CiJobArtifactConnection {  
+  pub nodes: Option<Vec<Option<CiJobArtifact>>>,
+  pub pageInfo: PageInfo
 }

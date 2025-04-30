@@ -22,16 +22,36 @@
 */
 
 
-use crate::{subscribe_to_topic, GitlabConsumerArgs, GitlabConsumerState, QUERY_COMMIT_FAILED, QUERY_RUN_FAILED, TRANSACTION_FAILED_ERROR};
+use crate::{subscribe_to_topic, GitlabConsumerArgs, GitlabConsumerState, TRANSACTION_FAILED_ERROR};
 use common::types::GitlabData;
 use common::PIPELINE_CONSUMER_TOPIC;
+use gitlab_queries::projects::CiJobArtifact;
 use neo4rs::Query;
 use ractor::{async_trait, registry::where_is, Actor, ActorProcessingErr, ActorRef};
-use tokio::net::unix::pipe;
-use tracing::{debug, error, field::debug, info, warn};
+use tracing::{debug, error, info,};
 
 pub struct GitlabPipelineConsumer;
 
+impl GitlabPipelineConsumer {
+    fn format_artifacts(artifacts: &[CiJobArtifact]) -> String {
+        artifacts
+            .iter()
+            .map(|artifact| {
+                format!(
+                    r#"{{ artifact_id: "{}", name: "{}", size: "{}", expire_at: "{}", download_path: "{}" }}"#,
+                    artifact.id,
+                    artifact.name.clone().unwrap_or_default(),
+                    // TODO: implement display for the enum artifact.file_type,
+                    artifact.size,
+                    artifact.expire_at.clone().unwrap_or_default(),
+                    artifact.download_path.clone().unwrap_or_default()
+                    
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+}
 #[async_trait]
 impl Actor for GitlabPipelineConsumer {
     type Msg = GitlabData;
@@ -78,15 +98,23 @@ impl Actor for GitlabPipelineConsumer {
                         let pipelines_data = pipelines
                         .iter()
                         .map(|pipeline| {
+                            
+                            let artifacts = match &pipeline.job_artifacts {
+                                Some(artifacts) => GitlabPipelineConsumer::format_artifacts(&artifacts),
+                                None => String::default()
+                            };
+                    
                             format!(
-                                r#"{{ id: "{id}", 
-                                active: "{active}",
-                                created_at: "{created_at}",
-                                sha: "{sha}", 
-                                is_child: "{child}",
-                                complete: "{complete}",
-                                duration: "{duration}",
-                                total_jobs: "{total_jobs}"
+                                r#"{{
+                                    id: "{id}",
+                                    active: "{active}",
+                                    created_at: "{created_at}",
+                                    sha: "{sha}",
+                                    is_child: "{child}",
+                                    complete: "{complete}",
+                                    duration: "{duration}",
+                                    total_jobs: "{total_jobs}",
+                                    artifacts: [ {artifacts} ]
                                 }}"#,
                                 id = pipeline.id.0,
                                 active = pipeline.active,
@@ -95,11 +123,13 @@ impl Actor for GitlabPipelineConsumer {
                                 child = pipeline.child,
                                 complete = pipeline.complete,
                                 duration = pipeline.duration.unwrap_or_default(),
-                                total_jobs = pipeline.total_jobs
+                                total_jobs = pipeline.total_jobs,
+                                artifacts = artifacts
                             )
                         })
                         .collect::<Vec<_>>()
                         .join(",\n");
+                    
                 
                         let cypher_query = format!(
                             "
@@ -114,15 +144,25 @@ impl Actor for GitlabPipelineConsumer {
                                 p.complete = pipeline_data.complete,
                                 p.total_jobs = pipeline_data.total_jobs
                                 
-
                             MERGE (proj)-[:HAS_PIPELINE]->(p)
+                        
+                            WITH p, pipeline_data.artifacts AS artifacts
+                            UNWIND artifacts AS artifact
+                            MERGE (a:Artifact {{ id: artifact.artifact_id }})
+                            SET a.size = artifact.size,
+                                a.name = artifact.name,
+                                a.download_path = artifact.download_path,
+                                a.expire_at = artifact.expire_at
+                            MERGE (p)-[:HAS_ARTIFACT]->(a)
                             "
                         );
+                        
             
                     
                         debug!("Executing Cypher: {}", cypher_query);
                     
                         transaction.run(Query::new(cypher_query)).await?;
+
                     
                         if let Err(e) = transaction.commit().await {
                             error!("Failed to commit pipelines transaction: {:?}", e);

@@ -117,7 +117,8 @@ impl Actor for GitlabPipelineObserver {
                                                     if !pipelines.is_empty() {
                                                         // Append nodes to the result list.
                                                         read_pipelines.extend(pipelines.into_iter().map(|option| {
-                                                            option.unwrap()
+                                                            let pipeline = option.unwrap();
+                                                            pipeline
                                                         }));
 
                                                         debug!("Found {0} pipeline run(s) for project {1}", read_pipelines.len(), full_path);

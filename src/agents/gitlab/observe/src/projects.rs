@@ -122,7 +122,15 @@ impl Actor for GitlabProjectObserver {
                                     if let Some(projects) = connection.nodes {
                                         // Append nodes to the result list.
                                         read_projects.extend(projects.into_iter().map(|option| {
-                                            option.unwrap()
+                                            let project = option.unwrap();
+
+                                            let observe_msg = GitlabObserverMessage::GetProjectPipelines(project.full_path.clone());
+                                            if let Some(pipeline_observer) = where_is(GITLAB_PIPELINE_OBSERVER.to_string()) {
+                                                pipeline_observer
+                                                    .send_message(observe_msg)
+                                                    .expect("Expected to send message to pipeline observer");
+                                            }
+                                            project
                                         }));
                                     }
                                     
@@ -142,16 +150,6 @@ impl Actor for GitlabProjectObserver {
                                         .send_message(TcpClientMessage::Send(msg))
                                         .expect("Expected to send message");
 
-
-                                    // inform the Pipeline Observer
-                                    if let Some(pipeline_observer) = where_is(GITLAB_PIPELINE_OBSERVER.to_string()) {
-                                        for project in read_projects {
-                                            let observe_msg = GitlabObserverMessage::GetProjectPipelines(project.full_path.clone());
-                                            pipeline_observer
-                                                .send_message(observe_msg)
-                                                .expect("Expected to send message to pipeline observer");
-                                        }
-                                    }
 
                                 }
                             }

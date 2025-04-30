@@ -39,7 +39,65 @@ impl fmt::Display for IdString {
     }
 }
 
+#[derive(
+    Debug, Serialize, Deserialize, serde::Deserialize, serde::Serialize, Archive, Clone, Default,
+)]
+pub struct JobIdString(pub String);
+
+impl JobIdString {
+    pub fn new<S: Into<String>>(s: S) -> Self {
+        JobIdString(s.into())
+    }
+}
+
+impl fmt::Display for JobIdString {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+#[derive(
+    Debug, Serialize, Deserialize, serde::Deserialize, serde::Serialize, Archive, Clone, Default,
+)]
+pub struct CiJobArtifactID(pub String);
+
+impl CiJobArtifactID {
+    pub fn new<S: Into<String>>(s: S) -> Self {
+        CiJobArtifactID(s.into())
+    }
+}
+
+impl fmt::Display for CiJobArtifactID {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+// 
+// Represents non-fractional signed whole numeric values. Since the value may exceed the size of a 32-bit integer, it's encoded as a string.
+// 
+#[derive(
+    Debug, Serialize, Deserialize, serde::Deserialize, serde::Serialize, Archive, Clone, Default,
+)]
+pub struct BigInt(String);
+
+impl BigInt {
+    pub fn new<S: Into<String>>(s: S) -> Self {
+        BigInt(s.into())
+    }
+}
+
+impl fmt::Display for BigInt {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+
+impl_scalar!(BigInt, gitlab::BigInt);
 impl_scalar!(IdString, gitlab::ID);
+impl_scalar!(CiJobArtifactID, gitlab::CiJobArtifactID);
+impl_scalar!(JobIdString, gitlab::JobID);
 
 // represent timestamps
 impl_scalar!(DateTimeString, gitlab::Time);
+
