@@ -264,7 +264,7 @@ impl Actor for GitlabPipelineConsumer {
 
                         WITH j
                         FOREACH (_ IN CASE WHEN j.runner IS NOT NULL THEN [1] ELSE [] END |
-                            MERGE (r:GitlabRunner { runner_id: j.runner })
+                            MERGE (r:GitlabRunner {{ runner_id: j.runner }})
                             MERGE (r)-[:HAS_JOB]-(j)
                         )
 
