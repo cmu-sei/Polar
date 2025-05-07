@@ -26,8 +26,42 @@ The Kubernetes Agent is designed to observe and report on the state of Kubernete
 - **Decision**: Start with foundational resources (ConfigMaps, Pods, Nodes), and iteratively add observers for other relevant Kubernetes primitives (e.g., Secrets, Services, Volumes, Deployments).
 - **Rationale**: Allows focused development and testing of each observer. It also aligns with evolving use cases without overwhelming the system early.
 
+## Topology
+
+TODO: Visual architecture diagram outlining cluster supervisor, and actors for various resources.
+
+## Roles
+
+**Cluster(Observer)Supervisor**
+ - Spawns and monitors child actors.
+ - Holds shared config and cluster context.
+ - Can restart children or orchestrate data flow changes.
+
+The ClusterSupervisor watches all child actors.
+
+upon their failure, it will restart:
+    Individual watcher/processor (gracefully or forcefully).
+    All watchers in a namespace.
+
+Dead-letter channel for errors or dropped messages from policy agents.
+
+Optional: metrics on mailbox sizes, message rates, errors?
+
+**Observers** (Kube.rs watchers)
+ - Wraps a kube_runtime::watcher for a specific resource type.
+ - Sends structured events (created, updated, deleted) to corresponding consumer agents.
+
+**ConsumerSupervisor**
+ - Similar to the observer cluster supervisor, the consumer has the simple task of lifecycle management for its child actors.
+
+**Consumers** 
+ - Receive k8s data from observer actors corresponding to their resource.
+ - Transforms data structures into queries to represent resources in the graph database.
+
 ## Current Resource Implementations
 
+### Nodes
+TODO: My initial thoughts are that since nodes aren't namespaced, the supervisor or perhaps another actor shopuld watch them for real time changes.
 ### ConfigMaps
 - Lists all ConfigMaps in the specified namespaces.
 - Watches for changes (Add, Update, Delete).

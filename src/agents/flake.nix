@@ -98,6 +98,7 @@
             (craneLib.fileset.commonCargoSources ./broker)
             (craneLib.fileset.commonCargoSources ./policy-config)
   	        (craneLib.fileset.commonCargoSources ./lib)
+            (craneLib.fileset.commonCargoSources ./kubernetes)
             (craneLib.fileset.commonCargoSources ./gitlab/consume)
             (craneLib.fileset.commonCargoSources ./gitlab/observe)
             (craneLib.fileset.commonCargoSources ./gitlab/common)
