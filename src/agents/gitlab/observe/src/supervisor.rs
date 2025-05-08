@@ -22,6 +22,7 @@ use crate::groups::GitlabGroupObserver;
 use crate::pipelines::GitlabJobObserver;
 use crate::pipelines::GitlabPipelineObserver;
 use crate::projects::GitlabProjectObserver;
+use crate::repositories::GitlabRepositoryObserver;
 use crate::runners::GitlabRunnerObserver;
 use crate::users::GitlabUserObserver;
 use crate::GitlabObserverArgs;
@@ -29,7 +30,7 @@ use crate::BROKER_CLIENT_NAME;
 use crate::GITLAB_JOBS_OBSERVER;
 use crate::GITLAB_PIPELINE_OBSERVER;
 use crate::GITLAB_USERS_OBSERVER;
-
+use crate::GITLAB_REPOSITORY_OBSERVER;
 pub struct ObserverSupervisor;
 
 pub struct ObserverSupervisorState {
@@ -171,6 +172,16 @@ impl Actor for ObserverSupervisor {
                             if let Err(e) = Actor::spawn_linked(
                                 Some("GITLAB_RUNNER_OBSERVER".to_string()),
                                 GitlabRunnerObserver,
+                                args.clone(),
+                                myself.clone().into(),
+                            )
+                            .await
+                            {
+                                warn!("failed to start runner observer {e}")
+                            }
+                            if let Err(e) = Actor::spawn_linked(
+                                Some(GITLAB_REPOSITORY_OBSERVER.to_string()),
+                                GitlabRepositoryObserver,
                                 args.clone(),
                                 myself.clone().into(),
                             )

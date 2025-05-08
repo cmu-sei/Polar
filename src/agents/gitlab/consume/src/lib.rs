@@ -35,6 +35,7 @@ pub mod runners;
 pub mod supervisor;
 pub mod users;
 pub mod pipelines;
+pub mod repositories;
 
 pub const BROKER_CLIENT_NAME: &str = "GITLAB_CONSUMER_CLIENT";
 pub const GITLAB_USER_CONSUMER: &str = "users";

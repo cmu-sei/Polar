@@ -28,7 +28,7 @@ use common::PIPELINE_CONSUMER_TOPIC;
 use gitlab_queries::projects::GitlabCiJob;
 use gitlab_queries::projects::CiJobArtifact;
 use neo4rs::Query;
-use ractor::{async_trait, registry::where_is, Actor, ActorProcessingErr, ActorRef};
+use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef};
 use tracing::{debug, error, info,};
 
 pub struct GitlabPipelineConsumer;
@@ -220,7 +220,7 @@ impl Actor for GitlabPipelineConsumer {
                                 a.name = artifact.name,
                                 a.download_path = artifact.download_path,
                                 a.expire_at = artifact.expire_at
-                            MERGE (p)-[:HAS_ARTIFACT]->(a)
+                            MERGE (p)-[:PRODUCED]->(a)
                             "
                         );
 
@@ -265,7 +265,7 @@ impl Actor for GitlabPipelineConsumer {
                         WITH j
                         FOREACH (_ IN CASE WHEN j.runner IS NOT NULL THEN [1] ELSE [] END |
                             MERGE (r:GitlabRunner {{ runner_id: j.runner }})
-                            MERGE (r)-[:HAS_JOB]-(j)
+                            MERGE (j)-[:EXCUTED_BY]-(r)
                         )
 
                         "#);

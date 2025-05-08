@@ -6,6 +6,7 @@ use common::types::GitlabData;
 use common::GROUPS_CONSUMER_TOPIC;
 use common::PIPELINE_CONSUMER_TOPIC;
 use common::PROJECTS_CONSUMER_TOPIC;
+use common::REPOSITORY_CONSUMER_TOPIC;
 use common::RUNNERS_CONSUMER_TOPIC;
 use common::USER_CONSUMER_TOPIC;
 use exponential_backoff::Backoff;
@@ -28,6 +29,7 @@ use crate::groups::GitlabGroupConsumer;
 use crate::pipelines::GitlabPipelineConsumer;
 use crate::projects::GitlabProjectConsumer;
 use crate::runners::GitlabRunnerConsumer;
+use crate::repositories::GitlabRepositoryConsumer;
 use crate::users::GitlabUserConsumer;
 use crate::GitlabConsumerArgs;
 use crate::BROKER_CLIENT_NAME;
@@ -263,6 +265,17 @@ impl Actor for ConsumerSupervisor {
                             if let Err(e) = Actor::spawn_linked(
                                 Some(PIPELINE_CONSUMER_TOPIC.to_string()),
                                 GitlabPipelineConsumer,
+                                args.clone(),
+                                myself.clone().into(),
+                            )
+                            .await
+                            {
+                                error!("failed to start pipeline consumer. {e}");
+                                myself.stop(None);
+                            }
+                            if let Err(e) = Actor::spawn_linked(
+                                Some(REPOSITORY_CONSUMER_TOPIC.to_string()),
+                                GitlabRepositoryConsumer,
                                 args.clone(),
                                 myself.clone().into(),
                             )

@@ -20,7 +20,7 @@
 
    DM24-0470
 */
-use crate::{GitlabObserverArgs, GitlabObserverMessage, GitlabObserverState, BROKER_CLIENT_NAME, GITLAB_JOBS_OBSERVER, GITLAB_PIPELINE_OBSERVER};
+use crate::{GitlabObserverArgs, GitlabObserverMessage, GitlabObserverState, BROKER_CLIENT_NAME, GITLAB_REPOSITORY_OBSERVER, GITLAB_JOBS_OBSERVER, GITLAB_PIPELINE_OBSERVER};
 use cassini::{client::TcpClientMessage, ClientMessage};
 use common::types::GitlabData;
 use common::PROJECTS_CONSUMER_TOPIC;
@@ -140,6 +140,13 @@ impl Actor for GitlabProjectObserver {
                                                     .expect("Expected to send message to pipeline observer");
                                             }
 
+                                            let observe_msg = GitlabObserverMessage::GetProjectContainerRepositories(project.full_path.clone());
+                                            if let Some(repository_observer) = where_is(GITLAB_REPOSITORY_OBSERVER.to_string()) {
+                                                repository_observer
+                                                    .send_message(observe_msg)
+                                                    .expect("Expected to send message to the registry observer");
+                                            }
+                                            
                                             //return the projects
                                             project
                                         }));

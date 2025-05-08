@@ -27,6 +27,7 @@ pub mod runners;
 pub mod supervisor;
 pub mod users;
 pub mod pipelines;
+pub mod repositories;
 
 use cynic::Operation;
 use gitlab_queries::groups::*;
@@ -36,7 +37,6 @@ use gitlab_queries::projects::{MultiProjectQuery, MultiProjectQueryArguments};
 use gitlab_queries::users::{MultiUserQuery, MultiUserQueryArguments};
 use gitlab_schema::IdString;
 use parse_link_header::parse_with_rel;
-use ractor::ActorRef;
 use reqwest::header::LINK;
 use reqwest::Client;
 use reqwest::Error;
@@ -45,10 +45,11 @@ use reqwest::Response;
 use serde::Deserialize;
 use tracing::{debug, error};
 
-pub const GITLAB_USERS_OBSERVER: &str = "GITLAB_USERS_OBSERVER";
-pub const BROKER_CLIENT_NAME: &str = "gitlab_web_client";
-pub const GITLAB_PIPELINE_OBSERVER: &str = "GITLAB_PIPELINE_OBSERVER";
-pub const GITLAB_JOBS_OBSERVER: &str = "GITLAB_JOBS_OBSERVER";
+pub const GITLAB_USERS_OBSERVER: &str = "gitlab:observer:users";
+pub const BROKER_CLIENT_NAME: &str = "gitlab:observer:web_client";
+pub const GITLAB_PIPELINE_OBSERVER: &str = "gitlab:observer:pipelines";
+pub const GITLAB_JOBS_OBSERVER: &str = "gitlab:observer:jobs";
+pub const GITLAB_REPOSITORY_OBSERVER: &str = "gitlab:observer:repositories";
 const PRIVATE_TOKEN_HEADER_STR: &str = "PRIVATE-TOKEN";
 
 /// General state for all gitlab observers
@@ -78,6 +79,10 @@ pub enum GitlabObserverMessage {
     GetRunners(Operation<MultiRunnerQuery, MultiRunnerQueryArguments>), 
     GetProjectPipelines(IdString),
     GetPipelineJobs(IdString),
+    GetProjectContainerRepositories(IdString),
+    GetProjectPackageRepositories(IdString),
+    GetGroupContainerRepositories(IdString),
+    GetGroupPackageRepositories(IdString)
 }
 
 pub async fn get_all_runners(

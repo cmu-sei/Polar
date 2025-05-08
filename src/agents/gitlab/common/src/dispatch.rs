@@ -17,7 +17,7 @@ impl MessageDispatcher {
     ///  Other agents may want to implement DLQ for when consumers aren't present and may return.
     /// For now, we don't need to bother since we're getting new data all the time from gitlab.
     ///         
-    pub fn deserailize_and_dispatch(message: Vec<u8>, topic: String) {
+    pub fn deserialize_and_dispatch(message: Vec<u8>, topic: String) {
         match rkyv::from_bytes::<GitlabData, Error>(&message) {
             Ok(message) => {
                 if let Some(consumer) = where_is(topic.clone()) {
@@ -64,7 +64,7 @@ impl Actor for MessageDispatcher {
     ) -> Result<(), ActorProcessingErr> {
         match message {
             DispatcherMessage::Dispatch { message, topic } => {
-                MessageDispatcher::deserailize_and_dispatch(message, topic);
+                MessageDispatcher::deserialize_and_dispatch(message, topic);
             }
         }
         Ok(())

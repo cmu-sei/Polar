@@ -5,6 +5,8 @@ use gitlab_schema::gitlab::{self as schema};
 use gitlab_schema::{CiJobArtifactID, DateTimeString};
 use gitlab_schema::IdString;
 use gitlab_schema::JobIdString;
+use gitlab_schema::ContainerRepositoryID;
+use gitlab_schema::BigInt;
 use crate::runners::CiRunnerIdFragment;
 use crate::PageInfo;
 use crate::Namespace;
@@ -75,8 +77,6 @@ pub struct ProjectConnection {
     pub nodes: Option<Vec<Option<Project>>>, //[UserCore] 	A list of nodes.
     pub page_info: PageInfo,                 // 	PageInfo! 	Information to aid in pagination.
 }
-
-
 
 #[derive(cynic::QueryVariables, Debug, Clone)]
 pub struct MultiProjectQueryArguments {
@@ -225,7 +225,7 @@ impl fmt::Display for CiJobStatus {
 
 #[derive(cynic::Enum, Deserialize, Serialize, rkyv::Archive, Clone)]
 #[cynic(schema = "gitlab")]
-enum JobArtifactFileType {
+pub enum JobArtifactFileType {
     Archive,
     Metadata,
     Trace,
@@ -313,17 +313,18 @@ pub struct Pipeline {
     pub complete: bool,
     pub compute_minutes: Option<f64>,
     pub created_at: DateTimeString,
-    // pub downstream: Option<PipelineConnection>,
+    // TODO: show downstream pipeline connections
+    //  pub downstream: Option<PipelineConnection>,
     pub duration: Option<i32>,
     pub failure_reason: Option<String>,
     pub finished_at: Option<DateTimeString>,
     pub job_artifacts: Option<Vec<CiJobArtifact>>,
     pub latest: bool,
+    pub source: Option<String>,
+    // TODO: pipeline statuses
     // pub status: PipelineStatusEnum,
     pub trigger: bool,
     pub total_jobs: i32,
-    //TODO: This makes us break the complexity limit, write another fragement or query to get pipeline jobs
-    // pub jobs: Option<CiJobConnection>
 }
 
 #[derive(cynic::QueryFragment, Deserialize, Serialize, rkyv::Archive, Clone)]
@@ -398,5 +399,101 @@ pub struct CiJobArtifact {
 #[cynic(schema = "gitlab")]
 pub struct CiJobArtifactConnection {  
   pub nodes: Option<Vec<Option<CiJobArtifact>>>,
-  pub pageInfo: PageInfo
+  pub page_info: PageInfo
+}
+
+#[derive(cynic::Enum, Deserialize, Serialize, rkyv::Archive)]
+#[cynic(schema = "gitlab")]
+pub enum ContainerRepositoryCleanupStatus {
+    Unscheduled,
+    Scheduled,
+    Unfinished,
+    Ongoing,
+}
+
+#[derive(cynic::QueryFragment, Deserialize, Serialize, rkyv::Archive)]
+#[cynic(schema = "gitlab")]
+pub struct ContainerRepository {
+    pub id: IdString,
+    pub created_at: DateTimeString,
+    // pub expiration_policy_cleanup_status: Option<ContainerRepositoryCleanupStatus>,
+    pub expiration_policy_started_at: Option<DateTimeString>,
+    pub last_cleanup_deleted_tags_count: Option<i32>,
+    pub location: String,
+    pub migration_state: String,
+    pub name: String,
+    pub path: String,
+    pub protection_rule_exists: bool,
+    // pub status: Option<ContainerRepositoryStatus>,
+    pub tags_count: i32,
+    pub updated_at: DateTimeString,
+    // pub user_permissions: ContainerRepositoryPermissions,
+    // pub project: Project, // You should define a Project fragment separately
+}
+
+/// a struct representing an image tag
+#[derive(cynic::QueryFragment, Deserialize, Serialize, rkyv::Archive)]
+#[cynic(schema = "gitlab")]
+pub struct ContainerRepositoryTag {
+    pub created_at: Option<DateTimeString>,
+    pub digest: Option<String>,
+    pub location: String,
+    pub media_type: Option<String>,
+    pub name: String,
+    pub path: String,
+    pub published_at: Option<DateTimeString>,
+    // pub referrers: Option<Vec<ContainerRepositoryReferrer>>,
+    pub revision: Option<String>,
+    pub short_revision: Option<String>,
+    pub total_size: Option<BigInt>,
+    // pub user_permissions: ContainerRepositoryTagPermissions,
+}
+
+#[derive(cynic::QueryFragment, Deserialize, Serialize, rkyv::Archive)]
+pub struct ContainerRepositoryTagConnection {
+    pub nodes: Option<Vec<Option<ContainerRepositoryTag>>>,
+    pub page_info: PageInfo,
+}
+
+/// This is a sort-of redundant type, only really helpful for some additional metadata and
+/// to get the connection between the repository and the underlying image tags
+/// See gitlab's graphql docs
+#[derive(cynic::QueryFragment, Deserialize, Serialize, rkyv::Archive)]
+#[cynic(schema = "gitlab", graphql_type = "ContainerRepositoryDetails")]
+pub struct ContainerRepositoryTags {
+    pub tags: Option<ContainerRepositoryTagConnection>
+}
+
+#[derive(cynic::QueryVariables, Deserialize, Serialize, rkyv::Archive)]
+pub struct ContainerRepositoryDetailsArgs {
+    pub id: ContainerRepositoryID
+}
+
+#[derive(cynic::QueryFragment, Deserialize, Serialize, rkyv::Archive)]
+#[cynic(schema = "gitlab", graphql_type = "Query", variables = "ContainerRepositoryDetailsArgs")]
+pub struct ContainerRepositoryDetailsQuery {
+    #[arguments(id: $id)]
+    pub container_repository: Option<ContainerRepositoryTags>
+}
+
+#[derive(cynic::QueryFragment, Deserialize, Serialize, rkyv::Archive)]
+#[cynic(schema = "gitlab", graphql_type = "ContainerRepositoryConnection")]
+pub struct ContainerRepositoryConnection {
+    pub nodes: Option<Vec<Option<ContainerRepository>>>,
+    pub page_info: PageInfo
+}
+
+/// A lighter query to just get a project's container repositories
+#[derive(cynic::QueryFragment, Deserialize, Serialize, rkyv::Archive)]
+#[cynic(schema = "gitlab", graphql_type = "Project")]
+pub struct ProjectContainerRepositoriesFragment {
+    pub id: IdString,
+    pub container_repositories: Option<ContainerRepositoryConnection>
+}
+
+#[derive(cynic::QueryFragment, Deserialize, Serialize, rkyv::Archive)]
+#[cynic(schema = "gitlab", graphql_type = "Query", variables = "SingleProjectQueryArguments")]
+pub struct ProjectContainerRepositoriesQuery {
+    #[arguments(fullPath: $full_path)]
+    pub project: Option<ProjectContainerRepositoriesFragment>
 }

@@ -1361,6 +1361,7 @@ dependencies = [
  "exponential-backoff",
  "futures-lite 1.13.0",
  "gitlab-queries",
+ "gitlab-schema",
  "lapin",
  "neo4rs",
  "polar",
