@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 async-trait = "0.1.83"
-ractor = { version="0.14.1", features = ["async-trait"]}
+ractor = { version="0.15.6", features = ["async-trait"]}
 rkyv = "0.8.10"
 tokio = { version = "1.30", features = ["full"] }
 tracing = "0.1.41"

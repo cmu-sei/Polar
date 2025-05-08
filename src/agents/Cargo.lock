@@ -628,7 +628,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "polar",
- "ractor 0.14.7",
+ "ractor 0.15.6",
  "ring",
  "rkyv 0.8.10",
  "rustls 0.23.25",
@@ -779,7 +779,7 @@ dependencies = [
  "gitlab-schema",
  "lapin",
  "polar",
- "ractor 0.14.7",
+ "ractor 0.15.6",
  "rkyv 0.8.10",
  "serde",
  "serde_json",
@@ -1488,7 +1488,7 @@ dependencies = [
  "lapin",
  "neo4rs",
  "polar",
- "ractor 0.14.7",
+ "ractor 0.15.6",
  "serde_json",
  "tokio",
  "tracing",
@@ -1507,10 +1507,9 @@ dependencies = [
  "cynic-codegen",
  "gitlab-queries",
  "gitlab-schema",
- "log",
  "parse_link_header",
  "polar",
- "ractor 0.14.7",
+ "ractor 0.15.6",
  "reqwest",
  "rkyv 0.8.10",
  "serde",
@@ -2284,14 +2283,19 @@ dependencies = [
 name = "kube-observer"
 version = "0.1.0"
 dependencies = [
+ "cassini",
  "futures",
  "k8s-openapi",
  "kube",
+ "polar",
  "ractor 0.15.6",
  "rkyv 0.8.10",
  "serde",
  "serde_json",
  "tokio",
+ "tracing",
+ "tracing-glog",
+ "tracing-subscriber",
  "workspace-hack",
 ]
 

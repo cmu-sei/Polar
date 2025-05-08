@@ -66,7 +66,6 @@ pub struct UserCoreFragment {
     pub name: String,
     pub state: UserState,
     pub organization: Option<String>,
-
     // pub last_activity_on: Option<DateTimeString>,
     pub location: Option<String>,
     pub created_at: Option<DateTimeString>,

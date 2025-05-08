@@ -1,26 +1,30 @@
 use futures::{StreamExt, TryStreamExt};
-use kube::{api::{Api, ListParams, PostParams, ResourceExt}, runtime::watcher::Event, Client};
-use k8s_openapi::{api::core::v1::{Node, Pod, Volume}, apimachinery::pkg::api::resource::Quantity};
+use kube::{api::{Api, ListParams, ResourceExt}, runtime::watcher::Event, Client, Config};
+use k8s_openapi::{api::core::v1::{Node, Pod}, apimachinery::pkg::api::resource::Quantity};
 use kube::runtime::watcher;
 use k8s_openapi::api::core::v1::ConfigMap;
+use kube_observer::{supervisor::{ClusterObserverSupervisor, ClusterObserverSupervisorArgs}, KUBERNETES_OBSERVER};
+use ractor::Actor;
+use tracing::error;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    polar::init_logging();
+
     // Infer the runtime environment and try to create a Kubernetes Client
-    let client = Client::try_default().await?;
+    let cassini_client_config = cassini::TCPClientConfig::new();
 
 
-    // Define the namespaces you want to inspect
-    let namespaces = vec!["default"];
+    let args = ClusterObserverSupervisorArgs {
+        cassini_client_config,
+    };
 
-    for ns in namespaces {
-        tokio::spawn(observe_configmaps(client.clone(), ns.to_string()));
-        tokio::spawn(observe_pods(client.clone(), ns.to_string()));
+    //TODO - make name a constant
+    // Start kubernetes supervisor
+    match Actor::spawn(Some("kubernetes.minikube.observer.supervisor".to_string()), ClusterObserverSupervisor, args).await {
+        Ok( (_, handle) ) => handle.await.expect("Something went wrong"),
+        Err(e) => error!("{e}")
     }
-    // Keep the main task alive
-    futures::future::pending::<()>().await;
-
-
     Ok(())
     
 }

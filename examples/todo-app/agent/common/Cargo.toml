@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 polar ={ path = "../../../../src/agents/lib" }
-ractor = { version="0.14.1", features = ["async-trait"]}
+ractor = { version="0.15.6", features = ["async-trait"]}
 rkyv = "0.8.10"
 serde = { version = "1.0.218", features = ["derive"] }
 tracing = "0.1.41"

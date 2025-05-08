@@ -7,35 +7,34 @@ stages:
 default:
   tags:
     - kubernetes
-# TODO: Reenable when open-vsx comes back up. We don't have caching so we can't rebuild the dev environment successfully w/o pulling from there.
-# SEE: https://status.open-vsx.org for details and status updates.
-# build-dev-environment:
-#   image: registry.sandbox.labz.s-box.org/sei/polar-mirror/nix:2.24.13
-#   stage: environment-setup
-#   rules:
-#     - changes:
-#       - dev/flake.nix
-#       - dev/flake.lock
-#       - dev/packages.nix
-#       - .gitlab-ci.yml
-#   script:
-#       #install needed tools
-#     - nix-env --install --attr nixpkgs.skopeo
-#     - |
-#       mkdir -p "$HOME/.config/nix"
-#       printf "experimental-features = nix-command flakes" > "$HOME/.config/nix/nix.conf"
-#       mkdir -p "/etc/containers"
-#       echo '{"default":[{"type":"insecureAcceptAnything"}]}' > /etc/containers/policy.json
-#       git config --global --add safe.directory "$(pwd)"
-#     - cd dev
 
-#     # build dev and testing environments
-#     - nix build --eval-system x86_64-linux --show-trace .#default -o polar-dev 
+build-dev-environment:
+  image: registry.sandbox.labz.s-box.org/sei/polar-mirror/nix:2.24.13
+  stage: environment-setup
+  rules:
+    - changes:
+      - dev/flake.nix
+      - dev/flake.lock
+      - dev/packages.nix
+      - .gitlab-ci.yml
+  script:
+      #install needed tools
+    - nix-env --install --attr nixpkgs.skopeo
+    - |
+      mkdir -p "$HOME/.config/nix"
+      printf "experimental-features = nix-command flakes" > "$HOME/.config/nix/nix.conf"
+      mkdir -p "/etc/containers"
+      echo '{"default":[{"type":"insecureAcceptAnything"}]}' > /etc/containers/policy.json
+      git config --global --add safe.directory "$(pwd)"
+    - cd dev
+
+    # build dev and testing environments
+    - nix build --eval-system x86_64-linux --show-trace .#default -o polar-dev 
     
-#     #  Use skopeo to inspect and upload our images
-#     - skopeo login --username "$CI_REGISTRY_USER" --password "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
-#     - skopeo inspect docker-archive://$(readlink -f ./polar-dev)
-#     - skopeo copy docker-archive://$(readlink -f ./polar-dev) docker://$CI_REGISTRY_IMAGE/polar-dev:0.1.0
+    #  Use skopeo to inspect and upload our images
+    - skopeo login --username "$CI_REGISTRY_USER" --password "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
+    - skopeo inspect docker-archive://$(readlink -f ./polar-dev)
+    - skopeo copy docker-archive://$(readlink -f ./polar-dev) docker://$CI_REGISTRY_IMAGE/polar-dev:0.1.0
 
 build-ci-environment:
   image: registry.sandbox.labz.s-box.org/sei/polar-mirror/nix:2.24.13

@@ -144,7 +144,8 @@ impl Actor for GitlabProjectObserver {
                                             project
                                         }));
                                     }
-                                    
+
+                                    // send data 
                                     let tcp_client = where_is(BROKER_CLIENT_NAME.to_string())
                                         .expect("Expected to find client");
 

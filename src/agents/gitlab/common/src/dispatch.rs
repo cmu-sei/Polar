@@ -2,22 +2,22 @@ use crate::types::GitlabData;
 use polar::DispatcherMessage;
 use ractor::{async_trait, registry::where_is, Actor, ActorProcessingErr, ActorRef};
 use rkyv::rancor::Error;
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
 /// Dispatcher Definition
-/// The Dispatcher is a core component of each agent. Its function is to deserialize data from it's binary
+/// The Dispatcher is a core component of each agent. Its function is to deserialize data from its binary
 /// format into strong rust datatypes, and forward it to any interested actors.
 pub struct MessageDispatcher;
 
 impl MessageDispatcher {
     /// Helper function - does as the name says.
     /// It's pretty safe to assume whatever message comes in contains data for our Gitlab agent.
-    /// We can jsut discard any message that don't conform to our expectations as bad data.
+    /// We can just discard any message that don't conform to our expectations as bad data.
     /// The incoming topic string will inform us of which actor is responsible for handling the message.
-    ///  Other agents may want to implement DLQ for when consumers aren't present and may return.
+    /// Other agents may want to implement DLQ for when consumers aren't present and may return.
     /// For now, we don't need to bother since we're getting new data all the time from gitlab.
     ///         
-    pub fn deserailize_and_dispatch(message: Vec<u8>, topic: String) {
+    pub fn deserialize_and_dispatch(message: Vec<u8>, topic: String) {
         match rkyv::from_bytes::<GitlabData, Error>(&message) {
             Ok(message) => {
                 if let Some(consumer) = where_is(topic.clone()) {
@@ -64,7 +64,7 @@ impl Actor for MessageDispatcher {
     ) -> Result<(), ActorProcessingErr> {
         match message {
             DispatcherMessage::Dispatch { message, topic } => {
-                MessageDispatcher::deserailize_and_dispatch(message, topic);
+                MessageDispatcher::deserialize_and_dispatch(message, topic);
             }
         }
         Ok(())

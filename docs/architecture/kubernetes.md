@@ -37,6 +37,29 @@ TODO: Visual architecture diagram outlining cluster supervisor, and actors for v
  - Holds shared config and cluster context.
  - Can restart children or orchestrate data flow changes.
 
+Configuration data will be read from a central config
+
+Its supervisor could provide structured actor metadata:
+```dhall
+let Actor =
+      { cluster : Text
+      , namespace : Text
+      , role : Text
+      , resource : Text
+      }
+
+in  [ { cluster = "prod-cluster", namespace = "default", role = "observer", resource = "pod" }
+    , ...
+    ]
+```
+Pros of this approach:
+
+    Consistent across all agents
+
+    Easy to override or simulate environments
+
+    Fits your Dhall + GitOps pipeline
+    
 The ClusterSupervisor watches all child actors.
 
 upon their failure, it will restart:
