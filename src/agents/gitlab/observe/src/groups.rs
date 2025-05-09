@@ -51,7 +51,7 @@ impl GitlabGroupObserver {
         registration_id: String,
         endpoint: String,
         op: Operation<GroupMembersQuery, GroupPathVariable>,
-    ) -> Result<(), Box<dyn Error>> {
+    ) -> Result<(), String> {
         debug!("Sending query: {:?}", op.query);
 
         match client
@@ -64,9 +64,14 @@ impl GitlabGroupObserver {
             Ok(response) => match response.json::<GraphQlResponse<GroupMembersQuery>>().await {
                 Ok(deserialized) => {
                     if let Some(errors) = deserialized.errors {
-                        for error in errors {
-                            warn!("Received errors, {error:?}");
-                        }
+                        let errors = errors
+                        .iter()
+                        .map(|error| { error.to_string() })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+
+                        error!("Failed to query instance! {errors}");
+                        return Err(errors);
                     }
 
                     let query = deserialized
@@ -97,9 +102,9 @@ impl GitlabGroupObserver {
 
                     Ok(())
                 }
-                Err(e) => Err(Box::new(e)),
+                Err(e) => Err(e.to_string()),
             },
-            Err(e) => Err(Box::new(e)),
+            Err(e) => Err(e.to_string()),
         }
     }
 
@@ -110,7 +115,7 @@ impl GitlabGroupObserver {
         registration_id: String,
         endpoint: String,
         op: Operation<GroupProjectsQuery, GroupPathVariable>,
-    ) -> Result<(), Box<dyn Error>> {
+    ) -> Result<(), String> {
         debug!("Sending query: {:?}", op.query);
 
         match client
@@ -123,9 +128,14 @@ impl GitlabGroupObserver {
             Ok(response) => match response.json::<GraphQlResponse<GroupProjectsQuery>>().await {
                 Ok(deserialized) => {
                     if let Some(errors) = deserialized.errors {
-                        for error in errors {
-                            warn!("Received errors, {error:?}");
-                        }
+                        let errors = errors
+                        .iter()
+                        .map(|error| { error.to_string() })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+
+                        error!("Failed to query instance! {errors}");
+                        return Err(errors);
                     }
 
                     let query = deserialized
@@ -156,9 +166,9 @@ impl GitlabGroupObserver {
 
                     Ok(())
                 }
-                Err(e) => Err(Box::new(e)),
+                Err(e) => Err(e.to_string()),
             },
-            Err(e) => Err(Box::new(e)),
+            Err(e) => Err(e.to_string()),
         }
     }
 
@@ -169,7 +179,7 @@ impl GitlabGroupObserver {
         registration_id: String,
         endpoint: String,
         op: Operation<GroupRunnersQuery, GroupPathVariable>,
-    ) -> Result<(), Box<dyn Error>> {
+    ) -> Result<(), String> {
         debug!("Sending query: {:?}", op.query);
 
         match client
@@ -182,9 +192,14 @@ impl GitlabGroupObserver {
             Ok(response) => match response.json::<GraphQlResponse<GroupRunnersQuery>>().await {
                 Ok(deserialized) => {
                     if let Some(errors) = deserialized.errors {
-                        for error in errors {
-                            warn!("Received errors, {error:?}");
-                        }
+                        let errors = errors
+                        .iter()
+                        .map(|error| { error.to_string() })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+
+                        error!("Failed to query instance! {errors}");
+                        return Err(errors);
                     }
 
                     let query = deserialized
@@ -215,9 +230,9 @@ impl GitlabGroupObserver {
 
                     Ok(())
                 }
-                Err(e) => Err(Box::new(e)),
+                Err(e) => Err(e.to_string()),
             },
-            Err(e) => Err(Box::new(e)),
+            Err(e) => Err(e.to_string()),
         }
     }
 }
@@ -294,9 +309,14 @@ impl Actor for GitlabGroupObserver {
                             response.json::<GraphQlResponse<AllGroupsQuery>>().await
                         {
                             if let Some(errors) = deserialized.errors {
-                                for error in errors {
-                                    warn!("Received errors, {error:?}");
-                                }
+                                let errors = errors
+                                .iter()
+                                .map(|error| { error.to_string() })
+                                .collect::<Vec<_>>()
+                                .join("\n");
+        
+                                error!("Failed to query instance! {errors}");
+                                myself.stop(Some(errors))
                             }
                             if let Some(query) = deserialized.data {
                                 if let Some(connection) = query.groups {

@@ -100,6 +100,7 @@ impl Actor for ObserverSupervisor {
                 //wait until we get a session id to start clients, try some configured amount of times every few seconds
                 let mut attempts = 0;
                 loop {
+                    
                     attempts += 1;
                     info!("Getting session data...");
                     if let CallResult::Success(result) = call(
@@ -108,7 +109,7 @@ impl Actor for ObserverSupervisor {
                         None,
                     )
                     .await
-                    .expect("Expected to call client!")
+                    .expect("Expected to call client!") //TODO: Match this and just stop if we can't do this instead of panicking.
                     {
                         if let Some(registration_id) = result {
                             let args = GitlabObserverArgs {
@@ -233,27 +234,34 @@ impl Actor for ObserverSupervisor {
 
     async fn handle_supervisor_evt(
         &self,
-        _: ActorRef<Self::Msg>,
+        myself: ActorRef<Self::Msg>,
         msg: SupervisionEvent,
         _: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match msg {
             SupervisionEvent::ActorStarted(_) => (),
             SupervisionEvent::ActorTerminated(actor_cell, _, reason) => {
-                info!(
+                error!(
                     "OBSERVER_SUPERVISOR: {0:?}:{1:?} terminated. {reason:?}",
                     actor_cell.get_name(),
                     actor_cell.get_id()
                 );
+                // at time of writing, if any observers terminate
+                // it's a likely unrecoverable state - 
+                // it could be caused by an invalid gitlab token being provided or any malformed query.
+                // this would require intervention by admins.
+                myself.stop(reason)
             }
             SupervisionEvent::ActorFailed(actor_cell, e) => {
-                warn!(
+                error!(
                     "OBSERVER_SUPERVISOR: {0:?}:{1:?} failed! {e:?}",
                     actor_cell.get_name(),
                     actor_cell.get_id()
                 );
+                myself.stop(Some(e.to_string())) 
+
             }
-            SupervisionEvent::ProcessGroupChanged(..) => todo!(),
+            SupervisionEvent::ProcessGroupChanged(..) => todo!("Investigate how this would/could happen and how to respond."),
         }
 
         Ok(())

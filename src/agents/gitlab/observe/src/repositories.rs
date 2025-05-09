@@ -149,9 +149,14 @@ impl Actor for GitlabRepositoryObserver {
                         match response.json::<GraphQlResponse<ProjectContainerRepositoriesQuery>>().await {
                             Ok(deserialized_response) => {
                                 if let Some(errors) = deserialized_response.errors {
-                                    for error in errors {
-                                        warn!("Received errors, {error:?}");
-                                    }
+                                    let errors = errors
+                                    .iter()
+                                    .map(|error| { error.to_string() })
+                                    .collect::<Vec<_>>()
+                                    .join("\n");
+            
+                                    error!("Failed to query instance! {errors}");
+                                    myself.stop(Some(errors))
                                 }
                                 else if let Some(data) = deserialized_response.data {
                                     

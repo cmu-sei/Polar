@@ -10,7 +10,7 @@ apiVersion = "v1"
     , namespace = Some values.namespace
     }
 -- , data : Optional (List { mapKey : Text, mapValue : Text })
-, immutable = Some True
+-- , immutable = Some True
 , stringData = Some [ { mapKey = values.gitlabSecret.key, mapValue = env:GITLAB_TOKEN as Text } ]
 , type = Some "Opaque"
 }

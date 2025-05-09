@@ -103,9 +103,14 @@ impl Actor for GitlabPipelineObserver {
                         match response.json::<GraphQlResponse<ProjectPipelineQuery>>().await {
                             Ok(deserialized) => {
                                 if let Some(errors) = deserialized.errors {
-                                    for error in errors {
-                                        warn!("Received errors, {error:?}");
-                                    }
+                                    let errors = errors
+                                    .iter()
+                                    .map(|error| { error.to_string() })
+                                    .collect::<Vec<_>>()
+                                    .join("\n");
+            
+                                    error!("Failed to query instance! {errors}");
+                                    myself.stop(Some(errors))
                                 }
                                 else if let Some(resp) = deserialized.data {
                                     
@@ -235,9 +240,14 @@ impl Actor for GitlabJobObserver {
                             // Handle successful data response
                             Ok(deserialized) => {
                                 if let Some(errors) = deserialized.errors {
-                                    for error in errors {
-                                        warn!("Received errors, {error:?}");
-                                    }
+                                    let errors = errors
+                                    .iter()
+                                    .map(|error| { error.to_string() })
+                                    .collect::<Vec<_>>()
+                                    .join("\n");
+            
+                                    error!("Failed to query instance! {errors}");
+                                    myself.stop(Some(errors))
                                 }
                                 // sift through and dig down to find the jobs list. 
                                 
