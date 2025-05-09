@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 pub const DISPATCH_ACTOR: &str = "DISPATCH";
-
+pub const CYPHER_NULL_STR: &str = "null";
 pub enum DispatcherMessage {
     Dispatch { message: Vec<u8>, topic: String }, // Serialize()
 }

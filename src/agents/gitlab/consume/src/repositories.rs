@@ -137,20 +137,20 @@ impl Actor for GitlabRepositoryConsumer {
                             .iter()
                             .map(|tag| {
                                 format!(
-                                    "{{ created_at: {created_at}, \
-                                    digest: {digest}, \
+                                    "{{ created_at: \"{created_at}\", \
+                                    digest: \"{digest}\", \
                                     location: \"{location}\", \
-                                    media_type: {media_type}, \
+                                    media_type: \"{media_type}\", \
                                     name: \"{name}\", \
                                     path: \"{path}\", \
-                                    published_at: {published_at}, \
-                                    revision: {revision}, \
-                                    short_revision: {short_revision}, \
-                                    total_size: {total_size} }}",
+                                    published_at: \"{published_at}\", \
+                                    revision: \"{revision}\", \
+                                    short_revision: \"{short_revision}\", \
+                                    total_size: \"{total_size}\" }}",
                                     created_at = tag.created_at.clone().unwrap_or(DateTimeString(String::default())),
-                                    digest = tag.digest.clone().unwrap_or_default(),
+                                    digest = tag.digest.clone().unwrap_or(String::default()),
                                     location = tag.location,
-                                    media_type = tag.media_type.clone().unwrap_or_default(),
+                                    media_type = tag.media_type.clone().unwrap_or(String::default()),
                                     name = tag.name,
                                     path = tag.path,
                                     published_at = tag.published_at.clone().unwrap_or(DateTimeString(String::default())),
@@ -175,10 +175,22 @@ impl Actor for GitlabRepositoryConsumer {
                             t.short_revision = tag.short_revision,
                             t.total_size = tag.total_size
                             WITH tag, t
-                            MATCH (r:ContainerRepository {{ path: tag.path }})
+                            MATCH (r:ContainerRepository {{ path: "{repo_path}" }})
                             MERGE (t)-[:CONTAINS_TAG]->(r)
                         "#);
 
+                        debug!(cypher_query);
+
+                        if let Err(_) = transaction.run(neo4rs::Query::new(cypher_query)).await {
+                            myself.stop(Some(QUERY_RUN_FAILED.to_string()));
+                            
+                        }
+                        
+                        if let Err(_) = transaction.commit().await {
+                            myself.stop(Some(QUERY_COMMIT_FAILED.to_string()));
+                        }
+                        
+                        info!("Committed transaction to database"); 
 
                     }
                     _ => (),

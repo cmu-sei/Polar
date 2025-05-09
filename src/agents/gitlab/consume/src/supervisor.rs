@@ -59,7 +59,7 @@ impl ConsumerSupervisor {
         // This section could be improved somewhat. The idea of using a hashmap of callback functions was suggested
         // but this is far more readable. Various typing errors were discovered trying to implement the hashmap.
         // Also, it'd be more ideal for this consumer to stay alive indefinitely, continuously retrying but that doesn't seem supported w/ this crate.
-        // If the grpah isn't back after 5-10 minutes we probably have a serious issue anyway.
+        // If the graph isn't back after 5-10 minutes we probably have a serious issue anyway.
         
         let attempts = 10;
         let min = Duration::from_secs(3);
