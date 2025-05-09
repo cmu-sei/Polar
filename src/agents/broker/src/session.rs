@@ -133,8 +133,6 @@ impl Actor for SessionManager {
                     // LOL they didn't stick around very long!
                     warn!("{REGISTRATION_REQ_FAILED_TXT} {CLIENT_NOT_FOUND_TXT}")
                 }
-
-                Ok(())
             }
             BrokerMessage::RegistrationResponse {
                 registration_id,
@@ -158,7 +156,6 @@ impl Actor for SessionManager {
                         }
                     }
                 }
-                Ok(())
             }
             BrokerMessage::DisconnectRequest {
                 client_id,
@@ -182,7 +179,6 @@ impl Actor for SessionManager {
                         None => warn!("Failed to find supervisor"),
                     }
                 }
-                Ok(())
             }
             BrokerMessage::TimeoutMessage {
                 client_id,
@@ -228,14 +224,10 @@ impl Actor for SessionManager {
                         });
                     }
                 }
-                Ok(())
             }
-            _ => {
-                warn!("Received unexpected message: {message:?}");
-                // TODO: This is actually an error case, but I don't know what the right generic error is at this momement.
-                Ok(())
-            }
+            _ => { warn!("Received unexpected message: {message:?}") }
         }
+        Ok(())
     }
 
     async fn handle_supervisor_evt(

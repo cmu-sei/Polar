@@ -110,7 +110,6 @@ impl Actor for TcpClientActor {
         info!("Connecting to {addr}");
         let connector = TlsConnector::from(Arc::clone(&state.client_config));
 
-        //TODO: Refactor, just expect this first connect to succeed and match the TLS connection result
         match TcpStream::connect(&addr).await {
             Ok(tcp_stream) => {
                 
@@ -227,7 +226,9 @@ impl Actor for TcpClientActor {
             }
             Err(e) => {
                 // Given that the gitlab consumer recently got an upgrade using an exponential backoff, 
-                // perhaps it's time the client actor got one too? Stopping the client causes the agent to crash.
+                // perhaps it's time the client actor got one too? 
+                // It's not the end of the world if cassini goes down is it? 
+                // if it does, it drops messages, but that doesn't mean we have to give up on the client end.
                 error!("Failed to connect to server: {e}");
                 myself.stop(Some("Failed to connect to server: {e}".to_string()));
             }

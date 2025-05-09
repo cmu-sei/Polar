@@ -116,7 +116,6 @@ impl Actor for GitlabGroupConsumer {
                                             .user
                                             .as_ref()
                                             .map_or_else(|| String::default(), |user| user.id.to_string()),
-                                        //TODO: Represent this as a string, Too annoying to get the string value of this right now
                                         access_level = membership.access_level.as_ref().map_or_else(
                                             || String::default(),
                                             |al| { al.integer_value.unwrap_or_default().to_string() }

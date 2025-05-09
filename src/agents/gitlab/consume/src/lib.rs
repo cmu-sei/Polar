@@ -43,7 +43,6 @@ pub const TRANSACTION_FAILED_ERROR: &str = "Expected to start a transaction with
 pub const QUERY_COMMIT_FAILED: &str = "Error committing transaction to graph";
 pub const QUERY_RUN_FAILED: &str = "Error running query on the graph.";
 
-//TODO: Give consumer state info about neo4j, and eventually, a graph adapter to work with
 pub struct GitlabConsumerState {
     pub registration_id: String,
     graph: neo4rs::Graph,
@@ -56,7 +55,6 @@ pub struct GitlabConsumerArgs {
 
 ///
 /// Helper fn to setup consumer state, subscribe to a given topic, and connect to the graph database
-/// TODO: Consider updating this function in the future to leverage a grpah adapter should support alternatives to neo4j
 pub async fn subscribe_to_topic(
     registration_id: String,
     topic: String,

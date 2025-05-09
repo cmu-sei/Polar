@@ -40,7 +40,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     
 
     let (supervisor, handle) = Actor::spawn(
-        Some("GITLAB_CONSUMER_SUPERVISOR".to_string()),
+        Some("gitlab.supervisor.consumer".to_string()),
         supervisor::ConsumerSupervisor,
         args,
     )
