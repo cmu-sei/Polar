@@ -80,7 +80,19 @@ build-workspace:
     - cd src/agents
     # build workspace
     - nix build --eval-system x86_64-linux --show-trace .#default
-    
+
+    # upload binary artifacts to our package registry
+    - |
+      for file in result/bin/*; do
+        if [ -f "$file" ]; then
+          filename=$(basename "$file")
+          curl --header "JOB-TOKEN: $CI_JOB_TOKEN" \
+               --upload-file "$file" \
+               "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/polar/0.1.0/$filename"
+          echo "Uploaded: $filename"
+        fi
+      done
+  
     # Vulnerability analysis on our store
     # vulnix returns nonzero exit codes, so we need to get around this.
     # SEE: https://github.com/nix-community/vulnix/issues/79
