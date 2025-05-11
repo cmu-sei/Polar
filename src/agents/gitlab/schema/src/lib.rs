@@ -23,6 +23,17 @@ impl fmt::Display for DateTimeString {
 }
 
 #[derive(
+    Debug, Serialize, Deserialize, serde::Deserialize, serde::Serialize, Archive, Default, Clone,
+)]
+pub struct DateString(pub String);
+
+impl fmt::Display for DateString {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+#[derive(
     Debug, Serialize, Deserialize, serde::Deserialize, serde::Serialize, Archive, Clone, Default,
 )]
 pub struct IdString(pub String);
@@ -110,7 +121,7 @@ impl_scalar!(BigInt, gitlab::BigInt);
 impl_scalar!(IdString, gitlab::ID);
 impl_scalar!(CiJobArtifactID, gitlab::CiJobArtifactID);
 impl_scalar!(JobIdString, gitlab::JobID);
-
 // represent timestamps
+impl_scalar!(DateString, gitlab::Date);
 impl_scalar!(DateTimeString, gitlab::Time);
 

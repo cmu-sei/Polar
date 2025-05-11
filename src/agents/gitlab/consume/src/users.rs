@@ -24,6 +24,7 @@
 use crate::{subscribe_to_topic, GitlabConsumerArgs, GitlabConsumerState, QUERY_COMMIT_FAILED, QUERY_RUN_FAILED, TRANSACTION_FAILED_ERROR};
 use common::types::GitlabData;
 use common::USER_CONSUMER_TOPIC;
+use gitlab_schema::DateString;
 use neo4rs::Query;
 use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef};
 use tracing::{debug, error, info};
@@ -78,11 +79,28 @@ impl Actor for GitlabUserConsumer {
                         .iter()
                         .map(|user| {
                             format!(
-                                "{{ username: \"{username}\", user_id: \"{user_id}\", created_at: \"{created_at}\", state: \"{state}\" }}",
+                                r#"{{
+                                    user_id: "{user_id}",
+                                    username: "{username}",
+                                    bot: "{bot}",
+                                    web_url: "{web_url}",
+                                    web_path: "{web_path}",
+                                    created_at: "{created_at}",
+                                    state: "{state}",
+                                    last_activity_on: "{last_activity_on}",
+                                    location: "{location}",    
+                                    organization: "{organization}"                                                            
+                                 }}"#,
                                 username = user.username.clone().unwrap_or_default(),
                                 user_id = user.id,
                                 created_at = user.created_at.clone().unwrap_or_default(),
-                                state = user.state
+                                state = user.state,
+                                bot = user.bot,
+                                last_activity_on = user.last_activity_on.clone().unwrap_or(DateString(String::default())),
+                                web_path = user.web_path,
+                                web_url = user.web_url,
+                                location = user.location.clone().unwrap_or_default(),
+                                organization = user.organization.clone().unwrap_or_default()
                             )
                         })
                         .collect::<Vec<_>>()
@@ -94,19 +112,26 @@ impl Actor for GitlabUserConsumer {
                             MERGE (user:GitlabUser {{ user_id: user_data.user_id }})
                             SET user.username = user_data.username,
                                 user.created_at = user_data.created_at,
-                                user.state = user_data.state
+                                user.state = user_data.state,
+                                user.bot = user_data.bot,
+                                user.location = user_data.location,
+                                user.web_url = user_data.web_url,
+                                user.web_path = user_data.web_path,
+                                user.organization = user_data.organization
                             "
                         );
                         debug!(cypher_query);
-                        transaction
+                        if let Err(e) = transaction
                             .run(Query::new(cypher_query))
-                            .await
-                            .expect("Expected to run query.");
-        
+                            .await {
+                                error!("{e}");
+                                myself.stop(Some(e.to_string()));
+                            }
+                        
                         if let Err(e) = transaction.commit().await {
                             myself.stop(Some(QUERY_COMMIT_FAILED.to_string()))
                         }
-        
+                        
                         info!("Committed transaction to database");
                     }
                     GitlabData::ProjectMembers(link) => {
