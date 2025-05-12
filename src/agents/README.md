@@ -64,15 +64,21 @@ It is possible to build individual or multiple components at a time. Below are s
 ```sh
 
 # Build only the observer or consumer agents
-nix build .#gitlabObserver
+nix build .#gitlabObserver -o gitlab-observer
 
-nix build .#gitlabConsumer
+nix build .#gitlabConsumer -o gitlab-consumer
 
 # build all images as tar.gz archives to be loaded into a container runtime
-nix build packages.x84_64.#cassiniImage .#observerImage .#consumerImage
+nix build packages.x84_64.#cassiniImage .#observerImage .#consumerImage -o polar
+
+# load the images into your runtime - for example, docker 
+
+docker load polar
+docker load polar-1
+docker load polar-2
 
 # Generate TLS Certificates
-nix build .#tlsCerts
+nix build .#tlsCerts -o certs
 
 # Run static analysis, unit tests via derivations in checks on the workspace.
 nix flake check
@@ -85,7 +91,8 @@ nix build \
 --show-trace \
 --impure         
 
-nix build --eval-system x86_64-linux --show-trace --impure .#packages.x86_64-linux.observerImage .#packages.x86_64-linux.consumerImage .#packages.x86_64-linux.cassiniImage           
+# If you've already configured a remote builder in your nix.conf, build all images available at time of writing + tlsCerts
+nix build --eval-system x86_64-linux --show-trace --impure .#packages.x86_64-linux.observerImage .#packages.x86_64-linux.consumerImage .#packages.x86_64-linux.cassiniImage .#tlsCerts
 # Impure remote checks
 # nix flake check --eval-system x86_64-linux --builders "ssh://user@some-linux-host x86_64-linux" --show-trace --impure   
 ```

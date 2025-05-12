@@ -80,7 +80,7 @@ pub enum GitlabObserverMessage {
     GetProjectPipelines(IdString),
     GetPipelineJobs(IdString),
     GetProjectContainerRepositories(IdString),
-    GetProjectPackageRepositories(IdString),
+    GetProjectPackages(IdString),
     GetGroupContainerRepositories(IdString),
     GetGroupPackageRepositories(IdString)
 }

@@ -329,6 +329,12 @@ pub struct Pipeline {
 
 #[derive(cynic::QueryFragment, Deserialize, Serialize, rkyv::Archive, Clone)]
 #[cynic(schema = "gitlab", graphql_type = "Pipeline")]
+pub struct PipelineFragment {
+    pub id: IdString, 
+}
+
+#[derive(cynic::QueryFragment, Deserialize, Serialize, rkyv::Archive, Clone)]
+#[cynic(schema = "gitlab", graphql_type = "Pipeline")]
 pub struct PipelineJobsFragment {
     pub id: IdString,
     pub jobs: Option<CiJobConnection>
@@ -496,4 +502,122 @@ pub struct ProjectContainerRepositoriesFragment {
 pub struct ProjectContainerRepositoriesQuery {
     #[arguments(fullPath: $full_path)]
     pub project: Option<ProjectContainerRepositoriesFragment>
+}
+
+#[derive(cynic::QueryFragment, Deserialize, Serialize, rkyv::Archive)]
+pub struct PackageTag {
+    pub id: IdString,
+    pub created_at: DateTimeString,
+    pub name: String,
+    updated_at: DateTimeString
+}
+
+#[derive(cynic::QueryFragment, Deserialize, Serialize, rkyv::Archive)]
+pub struct PackageTagConnection {
+    pub nodes: Option<Vec<Option<PackageTag>>>,
+    pub page_info: PageInfo,
+}
+
+#[derive(cynic::QueryFragment, Deserialize, Serialize, rkyv::Archive)]
+#[cynic(schema = "gitlab", graphql_type = "PipelineConnection")]
+pub struct PipelineFragmentConnection {
+    pub nodes: Option<Vec<Option<PipelineFragment>>>
+}
+
+#[derive(cynic::QueryFragment, Deserialize, Serialize, rkyv::Archive)]
+#[cynic(schema = "gitlab", graphql_type = "Package")]
+pub struct Package {
+    // pub _links: PackageLinks,
+    pub created_at: DateTimeString,
+    pub id: gitlab_schema::PackageIDString,
+    // pub metadata: Option<PackageMetadata>,
+    pub name: String,
+    pub package_type: PackageTypeEnum,
+    pub status: PackageStatus,
+    pub status_message: Option<String>,
+    pub updated_at: DateTimeString,
+    pub version: Option<String>,
+    pub tags: Option<PackageTagConnection>,
+    pub pipelines: Option<PipelineFragmentConnection>,
+}
+
+#[derive(cynic::Enum, Debug, Deserialize, Serialize, rkyv::Archive)]
+#[cynic(schema = "gitlab")]
+pub enum PackageTypeEnum {
+    Maven,
+    Npm,
+    Conan,
+    Nuget,
+    Pypi,
+    TerraformModule,
+    Helm,
+    Composer,
+    Generic,
+    Golang,
+    Debian,
+    MlModel, Rpm, Rubygems
+}
+
+#[derive(cynic::Enum, Debug, Deserialize, Serialize, rkyv::Archive)]
+#[cynic(schema = "gitlab")]
+pub enum PackageStatus {
+    Default,
+    Hidden,
+    PendingDestruction, Error, Processing
+}
+
+impl fmt::Display for PackageTypeEnum {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let s = match self {
+            PackageTypeEnum::Maven => "maven",
+            PackageTypeEnum::Npm => "npm",
+            PackageTypeEnum::Conan => "conan",
+            PackageTypeEnum::Nuget => "nuget",
+            PackageTypeEnum::Pypi => "pypi",
+            PackageTypeEnum::TerraformModule => "terraform_module",
+            PackageTypeEnum::Helm => "helm",
+            PackageTypeEnum::Composer => "composer",
+            PackageTypeEnum::Generic => "generic",
+            PackageTypeEnum::Golang => "golang",
+            PackageTypeEnum::Debian => "debian",
+            PackageTypeEnum::MlModel => "ml_model",
+            PackageTypeEnum::Rpm => "rpm",
+            PackageTypeEnum::Rubygems => "rubygems",
+        };
+        write!(f, "{}", s)
+    }
+}
+
+impl fmt::Display for PackageStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let s = match self {
+            PackageStatus::Default => "default",
+            PackageStatus::Hidden => "hidden",
+            PackageStatus::PendingDestruction => "pending_destruction",
+            PackageStatus::Error => "error",
+            PackageStatus::Processing => "processing",
+        };
+        write!(f, "{}", s)
+    }
+}
+
+
+#[derive(cynic::QueryFragment, Deserialize, Serialize, rkyv::Archive)]
+pub struct PackageConnection {
+    pub nodes: Option<Vec<Option<Package>>>,
+    pub page_info: PageInfo
+}
+
+#[derive(cynic::QueryFragment, Deserialize, Serialize, rkyv::Archive)]
+#[cynic(schema = "gitlab", graphql_type = "Project")]
+pub struct ProjectPackagesFragment {
+    pub id: IdString,
+    pub packages: Option<PackageConnection>
+}
+
+#[derive(cynic::QueryFragment, Deserialize, Serialize, rkyv::Archive)]
+#[cynic(schema = "gitlab", graphql_type = "Query", variables = "SingleProjectQueryArguments")]
+pub struct ProjectPackagesQuery {
+    #[arguments(fullPath: $full_path)]
+    pub project: Option<ProjectPackagesFragment>
 }
