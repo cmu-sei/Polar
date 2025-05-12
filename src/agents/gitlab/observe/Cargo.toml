@@ -46,6 +46,7 @@ cassini = { path = "../../broker" }
 ractor = { version="0.14.1", features = ["async-trait"]}
 cynic = { version = "3.9.1" , features = ["rkyv"] }
 gitlab-queries = { path = "../query" }
+gitlab-schema = {path = "../schema" }
 rkyv = "0.8.10"
 polar = {path = "../../lib"}
 [build-dependencies]

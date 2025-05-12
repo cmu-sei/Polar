@@ -159,11 +159,7 @@ impl Actor for SubscriberManager {
                                         .expect("expected to send ack to session");
                                 },
                             );
-                        } else {
-                            warn!("Session agent {id} not subscribed to topic {topic}");
-                            //TODO: determine naming convention for subscriber agents?
-                            // session_id:topic?
-                        }
+                        } else { warn!("Session agent {id} not subscribed to topic {topic}"); }
                     }
                     None => todo!(),
                 }

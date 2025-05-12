@@ -141,6 +141,7 @@ in
       skopeo
       grype
       syft
-      kubeconform 
+      sops
+      envsubst
     ];
   }

@@ -14,7 +14,7 @@ pub mod gitlab {}
 #[derive(
     Debug, Serialize, Deserialize, serde::Deserialize, serde::Serialize, Archive, Default, Clone,
 )]
-pub struct DateTimeString(String);
+pub struct DateTimeString(pub String);
 
 impl fmt::Display for DateTimeString {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -23,9 +23,26 @@ impl fmt::Display for DateTimeString {
 }
 
 #[derive(
+    Debug, Serialize, Deserialize, serde::Deserialize, serde::Serialize, Archive, Default, Clone,
+)]
+pub struct DateString(pub String);
+
+impl fmt::Display for DateString {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+#[derive(
     Debug, Serialize, Deserialize, serde::Deserialize, serde::Serialize, Archive, Clone, Default,
 )]
-pub struct IdString(String);
+pub struct IdString(pub String);
+
+impl IdString {
+    pub fn new<S: Into<String>>(s: S) -> Self {
+        IdString(s.into())
+    }
+}
 
 impl fmt::Display for IdString {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -33,7 +50,78 @@ impl fmt::Display for IdString {
     }
 }
 
-impl_scalar!(IdString, gitlab::ID);
+#[derive(
+    Debug, Serialize, Deserialize, serde::Deserialize, serde::Serialize, Archive, Clone, Default,
+)]
+pub struct JobIdString(pub String);
 
+impl JobIdString {
+    pub fn new<S: Into<String>>(s: S) -> Self {
+        JobIdString(s.into())
+    }
+}
+
+impl fmt::Display for JobIdString {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+#[derive(
+    Debug, Serialize, Deserialize, serde::Deserialize, serde::Serialize, Archive, Clone, Default,
+)]
+pub struct CiJobArtifactID(pub String);
+
+impl CiJobArtifactID {
+    pub fn new<S: Into<String>>(s: S) -> Self {
+        CiJobArtifactID(s.into())
+    }
+}
+
+impl fmt::Display for CiJobArtifactID {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+// 
+// Represents non-fractional signed whole numeric values. Since the value may exceed the size of a 32-bit integer, it's encoded as a string.
+// 
+#[derive(
+    Debug, Serialize, Deserialize, serde::Deserialize, serde::Serialize, Archive, Clone, Default,
+)]
+pub struct BigInt(pub String);
+
+impl BigInt {
+    pub fn new<S: Into<String>>(s: S) -> Self {
+        BigInt(s.into())
+    }
+}
+
+impl fmt::Display for BigInt {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+
+/// Represents a GitLab global ID for a container repository.
+/// Example: "gid://gitlab/ContainerRepository/1"
+#[derive(
+    Debug, Serialize, Deserialize, serde::Deserialize, serde::Serialize, Archive, Clone, Default,
+)]
+pub struct ContainerRepositoryID(pub String);
+
+impl fmt::Display for ContainerRepositoryID {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+impl_scalar!(ContainerRepositoryID, gitlab::ContainerRepositoryID);
+impl_scalar!(BigInt, gitlab::BigInt);
+impl_scalar!(IdString, gitlab::ID);
+impl_scalar!(CiJobArtifactID, gitlab::CiJobArtifactID);
+impl_scalar!(JobIdString, gitlab::JobID);
 // represent timestamps
+impl_scalar!(DateString, gitlab::Date);
 impl_scalar!(DateTimeString, gitlab::Time);
+

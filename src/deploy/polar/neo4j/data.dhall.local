@@ -1,0 +1,24 @@
+let kubernetes = ../../types/kubernetes.dhall
+let values = ../values.dhall
+
+let neo4jDataVolume = kubernetes.PersistentVolume::{ 
+    apiVersion = "v1"
+    , kind = "PersistentVolume"
+    , metadata = kubernetes.ObjectMeta::{
+        name = Some values.neo4j.volumes.data.name
+        , namespace = Some values.neo4j.namespace
+    }
+    , spec = Some kubernetes.PersistentVolumeSpec::{
+        accessModes = Some ["ReadWriteOnce"]
+        , capacity = 
+            Some ([
+                { mapKey = "storage"
+                , mapValue = "10Gi"
+                }
+            ])
+        , hostPath = Some kubernetes.HostPathVolumeSource:: { path = "/data/neo4j/data" }
+        , storageClassName = Some "standard"
+    }    
+}
+
+in neo4jDataVolume

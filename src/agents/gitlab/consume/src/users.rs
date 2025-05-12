@@ -21,14 +21,13 @@
    DM24-0470
 */
 
-use std::fmt::Display;
-
-use crate::{subscribe_to_topic, GitlabConsumerArgs, GitlabConsumerState, TRANSACTION_FAILED_ERROR};
+use crate::{subscribe_to_topic, GitlabConsumerArgs, GitlabConsumerState, QUERY_COMMIT_FAILED, QUERY_RUN_FAILED, TRANSACTION_FAILED_ERROR};
 use common::types::GitlabData;
 use common::USER_CONSUMER_TOPIC;
+use gitlab_schema::DateString;
 use neo4rs::Query;
-use ractor::{async_trait, registry::where_is, Actor, ActorProcessingErr, ActorRef};
-use tracing::{debug, error, field::debug, info, warn};
+use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef};
+use tracing::{debug, error, info};
 
 pub struct GitlabUserConsumer;
 
@@ -45,7 +44,7 @@ impl Actor for GitlabUserConsumer {
     ) -> Result<Self::State, ActorProcessingErr> {
         debug!("{myself:?} starting, connecting to broker");
         //subscribe to topic
-        match subscribe_to_topic(args.registration_id, USER_CONSUMER_TOPIC.to_string()).await {
+        match subscribe_to_topic(args.registration_id, USER_CONSUMER_TOPIC.to_string(), args.graph_config).await {
             Ok(state) => Ok(state),
             Err(e) => {
                 let err_msg = format!("Error subscribing to topic \"{USER_CONSUMER_TOPIC}\" {e}");
@@ -69,114 +68,148 @@ impl Actor for GitlabUserConsumer {
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        match message {
-            GitlabData::Users(users) => {
-                //Expect transaction to start, panic if it doesn't
-                let mut transaction = state.graph.start_txn().await.expect(TRANSACTION_FAILED_ERROR);
-
-                let users_data = users
-                .iter()
-                .map(|user| {
-                    format!(
-                        "{{ username: \"{username}\", user_id: \"{user_id}\", created_at: \"{created_at}\", state: \"{state}\" }}",
-                        username = user.username.clone().unwrap_or_default(),
-                        user_id = user.id,
-                        created_at = user.created_at.clone().unwrap_or_default(),
-                        state = user.state
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join(",\n");
-
-                let cypher_query = format!(
-                    "
-                    UNWIND [{users_data}] AS user_data
-                    MERGE (user:GitlabUser {{ user_id: user_data.user_id }})
-                    SET user.username = user_data.username,
-                        user.created_at = user_data.created_at,
-                        user.state = user_data.state
-                    "
-                );
-                debug!(cypher_query);
-                transaction
-                    .run(Query::new(cypher_query))
-                    .await
-                    .expect("Expected to run query.");
-                if let Err(e) = transaction.commit().await {
-                    let err_msg = format!("Error committing transaction to graph: {e}");
-                    error!("{err_msg}");
-                }
-                info!("Committed transaction to database");
-                
-            }
-            GitlabData::ProjectMembers(link) => {
-                let mut transaction =  state.graph.start_txn().await.expect(TRANSACTION_FAILED_ERROR);
-
-                let nodes = link.connection.nodes.unwrap();
-
-                let project_memberships = nodes
-                    .iter()
-                    .filter_map(|option| {
-                        let membership = option.as_ref().unwrap();
-
-                        //create a list of attribute sets that will represent the relationship between a user and each project
-                        membership.project.as_ref().map(|project| {
+        
+        //Expect transaction to start, stop if it doesn't
+        match state.graph.start_txn().await {
+            Ok(mut transaction) => {
+                match message {
+                    GitlabData::Users(users) => {
+            
+                        let users_data = users
+                        .iter()
+                        .map(|user| {
                             format!(
                                 r#"{{
-                                project_id: "{}",
-                                access_level: "{}",
-                                created_at: "{}",
-                                expires_at: "{}"
-                            }}"#,
-                                project.id,
-
-                                membership.access_level.as_ref().map_or_else(
-                                    || String::default(),
-                                    |al| {
-                                        al.integer_value.unwrap_or_default().to_string()
-                                    }
-                                ),
-                                membership.created_at.as_ref().map_or_else(
-                                    || String::default(),
-                                    |date| date.to_string()
-                                ),
-                                membership.expires_at.as_ref().map_or_else(
-                                    || String::default(),
-                                    |date| date.to_string()
-                                ),
+                                    user_id: "{user_id}",
+                                    username: "{username}",
+                                    bot: "{bot}",
+                                    web_url: "{web_url}",
+                                    web_path: "{web_path}",
+                                    created_at: "{created_at}",
+                                    state: "{state}",
+                                    last_activity_on: "{last_activity_on}",
+                                    location: "{location}",    
+                                    organization: "{organization}"                                                            
+                                 }}"#,
+                                username = user.username.clone().unwrap_or_default(),
+                                user_id = user.id,
+                                created_at = user.created_at.clone().unwrap_or_default(),
+                                state = user.state,
+                                bot = user.bot,
+                                last_activity_on = user.last_activity_on.clone().unwrap_or(DateString(String::default())),
+                                web_path = user.web_path,
+                                web_url = user.web_url,
+                                location = user.location.clone().unwrap_or_default(),
+                                organization = user.organization.clone().unwrap_or_default()
                             )
                         })
-                    })
-                    .collect::<Vec<_>>()
-                    .join(",\n");
+                        .collect::<Vec<_>>()
+                        .join(",\n");
+        
+                        let cypher_query = format!(
+                            "
+                            UNWIND [{users_data}] AS user_data
+                            MERGE (user:GitlabUser {{ user_id: user_data.user_id }})
+                            SET user.username = user_data.username,
+                                user.created_at = user_data.created_at,
+                                user.state = user_data.state,
+                                user.bot = user_data.bot,
+                                user.location = user_data.location,
+                                user.web_url = user_data.web_url,
+                                user.web_path = user_data.web_path,
+                                user.organization = user_data.organization
+                            "
+                        );
+                        debug!(cypher_query);
+                        if let Err(e) = transaction
+                            .run(Query::new(cypher_query))
+                            .await {
+                                error!("{e}");
+                                myself.stop(Some(e.to_string()));
+                            }
+                        
+                        if let Err(e) = transaction.commit().await {
+                            myself.stop(Some(QUERY_COMMIT_FAILED.to_string()))
+                        }
+                        
+                        info!("Committed transaction to database");
+                    }
+                    GitlabData::ProjectMembers(link) => {
+         
+                        let nodes = link.connection.nodes.unwrap();
+        
+                        let project_memberships = nodes
+                            .iter()
+                            .filter_map(|option| {
+                                let membership = option.as_ref().unwrap();
+        
+                                //create a list of attribute sets that will represent the relationship between a user and each project
+                                membership.project.as_ref().map(|project| {
+                                    format!(
+                                        r#"{{
+                                        project_id: "{}",
+                                        access_level: "{}",
+                                        created_at: "{}",
+                                        expires_at: "{}"
+                                    }}"#,
+                                        project.id,
+        
+                                        membership.access_level.as_ref().map_or_else(
+                                            || String::default(),
+                                            |al| {
+                                                al.integer_value.unwrap_or_default().to_string()
+                                            }
+                                        ),
+                                        membership.created_at.as_ref().map_or_else(
+                                            || String::default(),
+                                            |date| date.to_string()
+                                        ),
+                                        membership.expires_at.as_ref().map_or_else(
+                                            || String::default(),
+                                            |date| date.to_string()
+                                        ),
+                                    )
+                                })
+                            })
+                            .collect::<Vec<_>>()
+                            .join(",\n");
+        
+                        //write a query that finds the given user, and create a relationship between it and every project we were given
+                        let cypher_query = format!(
+                            "
+                            MATCH (user:GitlabUser {{ user_id: \"{}\" }})
+                            UNWIND [{}] AS project_data
+                            MERGE (project:GitlabProject {{ project_id: project_data.project_id }})
+                            MERGE (user)-[r:MEMBER_OF]->(project)
+                            SET r.access_level = project_data.access_level,
+                                r.created_at = project_data.created_at,
+                                r.expires_at = project_data.expires_at
+                            ",
+                            link.resource_id, project_memberships
+                        );
+        
+                        debug!(cypher_query);
 
-                //write a query that finds the given user, and create a relationship between it and every project we were given
-                let cypher_query = format!(
-                    "
-                    MATCH (user:GitlabUser {{ user_id: \"{}\" }})
-                    UNWIND [{}] AS project_data
-                    MERGE (project:GitlabProject {{ project_id: project_data.project_id }})
-                    MERGE (user)-[r:MEMBER_OF]->(project)
-                    SET r.access_level = project_data.access_level,
-                        r.created_at = project_data.created_at,
-                        r.expires_at = project_data.expires_at
-                    ",
-                    link.resource_id, project_memberships
-                );
-
-                debug!(cypher_query);
-                transaction
-                    .run(Query::new(cypher_query))
-                    .await
-                    .expect("Expected to run query.");
-                if let Err(e) = transaction.commit().await {
-                    error!("Error committing transaction to graph: {e}");
-                }
-                info!("Committed transaction to database");
+                        if let Err(_) = transaction.run(Query::new(cypher_query)).await {
+                            myself.stop(Some(QUERY_RUN_FAILED.to_string()));
+                            
+                        }
+                        
+                        if let Err(_) = transaction.commit().await {
+                            myself.stop(Some(QUERY_COMMIT_FAILED.to_string()));
+                        }
+                        
+                        info!("Committed transaction to database");
+                    }
+        
+                    _ => (),
+                }        
             }
-
-            _ => (),
+            Err(e) => myself.stop(Some(format!("{TRANSACTION_FAILED_ERROR}. {e}")))
         }
+
+      
+      
         Ok(())
     }
 }

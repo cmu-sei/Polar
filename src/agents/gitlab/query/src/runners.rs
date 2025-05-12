@@ -1,4 +1,3 @@
-use crate::UserCoreFragment;
 use gitlab_schema::{
     gitlab::{self as schema},
     DateTimeString, IdString,
@@ -6,7 +5,6 @@ use gitlab_schema::{
 use rkyv::Archive;
 use rkyv::Deserialize;
 use rkyv::Serialize;
-use std::fmt;
 
 #[derive(cynic::QueryFragment, Deserialize, Serialize, Archive, Clone)]
 pub struct CiRunnerConnection {
@@ -40,8 +38,15 @@ pub struct CiRunner {
     pub status: CiRunnerStatus,
     pub contacted_at: Option<DateTimeString>,
     pub created_at: Option<DateTimeString>,
-    pub created_by: Option<UserCoreFragment>,
+    pub created_by: Option<crate::users::UserCoreFragment>,
     pub tag_list: Option<Vec<String>>,
+}
+
+#[derive(cynic::QueryFragment, Deserialize, Serialize, Archive, Clone)]
+#[cynic(graphql_type = "CiRunner")]
+pub struct CiRunnerIdFragment {
+    pub id: CiRunnerID,
+    
 }
 
 #[derive(cynic::Enum, Clone, Copy, Debug, Deserialize, Serialize, Archive)]

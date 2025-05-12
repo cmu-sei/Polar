@@ -1,3 +1,5 @@
+use std::env;
+
 use ractor::{ActorRef, RpcReplyPort};
 use rkyv::{Archive, Deserialize, Serialize};
 
@@ -32,6 +34,34 @@ pub const REGISTRATION_REQ_FAILED_TXT: &str = "Failed to register session!";
 pub const LISTENER_MGR_NOT_FOUND_TXT: &str = "Listener Manager not found!";
 pub const TIMEOUT_REASON: &str = "SESSION_TIMEDOUT";
 pub const DISCONNECTED_REASON: &str = "CLIENT_DISCONNECTED";
+///
+/// A basse configuration for a TCP Client actor
+pub struct TCPClientConfig {
+    pub broker_endpoint: String,
+    pub server_name: String,
+    pub ca_certificate_path: String,
+    pub client_certificate_path: String,
+    pub client_key_path: String
+}
+
+impl TCPClientConfig {
+    /// Read filepaths from the environment and return. If we can't read these, we can't start
+    pub fn new() -> Self {
+        let client_certificate_path = env::var("TLS_CLIENT_CERT").expect("Expected a value for TLS_CLIENT_CERT.");
+        let client_key_path = env::var("TLS_CLIENT_KEY").expect("Expected a value for TLS_CLIENT_KEY.");
+        let ca_certificate_path = env::var("TLS_CA_CERT").expect("Expected a value for TLS_CA_CERT.");
+        let broker_endpoint = env::var("BROKER_ADDR").expect("Expected a valid socket address for BROKER_ADDR");
+        let server_name = env::var("CASSINI_SERVER_NAME").expect("Expected a value for CASSINI_SERVER_NAME");
+    
+       TCPClientConfig {
+            broker_endpoint,
+            server_name,
+            ca_certificate_path,
+            client_certificate_path,
+            client_key_path
+        }
+    }
+}
 /// Internal messagetypes for the Broker.
 ///
 #[derive(Debug)]
@@ -54,7 +84,7 @@ pub enum BrokerMessage {
     },
     /// Publish request from the client.
     PublishRequest {
-        registration_id: Option<String>, //TODO: Reemove option, listener checks for registration_id before forwarding
+        registration_id: Option<String>,
         topic: String,
         payload: Vec<u8>,
     },
@@ -189,7 +219,7 @@ impl BrokerMessage {
     pub fn from_client_message(
         msg: ClientMessage,
         client_id: String,
-        registration_id: Option<String>,
+        _: Option<String>,
     ) -> Self {
         match msg {
             ClientMessage::RegistrationRequest { registration_id } => {
@@ -243,4 +273,27 @@ impl BrokerMessage {
 /// IF we wanted to support topics subscribing to topics e.g overloading the type of subscriber topics can have, we will want to reconsider this approach.
 pub fn get_subscriber_name(registration_id: &str, topic: &str) -> String {
     format!("{0}:{1}", registration_id, topic)
+}
+
+pub fn parse_host_and_port(endpoint: &str) -> Result<(String, u16), String> {
+    // Add scheme if missing so Url::parse works
+    let formatted = if endpoint.contains("://") {
+        endpoint.to_string()
+    } else {
+        format!("https://{}", endpoint) // dummy scheme
+    };
+
+    let url = url::Url::parse(&formatted)
+        .map_err(|e| format!("Invalid endpoint URL: {}", e))?;
+
+    let host = url
+        .host_str()
+        .ok_or_else(|| "No host found in endpoint".to_string())?
+        .to_string();
+
+    let port = url
+        .port_or_known_default()
+        .ok_or_else(|| "No port found and no default for scheme".to_string())?;
+
+    Ok((host, port))
 }

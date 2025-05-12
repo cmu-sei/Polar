@@ -37,7 +37,7 @@ use reqwest::{Certificate, Client, ClientBuilder};
 
 use common::types::{GitlabData, ResourceLink};
 use cynic::QueryBuilder;
-use gitlab_queries::*;
+use gitlab_queries::users::*;
 use rkyv::rancor::Error;
 use tokio::time;
 use tracing::{debug, error, info, warn};
@@ -115,9 +115,14 @@ impl Actor for GitlabUserObserver {
                         match response.json::<GraphQlResponse<MultiUserQuery>>().await {
                             Ok(deserialized) => {
                                 if let Some(errors) = deserialized.errors {
-                                    for error in errors {
-                                        warn!("Received error, {error:?}");
-                                    }
+                                    let errors = errors
+                                    .iter()
+                                    .map(|error| { error.to_string() })
+                                    .collect::<Vec<_>>()
+                                    .join("\n");
+            
+                                    error!("Failed to query instance! {errors}");
+                                    myself.stop(Some(errors))
                                 }
                                 if let Some(query) = deserialized.data {
                                     if let Some(connection) = query.users {
@@ -222,10 +227,10 @@ impl Actor for GitlabUserObserver {
                             }
                         }
                     }
-                    Err(e) => error!("{e}"),
+                    Err(e) => warn!("Error observing data: {e}")
                 }
             }
-            _ => todo!(),
+            _ => (),
         }
         Ok(())
     }

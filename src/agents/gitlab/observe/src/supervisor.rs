@@ -2,6 +2,7 @@ use core::error;
 use std::time::Duration;
 
 use cassini::client::*;
+use cassini::TCPClientConfig;
 use common::get_file_as_byte_vec;
 use ractor::async_trait;
 use ractor::call;
@@ -18,13 +19,18 @@ use tracing::error;
 use tracing::{debug, info, warn};
 
 use crate::groups::GitlabGroupObserver;
+use crate::pipelines::GitlabJobObserver;
+use crate::pipelines::GitlabPipelineObserver;
 use crate::projects::GitlabProjectObserver;
+use crate::repositories::GitlabRepositoryObserver;
 use crate::runners::GitlabRunnerObserver;
 use crate::users::GitlabUserObserver;
 use crate::GitlabObserverArgs;
 use crate::BROKER_CLIENT_NAME;
+use crate::GITLAB_JOBS_OBSERVER;
+use crate::GITLAB_PIPELINE_OBSERVER;
 use crate::GITLAB_USERS_OBSERVER;
-
+use crate::GITLAB_REPOSITORY_OBSERVER;
 pub struct ObserverSupervisor;
 
 pub struct ObserverSupervisorState {
@@ -32,10 +38,7 @@ pub struct ObserverSupervisorState {
 }
 
 pub struct ObserverSupervisorArgs {
-    pub broker_addr: String,
-    pub client_cert_file: String,
-    pub client_private_key_file: String,
-    pub ca_cert_file: String,
+    pub client_config: TCPClientConfig,
     pub gitlab_endpoint: String,
     pub gitlab_token: Option<String>,
     pub proxy_ca_cert_file: Option<String>
@@ -46,8 +49,8 @@ impl ObserverSupervisor {
     fn get_client(proxy_ca_cert_path: Option<String>) -> Client {
         match proxy_ca_cert_path {
             Some(path) => {   
-                let cert_data = get_file_as_byte_vec(&path).expect("Expected to proxy CA cert from path.");
-                let root_cert = Certificate::from_pem(&cert_data).expect("Expected proxy CA cert to be in PEM format.");
+                let cert_data = get_file_as_byte_vec(&path).expect("Expected to find a proxy CA certificate at {path}");
+                let root_cert = Certificate::from_pem(&cert_data).expect("Expected {path} to be in PEM format.");
 
                 info!("Found PROXY_CA_CERT at: {path}, Configuring web client...");
 
@@ -84,13 +87,7 @@ impl Actor for ObserverSupervisor {
         let client_started_result = Actor::spawn_linked(
             Some(BROKER_CLIENT_NAME.to_string()),
             TcpClientActor,
-            TcpClientArgs {
-                bind_addr: args.broker_addr.clone(),
-                ca_cert_file: args.ca_cert_file,
-                client_cert_file: args.client_cert_file,
-                private_key_file: args.client_private_key_file,
-                registration_id: None,
-            },
+            TcpClientArgs { config: args.client_config, registration_id: None },
             myself.clone().into(),
         )
         .await;
@@ -103,6 +100,7 @@ impl Actor for ObserverSupervisor {
                 //wait until we get a session id to start clients, try some configured amount of times every few seconds
                 let mut attempts = 0;
                 loop {
+                    
                     attempts += 1;
                     info!("Getting session data...");
                     if let CallResult::Success(result) = call(
@@ -111,7 +109,7 @@ impl Actor for ObserverSupervisor {
                         None,
                     )
                     .await
-                    .expect("Expected to call client!")
+                    .expect("Expected to call client!") //TODO: Match this and just stop if we can't do this instead of panicking.
                     {
                         if let Some(registration_id) = result {
                             let args = GitlabObserverArgs {
@@ -143,6 +141,26 @@ impl Actor for ObserverSupervisor {
                                 warn!("failed to start project observer {e}")
                             }
                             if let Err(e) = Actor::spawn_linked(
+                                Some(GITLAB_PIPELINE_OBSERVER.to_string()),
+                                GitlabPipelineObserver,
+                                args.clone(),
+                                myself.clone().into(),
+                            )
+                            .await
+                            {
+                                warn!("failed to start project observer {e}")
+                            }
+                            if let Err(e) = Actor::spawn_linked(
+                                Some(GITLAB_JOBS_OBSERVER.to_string()),
+                                GitlabJobObserver,
+                                args.clone(),
+                                myself.clone().into(),
+                            )
+                            .await
+                            {
+                                warn!("failed to start project observer {e}")
+                            }
+                            if let Err(e) = Actor::spawn_linked(
                                 Some("GITLAB_GROUP_OBSERVER".to_string()),
                                 GitlabGroupObserver,
                                 args.clone(),
@@ -155,6 +173,16 @@ impl Actor for ObserverSupervisor {
                             if let Err(e) = Actor::spawn_linked(
                                 Some("GITLAB_RUNNER_OBSERVER".to_string()),
                                 GitlabRunnerObserver,
+                                args.clone(),
+                                myself.clone().into(),
+                            )
+                            .await
+                            {
+                                warn!("failed to start runner observer {e}")
+                            }
+                            if let Err(e) = Actor::spawn_linked(
+                                Some(GITLAB_REPOSITORY_OBSERVER.to_string()),
+                                GitlabRepositoryObserver,
                                 args.clone(),
                                 myself.clone().into(),
                             )
@@ -206,27 +234,34 @@ impl Actor for ObserverSupervisor {
 
     async fn handle_supervisor_evt(
         &self,
-        _: ActorRef<Self::Msg>,
+        myself: ActorRef<Self::Msg>,
         msg: SupervisionEvent,
         _: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match msg {
             SupervisionEvent::ActorStarted(_) => (),
             SupervisionEvent::ActorTerminated(actor_cell, _, reason) => {
-                info!(
+                error!(
                     "OBSERVER_SUPERVISOR: {0:?}:{1:?} terminated. {reason:?}",
                     actor_cell.get_name(),
                     actor_cell.get_id()
                 );
+                // at time of writing, if any observers terminate
+                // it's a likely unrecoverable state - 
+                // it could be caused by an invalid gitlab token being provided or any malformed query.
+                // this would require intervention by admins.
+                myself.stop(reason)
             }
             SupervisionEvent::ActorFailed(actor_cell, e) => {
-                warn!(
+                error!(
                     "OBSERVER_SUPERVISOR: {0:?}:{1:?} failed! {e:?}",
                     actor_cell.get_name(),
                     actor_cell.get_id()
                 );
+                myself.stop(Some(e.to_string())) 
+
             }
-            SupervisionEvent::ProcessGroupChanged(..) => todo!(),
+            SupervisionEvent::ProcessGroupChanged(..) => todo!("Investigate how this would/could happen and how to respond."),
         }
 
         Ok(())

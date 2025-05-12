@@ -1,4 +1,4 @@
-use crate::{ArchivedClientMessage, ClientMessage};
+use crate::{ArchivedClientMessage, ClientMessage, TCPClientConfig};
 use polar::DispatcherMessage;
 use ractor::registry::where_is;
 use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef, RpcReplyPort};
@@ -27,18 +27,16 @@ pub enum TcpClientMessage {
 /// Actor state for the TCP client
 pub struct TcpClientState {
     bind_addr: String,
+    server_name: String,
     writer: Option<Arc<Mutex<BufWriter<WriteHalf<TlsStream<TcpStream>>>>>>,
     reader: Option<ReadHalf<TlsStream<TcpStream>>>, // Use Option to allow taking ownership
     registration_id: Option<String>,
     client_config: Arc<ClientConfig>,
+    
 }
 
 pub struct TcpClientArgs {
-    pub bind_addr: String,
-    //TOOD: Just pass in the finished config
-    pub ca_cert_file: String,
-    pub client_cert_file: String,
-    pub private_key_file: String,
+    pub config: TCPClientConfig,
     pub registration_id: Option<String>,
 }
 
@@ -65,34 +63,36 @@ impl Actor for TcpClientActor {
 
         let mut root_cert_store = rustls::RootCertStore::empty();
         let _ = root_cert_store.add(
-            CertificateDer::from_pem_file(args.ca_cert_file.clone()).expect(&format!(
+            CertificateDer::from_pem_file(args.config.ca_certificate_path.clone()).expect(&format!(
                 "Expected to read CA cert as a PEM file from {}",
-                args.ca_cert_file
+                args.config.ca_certificate_path
             )),
         );
 
         let client_cert =
-            CertificateDer::from_pem_file(args.client_cert_file.clone()).expect(&format!(
+            CertificateDer::from_pem_file(args.config.client_certificate_path.clone()).expect(&format!(
                 "Expected to read client cert as a PEM file from {}",
-                args.client_cert_file
+                args.config.client_certificate_path
             ));
         let private_key =
-            PrivateKeyDer::from_pem_file(args.private_key_file.clone()).expect(&format!(
+            PrivateKeyDer::from_pem_file(args.config.client_key_path.clone()).expect(&format!(
                 "Expected to read client key as a PEM file from {}",
-                args.private_key_file
+                args.config.client_certificate_path
             ));
         let verifier = WebPkiServerVerifier::builder(Arc::new(root_cert_store))
             .build()
             .expect("Expected to build client verifier");
         let mut certs = Vec::new();
         certs.push(client_cert);
+        
         let config = rustls::ClientConfig::builder()
             .with_webpki_verifier(verifier)
             .with_client_auth_cert(certs, private_key)
             .unwrap();
 
         let state = TcpClientState {
-            bind_addr: args.bind_addr,
+            bind_addr: args.config.broker_endpoint,
+            server_name: args.config.server_name,
             reader: None,
             writer: None,
             registration_id: args.registration_id,
@@ -101,8 +101,7 @@ impl Actor for TcpClientActor {
 
         Ok(state)
     }
-
-    async fn post_start(
+     async fn post_start(
         &self,
         myself: ActorRef<Self::Msg>,
         state: &mut Self::State,
@@ -111,11 +110,10 @@ impl Actor for TcpClientActor {
         info!("Connecting to {addr}");
         let connector = TlsConnector::from(Arc::clone(&state.client_config));
 
-        //TODO: Refactor, just expect this first connect to succeed and match the TLS connection result
         match TcpStream::connect(&addr).await {
             Ok(tcp_stream) => {
-                //TODO: establish better "Common Name" for the broker server
-                let domain = ServerName::try_from("polar").expect("invalid DNS name");
+                
+                let domain = ServerName::try_from(state.server_name.clone()).expect("invalid DNS name");
 
                 match connector.connect(domain, tcp_stream).await {
                     Ok(tls_stream) => {
@@ -227,6 +225,10 @@ impl Actor for TcpClientActor {
                 }
             }
             Err(e) => {
+                // Given that the gitlab consumer recently got an upgrade using an exponential backoff, 
+                // perhaps it's time the client actor got one too? 
+                // It's not the end of the world if cassini goes down is it? 
+                // if it does, it drops messages, but that doesn't mean we have to give up on the client end.
                 error!("Failed to connect to server: {e}");
                 myself.stop(Some("Failed to connect to server: {e}".to_string()));
             }
@@ -244,7 +246,6 @@ impl Actor for TcpClientActor {
 
         Ok(())
     }
-
     async fn post_stop(
         &self,
         myself: ActorRef<Self::Msg>,

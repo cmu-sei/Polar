@@ -153,6 +153,9 @@
           executable = true;
         };
 
+        # get helm charts
+        charts = pkgs.callPackage ./make-chart.nix { inherit pkgs; };
+        
         devContainer = pkgs.dockerTools.buildImage {
           name = "polar-dev";
           tag = "latest";
@@ -228,15 +231,20 @@
           '';
         };
 
+        # So this build is a little hacky, we'd usually be able to use nix2container to just put some creds in a
+        # auth.json file and allow the daemon to see it, but we need to pull from a registry behind a proxy,
+        # and nix2container doesn't let us do that w/o disabling tlsverification. 
+        # We can switch to do that if this approach is too brittle.
         ciContainer = pkgs.dockerTools.buildImage {
           name = "polar-ci";
-          fromImage = pkgs.dockerTools.pullImage {
-            imageName = "nixos/nix";
-            imageDigest = "sha256:088c97f6f08320de53080138d595dda29226f8bc76b2ca8f617e4a739aefa8d7";
-            hash = "sha256-5LpLRfMAVpMh03eAxocPAhLgi/klQlPiMAGSZwhUZr8=";
-            finalImageName = "nixos/nix";
-            finalImageTag = "2.24.13";
-          };
+          fromImage = ./nix.tar;
+          #  pkgs.dockerTools.pullImage {
+          #   imageName = "nixos/nix";
+          #   imageDigest = "sha256:088c97f6f08320de53080138d595dda29226f8bc76b2ca8f617e4a739aefa8d7";
+          #   hash = "sha256-5LpLRfMAVpMh03eAxocPAhLgi/klQlPiMAGSZwhUZr8=";
+          #   finalImageName = "nixos/nix";
+          #   finalImageTag = "2.24.13";
+          # };
           tag = "0.1.0";
           copyToRoot = [
             license
@@ -266,10 +274,11 @@
 
       in
       {
-        inherit devContainer ciContainer;
+        inherit devContainer ciContainer charts;
 
         packages.default = devContainer;
         packages.ciContainer = ciContainer;
+        packages.charts = charts;
       }
     );
 }

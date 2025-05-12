@@ -104,9 +104,14 @@ impl Actor for GitlabRunnerObserver {
                             response.json::<GraphQlResponse<MultiRunnerQuery>>().await
                         {
                             if let Some(errors) = deserialized.errors {
-                                for error in errors {
-                                    warn!("Received errors, {error:?}");
-                                }
+                                let errors = errors
+                                .iter()
+                                .map(|error| { error.to_string() })
+                                .collect::<Vec<_>>()
+                                .join("\n");
+        
+                                error!("Failed to query instance! {errors}");
+                                myself.stop(Some(errors))
                             }
                             if let Some(query) = deserialized.data {
                                 if let Some(connection) = query.runners {
@@ -142,7 +147,7 @@ impl Actor for GitlabRunnerObserver {
                             }
                         }
                     }
-                    Err(e) => todo!(),
+                    Err(e) => warn!("Error observing data: {e}")
                 }
             }
             _ => (),

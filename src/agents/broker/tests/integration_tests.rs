@@ -3,7 +3,7 @@ mod tests {
 
     use cassini::broker::{Broker, BrokerArgs};
     use cassini::client::{TcpClientActor, TcpClientArgs, TcpClientMessage};
-    use cassini::{get_subscriber_name, ClientMessage, BROKER_NAME, LISTENER_MANAGER_NAME};
+    use cassini::{get_subscriber_name, ClientMessage, TCPClientConfig, BROKER_NAME, LISTENER_MANAGER_NAME};
     use core::panic;
     use ractor::registry::where_is;
     use ractor::{async_trait, ActorProcessingErr, ActorRef, SupervisionEvent};
@@ -16,8 +16,6 @@ mod tests {
 
     //Bind to some other port if desired
     pub const BIND_ADDR: &str = "127.0.0.1:8080";
-    // pub const EXPECTED_BROKER: &str = "Expected Broker to start";
-    pub const TEST_SUPERVISOR: &str = "TEST_SUPERVISOR";
     pub const TIMEOUT_ERR_MSG: &str = "Server did not start in time";
     /// Shared Notify instance to signal server readiness
     static SERVER_READY: Notify = Notify::const_new();
@@ -26,9 +24,7 @@ mod tests {
     static ACTIVE_TESTS: AtomicUsize = AtomicUsize::new(0);
     // notified to signal all tests are complete to trigger teardown
     static TEST_NOTIFY: Notify = Notify::const_new();
-
-    pub struct MockSupervisorState;
-    pub struct MockSupervisor;
+    
 
     #[tokio::test]
     async fn test_init() {
@@ -37,9 +33,9 @@ mod tests {
         let broker_args = BrokerArgs {
             bind_addr: String::from(BIND_ADDR),
             session_timeout: Some(5),
-            server_cert_file: env::var("TLS_SERVER_CERT_CHAIN").unwrap(),
-            private_key_file: env::var("TLS_SERVER_KEY").unwrap(),
-            ca_cert_file: env::var("TLS_CA_CERT").unwrap(),
+            server_cert_file: env::var("TLS_SERVER_CERT_CHAIN").expect("Expected to find value for TLS_SERVER_CERT_CHAIN"),
+            private_key_file: env::var("TLS_SERVER_KEY").expect("Expected to find value for TLS_PRIVATE_KEY"),
+            ca_cert_file: env::var("TLS_CA_CERT").expect("Expected to find value for TLS_CA_CERT"),
         };
 
         //start broker
@@ -52,6 +48,7 @@ mod tests {
 
         //wait to end
         TEST_NOTIFY.notified().await;
+        
     }
 
     #[tokio::test]
@@ -66,13 +63,7 @@ mod tests {
         let (client, _) = Actor::spawn(
             Some("test_registration_client".to_owned()),
             TcpClientActor,
-            TcpClientArgs {
-                bind_addr: BIND_ADDR.to_string(),
-                registration_id: None,
-                client_cert_file: env::var("TLS_CLIENT_CERT").unwrap(),
-                private_key_file: env::var("TLS_CLIENT_KEY").unwrap(),
-                ca_cert_file: env::var("TLS_CA_CERT").unwrap(),
-            },
+            TcpClientArgs { config: TCPClientConfig::new(), registration_id: None },
         )
         .await
         .expect("Failed to start client actor");
@@ -112,13 +103,7 @@ mod tests {
         let (client, _) = Actor::spawn(
             Some("test_registered_disconnect_client".to_owned()),
             TcpClientActor,
-            TcpClientArgs {
-                bind_addr: BIND_ADDR.to_string(),
-                registration_id: None,
-                client_cert_file: env::var("TLS_CLIENT_CERT").unwrap(),
-                private_key_file: env::var("TLS_CLIENT_KEY").unwrap(),
-                ca_cert_file: env::var("TLS_CA_CERT").unwrap(),
-            },
+            TcpClientArgs { config: TCPClientConfig::new(), registration_id: None },
         )
         .await
         .expect("Failed to start client actor");
@@ -172,13 +157,7 @@ mod tests {
         let (client, _) = Actor::spawn(
             Some("test_timeout_client".to_owned()),
             TcpClientActor,
-            TcpClientArgs {
-                bind_addr: BIND_ADDR.to_string(),
-                registration_id: None,
-                client_cert_file: env::var("TLS_CLIENT_CERT").unwrap(),
-                private_key_file: env::var("TLS_CLIENT_KEY").unwrap(),
-                ca_cert_file: env::var("TLS_CA_CERT").unwrap(),
-            },
+TcpClientArgs { config: TCPClientConfig::new(), registration_id: None },
         )
         .await
         .expect("Failed to start client actor");
@@ -240,13 +219,7 @@ mod tests {
         let (client, _) = Actor::spawn(
             Some("initial_reconnect_client".to_string()),
             TcpClientActor,
-            TcpClientArgs {
-                bind_addr: BIND_ADDR.to_string(),
-                registration_id: None,
-                client_cert_file: env::var("TLS_CLIENT_CERT").unwrap(),
-                private_key_file: env::var("TLS_CLIENT_KEY").unwrap(),
-                ca_cert_file: env::var("TLS_CA_CERT").unwrap(),
-            },
+TcpClientArgs { config: TCPClientConfig::new(), registration_id: None },
         )
         .await
         .expect("Failed to start client actor");
@@ -287,13 +260,7 @@ mod tests {
         let (new_client, _) = Actor::spawn(
             Some("test_reconnect_client".to_owned()),
             TcpClientActor,
-            TcpClientArgs {
-                bind_addr: BIND_ADDR.to_string(),
-                registration_id: session_id.clone(),
-                client_cert_file: env::var("TLS_CLIENT_CERT").unwrap(),
-                private_key_file: env::var("TLS_CLIENT_KEY").unwrap(),
-                ca_cert_file: env::var("TLS_CA_CERT").unwrap(),
-            },
+            TcpClientArgs { config: TCPClientConfig::new(), registration_id: None},
         )
         .await
         .expect("Failed to start client actor");
@@ -329,13 +296,7 @@ mod tests {
         let (subscriber_client, _) = Actor::spawn(
             Some(format!("dlq_subscriber_client")),
             TcpClientActor,
-            TcpClientArgs {
-                bind_addr: BIND_ADDR.to_string(),
-                registration_id: None,
-                client_cert_file: env::var("TLS_CLIENT_CERT").unwrap(),
-                private_key_file: env::var("TLS_CLIENT_KEY").unwrap(),
-                ca_cert_file: env::var("TLS_CA_CERT").unwrap(),
-            },
+TcpClientArgs { config: TCPClientConfig::new(), registration_id: None },
         )
         .await
         .expect("Failed to start client actor");
@@ -379,13 +340,7 @@ mod tests {
         let (publisher_client, _) = Actor::spawn(
             Some(format!("dlq_publisher_client")),
             TcpClientActor,
-            TcpClientArgs {
-                bind_addr: BIND_ADDR.to_string(),
-                registration_id: None,
-                client_cert_file: env::var("TLS_CLIENT_CERT").unwrap(),
-                private_key_file: env::var("TLS_CLIENT_KEY").unwrap(),
-                ca_cert_file: env::var("TLS_CA_CERT").unwrap(),
-            },
+TcpClientArgs { config: TCPClientConfig::new(), registration_id: None },
         )
         .await
         .expect("Failed to start client actor");
@@ -424,13 +379,7 @@ mod tests {
         let (new_client, _) = Actor::spawn(
             Some("read_dlq_client".to_owned()),
             TcpClientActor,
-            TcpClientArgs {
-                bind_addr: BIND_ADDR.to_string(),
-                registration_id: subscriber_session_id.clone(),
-                client_cert_file: env::var("TLS_CLIENT_CERT").unwrap(),
-                private_key_file: env::var("TLS_CLIENT_KEY").unwrap(),
-                ca_cert_file: env::var("TLS_CA_CERT").unwrap(),
-            },
+            TcpClientArgs{ config: TCPClientConfig::new(), registration_id: None },
         )
         .await
         .expect("Failed to start client actor");
@@ -465,13 +414,7 @@ mod tests {
         let (client, _) = Actor::spawn(
             Some("test_unsubscribe_client".to_owned()),
             TcpClientActor,
-            TcpClientArgs {
-                bind_addr: BIND_ADDR.to_string(),
-                registration_id: None,
-                client_cert_file: env::var("TLS_CLIENT_CERT").unwrap(),
-                private_key_file: env::var("TLS_CLIENT_KEY").unwrap(),
-                ca_cert_file: env::var("TLS_CA_CERT").unwrap(),
-            },
+TcpClientArgs { config: TCPClientConfig::new(), registration_id: None },
         )
         .await
         .expect("Failed to start client actor");
@@ -534,13 +477,7 @@ mod tests {
         let (client, _) = Actor::spawn(
             Some("queued_message_test_client".to_owned()),
             TcpClientActor,
-            TcpClientArgs {
-                bind_addr: BIND_ADDR.to_string(),
-                registration_id: None,
-                client_cert_file: env::var("TLS_CLIENT_CERT").unwrap(),
-                private_key_file: env::var("TLS_CLIENT_KEY").unwrap(),
-                ca_cert_file: env::var("TLS_CA_CERT").unwrap(),
-            },
+TcpClientArgs { config: TCPClientConfig::new(), registration_id: None },
         )
         .await
         .expect("Failed to start client actor");
@@ -564,13 +501,7 @@ mod tests {
         let (publisher_client, _) = Actor::spawn(
             Some(format!("comic_publisher_client")),
             TcpClientActor,
-            TcpClientArgs {
-                bind_addr: BIND_ADDR.to_string(),
-                registration_id: None,
-                client_cert_file: env::var("TLS_CLIENT_CERT").unwrap(),
-                private_key_file: env::var("TLS_CLIENT_KEY").unwrap(),
-                ca_cert_file: env::var("TLS_CA_CERT").unwrap(),
-            },
+TcpClientArgs { config: TCPClientConfig::new(), registration_id: None },
         )
         .await
         .expect("Failed to start client actor");

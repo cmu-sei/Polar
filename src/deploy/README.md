@@ -1,78 +1,40 @@
 # Polar Helm Charts
 
-This directory contains dhall configurations to generate Helm charts for Polar services, please keep in mind that they are a work in progress and that they are **not ready for production use!** Expect breaking changes as we continue to improve them.
+This directory contains dhall configurations to generate Helm charts for Polar services.
 
 ## Overview
-The `make-chart.sh` script (located under the `scripts` folder) automates the conversion of **Dhall configuration files** into a helm chart for a deployment. It ensures:
+The `make-chart.sh` script (located under the `scripts` folder) automates the conversion of **Dhall configuration files** into a helm chart for a deployment. It is part of the foundation of our GitOps workflow. It creates:
 - **Repeatable, Immutable Helm Charts** for GitOps workflows.
 - **Linting and Template Verification** with Helm.
 - **Safe GitOps Deployments** by generating Helm artifacts that can be stored and deployed consistently.
 
-## Prerequisites
-Ensure the following tools are installed:
+
+### GitOps & Immutability
+To maintain immutability, we commit the Helm chart to a versioned, accessed controlled git repository. All secrets are then handled per [our secrets management poilicy](../../docs/architecture/secrets-management.md).
+
+### Why Immutability Matters
+By ensuring the Helm chart is generated **before deployment and committed to Git**, we:
+- Avoid deployment drift caused by manual `helm install` changes.
+- Ensure the desired configuration is deployed across environments.
+- Enable rollbacks to previous **known-good** Helm chart versions.
+- Improve auditability and traceability of deployments.
+
+## Tools
+To accomplish this, we leverage some of the following tooling.
 - **Dhall-to-YAML** (`dhall-to-yaml`): Converts Dhall configurations into Kubernetes YAML.
 - **Helm**: Lints and renders the Helm chart for deployment.
 - A `neo4j.conf` file to configure neo4j.
-- [Minikube](https://minikube.sigs.k8s.io/docs/start/) (Or whatever kubernetes cluster you'd like to test on)
+- [Minikube](https://minikube.sigs.k8s.io/docs/start/) - Initially used for local testing, feel free to use your own!
 - Some client and server certificates from a trusted authroity. For testing, consider [generating your own](../agents/README.md)
+- A Personal Access Token for a Gitlab instance with, at minimum, read permissions for apis, registries, and repositories.
 - Container images for neo4j, cassini, and the gitlab agent should also be present. [See the documentation for info on building them](../agents/README.md). You can use your own preferred neo4j container image.
-## Setting Up
+- [cert-manager ](https://cert-manager.io/docs/installation/)
+- [sops](https://github.com/getsops/sops)
 
-Create some resources needed to test.
+## Usage
+We run the script to generate a Helm chart from Dhall configurations using this command in our CI
 
-```sh
-kubectl create namespace polar
-
-kubectl create secret generic cassini-mtls -n polar \
-    --from-file=ca_certificate.pem=conf/certs/ca_certificates/ca_certificate.pem \
-    --from-file=server_polar_certificate.pem=conf/certs/server/server_polar_certificate.pem \
-    --from-file=server_polar_key.pem=conf/certs/server/server_polar_key.pem
-
-kubectl create secret generic client-mtls -n polar \
-    --from-file=ca_certificate.pem=conf/certs/ca_certificates/ca_certificate.pem \
-    --from-file=client_polar_certificate.pem=conf/certs/client/client_polar_certificate.pem \
-    --from-file=client_polar_key.pem=conf/certs/client/client_polar_key.pem
-
-kubectl create secret generic gitlab-secret -n polar --from-literal=token=$GITLAB_TOKEN
-
-GRAPH_USERNAME=neo4j
-GRAPH_PASSWORD="somepassword"
-NEO4J_AUTH="${GRAPH_USERNAME}/${GRAPH_PASSWORD}"
-# Set some default credentials for neo4j in the format USERNAME/PASSWORD
-kubectl create secret generic neo4j-secret -n polar --from-literal=secret=$NEO4J_AUTH
-# create a a secret for just the password to be passed to the gitlab-observer
-kubectl create secret generic polar-graph-pw -n polar --from-literal=secret=$GRAPH_PASSWORD
-
-# For those testing behind corporate proxies, create a secret for your proxy CA
-kubectl create secret generic proxy-ca-cert -n polar \
-    --from-file=proxy_ca_certificate.pem=conf/certs/host/zscaler.pem
-```
-
-
-## Known Issues
-
-Macos Users testing using tools like minikube and podman have to deal with some additonal constraints that necessitate
-additional layers of absctraction between the podman VM and minikube container.
-
-Unfortunately, the `minikube mount` command seems to only work for linux systems, so it's best to use the `minikube cp` command to copy files into the minikube container to be used using `hostPath` volumes during testing. 
-
-For example, to copy a configuration for neo4j to minikube's `/data` directiory, you can run
-
-```bash
-    minikube cp var/lib/neo4j/conf/neo4j.conf /data/conf/neo4j.conf      
-```
-
-It does not seem to support copying directories at this time. So some scripting may be implemented to assist this.
-
-Finally, when exposing the neo4j service with minikube, remmeber to update the bolt port to use the port neo4j forwards for you, for example when running `minikube service -n polar neo4j --url`,
-
-You may see output similar to the below:
-
-```shell
-http://127.0.0.1:57084 # This will be the url of your web UI
-http://127.0.0.1:57085 # This will be your bolt port
-❗  Because you are using a Docker driver on darwin, the terminal needs to be open to run it.
-```
+  `sh scripts/make-chart.sh src/deploy/polar polar-deploy/chart --render-templates`
 
 ## Expected Output
 The make-chart script will:
@@ -80,34 +42,36 @@ The make-chart script will:
 2. **Generate an Umbrella Helm chart** within the given directory.
 3. **Run Helm linting and rendering** to validate the chart.
 
-## Usage
-Run the script to generate a Helm chart from Dhall configurations
 
-`sh make-chart.sh dhall chart`
-
-### Deploying with Helm
-Once the chart is generated. You can run something like
+### Testing with Helm
+Once the chart is generated and committed, we have our immutable artifact! We can download it and run something like this to try a one-time apply.
 
 ```bash
-helm install polar chart -n polar
+helm install polar polar-deploy/chart -n polar --create-namespace
 ```
 
-### GitOps & Immutability
-To maintain immutability and ensure **safe GitOps practices**:
-1. TODO: Document how to commit the Helm chart to a versioned repository
-   
-2. TODO: Document how to use Helm package versioning to store the chart as an immutable artifact:
+## Flux
 
-3. TODO: How to Deploy using GitOps tools** like ArgoCD or Flux
+Flux sits on the cluster constantly watching our Git repository and detects every change we make to the helm chart.
+If the GitRepository or Kustomization manifests are updated, Flux will automatically pick up those changes and deploy them to the Kubernetes cluster, closing the loop to ensure continuous deployment!
 
+At this time, many environment variables need to be present within our CI/CD environment. 
+Particularly those related to our Azure cloud environment.
 
-### Why Immutability Matters
-By ensuring the Helm chart is generated **before deployment and committed to Git**, we:
-- Avoid deployment drift caused by manual `helm install` changes.
-- Ensure the same configuration is deployed across environments.
-- Enable rollbacks to previous **known-good** Helm chart versions.
-- Improve auditability and traceability of deployments.
+Firstly, a service principal had to be created to maintain read access to our key vaults. So we need some of the follwing vars.
 
+`AZURE_CLIENT_ID` – The client ID of the Azure service principal
+`AZURE_TENANT_ID` – The Azure tenant ID where the application is registered.
+`ACR_USERNAME` - the username associated with the ACR token
+`ACR_TOKEN` – The token used to authenticate with the azure container registry so we can upload our images.
+`AZURE_CLIENT_SECRET` – Token used to authenticate with azure.
+`AZURE_ENVIRONMENT` - Should be "AzureUsGovernment" since that's what we're using
+`AZURE_AUTHORITY_HOST` - Should point to the Azure Gov login (.us suffix)
 
+Then there are the variables needed for actually deploying Polar's services.
 
+`GITLAB_USER` - A username for authenticating with gitlab, particularly for flux's uses
+`GITLAB_TOKEN` - A token for authenticating with gitlab.
+`NEO4J_AUTH` - The default credentials for the Neo4J instance.
 
+Each of Polar's services will also need environment variables of their own when deployed. See their README files for details.

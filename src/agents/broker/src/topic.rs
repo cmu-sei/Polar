@@ -312,7 +312,6 @@ impl Actor for TopicAgent {
                     }
                     None => {
                         warn!("Received publish request from unknown session: {payload:?}");
-                        //TODO: send error message?
                     }
                 }
             }
