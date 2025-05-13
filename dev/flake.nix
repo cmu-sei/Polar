@@ -21,6 +21,9 @@
     staticanalysis.inputs.flake-utils.follows = "flake-utils";
     staticanalysis.inputs.rust-overlay.follows = "rust-overlay";
 
+    dotacat.url = "github:daveman1010221/dotacat-fast";
+    dotacat.inputs.nixpkgs.follows = "nixpkgs";
+
     #openssl-fips.url = "github:daveman1010221/openssl-fips";
   };
 
