@@ -27,7 +27,7 @@
     #openssl-fips.url = "github:daveman1010221/openssl-fips";
   };
 
-  outputs = { flake-utils, nixpkgs, rust-overlay, myNeovimOverlay, nix-vscode-extensions, staticanalysis, ... }:
+  outputs = { flake-utils, nixpkgs, rust-overlay, myNeovimOverlay, nix-vscode-extensions, staticanalysis, dotacat, ... }:
     flake-utils.lib.eachDefaultSystem (system:
       let
 
@@ -50,7 +50,7 @@
         };
 
         #import package sets to be added to our environments
-        packageSets = import ./packages.nix {inherit system pkgs rust-overlay nix-vscode-extensions staticanalysis; };
+        packageSets = import ./packages.nix {inherit system pkgs rust-overlay nix-vscode-extensions staticanalysis dotacat; };
 
         # This is needed since VSCode Devcontainers need the following files in order to function.
         baseInfo = with pkgs; [

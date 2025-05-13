@@ -5,7 +5,8 @@
   pkgs,
   nix-vscode-extensions,
   rust-overlay,
-  staticanalysis
+  staticanalysis,
+  dotacat
 }:
 let
     # our VSCode extensions to include
@@ -126,6 +127,8 @@ in
 
       # -- Static Analysis Tools --
       staticanalysis.packages.${system}.default
+
+      dotacat.packages.${system}.default
     ];
 
     # Set up the packages we want to include in our CI and testing environments,
