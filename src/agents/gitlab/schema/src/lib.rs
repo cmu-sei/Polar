@@ -49,6 +49,16 @@ impl fmt::Display for IdString {
         write!(f, "{}", self.0)
     }
 }
+#[derive(
+    Debug, Serialize, Deserialize, serde::Deserialize, serde::Serialize, Archive, Default, Clone,
+)]
+pub struct PackageIDString(pub String);
+
+impl fmt::Display for PackageIDString {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
 
 #[derive(
     Debug, Serialize, Deserialize, serde::Deserialize, serde::Serialize, Archive, Clone, Default,
@@ -121,6 +131,7 @@ impl_scalar!(BigInt, gitlab::BigInt);
 impl_scalar!(IdString, gitlab::ID);
 impl_scalar!(CiJobArtifactID, gitlab::CiJobArtifactID);
 impl_scalar!(JobIdString, gitlab::JobID);
+impl_scalar!(PackageIDString, gitlab::PackagesPackageID);
 // represent timestamps
 impl_scalar!(DateString, gitlab::Date);
 impl_scalar!(DateTimeString, gitlab::Time);

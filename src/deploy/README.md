@@ -1,28 +1,27 @@
-# Polar Helm Charts
+# Polar Deployments
 
-This directory contains dhall configurations to generate Helm charts for Polar services.
+This directory contains dhall configurations to generate kubernetes manifests needed for Polar services.
 
 ## Overview
-The `make-chart.sh` script (located under the `scripts` folder) automates the conversion of **Dhall configuration files** into a helm chart for a deployment. It is part of the foundation of our GitOps workflow. It creates:
-- **Repeatable, Immutable Helm Charts** for GitOps workflows.
+The `render-manifests.sh` script (located under the `scripts` folder) automates the conversion of **Dhall configuration files** into valid kubernetes manifests for deployment. It is part of the foundation of our GitOps workflow. It creates:
+- **Repeatable, Immutable Manifests** for GitOps workflows.
 - **Linting and Template Verification** with Helm.
 - **Safe GitOps Deployments** by generating Helm artifacts that can be stored and deployed consistently.
 
 
 ### GitOps & Immutability
-To maintain immutability, we commit the Helm chart to a versioned, accessed controlled git repository. All secrets are then handled per [our secrets management poilicy](../../docs/architecture/secrets-management.md).
+To maintain immutability, we commit the kubernetes manifests to a versioned, accessed controlled git repository. All secrets are then handled per [our secrets management poilicy](../../docs/architecture/secrets-management.md).
 
 ### Why Immutability Matters
-By ensuring the Helm chart is generated **before deployment and committed to Git**, we:
+By ensuring the kubernetes manifest is generated **before deployment and committed to Git**, we:
 - Avoid deployment drift caused by manual `helm install` changes.
 - Ensure the desired configuration is deployed across environments.
-- Enable rollbacks to previous **known-good** Helm chart versions.
+- Enable rollbacks to previous **known-good** kubernetes manifest versions.
 - Improve auditability and traceability of deployments.
 
 ## Tools
 To accomplish this, we leverage some of the following tooling.
 - **Dhall-to-YAML** (`dhall-to-yaml`): Converts Dhall configurations into Kubernetes YAML.
-- **Helm**: Lints and renders the Helm chart for deployment.
 - A `neo4j.conf` file to configure neo4j.
 - [Minikube](https://minikube.sigs.k8s.io/docs/start/) - Initially used for local testing, feel free to use your own!
 - Some client and server certificates from a trusted authroity. For testing, consider [generating your own](../agents/README.md)
@@ -32,33 +31,19 @@ To accomplish this, we leverage some of the following tooling.
 - [sops](https://github.com/getsops/sops)
 
 ## Usage
-We run the script to generate a Helm chart from Dhall configurations using this command in our CI
+We run the script to generate a kubernetes manifest from Dhall configurations using this command in our CI
 
-  `sh scripts/make-chart.sh src/deploy/polar polar-deploy/chart --render-templates`
+  `sh scripts/render-manifests.sh src/deploy/polar polar-deploy/manifests`
 
-## Expected Output
-The make-chart script will:
-1. **Convert Dhall files** into Kubernetes YAML.
-2. **Generate an Umbrella Helm chart** within the given directory.
-3. **Run Helm linting and rendering** to validate the chart.
+## Flux and Continuous Deployment
 
-
-### Testing with Helm
-Once the chart is generated and committed, we have our immutable artifact! We can download it and run something like this to try a one-time apply.
-
-```bash
-helm install polar polar-deploy/chart -n polar --create-namespace
-```
-
-## Flux
-
-Flux sits on the cluster constantly watching our Git repository and detects every change we make to the helm chart.
+Flux sits on the cluster constantly watching our Git repository and detects every change we make to the kubernetes manifests.
 If the GitRepository or Kustomization manifests are updated, Flux will automatically pick up those changes and deploy them to the Kubernetes cluster, closing the loop to ensure continuous deployment!
 
 At this time, many environment variables need to be present within our CI/CD environment. 
 Particularly those related to our Azure cloud environment.
 
-Firstly, a service principal had to be created to maintain read access to our key vaults. So we need some of the follwing vars.
+Firstly, a service principal had to be created to maintain read access to our key vaults. So we need some of the following vars.
 
 `AZURE_CLIENT_ID` – The client ID of the Azure service principal
 `AZURE_TENANT_ID` – The Azure tenant ID where the application is registered.

@@ -25,7 +25,7 @@ use crate::{
     GitlabObserverArgs, GitlabObserverMessage, GitlabObserverState, BROKER_CLIENT_NAME
 };
 use cassini::{client::TcpClientMessage, ClientMessage};
-use gitlab_queries::projects::{ContainerRepository, ContainerRepositoryDetailsArgs, ContainerRepositoryDetailsQuery, ContainerRepositoryTag, ProjectContainerRepositoriesQuery, SingleProjectQueryArguments};
+use gitlab_queries::projects::{ContainerRepository, ContainerRepositoryDetailsArgs, ContainerRepositoryDetailsQuery, ContainerRepositoryTag, Package, ProjectContainerRepositoriesQuery, ProjectPackagesQuery, SingleProjectQueryArguments};
 use gitlab_schema::ContainerRepositoryID;
 use ractor::{async_trait, registry::where_is, Actor, ActorProcessingErr, ActorRef};
 use common::types::{GitlabData};
@@ -264,6 +264,92 @@ impl Actor for GitlabRepositoryObserver {
                 }
                 
             }
+            GitlabObserverMessage::GetProjectPackages(full_path) => {
+                let op = ProjectPackagesQuery::build(SingleProjectQueryArguments{
+                    full_path: full_path.clone()
+                });
+                
+                debug!("{}", op.query);
+
+                match state
+                .web_client
+                .post(state.gitlab_endpoint.clone())
+                .bearer_auth(state.token.clone().unwrap_or_default())
+                .json(&op)
+                .send()
+                .await {
+                    Ok(response) => {
+
+                        match response.json::<GraphQlResponse<ProjectPackagesQuery>>().await {
+                            Ok(deserialized_response) => {
+
+                                if let Some(errors) = deserialized_response.errors {
+                                    let errors = errors
+                                    .iter()
+                                    .map(|error| { error.to_string() })
+                                    .collect::<Vec<_>>()
+                                    .join("\n");
+            
+                                    error!("Failed to query instance! {errors}");
+                                    myself.stop(Some(errors))
+                                }
+                                else if let Some(data) = deserialized_response.data {
+                                    
+                                    if let Some(project) = data.project  {
+                                        
+                                        if let Some(connection) = project.packages {
+
+                                            match connection.nodes {
+                                                Some(packages) => {
+                                                    
+                                                    if !packages.is_empty() {
+                                                        let mut read_packages: Vec<Package> = Vec::new();
+
+                                                        read_packages.extend(packages.into_iter().map(|option| { option.unwrap() }));
+
+                                                        debug!("Found {} package(s) for project {full_path}", read_packages.len());
+
+                                                        match where_is(BROKER_CLIENT_NAME.to_string()) {
+                                                            Some(client) => {
+                                                                let data = GitlabData::ProjectPackages((full_path.to_string(), read_packages));
+                                                                // Serializing is as easy as a single function call
+                                                                let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&data).unwrap();
+                                                                
+                                                                let msg = ClientMessage::PublishRequest {
+                                                                    topic: REPOSITORY_CONSUMER_TOPIC.to_string(),
+                                                                    payload: bytes.to_vec(),
+                                                                    registration_id: Some(
+                                                                        state.registration_id.clone(),
+                                                                    ),
+                                                                };
+                
+                                                                client
+                                                                    .send_message(TcpClientMessage::Send(msg))
+                                                                    .expect("Expected to send message");
+                                                            }
+                                                            None => {
+                                                                let err_msg = "Failed to locate tcp client";
+                                                                error!("{err_msg}");
+                                                            }
+                                                        }
+                                                    
+                                                        
+                                                    }
+                                                }
+                                                None => ()
+                                            }
+                                        }
+                                    }
+                                }
+                            }   
+                            Err(e) => todo!()
+                        }
+                    },
+                    Err(e) => error!("{e}")
+                }
+
+            }
+        
             _ => (),
         }
         Ok(())

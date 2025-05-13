@@ -140,11 +140,20 @@ impl Actor for GitlabProjectObserver {
                                                     .expect("Expected to send message to pipeline observer");
                                             }
 
-                                            let observe_msg = GitlabObserverMessage::GetProjectContainerRepositories(project.full_path.clone());
+                                            
                                             if let Some(repository_observer) = where_is(GITLAB_REPOSITORY_OBSERVER.to_string()) {
+                                                let observe_msg = GitlabObserverMessage::GetProjectContainerRepositories(project.full_path.clone());
+
                                                 repository_observer
                                                     .send_message(observe_msg)
                                                     .expect("Expected to send message to the registry observer");
+
+                                                let get_packages_msg = GitlabObserverMessage::GetProjectPackages(project.full_path.clone());
+
+                                                repository_observer
+                                                    .send_message(get_packages_msg)
+                                                    .expect("Expected to send message to the registry observer");
+
                                             }
                                             
                                             //return the projects
