@@ -2,6 +2,8 @@
 let kubernetes = ../types/kubernetes.dhall
 let namespace = "polar"
 let sandboxHostSuffix = "sandbox.labz.s-box.org"
+-- When rendering, try to get the latest commtit SHA so we know what image tag to use
+let commitSha = (env:CI_COMMIT_SHORT_SHA as Text ? "latest")
 
 -- Values for pulling from a potentially private registry
 let sandboxRegistry 
@@ -62,7 +64,7 @@ let cassini =
   {
     name = "cassini"
   , namespace = namespace
-  , image = "${sandboxRegistry.url}/polar/cassini:0.1.0"
+  , image = "${sandboxRegistry.url}/polar/cassini:${commitSha}"
   , imagePullSecrets = sandboxRegistry.imagePullSecrets
   , containerSecurityContext 
     = kubernetes.SecurityContext::{
@@ -170,13 +172,13 @@ let gitlab = {
     }    
     , observer = {
         name = "polar-gitlab-observer"
-        , image = "${sandboxRegistry.url}/polar/polar-gitlab-observer:0.1.0"
+        , image = "${sandboxRegistry.url}/polar/polar-gitlab-observer:${commitSha}"
         , gitlabEndpoint = "https://gitlab.sandbox.labz.s-box.org/api/graphql"
         , gitlabSecret = gitlabSecret
     }
     , consumer = {
         name = "polar-gitlab-consumer"
-        , image = "${sandboxRegistry.url}/polar/polar-gitlab-consumer:0.1.0"
+        , image = "${sandboxRegistry.url}/polar/polar-gitlab-consumer:${commitSha}"
         -- Settings to configure the consumer's connection to the graph database
         
         , graph = {
