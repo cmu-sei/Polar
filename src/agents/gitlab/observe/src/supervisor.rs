@@ -41,7 +41,9 @@ pub struct ObserverSupervisorArgs {
     pub client_config: TCPClientConfig,
     pub gitlab_endpoint: String,
     pub gitlab_token: Option<String>,
-    pub proxy_ca_cert_file: Option<String>
+    pub proxy_ca_cert_file: Option<String>,
+    pub base_interval: u64,
+    pub max_backoff_secs: u64
 }
 
 impl ObserverSupervisor {
@@ -116,7 +118,9 @@ impl Actor for ObserverSupervisor {
                                 gitlab_endpoint: args.gitlab_endpoint.clone(),
                                 token: args.gitlab_token.clone(),
                                 registration_id: registration_id.clone(),
-                                web_client: ObserverSupervisor::get_client(args.proxy_ca_cert_file)
+                                web_client: ObserverSupervisor::get_client(args.proxy_ca_cert_file),
+                                base_interval: args.base_interval,
+                                max_backoff: args.max_backoff_secs,
                             };
 
                             //TODO: start observers based off of some configuration

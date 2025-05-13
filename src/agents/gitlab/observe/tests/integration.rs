@@ -75,7 +75,6 @@ mod tests {
         ACTIVE_TESTS.fetch_add(1, Ordering::SeqCst);
 
         let gitlab_endpoint = env::var("GITLAB_ENDPOINT").unwrap();
-        let broker_addr = env::var("BROKER_ADDR").unwrap();
         let gitlab_token = env::var("GITLAB_TOKEN").unwrap();
         
         let client =
@@ -98,7 +97,9 @@ mod tests {
             registration_id: session_id,
             gitlab_endpoint,
             token: Some(gitlab_token),
-            web_client: Client::new()
+            web_client: Client::new(),
+            max_backoff: 30,
+            base_interval: 10
         };
 
         //start users observer

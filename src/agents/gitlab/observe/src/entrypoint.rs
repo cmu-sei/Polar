@@ -39,13 +39,16 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let gitlab_token = env::var("GITLAB_TOKEN").expect("Expected to find a value for GITLAB_TOKEN.");
     // Helpful for looking at services behind a proxy
     let proxy_ca_cert_file = match env::var("PROXY_CA_CERT") { Ok(path) => Some(path), Err(_) => None };
-
-
+ 
     let args = supervisor::ObserverSupervisorArgs {
         client_config,
         gitlab_endpoint,
         gitlab_token: Some(gitlab_token),
-        proxy_ca_cert_file
+        proxy_ca_cert_file,
+        // TODO: read these from configuration
+        base_interval: 300,
+        max_backoff_secs: 6000,
+        
     };
 
     match Actor::spawn(

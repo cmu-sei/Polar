@@ -49,6 +49,7 @@ gitlab-queries = { path = "../query" }
 gitlab-schema = {path = "../schema" }
 rkyv = "0.8.10"
 polar = {path = "../../lib"}
+rand = { version = "0.9.1", features = ["small_rng"] }
 [build-dependencies]
 cynic-codegen = "3.9.1"
 # capnpc = "0.20.1"

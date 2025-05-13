@@ -84,7 +84,7 @@ pub enum BrokerMessage {
     },
     /// Publish request from the client.
     PublishRequest {
-        registration_id: Option<String>,
+        registration_id: Option<String>, //TODO: Reemove option, listener checks for registration_id before forwarding
         topic: String,
         payload: Vec<u8>,
     },
