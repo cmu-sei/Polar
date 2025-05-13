@@ -1,3 +1,4 @@
+/*
 use std::time::Duration;
 
 use common::MessageDispatcher;
@@ -286,3 +287,4 @@ impl Actor for TodoConsumer {
     }
 
 }
+*/
