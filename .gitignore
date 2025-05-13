@@ -21,3 +21,5 @@ open-vsx-nix.txt
 observer.env
 consumer.env
 manifests
+chart/
+.direnv/

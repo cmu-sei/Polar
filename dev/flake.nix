@@ -16,7 +16,7 @@
     nix-vscode-extensions.inputs.nixpkgs.follows = "nixpkgs";
     nix-vscode-extensions.inputs.flake-utils.follows = "flake-utils";
 
-    staticanalysis.url = "github:rmdettmar/polar-static-analysis";
+    staticanalysis.url = "github:daveman1010221/polar-static-analysis";
     staticanalysis.inputs.nixpkgs.follows = "nixpkgs";
     staticanalysis.inputs.flake-utils.follows = "flake-utils";
     staticanalysis.inputs.rust-overlay.follows = "rust-overlay";
@@ -275,6 +275,17 @@
       in
       {
         inherit devContainer ciContainer charts;
+
+        devShells.default = pkgs.mkShell {
+          name = "polar-devshell";
+          packages = packageSets.devPkgs ++ [ pkgs.pkg-config pkgs.openssl ];
+          shellHook = ''
+            export OPENSSL_DIR="${pkgs.openssl.dev}"
+            export OPENSSL_LIB_DIR="${pkgs.openssl.out}/lib"
+            export OPENSSL_INCLUDE_DIR="${pkgs.openssl.dev}/include"
+            export PKG_CONFIG_PATH="${pkgs.openssl.dev}/lib/pkgconfig"
+          '';
+        };
 
         packages.default = devContainer;
         packages.ciContainer = ciContainer;
