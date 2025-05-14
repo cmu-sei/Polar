@@ -22,7 +22,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     //TODO - make name a constant
     // Start kubernetes supervisor
     match Actor::spawn(Some("kubernetes.minikube.observer.supervisor".to_string()), ClusterObserverSupervisor, args).await {
-        Ok( (_, handle) ) => handle.await.expect("Something went wrong"),
+        Ok( (supervisor, handle) ) => handle.await.expect("Something went wrong"),
         Err(e) => error!("{e}")
     }
     Ok(())

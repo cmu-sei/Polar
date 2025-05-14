@@ -1,8 +1,6 @@
-use std::collections::HashMap;
-
 use cassini::{client::TcpClientMessage, ClientMessage};
-use kube::{api::{Api, ListParams, ObjectList, PostParams, ResourceExt}, runtime::watcher::Event, Client};
-use k8s_openapi::{api::core::v1::{Node, Pod, Volume}, apimachinery::pkg::api::resource::Quantity, chrono::{DateTime, Utc}};
+use kube::{api::{Api, ListParams, ResourceExt}, runtime::watcher::Event, Client};
+use k8s_openapi::api::core::v1::{Node, Pod, Volume};
 use kube::runtime::watcher;
 use ractor::{async_trait, registry::where_is, rpc::{call, CallResult}, Actor, ActorProcessingErr, ActorRef};
 use futures::{StreamExt, TryStreamExt};
@@ -15,9 +13,9 @@ pub struct PodObserver;
 
 pub struct PodObserverState {
     pub registration_id: String,
-    pub namespaces: Vec<String>,
+    pub namespace: String,
     pub kube_client: kube::Client,
-    pub watchers: HashMap<String, JoinHandle<Result<(), watcher::Error>>>,
+    pub watcher: Option<JoinHandle<Result<(), watcher::Error>>>,
 }
 
 pub enum PodObserverMessage {
@@ -36,6 +34,7 @@ impl PodObserver {
     /// Helper function to watch for events concerning pods.
     /// Runs inside of a thread we can cancel should problems arise.
     async fn watch_pods(registration_id: String, client: Client, namespace: String) -> Result<(), watcher::Error> {
+
         let api: Api<Pod> = Api::namespaced(client.clone(), &namespace);
         let mut watcher = watcher(api, watcher::Config::default()).boxed();
         while let Some(event) = watcher.try_next().await? {
@@ -134,11 +133,10 @@ impl Actor for PodObserver {
 
         let state = PodObserverState {
             registration_id: args.registration_id.clone(),
-            namespaces: vec![ String::from("default") ],
+            namespace: String::from("default"),
             kube_client: args.kube_client,
-            watchers: HashMap::new()
+            watcher: None,
         };
-
 
         Ok(state)
     }
@@ -154,30 +152,33 @@ impl Actor for PodObserver {
             error!("{e}");
             myself.stop((Some(e.to_string())));   
         }
-    
+
+        info!("trying to watch {} namespace.", state.namespace);
+            
+        //spawn a new thread to watch for pods
+        let client = state.kube_client.clone();
+        let id = state.registration_id.clone();
+        let ns = state.namespace.clone();
+
+        let handle = tokio::spawn(async move {
+            PodObserver::watch_pods(id, client, ns ).await
+        });
         
+        state.watcher = Some(handle);
 
-        // watch our given namespaces for new pod deployments 
-        let namespaces = state.namespaces.clone();
-
-        for namespace in namespaces {
-            info!("trying to watch {namespace} namespace.");
-            
-            //spawn a new thread to watch for pods
-            let client = state.kube_client.clone();
-            let id = state.registration_id.clone();
-            let ns = namespace.clone();
-
-            let handle = tokio::spawn(async move {
-                PodObserver::watch_pods(id, client, ns ).await
-            });
-            
-            //append joinhandle to list
-            state.watchers.insert(namespace, handle);
-        }
-    
         Ok(())
     }
+
+    // TODO: Implement post stop fn to cleanup watchers?
+    //
+    // async fn post_stop(
+    //     &self,
+    //     myself: ActorRef<Self::Msg>,
+    //     message: Self::Msg,
+    //     state: &mut Self::State,
+    // ) -> Result<(), ActorProcessingErr> {
+    //     Ok(())
+    // }
 
     async fn handle(
         &self,
@@ -187,38 +188,35 @@ impl Actor for PodObserver {
     ) -> Result<(), ActorProcessingErr> {
         match message {
             KubernetesObserverMessage::Pods  => {
-                //for each namepsace, get all deployed pods
-                for namespace in &state.namespaces {
+                // get all deployed pods in our given namespace
+                let api: Api<Pod> = Api::namespaced(state.kube_client.clone(), &state.namespace);
 
-                    let api: Api<Pod> = Api::namespaced(state.kube_client.clone(), &namespace);
+                match api.list(&ListParams::default()).await {
+                    Ok(pod_list) => {
+                        let serialized = serde_json::to_string_pretty(&KubeMessage::ResourceBatch {
+                            resources: pod_list.clone()
+                            }).unwrap();
+                            debug!("{serialized}");
 
-                    match api.list(&ListParams::default()).await {
-                        Ok(pod_list) => {
-                            let serialized = serde_json::to_string(&KubeMessage::ResourceBatch {
-                                resources: pod_list.clone()
-                                }).unwrap();
-            
-                                let envelope = TcpClientMessage::Send(ClientMessage::PublishRequest {
-                                    topic: myself.get_name().unwrap(), payload: serialized.into_bytes()  , registration_id: Some(state.registration_id.clone())
-                                }
-                                );
-                                
-                                // send data for batch processing
-            
-                                match where_is(TCP_CLIENT_NAME.to_owned()) {
-                                    Some(client) => {
-                                        if let Err(e) = client.send_message(envelope) {
-                                            warn!("Failed to send message to client {e}");
-                                        }
-                                    },
-                                    None => todo!("If no client present, drop the message?"),
-                                }
-                        }
-                        Err(e) => warn!("Expected to get a list of Pods. {e}")
+                            let envelope = TcpClientMessage::Send(ClientMessage::PublishRequest {
+                                topic: myself.get_name().unwrap(), payload: serialized.into_bytes()  , registration_id: Some(state.registration_id.clone())
+                            }
+                            );
+                            
+                            // send data for batch processing
+        
+                            match where_is(TCP_CLIENT_NAME.to_owned()) {
+                                Some(client) => {
+                                    if let Err(e) = client.send_message(envelope) {
+                                        warn!("Failed to send message to client {e}");
+                                    }
+                                },
+                                None => todo!("If no client present, drop the message?"),
+                            }
                     }
-
-                 
+                    Err(e) => warn!("Expected to get a list of Pods. {e}")
                 }
+
             },
             _ => (),
         }

@@ -68,7 +68,7 @@ impl Actor for ClusterObserverSupervisor {
                                         registration_id: registration_id.clone(),
                                         kube_client: kube_client.clone(),
                                     };
-                                    
+                                     
                                     if let Err(e) = Actor::spawn_linked(Some(KUBERNETES_OBSERVER.to_string()), PodObserver, args, myself.get_cell().clone()).await {
                                         error!("{e}")
                                     }
@@ -98,8 +98,6 @@ impl Actor for ClusterObserverSupervisor {
             }
             Err(e) => Err(ActorProcessingErr::from(e))
         }
-
-
         
     }
 
