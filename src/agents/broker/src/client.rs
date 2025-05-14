@@ -194,7 +194,7 @@ impl Actor for TcpClientActor {
                                                     result,
                                                 } => {
                                                     if result.is_ok() {
-                                                        debug!("Successfully subscribed to topic: {topic}");
+                                                        info!("Successfully subscribed to topic: {topic}");
                                                     } else {
                                                         warn!("Failed to subscribe to topic: {topic}, {result:?}");
                                                     }
@@ -205,7 +205,7 @@ impl Actor for TcpClientActor {
                                                     result,
                                                 } => {
                                                     if result.is_ok() {
-                                                        debug!("Successfully unsubscribed from topic: {topic}");
+                                                        info!("Successfully unsubscribed from topic: {topic}");
                                                     } else {
                                                         warn!("Failed to unsubscribe from topic: {topic}");
                                                     }
