@@ -49,43 +49,6 @@ pub enum KubernetesObserverMessage {
     Secrets
 }
 
-/// Messages intended to be serialized and set across the broker boundary to consumers for processing
-/// Generics make things 10x simpler here, as all types from the k8s_openapi crate can be serialized with serde.
-/// That said, it looks like they don't support rkyv serialization (yet) so there's a performance bottleneck.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum KubeMessage<K: std::clone::Clone> {
-    /// Observer read a batch of resources during initial sync with the server.
-    ResourceBatch {
-        resources: ObjectList<K>,
-    },
-    /// A new or updated resource has been observed
-    /// 
-    ResourceApplied {
-        resource: K,
-    },
-
-    /// A resource has been deleted
-    ResourceDeleted {
-        resource: K,
-    },
-
-    /// Indicates that the watcher is resetting and will re-list resources
-    ResyncStarted {
-        namespace: Option<String>,
-        resource_kind: String,
-    },
-
-    /// A resource has been observed during re-sync (initial apply)
-    ResyncResource {
-        resource: K,
-    },
-
-    /// Resync has completed and all InitApply resources have been listed
-    ResyncCompleted {
-        namespace: Option<String>,
-        resource_kind: String,
-    },
-}
 
 pub struct KubernetesObserverArgs {
     pub namespace: String,

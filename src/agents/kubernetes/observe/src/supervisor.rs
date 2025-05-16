@@ -1,14 +1,11 @@
 use std::time::Duration;
 use cassini::client::{TcpClientActor, TcpClientArgs, TcpClientMessage};
-use k8s_openapi::{api::core::v1::{Node, Pod, Volume}, apimachinery::pkg::api::resource::Quantity, chrono::{DateTime, Utc}};
-use kube::{runtime::watcher, Client};
+use kube::Client;
 use ractor::{async_trait, registry::where_is, rpc::{call, CallResult}, Actor, ActorProcessingErr, ActorRef, SupervisionEvent};
-use futures::{StreamExt, TryStreamExt};
-use tokio::{net::tcp, task::JoinHandle};
 use tracing::{debug, error, info, warn};
 use cassini::TCPClientConfig;
 
-use crate::{pods::{PodObserver, PodObserverArgs}, KubernetesObserverMessage, KUBERNETES_CONSUMER, KUBERNETES_OBSERVER, TCP_CLIENT_NAME};
+use crate::{pods::{PodObserver, PodObserverArgs}, KubernetesObserverMessage, KUBERNETES_OBSERVER, TCP_CLIENT_NAME};
 
 
 pub struct ClusterObserverSupervisor;

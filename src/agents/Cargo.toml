@@ -35,8 +35,9 @@ members = [
     "gitlab/schema",
     "gitlab/query",
     "policy-config",
-    "kubernetes/observe"
-    ]
+    "kubernetes/observe",
+    "kubernetes/consume",
+    "kubernetes/common"]
 
 [workspace.package]
 version = "0.1.0"

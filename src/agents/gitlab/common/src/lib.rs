@@ -21,10 +21,7 @@ This Software includes and/or makes use of Third-Party Software each subject to 
 DM24-0470
 */
 
-use lapin::{
-    options::BasicPublishOptions, publisher_confirm::Confirmation, BasicProperties, Channel,
-    Connection, ConnectionProperties,
-};
+
 use std::process;
 use std::{
     env,
@@ -32,10 +29,7 @@ use std::{
     io::{Read, Write},
 };
 use sysinfo::{Pid, ProcessRefreshKind, System, SystemExt};
-use tcp_stream::OwnedTLSConfig;
 use tracing::{error, info};
-use url::Url;
-
 pub mod dispatch;
 pub mod types;
 

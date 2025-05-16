@@ -1,13 +1,14 @@
 use cassini::{client::TcpClientMessage, ClientMessage};
-use kube::{api::{Api, ListParams, ResourceExt}, runtime::watcher::Event, Client};
-use k8s_openapi::api::core::v1::{Node, Pod, Volume};
+use kube::{api::{Api, ListParams, ResourceExt}, core::watch, runtime::watcher::Event, Client};
+use k8s_openapi::api::core::v1::Pod;
 use kube::runtime::watcher;
-use ractor::{async_trait, registry::where_is, rpc::{call, CallResult}, Actor, ActorProcessingErr, ActorRef};
+use ractor::{async_trait, registry::where_is,  Actor, ActorProcessingErr, ActorRef};
 use futures::{StreamExt, TryStreamExt};
-use tokio::{net::tcp, task::JoinHandle};
+use tokio::task::AbortHandle;
 use tracing::{debug, error, info, warn};
+use kube_common::{KubeMessage, RawKubeEvent};
 
-use crate::{send_to_client, KubeMessage, KubernetesObserverMessage, KUBERNETES_CONSUMER, TCP_CLIENT_NAME};
+use crate::{send_to_client, KUBERNETES_CONSUMER, TCP_CLIENT_NAME, KubernetesObserverMessage};
 
 pub struct PodObserver;
 
@@ -15,7 +16,7 @@ pub struct PodObserverState {
     pub registration_id: String,
     pub namespace: String,
     pub kube_client: kube::Client,
-    pub watcher: Option<JoinHandle<Result<(), watcher::Error>>>,
+    pub watcher: Option<AbortHandle>,
 }
 
 pub enum PodObserverMessage {
@@ -150,7 +151,7 @@ impl Actor for PodObserver {
         // start tasks to watch the cluster
         if let Err(e) = myself.send_message(KubernetesObserverMessage::Pods) {
             error!("{e}");
-            myself.stop((Some(e.to_string())));   
+            myself.stop(Some(e.to_string()));   
         }
 
         info!("trying to watch {} namespace.", state.namespace);
@@ -162,23 +163,28 @@ impl Actor for PodObserver {
 
         let handle = tokio::spawn(async move {
             PodObserver::watch_pods(id, client, ns ).await
-        });
+        }).abort_handle();
         
         state.watcher = Some(handle);
 
         Ok(())
     }
 
-    // TODO: Implement post stop fn to cleanup watchers?
-    //
-    // async fn post_stop(
-    //     &self,
-    //     myself: ActorRef<Self::Msg>,
-    //     message: Self::Msg,
-    //     state: &mut Self::State,
-    // ) -> Result<(), ActorProcessingErr> {
-    //     Ok(())
-    // }
+    
+    async fn post_stop(
+        &self,
+        myself: ActorRef<Self::Msg>,
+        state: &mut Self::State,
+    ) -> Result<(), ActorProcessingErr> {
+        // cleanup watcher task
+
+        if let Some(handle) = &state.watcher {
+            handle.abort();
+            info!("{myself:?} watcher stopped successfully.");
+        }
+
+        Ok(())
+    }
 
     async fn handle(
         &self,
@@ -193,28 +199,47 @@ impl Actor for PodObserver {
 
                 match api.list(&ListParams::default()).await {
                     Ok(pod_list) => {
-                        let serialized = serde_json::to_string_pretty(&KubeMessage::ResourceBatch {
-                            resources: pod_list.clone()
-                            }).unwrap();
-                            debug!("{serialized}");
+                        let kind = pod_list.types.kind.clone();
+                        let topic =  format!("kubernetes.cluster.consumer.{kind}");
 
-                            let envelope = TcpClientMessage::Send(ClientMessage::PublishRequest {
-                                topic: myself.get_name().unwrap(), payload: serialized.into_bytes()  , registration_id: Some(state.registration_id.clone())
-                            }
-                            );
-                            
-                            // send data for batch processing
-        
-                            match where_is(TCP_CLIENT_NAME.to_owned()) {
-                                Some(client) => {
-                                    if let Err(e) = client.send_message(envelope) {
-                                        warn!("Failed to send message to client {e}");
+                        match serde_json::to_value(pod_list.items) {
+                            Ok(serialized) => {
+                                let event = RawKubeEvent {
+                                    kind,
+                                    action: String::from("BatchProcess"),
+                                    object: serialized
+                                };
+
+                                let payload = serde_json::to_string(&event).unwrap();
+                                
+                                let envelope = TcpClientMessage::Send(ClientMessage::PublishRequest {
+                                        topic, payload: payload.into_bytes()  , registration_id: Some(state.registration_id.clone())
                                     }
-                                },
-                                None => todo!("If no client present, drop the message?"),
+                                    );
+                                    
+                                    // send data for batch processing
+                
+                                    match where_is(TCP_CLIENT_NAME.to_owned()) {
+                                        Some(client) => {
+                                            if let Err(e) = client.send_message(envelope) {
+                                                warn!("Failed to send message to client {e}");
+                                            }
+                                        },
+                                        None => {
+                                            error!("No cassini client found, stopping");
+                                            myself.stop(None);
+                                        },
+                                    }
                             }
+                            Err(e) => todo!()
+                        }
+                        
+ 
                     }
-                    Err(e) => warn!("Expected to get a list of Pods. {e}")
+                    Err(e) => {
+                        warn!("Expected to get a list of Pods. {e}");
+                        //TODO: Implement a backoff depending on the reason?
+                    }
                 }
 
             },

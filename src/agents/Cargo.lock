@@ -777,7 +777,6 @@ dependencies = [
  "futures-lite 1.13.0",
  "gitlab-queries",
  "gitlab-schema",
- "lapin",
  "polar",
  "ractor 0.15.6",
  "rkyv 0.8.10",
@@ -1776,7 +1775,7 @@ dependencies = [
  "httpdate",
  "itoa",
  "pin-project-lite",
- "socket2 0.4.10",
+ "socket2 0.5.9",
  "tokio",
  "tower-service",
  "tracing",
@@ -2248,6 +2247,47 @@ dependencies = [
 ]
 
 [[package]]
+name = "kube-common"
+version = "0.1.0"
+dependencies = [
+ "amq-protocol-uri",
+ "cassini",
+ "cynic",
+ "futures-lite 1.13.0",
+ "kube",
+ "polar",
+ "ractor 0.15.6",
+ "rkyv 0.8.10",
+ "serde",
+ "serde_json",
+ "sysinfo",
+ "tcp-stream",
+ "tracing",
+ "url",
+ "workspace-hack",
+]
+
+[[package]]
+name = "kube-consumer"
+version = "0.1.0"
+dependencies = [
+ "cassini",
+ "k8s-openapi",
+ "kube-common",
+ "neo4rs",
+ "polar",
+ "ractor 0.15.6",
+ "rkyv 0.8.10",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-glog",
+ "tracing-subscriber",
+ "workspace-hack",
+]
+
+[[package]]
 name = "kube-core"
 version = "0.99.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2287,6 +2327,7 @@ dependencies = [
  "futures",
  "k8s-openapi",
  "kube",
+ "kube-common",
  "polar",
  "ractor 0.15.6",
  "rkyv 0.8.10",
@@ -3091,6 +3132,7 @@ checksum = "7edddbd0b52d732b21ad9a5fab5c704c14cd949e5e9a1ec5929a24fded1b904c"
 name = "polar"
 version = "0.1.0"
 dependencies = [
+ "neo4rs",
  "ractor 0.14.7",
  "serde",
  "tracing",
