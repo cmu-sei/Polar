@@ -14,9 +14,20 @@ pub mod gitlab {}
 #[derive(
     Debug, Serialize, Deserialize, serde::Deserialize, serde::Serialize, Archive, Default, Clone,
 )]
-pub struct DateTimeString(String);
+pub struct DateTimeString(pub String);
 
 impl fmt::Display for DateTimeString {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+#[derive(
+    Debug, Serialize, Deserialize, serde::Deserialize, serde::Serialize, Archive, Default, Clone,
+)]
+pub struct DateString(pub String);
+
+impl fmt::Display for DateString {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.0)
     }
@@ -34,6 +45,16 @@ impl IdString {
 }
 
 impl fmt::Display for IdString {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+#[derive(
+    Debug, Serialize, Deserialize, serde::Deserialize, serde::Serialize, Archive, Default, Clone,
+)]
+pub struct PackageIDString(pub String);
+
+impl fmt::Display for PackageIDString {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.0)
     }
@@ -78,7 +99,7 @@ impl fmt::Display for CiJobArtifactID {
 #[derive(
     Debug, Serialize, Deserialize, serde::Deserialize, serde::Serialize, Archive, Clone, Default,
 )]
-pub struct BigInt(String);
+pub struct BigInt(pub String);
 
 impl BigInt {
     pub fn new<S: Into<String>>(s: S) -> Self {
@@ -93,11 +114,25 @@ impl fmt::Display for BigInt {
 }
 
 
+/// Represents a GitLab global ID for a container repository.
+/// Example: "gid://gitlab/ContainerRepository/1"
+#[derive(
+    Debug, Serialize, Deserialize, serde::Deserialize, serde::Serialize, Archive, Clone, Default,
+)]
+pub struct ContainerRepositoryID(pub String);
+
+impl fmt::Display for ContainerRepositoryID {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+impl_scalar!(ContainerRepositoryID, gitlab::ContainerRepositoryID);
 impl_scalar!(BigInt, gitlab::BigInt);
 impl_scalar!(IdString, gitlab::ID);
 impl_scalar!(CiJobArtifactID, gitlab::CiJobArtifactID);
 impl_scalar!(JobIdString, gitlab::JobID);
-
+impl_scalar!(PackageIDString, gitlab::PackagesPackageID);
 // represent timestamps
+impl_scalar!(DateString, gitlab::Date);
 impl_scalar!(DateTimeString, gitlab::Time);
 

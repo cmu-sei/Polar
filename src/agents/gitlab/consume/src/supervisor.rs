@@ -6,6 +6,7 @@ use common::types::GitlabData;
 use common::GROUPS_CONSUMER_TOPIC;
 use common::PIPELINE_CONSUMER_TOPIC;
 use common::PROJECTS_CONSUMER_TOPIC;
+use common::REPOSITORY_CONSUMER_TOPIC;
 use common::RUNNERS_CONSUMER_TOPIC;
 use common::USER_CONSUMER_TOPIC;
 use exponential_backoff::Backoff;
@@ -28,6 +29,7 @@ use crate::groups::GitlabGroupConsumer;
 use crate::pipelines::GitlabPipelineConsumer;
 use crate::projects::GitlabProjectConsumer;
 use crate::runners::GitlabRunnerConsumer;
+use crate::repositories::GitlabRepositoryConsumer;
 use crate::users::GitlabUserConsumer;
 use crate::GitlabConsumerArgs;
 use crate::BROKER_CLIENT_NAME;
@@ -57,7 +59,7 @@ impl ConsumerSupervisor {
         // This section could be improved somewhat. The idea of using a hashmap of callback functions was suggested
         // but this is far more readable. Various typing errors were discovered trying to implement the hashmap.
         // Also, it'd be more ideal for this consumer to stay alive indefinitely, continuously retrying but that doesn't seem supported w/ this crate.
-        // If the grpah isn't back after 5-10 minutes we probably have a serious issue anyway.
+        // If the graph isn't back after 5-10 minutes we probably have a serious issue anyway.
         
         let attempts = 10;
         let min = Duration::from_secs(3);
@@ -263,6 +265,17 @@ impl Actor for ConsumerSupervisor {
                             if let Err(e) = Actor::spawn_linked(
                                 Some(PIPELINE_CONSUMER_TOPIC.to_string()),
                                 GitlabPipelineConsumer,
+                                args.clone(),
+                                myself.clone().into(),
+                            )
+                            .await
+                            {
+                                error!("failed to start pipeline consumer. {e}");
+                                myself.stop(None);
+                            }
+                            if let Err(e) = Actor::spawn_linked(
+                                Some(REPOSITORY_CONSUMER_TOPIC.to_string()),
+                                GitlabRepositoryConsumer,
                                 args.clone(),
                                 myself.clone().into(),
                             )

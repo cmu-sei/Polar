@@ -14,15 +14,15 @@ async fn main() -> Result<(), Box<dyn Error> > {
     
     let broker_addr = env::var("BROKER_ADDR").unwrap();
 
-    let args = todo_observer::actors::ObserverSupervisorArgs {
-        broker_addr,
-        client_cert_file,
-        client_private_key_file,
-        ca_cert_file: ca_cert_file,
-    };
+    // let args = todo_observer::actors::ObserverSupervisorArgs {
+        // broker_addr,
+        // client_cert_file,
+        // client_private_key_file,
+        // ca_cert_file: ca_cert_file,
+    // };
 
-    let (supervisor, handle) = Actor::spawn(Some("TODO_APP_OBSERVER".to_string()), todo_observer::actors::ObserverSupervisor,args).await.expect("Expected to start observer agent");
-    let _ = handle.await;
+    // let (supervisor, handle) = Actor::spawn(Some("TODO_APP_OBSERVER".to_string()), todo_observer::actors::ObserverSupervisor,args).await.expect("Expected to start observer agent");
+    // let _ = handle.await;
     
     Ok(())
 }

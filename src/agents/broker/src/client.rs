@@ -196,7 +196,7 @@ impl Actor for TcpClientActor {
                                                     result,
                                                 } => {
                                                     if result.is_ok() {
-                                                        debug!("Successfully subscribed to topic: {topic}");
+                                                        info!("Successfully subscribed to topic: {topic}");
                                                     } else {
                                                         warn!("Failed to subscribe to topic: {topic}, {result:?}");
                                                     }
@@ -207,7 +207,7 @@ impl Actor for TcpClientActor {
                                                     result,
                                                 } => {
                                                     if result.is_ok() {
-                                                        debug!("Successfully unsubscribed from topic: {topic}");
+                                                        info!("Successfully unsubscribed from topic: {topic}");
                                                     } else {
                                                         warn!("Failed to unsubscribe from topic: {topic}");
                                                     }
@@ -228,7 +228,9 @@ impl Actor for TcpClientActor {
             }
             Err(e) => {
                 // Given that the gitlab consumer recently got an upgrade using an exponential backoff, 
-                // perhaps it's time the client actor got one too? Stopping the client causes the agent to crash.
+                // perhaps it's time the client actor got one too? 
+                // It's not the end of the world if cassini goes down is it? 
+                // if it does, it drops messages, but that doesn't mean we have to give up on the client end.
                 error!("Failed to connect to server: {e}");
                 myself.stop(Some("Failed to connect to server: {e}".to_string()));
             }

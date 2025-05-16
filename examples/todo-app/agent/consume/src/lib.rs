@@ -1,3 +1,4 @@
+/*
 
 pub mod actors;
 pub const BROKER_CLIENT_NAME: &str = "TODO_CONSUMER_CLIENT";
@@ -43,3 +44,4 @@ pub async fn subscribe_to_topic(registration_id: String, topic: String) -> Resul
         }
     }
 }
+*/

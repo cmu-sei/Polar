@@ -9,12 +9,13 @@ let secret = kubernetes.Secret::{
       , name = Some "flux-repo-secret" 
       , namespace = Some values.namespace
     }
-  -- TODO: make the secret immutable, nothing should be touching it, it should only ever be deleted and then recreated
+  -- NOTE: 
+  -- flux overwrites secrets as they get updated from the git repository, so we have to disable immutability.
+  -- Enabling it is accepting the responsibility of keeping this secret manually updated, or through some other means.
   --, immutable = True
-  -- In the future, it'll be desirable to use a seperate gitlab token than one for a user
   , stringData = Some [
     , { mapKey = "username", mapValue = env:GITLAB_USER as Text } 
-    , { mapKey = "password", mapValue = env:GITLAB_TOKEN as Text } 
+    , { mapKey = "password", mapValue = env:FLUX_GIT_REPO_TOKEN as Text } 
     ]
   , type = Some "Opaque"
 }

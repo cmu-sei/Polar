@@ -44,6 +44,7 @@ cassini = { path = "../../broker" }
 ractor = { version="0.15.6", features = ["async-trait"]}
 polar = { path = "../../lib" }
 gitlab-queries = { path = "../query" }
+gitlab-schema = {path = "../schema" }
 exponential-backoff = "2.1.0"
 
 [[bin]]

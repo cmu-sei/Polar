@@ -110,13 +110,13 @@ If you're not using Azure Key Vault, the automation can still be achieved throug
 - Encourages frequent key rotation without breaking deployments
 
 
-### ✅ Pros
+### Benefits
 - **Immutable history** of secrets changes with full context.
 - **No need to run or trust in-cluster secret operators** (e.g., External Secrets or Sealed Secrets).
 - **CI/CD flow remains declarative and secure**, aligning with GitOps principles.
 - **Flexible key rotation**, since encryption is externalized via Key Vault.
 
-### ❌ Cons
+### Considerations
 - **Key management complexity** must be handled externally (e.g., securely rotating keys in Azure).
 - **Encrypted files will still create Git churn**, though this is considered a feature for visibility, all changes need to be auditable and justified.
 - **Some manual overhead**, especially around tooling setup and file generation if not automated properly.

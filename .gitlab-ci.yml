@@ -11,6 +11,7 @@ default:
 build-dev-environment:
   image: registry.sandbox.labz.s-box.org/sei/polar-mirror/nix:2.24.13
   stage: environment-setup
+  allow_failure: true
   rules:
     - changes:
       - dev/flake.nix
@@ -39,6 +40,7 @@ build-dev-environment:
 build-ci-environment:
   image: registry.sandbox.labz.s-box.org/sei/polar-mirror/nix:2.24.13
   stage: environment-setup
+  allow_failure: true
   rules:
     - changes:
       - dev/flake.nix
@@ -79,7 +81,19 @@ build-workspace:
     - cd src/agents
     # build workspace
     - nix build --eval-system x86_64-linux --show-trace .#default
-    
+
+    # upload binary artifacts to our package registry
+    - |
+      for file in result/bin/*; do
+        if [ -f "$file" ]; then
+          filename=$(basename "$file")
+          curl --header "JOB-TOKEN: $CI_JOB_TOKEN" \
+               --upload-file "$file" \
+               "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/polar/$CI_COMMIT_SHORT_SHA/$filename"
+          echo "Uploaded: $filename"
+        fi
+      done
+  
     # Vulnerability analysis on our store
     # vulnix returns nonzero exit codes, so we need to get around this.
     # SEE: https://github.com/nix-community/vulnix/issues/79
@@ -102,16 +116,16 @@ build-workspace:
     - skopeo login --username "$CI_REGISTRY_USER" --password "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
     - | 
       skopeo inspect docker-archive://$(readlink -f cassini)
-      skopeo copy docker-archive://$(readlink -f cassini) docker://$CI_REGISTRY_IMAGE/cassini:0.1.0
+      skopeo copy docker-archive://$(readlink -f cassini) docker://$CI_REGISTRY_IMAGE/cassini:$CI_COMMIT_SHORT_SHA
       skopeo inspect docker-archive://$(readlink -f observer)
-      skopeo copy docker-archive://$(readlink -f observer) docker://$CI_REGISTRY_IMAGE/polar-gitlab-observer:0.1.0
+      skopeo copy docker-archive://$(readlink -f observer) docker://$CI_REGISTRY_IMAGE/polar-gitlab-observer:$CI_COMMIT_SHORT_SHA
       skopeo inspect docker-archive://$(readlink -f consumer)
-      skopeo copy docker-archive://$(readlink -f consumer) docker://$CI_REGISTRY_IMAGE/polar-gitlab-consumer:0.1.0
+      skopeo copy docker-archive://$(readlink -f consumer) docker://$CI_REGISTRY_IMAGE/polar-gitlab-consumer:$CI_COMMIT_SHORT_SHA
 
     # upload to ACR
-    - skopeo copy --dest-creds "$ACR_USERNAME:$ACR_TOKEN" docker-archive://$(readlink -f cassini) docker://$AZURE_REGISTRY/cassini:0.1.0
-    - skopeo copy --dest-creds "$ACR_USERNAME:$ACR_TOKEN" docker-archive://$(readlink -f observer) docker://$AZURE_REGISTRY/polar-gitlab-observer:0.1.0
-    - skopeo copy --dest-creds "$ACR_USERNAME:$ACR_TOKEN" docker-archive://$(readlink -f consumer) docker://$AZURE_REGISTRY/polar-gitlab-consumer:0.1.0
+    - skopeo copy --dest-creds "$ACR_USERNAME:$ACR_TOKEN" docker-archive://$(readlink -f cassini) docker://$AZURE_REGISTRY/cassini:$CI_COMMIT_SHORT_SHA
+    - skopeo copy --dest-creds "$ACR_USERNAME:$ACR_TOKEN" docker-archive://$(readlink -f observer) docker://$AZURE_REGISTRY/polar-gitlab-observer:$CI_COMMIT_SHORT_SHA
+    - skopeo copy --dest-creds "$ACR_USERNAME:$ACR_TOKEN" docker-archive://$(readlink -f consumer) docker://$AZURE_REGISTRY/polar-gitlab-consumer:$CI_COMMIT_SHORT_SHA
 
   artifacts:
     paths:

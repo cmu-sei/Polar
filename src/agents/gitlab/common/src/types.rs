@@ -22,11 +22,7 @@
 */
 
 use gitlab_queries::{
-    groups::GroupData,
-    groups::GroupMemberConnection,
-    runners::{CiRunner, CiRunnerConnection},
-    projects::{Project, ProjectConnection, ProjectMemberConnection, Pipeline, GitlabCiJob},
-    users::UserCoreFragment
+    groups::{GroupData, GroupMemberConnection}, projects::{ContainerRepository, ContainerRepositoryTag, GitlabCiJob, Package, Pipeline, Project, ProjectConnection, ProjectMemberConnection}, runners::{CiRunner, CiRunnerConnection}, users::UserCoreFragment
 };
 use gitlab_schema::IdString;
 
@@ -48,7 +44,9 @@ pub enum GitlabData {
     // RunnerJob((u32, Job)),
     Jobs((String, Vec<GitlabCiJob>)),
     Pipelines((String, Vec<Pipeline>)),
-    // PipelineJobs(ResourceLink<Job>)
+    ProjectPackages((String, Vec<Package>)),
+    ProjectContainerRepositories((String, Vec<ContainerRepository>)),
+    ContainerRepositoryTags((String, Vec<ContainerRepositoryTag>))
 }
 
 /// Helper type to link connection types to a resource's id
@@ -58,4 +56,3 @@ pub struct ResourceLink<T> {
     pub resource_id: IdString,
     pub connection: T,
 }
-

@@ -1,5 +1,3 @@
-use crate::users::UserCoreFragment;
-
 use gitlab_schema::{
     gitlab::{self as schema},
     DateTimeString, IdString,
@@ -7,7 +5,6 @@ use gitlab_schema::{
 use rkyv::Archive;
 use rkyv::Deserialize;
 use rkyv::Serialize;
-use std::fmt;
 
 #[derive(cynic::QueryFragment, Deserialize, Serialize, Archive, Clone)]
 pub struct CiRunnerConnection {

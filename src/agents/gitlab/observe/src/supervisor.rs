@@ -22,14 +22,18 @@ use crate::groups::GitlabGroupObserver;
 use crate::pipelines::GitlabJobObserver;
 use crate::pipelines::GitlabPipelineObserver;
 use crate::projects::GitlabProjectObserver;
+use crate::repositories::GitlabRepositoryObserver;
 use crate::runners::GitlabRunnerObserver;
 use crate::users::GitlabUserObserver;
 use crate::GitlabObserverArgs;
 use crate::BROKER_CLIENT_NAME;
+use crate::GITLAB_GROUPS_OBSERVER;
 use crate::GITLAB_JOBS_OBSERVER;
 use crate::GITLAB_PIPELINE_OBSERVER;
+use crate::GITLAB_PROJECT_OBSERVER;
+use crate::GITLAB_RUNNER_OBSERVER;
 use crate::GITLAB_USERS_OBSERVER;
-
+use crate::GITLAB_REPOSITORY_OBSERVER;
 pub struct ObserverSupervisor;
 
 pub struct ObserverSupervisorState {
@@ -40,7 +44,9 @@ pub struct ObserverSupervisorArgs {
     pub client_config: TCPClientConfig,
     pub gitlab_endpoint: String,
     pub gitlab_token: Option<String>,
-    pub proxy_ca_cert_file: Option<String>
+    pub proxy_ca_cert_file: Option<String>,
+    pub base_interval: u64,
+    pub max_backoff_secs: u64
 }
 
 impl ObserverSupervisor {
@@ -99,6 +105,7 @@ impl Actor for ObserverSupervisor {
                 //wait until we get a session id to start clients, try some configured amount of times every few seconds
                 let mut attempts = 0;
                 loop {
+                    
                     attempts += 1;
                     info!("Getting session data...");
                     if let CallResult::Success(result) = call(
@@ -107,14 +114,16 @@ impl Actor for ObserverSupervisor {
                         None,
                     )
                     .await
-                    .expect("Expected to call client!")
+                    .expect("Expected to call client!") //TODO: Match this and just stop if we can't do this instead of panicking.
                     {
                         if let Some(registration_id) = result {
                             let args = GitlabObserverArgs {
                                 gitlab_endpoint: args.gitlab_endpoint.clone(),
                                 token: args.gitlab_token.clone(),
                                 registration_id: registration_id.clone(),
-                                web_client: ObserverSupervisor::get_client(args.proxy_ca_cert_file)
+                                web_client: ObserverSupervisor::get_client(args.proxy_ca_cert_file),
+                                base_interval: args.base_interval,
+                                max_backoff: args.max_backoff_secs,
                             };
 
                             //TODO: start observers based off of some configuration
@@ -129,7 +138,7 @@ impl Actor for ObserverSupervisor {
                                 warn!("failed to start users observer {e}")
                             }
                             if let Err(e) = Actor::spawn_linked(
-                                Some("GITLAB_PROJECT_OBSERVER".to_string()),
+                                Some(GITLAB_PROJECT_OBSERVER.to_string()),
                                 GitlabProjectObserver,
                                 args.clone(),
                                 myself.clone().into(),
@@ -159,7 +168,7 @@ impl Actor for ObserverSupervisor {
                                 warn!("failed to start project observer {e}")
                             }
                             if let Err(e) = Actor::spawn_linked(
-                                Some("GITLAB_GROUP_OBSERVER".to_string()),
+                                Some(GITLAB_GROUPS_OBSERVER.to_string()),
                                 GitlabGroupObserver,
                                 args.clone(),
                                 myself.clone().into(),
@@ -169,8 +178,18 @@ impl Actor for ObserverSupervisor {
                                 warn!("failed to start group observer {e}")
                             }
                             if let Err(e) = Actor::spawn_linked(
-                                Some("GITLAB_RUNNER_OBSERVER".to_string()),
+                                Some(GITLAB_RUNNER_OBSERVER.to_string()),
                                 GitlabRunnerObserver,
+                                args.clone(),
+                                myself.clone().into(),
+                            )
+                            .await
+                            {
+                                warn!("failed to start runner observer {e}")
+                            }
+                            if let Err(e) = Actor::spawn_linked(
+                                Some(GITLAB_REPOSITORY_OBSERVER.to_string()),
+                                GitlabRepositoryObserver,
                                 args.clone(),
                                 myself.clone().into(),
                             )
@@ -222,27 +241,34 @@ impl Actor for ObserverSupervisor {
 
     async fn handle_supervisor_evt(
         &self,
-        _: ActorRef<Self::Msg>,
+        myself: ActorRef<Self::Msg>,
         msg: SupervisionEvent,
         _: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match msg {
             SupervisionEvent::ActorStarted(_) => (),
             SupervisionEvent::ActorTerminated(actor_cell, _, reason) => {
-                info!(
+                error!(
                     "OBSERVER_SUPERVISOR: {0:?}:{1:?} terminated. {reason:?}",
                     actor_cell.get_name(),
                     actor_cell.get_id()
                 );
+                // at time of writing, if any observers terminate
+                // it's a likely unrecoverable state - 
+                // it could be caused by an invalid gitlab token being provided or any malformed query.
+                // this would require intervention by admins.
+                myself.stop(reason)
             }
             SupervisionEvent::ActorFailed(actor_cell, e) => {
-                warn!(
+                error!(
                     "OBSERVER_SUPERVISOR: {0:?}:{1:?} failed! {e:?}",
                     actor_cell.get_name(),
                     actor_cell.get_id()
                 );
+                myself.stop(Some(e.to_string())) 
+
             }
-            SupervisionEvent::ProcessGroupChanged(..) => todo!(),
+            SupervisionEvent::ProcessGroupChanged(..) => todo!("Investigate how this would/could happen and how to respond."),
         }
 
         Ok(())

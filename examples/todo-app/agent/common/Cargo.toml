@@ -11,3 +11,9 @@ serde = { version = "1.0.218", features = ["derive"] }
 tracing = "0.1.41"
 tracing-glog = "0.4.0"
 tracing-subscriber = { version ="0.3.19", features=["std", "env-filter"]}
+
+# Dependent packages require tokio and the version they include is vulnerable...
+tokio = "1.43.1"
+
+[dev-dependencies]
+tokio = "1.43.1"

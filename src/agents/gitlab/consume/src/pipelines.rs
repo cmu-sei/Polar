@@ -28,8 +28,9 @@ use common::types::GitlabData;
 use common::PIPELINE_CONSUMER_TOPIC;
 use gitlab_queries::projects::GitlabCiJob;
 use gitlab_queries::projects::CiJobArtifact;
+use gitlab_schema::DateTimeString;
 use neo4rs::Query;
-use ractor::{async_trait, registry::where_is, Actor, ActorProcessingErr, ActorRef};
+use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef};
 use tracing::{debug, error, info,};
 
 pub struct GitlabPipelineConsumer;
@@ -164,12 +165,13 @@ impl Actor for GitlabPipelineConsumer {
                         let pipelines_data = pipelines
                         .iter()
                         .map(|pipeline| {
-                            // if this pipeline produced artifacts, add them
                             let artifacts = match &pipeline.job_artifacts {
                                 Some(artifacts) => GitlabPipelineConsumer::format_artifacts(&artifacts),
-                                None => String::default()
+                                None => String::default(),
                             };
-                            
+                    
+                            // Utility closures for optional fields
+
                             format!(
                                 r#"{{
                                     id: "{id}",
@@ -180,19 +182,29 @@ impl Actor for GitlabPipelineConsumer {
                                     complete: "{complete}",
                                     duration: "{duration}",
                                     total_jobs: "{total_jobs}",
+                                    compute_minutes: "{compute_minutes}",
+                                    failure_reason: "{failure_reason}",
+                                    finished_at: "{finished_at}",
+                                    source: "{source}",
+                                    trigger: "{trigger}",
+                                    latest: "{latest}",
                                     artifacts: [ {artifacts} ]
-                                    
                                 }}"#,
                                 id = pipeline.id.0,
-                                active = pipeline.active,
+                                active = pipeline.active.to_string(),
                                 created_at = pipeline.created_at,
-                                sha = pipeline.sha.clone().unwrap_or_default(),
-                                child = pipeline.child,
-                                complete = pipeline.complete,
-                                duration = pipeline.duration.unwrap_or_default(),
-                                total_jobs = pipeline.total_jobs,
+                                sha = pipeline.sha.clone().unwrap_or_else(|| "unknown".to_string()),
+                                child = pipeline.child.to_string(),
+                                complete = pipeline.complete.to_string(),
+                                duration = pipeline.duration.map_or("unknown".to_string(), |d| d.to_string()),
+                                total_jobs = pipeline.total_jobs.to_string(),
+                                compute_minutes = pipeline.compute_minutes.unwrap_or(0.0),
+                                failure_reason = pipeline.failure_reason.clone().unwrap_or_default(),
+                                finished_at = pipeline.finished_at.clone().unwrap_or(DateTimeString(String::default())),
+                                source = pipeline.source.clone().unwrap_or_default(),
+                                trigger = pipeline.trigger.to_string(),
+                                latest = pipeline.latest.to_string(),
                                 artifacts = artifacts,
-                                // jobs = jobs
                             )
                         })
                         .collect::<Vec<_>>()
@@ -205,12 +217,19 @@ impl Actor for GitlabPipelineConsumer {
                             MATCH (proj:GitlabProject {{ full_path: \"{full_path}\" }})
                             MERGE (p:GitlabPipeline {{ id: pipeline_data.id }})
                             SET p.id = pipeline_data.id,
-                                p.status = pipeline_data.status,
+                                p.active = pipeline_data.active,
                                 p.created_at = pipeline_data.created_at,
                                 p.sha = pipeline_data.sha,
-                                p.duration = pipeline_data.duration,
+                                p.child = pipeline_data.child,
                                 p.complete = pipeline_data.complete,
-                                p.total_jobs = pipeline_data.total_jobs
+                                p.duration = pipeline_data.duration,
+                                p.total_jobs = pipeline_data.total_jobs,
+                                p.compute_minutes = pipeline_data.compute_minutes,
+                                p.failure_reason = pipeline_data.failure_reason,
+                                p.finished_at = pipeline_data.finished_at,
+                                p.source = pipeline_data.source,
+                                p.trigger = pipeline_data.trigger,
+                                p.latest = pipeline_data.latest
                                 
                             MERGE (proj)-[:HAS_PIPELINE]->(p)
                         
@@ -221,7 +240,7 @@ impl Actor for GitlabPipelineConsumer {
                                 a.name = artifact.name,
                                 a.download_path = artifact.download_path,
                                 a.expire_at = artifact.expire_at
-                            MERGE (p)-[:HAS_ARTIFACT]->(a)
+                            MERGE (p)-[:PRODUCED]->(a)
                             "
                         );
 
@@ -266,7 +285,7 @@ impl Actor for GitlabPipelineConsumer {
                         WITH j
                         FOREACH (_ IN CASE WHEN j.runner IS NOT NULL THEN [1] ELSE [] END |
                             MERGE (r:GitlabRunner {{ runner_id: j.runner }})
-                            MERGE (r)-[:HAS_JOB]-(j)
+                            MERGE (j)-[:EXCUTED_BY]-(r)
                         )
 
                         "#);

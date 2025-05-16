@@ -3,8 +3,7 @@ use std::fmt;
 use cynic::*;
 use gitlab_schema::gitlab::{self as schema};
 use gitlab_schema::DateTimeString;
-use gitlab_schema::IdString;
-use rkyv::Archive;
+use gitlab_schema::DateString;
 use rkyv::Deserialize;
 use rkyv::Serialize;
 use crate::PageInfo;
@@ -66,7 +65,9 @@ pub struct UserCoreFragment {
     pub name: String,
     pub state: UserState,
     pub organization: Option<String>,
-    // pub last_activity_on: Option<DateTimeString>,
+    pub web_url: String,
+    pub web_path: String,
+    pub last_activity_on: Option<DateString>,
     pub location: Option<String>,
     pub created_at: Option<DateTimeString>,
     pub project_memberships: Option<ProjectMemberConnection>,

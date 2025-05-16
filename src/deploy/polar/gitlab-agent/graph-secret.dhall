@@ -10,7 +10,7 @@ apiVersion = "v1"
     , namespace = Some values.namespace
     }
 -- , data : Optional (List { mapKey : Text, mapValue : Text })
-, immutable = Some True
+-- , immutable = Some True
 , stringData = Some [ { mapKey = values.graphSecret.key, mapValue = env:GRAPH_PASSWORD as Text } ]
 , type = Some "Opaque"
 }

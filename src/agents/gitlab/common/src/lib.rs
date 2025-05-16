@@ -38,8 +38,7 @@ pub const GROUPS_CONSUMER_TOPIC: &str = "gitlab:consumer:groups";
 pub const USER_CONSUMER_TOPIC: &str = "gitlab:consumer:users";
 pub const RUNNERS_CONSUMER_TOPIC: &str = "gitlab:consumer:runners";
 pub const PIPELINE_CONSUMER_TOPIC: &str = "gitlab:consumer:pipelines"; 
-pub const RUNNERS_ROUTING_KEY: &str = "gitlab_runners";
-
+pub const REPOSITORY_CONSUMER_TOPIC: &str = "gitlab:consumer:repositories";
 
 // Checks for the existence of a lock file at the given path. Creates lock file if not found.
 #[deprecated]

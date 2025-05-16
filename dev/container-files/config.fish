@@ -71,7 +71,7 @@ end
 function fish_greeting --description="Displays the Fish logo and some other init stuff."
     set_color $fish_color_autosuggestion
     set_color normal
-    echo 'The license for this container can be found in /root/license.txt' | lolcat --force | cat
+    echo 'The license for this container can be found in /root/license.txt' | dotacat
     lol_fig "Welcome to the Polar Shell."
     
     # Array of funny phrases
@@ -81,7 +81,7 @@ function fish_greeting --description="Displays the Fish logo and some other init
     set random_index (random 1 (count $phrases))
     set phrase $phrases[$random_index]
 
-    echo $phrase | lolcat --force | cat
+    echo $phrase | dotacat
 end
 
 function hash_get --description="Return a hash of the input string."
@@ -101,12 +101,9 @@ function json_validate --description="Validate provided json against provided sc
 end
 
 function lol_fig --description="lolcat inside a figlet"
-    echo $argv | figlet | lolcat -f | cat
+    echo $argv | figlet | dotacat
 end
 
-#function lh --description="ls -alh, so you don't have to."
-    #grc ls -alh --color $argv
-#end
 function lh --description="Uses eza, a replacement for ls, with some useful options as defaults."
     eza --group --header --group-directories-first --long --icons --git --all --binary --dereference --links $argv
 end
