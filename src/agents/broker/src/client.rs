@@ -169,7 +169,9 @@ impl Actor for TcpClientActor {
                                                 } => {
                                                     //new message on topic
                                                     if result.is_ok() {
-                                                        //try to find dispatcher
+                                                        // try to find dispatcher
+                                                        // NOTE: This represents a mandate to name all dispatcher actors with this string
+                                                        // So far, we rely heavily on ractor's actor registry to do lookups to know where data is supposed to go.
                                                         let dispatcher =
                                                             where_is("DISPATCH".to_string())
                                                                 .expect(

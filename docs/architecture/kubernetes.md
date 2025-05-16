@@ -26,8 +26,65 @@ The Kubernetes Agent is designed to observe and report on the state of Kubernete
 - **Decision**: Start with foundational resources (ConfigMaps, Pods, Nodes), and iteratively add observers for other relevant Kubernetes primitives (e.g., Secrets, Services, Volumes, Deployments).
 - **Rationale**: Allows focused development and testing of each observer. It also aligns with evolving use cases without overwhelming the system early.
 
+## Topology
+
+TODO: Visual architecture diagram outlining cluster supervisor, and actors for various resources.
+
+## Roles
+
+**Cluster(Observer)Supervisor**
+ - Spawns and monitors child actors.
+ - Holds shared config and cluster context.
+ - Can restart children or orchestrate data flow changes.
+
+Configuration data will be read from a central config
+
+Its supervisor could provide structured actor metadata:
+```dhall
+let Actor =
+      { cluster : Text
+      , namespace : Text
+      , role : Text
+      , resource : Text
+      }
+
+in  [ { cluster = "prod-cluster", namespace = "default", role = "observer", resource = "pod" }
+    , ...
+    ]
+```
+Pros of this approach:
+
+    Consistent across all agents
+
+    Easy to override or simulate environments
+
+    Fits your Dhall + GitOps pipeline
+    
+The ClusterSupervisor watches all child actors.
+
+upon their failure, it will restart:
+    Individual watcher/processor (gracefully or forcefully).
+    All watchers in a namespace.
+
+Dead-letter channel for errors or dropped messages from policy agents.
+
+Optional: metrics on mailbox sizes, message rates, errors?
+
+**Observers** (Kube.rs watchers)
+ - Wraps a kube_runtime::watcher for a specific resource type.
+ - Sends structured events (created, updated, deleted) to corresponding consumer agents.
+
+**ConsumerSupervisor**
+ - Similar to the observer cluster supervisor, the consumer has the simple task of lifecycle management for its child actors.
+
+**Consumers** 
+ - Receive k8s data from observer actors corresponding to their resource.
+ - Transforms data structures into queries to represent resources in the graph database.
+
 ## Current Resource Implementations
 
+### Nodes
+TODO: My initial thoughts are that since nodes aren't namespaced, the supervisor or perhaps another actor shopuld watch them for real time changes.
 ### ConfigMaps
 - Lists all ConfigMaps in the specified namespaces.
 - Watches for changes (Add, Update, Delete).
@@ -43,6 +100,83 @@ The Kubernetes Agent is designed to observe and report on the state of Kubernete
 - Lists all cluster nodes.
 - Extracts readiness status, CPU/memory capacity, labels.
 - Watches for status changes and node events.
+
+### Node Types:
+
+    Pod { name, namespace, serviceAccountName, ... }
+
+    Volume { name } (some volumes will also have backing types)
+
+    ConfigMap { name }
+
+    Secret { name }
+
+    PVC { name }
+
+    ContainerImage { image } (optional, could just be a property)
+
+Edge Types:
+
+    (Pod)-[:USES_VOLUME]->(Volume)
+
+    (Volume)-[:BACKED_BY]->(ConfigMap | Secret | PVC)
+
+    (Pod)-[:USES_CONFIGMAP]->(ConfigMap) (for env vars)
+
+    (Pod)-[:USES_SECRET]->(Secret) (for env vars)
+
+    (Pod)-[:RUNS_IMAGE]->(ContainerImage)
+
+Optional:
+
+    (Pod)-[:RUNS_AS]->(ServiceAccount) (or just store as a prop)
+
+## Messaging strategy
+
+The design of our messaging system is driven by several key principles:
+
+### 1. **Unified Abstraction**
+
+By defining a central message type—an `ObservedEvent` that wraps an enum of possible Kubernetes resources (e.g., Pod, Node, Deployment)—we create a single, unified abstraction that all parts of the system can rely on. This allows all watchers (the actors interfacing with the Kubernetes API) to output their events in a consistent format, which simplifies downstream routing and processing. In this way, each watcher doesn’t need to know the specifics of every processor; they all just send out an `ObservedEvent`.
+
+### 2. **Leverage Serde Serialization**
+
+Since Kubernetes resource types provided by the `k8s-openapi` and `kube` crates are fully `serde`-serializable, we can directly embed these types in our messages. This not only simplifies our implementation by removing the need for manual data transformation but also allows flexibility:
+
+* **Direct Use:** Processors can work with the raw, rich resource data.
+* **Data Reduction:** Alternatively, we could extract only the relevant portions (e.g., metadata and status) if we need to optimize message size or processing speed.
+
+### 3. **Decoupling and Loose Coupling**
+
+Using a central routing mechanism (`DataRouter`) that receives all `ObservedEvent` messages means the producers (watchers) and consumers (processors) are decoupled. This architecture supports:
+
+* **Flexibility:** New processors can be added without changing the watchers.
+* **Resilience:** Failures in one processor won’t necessarily impact the others.
+* **Dynamic Routing:** The router can filter, duplicate, or transform messages as needed before sending them to the appropriate actor.
+
+### 4. **Type Safety and Clear Intent**
+
+By having a dedicated enum (`ObservedResource`) for the different resource types, we maintain type safety. Each variant clearly indicates which Kubernetes resource it represents. Additionally, including a `WatchAction` (Applied, Deleted, Restarted) alongside context (such as the cluster name, namespace, and a timestamp) gives every event a well-defined meaning, making the data more actionable for downstream processors.
+
+### 5. **Extensibility**
+
+This design lays a strong foundation for future growth:
+
+* **Adding New Resources:** As you need to observe more resource types, you can simply add a new variant to `ObservedResource` and create the corresponding watcher.
+* **Modular Processors:** Each processor (e.g., for metrics, logging, graph updates) can be implemented as an independent actor that subscribes only to the events it cares about.
+* **Dynamic Scaling:** The supervision layer (like the `ClusterSupervisor`) can manage these actors independently, allowing you to scale or restart parts of the system without a complete overhaul.
+
+### 6. **Actor Model Fit**
+
+With the actor-based approach using the ractor framework:
+
+* **Message Passing:** Our design naturally fits the message-passing paradigm of actors. Each event is self-contained, and the routing between actors happens via these messages.
+* **Fault Isolation:** If a particular processor fails or experiences a surge of events, it doesn’t block or crash the entire system. The supervisor can intervene, and messages can be retried or rerouted as needed.
+* **Concurrency:** Actors can process events concurrently, improving the responsiveness and throughput of your service in a dynamic cluster environment.
+
+In summary, the reasoning behind this design is to create a robust, flexible, and scalable architecture that leverages Rust’s type safety and the power of actor-based concurrency. The use of serialization for Kubernetes types simplifies our workflow and ensures that we can easily transform and route the rich data provided by the cluster into actionable insights for visualization and metrics collection.
+
+Does this cover your questions, or would you like to dive deeper into any particular aspect of the messaging system?
 
 ## Planned Enhancements
 - **Inter-observer Communication**: Message passing between observers to verify resource references (e.g., Pod-to-Secret linkage).

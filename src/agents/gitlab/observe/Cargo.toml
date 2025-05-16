@@ -37,13 +37,12 @@ parse_link_header = "0.3.3"
 common = {path = "../common"}
 serde_yaml = "0.9"
 clokwerk = "0.4.0"
-log = "0.4.22"
 tracing = "0.1.41"
 tracing-glog = "0.4.0"
 tracing-subscriber = { version ="0.3.19", features=["std", "env-filter"]}
 workspace-hack = { version = "0.1", path = "../../workspace-hack" }
 cassini = { path = "../../broker" }
-ractor = { version="0.14.1", features = ["async-trait"]}
+ractor = { version="0.15.6", features = ["async-trait"]}
 cynic = { version = "3.9.1" , features = ["rkyv"] }
 gitlab-queries = { path = "../query" }
 gitlab-schema = {path = "../schema" }

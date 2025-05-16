@@ -22,7 +22,8 @@
 */
 
 
-use crate::{subscribe_to_topic, GitlabConsumerArgs, GitlabConsumerState, TRANSACTION_FAILED_ERROR};
+use crate::{subscribe_to_topic, GitlabConsumerArgs, GitlabConsumerState};
+use polar::{QUERY_COMMIT_FAILED, TRANSACTION_FAILED_ERROR};
 use common::types::GitlabData;
 use common::PIPELINE_CONSUMER_TOPIC;
 use gitlab_queries::projects::GitlabCiJob;
@@ -295,10 +296,8 @@ impl Actor for GitlabPipelineConsumer {
 
                     
                         if let Err(e) = transaction.commit().await {
-                            error!("Failed to commit pipelines transaction: {:?}", e);
+                            error!("{QUERY_COMMIT_FAILED}, {e}");
                             // Up to you if you want to stop the actor or recover
-                        } else {
-                            info!("Committed pipelines batch transaction to database");
                         }
 
                    }

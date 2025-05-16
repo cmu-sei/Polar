@@ -21,7 +21,8 @@
    DM24-0470
 */
 
-use crate::{subscribe_to_topic, GitlabConsumerArgs, GitlabConsumerState, QUERY_RUN_FAILED, QUERY_COMMIT_FAILED, TRANSACTION_FAILED_ERROR};
+use crate::{subscribe_to_topic, GitlabConsumerArgs, GitlabConsumerState};
+use polar::{QUERY_RUN_FAILED, QUERY_COMMIT_FAILED, TRANSACTION_FAILED_ERROR};
 use common::types::GitlabData;
 use common::REPOSITORY_CONSUMER_TOPIC;
 use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef};

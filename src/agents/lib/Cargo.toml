@@ -12,3 +12,4 @@ tracing-subscriber = { version ="0.3.19", features=["std", "env-filter"]}
 serde = {version = "1", features = ["derive"]}
 # rkyv = "0.8.10"
 ractor = { version = "0.14.7", features = ["async-trait"] }
+neo4rs = "=0.8.0"
