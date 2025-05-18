@@ -31,7 +31,7 @@ use kube_common::KubeMessage;
 
 use crate::{KubeConsumerArgs, KubeConsumerState, BROKER_CLIENT_NAME};
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 pub fn pods_to_cypher(pods: &[Pod]) -> Vec<String> {
     let mut statements = Vec::new();
@@ -135,20 +135,22 @@ pub fn pods_to_cypher(pods: &[Pod]) -> Vec<String> {
                 if let Some(image) = &container.image {
                     if seen_images.insert(image.clone()) {
                         statements.push(format!(
-                            "MERGE (img:ContainerImage {{ image: '{}' }})",
+                            "MERGE (img:PodContainer {{ image: '{}' }})",
                             image
                         ));
                     }
                     statements.push(format!(
                         "MATCH (p:Pod {{ name: '{}', namespace: '{}' }}), \
-                               (img:ContainerImage {{ image: '{}' }}) \
-                         MERGE (p)-[:RUNS_IMAGE]->(img)",
+                               (c:PodContainer {{ image: '{}' }}) \
+                         MERGE (p)-[:HAS_CONTAINER]->(c)",
                         pod_name, namespace, image
                     ));
                 }
 
                 if let Some(envs) = &container.env {
+                    
                     for env in envs {
+                    
                         if let Some(value_from) = &env.value_from {
                             if let Some(cm_ref) = &value_from.config_map_key_ref {
                                 if seen_configmaps.insert(format!("{}::{}", namespace, cm_ref.name)) {
@@ -157,6 +159,7 @@ pub fn pods_to_cypher(pods: &[Pod]) -> Vec<String> {
                                         cm_ref.name, namespace
                                     ));
                                 }
+                                //link configmap to container
                                 statements.push(format!(
                                     "MATCH (p:Pod {{ name: '{}', namespace: '{}' }}), \
                                            (cm:ConfigMap {{ name: '{}', namespace: '{}' }}) \

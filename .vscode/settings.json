@@ -2,5 +2,9 @@
     "rust-analyzer.server.path": "rust-analyzer",
     "rust-analyzer.linkedProjects": [
         "src/agents/Cargo.toml",
+        "examples/todo-app/agent/common/Cargo.toml",
+        "examples/todo-app/agent/observe/Cargo.toml",
+        "examples/todo-app/agent/consume/Cargo.toml",
+        
     ]
 }

@@ -738,15 +738,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "clokwerk"
-version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bd108d365fcb6d7eddf17a6718eb6a33db18ba4178f8cc6b667f480710f10d76"
-dependencies = [
- "chrono",
-]
-
-[[package]]
 name = "cmake"
 version = "0.1.54"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1502,7 +1493,6 @@ name = "gitlab-observer"
 version = "0.1.0"
 dependencies = [
  "cassini",
- "clokwerk",
  "common",
  "cynic",
  "cynic-codegen",
@@ -1516,7 +1506,6 @@ dependencies = [
  "rkyv 0.8.10",
  "serde",
  "serde_json",
- "serde_yaml",
  "tokio",
  "tracing",
  "tracing-glog",
@@ -3207,6 +3196,24 @@ dependencies = [
  "syn 2.0.101",
  "version_check",
  "yansi",
+]
+
+[[package]]
+name = "provenance"
+version = "0.1.0"
+dependencies = [
+ "cassini",
+ "neo4rs",
+ "polar",
+ "ractor 0.15.6",
+ "rkyv 0.8.10",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-glog",
+ "tracing-subscriber",
+ "workspace-hack",
 ]
 
 [[package]]

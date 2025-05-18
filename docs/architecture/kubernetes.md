@@ -3,7 +3,7 @@
 ## Overview
 The Kubernetes Agent is designed to observe and report on the state of Kubernetes cluster resources for integration into a larger distributed data processing and analysis system. The agent is responsible for initial observation and continuous monitoring (via watchers) of Kubernetes resources, such as ConfigMaps, Pods, and Nodes, with the goal of capturing relevant metadata and relationships for downstream processing (e.g., graph database ingestion, lineage tracking, and security assurance).
 
-## Key Design Decisions
+## Key Design Decision So Far
 
 ### 1. **Hybrid Observation Model**
 - **Decision**: Use a hybrid approach of initial listing (observation) followed by continuous watching for events, changes etc.
@@ -11,7 +11,7 @@ The Kubernetes Agent is designed to observe and report on the state of Kubernete
 
 
 ### 2. **Concurrent Namespace-Specific Observers**
-- **Decision**: Spawn a separate asynchronous task per namespace for each observed resource.
+- **Decision**: The Cluster Observer Supervisor will spawn a separate set of observers per namespace for each observed resource.
 - **Rationale**: This supports horizontal scalability and makes it easier to isolate logic or failures to specific namespaces.
 
 ### 3. **Eventual Consistency Between Resource Observers**
@@ -37,9 +37,9 @@ TODO: Visual architecture diagram outlining cluster supervisor, and actors for v
  - Holds shared config and cluster context.
  - Can restart children or orchestrate data flow changes.
 
-Configuration data will be read from a central config
+Configuration data will be provided by a **Configuration Agent** in the future, but for now, values are hard-coded.
 
-Its supervisor could provide structured actor metadata:
+Its supervisor could provide structured actor metadata via dhall configurations.
 ```dhall
 let Actor =
       { cluster : Text
@@ -52,23 +52,10 @@ in  [ { cluster = "prod-cluster", namespace = "default", role = "observer", reso
     , ...
     ]
 ```
-Pros of this approach:
 
-    Consistent across all agents
+The ClusterSupervisor watches all child actors and manages their lifecycles.
 
-    Easy to override or simulate environments
-
-    Fits your Dhall + GitOps pipeline
-    
-The ClusterSupervisor watches all child actors.
-
-upon their failure, it will restart:
-    Individual watcher/processor (gracefully or forcefully).
-    All watchers in a namespace.
-
-Dead-letter channel for errors or dropped messages from policy agents.
-
-Optional: metrics on mailbox sizes, message rates, errors?
+Should its children fail for some reason, it will likely restart them, depending on the cause.
 
 **Observers** (Kube.rs watchers)
  - Wraps a kube_runtime::watcher for a specific resource type.
@@ -83,23 +70,22 @@ Optional: metrics on mailbox sizes, message rates, errors?
 
 ## Current Resource Implementations
 
+### Namespaces
+
+It's just as possible to read namespaces from a cluster automatically and go from there, but its also anticipated that a user might want to specify the namespaces an observer can see. We still need to confirm whether RBAC controls will be able to hide namespaces from an observer's query attempts, or if it's more ideal to make their configuration explicit.
+
 ### Nodes
-TODO: My initial thoughts are that since nodes aren't namespaced, the supervisor or perhaps another actor shopuld watch them for real time changes.
-### ConfigMaps
-- Lists all ConfigMaps in the specified namespaces.
-- Watches for changes (Add, Update, Delete).
-- Prints metadata and names.
+TODO: My initial thoughts are that since nodes aren't namespaced, the supervisor or perhaps another actor shopuld watch them for real time changes. It'll be more valuable whenever we can observe cloud/on-prem machines to see how they look in the cluster.
+
 
 ### Pods
-- Lists all Pods in the specified namespaces.
-- Extracts container image information.
-- Watches for changes and prints update events.
-- Planned: Link images to container registry metadata.
 
-### Nodes
-- Lists all cluster nodes.
-- Extracts readiness status, CPU/memory capacity, labels.
-- Watches for status changes and node events.
+The PodObserver Lists all Pods in the specified namespaces. The datatype exposed by the k8s_openapi crate also contains attributes detailing resources used by the Pod, including volumes, configMaps, secrets, etc.
+From there, consumers can extract more information about the relationship to other resources.
+Once it reads all data, the observer watches for changes and prints update events.
+
+It is planned to link images to container registry metadata.
+
 
 ### Node Types:
 
@@ -129,15 +115,16 @@ Edge Types:
 
 Optional:
 
-    (Pod)-[:RUNS_AS]->(ServiceAccount) (or just store as a prop)
+    (Pod)-[:RUNS_AS]->(ServiceAccount) (or just store as a property of the relationship)
 
 ## Messaging strategy
 
+K8s observers and data processors share a single distinct message type that more or less mirrors kubernetes' events.
 The design of our messaging system is driven by several key principles:
 
 ### 1. **Unified Abstraction**
 
-By defining a central message type—an `ObservedEvent` that wraps an enum of possible Kubernetes resources (e.g., Pod, Node, Deployment)—we create a single, unified abstraction that all parts of the system can rely on. This allows all watchers (the actors interfacing with the Kubernetes API) to output their events in a consistent format, which simplifies downstream routing and processing. In this way, each watcher doesn’t need to know the specifics of every processor; they all just send out an `ObservedEvent`.
+By defining a central message type—a `KubeMessage` that wraps an enum of possible Kubernetes resources (e.g., Pod, Node, Deployment)—we create a single, unified abstraction that all parts of the system can rely on. This allows all watchers (the actors interfacing with the Kubernetes API) to output their events in a consistent format, which simplifies downstream routing and processing. In this way, each watcher doesn’t need to know the specifics of every processor; they all just send out an `KubeMessage`.
 
 ### 2. **Leverage Serde Serialization**
 
@@ -148,7 +135,7 @@ Since Kubernetes resource types provided by the `k8s-openapi` and `kube` crates 
 
 ### 3. **Decoupling and Loose Coupling**
 
-Using a central routing mechanism (`DataRouter`) that receives all `ObservedEvent` messages means the producers (watchers) and consumers (processors) are decoupled. This architecture supports:
+Using a central routing mechanism (`DataRouter`) that receives all `KubeMessage` messages means the producers (watchers) and consumers (processors) are decoupled. This architecture supports:
 
 * **Flexibility:** New processors can be added without changing the watchers.
 * **Resilience:** Failures in one processor won’t necessarily impact the others.
