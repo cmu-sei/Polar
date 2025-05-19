@@ -1,5 +1,5 @@
 {
-    "rust-analyzer.server.path": "rust-analyzer",
+    "rust-analyzer.server.path": "/bin/rust-analyzer",
     "rust-analyzer.linkedProjects": [
         "src/agents/Cargo.toml",
     ]

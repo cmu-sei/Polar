@@ -1,5 +1,5 @@
 {
-    "rust-analyzer.server.path": "rust-analyzer",
+    "rust-analyzer.server.path": "/bin/rust-analyzer",
     "workbench.colorTheme": "Gruvbox Dark Hard",
     "terminal.integrated.fontFamily": "FiraMono Nerd Font Mono",
     "terminal.integrated.fontSize": 16,

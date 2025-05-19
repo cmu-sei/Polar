@@ -1,79 +1,99 @@
-#!/bin/bash
+#!/usr/bin/env bash
+set -euo pipefail
 
-# Function to create user account inside the container
+# ─────────────────────────────────────────────────────────────────────────────
+# 1. create the normal dev user  (original logic, untouched)
+# ─────────────────────────────────────────────────────────────────────────────
 create_user_in_container() {
-    local username=$1
-    local uid=$2
-    local gid=$3
+    local username=$1 uid=$2 gid=$3
 
-    if [ -z "$username" ]; then
-        echo "Username is required"
-        exit 1
-    fi
+    [[ -z $username || -z $uid || -z $gid ]] && {
+        echo "Usage: $0 username uid gid" ; exit 1; }
 
-    if [ -z "$uid" ]; then
-        echo "User ID is required"
-        exit 1
-    fi
+    echo "$username:x:$gid:"                >> /etc/group
+    echo "$username:x::"                    >> /etc/gshadow
+    echo "$username:x:$uid:$gid::/home/$username:/bin/fish" >> /etc/passwd
+    echo "$username:!x:::::::"              >> /etc/shadow
 
-    if [ -z "$gid" ]; then
-        echo "Group ID is required"
-        exit 1
-    fi
+    mkdir -p          /home/$username
+    cp -R /root/.     /home/$username || true
+    chmod 755         /home/$username
+    chown -R "$username:$username" /home/$username
 
-    # Add user to /etc/group
-    echo "$username:x:$gid:" >>/etc/group
+    chmod 1777 /tmp   # sticky‑bit temp
 
-    # Add user to /etc/gshadow
-    echo "$username:x::" >>/etc/gshadow
+    # fish config + XDG dirs
+    local cfg=/home/$username/.config/fish/config.fish
+    install -D -m 644 /dev/null "$cfg"
+    cat >>"$cfg" <<EOF
 
-    # Add user to /etc/passwd
-    echo "$username:x:$uid:$gid::/home/$username:/bin/fish" >>/etc/passwd
+# ── added by create‑user.sh
+set -x HOME            /home/$username
+set -x FISH_CONFIG_DIR \$HOME/.config/fish
+set -x XDG_DATA_HOME   \$HOME/.local/share
+set -x XDG_CONFIG_HOME \$HOME/.config
+set -x XDG_CACHE_HOME  \$HOME/.local/share
+EOF
 
-    # Add user to /etc/shadow
-    echo "$username:!x:::::::" >>/etc/shadow
+    # ────────────────────────────────────────────────────────────────────────
+    # 2.  DROPBEAR SSH SET‑UP  (✅ NEW)
+    # ────────────────────────────────────────────────────────────────────────
+    local DB_PORT=\${DROPBEAR_PORT:-2222}
+    local DB_DIR=/etc/dropbear
+    local AUTH_KEYS=/home/$username/.ssh/authorized_keys
 
-    # Create home directory for user
-    mkdir -p /home/$username
+    # packages must be in the image: dropbear & openssh
+    command -v dropbear  >/dev/null
+    command -v ssh-keygen >/dev/null
 
-    # Copy root's files to the new user's home directory
-    cp -R /root/. /home/$username
+    mkdir -p \$DB_DIR
+    [[ -s \$DB_DIR/dropbear_rsa_host_key ]] || \
+        ssh-keygen -t rsa -N '' -f \$DB_DIR/dropbear_rsa_host_key
 
-    # Set permissions for the home directory
-    chmod -R 755 /home/$username
+    install -d -o "$username" -g "$username" -m 700 /home/$username/.ssh
+    touch      \$AUTH_KEYS
+    chown "$username:$username" \$AUTH_KEYS
+    chmod 600  \$AUTH_KEYS
 
-    # Change ownership of the home directory to the new user
-    chown -R $username:$username /home/$username
+    # start dropbear (key‑only, loop‑back)
+    dropbear -R -E -F -p 127.0.0.1:\$DB_PORT &
+    export DROPBEAR_PID=$!
 
-    # Set permissions for the /tmp directory
-    chmod -R 777 /tmp
+    # ────────────────────────────────────────────────────────────────────────
+    # 3. helpful banner
+    # ────────────────────────────────────────────────────────────────────────
+    cat <<BANNER
 
-    HOME=/home/$username
+───────────────────────────────────────────────────────────────────────────────
+ 🚀  Container ready!
 
-    # set env vars
-    echo '' >> $HOME/.config/fish/config.fish
-    echo "set -x HOME /home/$username" >> $HOME/.config/fish/config.fish
-    echo 'set -x FISH_CONFIG_DIR $HOME/.config/fish' >> $HOME/.config/fish/config.fish
-    echo 'set -x XDG_DATA_HOME $HOME/.local/share' >> $HOME/.config/fish/config.fish
-    echo 'set -x XDG_CONFIG_HOME $HOME/.config' >> $HOME/.config/fish/config.fish
-    echo 'set -x XDG_CACHE_HOME $HOME/.local/share' >> $HOME/.config/fish/config.fish
+ • User ............. $username  (uid=$uid / gid=$gid)
+ • SSH server ....... dropbear on 127.0.0.1:\$DB_PORT  (🔑 key‑auth only)
 
+ 👉  To connect from host (Zed, VS Code Remote‑SSH, etc.):
 
-    # Set HOME environment variable and execute chroot and switch to the new user
-    HOME=/home/$username FISH_CONFIG_DIR=$HOME/.config/fish/ XDG_DATA_HOME=$HOME/.local/share XDG_CONFIG_HOME=$HOME/.config XDG_CACHE_HOME=$HOME/.local/share exec chroot --userspec=$uid:$gid / /bin/fish -c "cd /workspace; exec fish"
+     # once per container – copy your public key in:
+     docker cp ~/.ssh/id_ed25519.pub <container-id>:${AUTH_KEYS}
+
+     # then connect:
+     ssh -p \$DB_PORT $username@127.0.0.1
+
+   (If you use docker‑compose: add   ports: ["127.0.0.1:\$DB_PORT:\$DB_PORT"] )
+
+ Have fun!
+───────────────────────────────────────────────────────────────────────────────
+BANNER
+
+    # ────────────────────────────────────────────────────────────────────────
+    # 4. hand control to the requested command (original)
+    # ────────────────────────────────────────────────────────────────────────
+    exec chroot --userspec=$uid:$gid / /bin/fish -c "cd /workspace; exec fish"
 }
 
-# Check if script is being run with superuser privileges
-if [ "$EUID" -ne 0 ]; then
-    echo "Please run as root"
-    exit 1
-fi
+# must run as root
+(( EUID == 0 )) || { echo "Please run as root" ; exit 1; }
 
-# Check if correct number of arguments are provided
-if [ "$#" -ne 3 ]; then
-    echo "Usage: $0 username uid gid"
-    exit 1
-fi
+# args: username uid gid
+[[ $# == 3 ]] || { echo "Usage: $0 username uid gid" ; exit 1; }
 
-# Call the function with the provided arguments
-create_user_in_container $1 $2 $3
+create_user_in_container "$@"

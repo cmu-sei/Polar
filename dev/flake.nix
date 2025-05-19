@@ -12,10 +12,6 @@
     myNeovimOverlay.inputs.nixpkgs.follows = "nixpkgs";
     myNeovimOverlay.inputs.flake-utils.follows = "flake-utils";
 
-    nix-vscode-extensions.url = "github:nix-community/nix-vscode-extensions";
-    nix-vscode-extensions.inputs.nixpkgs.follows = "nixpkgs";
-    nix-vscode-extensions.inputs.flake-utils.follows = "flake-utils";
-
     staticanalysis.url = "github:daveman1010221/polar-static-analysis";
     staticanalysis.inputs.nixpkgs.follows = "nixpkgs";
     staticanalysis.inputs.flake-utils.follows = "flake-utils";
@@ -27,7 +23,7 @@
     #openssl-fips.url = "github:daveman1010221/openssl-fips";
   };
 
-  outputs = { flake-utils, nixpkgs, rust-overlay, myNeovimOverlay, nix-vscode-extensions, staticanalysis, dotacat, ... }:
+  outputs = { flake-utils, nixpkgs, rust-overlay, myNeovimOverlay, staticanalysis, dotacat, ... }:
     flake-utils.lib.eachDefaultSystem (system:
       let
 
@@ -50,9 +46,9 @@
         };
 
         #import package sets to be added to our environments
-        packageSets = import ./packages.nix {inherit system pkgs rust-overlay nix-vscode-extensions staticanalysis dotacat; };
+        packageSets = import ./packages.nix {inherit system pkgs rust-overlay staticanalysis dotacat; };
 
-        # This is needed since VSCode Devcontainers need the following files in order to function.
+        # This is needed since Devcontainers need the following files in order to function.
         baseInfo = with pkgs; [
           # Set up shadow file with user information
           (writeTextDir "etc/shadow" ''
@@ -130,12 +126,6 @@
           text = builtins.readFile ./container-files/plugins.fish;
         };
 
-        codeSettings = pkgs.writeTextFile {
-          name = "container-files/settings.json";
-          destination = "/root/.local/share/code-server/User/settings.json";
-          text = builtins.readFile ./container-files/settings.json;
-        };
-
         license = pkgs.writeTextFile {
           name = "container-files/license.txt";
           destination = "/root/license.txt";
@@ -166,7 +156,6 @@
             devEnv
             baseInfo
             fishConfig
-            codeSettings
             license
             gitconfig
             createUserScript
@@ -225,7 +214,7 @@
             mkdir -p usr/bin/
             ln -n bin/env usr/bin/env
 
-            # Link the dynamic linker/loader (needed for Node within vscode server)
+            # Link the dynamic linker/loader (needed for Node)
             mkdir -p lib64
             ln -s ${pkgs.stdenv.cc.cc}/lib/ld-linux-x86-64.so.2 lib64/ld-linux-x86-64.so.2
 
