@@ -28,85 +28,90 @@ impl Actor for ClusterObserverSupervisor {
         args: ClusterObserverSupervisorArgs,
     ) -> Result<Self::State, ActorProcessingErr> {
 
-        match Client::try_default().await {
-            Ok(kube_client) => {
-                debug!("Kubernetes client initialized");
+        
+        // Read Kubernetes credentials and other data from the environment
+        match kube::Config::incluster() {
+            Ok(kube_config) => {
+                // try to create a client and auth with the kube api
+                match Client::try_from(kube_config) {
+                    Ok(kube_client) => {
+                        debug!("Kubernetes client initialized");
 
-                let client_started_result = Actor::spawn_linked(
-                    Some(TCP_CLIENT_NAME.to_string()),
-                    TcpClientActor,
-                    TcpClientArgs { config: args.cassini_client_config, registration_id: None },
-                    myself.clone().into(),
-                )
-                .await;
-                
-                match client_started_result {
-                    Ok((client, _)) => {
-                        // Set up an interval
-                        let mut interval = tokio::time::interval(Duration::from_millis(1000));
-                        //wait until we get a session id to start clients, try some configured amount of times every few seconds
-                        let mut attempts = 0;
+                        let client_started_result = Actor::spawn_linked(
+                            Some(TCP_CLIENT_NAME.to_string()),
+                            TcpClientActor,
+                            TcpClientArgs { config: args.cassini_client_config, registration_id: None },
+                            myself.clone().into(),
+                        )
+                        .await;
+                        
+                        match client_started_result {
+                            Ok((client, _)) => {
+                                // Set up an interval
+                                let mut interval = tokio::time::interval(Duration::from_millis(1000));
+                                //wait until we get a session id to start clients, try some configured amount of times every few seconds
+                                let mut attempts = 0;
 
-                        loop {
-                            attempts += 1;
-                            info!("Getting session data...");
-                            if let CallResult::Success(result) = call(
-                                &client,
-                                |reply| TcpClientMessage::GetRegistrationId(reply),
-                                None,
-                            )
-                            .await
-                            .expect("Expected to call client!")
-                            {
-                                //if we successfully register with the broker
-                                if let Some(registration_id) = result {
-                                    //start actors
-                                    let args = PodObserverArgs {
-                                        registration_id: registration_id.clone(),
-                                        kube_client: kube_client.clone(),
-                                    };
-                                     
-                                    if let Err(e) = Actor::spawn_linked(Some(KUBERNETES_OBSERVER.to_string()), PodObserver, args, myself.get_cell().clone()).await {
-                                        error!("{e}")
+                                loop {
+                                    attempts += 1;
+                                    info!("Getting session data...");
+                                    if let CallResult::Success(result) = call(
+                                        &client,
+                                        |reply| TcpClientMessage::GetRegistrationId(reply),
+                                        None,
+                                    )
+                                    .await
+                                    .expect("Expected to call client!")
+                                    {
+                                        //if we successfully register with the broker
+                                        if let Some(registration_id) = result {
+                                            //start actors
+                                            let args = PodObserverArgs {
+                                                registration_id: registration_id.clone(),
+                                                kube_client: kube_client.clone(),
+                                            };
+                                            
+                                            if let Err(e) = Actor::spawn_linked(Some(KUBERNETES_OBSERVER.to_string()), PodObserver, args, myself.get_cell().clone()).await {
+                                                error!("{e}")
+                                            }
+
+                                            break;
+                                        } else if attempts < 5 {
+                                            warn!("Failed to get session data. Retrying.");
+                                        } else if attempts >= 5 {
+                                            error!("Failed to retrieve session data! timed out");
+                                            myself.stop(Some(
+                                                "Failed to retrieve session data! timed out".to_string(),
+                                            ));
+                                        }
                                     }
-
-                                    break;
-                                } else if attempts < 5 {
-                                    warn!("Failed to get session data. Retrying.");
-                                } else if attempts >= 5 {
-                                    error!("Failed to retrieve session data! timed out");
-                                    myself.stop(Some(
-                                        "Failed to retrieve session data! timed out".to_string(),
-                                    ));
+                                    interval.tick().await;
                                 }
                             }
-                            interval.tick().await;
+                            Err(e) => {
+                                error!("Failed to start tcp client {e}");
+                                myself.stop(None);
+                            }
                         }
+
+
+                        Ok(ClusterObserverSupervisorState)
+
                     }
-                    Err(e) => {
-                        error!("Failed to start tcp client {e}");
-                        myself.stop(None);
-                    }
+                    Err(e) => Err(ActorProcessingErr::from(e))
                 }
-
-
-                Ok(ClusterObserverSupervisorState)
-
             }
-            Err(e) => Err(ActorProcessingErr::from(e))
+            Err(e) => Err(ActorProcessingErr::from(e))    
         }
-        
     }
 
-    async fn post_start(
-        &self,
-        myself: ActorRef<Self::Msg>,
-        state: &mut Self::State,
-    ) -> Result<(), ActorProcessingErr> {
-
-
-        Ok(())
-    }
+    // async fn post_start(
+    //     &self,
+    //     myself: ActorRef<Self::Msg>,
+    //     state: &mut Self::State,
+    // ) -> Result<(), ActorProcessingErr> {
+    //     Ok(())
+    // }
     
     async fn handle_supervisor_evt(
         &self,
