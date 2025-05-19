@@ -34,6 +34,7 @@ pub const REGISTRATION_REQ_FAILED_TXT: &str = "Failed to register session!";
 pub const LISTENER_MGR_NOT_FOUND_TXT: &str = "Listener Manager not found!";
 pub const TIMEOUT_REASON: &str = "SESSION_TIMEDOUT";
 pub const DISCONNECTED_REASON: &str = "CLIENT_DISCONNECTED";
+pub const DISPATCH_NAME: &str = "DISPATCH";
 ///
 /// A basse configuration for a TCP Client actor
 pub struct TCPClientConfig {

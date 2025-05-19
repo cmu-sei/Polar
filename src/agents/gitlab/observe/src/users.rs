@@ -118,7 +118,6 @@ impl Actor for GitlabUserObserver {
     ) -> Result<(), ActorProcessingErr> {
         match message {
             GitlabObserverMessage::Tick(command) => {
-                debug!("Tick");
                 match command {
                     Command::GetUsers(op) => {
                                         

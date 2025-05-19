@@ -21,7 +21,8 @@
    DM24-0470
 */
 
-use crate::{subscribe_to_topic, GitlabConsumerArgs, GitlabConsumerState, QUERY_RUN_FAILED, QUERY_COMMIT_FAILED, TRANSACTION_FAILED_ERROR};
+use crate::{subscribe_to_topic, GitlabConsumerArgs, GitlabConsumerState};
+use polar::{QUERY_RUN_FAILED, QUERY_COMMIT_FAILED, TRANSACTION_FAILED_ERROR};
 use common::types::GitlabData;
 use common::REPOSITORY_CONSUMER_TOPIC;
 use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef};
@@ -195,66 +196,97 @@ impl Actor for GitlabRepositoryConsumer {
                     }
                     GitlabData::ProjectPackages((project_path, packages)) => {
 
-                       let packages_list = packages
-                       .iter()
-                       .map(|pkg| {
-                           format!(
-                            "{{ 
-                                id: \"{id}\", \
-                                name: \"{name}\", \
-                                version: \"{version}\", \
-                                package_type: \"{package_type}\", \
-                                created_at: \"{created_at}\", \
-                                updated_at: \"{updated_at}\", \
-                                status: \"{status}\", \
-                                status_message: \"{status_message}\"
-                            }}",
-                               id = pkg.id,
-                               name = pkg.name,
-                               version = pkg.version.clone().unwrap_or_default(),
-                               package_type = pkg.package_type,
-                               created_at = pkg
-                                   .created_at,
-                               updated_at = pkg
-                                   .updated_at,
-                               status = pkg.status,
-                               status_message = pkg.status_message.clone().unwrap_or_default(),
-                           )
-                       })
-                       .collect::<Vec<_>>()
-                       .join(",\n");
+                        let packages_list = packages
+                        .iter()
+                        .map(|pkg| {
+                            format!(
+                                "{{ 
+                                    id: \"{id}\", \
+                                    name: \"{name}\", \
+                                    version: \"{version}\", \
+                                    package_type: \"{package_type}\", \
+                                    created_at: \"{created_at}\", \
+                                    updated_at: \"{updated_at}\", \
+                                    status: \"{status}\", \
+                                    status_message: \"{status_message}\"
+                                }}",
+                                id = pkg.id,
+                                name = pkg.name,
+                                version = pkg.version.clone().unwrap_or_default(),
+                                package_type = pkg.package_type,
+                                created_at = pkg
+                                    .created_at,
+                                updated_at = pkg
+                                    .updated_at,
+                                status = pkg.status,
+                                status_message = pkg.status_message.clone().unwrap_or_default(),
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join(",\n");
 
-                       
-                       //TODO:  this works at a bare minimum to tie in projects, make a connection to a pipeline if CI/CD was used to generate it
-                       let cypher_query = format!(r#"
-                            UNWIND [{packages_list}] AS pkg
-                            MERGE (p:GitlabPackage {{ id: pkg.id }})
-                            SET
-                            p.name = pkg.name,
-                            p.version = pkg.version,
-                            p.package_type = pkg.package_type,
-                            p.created_at = datetime(pkg.created_at),
-                            p.updated_at = datetime(pkg.updated_at),
-                            p.status = pkg.status,
-                            p.status_message = pkg.status_message
-                            WITH p, pkg
-                            MATCH (project: GitlabProject) WHERE project.full_path = "{project_path}"
-                            MERGE (project)-[:HAS_PACKAGE]->(p)
-                       
-                       "#);
+                        
+                        //TODO:  this works at a bare minimum to tie in projects, make a connection to a pipeline if CI/CD was used to generate it
+                        let cypher_query = format!(r#"
+                                UNWIND [{packages_list}] AS pkg
+                                MERGE (p:GitlabPackage {{ id: pkg.id }})
+                                SET
+                                p.name = pkg.name,
+                                p.version = pkg.version,
+                                p.package_type = pkg.package_type,
+                                p.created_at = datetime(pkg.created_at),
+                                p.updated_at = datetime(pkg.updated_at),
+                                p.status = pkg.status,
+                                p.status_message = pkg.status_message
+                                WITH p, pkg
+                                MATCH (project: GitlabProject) WHERE project.full_path = "{project_path}"
+                                MERGE (project)-[:HAS_PACKAGE]->(p)
+                        
+                        "#);
 
-                       debug!(cypher_query);
+                        debug!(cypher_query);
 
-                       if let Err(_) = transaction.run(neo4rs::Query::new(cypher_query)).await {
-                           myself.stop(Some(QUERY_RUN_FAILED.to_string()));
-                           
-                       }
+                        if let Err(_) = transaction.run(neo4rs::Query::new(cypher_query)).await {
+                            myself.stop(Some(QUERY_RUN_FAILED.to_string()));
+                            
+                        }
                        
-                       if let Err(_) = transaction.commit().await {
-                           myself.stop(Some(QUERY_COMMIT_FAILED.to_string()));
-                       }
-                       
-                       info!("Committed transaction to database"); 
+                         // make pipeline connections if any
+                    
+                        for package in packages {
+                            if let Some(connection) = package.pipelines {
+                                match connection.nodes {
+                                    Some(pipelines) => {
+                                        for option in pipelines {
+
+                                            let pipeline = option.clone().unwrap();
+
+                                            let cypher_query = format!(r#"
+                                                MATCH (package:GitlabPackage) WHERE package.id = "{}"
+                                                WITH package
+                                                MATCH (pipeline:GitlabPipeline) WHERE pipeline.id = "{}"
+                                                WITH package, pipeline
+                                                MERGE (pipeline)-[:PRODUCED]-(package)
+                                            "#, package.id, pipeline.id);
+
+                                            debug!("{cypher_query}");
+
+                                            if let Err(_) = transaction.run(neo4rs::Query::new(cypher_query)).await {
+                                                myself.stop(Some(QUERY_RUN_FAILED.to_string()));
+                                                
+                                            }
+
+                                        }
+                                    }
+                                    None => ()
+                                }
+                            }
+                        }
+                        if let Err(_) = transaction.commit().await {
+                            myself.stop(Some(QUERY_COMMIT_FAILED.to_string()));
+                        }
+                        
+                        info!("Committed transaction to database"); 
                     }
                     _ => (),
 

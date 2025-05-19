@@ -27,8 +27,11 @@ use crate::runners::GitlabRunnerObserver;
 use crate::users::GitlabUserObserver;
 use crate::GitlabObserverArgs;
 use crate::BROKER_CLIENT_NAME;
+use crate::GITLAB_GROUPS_OBSERVER;
 use crate::GITLAB_JOBS_OBSERVER;
 use crate::GITLAB_PIPELINE_OBSERVER;
+use crate::GITLAB_PROJECT_OBSERVER;
+use crate::GITLAB_RUNNER_OBSERVER;
 use crate::GITLAB_USERS_OBSERVER;
 use crate::GITLAB_REPOSITORY_OBSERVER;
 pub struct ObserverSupervisor;
@@ -135,7 +138,7 @@ impl Actor for ObserverSupervisor {
                                 warn!("failed to start users observer {e}")
                             }
                             if let Err(e) = Actor::spawn_linked(
-                                Some("GITLAB_PROJECT_OBSERVER".to_string()),
+                                Some(GITLAB_PROJECT_OBSERVER.to_string()),
                                 GitlabProjectObserver,
                                 args.clone(),
                                 myself.clone().into(),
@@ -165,7 +168,7 @@ impl Actor for ObserverSupervisor {
                                 warn!("failed to start project observer {e}")
                             }
                             if let Err(e) = Actor::spawn_linked(
-                                Some("GITLAB_GROUP_OBSERVER".to_string()),
+                                Some(GITLAB_GROUPS_OBSERVER.to_string()),
                                 GitlabGroupObserver,
                                 args.clone(),
                                 myself.clone().into(),
@@ -175,7 +178,7 @@ impl Actor for ObserverSupervisor {
                                 warn!("failed to start group observer {e}")
                             }
                             if let Err(e) = Actor::spawn_linked(
-                                Some("GITLAB_RUNNER_OBSERVER".to_string()),
+                                Some(GITLAB_RUNNER_OBSERVER.to_string()),
                                 GitlabRunnerObserver,
                                 args.clone(),
                                 myself.clone().into(),

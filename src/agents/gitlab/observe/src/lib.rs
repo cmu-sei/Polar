@@ -55,14 +55,17 @@ use tracing::warn;
 use tracing::{debug, error};
 
 pub const GITLAB_USERS_OBSERVER: &str = "gitlab:observer:users";
+pub const GITLAB_PROJECT_OBSERVER: &str = "gitlab.observer.projects";
 pub const BROKER_CLIENT_NAME: &str = "gitlab:observer:web_client";
 pub const GITLAB_PIPELINE_OBSERVER: &str = "gitlab:observer:pipelines";
 pub const GITLAB_JOBS_OBSERVER: &str = "gitlab:observer:jobs";
 pub const GITLAB_REPOSITORY_OBSERVER: &str = "gitlab:observer:repositories";
-const PRIVATE_TOKEN_HEADER_STR: &str = "PRIVATE-TOKEN";
+pub const GITLAB_GROUPS_OBSERVER: &str = "gitlab:observer:groups";
+pub const GITLAB_RUNNER_OBSERVER: &str = "gitlab:observer:runners";
 pub const BACKOFF_RECEIVED_LOG: &str = "{myself:?} received backoff message...";
 pub const TOKEN_EXPIRED_BACKOFF_LOG: &str = "{myself:?} stopping due to bad credentials";
 pub const MESSAGE_FORWARDING_FAILED: &str = "Expected to forward a message to self.";
+const PRIVATE_TOKEN_HEADER_STR: &str = "PRIVATE-TOKEN";
 /// General state for all gitlab observers
 pub struct GitlabObserverState {
     /// Endpoint of GitLab instance
@@ -176,8 +179,9 @@ pub enum GitlabObserverMessage  {
     Backoff(BackoffReason),
 }
 
+
 /// helper function for our observers to respond to backoff messages
-/// either returns a new duration, or 
+/// either returns a new duration, or an error containing the reason it shouldn't
 pub fn handle_backoff(state: &mut GitlabObserverState, reason: BackoffReason) -> Result<Duration, String> {
     match reason {
         BackoffReason::GitlabUnreachable(_) =>  {

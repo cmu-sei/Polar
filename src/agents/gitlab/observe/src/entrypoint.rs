@@ -46,7 +46,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         gitlab_token: Some(gitlab_token),
         proxy_ca_cert_file,
         // TODO: read these from configuration
-        base_interval: 300,
+        base_interval: 10,
         max_backoff_secs: 6000,
         
     };

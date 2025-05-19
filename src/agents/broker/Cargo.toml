@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 async-trait = "0.1.83"
-ractor = { version="0.14.1", features = ["async-trait"]}
+ractor = { version="0.15.6", features = ["async-trait"]}
 rkyv = "0.8.10"
 tokio = { version = "1.30", features = ["full"] }
 tracing = "0.1.41"
@@ -13,8 +13,6 @@ tracing-glog = "0.4.0"
 tracing-subscriber = { version ="0.3.19", features=["std", "env-filter"]}
 uuid = { version = "1.11.0", features = ["v4"] }
 tokio-util = "0.7.13"
-#TODO: Consider using FIPS cryptography features?
-# REFERENCE: https://docs.rs/rustls/latest/rustls/index.html#crate-features
 rustls = { version = "=0.23.25", features = ["aws-lc-rs"] }
 tokio-rustls = "0.26.1"
 polar = { path = "../lib" }

@@ -25,7 +25,7 @@ use core::error;
 use std::time::Duration;
 
 use crate::{
-    Command, GitlabObserverArgs, GitlabObserverMessage, GitlabObserverState, BROKER_CLIENT_NAME
+    BackoffReason, Command, GitlabObserverArgs, GitlabObserverMessage, GitlabObserverState, BROKER_CLIENT_NAME, GITLAB_PROJECT_OBSERVER
 };
 use cassini::client::TcpClientMessage;
 use cassini::ClientMessage;
@@ -260,7 +260,6 @@ impl Actor for GitlabJobObserver {
                                             .join("\n");
                     
                                             error!("Failed to query instance! {errors}");
-                                            myself.stop(Some(errors))
                                         }
                                         // sift through and dig down to find the jobs list. 
                                         
@@ -323,7 +322,15 @@ impl Actor for GitlabJobObserver {
                                     }
                                 }
                             }
-                            Err(e) => {}
+                            Err(e) => {
+                                error!("{e}");
+                                match where_is(GITLAB_PROJECT_OBSERVER.to_string()) {
+                                    Some(observer) => {
+                                        observer.send_message(GitlabObserverMessage::Backoff(BackoffReason::GitlabUnreachable(e.to_string()))).unwrap();
+                                    },
+                                    None => myself.stop(None)
+                                }
+                            }
                         }
         
                     }

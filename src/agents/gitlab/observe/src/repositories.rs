@@ -316,6 +316,7 @@ impl Actor for GitlabRepositoryObserver {
         
                                                                 debug!("Found {} package(s) for project {full_path}", read_packages.len());
         
+                                                                    
                                                                 match where_is(BROKER_CLIENT_NAME.to_string()) {
                                                                     Some(client) => {
                                                                         let data = GitlabData::ProjectPackages((full_path.to_string(), read_packages));

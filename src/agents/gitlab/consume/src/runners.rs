@@ -21,7 +21,8 @@
    DM24-0470
 */
 
-use crate::{subscribe_to_topic, GitlabConsumerArgs, GitlabConsumerState, QUERY_COMMIT_FAILED, QUERY_RUN_FAILED, TRANSACTION_FAILED_ERROR};
+use crate::{subscribe_to_topic, GitlabConsumerArgs, GitlabConsumerState};
+use polar::{QUERY_COMMIT_FAILED, QUERY_RUN_FAILED, TRANSACTION_FAILED_ERROR};
 use common::types::GitlabData;
 use common::RUNNERS_CONSUMER_TOPIC;
 use neo4rs::Query;

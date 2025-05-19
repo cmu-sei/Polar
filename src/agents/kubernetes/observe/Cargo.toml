@@ -1,0 +1,24 @@
+[package]
+name = "kube-observer"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# NOTE cassini and the other services use the aws-lc-rs crypto provider for their work. So we will too!
+kube = {version = "0.99.0", default-features = false , features = ["client", "aws-lc-rs", "rustls-tls" ,"runtime", "derive"]}
+serde = { version = "1", features = ["derive"] }
+serde_json = "1.0"
+tokio = {version="1.39.3", features=["full"]}
+k8s-openapi = {version="0.24.0",features = ["v1_32"]}
+futures = "0.3.30"
+ractor = { version = "0.15.5", features = ["async-trait"] }
+rkyv = "0.8.10"
+workspace-hack = { version = "0.1", path = "../../workspace-hack" }
+cassini = { path = "../../broker" }
+tracing = "0.1.41"
+tracing-glog = "0.4.0"
+tracing-subscriber = { version ="0.3.19", features=["std", "env-filter"]}
+polar = {path = "../../lib"}
+kube-common = {path = "../common" }
+# [dev-dependencies]
+# k8s-openapi = {version="0.22.0",features = ["v1_28"]}

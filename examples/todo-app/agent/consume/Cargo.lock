@@ -218,7 +218,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "polar",
- "ractor",
+ "ractor 0.15.6",
  "ring",
  "rkyv",
  "rustls",
@@ -321,9 +321,10 @@ name = "common"
 version = "0.1.0"
 dependencies = [
  "polar",
- "ractor",
+ "ractor 0.15.6",
  "rkyv",
  "serde",
+ "tokio",
  "tracing",
  "tracing-glog",
  "tracing-subscriber",
@@ -1429,7 +1430,8 @@ checksum = "7edddbd0b52d732b21ad9a5fab5c704c14cd949e5e9a1ec5929a24fded1b904c"
 name = "polar"
 version = "0.1.0"
 dependencies = [
- "ractor",
+ "neo4rs",
+ "ractor 0.14.7",
  "serde",
  "tracing",
  "tracing-glog",
@@ -1523,6 +1525,24 @@ dependencies = [
  "strum",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "ractor"
+version = "0.15.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "164cbdac94cb8f5c3bbb031f959643619e7e74f13d94381d69ba6161640f063e"
+dependencies = [
+ "async-trait",
+ "bon",
+ "dashmap",
+ "futures",
+ "once_cell",
+ "strum",
+ "tokio",
+ "tokio_with_wasm",
+ "tracing",
+ "web-time",
 ]
 
 [[package]]
@@ -2151,7 +2171,7 @@ dependencies = [
  "common",
  "futures-lite",
  "neo4rs",
- "ractor",
+ "ractor 0.15.6",
  "reqwest",
  "ring",
  "rustls",
@@ -2227,6 +2247,30 @@ dependencies = [
  "futures-sink",
  "pin-project-lite",
  "tokio",
+]
+
+[[package]]
+name = "tokio_with_wasm"
+version = "0.8.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ed200846e8d48af28bd5724098dde6986c4a9f5136eb8e07477a078f054053cf"
+dependencies = [
+ "js-sys",
+ "tokio",
+ "tokio_with_wasm_proc",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
+]
+
+[[package]]
+name = "tokio_with_wasm_proc"
+version = "0.8.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "499ed9d797c376545920fa64c39c3efb34217ba4db826102db6c3912555291c9"
+dependencies = [
+ "quote",
+ "syn 2.0.101",
 ]
 
 [[package]]
@@ -2515,6 +2559,16 @@ name = "web-sys"
 version = "0.3.77"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "33b6dd2ef9186f1f2072e409e99cd22a975331a6b3591b12c764e0e55c60d5d2"
+dependencies = [
+ "js-sys",
+ "wasm-bindgen",
+]
+
+[[package]]
+name = "web-time"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5a6580f308b1fad9207618087a65c04e7a10bc77e02c8e84e9b00dd4b12fa0bb"
 dependencies = [
  "js-sys",
  "wasm-bindgen",
