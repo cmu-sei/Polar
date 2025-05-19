@@ -1,4 +1,5 @@
 #!/bin/bash
+set -euo pipefail
 
 convert_and_encrypt() {
     input_dhall="$1"
