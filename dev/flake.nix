@@ -66,6 +66,12 @@
           (writeTextDir "etc/gshadow" ''
             root:x::
           '')
+          # For Dropbear...
+          (writeTextDir "etc/shells" ''
+            /bin/sh
+            /bin/bash
+            /bin/fish
+          '')
           # Set up os-release file with NixOS information, since it is nix the check requirements
           # step for the dev container creation will skip.
           (writeTextDir "etc/os-release" ''
