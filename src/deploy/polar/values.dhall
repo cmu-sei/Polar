@@ -137,15 +137,15 @@ let graphSecret =
 -- The secret used by the observers to contact gitlab
 let gitlabSecret = kubernetes.SecretKeySelector::{ key = "token" , name = Some "gitlab-secret" }
 -- The name of the secret containign the tls keypair
-let gitlabClientCertificateSecret = "client-tls"
+let polarClientCertificateSecret = "client-tls"
 --  Certificate request spec for creating a client keypair
-let gitlabAgentCertificateSpec 
+let polarAgentCertificateSpec 
     = { commonName = mtls.commonName
       , dnsNames = [ cassiniDNSName ]
       , duration = "2160h"
       , issuerRef = { kind = "Issuer", name = mtls.leafIssuerName }
       , renewBefore = "360h"
-      , secretName = gitlabClientCertificateSecret
+      , secretName = polarClientCertificateSecret
       }
 --  General settings for the gitlab agent components
 let gitlab = {
@@ -167,8 +167,7 @@ let gitlab = {
     -- or just dealing with some other MITM situation, You'll need to trust the proxies certificates 
     , tls = {
       , certificateRequestName = "gitlab-agent-certificate"
-      , certificateSpec = gitlabAgentCertificateSpec
-
+      , certificateSpec = polarAgentCertificateSpec
     }    
     , observer = {
         name = "polar-gitlab-observer"
@@ -185,7 +184,7 @@ let gitlab = {
              graphDB = "neo4j"
           ,  graphUsername = "neo4j"
           -- The secret containing JUST the password string used by the consumer to authenticate
-          -- Not to be confused with the full crednetial string, which is formatted like  <username>/<password>
+          -- Not to be confused with the full credential string, which is formatted like  <username>/<password>
           ,  graphPassword = 
               kubernetes.SecretKeySelector::{
                 name = Some "polar-graph-pw"
@@ -193,7 +192,47 @@ let gitlab = {
               }
         }
     }
+}
+
+let kubeAgent = {
+  name = "kubernetes-agent"
+  , tls = {
+    , certificateRequestName = "kube-agent-certificate"
+    , certificateSpec = polarAgentCertificateSpec
     }
+  , podAnnotations = [ RejectSidecarAnnotation ]
+  , observer = {
+
+    name = "kube-observer"
+    , serviceAccountName = "kube-observer-sa"
+    , secretName = "kube-observer-sa-token"
+    , image = "${sandboxRegistry.url}/polar/polar-kube-observer:${commitSha}"
+  }
+  , consumer = {
+    name = "kube-consumer"
+    , image = "${sandboxRegistry.url}/polar/polar-kube-consumer:${commitSha}"
+    , graph = {
+      graphDB = "neo4j"
+      ,  graphUsername = "neo4j"
+      -- The secret containing JUST the password string used by the consumer to authenticate
+      -- Not to be confused with the full credential string, which is formatted like  <username>/<password>
+      ,  graphPassword = 
+          kubernetes.SecretKeySelector::{
+            name = Some "polar-graph-pw"
+            , key = "secret"
+          }
+    }
+  }
+  , containerSecurityContext 
+  = kubernetes.SecurityContext::{
+    , runAsGroup = Some 1000
+    , runAsNonRoot = Some True
+    , runAsUser = Some 1000
+    , capabilities = Some kubernetes.Capabilities::{
+      drop = Some [ "ALL" ]
+    }
+  }
+}
 
 let neo4jPorts = { https = 7473, bolt = 7687 }
 
@@ -250,13 +289,13 @@ let neo4j =
           { data =
               { name = "polar-db-data"
               , storageClassName = Some "managed-csi"
-              , storageSize = "10Gi"
+              , storageSize = "50Gi"
               , mountPath = "/var/lib/neo4j/data"
               }
           , logs =
               { name = "polar-db-logs"
               , storageClassName = Some "managed-csi"
-              , storageSize = "10Gi"
+              , storageSize = "50Gi"
               , mountPath = "/var/lib/neo4j/logs"
               }
           }
@@ -286,4 +325,5 @@ in
 ,   neo4jBoltAddr
 ,   gitlab
 ,   gitlabSecret
+,   kubeAgent
 }

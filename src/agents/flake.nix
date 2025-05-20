@@ -115,7 +115,7 @@
         # build workspace derivation to be given as a default package
         polarAgents = craneLib.buildPackage (individualCrateArgs // {
           pname = "polar";
-          cargoExtraArgs = "--workspace --locked --release";
+          cargoExtraArgs = "--workspace --locked";
           src = fileSetForCrate ./.;
         });
 
@@ -154,7 +154,7 @@
          
         cassini = craneLib.buildPackage (commonArgs // {
           inherit cargoArtifacts;
-          cargoExtraArgs = "--locked -p cassini"; 
+          cargoExtraArgs = "--locked"; 
           src = fileSetForCrate ./broker;
           # Disable tests for now, We'll run them later with env vars and TlsCerts
           doCheck = false;
