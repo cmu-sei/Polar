@@ -8,7 +8,7 @@ let subject = kubernetes.Subject::{ kind = "ServiceAccount"
 
 in kubernetes.RoleBinding::{ 
     apiVersion = "rbac.authorization.k8s.io/v1"
-, kind = "RoleBinding"
+, kind = "ClusterRoleBinding"
 , metadata = kubernetes.ObjectMeta::{ name = Some "kube-observer-read" }
 , roleRef = kubernetes.RoleRef::{ apiGroup = "", kind = "ClusterRole", name = "kube-observer-read" }
 , subjects = Some [ subject ]
