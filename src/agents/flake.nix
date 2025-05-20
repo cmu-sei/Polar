@@ -113,8 +113,8 @@
         };
 
         # build workspace derivation to be given as a default package
-        agentPkgs = craneLib.buildPackage (individualCrateArgs // {
-          pname = "gitlabAgent";
+        polarAgents = craneLib.buildPackage (individualCrateArgs // {
+          pname = "polar";
           cargoExtraArgs = "--workspace --locked";
           src = fileSetForCrate ./.;
         });
@@ -140,9 +140,21 @@
           src = fileSetForCrate ./gitlab/consume;
         });
 
+        kubeObserver = craneLib.buildPackage (individualCrateArgs // {
+          pname = "kube-observer";
+          cargoExtraArgs= "--locked";
+          src = fileSetForCrate ./kubernetes/observe;
+        });
+
+        kubeConsumer = craneLib.buildPackage (individualCrateArgs // {
+          pname = "kube-consumer";
+          cargoExtraArgs= "--locked";
+          src = fileSetForCrate ./kubernetes/consume;
+        });
+         
         cassini = craneLib.buildPackage (commonArgs // {
           inherit cargoArtifacts;
-          cargoExtraArgs = "--locked -p cassini"; 
+          cargoExtraArgs = "--locked"; 
           src = fileSetForCrate ./broker;
           # Disable tests for now, We'll run them later with env vars and TlsCerts
           doCheck = false;
@@ -214,12 +226,12 @@
       in
       {
         packages = {
-          inherit gitlabObserver gitlabConsumer cassini agentPkgs tlsCerts;
-          default = agentPkgs;
+          inherit gitlabObserver gitlabConsumer cassini polarAgents tlsCerts;
+          default = polarAgents;
 
-          observerImage = pkgs.dockerTools.buildImage {
+          gitlabObserverImage = pkgs.dockerTools.buildImage {
             name = "polar-gitlab-observer";
-            tag = "0.1.0";
+            tag = "latest";
             copyToRoot = [ etc observerEnv ]; 
             uid = commonUser.uid;
             gid = commonUser.gid;
@@ -232,9 +244,9 @@
             };
           };
  
-          consumerImage = pkgs.dockerTools.buildImage {
+          gitlabConsumerImage = pkgs.dockerTools.buildImage {
             name = "polar-gitlab-consumer";
-            tag = "0.1.0";
+            tag = "latest";
             copyToRoot = [ etc consumerEnv ];
             uid = commonUser.uid;
             gid = commonUser.gid;
@@ -247,9 +259,39 @@
             };
           };
           
+          kubeObserverImage = pkgs.dockerTools.buildImage {
+            name = "polar-kube-observer";
+            tag = "latest";
+            copyToRoot = [ pkgs.bashInteractiveFHS pkgs.busybox etc kubeObserver ]; 
+            uid = commonUser.uid;
+            gid = commonUser.gid;
+
+            config = {
+              User = "${commonUser.uid}:${commonUser.gid}";
+              Cmd = [ "kube-observer" ];
+              WorkingDir = "/";
+              Env = [ ];
+            };
+          };
+ 
+          kubeConsumerImage = pkgs.dockerTools.buildImage {
+            name = "polar-kube-consumer";
+            tag = "latest";
+            copyToRoot = [ pkgs.bashInteractiveFHS pkgs.busybox etc kubeConsumer ];
+            uid = commonUser.uid;
+            gid = commonUser.gid;
+
+            config = {
+              User = "${commonUser.uid}:${commonUser.gid}";
+              Cmd = [ "kube-consumer" ];
+              WorkingDir = "/";
+              Env = [ ];
+            };
+          };
+          
           cassiniImage = pkgs.dockerTools.buildImage {
             name = "cassini";
-            tag = "0.1.0";
+            tag = "latest";
             copyToRoot = [
               etc
               cassiniEnv

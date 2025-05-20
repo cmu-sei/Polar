@@ -1,4 +1,5 @@
 let kubernetes = ../../types/kubernetes.dhall
+let proxyUtils = ../../types/proxy-utils.dhall
 let values = ../values.dhall
 
 -- define an optional type for the CA cert it may or may not be provided in the future
@@ -14,52 +15,6 @@ let CommonEnv = [
 , kubernetes.EnvVar::{ name = "CASSINI_SERVER_NAME", value = Some values.cassiniDNSName }
 ]
 
--- Define a volume to load a proxy CA cert if one is provided
-let ProxyVolume =
-      λ(cert : Optional Text) →
-        merge
-          { Some =
-              λ(certName : Text) →
-                [ kubernetes.Volume::{
-                    , name = certName
-                    , secret = Some kubernetes.SecretVolumeSource::{
-                        secretName = Some certName
-                    }
-                  }
-                ]
-          , None = [] : List kubernetes.Volume.Type
-          }
-          cert
-
-let ProxyMount =
-      λ(cert : Optional Text) →
-        merge
-          { Some =
-              λ(cert : Text) →
-                [ kubernetes.VolumeMount::{
-                    , name = cert
-                    , mountPath = "/etc/tls/proxy"
-                    , readOnly = Some True
-                  }
-                ]
-          , None = [] : List kubernetes.VolumeMount.Type
-          }
-          cert
-
-let ProxyEnv =
-      λ(cert : Optional Text) →
-        merge
-          { Some =
-              λ(_ : Text) →
-                [ kubernetes.EnvVar::{
-                    , name = "PROXY_CA_CERT"
-                    , value = Some "${values.tlsPath}/proxy/proxy.crt"
-                  }
-                ]
-          , None = [] : List kubernetes.EnvVar.Type
-          }
-          cert
-
 -- Volumes accessible to our gitlab agent
 let volumes =
       [ 
@@ -71,7 +26,7 @@ let volumes =
             }
         }
       ]
-    # ProxyVolume proxyCACert
+    # proxyUtils.ProxyVolume proxyCACert
 
 let observerEnv =
       CommonEnv
@@ -87,7 +42,11 @@ let observerEnv =
             }
           }
       ]
-    # ProxyEnv proxyCACert
+    # proxyUtils.ProxyEnv proxyCACert
+
+let observerVolumeMounts =
+      [ kubernetes.VolumeMount::{ name = values.gitlab.tls.certificateSpec.secretName, mountPath = values.tlsPath } ]
+    # proxyUtils.ProxyMount proxyCACert
 
 let consumerEnv = CommonEnv # 
               [
@@ -117,10 +76,6 @@ let consumerEnv = CommonEnv #
               -- }
                             
           ]
-let observerVolumeMounts =
-      [ kubernetes.VolumeMount::{ name = values.gitlab.tls.certificateSpec.secretName, mountPath = values.tlsPath } ]
-    # ProxyMount proxyCACert
-
 
 let gitlabAgentPod 
   = kubernetes.PodSpec::{

@@ -1,12 +1,22 @@
-use std::time::Duration;
 use cassini::client::{TcpClientActor, TcpClientArgs, TcpClientMessage};
-use kube::Client;
-use ractor::{async_trait, registry::where_is, rpc::{call, CallResult}, Actor, ActorProcessingErr, ActorRef, SupervisionEvent};
-use tracing::{debug, error, info, warn};
+
 use cassini::TCPClientConfig;
+use k8s_openapi::api::core::v1::Namespace;
+use kube::Config;
+use kube::{api::ListParams, Api, Client};
 
-use crate::{pods::{PodObserver, PodObserverArgs}, KubernetesObserverMessage, KUBERNETES_OBSERVER, TCP_CLIENT_NAME};
+use ractor::{
+    async_trait,
+    rpc::{call, CallResult},
+    Actor, ActorProcessingErr, ActorRef, SupervisionEvent,
+};
+use std::time::Duration;
+use tracing::{debug, error, info, warn};
 
+use crate::{
+    pods::{PodObserver, PodObserverArgs},
+    KubernetesObserverMessage, KUBERNETES_OBSERVER, TCP_CLIENT_NAME,
+};
 
 pub struct ClusterObserverSupervisor;
 
@@ -16,30 +26,28 @@ pub struct ClusterObserverSupervisorArgs {
 
 pub struct ClusterObserverSupervisorState;
 
-#[async_trait]
-impl Actor for ClusterObserverSupervisor {
-    type Msg = KubernetesObserverMessage;
-    type State = ClusterObserverSupervisorState;
-    type Arguments = ClusterObserverSupervisorArgs;
-
-    async fn pre_start(
-        &self,
-        myself: ActorRef<Self::Msg>,
+impl ClusterObserverSupervisor {
+    pub async fn init(
+        kube_config: Config,
         args: ClusterObserverSupervisorArgs,
-    ) -> Result<Self::State, ActorProcessingErr> {
-
-        match Client::try_default().await {
+        myself: ActorRef<KubernetesObserverMessage>,
+    ) -> Result<ClusterObserverSupervisorState, ActorProcessingErr> {
+        // try to create a client and auth with the kube api
+        match Client::try_from(kube_config) {
             Ok(kube_client) => {
                 debug!("Kubernetes client initialized");
 
                 let client_started_result = Actor::spawn_linked(
                     Some(TCP_CLIENT_NAME.to_string()),
                     TcpClientActor,
-                    TcpClientArgs { config: args.cassini_client_config, registration_id: None },
+                    TcpClientArgs {
+                        config: args.cassini_client_config,
+                        registration_id: None,
+                    },
                     myself.clone().into(),
                 )
                 .await;
-                
+
                 match client_started_result {
                     Ok((client, _)) => {
                         // Set up an interval
@@ -60,14 +68,34 @@ impl Actor for ClusterObserverSupervisor {
                             {
                                 //if we successfully register with the broker
                                 if let Some(registration_id) = result {
-                                    //start actors
-                                    let args = PodObserverArgs {
-                                        registration_id: registration_id.clone(),
-                                        kube_client: kube_client.clone(),
-                                    };
-                                     
-                                    if let Err(e) = Actor::spawn_linked(Some(KUBERNETES_OBSERVER.to_string()), PodObserver, args, myself.get_cell().clone()).await {
-                                        error!("{e}")
+                                    //TODO: Discover as many namespaces as we can and spin up actors to watch each one.
+                                    match ClusterObserverSupervisor::discover_namespaces(
+                                        kube_client.clone(),
+                                    )
+                                    .await
+                                    {
+                                        Ok(namespaces) => {
+                                            for ns in namespaces {
+                                                //start actors
+                                                let args = PodObserverArgs {
+                                                    registration_id: registration_id.clone(),
+                                                    kube_client: kube_client.clone(),
+                                                    namespace: ns.clone(),
+                                                };
+
+                                                if let Err(e) = Actor::spawn_linked(
+                                                    Some(format!("{KUBERNETES_OBSERVER}.{ns}")),
+                                                    PodObserver,
+                                                    args,
+                                                    myself.get_cell().clone(),
+                                                )
+                                                .await
+                                                {
+                                                    error!("{e}")
+                                                }
+                                            }
+                                        }
+                                        Err(e) => todo!(),
                                     }
 
                                     break;
@@ -89,25 +117,78 @@ impl Actor for ClusterObserverSupervisor {
                     }
                 }
 
-
                 Ok(ClusterObserverSupervisorState)
-
             }
-            Err(e) => Err(ActorProcessingErr::from(e))
+            Err(e) => Err(ActorProcessingErr::from(e)),
         }
-        
     }
+    /// Fetch all namespace names from the Kubernetes cluster
+    pub async fn discover_namespaces(client: Client) -> Result<Vec<String>, String> {
+        // Create a Kubernetes client using in-cluster config or kubeconfig
 
-    async fn post_start(
+        // Access the Namespace API
+        let namespaces: Api<Namespace> = Api::all(client);
+
+        // List all namespaces with default parameters
+        match namespaces.list(&ListParams::default()).await {
+            Ok(ns_list) => {
+                // Extract just the namespace names
+                let mut ns_names = Vec::new();
+                for ns in ns_list.items {
+                    if let Some(name) = ns.metadata.name {
+                        ns_names.push(name);
+                    }
+                }
+
+                Ok(ns_names)
+            }
+            Err(e) => Err(e.to_string()),
+        }
+    }
+}
+
+#[async_trait]
+impl Actor for ClusterObserverSupervisor {
+    type Msg = KubernetesObserverMessage;
+    type State = ClusterObserverSupervisorState;
+    type Arguments = ClusterObserverSupervisorArgs;
+
+    async fn pre_start(
         &self,
         myself: ActorRef<Self::Msg>,
-        state: &mut Self::State,
-    ) -> Result<(), ActorProcessingErr> {
+        args: ClusterObserverSupervisorArgs,
+    ) -> Result<Self::State, ActorProcessingErr> {
+        // Read Kubernetes credentials and other data from the environment
+        info!("{myself:?} starting");
 
-
-        Ok(())
+        // detect deployed environment, otherwise, try to infer configuration from the environment
+        if let Ok(kube_config) = kube::Config::incluster() {
+            info!("Attempting to infer kube configuration from pod environment...");
+            match ClusterObserverSupervisor::init(kube_config, args, myself).await {
+                Ok(state) => Ok(state),
+                Err(e) => Err(ActorProcessingErr::from(e)),
+            }
+        } else if let Ok(kube_config) = kube::Config::infer().await {
+            info!("Attempting to infer kube configuration from local environment...");
+            match ClusterObserverSupervisor::init(kube_config, args, myself).await {
+                Ok(state) => Ok(state),
+                Err(e) => Err(ActorProcessingErr::from(e)),
+            }
+        } else {
+            Err(ActorProcessingErr::from(
+                "Failed to configure kubernetes client!",
+            ))
+        }
     }
-    
+
+    // async fn post_start(
+    //     &self,
+    //     myself: ActorRef<Self::Msg>,
+    //     state: &mut Self::State,
+    // ) -> Result<(), ActorProcessingErr> {
+    //     Ok(())
+    // }
+
     async fn handle_supervisor_evt(
         &self,
         _: ActorRef<Self::Msg>,
@@ -142,7 +223,6 @@ impl Actor for ClusterObserverSupervisor {
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-
         Ok(())
     }
 }
