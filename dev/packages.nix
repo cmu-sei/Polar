@@ -59,6 +59,7 @@ in
       nvim-pkg
       ps
       ripgrep
+      rsync
       rustlings
       strace
       tree

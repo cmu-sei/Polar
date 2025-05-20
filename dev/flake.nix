@@ -115,8 +115,8 @@
         }; 
 
         fishConfig = pkgs.writeTextFile {
-          name = "container-files/config.fish";
-          destination = "/root/.config/fish/config.fish";
+          name = "fish-config";
+          destination = "/etc/container‑skel/config.fish";
           text = builtins.readFile ./container-files/config.fish;
         };
 
