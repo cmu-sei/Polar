@@ -8,6 +8,22 @@
   dotacat
 }:
 let
+    rustSysroot = pkgs.buildEnv {
+        name = "rust-sysroot";
+        paths = [
+          pkgs.glibc
+          pkgs.glibc.dev
+          pkgs.gcc.cc.lib
+        ];
+    };
+
+    clangLldWrapper = pkgs.writeShellScriptBin "clang-lld-wrapper" ''
+      exec ${pkgs.llvmPackages_19.clang}/bin/clang \
+        -fuse-ld=lld \
+        --sysroot=${rustSysroot} \
+        "$@"
+    '';
+
 in 
   {
     devPkgs = with pkgs; [
@@ -77,10 +93,12 @@ in
       gnumake
       # clang or clang-tools are not strictly needed if stdenv is clang-based
       # but you can add them if you want the standalone `clang` CLI, e.g.:
-      #pkgs.llvmPackages_19.clang
-      pkgs.llvmPackages_19.clang-unwrapped
-      lld
+      pkgs.llvmPackages_19.clang
+      #pkgs.llvmPackages_19.clang-unwrapped
+      pkgs.llvmPackages_19.lld
       glibc
+      clangLldWrapper
+
       grc
 
       # -- Rust --

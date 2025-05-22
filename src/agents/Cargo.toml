@@ -37,7 +37,7 @@ members = [
     "policy-config",
     "kubernetes/observe",
     "kubernetes/consume",
-    "kubernetes/common", "provenance"]
+    "kubernetes/common", "provenance", "config-ops"]
 
 [workspace.package]
 version = "0.1.0"

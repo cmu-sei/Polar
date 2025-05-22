@@ -180,7 +180,7 @@
 
               "CC=clang"
               "CXX=clang++"
-              "LD=ld.lld"
+              #"LD=ld.lld"
               "CMAKE=/bin/cmake"
               "CMAKE_MAKE_PROGRAM=/bin/make"
               "COREUTILS=${pkgs.uutils-coreutils-noprefix}"
@@ -196,7 +196,7 @@
 
               #"LIBCLANG_PATH=${pkgs.libclang.lib}/lib/"
 
-              "RUSTFLAGS=-Clinker=clang"
+              "RUSTFLAGS=-Clinker=clang-lld-wrapper"
 
               "PATH=/bin:/usr/bin:${devEnv}/bin:/root/.cargo/bin"
 
