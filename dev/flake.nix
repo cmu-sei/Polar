@@ -2,23 +2,23 @@
   description = "creates a dev container for polar";
 
   inputs = {
-    flake-utils.url = "github:numtide/flake-utils"; # Utility functions for Nix flakes
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable"; # Main Nix package repository
+    flake-utils.url                             = "github:numtide/flake-utils"; # Utility functions for Nix flakes
+    nixpkgs.url                                 = "github:NixOS/nixpkgs/nixos-unstable"; # Main Nix package repository
 
-    rust-overlay.url = "github:oxalica/rust-overlay";
-    rust-overlay.inputs.nixpkgs.follows = "nixpkgs";
+    rust-overlay.url                            = "github:oxalica/rust-overlay";
+    rust-overlay.inputs.nixpkgs.follows         = "nixpkgs";
 
-    myNeovimOverlay.url = "github:daveman1010221/nix-neovim";
-    myNeovimOverlay.inputs.nixpkgs.follows = "nixpkgs";
-    myNeovimOverlay.inputs.flake-utils.follows = "flake-utils";
+    myNeovimOverlay.url                         = "github:daveman1010221/nix-neovim";
+    myNeovimOverlay.inputs.nixpkgs.follows      = "nixpkgs";
+    myNeovimOverlay.inputs.flake-utils.follows  = "flake-utils";
 
-    staticanalysis.url = "github:daveman1010221/polar-static-analysis";
-    staticanalysis.inputs.nixpkgs.follows = "nixpkgs";
-    staticanalysis.inputs.flake-utils.follows = "flake-utils";
-    staticanalysis.inputs.rust-overlay.follows = "rust-overlay";
+    staticanalysis.url                          = "github:daveman1010221/polar-static-analysis";
+    staticanalysis.inputs.nixpkgs.follows       = "nixpkgs";
+    staticanalysis.inputs.flake-utils.follows   = "flake-utils";
+    staticanalysis.inputs.rust-overlay.follows  = "rust-overlay";
 
-    dotacat.url = "github:daveman1010221/dotacat-fast";
-    dotacat.inputs.nixpkgs.follows = "nixpkgs";
+    dotacat.url                                 = "github:daveman1010221/dotacat-fast";
+    dotacat.inputs.nixpkgs.follows              = "nixpkgs";
 
     #openssl-fips.url = "github:daveman1010221/openssl-fips";
   };
@@ -35,45 +35,33 @@
           documentation = {
             dev.enable = true;
             man = {
-              man-db.enable = true;
-              generateCaches = true;
+              man-db.enable     = true;
+              generateCaches    = true;
             };
           };
-          overlays = [ 
+          overlays = [
             rust-overlay.overlays.default
             myNeovimOverlay.overlays.default
           ];
         };
 
-        #import package sets to be added to our environments
-        packageSets = import ./packages.nix {inherit system pkgs rust-overlay staticanalysis dotacat; };
+        # import package sets to be added to our environments
+        packageSets = import ./packages.nix { inherit system pkgs rust-overlay staticanalysis dotacat; };
 
-        # This is needed since Devcontainers need the following files in order to function.
+        # ---------------------------------------------------------------------
+        #  Files required by dev-containers so the bloody “check-requirements”
+        #  script stops whining.
+        # ---------------------------------------------------------------------
         baseInfo = with pkgs; [
-          # Set up shadow file with user information
-          (writeTextDir "etc/shadow" ''
-            root:!x:::::::
-          '')
-          # Set up passwd file with user information
-          (writeTextDir "etc/passwd" ''
-            root:x:0:0::/root:${runtimeShell}
-          '')
-          # Set up group file with user information
-          (writeTextDir "etc/group" ''
-            root:x:0:
-          '')
-          # Set up gshadow file with user information
-          (writeTextDir "etc/gshadow" ''
-            root:x::
-          '')
-          # For Dropbear...
-          (writeTextDir "etc/shells" ''
+          (writeTextDir "etc/shadow"  ''root:!x:::::::'')
+          (writeTextDir "etc/passwd"  ''root:x:0:0::/root:${runtimeShell}'')
+          (writeTextDir "etc/group"   ''root:x:0:'')
+          (writeTextDir "etc/gshadow" ''root:x::'')
+          (writeTextDir "etc/shells"  ''
             /bin/sh
             /bin/bash
             /bin/fish
           '')
-          # Set up os-release file with NixOS information, since it is nix the check requirements
-          # step for the dev container creation will skip.
           (writeTextDir "etc/os-release" ''
             NAME="NixOS"
             ID=nixos
@@ -86,6 +74,9 @@
           '')
         ];
 
+        # ---------------------------------------------------------------------
+        # Dev/CI envs
+        # ---------------------------------------------------------------------
         devEnv = pkgs.buildEnv {
           name = "dev-env";
           paths = packageSets.devPkgs;
@@ -108,65 +99,123 @@
           ];
         };
 
+        # ---------------------------------------------------------------------
+        # Misc config blobs copied verbatim
+        # ---------------------------------------------------------------------
         nixConfig = pkgs.writeTextFile {
-          name = "nix.conf";
-          destination = "/etc/nix/nix.conf";
-          text = builtins.readFile ./container-files/nix.conf;
+          name          = "nix.conf";
+          destination   = "/etc/nix/nix.conf";
+          text          = builtins.readFile ./container-files/nix.conf;
         };
 
         containerPolicyConfig = pkgs.writeTextFile {
-          name = "nix.conf";
+          name        = "policy.json";
           destination = "/etc/containers/policy.json";
-          text = builtins.readFile ./container-files/policy.json;
-        }; 
-
-        fishConfig = pkgs.writeTextFile {
-          name = "fish-config";
-          destination = "/etc/container‑skel/config.fish";
-          text = builtins.readFile ./container-files/config.fish;
+          text        = builtins.readFile ./container-files/policy.json;
         };
 
-        fishPluginsFile = pkgs.writeTextFile {
-          name = "container-files/plugins.fish";
-          destination = "/.plugins.fish";
-          text = builtins.readFile ./container-files/plugins.fish;
+        # ---------------------------------------------------------------------
+        # Fish vendor functions (system-wide) – this is what was missing.
+        # ---------------------------------------------------------------------
+        staticFuncPaths = pkgs.lib.mapAttrsToList
+          (fileName: _: ./container-files/shell/fish/functions/static/${fileName})
+          (builtins.readDir ./container-files/shell/fish/functions/static);
+
+        templatedFuncPaths = pkgs.lib.mapAttrsToList
+          (fileName: _:
+            let name = pkgs.lib.removeSuffix ".nix" fileName;
+            in pkgs.writeText "${name}.fish"
+                 (import ./container-files/shell/fish/functions/templated/${fileName} {
+                   inherit pkgs cowsayPath manpackage;
+                 }))
+          (pkgs.lib.filterAttrs (n: _: pkgs.lib.hasSuffix ".nix" n)
+            (builtins.readDir ./container-files/shell/fish/functions/templated));
+
+        vendorFuncs = pkgs.runCommand "fish-vendor-funcs" { }
+          (let all = staticFuncPaths ++ templatedFuncPaths;
+               list = pkgs.lib.concatStringsSep " " all;
+           in ''
+             mkdir -p $out/etc/fish/vendor_functions.d
+             for f in ${list}; do
+               clean=$(basename "$f" | sed -E 's/^[0-9a-z]{32,}-//')   # drop Nix hash
+               ln -s "$f" "$out/etc/fish/vendor_functions.d/$clean"
+             done
+           '');
+
+        # ---------------------------------------------------------------------
+        # Odds and ends
+        # ---------------------------------------------------------------------
+        cowsayPath  = pkgs.cowsay;
+        manpackage  = pkgs.man;
+        fisheyGrc   = pkgs.fishPlugins.grc;
+        bass        = pkgs.fishPlugins.bass;
+        bobthefish  = pkgs.fishPlugins.bobthefish;
+        starshipBin = "${pkgs.starship}/bin/starship";
+        atuinBin    = "${pkgs.atuin}/bin/atuin";
+        editor      = myNeovimOverlay;
+        fishShell   = pkgs.fish;
+
+        # skeleton file for create-user.sh to copy
+        fishConfig = pkgs.writeTextFile {
+          name        = "fish-config";
+          destination = "/etc/container-skel/config.fish";
+          text        = builtins.readFile ./container-files/shell/fish/config.fish;
+        };
+
+        shellInitFile = pkgs.writeTextFile {
+          name        = "shellInit.fish";
+          destination = "/etc/fish/shellInit.fish";
+          text        = import ./container-files/shell/fish/shellInit.nix { inherit pkgs; };
+        };
+
+        interactiveShellInitFile = pkgs.writeTextFile {
+          name        = "interactiveShellInit.fish";
+          destination = "/etc/fish/interactiveShellInit.fish";
+          text        = import ./container-files/shell/fish/interactiveShellInit.nix {
+            inherit fisheyGrc bass bobthefish starshipBin atuinBin editor fishShell;
+          };
         };
 
         license = pkgs.writeTextFile {
-          name = "container-files/license.txt";
+          name        = "license.txt";
           destination = "/root/license.txt";
-          text = builtins.readFile ./container-files/license.txt;
+          text        = builtins.readFile ./container-files/license.txt;
         };
 
         gitconfig = pkgs.writeTextFile {
-          name = "container-files/.gitconfig";
+          name        = ".gitconfig";
           destination = "/root/.gitconfig";
-          text = builtins.readFile ./container-files/.gitconfig;
+          text        = builtins.readFile ./container-files/.gitconfig;
         };
 
         # User creation script
         createUserScript = pkgs.writeTextFile {
-          name = "container-files/create-user.sh";
+          name        = "create-user.sh";
           destination = "/create-user.sh";
-          text = builtins.readFile ./container-files/create-user.sh;
-          executable = true;
+          text        = builtins.readFile ./container-files/create-user.sh;
+          executable  = true;
         };
 
-        # get helm charts
+        # helm charts
         charts = pkgs.callPackage ./make-chart.nix { inherit pkgs; };
-        
+
+        # ---------------------------------------------------------------------
+        # Dev container image
+        # ---------------------------------------------------------------------
         devContainer = pkgs.dockerTools.buildImage {
           name = "polar-dev";
-          tag = "latest";
+          tag  = "latest";
           copyToRoot = [
-            devEnv
             baseInfo
-            fishConfig
-            license
-            gitconfig
             createUserScript
-            fishPluginsFile
+            devEnv
+            fishConfig
+            gitconfig
+            interactiveShellInitFile
+            license
             nixConfig
+            shellInitFile
+            vendorFuncs
           ];
           config = {
             WorkingDir = "/workspace";
@@ -180,7 +229,6 @@
 
               "CC=clang"
               "CXX=clang++"
-              #"LD=ld.lld"
               "CMAKE=/bin/cmake"
               "CMAKE_MAKE_PROGRAM=/bin/make"
               "COREUTILS=${pkgs.uutils-coreutils-noprefix}"
@@ -213,61 +261,48 @@
               "USER=root"
             ];
             Volumes = {};
-            Cmd = [ "/bin/fish" ]; # Runs fish
+            Cmd = [ "/bin/fish" ];
           };
           extraCommands = ''
             # Link the env binary (needed for the check requirements script)
-            mkdir -p usr/bin/
-            ln -n bin/env usr/bin/env
+            mkdir -p usr/bin
+            ln -s ${pkgs.coreutils}/bin/env usr/bin/env
 
             # Link the dynamic linker/loader (needed for Node)
             mkdir -p lib64
-            ln -s ${pkgs.stdenv.cc.cc}/lib/ld-linux-x86-64.so.2 lib64/ld-linux-x86-64.so.2
+            ln -s ${pkgs.stdenv.cc.cc}/lib/ld-linux-x86-64.so.2 lib64/
 
-            # Create /tmp dir
             mkdir -p tmp
           '';
         };
 
-        # So this build is a little hacky, we'd usually be able to use nix2container to just put some creds in a
-        # auth.json file and allow the daemon to see it, but we need to pull from a registry behind a proxy,
-        # and nix2container doesn't let us do that w/o disabling tlsverification. 
-        # We can switch to do that if this approach is too brittle.
+        # ---------------------------------------------------------------------
+        # CI container
+        # ---------------------------------------------------------------------
+
+        # So this build is a little hacky, we'd usually be able to use
+        # nix2container to just put some creds in a auth.json file and allow
+        # the daemon to see it, but we need to pull from a registry behind a
+        # proxy, and nix2container doesn't let us do that w/o disabling
+        # tlsverification. We can switch to do that if this approach is too
+        # brittle.
         ciContainer = pkgs.dockerTools.buildImage {
           name = "polar-ci";
-          fromImage = ./nix.tar;
-          #  pkgs.dockerTools.pullImage {
-          #   imageName = "nixos/nix";
-          #   imageDigest = "sha256:088c97f6f08320de53080138d595dda29226f8bc76b2ca8f617e4a739aefa8d7";
-          #   hash = "sha256-5LpLRfMAVpMh03eAxocPAhLgi/klQlPiMAGSZwhUZr8=";
-          #   finalImageName = "nixos/nix";
-          #   finalImageTag = "2.24.13";
-          # };
+          fromImage = ./nix.tar; # see rant above
           tag = "0.1.0";
           copyToRoot = [
-            license
             ciEnv
-            nixConfig
             containerPolicyConfig
+            license
+            nixConfig
           ];
           config = {
             WorkingDir = "/workspace";
             Env = [
-              # Add our tools to the path
-              # CAUTION: This path value is taken directly from the base nix image and should not be overwritten, just appended to.
-              # Whenever we bump to later versions of the nix image, this should be updated this as needed.
+              # CAUTION: keep the base image PATH then append ours
               "PATH=/root/.nix-profile/bin:/nix/var/nix/profiles/default/bin:/nix/var/nix/profiles/default/sbin:${ciEnv}/bin"
             ];
           };
-          # extraCommands = ''
-          #   # Link the env binary (needed for the check requirements script)
-          #   mkdir -p usr/bin/
-
-          #   ln -n bin/env usr/bin/env
-            
-          #   # Create /tmp dir
-          #   mkdir -p tmp
-          # '';
         };
 
       in
@@ -285,9 +320,9 @@
           '';
         };
 
-        packages.default = devContainer;
+        packages.default     = devContainer;
         packages.ciContainer = ciContainer;
-        packages.charts = charts;
+        packages.charts      = charts;
       }
     );
 }

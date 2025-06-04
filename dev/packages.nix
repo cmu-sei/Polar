@@ -44,7 +44,9 @@ in
       fishPlugins.bobthefish
       fishPlugins.foreign-env
       fishPlugins.grc
-      lolcat
+      cowsay
+      starship
+      atuin
 
       # -- OpenSSL --
       cacert
@@ -68,6 +70,7 @@ in
       iproute2
       jq
       lsof
+      man
       man-db
       man-pages
       man-pages-posix
