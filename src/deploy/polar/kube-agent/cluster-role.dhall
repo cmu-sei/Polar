@@ -11,7 +11,7 @@ let ClusterRole =
       , rules = Some [
           kubernetes.PolicyRule::{
           , apiGroups = Some [""]
-          , resources = Some [ "pods" ]
+          , resources = Some [ "namespaces", "pods" ]
           , verbs = [ "get", "list", "watch" ]
           }
         ]

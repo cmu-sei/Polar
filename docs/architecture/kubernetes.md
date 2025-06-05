@@ -57,6 +57,9 @@ The ClusterSupervisor watches all child actors and manages their lifecycles.
 
 Should its children fail for some reason, it will likely restart them, depending on the cause.
 
+In deployment, the container for the kube-observer will need to be able to authenticate with the kubernetes API server, to enable this, we have to specify
+a ServiceAccount, a ClusterRole for that account that speicifies desired permissions, and a ClusterRoleBinding for that account. In the future, operators may desire more or less permissions than our standard, so we will aim to make this more configurable.
+
 **Observers** (Kube.rs watchers)
  - Wraps a kube_runtime::watcher for a specific resource type.
  - Sends structured events (created, updated, deleted) to corresponding consumer agents.
@@ -64,7 +67,7 @@ Should its children fail for some reason, it will likely restart them, depending
 **ConsumerSupervisor**
  - Similar to the observer cluster supervisor, the consumer has the simple task of lifecycle management for its child actors.
 
-**Consumers** 
+**Consumers**
  - Receive k8s data from observer actors corresponding to their resource.
  - Transforms data structures into queries to represent resources in the graph database.
 
@@ -72,7 +75,8 @@ Should its children fail for some reason, it will likely restart them, depending
 
 ### Namespaces
 
-It's just as possible to read namespaces from a cluster automatically and go from there, but its also anticipated that a user might want to specify the namespaces an observer can see. We still need to confirm whether RBAC controls will be able to hide namespaces from an observer's query attempts, or if it's more ideal to make their configuration explicit.
+Upon initialization, the cluster supervisor will try to discover all the namespaces it can so it can observe them. Once it has this list,
+it will spin up additional PodObserver actors to read currently deployed pods and set up a "watcher" to listen for additional pods to come online.
 
 ### Nodes
 TODO: My initial thoughts are that since nodes aren't namespaced, the supervisor or perhaps another actor shopuld watch them for real time changes. It'll be more valuable whenever we can observe cloud/on-prem machines to see how they look in the cluster.
@@ -173,4 +177,3 @@ Does this cover your questions, or would you like to dive deeper into any partic
 
 ## Conclusion
 This design allows the Kubernetes Agent to flexibly and reliably observe resource states while providing a strong foundation for relationship mapping and security verification. It balances completeness, modularity, and extensibility to support evolving requirements across regulated and secure environments.
-
