@@ -150,6 +150,8 @@ if status is-interactive; and not set -q __fish_nixos_interactive_config_sourced
         set -eU PATH
     end
 
+    direnv hook fish | source
+
     # /home/$user/.config/fish/config.fish
     if test (pwd) != "/workspace"
       cd /workspace

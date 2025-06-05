@@ -59,6 +59,7 @@ in
       bat
       curl
       delta
+      direnv
       eza
       fd
       findutils
@@ -110,7 +111,11 @@ in
         targets = [ "wasm32-unknown-unknown" ];
       }))
 
-
+      wasm-pack
+      wasmtime
+      wasmer
+      wasmer-pack
+      wasm-bindgen-cli_0_2_100
       cargo-leptos
       cargo-binutils
       cargo-wasi

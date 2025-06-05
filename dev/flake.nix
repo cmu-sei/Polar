@@ -53,10 +53,14 @@
         #  script stops whining.
         # ---------------------------------------------------------------------
         baseInfo = with pkgs; [
-          (writeTextDir "etc/shadow"  ''root:!x:::::::'')
-          (writeTextDir "etc/passwd"  ''root:x:0:0::/root:${runtimeShell}'')
-          (writeTextDir "etc/group"   ''root:x:0:'')
-          (writeTextDir "etc/gshadow" ''root:x::'')
+          (writeTextDir "etc/shadow"  ''root:!x:::::::
+          '')
+          (writeTextDir "etc/passwd"  ''root:x:0:0::/root:${runtimeShell}
+          '')
+          (writeTextDir "etc/group"   ''root:x:0:
+          '')
+          (writeTextDir "etc/gshadow" ''root:x::
+          '')
           (writeTextDir "etc/shells"  ''
             /bin/sh
             /bin/bash
@@ -246,7 +250,7 @@
 
               "RUSTFLAGS=-Clinker=clang-lld-wrapper"
 
-              "PATH=/bin:/usr/bin:${devEnv}/bin:/root/.cargo/bin"
+              "PATH=$PATH:/bin:/usr/bin:${devEnv}/bin:/root/.cargo/bin"
 
               # Add openssl to pkg config to ensure that it loads for cargo build
               "PKG_CONFIG_PATH=${pkgs.openssl.dev}/lib/pkgconfig"
