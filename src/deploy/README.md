@@ -35,12 +35,14 @@ We run the script to generate a kubernetes manifest from Dhall configurations us
 
   `sh scripts/render-manifests.sh src/deploy/polar polar-deploy/manifests`
 
+**NOTE:** If you've got `just` installed, you can `just render` the files instead.
+
 ## Flux and Continuous Deployment
 
 Flux sits on the cluster constantly watching our Git repository and detects every change we make to the kubernetes manifests.
 If the GitRepository or Kustomization manifests are updated, Flux will automatically pick up those changes and deploy them to the Kubernetes cluster, closing the loop to ensure continuous deployment!
 
-At this time, many environment variables need to be present within our CI/CD environment. 
+At this time, many environment variables need to be present within our CI/CD environment.
 Particularly those related to our Azure cloud environment.
 
 Firstly, a service principal had to be created to maintain read access to our key vaults. So we need some of the following vars.

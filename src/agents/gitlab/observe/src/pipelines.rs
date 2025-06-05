@@ -25,20 +25,18 @@ use core::error;
 use std::time::Duration;
 
 use crate::{
-    BackoffReason, Command, GitlabObserverArgs, GitlabObserverMessage, GitlabObserverState, BROKER_CLIENT_NAME, GITLAB_PROJECT_OBSERVER
+    BackoffReason, Command, GitlabObserverArgs, GitlabObserverMessage, GitlabObserverState,
+    BROKER_CLIENT_NAME, GITLAB_PROJECT_OBSERVER,
 };
 use cassini::client::TcpClientMessage;
 use cassini::ClientMessage;
-use common::{PIPELINE_CONSUMER_TOPIC};
+use common::PIPELINE_CONSUMER_TOPIC;
 use cynic::GraphQlResponse;
 use gitlab_queries::projects::*;
-use ractor::RpcReplyPort;
 use ractor::{async_trait, registry::where_is, Actor, ActorProcessingErr, ActorRef};
-use reqwest::{Certificate, Client, ClientBuilder};
 
 use common::types::{GitlabData, ResourceLink};
 use cynic::QueryBuilder;
-use gitlab_queries::projects::*;
 use rkyv::rancor::Error;
 use tokio::time;
 use tracing::{debug, error, info, warn};
@@ -62,11 +60,11 @@ impl Actor for GitlabPipelineObserver {
             args.gitlab_endpoint,
             args.token,
             args.web_client,
-            args.registration_id, 
-            Duration::from_secs(args.base_interval),    
+            args.registration_id,
+            Duration::from_secs(args.base_interval),
             Duration::from_secs(args.max_backoff),
         );
-        
+
         Ok(state)
     }
 
@@ -85,17 +83,18 @@ impl Actor for GitlabPipelineObserver {
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-       
         match message {
             GitlabObserverMessage::Tick(command) => {
                 match command {
                     Command::GetProjectPipelines(full_path) => {
                         debug!("Getting pipelines for project: {full_path:?}");
-        
-                        let op = ProjectPipelineQuery::build(SingleProjectQueryArguments { full_path: full_path.clone() } );
-        
+
+                        let op = ProjectPipelineQuery::build(SingleProjectQueryArguments {
+                            full_path: full_path.clone(),
+                        });
+
                         debug!("Sending query: {}", op.query);
-        
+
                         match state
                             .web_client
                             .post(state.gitlab_endpoint.clone())
@@ -105,57 +104,79 @@ impl Actor for GitlabPipelineObserver {
                             .await
                         {
                             Ok(response) => {
-                                match response.json::<GraphQlResponse<ProjectPipelineQuery>>().await {
+                                match response
+                                    .json::<GraphQlResponse<ProjectPipelineQuery>>()
+                                    .await
+                                {
                                     Ok(deserialized) => {
                                         if let Some(errors) = deserialized.errors {
                                             let errors = errors
-                                            .iter()
-                                            .map(|error| { error.to_string() })
-                                            .collect::<Vec<_>>()
-                                            .join("\n");
-                    
+                                                .iter()
+                                                .map(|error| error.to_string())
+                                                .collect::<Vec<_>>()
+                                                .join("\n");
+
                                             error!("Failed to query instance! {errors}");
                                             myself.stop(Some(errors))
-                                        }
-                                        else if let Some(resp) = deserialized.data {
-                                            
+                                        } else if let Some(resp) = deserialized.data {
                                             let mut read_pipelines = Vec::new();
-        
+
                                             if let Some(project) = resp.project {
                                                 match project.pipelines {
                                                     Some(connection) => {
                                                         if let Some(pipelines) = connection.nodes {
-        
                                                             if !pipelines.is_empty() {
                                                                 // Append nodes to the result list.
-                                                                read_pipelines.extend(pipelines.into_iter().map(|option| {
-                                                                    let pipeline = option.unwrap();
-                                                                    pipeline
-                                                                }));
-        
+                                                                read_pipelines.extend(
+                                                                    pipelines.into_iter().map(
+                                                                        |option| {
+                                                                            let pipeline =
+                                                                                option.unwrap();
+                                                                            pipeline
+                                                                        },
+                                                                    ),
+                                                                );
+
                                                                 debug!("Found {0} pipeline run(s) for project {1}", read_pipelines.len(), full_path);
-        
-                                                                let tcp_client = where_is(BROKER_CLIENT_NAME.to_string())
+
+                                                                let tcp_client = where_is(
+                                                                    BROKER_CLIENT_NAME.to_string(),
+                                                                )
                                                                 .expect("Expected to find client");
-        
-                                                                let data = GitlabData::Pipelines((full_path.0, read_pipelines));
-        
-                                                                let bytes = rkyv::to_bytes::<Error>(&data).unwrap();
-        
-                                                                let msg = ClientMessage::PublishRequest {
-                                                                    topic: PIPELINE_CONSUMER_TOPIC.to_string(),
-                                                                    payload: bytes.to_vec(),
-                                                                    registration_id: Some(state.registration_id.clone()),
-                                                                };
-        
+
+                                                                let data = GitlabData::Pipelines((
+                                                                    full_path.0,
+                                                                    read_pipelines,
+                                                                ));
+
+                                                                let bytes =
+                                                                    rkyv::to_bytes::<Error>(&data)
+                                                                        .unwrap();
+
+                                                                let msg =
+                                                                    ClientMessage::PublishRequest {
+                                                                        topic:
+                                                                            PIPELINE_CONSUMER_TOPIC
+                                                                                .to_string(),
+                                                                        payload: bytes.to_vec(),
+                                                                        registration_id: Some(
+                                                                            state
+                                                                                .registration_id
+                                                                                .clone(),
+                                                                        ),
+                                                                    };
+
                                                                 tcp_client
-                                                                    .send_message(TcpClientMessage::Send(msg))
-                                                                    .expect("Expected to send message");
+                                                                    .send_message(
+                                                                        TcpClientMessage::Send(msg),
+                                                                    )
+                                                                    .expect(
+                                                                        "Expected to send message",
+                                                                    );
                                                             }
                                                         }
-        
-                                                        }
-                                                    None => ()
+                                                    }
+                                                    None => (),
                                                 }
                                             }
                                         }
@@ -167,12 +188,11 @@ impl Actor for GitlabPipelineObserver {
                             }
                             Err(e) => {}
                         }
-        
                     }
-                    _ => todo!()
+                    _ => todo!(),
                 }
             }
-            _ => ()
+            _ => (),
         }
         Ok(())
     }
@@ -197,8 +217,8 @@ impl Actor for GitlabJobObserver {
             args.gitlab_endpoint,
             args.token,
             args.web_client,
-            args.registration_id, 
-            Duration::from_secs(args.base_interval),    
+            args.registration_id,
+            Duration::from_secs(args.base_interval),
             Duration::from_secs(args.max_backoff),
         );
 
@@ -220,7 +240,6 @@ impl Actor for GitlabJobObserver {
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-       
         match message {
             GitlabObserverMessage::Tick(command) => {
                 match command {
@@ -230,16 +249,17 @@ impl Actor for GitlabJobObserver {
                     // As a result, I've split the logic such that:
                     // Our pipeline observer queries a project and returns its pipelines.
                     // Our job observer performs a narrower query: given a project, only fetch pipelines with their jobs, not full pipeline objects.
-        
                     Command::GetPipelineJobs(full_path) => {
                         debug!("Getting pipelines for project: {full_path:?}");
-        
+
                         // Gitlab's Jobs API will only return empty results for non admin users, since it'ls unlikey people will give admin level tokens
                         // we can instead rely on a project-level query and use a modified version of our pipelines query
-                        let op = ProjectPipelineJobsQuery::build(SingleProjectQueryArguments { full_path: full_path.clone() } );
-        
+                        let op = ProjectPipelineJobsQuery::build(SingleProjectQueryArguments {
+                            full_path: full_path.clone(),
+                        });
+
                         debug!("Sending query: {}", op.query);
-        
+
                         match state
                             .web_client
                             .post(state.gitlab_endpoint.clone())
@@ -249,20 +269,22 @@ impl Actor for GitlabJobObserver {
                             .await
                         {
                             Ok(response) => {
-                                match response.json::<GraphQlResponse<ProjectPipelineJobsQuery>>().await {
+                                match response
+                                    .json::<GraphQlResponse<ProjectPipelineJobsQuery>>()
+                                    .await
+                                {
                                     // Handle successful data response
                                     Ok(deserialized) => {
                                         if let Some(errors) = deserialized.errors {
                                             let errors = errors
-                                            .iter()
-                                            .map(|error| { error.to_string() })
-                                            .collect::<Vec<_>>()
-                                            .join("\n");
-                    
+                                                .iter()
+                                                .map(|error| error.to_string())
+                                                .collect::<Vec<_>>()
+                                                .join("\n");
+
                                             error!("Failed to query instance! {errors}");
                                         }
-                                        // sift through and dig down to find the jobs list. 
-                                        
+                                        // sift through and dig down to find the jobs list.
                                         else if let Some(resp) = deserialized.data {
                                             if let Some(project) = resp.project {
                                                 match project.pipelines {
@@ -272,47 +294,49 @@ impl Actor for GitlabJobObserver {
                                                                 for p in pipelines {
                                                                     match p {
                                                                         Some(pipeline) => {
-        
-                                                                            if let Some(conn) = pipeline.jobs {
+                                                                            if let Some(conn) =
+                                                                                pipeline.jobs
+                                                                            {
                                                                                 // If pipeline has jobs, extract them
-                                                                                if let Some(jobs) = conn.nodes {
-                                                                                    
+                                                                                if let Some(jobs) =
+                                                                                    conn.nodes
+                                                                                {
                                                                                     let mut read_jobs: Vec<GitlabCiJob> = Vec::new();
-        
+
                                                                                     // the meat of everything happens here
                                                                                     // wrap up job and add it to the vec
-        
+
                                                                                     read_jobs.extend(jobs.into_iter().map(|option| {
                                                                                         let job = option.unwrap();
                                                                                         job
                                                                                     }));
-        
+
                                                                                     let tcp_client = where_is(BROKER_CLIENT_NAME.to_string())
                                                                                     .expect("Expected to find client");
-                            
+
                                                                                     let data = GitlabData::Jobs((pipeline.id.0, read_jobs));
-                            
+
                                                                                     let bytes = rkyv::to_bytes::<Error>(&data).unwrap();
-                            
+
                                                                                     let msg = ClientMessage::PublishRequest {
                                                                                         topic: PIPELINE_CONSUMER_TOPIC.to_string(),
                                                                                         payload: bytes.to_vec(),
                                                                                         registration_id: Some(state.registration_id.clone()),
                                                                                     };
-                            
+
                                                                                     tcp_client
                                                                                         .send_message(TcpClientMessage::Send(msg))
                                                                                         .expect("Expected to send message");
                                                                                 }
                                                                             }
                                                                         }
-                                                                        None => ()
+                                                                        None => (),
                                                                     }
                                                                 }
                                                             }
                                                         }
                                                     }
-                                                    None => ()
+                                                    None => (),
                                                 }
                                             }
                                         }
@@ -326,18 +350,21 @@ impl Actor for GitlabJobObserver {
                                 error!("{e}");
                                 match where_is(GITLAB_PROJECT_OBSERVER.to_string()) {
                                     Some(observer) => {
-                                        observer.send_message(GitlabObserverMessage::Backoff(BackoffReason::GitlabUnreachable(e.to_string()))).unwrap();
-                                    },
-                                    None => myself.stop(None)
+                                        observer
+                                            .send_message(GitlabObserverMessage::Backoff(
+                                                BackoffReason::GitlabUnreachable(e.to_string()),
+                                            ))
+                                            .unwrap();
+                                    }
+                                    None => myself.stop(None),
                                 }
                             }
                         }
-        
                     }
-                    _ => todo!()
+                    _ => todo!(),
                 }
             }
-            _ => ()
+            _ => (),
         }
         Ok(())
     }

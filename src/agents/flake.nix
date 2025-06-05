@@ -22,7 +22,7 @@
         pkgs = import nixpkgs {
           inherit system overlays;
         };
-        
+
         inherit (pkgs) lib;
 
         # Define the devShell
@@ -61,7 +61,7 @@
             pkgs.openssl
             pkgs.pkg-config
             pkgs.cmake
-            pkgs.libgcc            
+            pkgs.libgcc
             pkgs.libclang
           ] ++ lib.optionals pkgs.stdenv.isDarwin [
             # Additional darwin specific inputs can be set here
@@ -97,10 +97,11 @@
             ./gitlab/schema/src/gitlab.graphql
             (craneLib.fileset.commonCargoSources ./broker)
             (craneLib.fileset.commonCargoSources ./policy-config)
+            (craneLib.fileset.commonCargoSources ./config-ops)
   	        (craneLib.fileset.commonCargoSources ./lib)
             (craneLib.fileset.commonCargoSources ./provenance)
             (craneLib.fileset.commonCargoSources ./kubernetes/observe)
-            (craneLib.fileset.commonCargoSources ./kubernetes/consume) 
+            (craneLib.fileset.commonCargoSources ./kubernetes/consume)
             (craneLib.fileset.commonCargoSources ./kubernetes/common)
             (craneLib.fileset.commonCargoSources ./gitlab/consume)
             (craneLib.fileset.commonCargoSources ./gitlab/observe)
@@ -128,7 +129,7 @@
         # Note that the cargo workspace must define `workspace.members` using wildcards,
         # otherwise, omitting a crate will result in errors since
         # cargo won't be able to find the sources for all members.
-        
+
         gitlabObserver = craneLib.buildPackage (individualCrateArgs // {
           pname = "gitlab_agent";
           cargoExtraArgs = "--locked"; #build the binaries and all its dependencies, including common
@@ -136,7 +137,7 @@
         });
         gitlabConsumer = craneLib.buildPackage (individualCrateArgs // {
           pname = "gitlab_consumer";
-          cargoExtraArgs = "--locked"; 
+          cargoExtraArgs = "--locked";
           src = fileSetForCrate ./gitlab/consume;
         });
 
@@ -151,10 +152,10 @@
           cargoExtraArgs= "--locked";
           src = fileSetForCrate ./kubernetes/consume;
         });
-         
+
         cassini = craneLib.buildPackage (commonArgs // {
           inherit cargoArtifacts;
-          cargoExtraArgs = "--locked"; 
+          cargoExtraArgs = "--locked";
           src = fileSetForCrate ./broker;
           # Disable tests for now, We'll run them later with env vars and TlsCerts
           doCheck = false;
@@ -164,17 +165,17 @@
         tlsCerts = pkgs.callPackage ../flake/gen-certs.nix { inherit pkgs; };
 
         ### set up environments
-        
+
         #set up service environments
         observerEnv = pkgs.buildEnv {
           name = "gitlab-observer-env";
-          paths =  [ 
-            pkgs.bashInteractiveFHS 
-            pkgs.busybox 
+          paths =  [
+            pkgs.bashInteractiveFHS
+            pkgs.busybox
             gitlabObserver
           ];
-          
-          pathsToLink = [ 
+
+          pathsToLink = [
             "/bin"
             "/etc/ssl/certs"
           ];
@@ -183,7 +184,7 @@
         consumerEnv = pkgs.buildEnv {
           name = "gitlab-consumer-env";
           paths = [ pkgs.bashInteractiveFHS pkgs.busybox gitlabConsumer ];
-          pathsToLink = [ 
+          pathsToLink = [
             "/bin"
             "/etc/ssl/certs"
           ];
@@ -191,13 +192,13 @@
 
         cassiniEnv = pkgs.buildEnv {
           name = "cassini-env";
-          paths =  [ 
-            pkgs.bashInteractiveFHS 
-            pkgs.busybox 
-            cassini 
-          ]; 
+          paths =  [
+            pkgs.bashInteractiveFHS
+            pkgs.busybox
+            cassini
+          ];
 
-          pathsToLink = [ 
+          pathsToLink = [
             "/bin"
             "/etc/ssl/certs"
           ];
@@ -221,7 +222,7 @@
         echo "${commonUser.name}:!x:::::::" > $out/etc/shadow
         chmod -R 755 $out/home/${commonUser.name}
       '';
-      
+
 
       in
       {
@@ -232,7 +233,7 @@
           gitlabObserverImage = pkgs.dockerTools.buildImage {
             name = "polar-gitlab-observer";
             tag = "latest";
-            copyToRoot = [ etc observerEnv ]; 
+            copyToRoot = [ etc observerEnv ];
             uid = commonUser.uid;
             gid = commonUser.gid;
 
@@ -243,7 +244,7 @@
               Env = [ ];
             };
           };
- 
+
           gitlabConsumerImage = pkgs.dockerTools.buildImage {
             name = "polar-gitlab-consumer";
             tag = "latest";
@@ -258,11 +259,11 @@
               Env = [ ];
             };
           };
-          
+
           kubeObserverImage = pkgs.dockerTools.buildImage {
             name = "polar-kube-observer";
             tag = "latest";
-            copyToRoot = [ pkgs.bashInteractiveFHS pkgs.busybox etc kubeObserver ]; 
+            copyToRoot = [ pkgs.bashInteractiveFHS pkgs.busybox etc kubeObserver ];
             uid = commonUser.uid;
             gid = commonUser.gid;
 
@@ -273,7 +274,7 @@
               Env = [ ];
             };
           };
- 
+
           kubeConsumerImage = pkgs.dockerTools.buildImage {
             name = "polar-kube-consumer";
             tag = "latest";
@@ -288,14 +289,14 @@
               Env = [ ];
             };
           };
-          
+
           cassiniImage = pkgs.dockerTools.buildImage {
             name = "cassini";
             tag = "latest";
             copyToRoot = [
               etc
               cassiniEnv
-            ]; 
+            ];
             uid = commonUser.uid;
             gid = commonUser.gid;
 
@@ -303,7 +304,7 @@
               User = "${commonUser.uid}:${commonUser.gid}";
               Cmd = [ "cassini-server" ];
               WorkingDir = "/";
-              Env = [ 
+              Env = [
                 "CASSINI_BIND_ADDR=0.0.0.0:8080"
               ];
             };
@@ -313,4 +314,3 @@
         devShells.default = devShell;
       });
 }
-

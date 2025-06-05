@@ -31,9 +31,9 @@ use crate::GITLAB_GROUPS_OBSERVER;
 use crate::GITLAB_JOBS_OBSERVER;
 use crate::GITLAB_PIPELINE_OBSERVER;
 use crate::GITLAB_PROJECT_OBSERVER;
+use crate::GITLAB_REPOSITORY_OBSERVER;
 use crate::GITLAB_RUNNER_OBSERVER;
 use crate::GITLAB_USERS_OBSERVER;
-use crate::GITLAB_REPOSITORY_OBSERVER;
 pub struct ObserverSupervisor;
 
 pub struct ObserverSupervisorState {
@@ -46,28 +46,30 @@ pub struct ObserverSupervisorArgs {
     pub gitlab_token: Option<String>,
     pub proxy_ca_cert_file: Option<String>,
     pub base_interval: u64,
-    pub max_backoff_secs: u64
+    pub max_backoff_secs: u64,
 }
 
 impl ObserverSupervisor {
     /// Build reqwest client, optionally with a proxy CA certificate
     fn get_client(proxy_ca_cert_path: Option<String>) -> Client {
         match proxy_ca_cert_path {
-            Some(path) => {   
-                let cert_data = get_file_as_byte_vec(&path).expect("Expected to find a proxy CA certificate at {path}");
-                let root_cert = Certificate::from_pem(&cert_data).expect("Expected {path} to be in PEM format.");
+            Some(path) => {
+                let cert_data = get_file_as_byte_vec(&path)
+                    .expect("Expected to find a proxy CA certificate at {path}");
+                let root_cert = Certificate::from_pem(&cert_data)
+                    .expect("Expected {path} to be in PEM format.");
 
                 info!("Found PROXY_CA_CERT at: {path}, Configuring web client...");
 
                 ClientBuilder::new()
-                .add_root_certificate(root_cert)
-                .use_rustls_tls()
+                    .add_root_certificate(root_cert)
+                    .use_rustls_tls()
+                    .build()
+                    .expect("Expected to build web client with proxy CA certificate")
+            }
+            None => ClientBuilder::new()
                 .build()
-                .expect("Expected to build web client with proxy CA certificate")    
-            }
-            None => {
-                ClientBuilder::new().build().expect("Expected to build web client.")
-            }
+                .expect("Expected to build web client."),
         }
     }
 }
@@ -92,7 +94,10 @@ impl Actor for ObserverSupervisor {
         let client_started_result = Actor::spawn_linked(
             Some(BROKER_CLIENT_NAME.to_string()),
             TcpClientActor,
-            TcpClientArgs { config: args.client_config, registration_id: None },
+            TcpClientArgs {
+                config: args.client_config,
+                registration_id: None,
+            },
             myself.clone().into(),
         )
         .await;
@@ -105,7 +110,6 @@ impl Actor for ObserverSupervisor {
                 //wait until we get a session id to start clients, try some configured amount of times every few seconds
                 let mut attempts = 0;
                 loop {
-                    
                     attempts += 1;
                     info!("Getting session data...");
                     if let CallResult::Success(result) = call(
@@ -114,7 +118,8 @@ impl Actor for ObserverSupervisor {
                         None,
                     )
                     .await
-                    .expect("Expected to call client!") //TODO: Match this and just stop if we can't do this instead of panicking.
+                    .expect("Expected to call client!")
+                    //TODO: Match this and just stop if we can't do this instead of panicking.
                     {
                         if let Some(registration_id) = result {
                             let args = GitlabObserverArgs {
@@ -225,7 +230,6 @@ impl Actor for ObserverSupervisor {
         _: ActorRef<Self::Msg>,
         _: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        //TODO: Implement scheduling logic via clockwerk or some other means based off of configuration values within the state
         Ok(())
     }
 
@@ -254,7 +258,7 @@ impl Actor for ObserverSupervisor {
                     actor_cell.get_id()
                 );
                 // at time of writing, if any observers terminate
-                // it's a likely unrecoverable state - 
+                // it's a likely unrecoverable state -
                 // it could be caused by an invalid gitlab token being provided or any malformed query.
                 // this would require intervention by admins.
                 myself.stop(reason)
@@ -265,10 +269,11 @@ impl Actor for ObserverSupervisor {
                     actor_cell.get_name(),
                     actor_cell.get_id()
                 );
-                myself.stop(Some(e.to_string())) 
-
+                myself.stop(Some(e.to_string()))
             }
-            SupervisionEvent::ProcessGroupChanged(..) => todo!("Investigate how this would/could happen and how to respond."),
+            SupervisionEvent::ProcessGroupChanged(..) => {
+                todo!("Investigate how this would/could happen and how to respond.")
+            }
         }
 
         Ok(())

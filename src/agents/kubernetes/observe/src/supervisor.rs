@@ -66,17 +66,17 @@ impl ClusterObserverSupervisor {
                             .await
                             .expect("Expected to call client!")
                             {
-                                //if we successfully register with the broker
+                                // if we successfully register with the broker,
+                                // discover available namespaces and start actors to observer them
                                 if let Some(registration_id) = result {
-                                    //TODO: Discover as many namespaces as we can and spin up actors to watch each one.
                                     match ClusterObserverSupervisor::discover_namespaces(
                                         kube_client.clone(),
                                     )
                                     .await
                                     {
                                         Ok(namespaces) => {
+                                            //start actors
                                             for ns in namespaces {
-                                                //start actors
                                                 let args = PodObserverArgs {
                                                     registration_id: registration_id.clone(),
                                                     kube_client: kube_client.clone(),
@@ -95,7 +95,7 @@ impl ClusterObserverSupervisor {
                                                 }
                                             }
                                         }
-                                        Err(e) => todo!(),
+                                        Err(e) => return Err(ActorProcessingErr::from(e)),
                                     }
 
                                     break;
