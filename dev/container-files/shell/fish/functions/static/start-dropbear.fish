@@ -26,5 +26,5 @@ function start-dropbear
     end
 
     echo "🚀 Starting Dropbear on 0.0.0.0:2222"
-    dropbear -F -E -e -a -s -D ~/.ssh -r $rsa_key -r $ed25519_key -p 0.0.0.0:2223
+    dropbear -F -E -e -a -s -D ~/.ssh -r $rsa_key -r $ed25519_key -p 0.0.0.0:2223 &
 end
