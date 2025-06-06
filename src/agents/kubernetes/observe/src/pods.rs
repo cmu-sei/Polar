@@ -1,3 +1,4 @@
+use crate::{send_to_client, KubernetesObserverMessage, TCP_CLIENT_NAME};
 use cassini::{client::TcpClientMessage, ClientMessage};
 use futures::{StreamExt, TryStreamExt};
 use k8s_openapi::api::core::v1::Pod;
@@ -7,12 +8,12 @@ use kube::{
     runtime::watcher::Event,
     Client,
 };
-use kube_common::{KubeMessage, RawKubeEvent};
+use kube_common::{get_consumer_name, KUBERNETES_CONSUMER, RESOURCE_DELETED_ACTION};
+use kube_common::{RawKubeEvent, BATCH_PROCESS_ACTION, RESOURCE_APPLIED_ACTION};
 use ractor::{async_trait, registry::where_is, Actor, ActorProcessingErr, ActorRef};
+use serde_json::to_vec;
 use tokio::task::AbortHandle;
 use tracing::{debug, error, info, warn};
-
-use crate::{send_to_client, KubernetesObserverMessage, KUBERNETES_CONSUMER, TCP_CLIENT_NAME};
 
 pub struct PodObserver;
 
@@ -48,25 +49,44 @@ impl PodObserver {
         while let Some(event) = watcher.try_next().await? {
             match event {
                 Event::Apply(pod) => {
-                    debug!("Pod updated: {}", pod.name_any());
+                    PodObserver::log_pod_info(&pod);
 
-                    match serde_json::to_string(&pod) {
-                        Ok(serialized) => send_to_client(
-                            registration_id.clone(),
-                            KUBERNETES_CONSUMER.to_string(),
-                            serialized.into_bytes(),
-                        ),
-                        Err(e) => warn!("{e}"),
+                    if let Ok(serialized) = serde_json::to_value(&pod) {
+                        let message = RawKubeEvent {
+                            action: String::from(RESOURCE_APPLIED_ACTION),
+                            kind: "Pod".to_string(), //anywhewre we can get constants for this
+                            object: serialized,
+                        };
+
+                        if let Ok(payload) = to_vec(&message) {
+                            send_to_client(
+                                registration_id.clone(),
+                                KUBERNETES_CONSUMER.to_string(),
+                                payload,
+                            )
+                        }
                     }
                 }
                 Event::Delete(pod) => {
                     debug!("Pod deleted: {}", pod.name_any());
-                    match serde_json::to_string(&pod) {
-                        Ok(serialized) => send_to_client(
-                            registration_id.clone(),
-                            KUBERNETES_CONSUMER.to_string(),
-                            serialized.into_bytes(),
-                        ),
+
+                    match serde_json::to_value(&pod) {
+                        Ok(serialized) => {
+                            let message = RawKubeEvent {
+                                object: serialized,
+                                action: String::from(RESOURCE_DELETED_ACTION),
+                                kind: String::from("Pod"),
+                            };
+
+                            match to_vec(&message) {
+                                Ok(payload) => send_to_client(
+                                    registration_id.clone(),
+                                    get_consumer_name("cluster", "Pod"),
+                                    payload,
+                                ),
+                                Err(e) => error!("{e}"),
+                            }
+                        }
                         Err(e) => warn!("{e}"),
                     }
                 }
@@ -214,14 +234,13 @@ impl Actor for PodObserver {
 
                 match api.list(&ListParams::default()).await {
                     Ok(pod_list) => {
-                        let kind = pod_list.types.kind.clone();
-                        let topic = format!("kubernetes.cluster.consumer.{kind}");
+                        let topic = get_consumer_name("cluster", "Pod");
 
                         match serde_json::to_value(pod_list.items) {
                             Ok(serialized) => {
                                 let event = RawKubeEvent {
-                                    kind,
-                                    action: String::from("BatchProcess"),
+                                    kind: String::from("Pod"),
+                                    action: String::from(BATCH_PROCESS_ACTION),
                                     object: serialized,
                                 };
 

@@ -15,8 +15,9 @@ use tracing::{debug, error, info, warn};
 
 use crate::{
     pods::{PodObserver, PodObserverArgs},
-    KubernetesObserverMessage, KUBERNETES_OBSERVER, TCP_CLIENT_NAME,
+    KubernetesObserverMessage, TCP_CLIENT_NAME,
 };
+use kube_common::KUBERNETES_OBSERVER;
 
 pub struct ClusterObserverSupervisor;
 

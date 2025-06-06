@@ -1,8 +1,8 @@
 # Flake-based Docker Build Environment for Polar
 
-This repository provides secure, resilient, and repeatable build environments 
-for Polar using NixOS and Docker. The setup ensures that the same process used 
-for local development builds can also be utilized for CI/CD pipeline builds, 
+This repository provides secure, resilient, and repeatable build environments
+for Polar using NixOS and Docker. The setup ensures that the same process used
+for local development builds can also be utilized for CI/CD pipeline builds,
 providing consistency and isolation.
 
 ## Prerequisites
@@ -10,7 +10,7 @@ providing consistency and isolation.
 Before starting, ensure you have the following installed:
 
 - [Nix package manager](https://nixos.org/download.html)
-- [Docker](https://docs.docker.com/get-docker/) 
+- [Docker](https://docs.docker.com/get-docker/)
 
 ## Setup
 
@@ -35,19 +35,19 @@ Before starting, ensure you have the following installed:
     nix build .#devContainer
     ```
 
-    **The CI Container**    
-    
+    **The CI Container**
+
     To build the CI/CD container for a more lean testing environment, we first need to download the base nix image.
 
     ```sh
     skopeo copy docker://nixos/nix:2.24.13 docker-archive:nix.tar:nix:24.13
     ```
 
-    This is because of limiations within the nix ecosystem. The nixpkgs dockertools don't natively sujpport pulling images from private repositories, and nix2container, a library for managing containers with nix, 
-    doesn't support configuring CA certificates to pull images from our private, proxied registries. 
-    
+    This is because of limiations within the nix ecosystem. The nixpkgs dockertools don't natively sujpport pulling images from private repositories, and nix2container, a library for managing containers with nix,
+    doesn't support configuring CA certificates to pull images from our private, proxied registries.
+
     (At least, not at time of writing!)
-     
+
     So we're kindof stuck when working in more regulated environments.
 
     Once you have the nix image downloaded and present as a tarfile, you can run the build command for the derivation.
@@ -67,15 +67,15 @@ Before starting, ensure you have the following installed:
 
 1. **Run the Docker containers with your project directory mounted:**
     ```bash
-    docker run -it -v /path/to/your/project:/workspace -p 8080:8080 polar-dev:latest bash -c "/create-user.sh $(whoami) $(id -u) $(id -g)"
+    docker run -it -v /path/to/your/project:/workspace -p 2222:2222 polar-dev:latest bash -c "/create-user.sh $(whoami) $(id -u) $(id -g)"
     ```
 
     The create user command will set the user within the container and then
     drop into the fish shell. Replace `/path/to/your/project` with the path to
     your project directory. This command mounts your project directory into the
     container at the `/workspace` directory, allowing you to work on your
-    project files within the container. 
-    
+    project files within the container.
+
 ## Running with VSCode Dev Containers
 
 This setup is compatible with the VSCode Dev Containers feature, allowing you
