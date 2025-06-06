@@ -1,9 +1,18 @@
 use futures::{StreamExt, TryStreamExt};
-use kube::{api::{Api, ListParams, ResourceExt}, runtime::watcher::Event, Client, Config};
-use k8s_openapi::{api::core::v1::{Node, Pod}, apimachinery::pkg::api::resource::Quantity};
-use kube::runtime::watcher;
 use k8s_openapi::api::core::v1::ConfigMap;
-use kube_observer::{supervisor::{ClusterObserverSupervisor, ClusterObserverSupervisorArgs}, KUBERNETES_OBSERVER};
+use k8s_openapi::{
+    api::core::v1::{Node, Pod},
+    apimachinery::pkg::api::resource::Quantity,
+};
+use kube::runtime::watcher;
+use kube::{
+    api::{Api, ListParams, ResourceExt},
+    runtime::watcher::Event,
+    Client, Config,
+};
+use kube_common::KUBERNETES_OBSERVER;
+
+use kube_observer::supervisor::{ClusterObserverSupervisor, ClusterObserverSupervisorArgs};
 use ractor::Actor;
 use tracing::error;
 
@@ -14,31 +23,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Infer the runtime environment and try to create a Kubernetes Client
     let cassini_client_config = cassini::TCPClientConfig::new();
 
-
     let args = ClusterObserverSupervisorArgs {
         cassini_client_config,
     };
 
     //TODO - make name a constant
     // Start kubernetes supervisor
-    match Actor::spawn(Some("kubernetes.minikube.observer.supervisor".to_string()), ClusterObserverSupervisor, args).await {
-        Ok( (supervisor, handle) ) => handle.await.expect("Something went wrong"),
-        Err(e) => error!("{e}")
+    match Actor::spawn(
+        Some("kubernetes.minikube.observer.supervisor".to_string()),
+        ClusterObserverSupervisor,
+        args,
+    )
+    .await
+    {
+        Ok((supervisor, handle)) => handle.await.expect("Something went wrong"),
+        Err(e) => error!("{e}"),
     }
     Ok(())
-    
 }
-
 
 async fn observe_configmaps(client: Client, namespace: String) -> Result<(), watcher::Error> {
     let api: Api<ConfigMap> = Api::namespaced(client.clone(), &namespace);
-    let cm_list = api.list(&ListParams::default()).await.expect("Expected to get a list of configmaps");
+    let cm_list = api
+        .list(&ListParams::default())
+        .await
+        .expect("Expected to get a list of configmaps");
 
     println!("Namespace: {}", namespace);
     for cm in cm_list.items {
         let name = cm.metadata.name.unwrap_or_default();
         println!("  - ConfigMap: {}", name);
-        
     }
 
     let mut watcher = watcher(api, watcher::Config::default()).boxed();
@@ -59,7 +73,10 @@ async fn observe_configmaps(client: Client, namespace: String) -> Result<(), wat
 
 async fn observe_pods(client: Client, namespace: String) -> Result<(), watcher::Error> {
     let api: Api<Pod> = Api::namespaced(client.clone(), &namespace);
-    let pod_list = api.list(&ListParams::default()).await.expect("Expected to get a list of Pods");
+    let pod_list = api
+        .list(&ListParams::default())
+        .await
+        .expect("Expected to get a list of Pods");
 
     println!("Namespace: {} - Pods:", namespace);
     for pod in pod_list.items {
@@ -76,7 +93,7 @@ async fn observe_pods(client: Client, namespace: String) -> Result<(), watcher::
             }
             Event::Delete(pod) => {
                 println!("Pod deleted: {}", pod.name_any());
-            },
+            }
             _ => {}
         }
     }
@@ -95,32 +112,38 @@ fn log_pod_info(pod: &Pod) {
 
         // Volumes
         if let Some(volumes) = &spec.volumes {
-            
             for volume in volumes {
                 println!("    -> Uses Volume: {} ", volume.name);
 
                 volume
-                .config_map
-                .as_ref()
-                .map(|cm| println!("    -> Mounts ConfigMap: {} ", cm.name.clone()));
+                    .config_map
+                    .as_ref()
+                    .map(|cm| println!("    -> Mounts ConfigMap: {} ", cm.name.clone()));
 
                 volume
-                .persistent_volume_claim
-                .as_ref()
-                .map(|pvc| println!("    -> Uses PVC: {} ", pvc.claim_name));
-        
-                volume
-                .secret
-                .as_ref()
-                .map(|secret| println!("    -> Mounts Secret: {} ", secret.clone().secret_name.unwrap_or_default() ));
-            
+                    .persistent_volume_claim
+                    .as_ref()
+                    .map(|pvc| println!("    -> Uses PVC: {} ", pvc.claim_name));
+
+                volume.secret.as_ref().map(|secret| {
+                    println!(
+                        "    -> Mounts Secret: {} ",
+                        secret.clone().secret_name.unwrap_or_default()
+                    )
+                });
             }
         }
 
         // Containers and InitContainers
-        let containers = spec.containers.iter().chain(spec.init_containers.iter().flatten());
+        let containers = spec
+            .containers
+            .iter()
+            .chain(spec.init_containers.iter().flatten());
         for container in containers {
-            println!("    -> Container Image: {} ", container.image.clone().unwrap_or_default());
+            println!(
+                "    -> Container Image: {} ",
+                container.image.clone().unwrap_or_default()
+            );
 
             // Environment variable references
             for env in container.env.iter().flatten() {
@@ -139,7 +162,10 @@ fn log_pod_info(pod: &Pod) {
 
 async fn observe_nodes(client: Client) -> Result<(), watcher::Error> {
     let api: Api<Node> = Api::all(client.clone());
-    let node_list = api.list(&ListParams::default()).await.expect("Failed to list nodes");
+    let node_list = api
+        .list(&ListParams::default())
+        .await
+        .expect("Failed to list nodes");
 
     println!("--- Current Nodes ---");
     for node in node_list.items {
@@ -157,7 +183,7 @@ async fn observe_nodes(client: Client) -> Result<(), watcher::Error> {
             Event::Delete(node) => {
                 println!("Node deleted: {}", node.name_any());
             }
-            _ => ()
+            _ => (),
         }
     }
 
@@ -187,7 +213,10 @@ fn print_node_info(node: &Node) {
         .as_ref()
         .and_then(|s| s.conditions.as_ref())
         .and_then(|conditions| {
-            conditions.iter().find(|c| c.type_ == "Ready").map(|c| c.status.clone())
+            conditions
+                .iter()
+                .find(|c| c.type_ == "Ready")
+                .map(|c| c.status.clone())
         })
         .unwrap_or(String::default());
 

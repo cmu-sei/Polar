@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use cassini::client::*;
 use kube_common::MessageDispatcher;
-use polar::{DISPATCH_ACTOR, get_neo_config};
+use polar::{get_neo_config, DISPATCH_ACTOR};
 use ractor::async_trait;
 use ractor::registry::where_is;
 use ractor::rpc::call;
@@ -34,9 +34,8 @@ pub enum ClusterConsumerSupervisorMessage {
 
 pub struct ClusterConsumerSupervisorArgs {
     pub client_config: cassini::TCPClientConfig,
-    pub graph_config: neo4rs::Config
+    pub graph_config: neo4rs::Config,
 }
-
 
 #[async_trait]
 impl Actor for ClusterConsumerSupervisor {
@@ -53,7 +52,7 @@ impl Actor for ClusterConsumerSupervisor {
 
         let state = ClusterConsumerSupervisorState {
             max_registration_attempts: 5,
-            graph_config: get_neo_config()
+            graph_config: get_neo_config(),
         };
 
         let _ = Actor::spawn_linked(
@@ -99,15 +98,22 @@ impl Actor for ClusterConsumerSupervisor {
                         // In this case, failing to find the GRAPH_CA_CERT file. In which case, there's nothing we can really do.
                         // Should that happen, we should just log the error and stop
                         if let Some(registration_id) = result {
-
                             //start actors
                             let args = KubeConsumerArgs {
-                                registration_id, graph_config: state.graph_config.clone() 
+                                registration_id,
+                                graph_config: state.graph_config.clone(),
                             };
-                                
+
                             // TODO: The anticipated naming convention for these will be kubernetes.clustername.rrole.resource - but cluster name isn't really known ahead of time at the moment.
                             // For now, we'll test using either minikube or kind, so for now we can simply use kubernetes.cluster.default.pods
-                            if let Err(e) = Actor::spawn_linked(Some("kubernetes.cluster.consumer.PodList".to_string()), PodConsumer, args, myself.get_cell().clone()).await {
+                            if let Err(e) = Actor::spawn_linked(
+                                Some(kube_common::get_consumer_name("cluster", "Pod")),
+                                PodConsumer,
+                                args,
+                                myself.get_cell().clone(),
+                            )
+                            .await
+                            {
                                 error!("{e}");
                             }
 
@@ -166,18 +172,17 @@ impl Actor for ClusterConsumerSupervisor {
                     actor_cell.get_id()
                 );
 
-            //    match ClusterConsumerSupervisor::restart_actor(actor_name.clone(), myself.clone(), state.graph_config.clone()).await {
-            //         Ok(actor) => {
-            //             info!("Restarted actor {0:?}:{1:?}", 
-            //             actor_name,
-            //             actor.get_id())
-            //         }
-            //         Err(e) => {
-            //             error!("Failed to recover actor: {e}");
-            //             myself.stop(Some(e))
-            //         }
-            //    }
-                                    
+                //    match ClusterConsumerSupervisor::restart_actor(actor_name.clone(), myself.clone(), state.graph_config.clone()).await {
+                //         Ok(actor) => {
+                //             info!("Restarted actor {0:?}:{1:?}",
+                //             actor_name,
+                //             actor.get_id())
+                //         }
+                //         Err(e) => {
+                //             error!("Failed to recover actor: {e}");
+                //             myself.stop(Some(e))
+                //         }
+                //    }
             }
             SupervisionEvent::ActorFailed(actor_cell, e) => {
                 // we no actors start w/o names
@@ -188,19 +193,19 @@ impl Actor for ClusterConsumerSupervisor {
                     actor_name,
                     actor_cell.get_id()
                 );
-            //     match ClusterConsumerSupervisor::restart_actor(actor_name.clone(), myself.clone(), state.graph_config.clone()).await {
-            //         Ok(actor) => {
-            //             info!("Restarted actor {0:?}:{1:?}", 
-            //             actor_name,
-            //             actor.get_id())
-            //         }
-            //         Err(e) => {
-            //             error!("Failed to recover actor: {e}");
-            //             myself.stop(Some(e))
-            //         }
-            //    }
+                //     match ClusterConsumerSupervisor::restart_actor(actor_name.clone(), myself.clone(), state.graph_config.clone()).await {
+                //         Ok(actor) => {
+                //             info!("Restarted actor {0:?}:{1:?}",
+                //             actor_name,
+                //             actor.get_id())
+                //         }
+                //         Err(e) => {
+                //             error!("Failed to recover actor: {e}");
+                //             myself.stop(Some(e))
+                //         }
+                //    }
             }
-    
+
             SupervisionEvent::ProcessGroupChanged(..) => todo!(),
         }
 

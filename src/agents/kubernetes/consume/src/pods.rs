@@ -23,11 +23,11 @@
 
 use cassini::{client::TcpClientMessage, topic, ClientMessage};
 use k8s_openapi::api::core::v1::Pod;
+use kube_common::KubeMessage;
 use neo4rs::Query;
 use polar::{QUERY_COMMIT_FAILED, QUERY_RUN_FAILED};
 use ractor::{async_trait, registry::where_is, Actor, ActorProcessingErr, ActorRef};
 use tracing::{debug, error, info};
-use kube_common::KubeMessage;
 
 use crate::{KubeConsumerArgs, KubeConsumerState, BROKER_CLIENT_NAME};
 
@@ -44,8 +44,14 @@ pub fn pods_to_cypher(pods: &[Pod]) -> Vec<String> {
 
     for pod in pods {
         let pod_name = pod.metadata.name.clone().unwrap_or_default();
-        let namespace = pod.metadata.namespace.clone().unwrap_or_else(|| "default".to_string());
-        let sa_name = pod.spec.as_ref()
+        let namespace = pod
+            .metadata
+            .namespace
+            .clone()
+            .unwrap_or_else(|| "default".to_string());
+        let sa_name = pod
+            .spec
+            .as_ref()
             .and_then(|s| s.service_account_name.clone())
             .unwrap_or_default();
 
@@ -128,16 +134,16 @@ pub fn pods_to_cypher(pods: &[Pod]) -> Vec<String> {
             }
 
             // Containers and InitContainers
-            let containers = spec.containers.iter()
+            let containers = spec
+                .containers
+                .iter()
                 .chain(spec.init_containers.iter().flatten());
 
             for container in containers {
                 if let Some(image) = &container.image {
                     if seen_images.insert(image.clone()) {
-                        statements.push(format!(
-                            "MERGE (img:PodContainer {{ image: '{}' }})",
-                            image
-                        ));
+                        statements
+                            .push(format!("MERGE (img:PodContainer {{ image: '{}' }})", image));
                     }
                     statements.push(format!(
                         "MATCH (p:Pod {{ name: '{}', namespace: '{}' }}), \
@@ -148,12 +154,11 @@ pub fn pods_to_cypher(pods: &[Pod]) -> Vec<String> {
                 }
 
                 if let Some(envs) = &container.env {
-                    
                     for env in envs {
-                    
                         if let Some(value_from) = &env.value_from {
                             if let Some(cm_ref) = &value_from.config_map_key_ref {
-                                if seen_configmaps.insert(format!("{}::{}", namespace, cm_ref.name)) {
+                                if seen_configmaps.insert(format!("{}::{}", namespace, cm_ref.name))
+                                {
                                     statements.push(format!(
                                         "MERGE (cm:ConfigMap {{ name: '{}', namespace: '{}' }})",
                                         cm_ref.name, namespace
@@ -169,7 +174,9 @@ pub fn pods_to_cypher(pods: &[Pod]) -> Vec<String> {
                             }
 
                             if let Some(secret_ref) = &value_from.secret_key_ref {
-                                if seen_secrets.insert(format!("{}::{}", namespace, secret_ref.name)) {
+                                if seen_secrets
+                                    .insert(format!("{}::{}", namespace, secret_ref.name))
+                                {
                                     statements.push(format!(
                                         "MERGE (s:Secret {{ name: '{}', namespace: '{}' }})",
                                         secret_ref.name, namespace
@@ -199,7 +206,7 @@ pub struct PodConsumer;
 // }
 #[async_trait]
 impl Actor for PodConsumer {
-    type Msg = KubeMessage; // TODO: Looks like ractor can't use generic enums for message types, very inconvenient 
+    type Msg = KubeMessage; // TODO: Looks like ractor can't use generic enums for message types, very inconvenient
     type State = KubeConsumerState;
     type Arguments = KubeConsumerArgs;
 
@@ -209,20 +216,23 @@ impl Actor for PodConsumer {
         args: KubeConsumerArgs,
     ) -> Result<Self::State, ActorProcessingErr> {
         debug!("{myself:?} starting, connecting to broker");
-            
-        let client = where_is(BROKER_CLIENT_NAME.to_string()).expect("Expected to find TCP client.");
-            
+
+        let client =
+            where_is(BROKER_CLIENT_NAME.to_string()).expect("Expected to find TCP client.");
+
         client.send_message(TcpClientMessage::Send(ClientMessage::SubscribeRequest {
             registration_id: Some(args.registration_id.clone()),
             topic: myself.get_name().unwrap(),
         }))?;
 
         //load neo config and connect to graph db
-        
+
         let graph = neo4rs::Graph::connect(args.graph_config).await?;
 
-        Ok(KubeConsumerState { registration_id: args.registration_id, graph })
-        
+        Ok(KubeConsumerState {
+            registration_id: args.registration_id,
+            graph,
+        })
     }
 
     async fn post_start(
@@ -240,7 +250,6 @@ impl Actor for PodConsumer {
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        
         //Expect transaction to start, stop if it doesn't
         match state.graph.start_txn().await {
             Ok(mut transaction) => {
@@ -248,43 +257,59 @@ impl Actor for PodConsumer {
                     KubeMessage::ResourceBatch { kind, resources } => {
                         // ascertain resource type
                         info!("Received batch of {}", kind);
-                        
-                        match kind.as_str() {
-                            "PodList" => {
-                                
-                                match serde_json::from_value::<Vec<Pod>>(resources) {
-                                    Ok(pods) => {
-                                        debug!("Received {} pod(s)", pods.len());
 
-                                        let queries = pods_to_cypher(&pods);
+                        match serde_json::from_value::<Vec<Pod>>(resources) {
+                            Ok(pods) => {
+                                debug!("Received {} pod(s)", pods.len());
 
-                                        for query in queries {
-                                            debug!("{query:?}");
-                                            if let Err(e) = transaction.run(Query::new(query)).await {
-                                                myself.stop(Some(QUERY_RUN_FAILED.to_string()));
+                                let queries = pods_to_cypher(&pods);
 
-                                            }
-                                        }
-                                        
-                                        if let Err(e) = transaction.commit().await {
-                                            myself.stop(Some(QUERY_COMMIT_FAILED.to_string()));
-                                        }
-
-                                        info!("Transaction committed.");
+                                for query in queries {
+                                    debug!("{query:?}");
+                                    if let Err(e) = transaction.run(Query::new(query)).await {
+                                        myself.stop(Some(QUERY_RUN_FAILED.to_string()));
                                     }
-                                    Err(e) => todo!("{e}")
                                 }
-                            }
-                            "Pod" => todo!(),
-                            _ => todo!()
-                        }
-                        
 
+                                if let Err(e) = transaction.commit().await {
+                                    myself.stop(Some(QUERY_COMMIT_FAILED.to_string()));
+                                }
+
+                                info!("Transaction committed.");
+                            }
+                            Err(e) => todo!("{e}"),
+                        }
                     }
-                    _ => (),
-                }        
+                    KubeMessage::ResourceApplied { kind, resource } => {
+                        match serde_json::from_value::<Pod>(resource) {
+                            Ok(pod) => {
+                                let queries = pods_to_cypher(&vec![pod]);
+
+                                for query in queries {
+                                    debug!("{query:?}");
+                                    if let Err(e) = transaction.run(Query::new(query)).await {
+                                        let err = format!("{QUERY_RUN_FAILED} {e}");
+                                        error!("{err}");
+                                        myself.stop(Some(err));
+                                    }
+                                }
+
+                                if let Err(e) = transaction.commit().await {
+                                    myself.stop(Some(QUERY_COMMIT_FAILED.to_string()));
+                                }
+
+                                info!("Transaction committed.");
+                            }
+                            Err(e) => todo!("{e}"),
+                        }
+                    }
+                    KubeMessage::ResourceDeleted { kind, resource } => {
+                        todo!("Handle deletion per planned issues")
+                    }
+                    _ => todo!(),
+                }
             }
-            Err(e) => todo!() //myself.stop(Some(format!("{TRANSACTION_FAILED_ERROR}. {e}")))
+            Err(e) => todo!(), //myself.stop(Some(format!("{TRANSACTION_FAILED_ERROR}. {e}")))
         }
 
         Ok(())
