@@ -36,7 +36,7 @@ nix build --impure --eval-system x86_64-linux .#packages.x86_64-linux.default
 > Starts the docker compose file to start up Polar's dependencies - Neo4J and Cassini
 
 ~~~sh
-podman compose -f conf/gitlab_compose/docker-compose.yml up neo4j cassini -d
+podman compose -f conf/gitlab_compose/docker-compose.yml up 
 ~~~
 ## render
 
