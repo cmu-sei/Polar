@@ -200,9 +200,6 @@
           executable  = true;
         };
 
-        # helm charts
-        charts = pkgs.callPackage ./make-chart.nix { inherit pkgs; };
-
         # ---------------------------------------------------------------------
         # Dev container image
         # ---------------------------------------------------------------------
@@ -326,7 +323,6 @@
 
         packages.default     = devContainer;
         packages.ciContainer = ciContainer;
-        packages.charts      = charts;
       }
     );
 }

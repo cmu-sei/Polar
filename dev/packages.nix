@@ -24,7 +24,7 @@ let
         "$@"
     '';
 
-in 
+in
   {
     devPkgs = with pkgs; [
       # -- Basic Required Files --
@@ -125,7 +125,7 @@ in
 
       # The last editor you'll ever use
       zed
-      
+
       # Put any extra packages or libraries you need here. For example,
       # if working on a Rust project that requires a linear algebra
       # package:
@@ -146,7 +146,6 @@ in
       jq
       yq
       vulnix
-      kubernetes-helm
       skopeo
       grype
       syft
