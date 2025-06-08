@@ -23,7 +23,7 @@ convert_and_encrypt() {
 convert_dhall_to_yaml() {
     local dhall_dir="$1"
     local output_dir="$2"
-    
+
     # Ensure the directory exists
     if [[ ! -d "$dhall_dir" ]]; then
         echo "Error: Directory '$dhall_dir' does not exist." >&2
@@ -34,7 +34,7 @@ convert_dhall_to_yaml() {
     find "$dhall_dir" -maxdepth 1 -type f -name "*.dhall" | while read -r dhall_file; do
         # Extract the relative path of the file inside the dhall_dir
         relative_path="${dhall_file#$dhall_dir/}"
-        
+
         # Generate the corresponding yaml file path
         yaml_file="$output_dir/$relative_path"
         yaml_file="${yaml_file%.dhall}.yaml"  # Change extension to .yaml
@@ -48,13 +48,13 @@ convert_dhall_to_yaml() {
             convert_and_encrypt $dhall_file $yaml_file
         else
             echo "[INFO] Converting: $dhall_file -> $yaml_file"
-            
+
             if ! dhall-to-yaml --file "$dhall_file" > "$yaml_file"; then
                 echo "[ERROR] Error: Failed to convert $dhall_file" >&2
                 exit 1
             fi
         fi
-       
+
     done
 
     echo "[SUCCESS] All Dhall files in '$dhall_dir' converted successfully."
@@ -99,7 +99,7 @@ for SERVICE_DIR in "$DHALL_ROOT"/*/; do
 
     SERVICE_NAME=$(basename "$SERVICE_DIR")
 
-    echo "[INFO] Processing service: $SERVICE_NAME"    
+    echo "[INFO] Processing service: $SERVICE_NAME"
 
     convert_dhall_to_yaml "$DHALL_ROOT/$SERVICE_NAME" "$OUTPUT_DIR/"
 

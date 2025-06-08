@@ -50,22 +50,43 @@ Polar agents are predominantly envisioned to be implemented in Rust, prioritizin
 
 ## Agents
 
-### Gitlab Agent
-
-The gitlab agent is a suite of services configured to observe a given gitlab instance and push to a hosted rabbitmq message broker.
-
-Three important parts of the framework implementation include:
-* GitLab Resource Observer
-    * Requires credentials for Gitlab in the form of a private token configured with read and write access for the API as well as credentials for authenticating with the given rabbitmq instance. The GitLab Observer is instantiated as a set of cooperating binaries, each handling a specific type of GitLab data.
-* GitLab Message Consumer (now known as the Information Processor)
-    * The message consumer requires credentials for the rabbitmq instance as well and credentials for signing into a given neo4j graph database to publish information to. The information processor transforms specific GitLab data into domain-specified nodes and edges that can be used to tie CI/CD concepts to other domain knowledge.
-* The Types Library
-    * Contains implementation of the various GitLab types, as well as implementations  for serialization / deserialization.
+### [Gitlab Agents](src/agents/gitlab/README.md)
+### [Kubernetes Agents](src/agents/kubernetes/README.md)
+### [Provenance Agent](src/agents/provenance/README.md)
 
 All credentials, endpoints, and the like should be read in as environment variables,possibly from an environment file. There is an example an environment file in the gitlab agent [README](./docs/README_gitlab.md) in the manual setup.
 
 ## Getting Started
-Please consult the [README](./src/agents/README.md)
+
+  **Install Nix and enable it to use flakes:**
+    Checkout the instructions at https://nix.dev/ on how you can do this.
+    Chances are you can run the following command once you have nix installed to configure it
+    ```sh
+    printf 'experimental-features = nix-command flakes' > "$HOME/.config/nix/nix.conf"
+    ```
+
+  Check out the [maskfile](./maskfile.md) to see some quickstart operations
+
+
+## Benefits of Using Nix and Flakes
+
+**Security and Reproducibility:**
+Nix provides a highly reproducible build system by describing the entire build
+environment as code, ensuring that builds are consistent across different
+environments and over time. This reduces the "works on my machine" problems and
+enhances security by eliminating unpredictable states. Nix Flakes further
+secure the process by locking down dependency versions and providing an
+isolated, declarative approach to package management.
+
+**Compatibility:**
+The use of Nix Flakes makes this environment easily compatible with VSCode Dev
+Containers, ensuring a seamless developer experience across different machines
+and setups.
+
+**Efficiency:**
+The Nix-based environment is lightweight and efficient, by only installing the
+necessary dependencies for the build process, reducing the overall size and
+complexity of the build environment and speeding up the build process.
 
 ## Additional Resources
 * [Polar: Improving DevSecOps Observability](https://insights.sei.cmu.edu/blog/polar-improving-devsecops-observability/): Blog that provides comprehensive insights into Polar's architecture, components, and capabilities.

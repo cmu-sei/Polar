@@ -14,9 +14,9 @@ build-dev-environment:
   allow_failure: true
   rules:
     - changes:
-        - dev/flake.nix
-        - dev/flake.lock
-        - dev/packages.nix
+        - flake.nix
+        - flake.lock
+        - src/flake/*
         - .gitlab-ci.yml
   script:
     #install needed tools
@@ -27,9 +27,8 @@ build-dev-environment:
       mkdir -p "/etc/containers"
       echo '{"default":[{"type":"insecureAcceptAnything"}]}' > /etc/containers/policy.json
       git config --global --add safe.directory "$(pwd)"
-    - cd dev
     # build dev and testing environments
-    - nix build .#default -o polar-dev
+    - nix build .#containers.devContainer -o polar-dev
 
     #  Use skopeo to inspect and upload our images
     - skopeo login --username "$CI_REGISTRY_USER" --password "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
@@ -42,9 +41,9 @@ build-ci-environment:
   allow_failure: true
   rules:
     - changes:
-        - dev/flake.nix
-        - dev/flake.lock
-        - dev/packages.nix
+        - flake.nix
+        - flake.lock
+        - src/flake/*
         - .gitlab-ci.yml
   script:
     #install needed tools
@@ -56,14 +55,13 @@ build-ci-environment:
       mkdir -p "/etc/containers"
       echo '{"default":[{"type":"insecureAcceptAnything"}]}' > /etc/containers/policy.json
       git config --global --add safe.directory "$(pwd)"
-    - cd dev
     # So, nix's container tooling doesn't support pulling from private registries very well, luckily, skopeo works just fine.
     - skopeo login --username "$CI_REGISTRY_USER" --password "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
     - skopeo copy docker://registry.sandbox.labz.s-box.org/sei/polar-mirror/nix:2.24.13 docker-archive:nix.tar:nix:24.13
     # git add or else nix won't see the downloaded image
     - git add nix.tar
     # build ci environment
-    - nix build .#ciContainer -o polar-ci
+    - nix build .#containers.ciContaienr -o polar-ci
 
     # Use skopeo to inspect and upload our images
     - skopeo inspect docker-archive://$(readlink -f ./polar-ci )
@@ -78,7 +76,7 @@ build-workspace:
     - git config --global --add safe.directory "$(pwd)"
 
     # build workspace
-    - nix build .#default
+    - nix build
 
     # upload binary artifacts to our package registry
     - |
