@@ -35,40 +35,8 @@ build-dev-environment:
     - skopeo inspect docker-archive://$(readlink -f ./polar-dev)
     - skopeo copy docker-archive://$(readlink -f ./polar-dev) docker://$CI_REGISTRY_IMAGE/polar-dev:0.1.0
 
-build-ci-environment:
-  image: registry.sandbox.labz.s-box.org/sei/polar-mirror/nix:2.24.13
-  stage: environment-setup
-  allow_failure: true
-  rules:
-    - changes:
-        - flake.nix
-        - flake.lock
-        - src/flake/*
-        - .gitlab-ci.yml
-  script:
-    #install needed tools
-    - nix-env --install --attr nixpkgs.skopeo
-
-    - |
-      mkdir -p "$HOME/.config/nix"
-      printf "experimental-features = nix-command flakes" > "$HOME/.config/nix/nix.conf"
-      mkdir -p "/etc/containers"
-      echo '{"default":[{"type":"insecureAcceptAnything"}]}' > /etc/containers/policy.json
-      git config --global --add safe.directory "$(pwd)"
-    # So, nix's container tooling doesn't support pulling from private registries very well, luckily, skopeo works just fine.
-    - skopeo login --username "$CI_REGISTRY_USER" --password "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
-    - skopeo copy docker://registry.sandbox.labz.s-box.org/sei/polar-mirror/nix:2.24.13 docker-archive:nix.tar:nix:24.13
-    # git add or else nix won't see the downloaded image
-    - git add nix.tar
-    # build ci environment
-    - nix build .#containers.ciContaienr -o polar-ci
-
-    # Use skopeo to inspect and upload our images
-    - skopeo inspect docker-archive://$(readlink -f ./polar-ci )
-    - skopeo copy docker-archive://$(readlink -f ./polar-ci ) docker://$CI_REGISTRY_IMAGE/polar-ci:0.1.0
-
 build-workspace:
-  image: registry.sandbox.labz.s-box.org/sei/polar-mirror/polar-ci:0.1.0
+  image: registry.sandbox.labz.s-box.org/sei/polar-mirror/polar-dev:0.1.0
   stage: build
   variables:
     AZURE_REGISTRY: sandboxaksacr.azurecr.us/polar
@@ -132,7 +100,7 @@ build-workspace:
       - src/agents/vulnix-report.json
 
 render-manifests:
-  image: registry.sandbox.labz.s-box.org/sei/polar-mirror/polar-ci:0.1.0
+  image: registry.sandbox.labz.s-box.org/sei/polar-mirror/polar-dev:0.1.0
   stage: render
   variables:
     TARGET_ENV: sandbox

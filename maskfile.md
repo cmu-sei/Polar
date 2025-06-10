@@ -2,31 +2,13 @@
 If you have `mask` installed, you can use it to quickly perform   common operations.
 
 
-## build image
+## build-image
 
 ### dev
   > Builds the Polar Dev image. A contaienrized Rust development environment in case you don't want to do local development.
-  nix build .#containers.dev
+  ~~~sh
+  nix build .#containers.devContainer
   ~~~
-
-### polar-ci
-
-> Builds the Polar Ci container for use in our build and testing workflows
-
-**The CI Container**
-
-To build the a more lean testing environment for CI/CD, we first need to download the base nix image.
-This is because of limiations within the nix ecosystem. The nixpkgs dockertools don't natively support pulling images from private repositories, and nix2container, a library for managing containers with nix,
-doesn't support configuring CA certificates to pull images from our private, proxied registries.
-~~~sh
-
-nix-shell -p skopeo --run "skopeo copy docker://nixos/nix:2.24.13 docker-archive:nix.tar:nix:24.13"
-git add nix.tar
-
-nix build .#containers.ciContainer -o polar-ci
-# don't commit tar
-git rm nix.tar
-~~~
 
 ## start-dev
 > Enters the Polar Dev container.

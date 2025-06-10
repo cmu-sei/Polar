@@ -244,37 +244,10 @@ let
       '';
     };
 
-    # ---------------------------------------------------------------------
-    # CI container
-    # ---------------------------------------------------------------------
 
-    # So this build is a little hacky, we'd usually be able to use
-    # nix2container to just put some creds in a auth.json file and allow
-    # the daemon to see it, but we need to pull from a registry behind a
-    # proxy, and nix2container doesn't let us do that w/o disabling
-    # tlsverification. We can switch to do that if this approach is too
-    # brittle.
-    ciContainer = pkgs.dockerTools.buildImage {
-      name = "polar-ci";
-      fromImage = ./nix.tar; # see rant above
-      tag = "0.1.0";
-      copyToRoot = [
-        ciEnv
-        containerPolicyConfig
-        license
-        nixConfig
-      ];
-      config = {
-        WorkingDir = "/workspace";
-        Env = [
-          # CAUTION: keep the base image PATH then append ours
-          "PATH=/root/.nix-profile/bin:/nix/var/nix/profiles/default/bin:/nix/var/nix/profiles/default/sbin:${ciEnv}/bin"
-        ];
-      };
-    };
 
 in {
-  inherit devContainer ciContainer ;
+  inherit devContainer;
 
   devShells.default = pkgs.mkShell {
     name = "polar-devshell";
