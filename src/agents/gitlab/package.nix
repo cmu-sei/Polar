@@ -17,7 +17,7 @@ let
     });
     consumer = craneLib.buildPackage (crateArgs // {
     pname = "gitlab-consumer";
-    cargoExtraArgs = "---bin gitlab-consumer --locked";
+    cargoExtraArgs = "--bin gitlab-consumer --locked";
     src = workspaceFileset ./gitlab/consume;
     });
 
