@@ -14,7 +14,7 @@ let
 
     cassini = craneLib.buildPackage (crateArgs // {
     inherit cargoArtifacts;
-    cargoExtraArgs = "--bin cassini --locked";
+    cargoExtraArgs = "--bin cassini-server --locked";
     src = workspaceFileset ./broker;
     # Disable tests for now, We'll run them later with env vars and TlsCerts
     doCheck = false;
