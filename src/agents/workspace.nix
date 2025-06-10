@@ -108,7 +108,7 @@ let
 
     kubeAgent = import ./kubernetes/package.nix {
       inherit pkgs commonPaths craneLib  workspaceFileset cargoArtifacts commonUser;
-      crateARgs = individualCrateArgs;
+      crateArgs = individualCrateArgs;
     };
 
 in
