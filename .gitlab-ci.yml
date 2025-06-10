@@ -36,7 +36,7 @@ build-dev-environment:
     - skopeo copy docker-archive://$(readlink -f ./polar-dev) docker://$CI_REGISTRY_IMAGE/polar-dev:0.1.0
 
 build-workspace:
-  image: registry.sandbox.labz.s-box.org/sei/polar-mirror/polar-dev:0.1.0
+  image: registry.sandbox.labz.s-box.org/sei/polar-mirror/polar-ci:0.1.0
   stage: build
   variables:
     AZURE_REGISTRY: sandboxaksacr.azurecr.us/polar
@@ -100,7 +100,7 @@ build-workspace:
       - src/agents/vulnix-report.json
 
 render-manifests:
-  image: registry.sandbox.labz.s-box.org/sei/polar-mirror/polar-dev:0.1.0
+  image: registry.sandbox.labz.s-box.org/sei/polar-mirror/polar-ci:0.1.0
   stage: render
   variables:
     TARGET_ENV: sandbox

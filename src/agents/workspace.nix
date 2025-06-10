@@ -4,7 +4,7 @@
 
 let
 
-    craneLib = (crane.mkLib pkgs).overrideToolchain (p: p.rust-bin.nightly."2025-01-06".default);
+    craneLib = (crane.mkLib pkgs).overrideToolchain (p: p.rust-bin.nightly.latest.default);
 
     src = craneLib.cleanCargoSource ./.;
 
