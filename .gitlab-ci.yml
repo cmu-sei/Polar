@@ -62,8 +62,8 @@ build-workspace:
     - nix build .#polarPkgs.cassini.cassiniImage -o cassini
     - nix build .#polarPkgs.gitlabAgent.observerImage -o gitlab-observer
     - nix build .#polarPkgs.gitlabAgent.consumerImage -o gitlab-consumer
-    - nix build .#polarPkgs.kubeAgent.kubeObserverImage -o kube-observer
-    - nix build .#polarPkgs.kubeAgent.kubeConsumerImage -o kube-consumer
+    - nix build .#polarPkgs.kubeAgent.observerImage -o kube-observer
+    - nix build .#polarPkgs.kubeAgent.consumerImage -o kube-consumer
 
     # Vulnerability analysis on our store
     # vulnix returns nonzero exit codes, so we need to get around this.
