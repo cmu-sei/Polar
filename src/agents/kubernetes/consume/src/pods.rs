@@ -43,6 +43,9 @@ pub fn pods_to_cypher(pods: &[Pod]) -> Vec<String> {
     let mut seen_images = HashSet::new();
 
     for pod in pods {
+        //add unique id to podsmut
+        let uid = pod.metadata.uid.clone().unwrap_or_default();
+
         let pod_name = pod.metadata.name.clone().unwrap_or_default();
         let namespace = pod
             .metadata
@@ -57,7 +60,7 @@ pub fn pods_to_cypher(pods: &[Pod]) -> Vec<String> {
 
         // Pod node
         statements.push(format!(
-            "MERGE (p:Pod {{ name: '{pod_name}', namespace: '{namespace}' }}) \
+            "MERGE (p:Pod {{uid: '{uid}', name: '{pod_name}', namespace: '{namespace}' }}) \
              SET p.serviceAccountName = '{sa_name}'"
         ));
 
@@ -302,24 +305,27 @@ impl Actor for PodConsumer {
                     KubeMessage::ResourceDeleted { resource, .. } => {
                         match from_value::<Pod>(resource) {
                             Ok(pod) => {
+                                //add unique id to podsmut
+                                let uid = pod.metadata.uid.clone().unwrap_or_default();
+
                                 let pod_name = pod.metadata.name.clone().unwrap_or_default();
 
                                 let timestamp = chrono::Utc::now().to_rfc3339();
 
                                 let cypher_query = format!(
                                     r#"
-                                    MATCH (pod:Pod) WHERE pod.name = "{pod_name}"
+                                    MATCH (pod:Pod) WHERE pod.uid = "{uid}"
                                     WITH pod
                                     SET pod.deleteAt = "{timestamp}"
 
-                                    // Mark containers as deleted
+                                    WITH pod
 
-                                    MATCH (c:PodContainer)<-[:HAS_CONTAINER]-()
+                                    MATCH (c:PodContainer)<-[:HAS_CONTAINER]-(pod)
                                     UNWIND c as container
-                                    SET container.deleteAt = {timestamp}
+                                    SET container.deleteAt = "{timestamp}"
                                     "#
                                 );
-
+                                debug!("{cypher_query}");
                                 if let Err(e) = transaction.run(Query::new(cypher_query)).await {
                                     let err = format!("{QUERY_RUN_FAILED} {e}");
                                     error!("{err}");
