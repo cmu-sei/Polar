@@ -27,6 +27,7 @@ use kube_common::KubeMessage;
 use neo4rs::Query;
 use polar::{QUERY_COMMIT_FAILED, QUERY_RUN_FAILED};
 use ractor::{async_trait, registry::where_is, Actor, ActorProcessingErr, ActorRef};
+use serde_json::from_value;
 use tracing::{debug, error, info};
 
 use crate::{KubeConsumerArgs, KubeConsumerState, BROKER_CLIENT_NAME};
@@ -35,7 +36,6 @@ use std::collections::{HashMap, HashSet};
 
 pub fn pods_to_cypher(pods: &[Pod]) -> Vec<String> {
     let mut statements = Vec::new();
-
     let mut seen_volumes = HashSet::new();
     let mut seen_configmaps = HashSet::new();
     let mut seen_secrets = HashSet::new();
@@ -57,9 +57,8 @@ pub fn pods_to_cypher(pods: &[Pod]) -> Vec<String> {
 
         // Pod node
         statements.push(format!(
-            "MERGE (p:Pod {{ name: '{}', namespace: '{}' }}) \
-             SET p.serviceAccountName = '{}'",
-            pod_name, namespace, sa_name,
+            "MERGE (p:Pod {{ name: '{pod_name}', namespace: '{namespace}' }}) \
+             SET p.serviceAccountName = '{sa_name}'"
         ));
 
         if let Some(spec) = &pod.spec {
@@ -254,10 +253,7 @@ impl Actor for PodConsumer {
         match state.graph.start_txn().await {
             Ok(mut transaction) => {
                 match message {
-                    KubeMessage::ResourceBatch { kind, resources } => {
-                        // ascertain resource type
-                        info!("Received batch of {}", kind);
-
+                    KubeMessage::ResourceBatch { resources, .. } => {
                         match serde_json::from_value::<Vec<Pod>>(resources) {
                             Ok(pods) => {
                                 debug!("Received {} pod(s)", pods.len());
@@ -281,7 +277,7 @@ impl Actor for PodConsumer {
                         }
                     }
                     KubeMessage::ResourceApplied { kind, resource } => {
-                        match serde_json::from_value::<Pod>(resource) {
+                        match from_value::<Pod>(resource) {
                             Ok(pod) => {
                                 let queries = pods_to_cypher(&vec![pod]);
 
@@ -303,8 +299,43 @@ impl Actor for PodConsumer {
                             Err(e) => todo!("{e}"),
                         }
                     }
-                    KubeMessage::ResourceDeleted { kind, resource } => {
-                        todo!("Handle deletion per planned issues")
+                    KubeMessage::ResourceDeleted { resource, .. } => {
+                        match from_value::<Pod>(resource) {
+                            Ok(pod) => {
+                                let pod_name = pod.metadata.name.clone().unwrap_or_default();
+
+                                let timestamp = chrono::Utc::now().to_rfc3339();
+
+                                let cypher_query = format!(
+                                    r#"
+                                    MATCH (pod:Pod) WHERE pod.name = "{pod_name}"
+                                    WITH pod
+                                    SET pod.deleteAt = "{timestamp}"
+
+                                    // Mark containers as deleted
+
+                                    MATCH (c:PodContainer)<-[:HAS_CONTAINER]-()
+                                    UNWIND c as container
+                                    SET container.deleteAt = {timestamp}
+                                    "#
+                                );
+
+                                if let Err(e) = transaction.run(Query::new(cypher_query)).await {
+                                    let err = format!("{QUERY_RUN_FAILED} {e}");
+                                    error!("{err}");
+                                    myself.stop(Some(err));
+                                }
+
+                                if let Err(e) = transaction.commit().await {
+                                    myself.stop(Some(QUERY_COMMIT_FAILED.to_string()));
+                                }
+
+                                // TODO: Detach and delete pod node
+                                // let delete_query =
+                                //     format!("MATCH (p:Pod {{ name: '{pod_name}', namespace: '{namespace}' }}) DETACH DELETE p");
+                            }
+                            Err(e) => error!("{e}"),
+                        }
                     }
                     _ => todo!(),
                 }
