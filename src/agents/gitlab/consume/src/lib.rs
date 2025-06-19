@@ -22,20 +22,18 @@
 */
 
 use cassini::{client::TcpClientMessage, ClientMessage};
-use gitlab_queries::{groups::GroupData, Namespace, projects::Project};
-use neo4rs::{Config, ConfigBuilder, Query, Txn};
-use ractor::{registry::where_is, ActorProcessingErr, MessagingErr};
-use std::{collections::VecDeque, error::Error};
-use tracing::{debug, error, info};
-use url::Url;
+use neo4rs::{Config, ConfigBuilder};
+use ractor::registry::where_is;
+use std::error::Error;
+use tracing::info;
 
 pub mod groups;
+pub mod pipelines;
 pub mod projects;
+pub mod repositories;
 pub mod runners;
 pub mod supervisor;
 pub mod users;
-pub mod pipelines;
-pub mod repositories;
 
 pub const BROKER_CLIENT_NAME: &str = "GITLAB_CONSUMER_CLIENT";
 pub const GITLAB_USER_CONSUMER: &str = "users";
@@ -47,7 +45,7 @@ pub struct GitlabConsumerState {
 #[derive(Clone, Debug)]
 pub struct GitlabConsumerArgs {
     pub registration_id: String,
-    pub graph_config:  neo4rs::Config
+    pub graph_config: neo4rs::Config,
 }
 
 ///
@@ -55,21 +53,23 @@ pub struct GitlabConsumerArgs {
 pub async fn subscribe_to_topic(
     registration_id: String,
     topic: String,
-    config: neo4rs::Config
+    config: neo4rs::Config,
 ) -> Result<GitlabConsumerState, Box<dyn Error>> {
     let client = where_is(BROKER_CLIENT_NAME.to_string()).expect("Expected to find TCP client.");
-        
+
     client.send_message(TcpClientMessage::Send(ClientMessage::SubscribeRequest {
         registration_id: Some(registration_id.clone()),
         topic,
     }))?;
 
     //load neo config and connect to graph db
-    
+
     let graph = neo4rs::Graph::connect(config).await?;
 
-    Ok(GitlabConsumerState { registration_id, graph })
-
+    Ok(GitlabConsumerState {
+        registration_id,
+        graph,
+    })
 }
 
 pub fn get_neo_config() -> Config {
@@ -80,34 +80,32 @@ pub fn get_neo_config() -> Config {
         std::env::var("GRAPH_PASSWORD").expect("No GRAPH_PASSWORD provided for Neo4J.");
     let neo4j_endpoint = std::env::var("GRAPH_ENDPOINT").expect("No GRAPH_ENDPOINT provided.");
     info!("Using Neo4j database at {neo4j_endpoint}");
-    
+
     let config = match std::env::var("GRAPH_CA_CERT") {
         Ok(client_certificate) => {
-
             info!("Found GRAPH_CA_CERT at {client_certificate}. Configuring graph client.");
-            ConfigBuilder::default() 
-            .uri(neo4j_endpoint)
-            .user(neo_user) 
-            .password(neo_password) 
-            .db(database_name)
-            .fetch_size(500)
-            .with_client_certificate(client_certificate)        
-            .max_connections(10)
-            .build().expect("Expected to build neo4rs configuration")
+            ConfigBuilder::default()
+                .uri(neo4j_endpoint)
+                .user(neo_user)
+                .password(neo_password)
+                .db(database_name)
+                .fetch_size(500)
+                .with_client_certificate(client_certificate)
+                .max_connections(10)
+                .build()
+                .expect("Expected to build neo4rs configuration")
         }
-        Err(_) => {
-            ConfigBuilder::default() 
+        Err(_) => ConfigBuilder::default()
             .uri(neo4j_endpoint)
             .user(neo_user)
             .password(neo_password)
             .db(database_name)
             .fetch_size(500)
             .max_connections(10)
-            .build().expect("Expected to build neo4rs configuration")
-        }
-    
+            .build()
+            .expect("Expected to build neo4rs configuration"),
     };
-     
+
     config
 }
 
@@ -115,5 +113,5 @@ pub fn get_neo_config() -> Config {
 pub enum CrashReason {
     CaCertReadError(String), // error when reading CA cert
     SubscriptionError(String), // error when subscribing to the topic
-    // Add other error types as necessary
+                             // Add other error types as necessary
 }

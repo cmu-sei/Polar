@@ -32,7 +32,7 @@ use tracing::{debug, error, info};
 
 use crate::{KubeConsumerArgs, KubeConsumerState, BROKER_CLIENT_NAME};
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 pub fn pods_to_cypher(pods: &[Pod]) -> Vec<String> {
     let mut statements = Vec::new();
@@ -279,7 +279,7 @@ impl Actor for PodConsumer {
                             Err(e) => todo!("{e}"),
                         }
                     }
-                    KubeMessage::ResourceApplied { kind, resource } => {
+                    KubeMessage::ResourceApplied { resource, .. } => {
                         match from_value::<Pod>(resource) {
                             Ok(pod) => {
                                 let queries = pods_to_cypher(&vec![pod]);
@@ -307,8 +307,6 @@ impl Actor for PodConsumer {
                             Ok(pod) => {
                                 //add unique id to podsmut
                                 let uid = pod.metadata.uid.clone().unwrap_or_default();
-
-                                let pod_name = pod.metadata.name.clone().unwrap_or_default();
 
                                 let timestamp = chrono::Utc::now().to_rfc3339();
 

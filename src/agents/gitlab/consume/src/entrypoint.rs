@@ -25,21 +25,20 @@ use cassini::TCPClientConfig;
 use gitlab_consumer::{get_neo_config, supervisor};
 use polar::init_logging;
 use ractor::Actor;
-use std::{env, error::Error};
+use std::error::Error;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     init_logging();
 
     let client_config = TCPClientConfig::new();
-    
 
     let args = supervisor::ConsumerSupervisorArgs {
-        client_config, graph_config: get_neo_config()
+        client_config,
+        graph_config: get_neo_config(),
     };
-    
 
-    let (supervisor, handle) = Actor::spawn(
+    let (_, handle) = Actor::spawn(
         Some("gitlab.supervisor.consumer".to_string()),
         supervisor::ConsumerSupervisor,
         args,

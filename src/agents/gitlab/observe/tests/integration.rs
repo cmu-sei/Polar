@@ -6,19 +6,18 @@ mod tests {
     use gitlab_observer::*;
     use ractor::registry::where_is;
     use ractor::rpc::call;
-    use ractor::Actor;
+    use ractor::{Actor, OutputPort};
     use reqwest::Client;
-    use supervisor::ObserverSupervisor;
     use std::env;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::{error::Error, time::Duration};
+    use std::time::Duration;
     use tokio::sync::Notify;
     use tokio::time::timeout;
 
     //Bind to some other port if desired
     pub const BIND_ADDR: &str = "127.0.0.1:8080";
     // pub const EXPECTED_BROKER: &str = "Expected Broker to start";
-    pub const TEST_SUPERVISOR: &str = "TEST_SUPERVISOR";
+
     pub const TIMEOUT_ERR_MSG: &str = "Server did not start in time";
     /// Shared Notify instance to signal server readiness
     static BROKER_READY: Notify = Notify::const_new();
@@ -47,12 +46,16 @@ mod tests {
 
         tokio::time::sleep(Duration::from_secs(1)).await;
 
+        let output_port = std::sync::Arc::new(OutputPort::default());
+
         //start client
         let _ = Actor::spawn(
             Some(BROKER_CLIENT_NAME.to_string()),
             TcpClientActor,
             TcpClientArgs {
-                config: TCPClientConfig::new(), registration_id: None
+                config: TCPClientConfig::new(),
+                registration_id: None,
+                output_port,
             },
         )
         .await
@@ -76,7 +79,7 @@ mod tests {
 
         let gitlab_endpoint = env::var("GITLAB_ENDPOINT").unwrap();
         let gitlab_token = env::var("GITLAB_TOKEN").unwrap();
-        
+
         let client =
             where_is(BROKER_CLIENT_NAME.to_string()).expect("Expected client to be present");
 
@@ -99,11 +102,11 @@ mod tests {
             token: Some(gitlab_token),
             web_client: Client::new(),
             max_backoff: 30,
-            base_interval: 10
+            base_interval: 10,
         };
 
         //start users observer
-        let (observer, handle) = Actor::spawn(
+        let (observer, _) = Actor::spawn(
             Some(GITLAB_USERS_OBSERVER.to_string()),
             users::GitlabUserObserver,
             args,
