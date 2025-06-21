@@ -1,17 +1,6 @@
-// Now assume you have another Data Agent scraping GitLab. It should collect:
-
-//     Project registry paths (e.g., registry.gitlab.com/my-org/my-app)
-
-//     CI/CD pipeline metadata
-
-//     Known tags/digests
-
-//     Commit SHA metadata, if available
-
-// This allows you to normalize both sides (pod images + GitLab data) into a shared format like:
-pub mod supervisor;
-
+pub mod nodes;
 pub mod pods;
+pub mod supervisor;
 
 use cassini::{client::TcpClientMessage, ClientMessage};
 use ractor::registry::where_is;
@@ -45,7 +34,7 @@ pub enum KubernetesObserverMessage {
 pub struct KubernetesObserverArgs {
     pub namespace: String,
 }
-
+/// Helper function to send a message to the cassini client actor
 pub fn send_to_client(registration_id: String, topic: String, payload: Vec<u8>) {
     let envelope = TcpClientMessage::Send(ClientMessage::PublishRequest {
         topic,
