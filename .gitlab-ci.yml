@@ -61,7 +61,7 @@ build-ci-environment:
     #  Use skopeo to inspect and upload our images
     - skopeo login --username "$CI_REGISTRY_USER" --password "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
     - skopeo inspect docker-archive://$(readlink -f ./polar-ci)
-    - skopeo copy docker-archive://$(readlink -f ./polar-dev) docker://$CI_REGISTRY_IMAGE/polar-ci:0.1.0
+    - skopeo copy docker-archive://$(readlink -f ./polar-ci) docker://$CI_REGISTRY_IMAGE/polar-ci:0.1.0
 
 build-workspace:
   image: registry.sandbox.labz.s-box.org/sei/polar-mirror/polar-ci:0.1.0
