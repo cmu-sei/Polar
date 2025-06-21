@@ -1,7 +1,5 @@
-use kube::api::ObjectList;
 use polar::DispatcherMessage;
 use ractor::{async_trait, registry::where_is, Actor, ActorProcessingErr, ActorRef};
-use rkyv::rancor::Error;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::fmt::Debug;
@@ -75,7 +73,7 @@ impl MessageDispatcher {
     /// We can just discard any message that don't conform to our expectations as bad data.
     /// The incoming topic string will inform us of which actor is responsible for handling the message.
 
-    pub fn deserialize_and_dispatch(message: Vec<u8>, cluster: &str) {
+    pub fn deserialize_and_dispatch(message: Vec<u8>, _: &str) {
         // 1) Parse the raw message into your RawKubeEvent
         let raw_event: RawKubeEvent = match serde_json::from_slice(&message) {
             Ok(ev) => ev,
@@ -153,8 +151,8 @@ impl Actor for MessageDispatcher {
 
     async fn pre_start(
         &self,
-        myself: ActorRef<Self::Msg>,
-        args: (),
+        _myself: ActorRef<Self::Msg>,
+        _args: (),
     ) -> Result<Self::State, ActorProcessingErr> {
         Ok(DispatcherState)
     }

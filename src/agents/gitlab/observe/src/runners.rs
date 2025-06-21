@@ -28,10 +28,11 @@ use common::{types::GitlabData, RUNNERS_CONSUMER_TOPIC};
 use cynic::{GraphQlResponse, QueryBuilder};
 use gitlab_queries::runners::*;
 
-use crate::{get_all_elements, handle_backoff, BackoffReason, Command, GitlabObserverArgs, GitlabObserverMessage, GitlabObserverState, BACKOFF_RECEIVED_LOG};
+use crate::{
+    handle_backoff, BackoffReason, Command, GitlabObserverArgs, GitlabObserverMessage,
+    GitlabObserverState,
+};
 use ractor::{async_trait, registry::where_is, Actor, ActorProcessingErr, ActorRef};
-use reqwest::Client;
-use serde_json::to_string;
 use tracing::{debug, error, info, warn};
 
 use crate::BROKER_CLIENT_NAME;
@@ -39,15 +40,18 @@ use crate::BROKER_CLIENT_NAME;
 pub struct GitlabRunnerObserver;
 
 impl GitlabRunnerObserver {
-
-        /// Helper fn to start a new event loop and update state with a new abort handle for the task.
+    /// Helper fn to start a new event loop and update state with a new abort handle for the task.
     /// This function is needed because ractor agents maintain concurrency internally. Every time we call the send_interval() function, the duration
     /// is copied in and used to create a new loop. So it's more prudent to simply kill and replace that thread than it is to
     /// loop for a dynamic amount of time
-    fn observe(myself: ActorRef<GitlabObserverMessage>, state: &mut GitlabObserverState, duration: Duration) {
+    fn observe(
+        myself: ActorRef<GitlabObserverMessage>,
+        state: &mut GitlabObserverState,
+        duration: Duration,
+    ) {
         info!("Observing every {} seconds", duration.as_secs());
-        let handle = myself.send_interval(duration, 
-            || {
+        let handle = myself
+            .send_interval(duration, || {
                 //build query
                 let op = MultiRunnerQuery::build(MultiRunnerQueryArguments {
                     paused: Some(false),
@@ -60,11 +64,11 @@ impl GitlabRunnerObserver {
                 // pass query in message
                 let command = Command::GetRunners(op);
                 GitlabObserverMessage::Tick(command)
-        }).abort_handle();
+            })
+            .abort_handle();
 
         state.task_handle = Some(handle);
     }
-
 }
 #[async_trait]
 impl Actor for GitlabRunnerObserver {
@@ -80,12 +84,13 @@ impl Actor for GitlabRunnerObserver {
         debug!("{myself:?} starting, connecting to instance");
 
         let state = GitlabObserverState::new(
-            args.gitlab_endpoint, 
-            args.token, 
-            args.web_client, 
-            args.registration_id, 
-            Duration::from_secs(args.base_interval), 
-            Duration::from_secs(args.max_backoff));
+            args.gitlab_endpoint,
+            args.token,
+            args.web_client,
+            args.registration_id,
+            Duration::from_secs(args.base_interval),
+            Duration::from_secs(args.max_backoff),
+        );
         Ok(state)
     }
 
@@ -94,13 +99,11 @@ impl Actor for GitlabRunnerObserver {
         myself: ActorRef<Self::Msg>,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-
         info!("{myself:?} starting...");
 
-        GitlabRunnerObserver::observe(myself, state, state.base_interval); 
-        
-        Ok(())
+        GitlabRunnerObserver::observe(myself, state, state.base_interval);
 
+        Ok(())
     }
     async fn handle(
         &self,
@@ -108,105 +111,112 @@ impl Actor for GitlabRunnerObserver {
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-            match message {
-                GitlabObserverMessage::Tick(command) => {
-                    match command {
-                        Command::GetRunners(op) => {
-                            debug!("Sending query: {:?}", op.query);
-            
-                            match state
-                                .web_client
-                                .post(state.gitlab_endpoint.clone())
-                                .bearer_auth(state.token.clone().unwrap_or_default())
-                                .json(&op)
-                                .send()
-                                .await
-                            {
-                                Ok(response) => {
-                                    match response.json::<GraphQlResponse<MultiRunnerQuery>>().await {
-                                        Ok(deserialized) => {
-                                            if let Some(errors) = deserialized.errors {
-                                                let errors = errors
-                                                .iter()
-                                                .map(|error| { error.to_string() })
-                                                .collect::<Vec<_>>()
-                                                .join("\n");
-                        
-                                                if let Err(e) = myself.send_message(GitlabObserverMessage::Backoff(BackoffReason::GraphqlError(errors))) {        
-                                                    error!("{e}");
-                                                    myself.stop(Some(e.to_string()))
-                                                }
-                                            }
-                                            else if let Some(query) = deserialized.data {
-                                                if let Some(connection) = query.runners {
-                                                    let mut read_runners = Vec::new();
-                
-                                                    if let Some(runners) = connection.nodes {
-                                                        for option in runners {
-                                                            if let Some(runner) = option {
-                                                                read_runners.push(runner);
-                                                            }
-                                                        }
-                                                    }
-                
-                                                    info!("Observed {0} runner(s)", read_runners.len());
-                
-                                                    let client = where_is(BROKER_CLIENT_NAME.to_string())
-                                                        .expect("Expected to find tcp client!");
-                
-                                                    let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(
-                                                        &GitlabData::Runners(read_runners),
-                                                    )
-                                                    .unwrap();
-                
-                                                    let msg = ClientMessage::PublishRequest {
-                                                        topic: RUNNERS_CONSUMER_TOPIC.to_string(),
-                                                        payload: bytes.to_vec(),
-                                                        registration_id: Some(state.registration_id.clone()),
-                                                    };
-                                                    client
-                                                        .send_message(TcpClientMessage::Send(msg))
-                                                        .expect("Expected to send message to tcp client!");
-                                                }
-                                            }
+        match message {
+            GitlabObserverMessage::Tick(command) => match command {
+                Command::GetRunners(op) => {
+                    debug!("Sending query: {:?}", op.query);
+
+                    match state
+                        .web_client
+                        .post(state.gitlab_endpoint.clone())
+                        .bearer_auth(state.token.clone().unwrap_or_default())
+                        .json(&op)
+                        .send()
+                        .await
+                    {
+                        Ok(response) => {
+                            match response.json::<GraphQlResponse<MultiRunnerQuery>>().await {
+                                Ok(deserialized) => {
+                                    if let Some(errors) = deserialized.errors {
+                                        let errors = errors
+                                            .iter()
+                                            .map(|error| error.to_string())
+                                            .collect::<Vec<_>>()
+                                            .join("\n");
+
+                                        if let Err(e) =
+                                            myself.send_message(GitlabObserverMessage::Backoff(
+                                                BackoffReason::GraphqlError(errors),
+                                            ))
+                                        {
+                                            error!("{e}");
+                                            myself.stop(Some(e.to_string()))
                                         }
-                                        Err(e) => {
-                                            error!("Failed to deserialize query {e}");
-                                            if let Err(e) = myself.send_message(GitlabObserverMessage::Backoff(BackoffReason::FatalError(e.to_string()))) {        
-                                                error!("{e}");
-                                                myself.stop(Some(e.to_string()))
+                                    } else if let Some(query) = deserialized.data {
+                                        if let Some(connection) = query.runners {
+                                            let mut read_runners = Vec::new();
+
+                                            if let Some(runners) = connection.nodes {
+                                                for option in runners {
+                                                    if let Some(runner) = option {
+                                                        read_runners.push(runner);
+                                                    }
+                                                }
                                             }
+
+                                            info!("Observed {0} runner(s)", read_runners.len());
+
+                                            let client = where_is(BROKER_CLIENT_NAME.to_string())
+                                                .expect("Expected to find tcp client!");
+
+                                            let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(
+                                                &GitlabData::Runners(read_runners),
+                                            )
+                                            .unwrap();
+
+                                            let msg = ClientMessage::PublishRequest {
+                                                topic: RUNNERS_CONSUMER_TOPIC.to_string(),
+                                                payload: bytes.to_vec(),
+                                                registration_id: Some(
+                                                    state.registration_id.clone(),
+                                                ),
+                                            };
+                                            client
+                                                .send_message(TcpClientMessage::Send(msg))
+                                                .expect("Expected to send message to tcp client!");
                                         }
                                     }
-                                        
                                 }
                                 Err(e) => {
-                                    warn!("Error observing data: {e}");
-                                    if let Err(e) = myself.send_message(GitlabObserverMessage::Backoff(BackoffReason::GitlabUnreachable(e.to_string()))) {        
+                                    error!("Failed to deserialize query {e}");
+                                    if let Err(e) =
+                                        myself.send_message(GitlabObserverMessage::Backoff(
+                                            BackoffReason::FatalError(e.to_string()),
+                                        ))
+                                    {
                                         error!("{e}");
                                         myself.stop(Some(e.to_string()))
-                                    } 
-
+                                    }
                                 }
                             }
                         }
-                        _ => (),
+                        Err(e) => {
+                            warn!("Error observing data: {e}");
+                            if let Err(e) = myself.send_message(GitlabObserverMessage::Backoff(
+                                BackoffReason::GitlabUnreachable(e.to_string()),
+                            )) {
+                                error!("{e}");
+                                myself.stop(Some(e.to_string()))
+                            }
+                        }
                     }
                 }
-                GitlabObserverMessage::Backoff(reason) => {
-                    // cancel old event loop and start a new one with updated state, if observer hasn't stopped
-                    if let Some(handle) = &state.task_handle {
-                        handle.abort();
-                        // start new loop
-                        match handle_backoff(state, reason) {
-                            Ok(duration) => {
-                                GitlabRunnerObserver::observe(myself, state, duration);
-                            }
-                            Err(e) => myself.stop(Some(e.to_string()))
-                        }   
+                _ => (),
+            },
+            GitlabObserverMessage::Backoff(reason) => {
+                // cancel old event loop and start a new one with updated state, if observer hasn't stopped
+                if let Some(handle) = &state.task_handle {
+                    handle.abort();
+                    // start new loop
+                    match handle_backoff(state, reason) {
+                        Ok(duration) => {
+                            GitlabRunnerObserver::observe(myself, state, duration);
+                        }
+                        Err(e) => myself.stop(Some(e.to_string())),
                     }
                 }
             }
+        }
 
         Ok(())
     }

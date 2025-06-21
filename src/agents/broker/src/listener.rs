@@ -10,7 +10,7 @@ use rustls::{
 use std::sync::Arc;
 use tokio::{
     io::{split, AsyncReadExt, AsyncWriteExt, BufWriter, ReadHalf, WriteHalf},
-    net::{unix::SocketAddr, TcpListener, TcpStream},
+    net::{TcpListener, TcpStream},
     sync::Mutex,
 };
 use tokio_rustls::{server::TlsStream, TlsAcceptor};
@@ -272,7 +272,7 @@ impl Listener {
         writer: Arc<Mutex<BufWriter<WriteHalf<TlsStream<TcpStream>>>>>,
     ) -> Result<(), Error> {
         match rkyv::to_bytes::<Error>(&message) {
-            Ok(mut bytes) => {
+            Ok(bytes) => {
                 //create new buffer
                 let mut buffer = Vec::new();
 
@@ -345,22 +345,26 @@ impl Actor for Listener {
                     let mut buffer = vec![0; incoming_msg_length as usize];
                     if let Ok(_) = buf_reader.read_exact(&mut buffer).await {
                         // use unsafe API for maximum performance
-                        match rkyv::access::<ArchivedClientMessage, Error>(&buffer[..]) { 
-                            Ok(archived) =>  {
+                        match rkyv::access::<ArchivedClientMessage, Error>(&buffer[..]) {
+                            Ok(archived) => {
                                 // deserialize back to the original type
-                                if let Ok(deserialized) = deserialize::<ClientMessage, Error>(archived) {
+                                if let Ok(deserialized) =
+                                    deserialize::<ClientMessage, Error>(archived)
+                                {
                                     //convert datatype to broker_meessage, fields will be populated during message handling
-                                    let converted_msg =
-                                        BrokerMessage::from_client_message(deserialized, id.clone(), None);
-                                    
+                                    let converted_msg = BrokerMessage::from_client_message(
+                                        deserialized,
+                                        id.clone(),
+                                        None,
+                                    );
+
                                     myself
                                         .send_message(converted_msg)
                                         .expect("Could not forward message to handler");
                                 }
                             }
-                            Err(e) => warn!("Failed to parse message: {e}")
+                            Err(e) => warn!("Failed to parse message: {e}"),
                         }
-
                     }
                 }
             }

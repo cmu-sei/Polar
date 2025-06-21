@@ -159,7 +159,9 @@ impl Actor for SubscriberManager {
                                         .expect("expected to send ack to session");
                                 },
                             );
-                        } else { warn!("Session agent {id} not subscribed to topic {topic}"); }
+                        } else {
+                            warn!("Session agent {id} not subscribed to topic {topic}");
+                        }
                     }
                     None => todo!(),
                 }
@@ -338,7 +340,7 @@ impl Actor for SubscriberAgent {
                     .expect("Expected to forward message to subscriber")
                     {
                         CallResult::Success(result) => {
-                            if let Err(e) = result {
+                            if let Err(_e) = result {
                                 //session couldn't talk to listener, add message to DLQ
                                 state.dead_letter_queue.push_back(payload.clone());
                                 debug!(

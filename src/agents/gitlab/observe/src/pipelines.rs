@@ -21,24 +21,20 @@
    DM24-0470
 */
 
-use core::error;
-use std::time::Duration;
-
 use crate::{
     BackoffReason, Command, GitlabObserverArgs, GitlabObserverMessage, GitlabObserverState,
     BROKER_CLIENT_NAME, GITLAB_PROJECT_OBSERVER,
 };
 use cassini::client::TcpClientMessage;
 use cassini::ClientMessage;
+use common::types::GitlabData;
 use common::PIPELINE_CONSUMER_TOPIC;
 use cynic::GraphQlResponse;
+use cynic::QueryBuilder;
 use gitlab_queries::projects::*;
 use ractor::{async_trait, registry::where_is, Actor, ActorProcessingErr, ActorRef};
-
-use common::types::{GitlabData, ResourceLink};
-use cynic::QueryBuilder;
 use rkyv::rancor::Error;
-use tokio::time;
+use std::time::Duration;
 use tracing::{debug, error, info, warn};
 
 pub struct GitlabPipelineObserver;
@@ -71,7 +67,7 @@ impl Actor for GitlabPipelineObserver {
     async fn post_start(
         &self,
         myself: ActorRef<Self::Msg>,
-        state: &mut Self::State,
+        _state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         info!("{myself:?} Started");
         Ok(())
@@ -228,7 +224,7 @@ impl Actor for GitlabJobObserver {
     async fn post_start(
         &self,
         myself: ActorRef<Self::Msg>,
-        state: &mut Self::State,
+        _state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         info!("{myself:?} Started");
         Ok(())

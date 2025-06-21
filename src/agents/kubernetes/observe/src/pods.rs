@@ -167,7 +167,7 @@ impl Actor for PodObserver {
 
     async fn pre_start(
         &self,
-        myself: ActorRef<Self::Msg>,
+        _myself: ActorRef<Self::Msg>,
         args: PodObserverArgs,
     ) -> Result<Self::State, ActorProcessingErr> {
         let state = PodObserverState {

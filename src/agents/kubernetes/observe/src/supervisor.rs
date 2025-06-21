@@ -1,20 +1,15 @@
-use cassini::client::{TcpClientActor, TcpClientArgs, TcpClientMessage};
+use cassini::client::{TcpClientActor, TcpClientArgs};
 use cassini::TCPClientConfig;
 use k8s_openapi::api::core::v1::Namespace;
 use kube::Config;
 use kube::{api::ListParams, Api, Client};
-
-use ractor::{
-    async_trait,
-    rpc::{call, CallResult},
-    Actor, ActorProcessingErr, ActorRef, SupervisionEvent,
-};
-use std::time::Duration;
+use ractor::OutputPort;
+use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef, SupervisionEvent};
 use tracing::{debug, error, info, warn};
 
 use crate::{
     pods::{PodObserver, PodObserverArgs},
-    KubernetesObserverMessage, TCP_CLIENT_NAME,
+    TCP_CLIENT_NAME,
 };
 use kube_common::KUBERNETES_OBSERVER;
 
@@ -24,100 +19,46 @@ pub struct ClusterObserverSupervisorArgs {
     pub cassini_client_config: TCPClientConfig,
 }
 
-pub struct ClusterObserverSupervisorState;
+pub struct ClusterObserverSupervisorState {
+    kube_client: kube::Client,
+}
+
+pub enum SupervisorMessage {
+    ClientRegistered(String),
+}
 
 impl ClusterObserverSupervisor {
     pub async fn init(
         kube_config: Config,
         args: ClusterObserverSupervisorArgs,
-        myself: ActorRef<KubernetesObserverMessage>,
+        myself: ActorRef<SupervisorMessage>,
     ) -> Result<ClusterObserverSupervisorState, ActorProcessingErr> {
         // try to create a client and auth with the kube api
         match Client::try_from(kube_config) {
             Ok(kube_client) => {
                 debug!("Kubernetes client initialized");
 
-                let client_started_result = Actor::spawn_linked(
+                let output_port = std::sync::Arc::new(OutputPort::default());
+
+                output_port.subscribe(myself.clone(), |message| {
+                    Some(SupervisorMessage::ClientRegistered(message))
+                });
+
+                match Actor::spawn_linked(
                     Some(TCP_CLIENT_NAME.to_string()),
                     TcpClientActor,
                     TcpClientArgs {
                         config: args.cassini_client_config,
                         registration_id: None,
+                        output_port,
                     },
-                    myself.clone().into(),
+                    myself.into(),
                 )
-                .await;
-
-                match client_started_result {
-                    Ok((client, _)) => {
-                        // Set up an interval
-                        let mut interval = tokio::time::interval(Duration::from_millis(1000));
-                        //wait until we get a session id to start clients, try some configured amount of times every few seconds
-                        let mut attempts = 0;
-
-                        loop {
-                            attempts += 1;
-                            info!("Getting session data...");
-                            if let CallResult::Success(result) = call(
-                                &client,
-                                |reply| TcpClientMessage::GetRegistrationId(reply),
-                                None,
-                            )
-                            .await
-                            .expect("Expected to call client!")
-                            {
-                                // if we successfully register with the broker,
-                                // discover available namespaces and start actors to observer them
-                                if let Some(registration_id) = result {
-                                    match ClusterObserverSupervisor::discover_namespaces(
-                                        kube_client.clone(),
-                                    )
-                                    .await
-                                    {
-                                        Ok(namespaces) => {
-                                            //start actors
-                                            for ns in namespaces {
-                                                let args = PodObserverArgs {
-                                                    registration_id: registration_id.clone(),
-                                                    kube_client: kube_client.clone(),
-                                                    namespace: ns.clone(),
-                                                };
-
-                                                if let Err(e) = Actor::spawn_linked(
-                                                    Some(format!("{KUBERNETES_OBSERVER}.{ns}")),
-                                                    PodObserver,
-                                                    args,
-                                                    myself.get_cell().clone(),
-                                                )
-                                                .await
-                                                {
-                                                    error!("{e}")
-                                                }
-                                            }
-                                        }
-                                        Err(e) => return Err(ActorProcessingErr::from(e)),
-                                    }
-
-                                    break;
-                                } else if attempts < 5 {
-                                    warn!("Failed to get session data. Retrying.");
-                                } else if attempts >= 5 {
-                                    error!("Failed to retrieve session data! timed out");
-                                    myself.stop(Some(
-                                        "Failed to retrieve session data! timed out".to_string(),
-                                    ));
-                                }
-                            }
-                            interval.tick().await;
-                        }
-                    }
-                    Err(e) => {
-                        error!("Failed to start tcp client {e}");
-                        myself.stop(None);
-                    }
+                .await
+                {
+                    Ok(_) => Ok(ClusterObserverSupervisorState { kube_client }),
+                    Err(e) => Err(ActorProcessingErr::from(e)),
                 }
-
-                Ok(ClusterObserverSupervisorState)
             }
             Err(e) => Err(ActorProcessingErr::from(e)),
         }
@@ -149,7 +90,7 @@ impl ClusterObserverSupervisor {
 
 #[async_trait]
 impl Actor for ClusterObserverSupervisor {
-    type Msg = KubernetesObserverMessage;
+    type Msg = SupervisorMessage;
     type State = ClusterObserverSupervisorState;
     type Arguments = ClusterObserverSupervisorArgs;
 
@@ -180,14 +121,6 @@ impl Actor for ClusterObserverSupervisor {
             ))
         }
     }
-
-    // async fn post_start(
-    //     &self,
-    //     myself: ActorRef<Self::Msg>,
-    //     state: &mut Self::State,
-    // ) -> Result<(), ActorProcessingErr> {
-    //     Ok(())
-    // }
 
     async fn handle_supervisor_evt(
         &self,
@@ -223,6 +156,36 @@ impl Actor for ClusterObserverSupervisor {
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
+        match message {
+            SupervisorMessage::ClientRegistered(registration_id) => {
+                match ClusterObserverSupervisor::discover_namespaces(state.kube_client.clone())
+                    .await
+                {
+                    Ok(namespaces) => {
+                        //start actors
+                        for ns in namespaces {
+                            let args = PodObserverArgs {
+                                registration_id: registration_id.clone(),
+                                kube_client: state.kube_client.clone(),
+                                namespace: ns.clone(),
+                            };
+
+                            if let Err(e) = Actor::spawn_linked(
+                                Some(format!("{KUBERNETES_OBSERVER}.{ns}")),
+                                PodObserver,
+                                args,
+                                myself.get_cell().clone(),
+                            )
+                            .await
+                            {
+                                error!("{e}")
+                            }
+                        }
+                    }
+                    Err(e) => return Err(ActorProcessingErr::from(e)),
+                }
+            }
+        }
         Ok(())
     }
 }

@@ -1,7 +1,5 @@
 use crate::UNEXPECTED_MESSAGE_STR;
-use crate::{
-    get_subscriber_name, BrokerMessage, PUBLISH_REQ_FAILED_TXT, SUBSCRIBE_REQUEST_FAILED_TXT,
-};
+use crate::{get_subscriber_name, BrokerMessage, PUBLISH_REQ_FAILED_TXT};
 use ractor::registry::where_is;
 use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef};
 use std::collections::{HashMap, VecDeque};

@@ -1,23 +1,17 @@
-use std::fmt;
-
-use cynic::*;
 use gitlab_schema::gitlab::{self as schema};
-use gitlab_schema::DateTimeString;
 use gitlab_schema::IdString;
 use projects::AccessLevelEnum;
-use rkyv::Archive;
 use rkyv::Deserialize;
 use rkyv::Serialize;
 
-pub mod users;
 pub mod groups;
 pub mod projects;
 pub mod runners;
+pub mod users;
 
 // #[derive(cynic::Scalar,serde::Deserialize, Clone, Debug)]
 // #[cynic(schema = "gitlab", graphql_type = "UserID")]
 // pub struct UserID(Id);
-
 
 #[derive(cynic::QueryFragment, Debug, Clone, Deserialize, Serialize, rkyv::Archive)]
 #[cynic(schema = "gitlab")]
@@ -37,11 +31,9 @@ pub struct PageInfo {
     pub start_cursor: Option<String>,
 }
 
-
 #[derive(cynic::QueryFragment, Deserialize, Serialize, rkyv::Archive, Clone)]
 #[cynic(schema = "gitlab")]
 pub struct AccessLevel {
     pub integer_value: Option<i32>,
     pub string_value: Option<AccessLevelEnum>,
 }
-

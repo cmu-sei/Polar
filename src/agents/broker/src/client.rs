@@ -1,7 +1,7 @@
 use crate::{ArchivedClientMessage, ClientMessage, TCPClientConfig};
 use polar::DispatcherMessage;
 use ractor::registry::where_is;
-use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef, RpcReplyPort};
+use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef, OutputPort, RpcReplyPort};
 use rkyv::deserialize;
 use rkyv::rancor::Error;
 use rustls::client::WebPkiServerVerifier;
@@ -21,7 +21,12 @@ pub enum TcpClientMessage {
     Send(ClientMessage),
     RegistrationResponse(String),
     ErrorMessage(String),
+    /// Returns the registration id when queried, unlikely to be useful
+    /// unless some other agent dies before the client does and needs to get it back
     GetRegistrationId(RpcReplyPort<Option<String>>),
+    /// Message that gets emitted when the client successfully registers with the broker.
+    /// It should contain a valid registration uid
+    ClientRegistered(String),
 }
 
 /// Actor state for the TCP client
@@ -32,12 +37,13 @@ pub struct TcpClientState {
     reader: Option<ReadHalf<TlsStream<TcpStream>>>, // Use Option to allow taking ownership
     registration_id: Option<String>,
     client_config: Arc<ClientConfig>,
-    
+    output_port: Arc<OutputPort<String>>,
 }
 
 pub struct TcpClientArgs {
     pub config: TCPClientConfig,
     pub registration_id: Option<String>,
+    pub output_port: Arc<OutputPort<String>>,
 }
 
 /// TCP client actor
@@ -63,17 +69,21 @@ impl Actor for TcpClientActor {
 
         let mut root_cert_store = rustls::RootCertStore::empty();
         let _ = root_cert_store.add(
-            CertificateDer::from_pem_file(args.config.ca_certificate_path.clone()).expect(&format!(
-                "Expected to read CA cert as a PEM file from {}",
-                args.config.ca_certificate_path
-            )),
+            CertificateDer::from_pem_file(args.config.ca_certificate_path.clone()).expect(
+                &format!(
+                    "Expected to read CA cert as a PEM file from {}",
+                    args.config.ca_certificate_path
+                ),
+            ),
         );
 
-        let client_cert =
-            CertificateDer::from_pem_file(args.config.client_certificate_path.clone()).expect(&format!(
-                "Expected to read client cert as a PEM file from {}",
-                args.config.client_certificate_path
-            ));
+        let client_cert = CertificateDer::from_pem_file(
+            args.config.client_certificate_path.clone(),
+        )
+        .expect(&format!(
+            "Expected to read client cert as a PEM file from {}",
+            args.config.client_certificate_path
+        ));
         let private_key =
             PrivateKeyDer::from_pem_file(args.config.client_key_path.clone()).expect(&format!(
                 "Expected to read client key as a PEM file from {}",
@@ -84,7 +94,7 @@ impl Actor for TcpClientActor {
             .expect("Expected to build client verifier");
         let mut certs = Vec::new();
         certs.push(client_cert);
-        
+
         let config = rustls::ClientConfig::builder()
             .with_webpki_verifier(verifier)
             .with_client_auth_cert(certs, private_key)
@@ -97,11 +107,12 @@ impl Actor for TcpClientActor {
             writer: None,
             registration_id: args.registration_id,
             client_config: Arc::new(config),
+            output_port: args.output_port,
         };
 
         Ok(state)
     }
-     async fn post_start(
+    async fn post_start(
         &self,
         myself: ActorRef<Self::Msg>,
         state: &mut Self::State,
@@ -112,8 +123,8 @@ impl Actor for TcpClientActor {
 
         match TcpStream::connect(&addr).await {
             Ok(tcp_stream) => {
-                
-                let domain = ServerName::try_from(state.server_name.clone()).expect("invalid DNS name");
+                let domain =
+                    ServerName::try_from(state.server_name.clone()).expect("invalid DNS name");
 
                 match connector.connect(domain, tcp_stream).await {
                     Ok(tls_stream) => {
@@ -157,9 +168,12 @@ impl Actor for TcpClientActor {
                                                 } => {
                                                     if success {
                                                         info!("Successfully began session with id: {registration_id}");
+                                                        //emit registration event for consumers
                                                         cloned_self.send_message(TcpClientMessage::RegistrationResponse(registration_id)).expect("Could not forward message to {myself:?");
                                                     } else {
                                                         warn!("Failed to register session with the server. {error:?}");
+                                                        //TODO: We practically never fail to register unless there's some sort of connection error.
+                                                        // Should this change, how do we want to react?
                                                     }
                                                 }
                                                 ClientMessage::PublishResponse {
@@ -227,9 +241,9 @@ impl Actor for TcpClientActor {
                 }
             }
             Err(e) => {
-                // Given that the gitlab consumer recently got an upgrade using an exponential backoff, 
-                // perhaps it's time the client actor got one too? 
-                // It's not the end of the world if cassini goes down is it? 
+                // Given that the gitlab consumer recently got an upgrade using an exponential backoff,
+                // perhaps it's time the client actor got one too?
+                // It's not the end of the world if cassini goes down is it?
                 // if it does, it drops messages, but that doesn't mean we have to give up on the client end.
                 error!("Failed to connect to server: {e}");
                 myself.stop(Some("Failed to connect to server: {e}".to_string()));
@@ -266,7 +280,7 @@ impl Actor for TcpClientActor {
         match message {
             TcpClientMessage::Send(broker_msg) => {
                 match rkyv::to_bytes::<Error>(&broker_msg) {
-                    Ok(mut bytes) => {
+                    Ok(bytes) => {
                         //create new buffer
                         let mut buffer = Vec::new();
 
@@ -297,7 +311,9 @@ impl Actor for TcpClientActor {
                 }
             }
             TcpClientMessage::RegistrationResponse(registration_id) => {
-                state.registration_id = Some(registration_id)
+                state.registration_id = Some(registration_id.clone());
+                // emit event
+                state.output_port.send(registration_id);
             }
             TcpClientMessage::GetRegistrationId(reply) => {
                 if let Some(registration_id) = &state.registration_id {

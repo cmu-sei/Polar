@@ -21,15 +21,12 @@ This Software includes and/or makes use of Third-Party Software each subject to 
 DM24-0470
 */
 
-
 use std::process;
 use std::{
-    env,
     fs::{self, File},
     io::{Read, Write},
 };
 use sysinfo::{Pid, ProcessRefreshKind, System, SystemExt};
-use tracing::{error, info};
 pub mod dispatch;
 pub mod types;
 
@@ -37,7 +34,7 @@ pub const PROJECTS_CONSUMER_TOPIC: &str = "gitlab:consumer:projects";
 pub const GROUPS_CONSUMER_TOPIC: &str = "gitlab:consumer:groups";
 pub const USER_CONSUMER_TOPIC: &str = "gitlab:consumer:users";
 pub const RUNNERS_CONSUMER_TOPIC: &str = "gitlab:consumer:runners";
-pub const PIPELINE_CONSUMER_TOPIC: &str = "gitlab:consumer:pipelines"; 
+pub const PIPELINE_CONSUMER_TOPIC: &str = "gitlab:consumer:pipelines";
 pub const REPOSITORY_CONSUMER_TOPIC: &str = "gitlab:consumer:repositories";
 
 // Checks for the existence of a lock file at the given path. Creates lock file if not found.

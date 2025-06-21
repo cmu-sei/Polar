@@ -1,6 +1,6 @@
 use crate::UNEXPECTED_MESSAGE_STR;
 use crate::{
-    listener, BrokerMessage, BROKER_NOT_FOUND_TXT, CLIENT_NOT_FOUND_TXT, PUBLISH_REQ_FAILED_TXT,
+    BrokerMessage, BROKER_NOT_FOUND_TXT, CLIENT_NOT_FOUND_TXT, PUBLISH_REQ_FAILED_TXT,
     REGISTRATION_REQ_FAILED_TXT, SUBSCRIBE_REQUEST_FAILED_TXT, TIMEOUT_REASON,
 };
 use ractor::{
@@ -135,9 +135,7 @@ impl Actor for SessionManager {
                 }
             }
             BrokerMessage::RegistrationResponse {
-                registration_id,
-                client_id,
-                ..
+                registration_id, ..
             } => {
                 //A client has (re)registered. Cancel timeout thread
 
@@ -225,7 +223,9 @@ impl Actor for SessionManager {
                     }
                 }
             }
-            _ => { warn!("Received unexpected message: {message:?}") }
+            _ => {
+                warn!("Received unexpected message: {message:?}")
+            }
         }
         Ok(())
     }
@@ -277,7 +277,7 @@ impl Actor for SessionAgent {
 
     async fn pre_start(
         &self,
-        myself: ActorRef<Self::Msg>,
+        _myself: ActorRef<Self::Msg>,
         args: SessionAgentArgs,
     ) -> Result<Self::State, ActorProcessingErr> {
         //parse args. if any
@@ -396,7 +396,7 @@ impl Actor for SessionAgent {
                 payload,
             } => {
                 //forward to broker
-                if let Err(e) = state.broker.send_message(BrokerMessage::PublishRequest {
+                if let Err(_e) = state.broker.send_message(BrokerMessage::PublishRequest {
                     registration_id: registration_id.clone(),
                     topic: topic.clone(),
                     payload: payload.clone(),
