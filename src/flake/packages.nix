@@ -143,7 +143,7 @@ in
       bash # Basic bash to run bare essential code
       glibcLocalesUtf8
       uutils-coreutils-noprefix # Essential GNU utilities (ls, cat, etc.)
-
+      curl
       gnugrep # GNU version of grep for searching text
       gnused # GNU version of sed for text processing
       gnutar # GNU version of tar for archiving
