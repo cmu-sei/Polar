@@ -278,6 +278,7 @@ let
         gitconfig
         license
         nixConfig
+        containerPolicyConfig
       ];
       config = {
         WorkingDir = "/workspace";

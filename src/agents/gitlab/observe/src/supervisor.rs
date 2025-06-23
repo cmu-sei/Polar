@@ -34,6 +34,7 @@ pub struct ObserverSupervisor;
 pub struct ObserverSupervisorState {
     pub gitlab_endpoint: String,
     pub gitlab_token: Option<String>,
+    /// base interval that observers will use to query
     pub base_interval: u64,
     pub max_backoff_secs: u64,
     pub proxy_ca_cert_file: Option<String>,
@@ -96,7 +97,6 @@ impl Actor for ObserverSupervisor {
         let output_port = std::sync::Arc::new(OutputPort::default());
 
         // subscribe self to this port
-        // TODO: Does this make sense? the supervisor is the only one that cares, whether registration is successful after all
         output_port.subscribe(myself.clone(), |message| {
             Some(SupervisorMessage::ClientRegistered(message))
         });
