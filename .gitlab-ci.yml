@@ -109,12 +109,11 @@ build-workspace:
     - ls -lh
     # Use skopeo to inspect and upload our images
     - skopeo login --username "$CI_REGISTRY_USER" --password "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
-    - |
-      skopeo copy docker-archive://$(readlink -f cassini) docker://$CI_REGISTRY_IMAGE/cassini:$CI_COMMIT_SHORT_SHA
-      skopeo copy docker-archive://$(readlink -f gitlab-observer) docker://$CI_REGISTRY_IMAGE/polar-gitlab-observer:$CI_COMMIT_SHORT_SHA
-      skopeo copy docker-archive://$(readlink -f gitlab-consumer) docker://$CI_REGISTRY_IMAGE/polar-gitlab-consumer:$CI_COMMIT_SHORT_SHA
-      skopeo copy docker-archive://$(readlink -f kube-observer) docker://$CI_REGISTRY_IMAGE/polar-kube-observer:$CI_COMMIT_SHORT_SHA
-      skopeo copy docker-archive://$(readlink -f kube-consumer) docker://$CI_REGISTRY_IMAGE/polar-kube-consumer:$CI_COMMIT_SHORT_SHA
+    - skopeo copy docker-archive://$(readlink -f cassini) docker://$CI_REGISTRY_IMAGE/cassini:$CI_COMMIT_SHORT_SHA
+    - skopeo copy docker-archive://$(readlink -f gitlab-observer) docker://$CI_REGISTRY_IMAGE/polar-gitlab-observer:$CI_COMMIT_SHORT_SHA
+    - skopeo copy docker-archive://$(readlink -f gitlab-consumer) docker://$CI_REGISTRY_IMAGE/polar-gitlab-consumer:$CI_COMMIT_SHORT_SHA
+    - skopeo copy docker-archive://$(readlink -f kube-observer) docker://$CI_REGISTRY_IMAGE/polar-kube-observer:$CI_COMMIT_SHORT_SHA
+    - skopeo copy docker-archive://$(readlink -f kube-consumer) docker://$CI_REGISTRY_IMAGE/polar-kube-consumer:$CI_COMMIT_SHORT_SHA
 
     # upload to ACR
     - skopeo copy --dest-creds "$ACR_USERNAME:$ACR_TOKEN" docker-archive://$(readlink -f cassini) docker://$AZURE_REGISTRY/cassini:$CI_COMMIT_SHORT_SHA
