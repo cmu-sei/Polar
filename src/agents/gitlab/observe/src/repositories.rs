@@ -22,7 +22,8 @@
 */
 
 use crate::{
-    Command, GitlabObserverArgs, GitlabObserverMessage, GitlabObserverState, BROKER_CLIENT_NAME,
+    graphql_endpoint, Command, GitlabObserverArgs, GitlabObserverMessage, GitlabObserverState,
+    BROKER_CLIENT_NAME,
 };
 use cassini::{client::TcpClientMessage, ClientMessage};
 use common::types::GitlabData;
@@ -125,7 +126,7 @@ impl Actor for GitlabRepositoryObserver {
         args: GitlabObserverArgs,
     ) -> Result<Self::State, ActorProcessingErr> {
         let state = GitlabObserverState::new(
-            args.gitlab_endpoint,
+            graphql_endpoint(&args.gitlab_endpoint),
             args.token,
             args.web_client,
             args.registration_id,

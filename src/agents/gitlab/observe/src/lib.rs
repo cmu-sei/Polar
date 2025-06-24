@@ -20,8 +20,8 @@
 
    DM24-0470
 */
-
 pub mod groups;
+pub mod meta;
 pub mod pipelines;
 pub mod projects;
 pub mod repositories;
@@ -29,7 +29,7 @@ pub mod runners;
 pub mod supervisor;
 pub mod users;
 
-use cynic::Operation;
+use cynic::{GraphQlError, Operation};
 use gitlab_queries::groups::*;
 use gitlab_queries::projects::{MultiProjectQuery, MultiProjectQueryArguments};
 use gitlab_queries::runners::MultiRunnerQuery;
@@ -38,6 +38,7 @@ use gitlab_queries::users::{MultiUserQuery, MultiUserQueryArguments};
 use gitlab_schema::IdString;
 use parse_link_header::parse_with_rel;
 use ractor::concurrency::Duration;
+use ractor::ActorRef;
 use rand::rngs::SmallRng;
 use rand::Rng;
 use rand::SeedableRng;
@@ -162,6 +163,7 @@ pub enum Command {
     GetProjectPackages(IdString),
     GetGroupContainerRepositories(IdString),
     GetGroupPackageRepositories(IdString),
+    GetMetadata,
 }
 pub enum BackoffReason {
     FatalError(String),
@@ -174,6 +176,25 @@ pub enum GitlabObserverMessage {
     Backoff(BackoffReason),
 }
 
+pub fn handle_graphql_errors(
+    errors: Vec<GraphQlError>,
+    actor_ref: ActorRef<GitlabObserverMessage>,
+) {
+    let errors = errors
+        .iter()
+        .map(|error| error.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    error!("Failed to query instance! {errors}");
+
+    if let Err(e) = actor_ref.send_message(GitlabObserverMessage::Backoff(
+        BackoffReason::GraphqlError(errors),
+    )) {
+        error!("{e}");
+        actor_ref.stop(Some(e.to_string()))
+    }
+}
 /// helper function for our observers to respond to backoff messages
 /// either returns a new duration, or an error containing the reason it shouldn't
 pub fn handle_backoff(
@@ -325,4 +346,11 @@ pub async fn get_all_elements<T: for<'a> Deserialize<'a>>(
     }
 
     return Some(elements);
+}
+
+pub fn graphql_endpoint(gitlab_endpoint: &str) -> String {
+    format!("{gitlab_endpoint}/graphql")
+}
+pub fn v4_api_endpoint(gitlab_endpoint: &str) -> String {
+    format!("{gitlab_endpoint}/v4")
 }

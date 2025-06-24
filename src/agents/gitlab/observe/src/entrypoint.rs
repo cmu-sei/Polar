@@ -35,7 +35,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let client_config = TCPClientConfig::new();
 
-    let gitlab_endpoint = env::var("GITLAB_ENDPOINT").expect("Expected to find a value for GITLAB_ENDPOINT. Please provide a valid endpoint to a gitlab graphql endpoint.");
+    let gitlab_endpoint = url::Url::parse(
+        env::var("GITLAB_ENDPOINT")
+            .expect("Expected to find a value for GITLAB_ENDPOINT. Please provide a valid URL.")
+            .as_str(),
+    )
+    .expect("Expected a valid URL.");
+
     let gitlab_token =
         env::var("GITLAB_TOKEN").expect("Expected to find a value for GITLAB_TOKEN.");
     // Helpful for looking at services behind a proxy
@@ -46,7 +52,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let args = supervisor::ObserverSupervisorArgs {
         client_config,
-        gitlab_endpoint,
+        gitlab_endpoint: gitlab_endpoint.to_string(),
         gitlab_token: Some(gitlab_token),
         proxy_ca_cert_file,
         // TODO: read these from configuration

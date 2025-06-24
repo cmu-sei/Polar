@@ -22,7 +22,14 @@
 */
 
 use gitlab_queries::{
-    groups::{GroupData, GroupMemberConnection}, projects::{ContainerRepository, ContainerRepositoryTag, GitlabCiJob, Package, Pipeline, Project, ProjectConnection, ProjectMemberConnection}, runners::{CiRunner, CiRunnerConnection}, users::UserCoreFragment
+    groups::{GroupData, GroupMemberConnection},
+    projects::{
+        ContainerRepository, ContainerRepositoryTag, GitlabCiJob, Package, Pipeline, Project,
+        ProjectConnection, ProjectMemberConnection,
+    },
+    runners::{CiRunner, CiRunnerConnection},
+    users::UserCoreFragment,
+    LicenseHistoryEntry, Metadata,
 };
 use gitlab_schema::IdString;
 
@@ -46,7 +53,9 @@ pub enum GitlabData {
     Pipelines((String, Vec<Pipeline>)),
     ProjectPackages((String, Vec<Package>)),
     ProjectContainerRepositories((String, Vec<ContainerRepository>)),
-    ContainerRepositoryTags((String, Vec<ContainerRepositoryTag>))
+    ContainerRepositoryTags((String, Vec<ContainerRepositoryTag>)),
+    Metadata(Metadata),
+    Licenses(Vec<LicenseHistoryEntry>),
 }
 
 /// Helper type to link connection types to a resource's id
@@ -55,4 +64,33 @@ pub enum GitlabData {
 pub struct ResourceLink<T> {
     pub resource_id: IdString,
     pub connection: T,
+}
+
+#[derive(Debug, Serialize, Deserialize, Archive)]
+pub struct GitlabInstance {
+    pub base_url: String,
+    pub version: Option<String>,
+    pub revision: Option<String>,
+    pub enterprise: bool,
+    pub license: Option<GitlabLicense>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Archive)]
+pub struct GitlabVersion {
+    pub version: String,
+    pub revision: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, Archive)]
+pub struct GitlabMetadata {
+    pub enterprise: bool,
+}
+
+#[derive(Debug, Deserialize, Serialize, Archive)]
+pub struct GitlabLicense {
+    pub id: String,
+    pub plan: String,
+    pub starts_at: String,
+    pub expires_at: String,
+    pub active_users: u32,
 }

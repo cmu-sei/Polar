@@ -128,14 +128,6 @@ impl Actor for ObserverSupervisor {
         }
     }
 
-    async fn post_start(
-        &self,
-        _: ActorRef<Self::Msg>,
-        _: &mut Self::State,
-    ) -> Result<(), ActorProcessingErr> {
-        Ok(())
-    }
-
     async fn handle(
         &self,
         myself: ActorRef<Self::Msg>,

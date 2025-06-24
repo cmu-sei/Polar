@@ -22,8 +22,8 @@
 */
 
 use crate::{
-    BackoffReason, Command, GitlabObserverArgs, GitlabObserverMessage, GitlabObserverState,
-    BROKER_CLIENT_NAME, GITLAB_PROJECT_OBSERVER,
+    graphql_endpoint, BackoffReason, Command, GitlabObserverArgs, GitlabObserverMessage,
+    GitlabObserverState, BROKER_CLIENT_NAME, GITLAB_PROJECT_OBSERVER,
 };
 use cassini::client::TcpClientMessage;
 use cassini::ClientMessage;
@@ -53,7 +53,7 @@ impl Actor for GitlabPipelineObserver {
         debug!("{myself:?} starting");
 
         let state = GitlabObserverState::new(
-            args.gitlab_endpoint,
+            graphql_endpoint(&args.gitlab_endpoint),
             args.token,
             args.web_client,
             args.registration_id,

@@ -21,9 +21,9 @@
    DM24-0470
 */
 use crate::{
-    handle_backoff, BackoffReason, Command, GitlabObserverArgs, GitlabObserverMessage,
-    GitlabObserverState, BROKER_CLIENT_NAME, GITLAB_JOBS_OBSERVER, GITLAB_PIPELINE_OBSERVER,
-    GITLAB_REPOSITORY_OBSERVER, MESSAGE_FORWARDING_FAILED,
+    graphql_endpoint, handle_backoff, BackoffReason, Command, GitlabObserverArgs,
+    GitlabObserverMessage, GitlabObserverState, BROKER_CLIENT_NAME, GITLAB_JOBS_OBSERVER,
+    GITLAB_PIPELINE_OBSERVER, GITLAB_REPOSITORY_OBSERVER, MESSAGE_FORWARDING_FAILED,
 };
 use cassini::{client::TcpClientMessage, ClientMessage};
 use common::types::GitlabData;
@@ -95,7 +95,7 @@ impl Actor for GitlabProjectObserver {
         debug!("{myself:?} starting, connecting to instance");
 
         let state = GitlabObserverState::new(
-            args.gitlab_endpoint,
+            graphql_endpoint(&args.gitlab_endpoint),
             args.token,
             args.web_client,
             args.registration_id,
