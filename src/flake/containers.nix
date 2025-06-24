@@ -304,6 +304,7 @@ let
         # Link the env binary (needed for the check requirements script)
         mkdir -p usr/bin
         ln -s ${pkgs.coreutils}/bin/env usr/bin/env
+        mkdir -p var/tmp
         mkdir -p tmp
       '';
     };
