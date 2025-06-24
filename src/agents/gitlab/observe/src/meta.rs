@@ -1,22 +1,22 @@
 use crate::{
-    handle_backoff, handle_graphql_errors, v4_api_endpoint, BackoffReason, Command,
+    graphql_endpoint, handle_backoff, handle_graphql_errors, BackoffReason, Command,
     GitlabObserverMessage, BROKER_CLIENT_NAME,
 };
 use crate::{GitlabObserverArgs, GitlabObserverState};
 use cassini::client::TcpClientMessage;
 use cassini::ClientMessage;
-use common::types::GitlabData;
+use common::types::{GitlabData, GitlabInstance};
 use common::METADATA_CONSUMER_TOPIC;
 use cynic::GraphQlResponse;
-use ractor::registry::where_is;
-use rkyv::rancor;
-
 use cynic::QueryBuilder;
 use gitlab_queries::{LicenseHistoryEntry, LicenseHistoryQuery, MetadataQuery};
+use ractor::registry::where_is;
 use ractor::{concurrency::Duration, Actor, ActorProcessingErr, ActorRef};
+use rkyv::rancor;
+
 use tracing::{debug, error, info};
 
-struct MetaObserver;
+pub struct MetaObserver;
 
 impl MetaObserver {
     fn observe(
@@ -61,7 +61,13 @@ impl MetaObserver {
                             if let Some(metadata) = query_result.metadata {
                                 //package and send
 
-                                let message = GitlabData::Metadata(metadata);
+                                //TODO: Get base url w/o api
+                                let instance = GitlabInstance {
+                                    base_url: state.gitlab_endpoint.clone(),
+                                    metadata,
+                                };
+
+                                let message = GitlabData::Instance(instance);
 
                                 if let Ok(seriarlized) = rkyv::to_bytes::<rancor::Error>(&message) {
                                     let client = where_is(BROKER_CLIENT_NAME.to_string()).unwrap();
@@ -131,9 +137,9 @@ impl MetaObserver {
                                     ));
                                 }
 
-                                if let Ok(seriarlized) =
-                                    rkyv::to_bytes::<rancor::Error>(&read_licenses)
-                                {
+                                let message = GitlabData::Licenses(read_licenses);
+
+                                if let Ok(seriarlized) = rkyv::to_bytes::<rancor::Error>(&message) {
                                     let client = where_is(BROKER_CLIENT_NAME.to_string()).unwrap();
 
                                     let msg = ClientMessage::PublishRequest {
@@ -149,7 +155,7 @@ impl MetaObserver {
                             }
                         }
                     }
-                    Err(_e) => todo!("handle deserialization"),
+                    Err(_e) => todo!("handle deserialization error"),
                 }
             }
             Err(e) => {
@@ -180,7 +186,7 @@ impl Actor for MetaObserver {
         args: GitlabObserverArgs,
     ) -> Result<Self::State, ActorProcessingErr> {
         let state = GitlabObserverState::new(
-            v4_api_endpoint(&args.gitlab_endpoint),
+            graphql_endpoint(&args.gitlab_endpoint),
             args.token,
             args.web_client,
             args.registration_id,
@@ -210,7 +216,7 @@ impl Actor for MetaObserver {
         match message {
             GitlabObserverMessage::Tick(command) => match command {
                 Command::GetMetadata => {
-                    MetaObserver::get_metadata(state, myself);
+                    MetaObserver::get_metadata(state, myself).await;
                 }
                 _ => (), // ignore other messages
             },

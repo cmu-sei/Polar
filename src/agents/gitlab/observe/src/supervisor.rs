@@ -1,6 +1,7 @@
 use cassini::client::*;
 use cassini::TCPClientConfig;
 use common::get_file_as_byte_vec;
+use common::METADATA_CONSUMER_TOPIC;
 use ractor::async_trait;
 use ractor::Actor;
 use ractor::ActorProcessingErr;
@@ -14,6 +15,7 @@ use tracing::error;
 use tracing::{debug, info, warn};
 
 use crate::groups::GitlabGroupObserver;
+use crate::meta::MetaObserver;
 use crate::pipelines::GitlabJobObserver;
 use crate::pipelines::GitlabPipelineObserver;
 use crate::projects::GitlabProjectObserver;
@@ -29,6 +31,7 @@ use crate::GITLAB_PROJECT_OBSERVER;
 use crate::GITLAB_REPOSITORY_OBSERVER;
 use crate::GITLAB_RUNNER_OBSERVER;
 use crate::GITLAB_USERS_OBSERVER;
+use crate::META_OBSERVER;
 pub struct ObserverSupervisor;
 
 pub struct ObserverSupervisorState {
@@ -146,7 +149,19 @@ impl Actor for ObserverSupervisor {
                     max_backoff: state.max_backoff_secs,
                 };
 
-                //TODO: decide which observers to start based off of some configuration
+                //TODO: Should other observers wait until the meta observer is online and observing?
+                // TODO: decide which observers to start based off of some configuration
+                if let Err(e) = Actor::spawn_linked(
+                    Some(META_OBSERVER.to_string()),
+                    MetaObserver,
+                    args.clone(),
+                    myself.clone().into(),
+                )
+                .await
+                {
+                    warn!("failed to start meta observer {e}")
+                }
+
                 if let Err(e) = Actor::spawn_linked(
                     Some(GITLAB_USERS_OBSERVER.to_string()),
                     GitlabUserObserver,

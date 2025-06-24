@@ -54,7 +54,7 @@ pub enum GitlabData {
     ProjectPackages((String, Vec<Package>)),
     ProjectContainerRepositories((String, Vec<ContainerRepository>)),
     ContainerRepositoryTags((String, Vec<ContainerRepositoryTag>)),
-    Metadata(Metadata),
+    Instance(GitlabInstance),
     Licenses(Vec<LicenseHistoryEntry>),
 }
 
@@ -66,13 +66,14 @@ pub struct ResourceLink<T> {
     pub connection: T,
 }
 
-#[derive(Debug, Serialize, Deserialize, Archive)]
+#[derive(Serialize, Deserialize, Archive)]
 pub struct GitlabInstance {
+    /// TODO: add a unique instance id
+    // pub instance_id: String
+    // TODO: Add last seen at timestamp
+    // pub last_seen_at: chrono::DateTime?
     pub base_url: String,
-    pub version: Option<String>,
-    pub revision: Option<String>,
-    pub enterprise: bool,
-    pub license: Option<GitlabLicense>,
+    pub metadata: Metadata,
 }
 
 #[derive(Debug, Deserialize, Serialize, Archive)]

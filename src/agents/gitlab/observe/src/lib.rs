@@ -51,6 +51,7 @@ use serde::Deserialize;
 use tokio::task::AbortHandle;
 use tracing::{debug, error};
 
+pub const META_OBSERVER: &str = "gitlab:observer:metadata";
 pub const GITLAB_USERS_OBSERVER: &str = "gitlab:observer:users";
 pub const GITLAB_PROJECT_OBSERVER: &str = "gitlab.observer.projects";
 pub const BROKER_CLIENT_NAME: &str = "gitlab:observer:web_client";

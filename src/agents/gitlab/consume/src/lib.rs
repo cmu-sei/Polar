@@ -28,6 +28,7 @@ use std::error::Error;
 use tracing::info;
 
 pub mod groups;
+pub mod meta;
 pub mod pipelines;
 pub mod projects;
 pub mod repositories;

@@ -29,24 +29,25 @@ edition = "2021"
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
-serde = {version = "1", features = ["derive"]}
+serde = { version = "1", features = ["derive"] }
 serde_json = "1.0"
-reqwest = {version = "0.11.17", features = ["json", "rustls-tls"]}
+reqwest = { version = "0.11.17", features = ["json", "rustls-tls"] }
 url = "2.3.1"
 parse_link_header = "0.3.3"
-common = {path = "../common"}
+common = { path = "../common" }
 tracing = "0.1.41"
 tracing-glog = "0.4.0"
-tracing-subscriber = { version ="0.3.19", features=["std", "env-filter"]}
+tracing-subscriber = { version = "0.3.19", features = ["std", "env-filter"] }
 workspace-hack = { version = "0.1", path = "../../workspace-hack" }
 cassini = { path = "../../broker" }
-ractor = { version="0.15.6", features = ["async-trait"]}
-cynic = { version = "3.9.1" , features = ["rkyv"] }
+ractor = { version = "0.15.6", features = ["async-trait"] }
+cynic = { version = "3.9.1", features = ["rkyv"] }
 gitlab-queries = { path = "../query" }
-gitlab-schema = {path = "../schema" }
+gitlab-schema = { path = "../schema" }
 rkyv = "0.8.10"
-polar = {path = "../../lib"}
+polar = { path = "../../lib" }
 rand = { version = "0.9.1", features = ["small_rng"] }
+
 [build-dependencies]
 cynic-codegen = "3.9.1"
 # capnpc = "0.20.1"
@@ -54,4 +55,3 @@ cynic-codegen = "3.9.1"
 [[bin]]
 name = "gitlab-observer"
 path = "src/entrypoint.rs"
-

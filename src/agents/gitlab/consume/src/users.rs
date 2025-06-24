@@ -46,7 +46,13 @@ impl Actor for GitlabUserConsumer {
     ) -> Result<Self::State, ActorProcessingErr> {
         debug!("{myself:?} starting, connecting to broker");
         //subscribe to topic
-        match subscribe_to_topic(args.registration_id, USER_CONSUMER_TOPIC.to_string(), args.graph_config).await {
+        match subscribe_to_topic(
+            args.registration_id,
+            USER_CONSUMER_TOPIC.to_string(),
+            args.graph_config,
+        )
+        .await
+        {
             Ok(state) => Ok(state),
             Err(e) => {
                 let err_msg = format!("Error subscribing to topic \"{USER_CONSUMER_TOPIC}\" {e}");
@@ -70,18 +76,16 @@ impl Actor for GitlabUserConsumer {
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        
         //Expect transaction to start, stop if it doesn't
         match state.graph.start_txn().await {
             Ok(mut transaction) => {
                 match message {
                     GitlabData::Users(users) => {
-            
                         let users_data = users
-                        .iter()
-                        .map(|user| {
-                            format!(
-                                r#"{{
+                            .iter()
+                            .map(|user| {
+                                format!(
+                                    r#"{{
                                     user_id: "{user_id}",
                                     username: "{username}",
                                     bot: "{bot}",
@@ -90,24 +94,27 @@ impl Actor for GitlabUserConsumer {
                                     created_at: "{created_at}",
                                     state: "{state}",
                                     last_activity_on: "{last_activity_on}",
-                                    location: "{location}",    
-                                    organization: "{organization}"                                                            
+                                    location: "{location}",
+                                    organization: "{organization}"
                                  }}"#,
-                                username = user.username.clone().unwrap_or_default(),
-                                user_id = user.id,
-                                created_at = user.created_at.clone().unwrap_or_default(),
-                                state = user.state,
-                                bot = user.bot,
-                                last_activity_on = user.last_activity_on.clone().unwrap_or(DateString(String::default())),
-                                web_path = user.web_path,
-                                web_url = user.web_url,
-                                location = user.location.clone().unwrap_or_default(),
-                                organization = user.organization.clone().unwrap_or_default()
-                            )
-                        })
-                        .collect::<Vec<_>>()
-                        .join(",\n");
-        
+                                    username = user.username.clone().unwrap_or_default(),
+                                    user_id = user.id,
+                                    created_at = user.created_at.clone().unwrap_or_default(),
+                                    state = user.state,
+                                    bot = user.bot,
+                                    last_activity_on = user
+                                        .last_activity_on
+                                        .clone()
+                                        .unwrap_or(DateString(String::default())),
+                                    web_path = user.web_path,
+                                    web_url = user.web_url,
+                                    location = user.location.clone().unwrap_or_default(),
+                                    organization = user.organization.clone().unwrap_or_default()
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                            .join(",\n");
+
                         let cypher_query = format!(
                             "
                             UNWIND [{users_data}] AS user_data
@@ -123,28 +130,25 @@ impl Actor for GitlabUserConsumer {
                             "
                         );
                         debug!(cypher_query);
-                        if let Err(e) = transaction
-                            .run(Query::new(cypher_query))
-                            .await {
-                                error!("{e}");
-                                myself.stop(Some(e.to_string()));
-                            }
-                        
+                        if let Err(e) = transaction.run(Query::new(cypher_query)).await {
+                            error!("{e}");
+                            myself.stop(Some(e.to_string()));
+                        }
+
                         if let Err(e) = transaction.commit().await {
                             myself.stop(Some(QUERY_COMMIT_FAILED.to_string()))
                         }
-                        
+
                         info!("Committed transaction to database");
                     }
                     GitlabData::ProjectMembers(link) => {
-         
                         let nodes = link.connection.nodes.unwrap();
-        
+
                         let project_memberships = nodes
                             .iter()
                             .filter_map(|option| {
                                 let membership = option.as_ref().unwrap();
-        
+
                                 //create a list of attribute sets that will represent the relationship between a user and each project
                                 membership.project.as_ref().map(|project| {
                                     format!(
@@ -155,7 +159,6 @@ impl Actor for GitlabUserConsumer {
                                         expires_at: "{}"
                                     }}"#,
                                         project.id,
-        
                                         membership.access_level.as_ref().map_or_else(
                                             || String::default(),
                                             |al| {
@@ -175,7 +178,7 @@ impl Actor for GitlabUserConsumer {
                             })
                             .collect::<Vec<_>>()
                             .join(",\n");
-        
+
                         //write a query that finds the given user, and create a relationship between it and every project we were given
                         let cypher_query = format!(
                             "
@@ -189,29 +192,26 @@ impl Actor for GitlabUserConsumer {
                             ",
                             link.resource_id, project_memberships
                         );
-        
+
                         debug!(cypher_query);
 
                         if let Err(_) = transaction.run(Query::new(cypher_query)).await {
                             myself.stop(Some(QUERY_RUN_FAILED.to_string()));
-                            
                         }
-                        
+
                         if let Err(_) = transaction.commit().await {
                             myself.stop(Some(QUERY_COMMIT_FAILED.to_string()));
                         }
-                        
+
                         info!("Committed transaction to database");
                     }
-        
+
                     _ => (),
-                }        
+                }
             }
-            Err(e) => myself.stop(Some(format!("{TRANSACTION_FAILED_ERROR}. {e}")))
+            Err(e) => myself.stop(Some(format!("{TRANSACTION_FAILED_ERROR}. {e}"))),
         }
 
-      
-      
         Ok(())
     }
 }
