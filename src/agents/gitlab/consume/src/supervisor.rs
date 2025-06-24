@@ -4,6 +4,7 @@ use cassini::client::*;
 use common::dispatch::MessageDispatcher;
 use common::types::GitlabData;
 use common::GROUPS_CONSUMER_TOPIC;
+use common::METADATA_CONSUMER_TOPIC;
 use common::PIPELINE_CONSUMER_TOPIC;
 use common::PROJECTS_CONSUMER_TOPIC;
 use common::REPOSITORY_CONSUMER_TOPIC;
@@ -27,6 +28,7 @@ use tracing::warn;
 
 use crate::get_neo_config;
 use crate::groups::GitlabGroupConsumer;
+use crate::meta::MetaConsumer;
 use crate::pipelines::GitlabPipelineConsumer;
 use crate::projects::GitlabProjectConsumer;
 use crate::repositories::GitlabRepositoryConsumer;
@@ -240,6 +242,17 @@ impl Actor for ConsumerSupervisor {
                     graph_config: get_neo_config(),
                 };
 
+                if let Err(e) = Actor::spawn_linked(
+                    Some(METADATA_CONSUMER_TOPIC.to_string()),
+                    MetaConsumer,
+                    args.clone(),
+                    myself.clone().into(),
+                )
+                .await
+                {
+                    error!("failed to start meta consumer. {e}");
+                    myself.stop(None);
+                }
                 if let Err(e) = Actor::spawn_linked(
                     Some(USER_CONSUMER_TOPIC.to_string()),
                     GitlabUserConsumer,

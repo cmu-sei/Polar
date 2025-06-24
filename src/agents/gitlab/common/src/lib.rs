@@ -30,6 +30,9 @@ use sysinfo::{Pid, ProcessRefreshKind, System, SystemExt};
 pub mod dispatch;
 pub mod types;
 
+// TODO: These are suitable for one particular instance, but eventually we may have others, what'll be a good way
+// to be able to make sure queues don't get confused between instances?
+pub const METADATA_CONSUMER_TOPIC: &str = "gitlab.consumer.metadata";
 pub const PROJECTS_CONSUMER_TOPIC: &str = "gitlab:consumer:projects";
 pub const GROUPS_CONSUMER_TOPIC: &str = "gitlab:consumer:groups";
 pub const USER_CONSUMER_TOPIC: &str = "gitlab:consumer:users";

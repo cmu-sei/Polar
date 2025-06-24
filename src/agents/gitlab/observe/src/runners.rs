@@ -29,8 +29,8 @@ use cynic::{GraphQlResponse, QueryBuilder};
 use gitlab_queries::runners::*;
 
 use crate::{
-    handle_backoff, BackoffReason, Command, GitlabObserverArgs, GitlabObserverMessage,
-    GitlabObserverState,
+    graphql_endpoint, handle_backoff, BackoffReason, Command, GitlabObserverArgs,
+    GitlabObserverMessage, GitlabObserverState,
 };
 use ractor::{async_trait, registry::where_is, Actor, ActorProcessingErr, ActorRef};
 use tracing::{debug, error, info, warn};
@@ -84,7 +84,7 @@ impl Actor for GitlabRunnerObserver {
         debug!("{myself:?} starting, connecting to instance");
 
         let state = GitlabObserverState::new(
-            args.gitlab_endpoint,
+            graphql_endpoint(&args.gitlab_endpoint),
             args.token,
             args.web_client,
             args.registration_id,
