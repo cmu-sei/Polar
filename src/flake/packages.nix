@@ -148,6 +148,7 @@ in
       gnused # GNU version of sed for text processing
       gnutar # GNU version of tar for archiving
       gzip # Compression utility
+      findutils
       cacert
       openssl
       nix
