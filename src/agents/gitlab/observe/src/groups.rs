@@ -164,49 +164,52 @@ impl GitlabGroupObserver {
             .send()
             .await
         {
-            Ok(response) => match response.json::<GraphQlResponse<GroupProjectsQuery>>().await {
-                Ok(deserialized) => {
-                    if let Some(errors) = deserialized.errors {
-                        let errors = errors
-                            .iter()
-                            .map(|error| error.to_string())
-                            .collect::<Vec<_>>()
-                            .join("\n");
+            Ok(response) => {
+                debug!("{response:?}");
+                match response.json::<GraphQlResponse<GroupProjectsQuery>>().await {
+                    Ok(deserialized) => {
+                        if let Some(errors) = deserialized.errors {
+                            let errors = errors
+                                .iter()
+                                .map(|error| error.to_string())
+                                .collect::<Vec<_>>()
+                                .join("\n");
 
-                        error!("Failed to query instance! {errors}");
-                        return Err(errors);
-                    }
+                            error!("Failed to query instance! {errors}");
+                            return Err(errors);
+                        }
 
-                    let query = deserialized
-                        .data
-                        .expect("Expected there to be something here");
-                    query.group.map(|group| {
-                        let conn = group.projects.unwrap();
+                        let query = deserialized
+                            .data
+                            .expect("Expected there to be something here");
+                        query.group.map(|group| {
+                            let conn = group.projects.unwrap();
 
-                        let client = where_is(BROKER_CLIENT_NAME.to_string())
-                            .expect("Expected to find tcp client");
+                            let client = where_is(BROKER_CLIENT_NAME.to_string())
+                                .expect("Expected to find tcp client");
 
-                        let data = GitlabData::GroupProjects(ResourceLink {
-                            resource_id: group.id.clone(),
-                            connection: conn.clone(),
+                            let data = GitlabData::GroupProjects(ResourceLink {
+                                resource_id: group.id.clone(),
+                                connection: conn.clone(),
+                            });
+
+                            let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&data).unwrap();
+
+                            let msg = ClientMessage::PublishRequest {
+                                topic: GROUPS_CONSUMER_TOPIC.to_string(),
+                                payload: bytes.to_vec(),
+                                registration_id: Some(registration_id),
+                            };
+                            client
+                                .send_message(TcpClientMessage::Send(msg))
+                                .expect("Expected to send message to tcp client!");
                         });
 
-                        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&data).unwrap();
-
-                        let msg = ClientMessage::PublishRequest {
-                            topic: GROUPS_CONSUMER_TOPIC.to_string(),
-                            payload: bytes.to_vec(),
-                            registration_id: Some(registration_id),
-                        };
-                        client
-                            .send_message(TcpClientMessage::Send(msg))
-                            .expect("Expected to send message to tcp client!");
-                    });
-
-                    Ok(())
+                        Ok(())
+                    }
+                    Err(e) => Err(e.to_string()),
                 }
-                Err(e) => Err(e.to_string()),
-            },
+            }
             Err(e) => Err(e.to_string()),
         }
     }
@@ -290,7 +293,7 @@ impl Actor for GitlabGroupObserver {
         debug!("{myself:?} starting, connecting to instance");
 
         let state = GitlabObserverState::new(
-            args.gitlab_endpoint,
+            graphql_endpoint(&args.gitlab_endpoint),
             args.token,
             args.web_client,
             args.registration_id,
@@ -331,6 +334,7 @@ impl Actor for GitlabGroupObserver {
                             .await
                         {
                             Ok(response) => {
+                                debug!("{response:?}");
                                 match response.json::<GraphQlResponse<AllGroupsQuery>>().await {
                                     Ok(deserialized) => {
                                         if let Some(errors) = deserialized.errors {
