@@ -1,13 +1,12 @@
-use std::fmt;
-
+use crate::projects::ProjectMemberConnection;
+use crate::PageInfo;
 use cynic::*;
 use gitlab_schema::gitlab::{self as schema};
-use gitlab_schema::DateTimeString;
 use gitlab_schema::DateString;
+use gitlab_schema::DateTimeString;
 use rkyv::Deserialize;
 use rkyv::Serialize;
-use crate::PageInfo;
-use crate::projects::ProjectMemberConnection;
+use std::fmt;
 
 /// NOTE: Cynic matches rust variants up to their equivalent SCREAMING_SNAKE_CASE GraphQL variants.
 /// This behaviour is disabled because the gitlab schema goes against this
@@ -117,4 +116,3 @@ pub struct MultiUserQuery {
     #[arguments(ids: $ids, usernames: $usernames, admins: $admins)]
     pub users: Option<UserCoreConnection>,
 }
-

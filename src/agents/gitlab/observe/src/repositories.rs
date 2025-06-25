@@ -22,8 +22,8 @@
 */
 
 use crate::{
-    graphql_endpoint, Command, GitlabObserverArgs, GitlabObserverMessage, GitlabObserverState,
-    BROKER_CLIENT_NAME,
+    graphql_endpoint, BackoffReason, Command, GitlabObserverArgs, GitlabObserverMessage,
+    GitlabObserverState, BROKER_CLIENT_NAME, MESSAGE_FORWARDING_FAILED,
 };
 use cassini::{client::TcpClientMessage, ClientMessage};
 use common::types::GitlabData;
@@ -37,7 +37,7 @@ use gitlab_queries::projects::{
 use gitlab_schema::ContainerRepositoryID;
 use ractor::concurrency::Duration;
 use ractor::{async_trait, registry::where_is, Actor, ActorProcessingErr, ActorRef};
-use tracing::{debug, error, warn};
+use tracing::{debug, error, info, warn};
 
 pub struct GitlabRepositoryObserver;
 
@@ -139,9 +139,10 @@ impl Actor for GitlabRepositoryObserver {
 
     async fn post_start(
         &self,
-        _: ActorRef<Self::Msg>,
+        myself: ActorRef<Self::Msg>,
         _: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
+        info!("{myself:?} started");
         Ok(())
     }
 
@@ -386,13 +387,16 @@ impl Actor for GitlabRepositoryObserver {
                                             }
                                         }
                                     }
-                                    Err(e) => todo!(),
+                                    Err(e) => myself
+                                        .send_message(GitlabObserverMessage::Backoff(
+                                            BackoffReason::GitlabUnreachable(e.to_string()),
+                                        ))
+                                        .expect(MESSAGE_FORWARDING_FAILED),
                                 }
                             }
                             Err(e) => error!("{e}"),
                         }
                     }
-
                     _ => (),
                 }
             }

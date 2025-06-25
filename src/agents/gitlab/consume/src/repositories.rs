@@ -22,12 +22,12 @@
 */
 
 use crate::{subscribe_to_topic, GitlabConsumerArgs, GitlabConsumerState};
-use polar::{QUERY_RUN_FAILED, QUERY_COMMIT_FAILED, TRANSACTION_FAILED_ERROR};
 use common::types::GitlabData;
 use common::REPOSITORY_CONSUMER_TOPIC;
-use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef};
-use tracing::{debug , info};
 use gitlab_schema::{BigInt, DateTimeString};
+use polar::{QUERY_COMMIT_FAILED, QUERY_RUN_FAILED, TRANSACTION_FAILED_ERROR};
+use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef};
+use tracing::{debug, info};
 
 pub struct GitlabRepositoryConsumer;
 
@@ -44,10 +44,17 @@ impl Actor for GitlabRepositoryConsumer {
     ) -> Result<Self::State, ActorProcessingErr> {
         debug!("{myself:?} starting, connecting to broker");
         //subscribe to topic
-        match subscribe_to_topic(args.registration_id, REPOSITORY_CONSUMER_TOPIC.to_string(), args.graph_config).await {
+        match subscribe_to_topic(
+            args.registration_id,
+            REPOSITORY_CONSUMER_TOPIC.to_string(),
+            args.graph_config,
+        )
+        .await
+        {
             Ok(state) => Ok(state),
             Err(e) => {
-                let err_msg = format!("Error subscribing to topic \"{REPOSITORY_CONSUMER_TOPIC}\" {e}");
+                let err_msg =
+                    format!("Error subscribing to topic \"{REPOSITORY_CONSUMER_TOPIC}\" {e}");
                 Err(ActorProcessingErr::from(err_msg))
             }
         }
@@ -67,41 +74,40 @@ impl Actor for GitlabRepositoryConsumer {
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        
         //Expect transaction to start, stop if it doesn't
         match state.graph.start_txn().await {
             Ok(mut transaction) => {
                 match message {
                     GitlabData::ProjectContainerRepositories((full_path, repositories)) => {
-                        
                         let repos_data = repositories
-                        .iter()
-                        .map(|repo| {
-                            format!(
-                                "{{ id: \"{id}\",
-                                created_at: \"{created_at}\", 
+                            .iter()
+                            .map(|repo| {
+                                format!(
+                                    "{{ id: \"{id}\",
+                                created_at: \"{created_at}\",
                                 updated_at: \"{updated_at}\", \
-                                location: \"{location}\", 
-                                name: \"{name}\", 
+                                location: \"{location}\",
+                                name: \"{name}\",
                                 path: \"{path}\", \
-                                migration_state: \"{migration_state}\", 
+                                migration_state: \"{migration_state}\",
                                 protection_rule_exists: {protection_rule_exists}, \
                                 tags_count: {tags_count} }}",
-                                id = repo.id,
-                                created_at = repo.created_at,
-                                updated_at = repo.updated_at,
-                                location = repo.location,
-                                name = repo.name,
-                                path = repo.path,
-                                migration_state = repo.migration_state,
-                                protection_rule_exists = repo.protection_rule_exists,
-                                tags_count = repo.tags_count,
-                            )
-                        })
-                        .collect::<Vec<_>>()
-                        .join(",\n");
+                                    id = repo.id,
+                                    created_at = repo.created_at,
+                                    updated_at = repo.updated_at,
+                                    location = repo.location,
+                                    name = repo.name,
+                                    path = repo.path,
+                                    migration_state = repo.migration_state,
+                                    protection_rule_exists = repo.protection_rule_exists,
+                                    tags_count = repo.tags_count,
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                            .join(",\n");
 
-                        let cypher_query = format!(r#"
+                        let cypher_query = format!(
+                            r#"
                             UNWIND [{repos_data}] AS repo
                             MERGE (r:ContainerRepository {{ id: repo.id }})
                             SET
@@ -117,26 +123,30 @@ impl Actor for GitlabRepositoryConsumer {
                             WITH r
                             MATCH (p:GitlabProject {{ full_path: "{full_path}" }})
                             MERGE (r)-[:BELONGS_TO]-(p)
-                        "#);
+                        "#
+                        );
 
                         debug!(cypher_query);
 
                         if let Err(_) = transaction.run(neo4rs::Query::new(cypher_query)).await {
                             myself.stop(Some(QUERY_RUN_FAILED.to_string()));
-                            
                         }
-                        
+
                         if let Err(_) = transaction.commit().await {
                             myself.stop(Some(QUERY_COMMIT_FAILED.to_string()));
                         }
-                        
+
                         info!("Committed transaction to database");
                     }
-                    GitlabData::ContainerRepositoryTags((repo_path, tags)) => {
-
+                    GitlabData::ContainerRepositoryTags((project_path, tags)) => {
                         let tags_data = tags
                             .iter()
                             .map(|tag| {
+                                // ContainerRepository paths are always in the form of <namespace>/<project_name>/<image_name>
+                                // so we should be able to take advantage of this and strip the tag off
+                                // and use that to find our matching repo node
+                                let repo_path = tag.path.split(':').next().unwrap_or("");
+
                                 format!(
                                     "{{ created_at: \"{created_at}\", \
                                     digest: \"{digest}\", \
@@ -147,23 +157,34 @@ impl Actor for GitlabRepositoryConsumer {
                                     published_at: \"{published_at}\", \
                                     revision: \"{revision}\", \
                                     short_revision: \"{short_revision}\", \
-                                    total_size: \"{total_size}\" }}",
-                                    created_at = tag.created_at.clone().unwrap_or(DateTimeString(String::default())),
+                                    total_size: \"{total_size}\", \
+                                    repo_path: \"{repo_path}\"
+                                    }}",
+                                    created_at = tag
+                                        .created_at
+                                        .clone()
+                                        .unwrap_or(DateTimeString(String::default())),
                                     digest = tag.digest.clone().unwrap_or(String::default()),
                                     location = tag.location,
-                                    media_type = tag.media_type.clone().unwrap_or(String::default()),
+                                    media_type =
+                                        tag.media_type.clone().unwrap_or(String::default()),
                                     name = tag.name,
                                     path = tag.path,
-                                    published_at = tag.published_at.clone().unwrap_or(DateTimeString(String::default())),
+                                    published_at = tag
+                                        .published_at
+                                        .clone()
+                                        .unwrap_or(DateTimeString(String::default())),
                                     revision = tag.revision.clone().unwrap_or_default(),
                                     short_revision = tag.short_revision.clone().unwrap_or_default(),
-                                    total_size = tag.total_size.clone().unwrap_or(BigInt(String::default()))
+                                    total_size =
+                                        tag.total_size.clone().unwrap_or(BigInt(String::default()))
                                 )
                             })
                             .collect::<Vec<_>>()
                             .join(",\n");
 
-                        let cypher_query = format!(r#"
+                        let cypher_query = format!(
+                            r#"
                             UNWIND [{tags_data}] AS tag
                             MERGE (t:ContainerImageTag {{ name: tag.name, path: tag.path }})
                             SET
@@ -174,33 +195,35 @@ impl Actor for GitlabRepositoryConsumer {
                             t.published_at = tag.published_at,
                             t.revision = tag.revision,
                             t.short_revision = tag.short_revision,
-                            t.total_size = tag.total_size
-                            WITH tag, t
-                            MATCH (r:ContainerRepository {{ path: "{repo_path}" }})
+                            t.total_size = tag.total_size,
+                            t.repo_path = tag.repo_path
+                            WITH t
+
+                            // TODO: This doesn't seem to be getting applied generally, investigate why
+                            MATCH (r:ContainerRepository {{ path: t.repo_path }})
+                            WITH r,t
                             MERGE (t)-[:CONTAINS_TAG]->(r)
-                        "#);
+                        "#
+                        );
 
                         debug!(cypher_query);
 
                         if let Err(_) = transaction.run(neo4rs::Query::new(cypher_query)).await {
                             myself.stop(Some(QUERY_RUN_FAILED.to_string()));
-                            
                         }
-                        
+
                         if let Err(_) = transaction.commit().await {
                             myself.stop(Some(QUERY_COMMIT_FAILED.to_string()));
                         }
-                        
-                        info!("Committed transaction to database"); 
 
+                        info!("Committed transaction to database");
                     }
                     GitlabData::ProjectPackages((project_path, packages)) => {
-
                         let packages_list = packages
-                        .iter()
-                        .map(|pkg| {
-                            format!(
-                                "{{ 
+                            .iter()
+                            .map(|pkg| {
+                                format!(
+                                    "{{
                                     id: \"{id}\", \
                                     name: \"{name}\", \
                                     version: \"{version}\", \
@@ -210,24 +233,22 @@ impl Actor for GitlabRepositoryConsumer {
                                     status: \"{status}\", \
                                     status_message: \"{status_message}\"
                                 }}",
-                                id = pkg.id,
-                                name = pkg.name,
-                                version = pkg.version.clone().unwrap_or_default(),
-                                package_type = pkg.package_type,
-                                created_at = pkg
-                                    .created_at,
-                                updated_at = pkg
-                                    .updated_at,
-                                status = pkg.status,
-                                status_message = pkg.status_message.clone().unwrap_or_default(),
-                            )
-                        })
-                        .collect::<Vec<_>>()
-                        .join(",\n");
+                                    id = pkg.id,
+                                    name = pkg.name,
+                                    version = pkg.version.clone().unwrap_or_default(),
+                                    package_type = pkg.package_type,
+                                    created_at = pkg.created_at,
+                                    updated_at = pkg.updated_at,
+                                    status = pkg.status,
+                                    status_message = pkg.status_message.clone().unwrap_or_default(),
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                            .join(",\n");
 
-                        
                         //TODO:  this works at a bare minimum to tie in projects, make a connection to a pipeline if CI/CD was used to generate it
-                        let cypher_query = format!(r#"
+                        let cypher_query = format!(
+                            r#"
                                 UNWIND [{packages_list}] AS pkg
                                 MERGE (p:GitlabPackage {{ id: pkg.id }})
                                 SET
@@ -241,62 +262,62 @@ impl Actor for GitlabRepositoryConsumer {
                                 WITH p, pkg
                                 MATCH (project: GitlabProject) WHERE project.full_path = "{project_path}"
                                 MERGE (project)-[:HAS_PACKAGE]->(p)
-                        
-                        "#);
+
+                        "#
+                        );
 
                         debug!(cypher_query);
 
                         if let Err(_) = transaction.run(neo4rs::Query::new(cypher_query)).await {
                             myself.stop(Some(QUERY_RUN_FAILED.to_string()));
-                            
                         }
-                       
-                         // make pipeline connections if any
-                    
+
+                        // make pipeline connections if any
+
                         for package in packages {
                             if let Some(connection) = package.pipelines {
                                 match connection.nodes {
                                     Some(pipelines) => {
                                         for option in pipelines {
-
                                             let pipeline = option.clone().unwrap();
 
-                                            let cypher_query = format!(r#"
+                                            let cypher_query = format!(
+                                                r#"
                                                 MATCH (package:GitlabPackage) WHERE package.id = "{}"
                                                 WITH package
                                                 MATCH (pipeline:GitlabPipeline) WHERE pipeline.id = "{}"
                                                 WITH package, pipeline
                                                 MERGE (pipeline)-[:PRODUCED]-(package)
-                                            "#, package.id, pipeline.id);
+                                            "#,
+                                                package.id, pipeline.id
+                                            );
 
                                             debug!("{cypher_query}");
 
-                                            if let Err(_) = transaction.run(neo4rs::Query::new(cypher_query)).await {
+                                            if let Err(_) = transaction
+                                                .run(neo4rs::Query::new(cypher_query))
+                                                .await
+                                            {
                                                 myself.stop(Some(QUERY_RUN_FAILED.to_string()));
-                                                
                                             }
-
                                         }
                                     }
-                                    None => ()
+                                    None => (),
                                 }
                             }
                         }
                         if let Err(_) = transaction.commit().await {
                             myself.stop(Some(QUERY_COMMIT_FAILED.to_string()));
                         }
-                        
-                        info!("Committed transaction to database"); 
+
+                        info!("Committed transaction to database");
                     }
                     _ => (),
-
-                }        
+                }
             }
-            Err(e) => myself.stop(Some(format!("{TRANSACTION_FAILED_ERROR}. {e}")))
+            Err(e) => myself.stop(Some(format!("{TRANSACTION_FAILED_ERROR}. {e}"))),
         }
 
-      
-      
         Ok(())
     }
 }

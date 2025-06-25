@@ -2,7 +2,7 @@ use crate::{
     graphql_endpoint, handle_backoff, handle_graphql_errors, BackoffReason, Command,
     GitlabObserverMessage, BROKER_CLIENT_NAME,
 };
-use crate::{GitlabObserverArgs, GitlabObserverState};
+use crate::{GitlabObserverArgs, GitlabObserverState, MESSAGE_FORWARDING_FAILED};
 use cassini::client::TcpClientMessage;
 use cassini::ClientMessage;
 use common::types::{GitlabData, GitlabInstance};
@@ -85,7 +85,11 @@ impl MetaObserver {
                             }
                         }
                     }
-                    Err(e) => todo!(),
+                    Err(e) => actor_ref
+                        .send_message(GitlabObserverMessage::Backoff(
+                            BackoffReason::GitlabUnreachable(e.to_string()),
+                        ))
+                        .expect(MESSAGE_FORWARDING_FAILED),
                 }
             }
             Err(e) => {
@@ -94,7 +98,7 @@ impl MetaObserver {
                     .send_message(GitlabObserverMessage::Backoff(
                         BackoffReason::GitlabUnreachable(e.to_string()),
                     ))
-                    .expect("Expected to forward message to self")
+                    .expect(MESSAGE_FORWARDING_FAILED)
             }
         }
 
