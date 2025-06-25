@@ -334,7 +334,6 @@ impl Actor for GitlabGroupObserver {
                             .await
                         {
                             Ok(response) => {
-                                debug!("{response:?}");
                                 match response.json::<GraphQlResponse<AllGroupsQuery>>().await {
                                     Ok(deserialized) => {
                                         if let Some(errors) = deserialized.errors {
