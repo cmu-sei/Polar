@@ -54,10 +54,8 @@ Polar agents are predominantly envisioned to be implemented in Rust, prioritizin
 ### [Kubernetes Agents](src/agents/kubernetes/README.md)
 ### [Provenance Agent](src/agents/provenance/README.md)
 
-All credentials, endpoints, and the like should be read in as environment variables,possibly from an environment file. There is an example an environment file in the gitlab agent [README](./docs/README_gitlab.md) in the manual setup.
-
 ## Getting Started
-
+The Nix package manager is a major component of our build processe. You'll want to have it installed.
   **Install Nix and enable it to use flakes:**
     Checkout the instructions at https://nix.dev/ on how you can do this.
     Chances are you can run the following command once you have nix installed to configure it
@@ -65,7 +63,7 @@ All credentials, endpoints, and the like should be read in as environment variab
     printf 'experimental-features = nix-command flakes' > "$HOME/.config/nix/nix.conf"
     ```
 
-  Check out the [maskfile](./maskfile.md) to see some quickstart operations
+  Check out the [maskfile](./maskfile.md) to see some shortcuts for common dev operations
 
 
 ## Benefits of Using Nix and Flakes

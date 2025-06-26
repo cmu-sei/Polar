@@ -1,5 +1,5 @@
 # Common Developer Tasks for Polar
-If you have `mask` installed, you can use it to quickly perform   common operations.
+If you have `mask` installed, you can use it to quickly perform these common operations.
 
 
 ## build-image
@@ -8,6 +8,12 @@ If you have `mask` installed, you can use it to quickly perform   common operati
   > Builds the Polar Dev image. A contaienrized Rust development environment in case you don't want to do local development.
   ~~~sh
   nix build .#containers.devContainer
+  ~~~
+
+### ci
+  > Builds the Polar Dev image. A contaienrized Rust development environment in case you don't want to do local development.
+  ~~~sh
+  nix build .#containers.ciContainer
   ~~~
 
 ## start-dev
@@ -23,7 +29,12 @@ project files within the container.
 ~~~sh
 podman run --rm --name polar-dev --user 0 --userns=keep-id -it -v $(pwd):/workspace:rw -p 2222:2223 polar-dev:latest bash -c "/create-user.sh $(whoami) $(id -u) $(id -g)"
 ~~~
+## start-ci
+> Enters the Polar Dev container.
 
+~~~sh
+docker run --rm --name polar-ci --user 0 -it -v $(pwd):/workspace:rw -p 2222:2223 polar-ci:latest
+~~~
 ## start-compose
 > Starts the docker compose file to start up Polar's dependencies - Neo4J and Cassini
 

@@ -13,35 +13,62 @@ let
     packageSets = import ./packages.nix { inherit system pkgs rust-overlay staticanalysis dotacat; };
 
     # ---------------------------------------------------------------------
-    #  Files required by dev-containers so the bloody “check-requirements”
-    #  script stops whining.
+    #  Files required by dev-containers.
+    #  sets up users and permissions
     # ---------------------------------------------------------------------
-    baseInfo = with pkgs; [
-        (writeTextDir "etc/shadow"  ''root:!x:::::::
-        '')
-        (writeTextDir "etc/passwd"  ''root:x:0:0::/root:${runtimeShell}
-        '')
-        (writeTextDir "etc/group"   ''root:x:0:
-        '')
-        (writeTextDir "etc/gshadow" ''root:x::
-        '')
-        (writeTextDir "etc/shells"  ''
-        /bin/sh
-        /bin/bash
-        /bin/fish
-        '')
-        (writeTextDir "etc/os-release" ''
-        NAME="NixOS"
-        ID=nixos
-        VERSION="unstable"
-        VERSION_CODENAME=unstable
-        PRETTY_NAME="NixOS (unstable)"
-        HOME_URL="https://nixos.org/"
-        SUPPORT_URL="https://nixos.org/nixos/manual/"
-        BUG_REPORT_URL="https://github.com/NixOS/nixpkgs/issues"
-        '')
-    ];
+    # define a fixed number of build users;
+    # TODO: Make mroe dynamic? We make one per available CPU in the create-user script
+    buildUserCount = 10;
 
+    nixbldUsers = builtins.genList (n: {
+      name = "nixbld${toString (n + 1)}";
+      uid = 30000 + n;
+      gid = 30000;
+    }) buildUserCount;
+
+
+    # Join user entries into each file format
+    passwdEntries = builtins.concatStringsSep "\n" (
+      ["root:x:0:0::/root:${pkgs.runtimeShell}"]
+      ++ map (u: "${u.name}:x:${toString u.uid}:${toString u.gid}::/var/empty:/sbin/nologin") nixbldUsers
+    );
+
+    nixldGroupEntry = "nixbld:x:30000:" + (builtins.concatStringsSep "," (map (u: u.name) nixbldUsers));
+    groupEntries = builtins.concatStringsSep "\n" (
+      ["root:x:0:" nixldGroupEntry]
+    );
+    nixbldShadow = "nixbld:!:" + (builtins.concatStringsSep "," (map (u: u.name) nixbldUsers)) + ":";
+    gshadowEntries = builtins.concatStringsSep "\n" (
+      ["root:x::" nixbldShadow]
+    );
+
+    shadowEntries = "root:!x:::::::"; # unchanged
+
+    shellsFile = ''
+      /bin/sh
+      /bin/bash
+      /bin/fish
+    '';
+
+    osRelease = ''
+      NAME="NixOS"
+      ID=nixos
+      VERSION="unstable"
+      VERSION_CODENAME=unstable
+      PRETTY_NAME="NixOS (unstable)"
+      HOME_URL="https://nixos.org/"
+      SUPPORT_URL="https://nixos.org/nixos/manual/"
+      BUG_REPORT_URL="https://github.com/NixOS/nixpkgs/issues"
+    '';
+
+    baseInfo = with pkgs; [
+      (writeTextDir "etc/shadow" shadowEntries)
+      (writeTextDir "etc/passwd" passwdEntries)
+      (writeTextDir "etc/group" groupEntries)
+      (writeTextDir "etc/gshadow" gshadowEntries)
+      (writeTextDir "etc/shells" shellsFile)
+      (writeTextDir "etc/os-release" osRelease)
+    ];
 
     # ---------------------------------------------------------------------
     # Dev/CI envs
@@ -67,8 +94,6 @@ let
         "/etc/ssl/certs"
         ];
     };
-
-
 
     # ---------------------------------------------------------------------
     # Misc config blobs copied verbatim
@@ -244,10 +269,51 @@ let
       '';
     };
 
+    ciContainer = pkgs.dockerTools.buildImage {
+      name = "polar-ci";
+      tag  = "latest";
+      copyToRoot = [
+        ciEnv
+        baseInfo
+        gitconfig
+        license
+        nixConfig
+        containerPolicyConfig
+      ];
+      config = {
+        WorkingDir = "/workspace";
+        Env = [
+          "COREUTILS=${pkgs.uutils-coreutils-noprefix}"
+          "LANG=en_US.UTF-8"
+          "TZ=UTC"
+          "MANPAGER=sh -c 'col -bx | bat --language man --style plain'"
+          "MANPATH=${pkgs.man-db}/share/man:$MANPATH"
+          "LOCALE_ARCHIVE=${pkgs.glibcLocalesUtf8}/lib/locale/locale-archive"
+
+          "PATH=$PATH:/bin:/usr/bin:${ciEnv}/bin:/root/.cargo/bin"
+          "SSL_CERT_DIR=/etc/ssl/certs"
+          # Add certificates to allow for cargo to download files from the
+          # internet. May have to adjust this for FIPS.
+          "SSL_CERT_FILE=/etc/ssl/certs/ca-bundle.crt"
+          "USER=root"
+        ];
+        Volumes = {};
+        Cmd = [ "/bin/bash" ];
+      };
+      extraCommands = ''
+        # Link the env binary (needed for the check requirements script)
+        mkdir -p usr/bin
+        ln -s ${pkgs.coreutils}/bin/env usr/bin/env
+        mkdir -p var/tmp
+        mkdir -p tmp
+      '';
+    };
+
+
 
 
 in {
-  inherit devContainer;
+  inherit devContainer ciContainer;
 
   devShells.default = pkgs.mkShell {
     name = "polar-devshell";

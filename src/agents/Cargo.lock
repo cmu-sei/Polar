@@ -689,6 +689,7 @@ dependencies = [
  "iana-time-zone",
  "js-sys",
  "num-traits",
+ "rkyv 0.7.45",
  "serde",
  "wasm-bindgen",
  "windows-link",
@@ -793,6 +794,9 @@ dependencies = [
 [[package]]
 name = "config-ops"
 version = "0.1.0"
+dependencies = [
+ "workspace-hack",
+]
 
 [[package]]
 name = "const-oid"
@@ -2238,6 +2242,7 @@ name = "kube-consumer"
 version = "0.1.0"
 dependencies = [
  "cassini",
+ "chrono",
  "k8s-openapi",
  "kube-common",
  "neo4rs",
@@ -2250,6 +2255,7 @@ dependencies = [
  "tracing",
  "tracing-glog",
  "tracing-subscriber",
+ "uuid",
  "workspace-hack",
 ]
 

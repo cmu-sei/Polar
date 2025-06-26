@@ -1,7 +1,3 @@
-use neo4rs::Graph;
-use ractor::registry::where_is;
-use serde::{Deserialize, Serialize};
-
 pub const DISPATCH_ACTOR: &str = "DISPATCH";
 pub const TRANSACTION_FAILED_ERROR: &str = "Expected to start a transaction with the graph";
 pub const QUERY_COMMIT_FAILED: &str = "Error committing transaction to graph";
@@ -53,35 +49,33 @@ pub fn get_neo_config() -> neo4rs::Config {
         std::env::var("GRAPH_PASSWORD").expect("No GRAPH_PASSWORD provided for Neo4J.");
     let neo4j_endpoint = std::env::var("GRAPH_ENDPOINT").expect("No GRAPH_ENDPOINT provided.");
     tracing::info!("Using Neo4j database at {neo4j_endpoint}");
-    
+
     let config = match std::env::var("GRAPH_CA_CERT") {
         Ok(client_certificate) => {
-
-            tracing::info!("Found GRAPH_CA_CERT at {client_certificate}. Configuring graph client.");
-            neo4rs::ConfigBuilder::default() 
-            .uri(neo4j_endpoint)
-            .user(neo_user) 
-            .password(neo_password) 
-            .db(database_name)
-            .fetch_size(500)
-            .with_client_certificate(client_certificate)        
-            .max_connections(10)
-            .build().expect("Expected to build neo4rs configuration")
+            tracing::info!(
+                "Found GRAPH_CA_CERT at {client_certificate}. Configuring graph client."
+            );
+            neo4rs::ConfigBuilder::default()
+                .uri(neo4j_endpoint)
+                .user(neo_user)
+                .password(neo_password)
+                .db(database_name)
+                .fetch_size(500)
+                .with_client_certificate(client_certificate)
+                .max_connections(10)
+                .build()
+                .expect("Expected to build neo4rs configuration")
         }
-        Err(_) => {
-            neo4rs::ConfigBuilder::default() 
+        Err(_) => neo4rs::ConfigBuilder::default()
             .uri(neo4j_endpoint)
             .user(neo_user)
             .password(neo_password)
             .db(database_name)
             .fetch_size(500)
             .max_connections(10)
-            .build().expect("Expected to build neo4rs configuration")
-        }
-    
+            .build()
+            .expect("Expected to build neo4rs configuration"),
     };
-     
+
     config
 }
-
-

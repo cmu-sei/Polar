@@ -1,18 +1,14 @@
-use std::fmt;
-
-use cynic::*;
-use gitlab_schema::gitlab::CiRunnerConnection;
+use crate::projects::ProjectConnection;
+use crate::users::UserCoreFragment;
 use gitlab_schema::gitlab::{self as schema};
 use gitlab_schema::DateTimeString;
 use gitlab_schema::IdString;
-use crate::projects::ProjectConnection;
-use crate::users::UserCoreFragment;
 
 use rkyv::Archive;
 use rkyv::Deserialize;
 use rkyv::Serialize;
 
-#[derive(cynic::QueryVariables, Debug, Clone, Deserialize, Serialize, rkyv::Archive)]
+#[derive(cynic::QueryVariables, Debug, Clone, Deserialize, Serialize, Archive)]
 pub struct MultiGroupQueryArguments {
     //TODO: Doesn't appear to be supported in our test version of gitlab, but it is mentioned as as an argument in the docs
     // pub ids: Option<Vec<IdString>>,
@@ -27,7 +23,7 @@ pub struct MultiGroupQueryArguments {
     pub last: Option<i32>,
 }
 
-#[derive(cynic::QueryFragment, Clone, Deserialize, Serialize, rkyv::Archive)]
+#[derive(cynic::QueryFragment, Clone, Deserialize, Serialize, Archive)]
 #[cynic(schema = "gitlab")]
 pub struct GroupConnection {
     pub edges: Option<Vec<Option<GroupEdge>>>,
@@ -35,14 +31,14 @@ pub struct GroupConnection {
     pub page_info: crate::PageInfo,
 }
 
-#[derive(cynic::QueryFragment, Clone, Deserialize, Serialize, rkyv::Archive)]
+#[derive(cynic::QueryFragment, Clone, Deserialize, Serialize, Archive)]
 #[cynic(schema = "gitlab")]
 pub struct GroupEdge {
     pub cursor: String,
     pub node: Option<GroupData>,
 }
 
-#[derive(cynic::QueryFragment, Clone, Deserialize, Serialize, rkyv::Archive)]
+#[derive(cynic::QueryFragment, Clone, Deserialize, Serialize, Archive)]
 #[cynic(schema = "gitlab", graphql_type = "Group")]
 pub struct GroupData {
     pub id: IdString,
@@ -53,7 +49,7 @@ pub struct GroupData {
     pub marked_for_deletion_on: Option<DateTimeString>,
 }
 
-#[derive(cynic::QueryFragment, Clone, Deserialize, Serialize, rkyv::Archive)]
+#[derive(cynic::QueryFragment, Clone, Deserialize, Serialize, Archive)]
 #[cynic(schema = "gitlab", graphql_type = "Group")]
 pub struct GroupMembersFragment {
     pub id: IdString,
@@ -61,7 +57,7 @@ pub struct GroupMembersFragment {
     pub group_members: Option<GroupMemberConnection>,
 }
 
-#[derive(cynic::QueryFragment, Clone, Deserialize, Serialize, rkyv::Archive)]
+#[derive(cynic::QueryFragment, Clone, Deserialize, Serialize, Archive)]
 #[cynic(schema = "gitlab", graphql_type = "Group")]
 pub struct GroupProjectsFragment {
     pub id: IdString,
@@ -69,7 +65,7 @@ pub struct GroupProjectsFragment {
     pub projects_count: i32,
 }
 
-#[derive(cynic::QueryFragment, Clone, Deserialize, Serialize, rkyv::Archive)]
+#[derive(cynic::QueryFragment, Clone, Deserialize, Serialize, Archive)]
 #[cynic(schema = "gitlab", graphql_type = "Group")]
 pub struct GroupRunnersFragment {
     pub id: IdString,
@@ -77,7 +73,7 @@ pub struct GroupRunnersFragment {
 }
 
 /// Datatype representing a users's membership for a group
-#[derive(cynic::QueryFragment, Clone, Deserialize, Serialize, rkyv::Archive)]
+#[derive(cynic::QueryFragment, Clone, Deserialize, Serialize, Archive)]
 #[cynic(schema = "gitlab")]
 pub struct GroupMember {
     /// GitLab::Access level.
@@ -110,7 +106,7 @@ pub struct GroupMember {
     // pub user_permissions: GroupPermissions,
 }
 
-#[derive(cynic::QueryFragment, Deserialize, Clone, Serialize, rkyv::Archive)]
+#[derive(cynic::QueryFragment, Deserialize, Clone, Serialize, Archive)]
 #[cynic(schema = "gitlab")]
 pub struct GroupMemberConnection {
     // pub edges: Option<Vec<Option<GroupMemberEdge>>>,
@@ -118,13 +114,12 @@ pub struct GroupMemberConnection {
     pub page_info: crate::PageInfo,
 }
 
-#[derive(cynic::QueryFragment, Clone, Deserialize, Serialize, rkyv::Archive)]
+#[derive(cynic::QueryFragment, Clone, Deserialize, Serialize, Archive)]
 #[cynic(schema = "gitlab")]
 pub struct GroupMemberEdge {
     pub cursor: String,
     pub node: Option<GroupMember>,
 }
-
 
 // #[derive(cynic::QueryFragment, Debug, Clone)]
 // #[cynic(schema = "gitlab")]

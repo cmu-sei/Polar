@@ -22,13 +22,13 @@
 */
 
 use crate::{subscribe_to_topic, GitlabConsumerArgs, GitlabConsumerState};
-use polar::{QUERY_COMMIT_FAILED, QUERY_RUN_FAILED, TRANSACTION_FAILED_ERROR};
 use common::types::GitlabData;
 use common::RUNNERS_CONSUMER_TOPIC;
 use neo4rs::Query;
+use polar::{QUERY_COMMIT_FAILED, QUERY_RUN_FAILED, TRANSACTION_FAILED_ERROR};
 
 use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef};
-use tracing::{debug, error, info};
+use tracing::{debug, info};
 
 pub struct GitlabRunnerConsumer;
 
@@ -45,11 +45,16 @@ impl Actor for GitlabRunnerConsumer {
     ) -> Result<Self::State, ActorProcessingErr> {
         debug!("{myself:?} starting, connecting to broker");
         //subscribe to topic
-        match subscribe_to_topic(args.registration_id, RUNNERS_CONSUMER_TOPIC.to_string(), args.graph_config).await {
+        match subscribe_to_topic(
+            args.registration_id,
+            RUNNERS_CONSUMER_TOPIC.to_string(),
+            args.graph_config,
+        )
+        .await
+        {
             Ok(state) => Ok(state),
             Err(e) => {
-                let err_msg =
-                    format!("Error starting actor: \"{RUNNERS_CONSUMER_TOPIC}\" {e}");
+                let err_msg = format!("Error starting actor: \"{RUNNERS_CONSUMER_TOPIC}\" {e}");
                 Err(ActorProcessingErr::from(err_msg))
             }
         }
@@ -70,14 +75,10 @@ impl Actor for GitlabRunnerConsumer {
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-
         match state.graph.start_txn().await {
-            Ok(mut transaction) => {
-                match message {
-
-                    GitlabData::Runners(runners) => {
-
-                        let runner_data = runners
+            Ok(mut transaction) => match message {
+                GitlabData::Runners(runners) => {
+                    let runner_data = runners
                         .iter()
                         .map(|runner| {
                             format!(
@@ -86,9 +87,9 @@ impl Actor for GitlabRunnerConsumer {
                             paused: '{paused}',
                             runner_type: '{runner_type:?}',
                             status: '{status:?}',
-                            access_level: '{access_level:?}', 
+                            access_level: '{access_level:?}',
                             run_untagged: '{run_untagged}',
-                            tag_list: '{tag_list:?}' 
+                            tag_list: '{tag_list:?}'
                             }}"#,
                                 runner_id = runner.id.0,
                                 paused = runner.paused,
@@ -101,37 +102,34 @@ impl Actor for GitlabRunnerConsumer {
                         })
                         .collect::<Vec<_>>()
                         .join(",\n");
-        
-                        let cypher_query = format!(
-                            "
+
+                    let cypher_query = format!(
+                        "
                             UNWIND [{runner_data}] AS runner_data
                             MERGE (runner:GitlabRunner {{ runner_id: runner_data.runner_id }})
                             SET runner.paused = runner_data.paused,
                                 runner.runner_type = runner_data.runner_type,
                                 runner.status = runner_data.status,
-                                runner.access_level = runner_data.access_level, 
+                                runner.access_level = runner_data.access_level,
                                 runner.run_untagged = runner_data.run_untagged,
-                                runner.tag_list = runner_data.tag_list 
+                                runner.tag_list = runner_data.tag_list
                             "
-                        );
-                        debug!(cypher_query);
-                        if let Err(e) = transaction.run(Query::new(cypher_query)).await {
-                            myself.stop(Some(QUERY_RUN_FAILED.to_string()));
-                            
-                        }
-                        
-                        if let Err(e) = transaction.commit().await {
-                            myself.stop(Some(QUERY_COMMIT_FAILED.to_string()));
-                        }
-                        info!("Committed transaction to database");
+                    );
+                    debug!(cypher_query);
+                    if let Err(e) = transaction.run(Query::new(cypher_query)).await {
+                        myself.stop(Some(QUERY_RUN_FAILED.to_string()));
                     }
-                    _ => (),
+
+                    if let Err(e) = transaction.commit().await {
+                        myself.stop(Some(QUERY_COMMIT_FAILED.to_string()));
+                    }
+                    info!("Committed transaction to database");
                 }
-            }
-            Err(e) => myself.stop(Some(format!("{TRANSACTION_FAILED_ERROR}. {e}")))
+                _ => (),
+            },
+            Err(e) => myself.stop(Some(format!("{TRANSACTION_FAILED_ERROR}. {e}"))),
         }
-      
+
         Ok(())
     }
 }
-

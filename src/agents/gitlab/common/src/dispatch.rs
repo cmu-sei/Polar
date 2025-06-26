@@ -16,7 +16,7 @@ impl MessageDispatcher {
     /// The incoming topic string will inform us of which actor is responsible for handling the message.
     /// Other agents may want to implement DLQ for when consumers aren't present and may return.
     /// For now, we don't need to bother since we're getting new data all the time from gitlab.
-    ///         
+    ///
     pub fn deserialize_and_dispatch(message: Vec<u8>, topic: String) {
         match rkyv::from_bytes::<GitlabData, Error>(&message) {
             Ok(message) => {
@@ -41,8 +41,8 @@ impl Actor for MessageDispatcher {
 
     async fn pre_start(
         &self,
-        myself: ActorRef<Self::Msg>,
-        args: (),
+        _myself: ActorRef<Self::Msg>,
+        _args: (),
     ) -> Result<Self::State, ActorProcessingErr> {
         Ok(DispatcherState)
     }

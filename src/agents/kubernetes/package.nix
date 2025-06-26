@@ -18,7 +18,7 @@ let
 
     consumer = craneLib.buildPackage (crateArgs // {
         pname = "kube-consumer";
-        cargoExtraArgs= "--bin kube-observer --locked";
+        cargoExtraArgs= "--bin kube-consumer --locked";
         src = workspaceFileset ./kubernetes/consume;
     });
 

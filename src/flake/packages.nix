@@ -138,8 +138,21 @@ in
     ];
 
     # Set up the packages we want to include in our CI and testing environments,
-    # on top of the official nix image which can facilitate most operations
     ciPkgs = with pkgs; [
+      # -- Basic Required Files --
+      bash # Basic bash to run bare essential code
+      glibcLocalesUtf8
+      uutils-coreutils-noprefix # Essential GNU utilities (ls, cat, etc.)
+      curl
+      gnugrep # GNU version of grep for searching text
+      gnused # GNU version of sed for text processing
+      gnutar # GNU version of tar for archiving
+      gzip # Compression utility
+      findutils
+      cacert
+      openssl
+      nix
+      git
       dhall
       dhall-yaml
       dhall-json

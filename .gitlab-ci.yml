@@ -8,10 +8,12 @@ default:
   tags:
     - kubernetes
 
+variables:
+  CI_IMAGE: "$CI_REGISTRY_IMAGE/polar-ci"
+
 build-dev-environment:
   image: registry.sandbox.labz.s-box.org/sei/polar-mirror/nix:2.24.13
   stage: environment-setup
-  allow_failure: true
   rules:
     - changes:
         - flake.nix
@@ -34,6 +36,32 @@ build-dev-environment:
     - skopeo login --username "$CI_REGISTRY_USER" --password "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
     - skopeo inspect docker-archive://$(readlink -f ./polar-dev)
     - skopeo copy docker-archive://$(readlink -f ./polar-dev) docker://$CI_REGISTRY_IMAGE/polar-dev:0.1.0
+
+build-ci-environment:
+  image: registry.sandbox.labz.s-box.org/sei/polar-mirror/nix:2.24.13
+  stage: environment-setup
+  rules:
+    - changes:
+        - flake.nix
+        - flake.lock
+        - src/flake/*
+        - .gitlab-ci.yml
+  script:
+    #install needed tools
+    - nix-env --install --attr nixpkgs.skopeo
+    - |
+      mkdir -p "$HOME/.config/nix"
+      printf "experimental-features = nix-command flakes" > "$HOME/.config/nix/nix.conf"
+      mkdir -p "/etc/containers"
+      echo '{"default":[{"type":"insecureAcceptAnything"}]}' > /etc/containers/policy.json
+      git config --global --add safe.directory "$(pwd)"
+    # build dev and testing environments
+    - nix build .#containers.ciContainer -o polar-ci
+
+    #  Use skopeo to inspect and upload our images
+    - skopeo login --username "$CI_REGISTRY_USER" --password "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
+    - skopeo inspect docker-archive://$(readlink -f ./polar-ci)
+    - skopeo copy docker-archive://$(readlink -f ./polar-ci) docker://$CI_REGISTRY_IMAGE/polar-ci:0.1.0
 
 build-workspace:
   image: registry.sandbox.labz.s-box.org/sei/polar-mirror/polar-ci:0.1.0
@@ -62,8 +90,8 @@ build-workspace:
     - nix build .#polarPkgs.cassini.cassiniImage -o cassini
     - nix build .#polarPkgs.gitlabAgent.observerImage -o gitlab-observer
     - nix build .#polarPkgs.gitlabAgent.consumerImage -o gitlab-consumer
-    - nix build .#polarPkgs.kubeAgent.kubeObserverImage -o kube-observer
-    - nix build .#polarPkgs.kubeAgent.kubeConsumerImage -o kube-consumer
+    - nix build .#polarPkgs.kubeAgent.observerImage -o kube-observer
+    - nix build .#polarPkgs.kubeAgent.consumerImage -o kube-consumer
 
     # Vulnerability analysis on our store
     # vulnix returns nonzero exit codes, so we need to get around this.
@@ -81,12 +109,11 @@ build-workspace:
     - ls -lh
     # Use skopeo to inspect and upload our images
     - skopeo login --username "$CI_REGISTRY_USER" --password "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
-    - |
-      skopeo copy docker-archive://$(readlink -f cassini) docker://$CI_REGISTRY_IMAGE/cassini:$CI_COMMIT_SHORT_SHA
-      skopeo copy docker-archive://$(readlink -f gitlab-observer) docker://$CI_REGISTRY_IMAGE/polar-gitlab-observer:$CI_COMMIT_SHORT_SHA
-      skopeo copy docker-archive://$(readlink -f gitlab-consumer) docker://$CI_REGISTRY_IMAGE/polar-gitlab-consumer:$CI_COMMIT_SHORT_SHA
-      skopeo copy docker-archive://$(readlink -f kube-observer) docker://$CI_REGISTRY_IMAGE/polar-kube-observer:$CI_COMMIT_SHORT_SHA
-      skopeo copy docker-archive://$(readlink -f kube-consumer) docker://$CI_REGISTRY_IMAGE/polar-kube-consumer:$CI_COMMIT_SHORT_SHA
+    - skopeo copy docker-archive:$(readlink -f cassini) docker://$CI_REGISTRY_IMAGE/cassini:$CI_COMMIT_SHORT_SHA
+    - skopeo copy docker-archive:$(readlink -f gitlab-observer) docker://$CI_REGISTRY_IMAGE/polar-gitlab-observer:$CI_COMMIT_SHORT_SHA
+    - skopeo copy docker-archive:$(readlink -f gitlab-consumer) docker://$CI_REGISTRY_IMAGE/polar-gitlab-consumer:$CI_COMMIT_SHORT_SHA
+    - skopeo copy docker-archive:$(readlink -f kube-observer) docker://$CI_REGISTRY_IMAGE/polar-kube-observer:$CI_COMMIT_SHORT_SHA
+    - skopeo copy docker-archive:$(readlink -f kube-consumer) docker://$CI_REGISTRY_IMAGE/polar-kube-consumer:$CI_COMMIT_SHORT_SHA
 
     # upload to ACR
     - skopeo copy --dest-creds "$ACR_USERNAME:$ACR_TOKEN" docker-archive://$(readlink -f cassini) docker://$AZURE_REGISTRY/cassini:$CI_COMMIT_SHORT_SHA

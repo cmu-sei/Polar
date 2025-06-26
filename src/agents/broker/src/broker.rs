@@ -7,10 +7,9 @@ use crate::{
     LISTENER_MGR_NOT_FOUND_TXT, SUBSCRIBE_REQUEST_FAILED_TXT, UNEXPECTED_MESSAGE_STR,
 };
 use crate::{
-    BrokerMessage, LISTENER_MANAGER_NAME, PUBLISH_REQ_FAILED_TXT,
-    REGISTRATION_REQ_FAILED_TXT, SESSION_MANAGER_NAME, SESSION_MGR_NOT_FOUND_TXT,
-    SESSION_NOT_FOUND_TXT, SUBSCRIBER_MANAGER_NAME, SUBSCRIBER_MGR_NOT_FOUND_TXT,
-    TOPIC_MANAGER_NAME,
+    BrokerMessage, LISTENER_MANAGER_NAME, PUBLISH_REQ_FAILED_TXT, REGISTRATION_REQ_FAILED_TXT,
+    SESSION_MANAGER_NAME, SESSION_NOT_FOUND_TXT, SUBSCRIBER_MANAGER_NAME,
+    SUBSCRIBER_MGR_NOT_FOUND_TXT, TOPIC_MANAGER_NAME,
 };
 use ractor::{
     async_trait,
@@ -18,7 +17,7 @@ use ractor::{
     rpc::{call, CallResult::Success},
     Actor, ActorProcessingErr, ActorRef, SupervisionEvent,
 };
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 // ============================== Broker Supervisor Actor Definition ============================== //
 
@@ -363,7 +362,7 @@ impl Actor for Broker {
                                                                 Ok(_) => {
                                                                     //send ack to session
                                                                     if let Some(session) = where_is(registration_id.clone()) {
-                                                                        if let Err(e) = session.send_message(BrokerMessage::SubscribeAcknowledgment { registration_id: registration_id, topic: topic.clone(), result: Ok(()) }) {
+                                                                        if let Err(_e) = session.send_message(BrokerMessage::SubscribeAcknowledgment { registration_id: registration_id, topic: topic.clone(), result: Ok(()) }) {
                                                                             warn!("{SUBSCRIBE_REQUEST_FAILED_TXT} {SESSION_NOT_FOUND_TXT}");
                                                                         }
                                                                     } else { warn!("{SUBSCRIBE_REQUEST_FAILED_TXT} {SESSION_NOT_FOUND_TXT}"); }
@@ -402,7 +401,7 @@ impl Actor for Broker {
                 if let Some(registration_id) = registration_id {
                     //find topic actor, tell it to forget session
                     if let Some(topic_actor) = where_is(topic.clone()) {
-                        if let Err(e) =
+                        if let Err(_e) =
                             topic_actor.send_message(BrokerMessage::UnsubscribeRequest {
                                 registration_id: Some(registration_id.clone()),
                                 topic: topic.clone(),

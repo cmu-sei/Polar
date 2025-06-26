@@ -21,12 +21,12 @@
    DM24-0470
 */
 use crate::{subscribe_to_topic, GitlabConsumerArgs, GitlabConsumerState};
-use polar::{QUERY_COMMIT_FAILED, QUERY_RUN_FAILED, TRANSACTION_FAILED_ERROR};
 use common::types::GitlabData;
 use common::GROUPS_CONSUMER_TOPIC;
 use neo4rs::Query;
-use ractor::{async_trait, registry::where_is, Actor, ActorProcessingErr, ActorRef};
-use tracing::{debug, error, info};
+use polar::{QUERY_COMMIT_FAILED, QUERY_RUN_FAILED, TRANSACTION_FAILED_ERROR};
+use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef};
+use tracing::{debug, info};
 
 pub struct GitlabGroupConsumer;
 
@@ -38,11 +38,17 @@ impl Actor for GitlabGroupConsumer {
 
     async fn pre_start(
         &self,
-        myself: ActorRef<Self::Msg>,
+        _myself: ActorRef<Self::Msg>,
         args: GitlabConsumerArgs,
     ) -> Result<Self::State, ActorProcessingErr> {
         //subscribe to topic
-        match subscribe_to_topic(args.registration_id, GROUPS_CONSUMER_TOPIC.to_string(), args.graph_config).await {
+        match subscribe_to_topic(
+            args.registration_id,
+            GROUPS_CONSUMER_TOPIC.to_string(),
+            args.graph_config,
+        )
+        .await
+        {
             Ok(state) => Ok(state),
             Err(e) => {
                 let err_msg = format!("Error starting actor: {GROUPS_CONSUMER_TOPIC} {e}");
@@ -65,12 +71,10 @@ impl Actor for GitlabGroupConsumer {
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-
         match state.graph.start_txn().await {
             Ok(mut transaction) => {
                 match message {
                     GitlabData::Groups(vec) => {
-
                         for g in vec {
                             let query = format!(
                                 r#"
@@ -90,20 +94,19 @@ impl Actor for GitlabGroupConsumer {
                                 .await
                                 .expect("Expected to run query on transaction.");
                         }
-        
+
                         transaction
                             .commit()
                             .await
                             .expect("Expected to commit transaction");
                     }
                     GitlabData::GroupMembers(link) => {
-        
                         if let Some(vec) = link.connection.nodes {
                             let group_memberships = vec
                                 .iter()
                                 .map(|option| {
                                     let membership = option.as_ref().unwrap();
-        
+
                                     //create a list of attribute sets
                                     format!(
                                         r#"{{
@@ -113,31 +116,34 @@ impl Actor for GitlabGroupConsumer {
                                         updated_at: "{updated_at}",
                                         expires_at: "{expires_at}"
                                     }}"#,
-                                        user_id = membership
-                                            .user
-                                            .as_ref()
-                                            .map_or_else(|| String::default(), |user| user.id.to_string()),
-                                        access_level = membership.access_level.as_ref().map_or_else(
+                                        user_id = membership.user.as_ref().map_or_else(
                                             || String::default(),
-                                            |al| { al.integer_value.unwrap_or_default().to_string() }
+                                            |user| user.id.to_string()
                                         ),
-                                        created_at = membership
-                                            .created_at
-                                            .as_ref()
-                                            .map_or_else(|| String::default(), |date| date.to_string()),
-                                        updated_at = membership
-                                            .updated_at
-                                            .as_ref()
-                                            .map_or_else(|| String::default(), |date| date.to_string()),
-                                        expires_at = membership
-                                            .expires_at
-                                            .as_ref()
-                                            .map_or_else(|| String::default(), |date| date.to_string()),
+                                        access_level =
+                                            membership.access_level.as_ref().map_or_else(
+                                                || String::default(),
+                                                |al| {
+                                                    al.integer_value.unwrap_or_default().to_string()
+                                                }
+                                            ),
+                                        created_at = membership.created_at.as_ref().map_or_else(
+                                            || String::default(),
+                                            |date| date.to_string()
+                                        ),
+                                        updated_at = membership.updated_at.as_ref().map_or_else(
+                                            || String::default(),
+                                            |date| date.to_string()
+                                        ),
+                                        expires_at = membership.expires_at.as_ref().map_or_else(
+                                            || String::default(),
+                                            |date| date.to_string()
+                                        ),
                                     )
                                 })
                                 .collect::<Vec<_>>()
                                 .join(",\n");
-        
+
                             let cypher_query = format!(
                                 "
                                 MERGE (group:GitlabGroup {{ group_id: \"{group_id}\" }})
@@ -153,27 +159,26 @@ impl Actor for GitlabGroupConsumer {
                                 ",
                                 group_id = link.resource_id
                             );
-        
+
                             debug!(cypher_query);
                             transaction
                                 .run(Query::new(cypher_query))
                                 .await
                                 .expect("Expected to run query.");
-                            
-                            if let Err(e) = transaction.commit().await {
+
+                            if let Err(_e) = transaction.commit().await {
                                 myself.stop(Some(QUERY_COMMIT_FAILED.to_string()))
                             }
                             info!("Committed transaction to database");
                         }
                     }
                     GitlabData::GroupProjects(link) => {
-        
                         if let Some(vec) = link.connection.nodes {
                             let projects = vec
                                 .iter()
                                 .map(|option| {
                                     let project = option.as_ref().unwrap();
-        
+
                                     //create a list of attribute sets
                                     format!(
                                         r#"{{ project_id: "{project_id}" }}"#,
@@ -182,7 +187,7 @@ impl Actor for GitlabGroupConsumer {
                                 })
                                 .collect::<Vec<_>>()
                                 .join(",\n");
-        
+
                             let cypher_query = format!(
                                 "
                                 MERGE (group:GitlabGroup {{ group_id: \"{group_id}\" }})
@@ -194,31 +199,34 @@ impl Actor for GitlabGroupConsumer {
                                 ",
                                 group_id = link.resource_id
                             );
-        
+
                             debug!(cypher_query);
-                            if let Err(e) = transaction.run(Query::new(cypher_query)).await {
+                            if let Err(_e) = transaction.run(Query::new(cypher_query)).await {
                                 myself.stop(Some(QUERY_RUN_FAILED.to_string()));
-                                
                             }
-                            
-                            if let Err(e) = transaction.commit().await {
+
+                            if let Err(_e) = transaction.commit().await {
                                 myself.stop(Some(QUERY_COMMIT_FAILED.to_string()));
                             }
                             info!("Committed transaction to database");
                         }
                     }
                     GitlabData::GroupRunners(link) => {
-                        let mut transaction = state.graph.start_txn().await.expect(TRANSACTION_FAILED_ERROR);
-        
+                        let mut transaction = state
+                            .graph
+                            .start_txn()
+                            .await
+                            .expect(TRANSACTION_FAILED_ERROR);
+
                         if let Some(vec) = link.connection.nodes {
                             let runners = vec
                                 .iter()
                                 .map(|option| {
                                     let runner = option.as_ref().unwrap();
-        
+
                                     //create a list of attribute sets
                                     format!(
-                                        r#"{{ 
+                                        r#"{{
                                     runner_id: "{runner_id}",
                                     paused: "{paused}"
                                 }}"#,
@@ -228,7 +236,7 @@ impl Actor for GitlabGroupConsumer {
                                 })
                                 .collect::<Vec<_>>()
                                 .join(",\n");
-        
+
                             let cypher_query = format!(
                                 "
                                 MERGE (group:GitlabGroup {{ group_id: \"{group_id}\" }})
@@ -240,27 +248,25 @@ impl Actor for GitlabGroupConsumer {
                                 ",
                                 group_id = link.resource_id
                             );
-        
+
                             debug!(cypher_query);
-                            if let Err(e) = transaction.run(Query::new(cypher_query)).await {
+                            if let Err(_e) = transaction.run(Query::new(cypher_query)).await {
                                 myself.stop(Some(QUERY_RUN_FAILED.to_string()));
-                                
                             }
-                            
-                            if let Err(e) = transaction.commit().await {
+
+                            if let Err(_e) = transaction.commit().await {
                                 myself.stop(Some(QUERY_COMMIT_FAILED.to_string()));
                             }
                             info!("Committed transaction to database");
                         }
                     }
-        
+
                     _ => (),
                 }
-                
             }
-            Err(e) => myself.stop(Some(format!("{TRANSACTION_FAILED_ERROR}. {e}")))
+            Err(e) => myself.stop(Some(format!("{TRANSACTION_FAILED_ERROR}. {e}"))),
         }
-        
+
         Ok(())
     }
 }

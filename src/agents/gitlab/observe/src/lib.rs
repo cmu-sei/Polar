@@ -20,25 +20,24 @@
 
    DM24-0470
 */
-
 pub mod groups;
+pub mod meta;
+pub mod pipelines;
 pub mod projects;
+pub mod repositories;
 pub mod runners;
 pub mod supervisor;
 pub mod users;
-pub mod pipelines;
-pub mod repositories;
 
-use cynic::Operation;
+use cynic::{GraphQlError, Operation};
 use gitlab_queries::groups::*;
+use gitlab_queries::projects::{MultiProjectQuery, MultiProjectQueryArguments};
 use gitlab_queries::runners::MultiRunnerQuery;
 use gitlab_queries::runners::MultiRunnerQueryArguments;
-use gitlab_queries::projects::{MultiProjectQuery, MultiProjectQueryArguments};
 use gitlab_queries::users::{MultiUserQuery, MultiUserQueryArguments};
 use gitlab_schema::IdString;
 use parse_link_header::parse_with_rel;
 use ractor::concurrency::Duration;
-use ractor::concurrency::JoinHandle;
 use ractor::ActorRef;
 use rand::rngs::SmallRng;
 use rand::Rng;
@@ -50,10 +49,9 @@ use reqwest::Method;
 use reqwest::Response;
 use serde::Deserialize;
 use tokio::task::AbortHandle;
-use tracing::info;
-use tracing::warn;
 use tracing::{debug, error};
 
+pub const META_OBSERVER: &str = "gitlab:observer:metadata";
 pub const GITLAB_USERS_OBSERVER: &str = "gitlab:observer:users";
 pub const GITLAB_PROJECT_OBSERVER: &str = "gitlab.observer.projects";
 pub const BROKER_CLIENT_NAME: &str = "gitlab:observer:web_client";
@@ -69,25 +67,25 @@ const PRIVATE_TOKEN_HEADER_STR: &str = "PRIVATE-TOKEN";
 /// General state for all gitlab observers
 pub struct GitlabObserverState {
     /// Endpoint of GitLab instance
-    pub gitlab_endpoint: String, 
+    pub gitlab_endpoint: String,
     /// Token for authentication
-    pub token: Option<String>,   
+    pub token: Option<String>,
     /// HTTP client
-    pub web_client: Client,      
+    pub web_client: Client,
     /// ID of the agent's session with the broker
-    pub registration_id: String, 
+    pub registration_id: String,
     /// amount of time in seconds the observer will wait before next tick, updated internally by backoff
-    backoff_interval: Duration, 
+    backoff_interval: Duration,
     /// Max amount of time the observer will wait before ticking
-    max_backoff: Duration, 
+    max_backoff: Duration,
     /// Times we failed to query gitlab for one reason or another
-    failed_attempts: u64, 
+    failed_attempts: u64,
     /// RNG used to calculate jitter
     rng: rand::rngs::SmallRng,
     /// minimum amount of time an observer will wait between queries
     base_interval: Duration,
-    /// thread handle containing the observer loop 
-    task_handle: Option<AbortHandle>
+    /// thread handle containing the observer loop
+    task_handle: Option<AbortHandle>,
 }
 
 impl GitlabObserverState {
@@ -100,7 +98,6 @@ impl GitlabObserverState {
         base_interval: Duration,
         max_backoff: Duration,
     ) -> Self {
-
         //init rng
 
         let mut rng = rand::rng();
@@ -132,7 +129,7 @@ impl GitlabObserverState {
         let jitter = Duration::from_secs(self.rng.random_range(0..30));
         let new_interval = self.backoff_interval * 2 + jitter;
         self.backoff_interval = std::cmp::min(new_interval, self.max_backoff);
-        self.failed_attempts +=1;
+        self.failed_attempts += 1;
     }
 
     /// Reset backoff interval to base
@@ -160,61 +157,87 @@ pub enum Command {
     GetProjects(Operation<MultiProjectQuery, MultiProjectQueryArguments>),
     GetGroups(Operation<AllGroupsQuery, MultiGroupQueryArguments>),
     GetGroupMembers(Operation<GroupMembersQuery, GroupPathVariable>),
-    GetRunners(Operation<MultiRunnerQuery, MultiRunnerQueryArguments>), 
+    GetRunners(Operation<MultiRunnerQuery, MultiRunnerQueryArguments>),
     GetProjectPipelines(IdString),
     GetPipelineJobs(IdString),
     GetProjectContainerRepositories(IdString),
     GetProjectPackages(IdString),
     GetGroupContainerRepositories(IdString),
-    GetGroupPackageRepositories(IdString)
+    GetGroupPackageRepositories(IdString),
+    GetMetadata,
 }
+
+#[derive(Debug)]
 pub enum BackoffReason {
     FatalError(String),
     GraphqlError(String),
     GitlabUnreachable(String),
     TokenInvalid(String),
 }
-pub enum GitlabObserverMessage  {
+
+pub enum GitlabObserverMessage {
     Tick(Command),
     Backoff(BackoffReason),
 }
 
+pub fn handle_graphql_errors(
+    errors: Vec<GraphQlError>,
+    actor_ref: ActorRef<GitlabObserverMessage>,
+) {
+    let errors = errors
+        .iter()
+        .map(|error| error.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
 
+    error!("Failed to query instance! {errors}");
+
+    if let Err(e) = actor_ref.send_message(GitlabObserverMessage::Backoff(
+        BackoffReason::GraphqlError(errors),
+    )) {
+        error!("{e}");
+        actor_ref.stop(Some(e.to_string()))
+    }
+}
 /// helper function for our observers to respond to backoff messages
 /// either returns a new duration, or an error containing the reason it shouldn't
-pub fn handle_backoff(state: &mut GitlabObserverState, reason: BackoffReason) -> Result<Duration, String> {
+pub fn handle_backoff(
+    state: &mut GitlabObserverState,
+    reason: BackoffReason,
+) -> Result<Duration, String> {
     match reason {
-        BackoffReason::GitlabUnreachable(_) =>  {
+        BackoffReason::GitlabUnreachable(_) => {
             // If gitlab is unreachable, it *could* come back, but we should only hang around so much before giving up
             if state.failed_attempts < 5 {
                 state.apply_backoff();
                 Ok(state.backoff_interval())
-
             } else {
                 let error = "Backoff limit reached! Stopping".to_string();
-                error!(error); 
+                error!(error);
                 Err(error)
             }
         }
-        BackoffReason::GraphqlError(error) => {
+        BackoffReason::GraphqlError(_error) => {
             // Error could've been a timeout, authentication problem, or some malformed graphql query that's too complex/invalid.
             // unfortunately, there's really no way to know w/o some string parsing, graphql errors aren't well formed.
             // We'll choose to only try 3 just in case it's just a timeout.
             if state.failed_attempts < 3 {
                 state.apply_backoff();
                 Ok(state.backoff_interval())
-
             } else {
                 let error = "Backoff limit reached! Stopping".to_string();
-                error!(error); 
+                error!(error);
                 Err(error)
             }
-        },
-        BackoffReason::FatalError(error) => {
-            error!("Encountered a fatal error message! {error}");
-            Err(error)
         }
-        _ => todo!()
+        BackoffReason::FatalError(error) => {
+            error!("Encountered an error! {error}");
+            // No need to crash, or panic. We're either getting garbage from gitlab
+            // or its unreachable, either way, there's nothing the observers can do about it
+            state.apply_backoff();
+            Ok(state.backoff_interval)
+        }
+        _ => todo!("Handle new message type {reason:?}"),
     }
 }
 
@@ -330,4 +353,11 @@ pub async fn get_all_elements<T: for<'a> Deserialize<'a>>(
     }
 
     return Some(elements);
+}
+
+pub fn graphql_endpoint(gitlab_endpoint: &str) -> String {
+    format!("{gitlab_endpoint}/graphql")
+}
+pub fn v4_api_endpoint(gitlab_endpoint: &str) -> String {
+    format!("{gitlab_endpoint}/v4")
 }

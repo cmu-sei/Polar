@@ -1,13 +1,11 @@
+use neo4rs::Graph;
 use neo4rs::Query;
 use polar::get_neo_config;
-use ractor::call_t;
+use ractor::async_trait;
 use ractor::concurrency::Duration;
 use ractor::Actor;
 use ractor::ActorProcessingErr;
 use ractor::ActorRef;
-use ractor::RpcReplyPort;
-use ractor::async_trait;
-use neo4rs::Graph;
 use tokio::task::AbortHandle;
 
 struct ProvenanceActor;
@@ -15,11 +13,11 @@ struct ProvenanceActor;
 struct ProvenanceActorState {
     graph: Graph,
     interval: Duration,
-    abort_handle: Option<AbortHandle>
+    abort_handle: Option<AbortHandle>,
 }
 
 enum ProvenanceActorMessage {
-    Link
+    Link,
 }
 
 #[async_trait]
@@ -33,28 +31,33 @@ impl Actor for ProvenanceActor {
         myself: ActorRef<Self::Msg>,
         _: (),
     ) -> Result<Self::State, ActorProcessingErr> {
-        
         tracing::info!("{myself:?} starting...");
 
         // get graph connection
         //TODO: Get some schedule from configuration agent
         match neo4rs::Graph::connect(get_neo_config()).await {
-            Ok(graph) => Ok(ProvenanceActorState{ graph, interval: Duration::from_secs(30), abort_handle: None }),
-            Err(e) => Err(ActorProcessingErr::from(e))
+            Ok(graph) => Ok(ProvenanceActorState {
+                graph,
+                interval: Duration::from_secs(30),
+                abort_handle: None,
+            }),
+            Err(e) => Err(ActorProcessingErr::from(e)),
         }
     }
 
-        async fn post_start(
+    async fn post_start(
         &self,
         myself: ActorRef<Self::Msg>,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         tracing::info!("{:?} Starting loop", myself.get_name());
-        
-        state.abort_handle = Some(myself.send_interval(state.interval.clone(), || {
-            ProvenanceActorMessage::Link
-        }).abort_handle());
-        
+
+        state.abort_handle = Some(
+            myself
+                .send_interval(state.interval.clone(), || ProvenanceActorMessage::Link)
+                .abort_handle(),
+        );
+
         Ok(())
     }
 
@@ -63,7 +66,6 @@ impl Actor for ProvenanceActor {
         myself: ActorRef<Self::Msg>,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        
         if let Some(handle) = &state.abort_handle {
             handle.abort()
         }
@@ -83,7 +85,6 @@ impl Actor for ProvenanceActor {
 
         match message {
             ProvenanceActorMessage::Link => {
-
                 let query = "
                     MATCH (p:PodContainer)
                     WHERE p.image IS NOT NULL
@@ -98,8 +99,9 @@ impl Actor for ProvenanceActor {
 
                 tracing::debug!(query);
 
-                if let Err(e) = state.graph.run(Query::new(query.to_string())).await { tracing::warn!("{e}"); }
-
+                if let Err(e) = state.graph.run(Query::new(query.to_string())).await {
+                    tracing::warn!("{e}");
+                }
             }
         }
         Ok(())
@@ -109,7 +111,7 @@ impl Actor for ProvenanceActor {
 #[tokio::main]
 async fn main() {
     polar::init_logging();
-    let (actor, handle) = Actor::spawn(Some("polar.provenance".to_string()), ProvenanceActor, ())
+    let (_, handle) = Actor::spawn(Some("polar.provenance".to_string()), ProvenanceActor, ())
         .await
         .expect("Failed to start actor!");
 

@@ -24,8 +24,8 @@
 use std::time::Duration;
 
 use crate::{
-    handle_backoff, BackoffReason, Command, GitlabObserverArgs, GitlabObserverMessage,
-    GitlabObserverState, BROKER_CLIENT_NAME, MESSAGE_FORWARDING_FAILED, TOKEN_EXPIRED_BACKOFF_LOG,
+    graphql_endpoint, handle_backoff, BackoffReason, Command, GitlabObserverArgs,
+    GitlabObserverMessage, GitlabObserverState, BROKER_CLIENT_NAME, MESSAGE_FORWARDING_FAILED,
 };
 use cassini::client::TcpClientMessage;
 use cassini::ClientMessage;
@@ -89,7 +89,7 @@ impl Actor for GitlabUserObserver {
         debug!("{myself:?} starting");
 
         let state = GitlabObserverState::new(
-            args.gitlab_endpoint,
+            graphql_endpoint(&args.gitlab_endpoint),
             args.token,
             args.web_client,
             args.registration_id,

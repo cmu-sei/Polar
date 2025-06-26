@@ -1,16 +1,12 @@
-use core::error;
-use std::time::Duration;
-
 use cassini::client::*;
 use cassini::TCPClientConfig;
 use common::get_file_as_byte_vec;
+use common::METADATA_CONSUMER_TOPIC;
 use ractor::async_trait;
-use ractor::call;
-use ractor::rpc::call;
-use ractor::rpc::CallResult;
 use ractor::Actor;
 use ractor::ActorProcessingErr;
 use ractor::ActorRef;
+use ractor::OutputPort;
 use ractor::SupervisionEvent;
 use reqwest::Certificate;
 use reqwest::Client;
@@ -19,6 +15,7 @@ use tracing::error;
 use tracing::{debug, info, warn};
 
 use crate::groups::GitlabGroupObserver;
+use crate::meta::MetaObserver;
 use crate::pipelines::GitlabJobObserver;
 use crate::pipelines::GitlabPipelineObserver;
 use crate::projects::GitlabProjectObserver;
@@ -34,10 +31,16 @@ use crate::GITLAB_PROJECT_OBSERVER;
 use crate::GITLAB_REPOSITORY_OBSERVER;
 use crate::GITLAB_RUNNER_OBSERVER;
 use crate::GITLAB_USERS_OBSERVER;
+use crate::META_OBSERVER;
 pub struct ObserverSupervisor;
 
 pub struct ObserverSupervisorState {
-    max_registration_attempts: u32, // amount of times the supervisor will try to get the session_id from the client
+    pub gitlab_endpoint: String,
+    pub gitlab_token: Option<String>,
+    /// base interval that observers will use to query
+    pub base_interval: u64,
+    pub max_backoff_secs: u64,
+    pub proxy_ca_cert_file: Option<String>,
 }
 
 pub struct ObserverSupervisorArgs {
@@ -74,9 +77,15 @@ impl ObserverSupervisor {
     }
 }
 
+pub enum SupervisorMessage {
+    /// Notification message telling the supervisor the client's been registered with the broker.
+    /// This triggers the observer to finish startup and cancels the timeout
+    ClientRegistered(String),
+}
+
 #[async_trait]
 impl Actor for ObserverSupervisor {
-    type Msg = ();
+    type Msg = SupervisorMessage;
     type State = ObserverSupervisorState;
     type Arguments = ObserverSupervisorArgs;
 
@@ -87,159 +96,144 @@ impl Actor for ObserverSupervisor {
     ) -> Result<Self::State, ActorProcessingErr> {
         debug!("{myself:?} starting");
 
-        let state = ObserverSupervisorState {
-            max_registration_attempts: 5, //TODO: take from args
-        };
+        // define an output port for the actor to subscribe to
+        let output_port = std::sync::Arc::new(OutputPort::default());
 
-        let client_started_result = Actor::spawn_linked(
+        // subscribe self to this port
+        output_port.subscribe(myself.clone(), |message| {
+            Some(SupervisorMessage::ClientRegistered(message))
+        });
+
+        match Actor::spawn_linked(
             Some(BROKER_CLIENT_NAME.to_string()),
             TcpClientActor,
             TcpClientArgs {
                 config: args.client_config,
                 registration_id: None,
+                output_port,
             },
             myself.clone().into(),
         )
-        .await;
-
-        //Expect client to start, panic if it doesn't
-        match client_started_result {
-            Ok((client, _)) => {
-                // Set up an interval
-                let mut interval = tokio::time::interval(Duration::from_millis(500));
-                //wait until we get a session id to start clients, try some configured amount of times every few seconds
-                let mut attempts = 0;
-                loop {
-                    attempts += 1;
-                    info!("Getting session data...");
-                    if let CallResult::Success(result) = call(
-                        &client,
-                        |reply| TcpClientMessage::GetRegistrationId(reply),
-                        None,
-                    )
-                    .await
-                    .expect("Expected to call client!")
-                    //TODO: Match this and just stop if we can't do this instead of panicking.
-                    {
-                        if let Some(registration_id) = result {
-                            let args = GitlabObserverArgs {
-                                gitlab_endpoint: args.gitlab_endpoint.clone(),
-                                token: args.gitlab_token.clone(),
-                                registration_id: registration_id.clone(),
-                                web_client: ObserverSupervisor::get_client(args.proxy_ca_cert_file),
-                                base_interval: args.base_interval,
-                                max_backoff: args.max_backoff_secs,
-                            };
-
-                            //TODO: start observers based off of some configuration
-                            if let Err(e) = Actor::spawn_linked(
-                                Some(GITLAB_USERS_OBSERVER.to_string()),
-                                GitlabUserObserver,
-                                args.clone(),
-                                myself.clone().into(),
-                            )
-                            .await
-                            {
-                                warn!("failed to start users observer {e}")
-                            }
-                            if let Err(e) = Actor::spawn_linked(
-                                Some(GITLAB_PROJECT_OBSERVER.to_string()),
-                                GitlabProjectObserver,
-                                args.clone(),
-                                myself.clone().into(),
-                            )
-                            .await
-                            {
-                                warn!("failed to start project observer {e}")
-                            }
-                            if let Err(e) = Actor::spawn_linked(
-                                Some(GITLAB_PIPELINE_OBSERVER.to_string()),
-                                GitlabPipelineObserver,
-                                args.clone(),
-                                myself.clone().into(),
-                            )
-                            .await
-                            {
-                                warn!("failed to start project observer {e}")
-                            }
-                            if let Err(e) = Actor::spawn_linked(
-                                Some(GITLAB_JOBS_OBSERVER.to_string()),
-                                GitlabJobObserver,
-                                args.clone(),
-                                myself.clone().into(),
-                            )
-                            .await
-                            {
-                                warn!("failed to start project observer {e}")
-                            }
-                            if let Err(e) = Actor::spawn_linked(
-                                Some(GITLAB_GROUPS_OBSERVER.to_string()),
-                                GitlabGroupObserver,
-                                args.clone(),
-                                myself.clone().into(),
-                            )
-                            .await
-                            {
-                                warn!("failed to start group observer {e}")
-                            }
-                            if let Err(e) = Actor::spawn_linked(
-                                Some(GITLAB_RUNNER_OBSERVER.to_string()),
-                                GitlabRunnerObserver,
-                                args.clone(),
-                                myself.clone().into(),
-                            )
-                            .await
-                            {
-                                warn!("failed to start runner observer {e}")
-                            }
-                            if let Err(e) = Actor::spawn_linked(
-                                Some(GITLAB_REPOSITORY_OBSERVER.to_string()),
-                                GitlabRepositoryObserver,
-                                args.clone(),
-                                myself.clone().into(),
-                            )
-                            .await
-                            {
-                                warn!("failed to start runner observer {e}")
-                            }
-
-                            break;
-                        } else if attempts < state.max_registration_attempts {
-                            warn!("Failed to get session data. Retrying.");
-                        } else if attempts >= state.max_registration_attempts {
-                            error!("Failed to retrieve session data! timed out");
-                            myself.stop(Some(
-                                "Failed to retrieve session data! timed out".to_string(),
-                            ));
-                        }
-                    }
-                    interval.tick().await;
-                }
-            }
+        .await
+        {
+            // set up and return state
+            Ok(_) => Ok(ObserverSupervisorState {
+                gitlab_endpoint: args.gitlab_endpoint.clone(),
+                gitlab_token: args.gitlab_token.clone(),
+                base_interval: args.base_interval,
+                max_backoff_secs: args.max_backoff_secs,
+                proxy_ca_cert_file: args.proxy_ca_cert_file,
+            }),
             Err(e) => {
                 error!("{e}");
-                myself.stop(None);
+                Err(ActorProcessingErr::from(e))
             }
         }
-
-        Ok(state)
-    }
-
-    async fn post_start(
-        &self,
-        _: ActorRef<Self::Msg>,
-        _: &mut Self::State,
-    ) -> Result<(), ActorProcessingErr> {
-        Ok(())
     }
 
     async fn handle(
         &self,
-        _myself: ActorRef<Self::Msg>,
-        _: Self::Msg,
-        _: &mut Self::State,
+        myself: ActorRef<Self::Msg>,
+        message: Self::Msg,
+        state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        //TODO: Implement some message handling here, handle cases where the scheudler may request a certain resource be observed, like users, projects, etc.
+        match message {
+            SupervisorMessage::ClientRegistered(registration_id) => {
+                // set up args for observer actors
+                let args = GitlabObserverArgs {
+                    gitlab_endpoint: state.gitlab_endpoint.clone(),
+                    token: state.gitlab_token.clone(),
+                    registration_id: registration_id.clone(),
+                    web_client: ObserverSupervisor::get_client(state.proxy_ca_cert_file.clone()),
+                    base_interval: state.base_interval,
+                    max_backoff: state.max_backoff_secs,
+                };
+
+                //TODO: Should other observers wait until the meta observer is online and observing?
+                // TODO: decide which observers to start based off of some configuration
+                if let Err(e) = Actor::spawn_linked(
+                    Some(META_OBSERVER.to_string()),
+                    MetaObserver,
+                    args.clone(),
+                    myself.clone().into(),
+                )
+                .await
+                {
+                    warn!("failed to start meta observer {e}")
+                }
+
+                if let Err(e) = Actor::spawn_linked(
+                    Some(GITLAB_USERS_OBSERVER.to_string()),
+                    GitlabUserObserver,
+                    args.clone(),
+                    myself.clone().into(),
+                )
+                .await
+                {
+                    warn!("failed to start users observer {e}")
+                }
+                if let Err(e) = Actor::spawn_linked(
+                    Some(GITLAB_PROJECT_OBSERVER.to_string()),
+                    GitlabProjectObserver,
+                    args.clone(),
+                    myself.clone().into(),
+                )
+                .await
+                {
+                    warn!("failed to start project observer {e}")
+                }
+                if let Err(e) = Actor::spawn_linked(
+                    Some(GITLAB_PIPELINE_OBSERVER.to_string()),
+                    GitlabPipelineObserver,
+                    args.clone(),
+                    myself.clone().into(),
+                )
+                .await
+                {
+                    warn!("failed to start project observer {e}")
+                }
+                if let Err(e) = Actor::spawn_linked(
+                    Some(GITLAB_JOBS_OBSERVER.to_string()),
+                    GitlabJobObserver,
+                    args.clone(),
+                    myself.clone().into(),
+                )
+                .await
+                {
+                    warn!("failed to start project observer {e}")
+                }
+                if let Err(e) = Actor::spawn_linked(
+                    Some(GITLAB_GROUPS_OBSERVER.to_string()),
+                    GitlabGroupObserver,
+                    args.clone(),
+                    myself.clone().into(),
+                )
+                .await
+                {
+                    warn!("failed to start group observer {e}")
+                }
+                if let Err(e) = Actor::spawn_linked(
+                    Some(GITLAB_RUNNER_OBSERVER.to_string()),
+                    GitlabRunnerObserver,
+                    args.clone(),
+                    myself.clone().into(),
+                )
+                .await
+                {
+                    warn!("failed to start runner observer {e}")
+                }
+                if let Err(e) = Actor::spawn_linked(
+                    Some(GITLAB_REPOSITORY_OBSERVER.to_string()),
+                    GitlabRepositoryObserver,
+                    args.clone(),
+                    myself.clone().into(),
+                )
+                .await
+                {
+                    warn!("failed to start runner observer {e}")
+                }
+            }
+        }
         Ok(())
     }
 

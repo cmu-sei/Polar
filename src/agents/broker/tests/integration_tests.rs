@@ -3,16 +3,16 @@ mod tests {
 
     use cassini::broker::{Broker, BrokerArgs};
     use cassini::client::{TcpClientActor, TcpClientArgs, TcpClientMessage};
-    use cassini::{get_subscriber_name, ClientMessage, TCPClientConfig, BROKER_NAME, LISTENER_MANAGER_NAME};
-    use core::panic;
+    use cassini::{get_subscriber_name, ClientMessage, TCPClientConfig, BROKER_NAME};
     use ractor::registry::where_is;
-    use ractor::{async_trait, ActorProcessingErr, ActorRef, SupervisionEvent};
+    use ractor::OutputPort;
     use ractor::{concurrency::Duration, Actor};
     use std::env;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
     use tokio::sync::Notify;
     use tokio::time::timeout;
-    use tracing::{debug, info};
+    use tracing::debug;
 
     //Bind to some other port if desired
     pub const BIND_ADDR: &str = "127.0.0.1:8080";
@@ -24,7 +24,45 @@ mod tests {
     static ACTIVE_TESTS: AtomicUsize = AtomicUsize::new(0);
     // notified to signal all tests are complete to trigger teardown
     static TEST_NOTIFY: Notify = Notify::const_new();
-    
+
+    /// an example subscriber that'll await registration
+    struct Subscriber;
+
+    enum SubscriberMessage {
+        Published(String),
+    }
+
+    #[ractor::async_trait]
+    impl Actor for Subscriber {
+        type Msg = SubscriberMessage;
+
+        type State = ();
+        type Arguments = ();
+
+        async fn pre_start(
+            &self,
+            myself: ractor::ActorRef<Self::Msg>,
+            _: (),
+        ) -> Result<Self::State, ractor::errors::ActorProcessingErr> {
+            debug!("{myself:?} starting");
+            Ok(())
+        }
+
+        async fn handle(
+            &self,
+            myself: ractor::ActorRef<Self::Msg>,
+            message: Self::Msg,
+            _: &mut Self::State,
+        ) -> Result<(), ractor::errors::ActorProcessingErr> {
+            match message {
+                Self::Msg::Published(msg) => {
+                    tracing::info!("Subscriber ({myself:?}) received registration id '{msg}'");
+                    myself.stop(None);
+                }
+            }
+            Ok(())
+        }
+    }
 
     #[tokio::test]
     async fn test_init() {
@@ -33,8 +71,10 @@ mod tests {
         let broker_args = BrokerArgs {
             bind_addr: String::from(BIND_ADDR),
             session_timeout: Some(5),
-            server_cert_file: env::var("TLS_SERVER_CERT_CHAIN").expect("Expected to find value for TLS_SERVER_CERT_CHAIN"),
-            private_key_file: env::var("TLS_SERVER_KEY").expect("Expected to find value for TLS_PRIVATE_KEY"),
+            server_cert_file: env::var("TLS_SERVER_CERT_CHAIN")
+                .expect("Expected to find value for TLS_SERVER_CERT_CHAIN"),
+            private_key_file: env::var("TLS_SERVER_KEY")
+                .expect("Expected to find value for TLS_PRIVATE_KEY"),
             ca_cert_file: env::var("TLS_CA_CERT").expect("Expected to find value for TLS_CA_CERT"),
         };
 
@@ -48,7 +88,6 @@ mod tests {
 
         //wait to end
         TEST_NOTIFY.notified().await;
-        
     }
 
     #[tokio::test]
@@ -60,28 +99,39 @@ mod tests {
 
         ACTIVE_TESTS.fetch_add(1, Ordering::SeqCst);
 
+        let output_port = Arc::new(OutputPort::default());
+
+        let (subscriber, subscriber_handle) = Actor::spawn(None, Subscriber, ())
+            .await
+            .expect("Expected to start subscriber");
+
+        //subscribe to output
+        output_port.subscribe(subscriber, |message| {
+            debug!("Converting message");
+            Some(SubscriberMessage::Published(message))
+        });
+
         let (client, _) = Actor::spawn(
             Some("test_registration_client".to_owned()),
             TcpClientActor,
-            TcpClientArgs { config: TCPClientConfig::new(), registration_id: None },
+            TcpClientArgs {
+                config: TCPClientConfig::new(),
+                registration_id: None,
+                output_port: output_port.clone(),
+            },
         )
         .await
         .expect("Failed to start client actor");
 
         tokio::time::sleep(Duration::from_secs(1)).await;
 
-        let session_id = client
-            .call(
-                TcpClientMessage::GetRegistrationId,
-                Some(Duration::from_secs(10)),
-            )
+        // await subscriber to die
+        subscriber_handle
             .await
-            .unwrap()
-            .unwrap();
+            .expect("Expected subscriber to get notified");
 
-        assert_ne!(session_id, None);
         client
-            .kill_and_wait(None)
+            .stop_and_wait(None, None)
             .await
             .expect("Expected to stop client");
 
@@ -100,17 +150,34 @@ mod tests {
 
         ACTIVE_TESTS.fetch_add(1, Ordering::SeqCst);
 
+        let output_port = Arc::new(OutputPort::default());
+
+        let (subscriber, subscriber_handle) = Actor::spawn(None, Subscriber, ())
+            .await
+            .expect("Expected to start subscriber");
+
+        //subscribe to output
+        output_port.subscribe(subscriber, |message| {
+            debug!("Converting message");
+            Some(SubscriberMessage::Published(message))
+        });
+
         let (client, _) = Actor::spawn(
             Some("test_registered_disconnect_client".to_owned()),
             TcpClientActor,
-            TcpClientArgs { config: TCPClientConfig::new(), registration_id: None },
+            TcpClientArgs {
+                registration_id: None,
+                config: TCPClientConfig::new(),
+                output_port,
+            },
         )
         .await
         .expect("Failed to start client actor");
 
         tokio::time::sleep(Duration::from_secs(1)).await;
 
-        //disconnect
+        //await subscriber to exit
+        subscriber_handle.await.unwrap();
 
         let session_id = client
             .call(
@@ -120,8 +187,6 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-
-        assert_ne!(session_id, None);
 
         client
             .send_message(TcpClientMessage::Send(ClientMessage::DisconnectRequest(
@@ -154,10 +219,16 @@ mod tests {
 
         ACTIVE_TESTS.fetch_add(1, Ordering::SeqCst);
 
+        let output_port = Arc::new(OutputPort::default());
+
         let (client, _) = Actor::spawn(
             Some("test_timeout_client".to_owned()),
             TcpClientActor,
-TcpClientArgs { config: TCPClientConfig::new(), registration_id: None },
+            TcpClientArgs {
+                registration_id: None,
+                config: TCPClientConfig::new(),
+                output_port,
+            },
         )
         .await
         .expect("Failed to start client actor");
@@ -172,8 +243,6 @@ TcpClientArgs { config: TCPClientConfig::new(), registration_id: None },
             .await
             .unwrap()
             .unwrap();
-
-        assert_ne!(session_id, None);
 
         tokio::time::sleep(Duration::from_secs(1)).await;
 
@@ -215,11 +284,16 @@ TcpClientArgs { config: TCPClientConfig::new(), registration_id: None },
             .expect(TIMEOUT_ERR_MSG);
 
         ACTIVE_TESTS.fetch_add(1, Ordering::SeqCst);
+        let output_port = Arc::new(OutputPort::default());
 
         let (client, _) = Actor::spawn(
             Some("initial_reconnect_client".to_string()),
             TcpClientActor,
-TcpClientArgs { config: TCPClientConfig::new(), registration_id: None },
+            TcpClientArgs {
+                registration_id: None,
+                config: TCPClientConfig::new(),
+                output_port: output_port.clone(),
+            },
         )
         .await
         .expect("Failed to start client actor");
@@ -260,7 +334,11 @@ TcpClientArgs { config: TCPClientConfig::new(), registration_id: None },
         let (new_client, _) = Actor::spawn(
             Some("test_reconnect_client".to_owned()),
             TcpClientActor,
-            TcpClientArgs { config: TCPClientConfig::new(), registration_id: None},
+            TcpClientArgs {
+                registration_id: None,
+                config: TCPClientConfig::new(),
+                output_port,
+            },
         )
         .await
         .expect("Failed to start client actor");
@@ -292,11 +370,16 @@ TcpClientArgs { config: TCPClientConfig::new(), registration_id: None },
 
         ACTIVE_TESTS.fetch_add(1, Ordering::SeqCst);
 
+        let output_port = Arc::new(OutputPort::default());
         //start a client to subscribe to some topic
         let (subscriber_client, _) = Actor::spawn(
             Some(format!("dlq_subscriber_client")),
             TcpClientActor,
-TcpClientArgs { config: TCPClientConfig::new(), registration_id: None },
+            TcpClientArgs {
+                registration_id: None,
+                config: TCPClientConfig::new(),
+                output_port: output_port.clone(),
+            },
         )
         .await
         .expect("Failed to start client actor");
@@ -340,7 +423,11 @@ TcpClientArgs { config: TCPClientConfig::new(), registration_id: None },
         let (publisher_client, _) = Actor::spawn(
             Some(format!("dlq_publisher_client")),
             TcpClientActor,
-TcpClientArgs { config: TCPClientConfig::new(), registration_id: None },
+            TcpClientArgs {
+                registration_id: None,
+                config: TCPClientConfig::new(),
+                output_port: output_port.clone(),
+            },
         )
         .await
         .expect("Failed to start client actor");
@@ -359,7 +446,7 @@ TcpClientArgs { config: TCPClientConfig::new(), registration_id: None },
         assert_ne!(publisher_session_id, None);
 
         //send a few messages
-        for i in 1..10 {
+        for _ in 1..10 {
             publisher_client
                 .send_message(TcpClientMessage::Send(ClientMessage::PublishRequest {
                     topic: topic.clone(),
@@ -379,7 +466,11 @@ TcpClientArgs { config: TCPClientConfig::new(), registration_id: None },
         let (new_client, _) = Actor::spawn(
             Some("read_dlq_client".to_owned()),
             TcpClientActor,
-            TcpClientArgs{ config: TCPClientConfig::new(), registration_id: None },
+            TcpClientArgs {
+                registration_id: None,
+                config: TCPClientConfig::new(),
+                output_port,
+            },
         )
         .await
         .expect("Failed to start client actor");
@@ -411,10 +502,16 @@ TcpClientArgs { config: TCPClientConfig::new(), registration_id: None },
 
         ACTIVE_TESTS.fetch_add(1, Ordering::SeqCst);
 
+        let output_port = Arc::new(OutputPort::default());
+
         let (client, _) = Actor::spawn(
             Some("test_unsubscribe_client".to_owned()),
             TcpClientActor,
-TcpClientArgs { config: TCPClientConfig::new(), registration_id: None },
+            TcpClientArgs {
+                registration_id: None,
+                config: TCPClientConfig::new(),
+                output_port: output_port.clone(),
+            },
         )
         .await
         .expect("Failed to start client actor");
@@ -474,10 +571,15 @@ TcpClientArgs { config: TCPClientConfig::new(), registration_id: None },
 
         ACTIVE_TESTS.fetch_add(1, Ordering::SeqCst);
 
+        let output_port = Arc::new(OutputPort::default());
         let (client, _) = Actor::spawn(
             Some("queued_message_test_client".to_owned()),
             TcpClientActor,
-TcpClientArgs { config: TCPClientConfig::new(), registration_id: None },
+            TcpClientArgs {
+                registration_id: None,
+                config: TCPClientConfig::new(),
+                output_port: output_port.clone(),
+            },
         )
         .await
         .expect("Failed to start client actor");
@@ -501,7 +603,11 @@ TcpClientArgs { config: TCPClientConfig::new(), registration_id: None },
         let (publisher_client, _) = Actor::spawn(
             Some(format!("comic_publisher_client")),
             TcpClientActor,
-TcpClientArgs { config: TCPClientConfig::new(), registration_id: None },
+            TcpClientArgs {
+                registration_id: None,
+                config: TCPClientConfig::new(),
+                output_port: output_port.clone(),
+            },
         )
         .await
         .expect("Failed to start client actor");

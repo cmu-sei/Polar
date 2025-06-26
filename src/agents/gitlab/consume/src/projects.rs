@@ -44,11 +44,16 @@ impl Actor for GitlabProjectConsumer {
         args: GitlabConsumerArgs,
     ) -> Result<Self::State, ActorProcessingErr> {
         debug!("{myself:?} starting, connecting to broker");
-        match subscribe_to_topic(args.registration_id, PROJECTS_CONSUMER_TOPIC.to_string(), args.graph_config).await {
+        match subscribe_to_topic(
+            args.registration_id,
+            PROJECTS_CONSUMER_TOPIC.to_string(),
+            args.graph_config,
+        )
+        .await
+        {
             Ok(state) => Ok(state),
             Err(e) => {
-                let err_msg =
-                    format!("Error starting actor: \"{PROJECTS_CONSUMER_TOPIC}\" {e}");
+                let err_msg = format!("Error starting actor: \"{PROJECTS_CONSUMER_TOPIC}\" {e}");
                 Err(ActorProcessingErr::from(err_msg))
             }
         }
@@ -70,12 +75,10 @@ impl Actor for GitlabProjectConsumer {
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-
         match state.graph.start_txn().await {
             Ok(mut transaction) => {
                 match message {
                     GitlabData::Projects(projects) => {
-
                         // Create list of projects
                         let project_array = projects.iter()
                             .map(|project| {
@@ -90,7 +93,7 @@ impl Actor for GitlabProjectConsumer {
                             })
                             .collect::<Vec<_>>()
                             .join(",\n");
-        
+
                         // Here, we write a query that creates additional nodes for the group and namespace of the project
                         let cypher_query = format!(
                             "
@@ -102,25 +105,21 @@ impl Actor for GitlabProjectConsumer {
                                 project.last_activity_at = project_data.last_activity_at
                             "
                         );
-        
+
                         debug!(cypher_query);
-                        if let Err(e) = transaction.run(Query::new(cypher_query)).await {
+                        if let Err(_e) = transaction.run(Query::new(cypher_query)).await {
                             myself.stop(Some(QUERY_RUN_FAILED.to_string()));
-                            
                         }
-                        
-                        if let Err(e) = transaction.commit().await {
+
+                        if let Err(_e) = transaction.commit().await {
                             myself.stop(Some(QUERY_COMMIT_FAILED.to_string()));
                         }
                         info!("Transaction committed.");
                     }
                     _ => (),
                 }
-         
             }
-            Err(e) => {
-                myself.stop(Some(format!("{TRANSACTION_FAILED_ERROR}. {e}")))
-            }
+            Err(e) => myself.stop(Some(format!("{TRANSACTION_FAILED_ERROR}. {e}"))),
         }
         Ok(())
     }
