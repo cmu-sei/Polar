@@ -159,7 +159,11 @@ impl MetaObserver {
                             }
                         }
                     }
-                    Err(_e) => todo!("handle deserialization error"),
+                    Err(_e) => actor_ref
+                        .send_message(GitlabObserverMessage::Backoff(BackoffReason::FatalError(
+                            e.to_string(),
+                        )))
+                        .expect(MESSAGE_FORWARDING_FAILED),
                 }
             }
             Err(e) => {
@@ -168,7 +172,7 @@ impl MetaObserver {
                     .send_message(GitlabObserverMessage::Backoff(
                         BackoffReason::GitlabUnreachable(e.to_string()),
                     ))
-                    .expect("Expected to forward message to self")
+                    .expect(MESSAGE_FORWARDING_FAILED)
             }
         }
     }
