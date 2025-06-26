@@ -159,7 +159,7 @@ impl MetaObserver {
                             }
                         }
                     }
-                    Err(_e) => actor_ref
+                    Err(e) => actor_ref
                         .send_message(GitlabObserverMessage::Backoff(BackoffReason::FatalError(
                             e.to_string(),
                         )))
