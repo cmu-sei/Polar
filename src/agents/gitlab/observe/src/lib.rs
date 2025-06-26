@@ -166,12 +166,15 @@ pub enum Command {
     GetGroupPackageRepositories(IdString),
     GetMetadata,
 }
+
+#[derive(Debug)]
 pub enum BackoffReason {
     FatalError(String),
     GraphqlError(String),
     GitlabUnreachable(String),
     TokenInvalid(String),
 }
+
 pub enum GitlabObserverMessage {
     Tick(Command),
     Backoff(BackoffReason),
@@ -228,10 +231,13 @@ pub fn handle_backoff(
             }
         }
         BackoffReason::FatalError(error) => {
-            error!("Encountered a fatal error message! {error}");
-            Err(error)
+            error!("Encountered an error! {error}");
+            // No need to crash, or panic. We're either getting garbage from gitlab
+            // or its unreachable, either way, there's nothing the observers can do about it
+            state.apply_backoff();
+            Ok(state.backoff_interval)
         }
-        _ => todo!(),
+        _ => todo!("Handle new message type {reason:?}"),
     }
 }
 
