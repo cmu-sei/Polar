@@ -65,12 +65,16 @@
         inherit pkgs lib crane rust-overlay;
         };
 
+        commitMsgHooksPkg = import ./src/git-hooks/package.nix {
+        inherit pkgs crane;
+        };
+
         # get certificates for mtls
         tlsCerts = pkgs.callPackage ./src/flake/gen-certs.nix { inherit pkgs; };
       in
       {
         packages = {
-          inherit polarPkgs containers tlsCerts;
+          inherit polarPkgs containers tlsCerts commitMsgHooksPkg;
           default = polarPkgs.workspacePackages;
         };
 
