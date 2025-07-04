@@ -1,18 +1,14 @@
 use crate::{
-    graphql_endpoint, handle_backoff, handle_graphql_errors, BackoffReason, Command,
-    GitlabObserverMessage, BROKER_CLIENT_NAME,
+    handle_backoff, handle_graphql_errors, init_observer_state, send_to_broker, BackoffReason,
+    Command, GitlabObserverMessage,
 };
 use crate::{GitlabObserverArgs, GitlabObserverState, MESSAGE_FORWARDING_FAILED};
-use cassini::client::TcpClientMessage;
-use cassini::ClientMessage;
 use common::types::{GitlabData, GitlabInstance};
 use common::METADATA_CONSUMER_TOPIC;
 use cynic::GraphQlResponse;
 use cynic::QueryBuilder;
 use gitlab_queries::{LicenseHistoryEntry, LicenseHistoryQuery, MetadataQuery};
-use ractor::registry::where_is;
 use ractor::{concurrency::Duration, Actor, ActorProcessingErr, ActorRef};
-use rkyv::rancor;
 
 use tracing::{debug, error, info};
 
@@ -37,7 +33,7 @@ impl MetaObserver {
     async fn get_metadata(
         state: &mut GitlabObserverState,
         actor_ref: ActorRef<GitlabObserverMessage>,
-    ) {
+    ) -> Result<(), ActorProcessingErr> {
         let operation = MetadataQuery::build(());
 
         //execute
@@ -67,21 +63,9 @@ impl MetaObserver {
                                     metadata,
                                 };
 
-                                let message = GitlabData::Instance(instance);
+                                let data = GitlabData::Instance(instance);
 
-                                if let Ok(seriarlized) = rkyv::to_bytes::<rancor::Error>(&message) {
-                                    let client = where_is(BROKER_CLIENT_NAME.to_string()).unwrap();
-
-                                    let msg = ClientMessage::PublishRequest {
-                                        topic: METADATA_CONSUMER_TOPIC.to_string(),
-                                        payload: seriarlized.to_vec(),
-                                        registration_id: Some(state.registration_id.clone()),
-                                    };
-
-                                    client
-                                        .send_message(TcpClientMessage::Send(msg))
-                                        .expect("Expected to send message");
-                                }
+                                return send_to_broker(state, data, METADATA_CONSUMER_TOPIC);
                             }
                         }
                     }
@@ -125,12 +109,13 @@ impl MetaObserver {
                     Ok(deserialized) => {
                         if let Some(errors) = deserialized.errors {
                             handle_graphql_errors(errors, actor_ref.clone());
+                            return Ok(());
                         } else if let Some(query_result) = deserialized.data {
-                            if let Some(connection) = query_result.license_history_entries {
+                            query_result.license_history_entries.map(|connection| {
                                 //package and send
                                 let mut read_licenses: Vec<LicenseHistoryEntry> = Vec::new();
 
-                                if let Some(licenses) = connection.nodes {
+                                connection.nodes.map(|licenses| {
                                     read_licenses.extend(licenses.into_iter().filter_map(
                                         |option| {
                                             option.map(|license| {
@@ -139,31 +124,26 @@ impl MetaObserver {
                                             })
                                         },
                                     ));
-                                }
+                                });
 
-                                let message = GitlabData::Licenses(read_licenses);
+                                let data = GitlabData::Licenses(read_licenses);
 
-                                if let Ok(seriarlized) = rkyv::to_bytes::<rancor::Error>(&message) {
-                                    let client = where_is(BROKER_CLIENT_NAME.to_string()).unwrap();
-
-                                    let msg = ClientMessage::PublishRequest {
-                                        topic: METADATA_CONSUMER_TOPIC.to_string(),
-                                        payload: seriarlized.to_vec(),
-                                        registration_id: Some(state.registration_id.clone()),
-                                    };
-
-                                    client
-                                        .send_message(TcpClientMessage::Send(msg))
-                                        .expect("Expected to send message");
-                                }
-                            }
+                                return send_to_broker(state, data, METADATA_CONSUMER_TOPIC);
+                            });
+                            Ok(())
+                        } else {
+                            return Ok(());
                         }
                     }
-                    Err(e) => actor_ref
-                        .send_message(GitlabObserverMessage::Backoff(BackoffReason::FatalError(
-                            e.to_string(),
-                        )))
-                        .expect(MESSAGE_FORWARDING_FAILED),
+                    Err(e) => {
+                        error!("{e}");
+                        actor_ref
+                            .send_message(GitlabObserverMessage::Backoff(
+                                BackoffReason::FatalError(e.to_string()),
+                            ))
+                            .expect(MESSAGE_FORWARDING_FAILED);
+                        Ok(())
+                    }
                 }
             }
             Err(e) => {
@@ -172,7 +152,8 @@ impl MetaObserver {
                     .send_message(GitlabObserverMessage::Backoff(
                         BackoffReason::GitlabUnreachable(e.to_string()),
                     ))
-                    .expect(MESSAGE_FORWARDING_FAILED)
+                    .expect(MESSAGE_FORWARDING_FAILED);
+                Ok(())
             }
         }
     }
@@ -193,16 +174,7 @@ impl Actor for MetaObserver {
         _myself: ActorRef<Self::Msg>,
         args: GitlabObserverArgs,
     ) -> Result<Self::State, ActorProcessingErr> {
-        let state = GitlabObserverState::new(
-            graphql_endpoint(&args.gitlab_endpoint),
-            args.token,
-            args.web_client,
-            args.registration_id,
-            Duration::from_secs(args.base_interval),
-            Duration::from_secs(args.max_backoff),
-        );
-
-        Ok(state)
+        Ok(init_observer_state(args))
     }
 
     async fn post_start(

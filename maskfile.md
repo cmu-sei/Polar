@@ -16,6 +16,32 @@ If you have `mask` installed, you can use it to quickly perform these common ope
   nix build .#containers.ciContainer
   ~~~
 
+### cassini
+  > Build's cassini's container image
+
+  ~~~sh
+  nix build --eval-system x86_64-linux --show-trace .#polarPkgs.cassini.cassiniImage
+  podman load < result
+  ~~~
+
+### gitlab
+> builds the gitlab agents and their images
+~~~sh
+nix build --eval-system x86_64-linux --show-trace .#polarPkgs.gitlabAgent.observerImage -o gitlab-observer
+nix build --eval-system x86_64-linux --show-trace .#polarPkgs.gitlabAgent.consumerImage -o gitlab-consumer
+
+podman load < gitlab-observer
+podman load < gitlab-consumer
+~~~
+### kube
+> builds the kube agents and their  images
+~~~sh
+nix build --eval-system x86_64-linux --show-trace .#polarPkgs.kubeAgent.kubeObserverImage -o kube-observer
+nix build --eval-system x86_64-linux --show-trace .#polarPkgs.kubeAgent.kubeConsumerImage -o kube-consumer
+
+podman load < kube-observer
+podman load < kube-consumer
+~~~
 ## start-dev
 > Enters the Polar Dev container.
 
@@ -36,47 +62,28 @@ podman run --rm --name polar-dev --user 0 --userns=keep-id -it -v $(pwd):/worksp
 docker run --rm --name polar-ci --user 0 -it -v $(pwd):/workspace:rw -p 2222:2223 polar-ci:latest
 ~~~
 ## start-compose
-> Starts the docker compose file to start up Polar's dependencies - Neo4J and Cassini
+> Starts the docker compose file to start up the docker compose for local testing. Runs in background
 
 ~~~sh
-podman compose -f conf/gitlab_compose/docker-compose.yml up
+podman compose -f conf/gitlab_compose/docker-compose.yml up -d
 ~~~
 
-## build-agents
+## build
+
+### agents
 > Builds all of the polar agents and outputs their binaries
 ~~~sh
 nix build .#default -o polar
 ~~~
 
-### cassini
-> Builds the latest version of cassini and its image
-~~~sh
-nix build --eval-system x86_64-linux --show-trace .#polarPkgs.cassini.cassini -o cassini
-nix build --eval-system x86_64-linux --show-trace .#polarPkgs.cassini.cassiniImage -o cassini-image
-~~~
+## get-tls
+  > Runs the nix derivation to generate TLS certificates for testing.
 
-### gitlab
-> builds the gitlab agents and their images
-~~~sh
-nix build --eval-system x86_64-linux --show-trace .#polarPkgs.gitlabAgent.observerImage -o gitlab-observer
-nix build --eval-system x86_64-linux --show-trace .#polarPkgs.gitlabAgent.consumerImage -o gitlab-consumer
-~~~
-### kube
-> builds the kube agents and their  images
-~~~sh
-nix build --eval-system x86_64-linux --show-trace .#polarPkgs.kubeAgent.kubeObserverImage -o kube-observer
-nix build --eval-system x86_64-linux --show-trace .#polarPkgs.kubeAgent.kubeConsumerImage -o kube-consumer
-~~~
-
-## build
-
-### polar-dev
-  > Builds the Polar Dev container, see the [README](dev/README.md) for details
   ~~~sh
-  nix build .#containers.devContainer
+  nix build .#tlsCerts -o certs
+
+  ls -alh certs
   ~~~
-
-
 
 ## render
 

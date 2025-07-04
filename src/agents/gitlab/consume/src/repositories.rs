@@ -22,7 +22,7 @@
 */
 
 use crate::{subscribe_to_topic, GitlabConsumerArgs, GitlabConsumerState};
-use common::types::GitlabData;
+use common::types::{GitlabData, GitlabEnvelope};
 use common::REPOSITORY_CONSUMER_TOPIC;
 use gitlab_schema::{BigInt, DateTimeString};
 use polar::{QUERY_COMMIT_FAILED, QUERY_RUN_FAILED, TRANSACTION_FAILED_ERROR};
@@ -33,7 +33,7 @@ pub struct GitlabRepositoryConsumer;
 
 #[async_trait]
 impl Actor for GitlabRepositoryConsumer {
-    type Msg = GitlabData;
+    type Msg = GitlabEnvelope;
     type State = GitlabConsumerState;
     type Arguments = GitlabConsumerArgs;
 
@@ -77,7 +77,7 @@ impl Actor for GitlabRepositoryConsumer {
         //Expect transaction to start, stop if it doesn't
         match state.graph.start_txn().await {
             Ok(mut transaction) => {
-                match message {
+                match message.data {
                     GitlabData::ProjectContainerRepositories((full_path, repositories)) => {
                         let repos_data = repositories
                             .iter()

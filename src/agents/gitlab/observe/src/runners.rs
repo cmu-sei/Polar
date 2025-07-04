@@ -24,13 +24,16 @@
 use std::time::Duration;
 
 use cassini::{client::TcpClientMessage, ClientMessage};
-use common::{types::GitlabData, RUNNERS_CONSUMER_TOPIC};
+use common::{
+    types::{GitlabData, WithInstance},
+    RUNNERS_CONSUMER_TOPIC,
+};
 use cynic::{GraphQlResponse, QueryBuilder};
 use gitlab_queries::runners::*;
 
 use crate::{
-    graphql_endpoint, handle_backoff, BackoffReason, Command, GitlabObserverArgs,
-    GitlabObserverMessage, GitlabObserverState,
+    graphql_endpoint, handle_backoff, init_observer_state, send_to_broker, BackoffReason, Command,
+    GitlabObserverArgs, GitlabObserverMessage, GitlabObserverState,
 };
 use ractor::{async_trait, registry::where_is, Actor, ActorProcessingErr, ActorRef};
 use tracing::{debug, error, info, warn};
@@ -83,14 +86,7 @@ impl Actor for GitlabRunnerObserver {
     ) -> Result<Self::State, ActorProcessingErr> {
         debug!("{myself:?} starting, connecting to instance");
 
-        let state = GitlabObserverState::new(
-            graphql_endpoint(&args.gitlab_endpoint),
-            args.token,
-            args.web_client,
-            args.registration_id,
-            Duration::from_secs(args.base_interval),
-            Duration::from_secs(args.max_backoff),
-        );
+        let state = init_observer_state(args);
         Ok(state)
     }
 
@@ -154,26 +150,13 @@ impl Actor for GitlabRunnerObserver {
                                                 }
                                             }
 
-                                            info!("Observed {0} runner(s)", read_runners.len());
-
-                                            let client = where_is(BROKER_CLIENT_NAME.to_string())
-                                                .expect("Expected to find tcp client!");
-
-                                            let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(
-                                                &GitlabData::Runners(read_runners),
-                                            )
-                                            .unwrap();
-
-                                            let msg = ClientMessage::PublishRequest {
-                                                topic: RUNNERS_CONSUMER_TOPIC.to_string(),
-                                                payload: bytes.to_vec(),
-                                                registration_id: Some(
-                                                    state.registration_id.clone(),
-                                                ),
-                                            };
-                                            client
-                                                .send_message(TcpClientMessage::Send(msg))
-                                                .expect("Expected to send message to tcp client!");
+                                            if let Err(e) = send_to_broker(
+                                                state,
+                                                GitlabData::Runners(read_runners),
+                                                RUNNERS_CONSUMER_TOPIC,
+                                            ) {
+                                                return Err(e);
+                                            }
                                         }
                                     }
                                 }

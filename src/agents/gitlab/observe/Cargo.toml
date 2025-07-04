@@ -47,6 +47,7 @@ gitlab-schema = { path = "../schema" }
 rkyv = "0.8.10"
 polar = { path = "../../lib" }
 rand = { version = "0.9.1", features = ["small_rng"] }
+uuid = { version = "1.17.0", features = ["v5"] }
 
 [build-dependencies]
 cynic-codegen = "3.9.1"

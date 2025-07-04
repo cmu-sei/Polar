@@ -35,6 +35,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let client_config = TCPClientConfig::new();
 
+    // Should be a regular base URL for a gitlab instance.
+    // i.e. "https://example.gitlab.com" - no trailing "/"
     let gitlab_endpoint = url::Url::parse(
         env::var("GITLAB_ENDPOINT")
             .expect("Expected to find a value for GITLAB_ENDPOINT. Please provide a valid URL.")
@@ -56,7 +58,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         gitlab_token: Some(gitlab_token),
         proxy_ca_cert_file,
         // TODO: read these from configuration
-        base_interval: 300, // 5 minute default
+        base_interval: 30, // 5 minute default
         max_backoff_secs: 6000,
     };
 

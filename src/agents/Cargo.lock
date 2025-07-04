@@ -215,21 +215,6 @@ dependencies = [
 
 [[package]]
 name = "async-global-executor"
-version = "2.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "05b1b633a2115cd122d73b955eadd9916c18c8f510ec9cd1686404c60ad1c29c"
-dependencies = [
- "async-channel",
- "async-executor",
- "async-io 2.4.0",
- "async-lock 3.4.0",
- "blocking",
- "futures-lite 2.6.0",
- "once_cell",
-]
-
-[[package]]
-name = "async-global-executor"
 version = "3.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "13f937e26114b93193065fd44f507aa2e9169ad0cdabbb996920b1fe1ddea7ba"
@@ -248,7 +233,7 @@ version = "2.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9af57045d58eeb1f7060e7025a1631cbc6399e0a1d10ad6735b3d0ea7f8346ce"
 dependencies = [
- "async-global-executor 3.1.0",
+ "async-global-executor",
  "async-trait",
  "executor-trait",
 ]
@@ -763,7 +748,6 @@ dependencies = [
 name = "common"
 version = "0.1.0"
 dependencies = [
- "amq-protocol-uri",
  "cassini",
  "cynic",
  "cynic-codegen",
@@ -775,10 +759,10 @@ dependencies = [
  "rkyv 0.8.10",
  "serde",
  "serde_json",
- "sysinfo",
  "tcp-stream",
  "tracing",
  "url",
+ "uuid",
  "workspace-hack",
 ]
 
@@ -1478,7 +1462,6 @@ dependencies = [
 name = "gitlab-consumer"
 version = "0.1.0"
 dependencies = [
- "async-global-executor 2.4.1",
  "cassini",
  "common",
  "exponential-backoff",
@@ -1519,6 +1502,7 @@ dependencies = [
  "tracing-glog",
  "tracing-subscriber",
  "url",
+ "uuid",
  "workspace-hack",
 ]
 
@@ -4041,6 +4025,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "sha1_smol"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bbfa15b3dddfee50a0fff136974b3e1bde555604ba463834a7eb7deb6417705d"
+
+[[package]]
 name = "sha2"
 version = "0.10.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4686,11 +4676,14 @@ checksum = "b6c140620e7ffbb22c2dee59cafe6084a59b5ffc27a8859a5f0d494b5d52b6be"
 
 [[package]]
 name = "uuid"
-version = "1.16.0"
+version = "1.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "458f7a779bf54acc9f347480ac654f68407d3aab21269a6e3c9f922acd9e2da9"
+checksum = "3cf4199d1e5d15ddd86a694e4d0dffa9c323ce759fea589f00fef9d81cc1931d"
 dependencies = [
  "getrandom 0.3.3",
+ "js-sys",
+ "sha1_smol",
+ "wasm-bindgen",
 ]
 
 [[package]]

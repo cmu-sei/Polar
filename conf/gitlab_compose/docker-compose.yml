@@ -43,7 +43,7 @@ services:
       # - ../certs/neo4j/server_neo4j_key.pem:/var/lib/neo4j/certificates/bolt/tls.key
 
   cassini:
-    image: registry.sandbox.labz.s-box.org/sei/polar-mirror/cassini:af85ba39
+    image: cassini:latest
     networks:
       - polar
     ports:

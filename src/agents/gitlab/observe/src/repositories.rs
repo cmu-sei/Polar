@@ -22,11 +22,12 @@
 */
 
 use crate::{
-    graphql_endpoint, BackoffReason, Command, GitlabObserverArgs, GitlabObserverMessage,
-    GitlabObserverState, BROKER_CLIENT_NAME, MESSAGE_FORWARDING_FAILED,
+    graphql_endpoint, init_observer_state, send_to_broker, BackoffReason, Command,
+    GitlabObserverArgs, GitlabObserverMessage, GitlabObserverState, BROKER_CLIENT_NAME,
+    MESSAGE_FORWARDING_FAILED,
 };
 use cassini::{client::TcpClientMessage, ClientMessage};
-use common::types::GitlabData;
+use common::types::{GitlabData, WithInstance};
 use common::REPOSITORY_CONSUMER_TOPIC;
 use cynic::{GraphQlResponse, QueryBuilder};
 use gitlab_queries::projects::{
@@ -125,16 +126,7 @@ impl Actor for GitlabRepositoryObserver {
         _myself: ActorRef<Self::Msg>,
         args: GitlabObserverArgs,
     ) -> Result<Self::State, ActorProcessingErr> {
-        let state = GitlabObserverState::new(
-            graphql_endpoint(&args.gitlab_endpoint),
-            args.token,
-            args.web_client,
-            args.registration_id,
-            Duration::from_secs(args.base_interval),
-            Duration::from_secs(args.max_backoff),
-        );
-
-        Ok(state)
+        Ok(init_observer_state(args))
     }
 
     async fn post_start(
@@ -218,30 +210,9 @@ impl Actor for GitlabRepositoryObserver {
                                                                                 //send tag data
                                                                                 if !tags.is_empty()
                                                                                 {
-                                                                                    match where_is(BROKER_CLIENT_NAME.to_string()) {
-                                                                                        Some(tcp_client) => {
+                                                                                    let data = GitlabData::ContainerRepositoryTags((full_path.clone().to_string(), tags));
 
-                                                                                            let tag_message = GitlabData::ContainerRepositoryTags((full_path.clone().to_string(), tags));
-
-                                                                                            match rkyv::to_bytes::<rkyv::rancor::Error>(&tag_message) {
-                                                                                                Ok(bytes) => {
-                                                                                                    let msg = ClientMessage::PublishRequest {
-                                                                                                        topic: REPOSITORY_CONSUMER_TOPIC.to_string(),
-                                                                                                        payload: bytes.to_vec(),
-                                                                                                        registration_id: Some(state.registration_id.clone()),
-                                                                                                    };
-                                                                                                    tcp_client
-                                                                                                        .send_message(TcpClientMessage::Send(msg))
-                                                                                                        .expect("Expected to send message");
-                                                                                                }
-                                                                                                Err(e) => error!("Failed to serialize data. {e}")
-                                                                                            }
-                                                                                        }
-                                                                                        None => {
-                                                                                            warn!("Couldn't find client to send data, stopping.");
-                                                                                            myself.stop(None)
-                                                                                        }
-                                                                                    }
+                                                                                    if let Err(e) = send_to_broker(state, data, REPOSITORY_CONSUMER_TOPIC) { return Err(e) }
                                                                                 }
                                                                             }
                                                                             Err(e) => warn!("{e}"),
@@ -255,32 +226,15 @@ impl Actor for GitlabRepositoryObserver {
                                                             }
 
                                                             // send off repository data
-
                                                             if !read_repositories.is_empty() {
-                                                                match where_is(
-                                                                    BROKER_CLIENT_NAME.to_string(),
-                                                                ) {
-                                                                    Some(tcp_client) => {
-                                                                        let repo_data = GitlabData::ProjectContainerRepositories((full_path.to_string(), read_repositories));
+                                                                let data = GitlabData::ProjectContainerRepositories((full_path.to_string(), read_repositories));
 
-                                                                        match rkyv::to_bytes::<rkyv::rancor::Error>(&repo_data) {
-                                                                            Ok(bytes) => {
-                                                                                let msg = ClientMessage::PublishRequest {
-                                                                                    topic: REPOSITORY_CONSUMER_TOPIC.to_string(),
-                                                                                    payload: bytes.to_vec(),
-                                                                                    registration_id: Some(state.registration_id.clone()),
-                                                                                };
-                                                                                tcp_client
-                                                                                    .send_message(TcpClientMessage::Send(msg))
-                                                                                    .expect("Expected to send message");
-                                                                            }
-                                                                            Err(e) => error!("Failed to serialize data. {e}")
-                                                                        }
-                                                                    }
-                                                                    None => {
-                                                                        warn!("Couldn't find client to send data, stopping.");
-                                                                        myself.stop(None)
-                                                                    }
+                                                                if let Err(e) = send_to_broker(
+                                                                    state,
+                                                                    data,
+                                                                    REPOSITORY_CONSUMER_TOPIC,
+                                                                ) {
+                                                                    return Err(e);
                                                                 }
                                                             }
                                                         }
@@ -348,36 +302,18 @@ impl Actor for GitlabRepositoryObserver {
 
                                                                 debug!("Found {} package(s) for project {full_path}", read_packages.len());
 
-                                                                match where_is(
-                                                                    BROKER_CLIENT_NAME.to_string(),
+                                                                let data =
+                                                                    GitlabData::ProjectPackages((
+                                                                        full_path.to_string(),
+                                                                        read_packages,
+                                                                    ));
+
+                                                                if let Err(e) = send_to_broker(
+                                                                    state,
+                                                                    data,
+                                                                    REPOSITORY_CONSUMER_TOPIC,
                                                                 ) {
-                                                                    Some(client) => {
-                                                                        let data = GitlabData::ProjectPackages((full_path.to_string(), read_packages));
-                                                                        // Serializing is as easy as a single function call
-                                                                        let bytes =
-                                                                            rkyv::to_bytes::<
-                                                                                rkyv::rancor::Error,
-                                                                            >(
-                                                                                &data
-                                                                            )
-                                                                            .unwrap();
-
-                                                                        let msg = ClientMessage::PublishRequest {
-                                                                            topic: REPOSITORY_CONSUMER_TOPIC.to_string(),
-                                                                            payload: bytes.to_vec(),
-                                                                            registration_id: Some(
-                                                                                state.registration_id.clone(),
-                                                                            ),
-                                                                        };
-
-                                                                        client
-                                                                            .send_message(TcpClientMessage::Send(msg))
-                                                                            .expect("Expected to send message");
-                                                                    }
-                                                                    None => {
-                                                                        let err_msg = "Failed to locate tcp client";
-                                                                        error!("{err_msg}");
-                                                                    }
+                                                                    return Err(e);
                                                                 }
                                                             }
                                                         }

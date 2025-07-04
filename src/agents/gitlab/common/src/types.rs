@@ -32,8 +32,18 @@ use gitlab_queries::{
     LicenseHistoryEntry, Metadata,
 };
 use gitlab_schema::IdString;
-
 use rkyv::{Archive, Deserialize, Serialize};
+
+/// Associates a data payload with a particular GitLab instance.
+/// This UUID should be generated deterministically (e.g., UUIDv5 from base_url).
+#[derive(Debug, Clone, Archive, Serialize, Deserialize)]
+pub struct WithInstance<T> {
+    pub instance_id: String,
+    pub data: T,
+}
+
+/// Envelope type to wrap gitlab data in messages
+pub type GitlabEnvelope = WithInstance<GitlabData>;
 
 /// This enum mostly serves as a way to inform the deserializer what datatype to map the bytes into.
 /// The underlying byte vector contains a message meant for some consumer on a given topic
