@@ -56,11 +56,12 @@ project files within the container.
 podman run --rm --name polar-dev --user 0 --userns=keep-id -it -v $(pwd):/workspace:rw -p 2222:2223 polar-dev:latest bash -c "/create-user.sh $(whoami) $(id -u) $(id -g)"
 ~~~
 ## start-ci
-> Enters the Polar Dev container.
+> Enters the Polar CI container.
 
 ~~~sh
-docker run --rm --name polar-ci --user 0 -it -v $(pwd):/workspace:rw -p 2222:2223 polar-ci:latest
+podman run --rm --name polar-ci -it -v $(pwd):/workspace:rw polar-ci:latest
 ~~~
+
 ## start-compose
 > Starts the docker compose file to start up the docker compose for local testing. Runs in background
 

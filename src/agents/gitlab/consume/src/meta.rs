@@ -149,7 +149,7 @@ impl Actor for MetaConsumer {
                             lic.plan = entry.plan,
                             lic.type = entry.type,
                             lic.usersInLicenseCount = entry.usersInLicenseCount
-
+                        WITH lic
                         MERGE (instance: GitlabInstance {{instance_id: "{}" }})
                         WITH lic, instance
                         MERGE (instance)-[:OBSERVED_LICENSE]->(lic)

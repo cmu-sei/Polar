@@ -8,9 +8,6 @@ default:
   tags:
     - kubernetes
 
-variables:
-  CI_IMAGE: "$CI_REGISTRY_IMAGE/polar-ci"
-
 build-dev-environment:
   image: registry.sandbox.labz.s-box.org/sei/polar-mirror/nix:2.24.13
   stage: environment-setup
@@ -93,10 +90,18 @@ build-workspace:
     - nix build .#polarPkgs.kubeAgent.observerImage -o kube-observer
     - nix build .#polarPkgs.kubeAgent.consumerImage -o kube-consumer
 
+    # Generatge sboms
+    - syft scan $(readlink -f cassini) -o cyclonedx-json=cassini-sbom.json
+    - syft scan $(readlink -f gitlab-observer) -o cyclonedx-json=gitlab-observer.sbom.json
+    - syft scan $(readlink -f gitlab-consumer) -o cyclonedx-json=gitlab-consumer.sbom.json
+    - syft scan $(readlink -f kube-observer) -o cyclonedx-json=kube-observer.sbom.json
+    - syft scan $(readlink -f kube-consumer) -o cyclonedx-json=kube-consumer.sbom.json
+
     # Vulnerability analysis on our store
     # vulnix returns nonzero exit codes, so we need to get around this.
     # SEE: https://github.com/nix-community/vulnix/issues/79
     - vulnix --json result > vulnix-report.json || export VULNIX_EXIT=$?
+
     - |
       if [[ "$VULNIX_EXIT" -eq 2 ]]; then
         echo "Non-whitelisted vulnerabilities found!"
@@ -123,8 +128,12 @@ build-workspace:
     - skopeo copy --dest-creds "$ACR_USERNAME:$ACR_TOKEN" docker-archive://$(readlink -f kube-consumer) docker://$AZURE_REGISTRY/polar-kube-consumer:$CI_COMMIT_SHORT_SHA
 
   artifacts:
+    when: always
     paths:
-      - src/agents/vulnix-report.json
+      - "*.sbom.json"
+      - vulnix-report.json
+
+    expire_in: "1 week"
 
 render-manifests:
   image: registry.sandbox.labz.s-box.org/sei/polar-mirror/polar-ci:0.1.0

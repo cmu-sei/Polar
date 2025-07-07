@@ -32,8 +32,6 @@ use cynic::GraphQlResponse;
 use cynic::QueryBuilder;
 use gitlab_queries::projects::*;
 use ractor::{async_trait, registry::where_is, Actor, ActorProcessingErr, ActorRef};
-use rkyv::rancor::Error;
-use std::time::Duration;
 use tracing::{debug, error, info, warn};
 
 pub struct GitlabPipelineObserver;
