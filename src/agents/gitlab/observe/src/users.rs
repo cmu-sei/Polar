@@ -24,21 +24,18 @@
 use std::time::Duration;
 
 use crate::{
-    graphql_endpoint, handle_backoff, init_observer_state, send_to_broker, BackoffReason, Command,
+    handle_backoff, init_observer_state, send_to_broker, BackoffReason, Command,
     GitlabObserverArgs, GitlabObserverMessage, GitlabObserverState, BROKER_CLIENT_NAME,
     MESSAGE_FORWARDING_FAILED,
 };
-use cassini::client::TcpClientMessage;
-use cassini::ClientMessage;
-use common::{types::WithInstance, USER_CONSUMER_TOPIC};
+use common::USER_CONSUMER_TOPIC;
 use cynic::GraphQlResponse;
 
-use ractor::{async_trait, registry::where_is, Actor, ActorProcessingErr, ActorRef};
+use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef};
 
 use common::types::{GitlabData, ResourceLink};
 use cynic::QueryBuilder;
 use gitlab_queries::users::*;
-use rkyv::rancor::Error;
 
 use tracing::{debug, error, info, warn};
 

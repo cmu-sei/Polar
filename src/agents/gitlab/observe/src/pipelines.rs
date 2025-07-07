@@ -21,13 +21,11 @@
    DM24-0470
 */
 
-use crate::{
-    graphql_endpoint, BackoffReason, Command, GitlabObserverArgs, GitlabObserverMessage,
-    GitlabObserverState, BROKER_CLIENT_NAME, GITLAB_PROJECT_OBSERVER,
-};
 use crate::{init_observer_state, send_to_broker};
-use cassini::client::TcpClientMessage;
-use cassini::ClientMessage;
+use crate::{
+    BackoffReason, Command, GitlabObserverArgs, GitlabObserverMessage, GitlabObserverState,
+    GITLAB_PROJECT_OBSERVER,
+};
 use common::types::GitlabData;
 use common::PIPELINE_CONSUMER_TOPIC;
 use cynic::GraphQlResponse;

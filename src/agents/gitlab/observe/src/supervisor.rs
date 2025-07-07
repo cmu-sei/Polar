@@ -1,7 +1,6 @@
 use cassini::client::*;
 use cassini::TCPClientConfig;
 use common::get_file_as_byte_vec;
-use common::METADATA_CONSUMER_TOPIC;
 use ractor::async_trait;
 use ractor::Actor;
 use ractor::ActorProcessingErr;

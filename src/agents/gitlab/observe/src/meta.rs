@@ -65,7 +65,10 @@ impl MetaObserver {
 
                                 let data = GitlabData::Instance(instance);
 
-                                return send_to_broker(state, data, METADATA_CONSUMER_TOPIC);
+                                if let Err(e) = send_to_broker(state, data, METADATA_CONSUMER_TOPIC)
+                                {
+                                    return Err(e);
+                                }
                             }
                         }
                     }
@@ -128,11 +131,11 @@ impl MetaObserver {
 
                                 let data = GitlabData::Licenses(read_licenses);
 
-                                return send_to_broker(state, data, METADATA_CONSUMER_TOPIC);
+                                send_to_broker(state, data, METADATA_CONSUMER_TOPIC)
                             });
                             Ok(())
                         } else {
-                            return Ok(());
+                            Ok(())
                         }
                     }
                     Err(e) => {

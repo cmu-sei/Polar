@@ -22,12 +22,10 @@
 */
 
 use crate::{
-    graphql_endpoint, init_observer_state, send_to_broker, BackoffReason, Command,
-    GitlabObserverArgs, GitlabObserverMessage, GitlabObserverState, BROKER_CLIENT_NAME,
-    MESSAGE_FORWARDING_FAILED,
+    init_observer_state, send_to_broker, BackoffReason, Command, GitlabObserverArgs,
+    GitlabObserverMessage, GitlabObserverState, MESSAGE_FORWARDING_FAILED,
 };
-use cassini::{client::TcpClientMessage, ClientMessage};
-use common::types::{GitlabData, WithInstance};
+use common::types::GitlabData;
 use common::REPOSITORY_CONSUMER_TOPIC;
 use cynic::{GraphQlResponse, QueryBuilder};
 use gitlab_queries::projects::{
@@ -36,8 +34,7 @@ use gitlab_queries::projects::{
     SingleProjectQueryArguments,
 };
 use gitlab_schema::ContainerRepositoryID;
-use ractor::concurrency::Duration;
-use ractor::{async_trait, registry::where_is, Actor, ActorProcessingErr, ActorRef};
+use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef};
 use tracing::{debug, error, info, warn};
 
 pub struct GitlabRepositoryObserver;

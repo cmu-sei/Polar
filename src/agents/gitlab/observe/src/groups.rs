@@ -24,10 +24,10 @@
 use ractor::concurrency::Duration;
 
 use crate::{
-    graphql_endpoint, handle_backoff, init_observer_state, send_to_broker, BackoffReason, Command,
+    handle_backoff, init_observer_state, send_to_broker, BackoffReason, Command,
     GitlabObserverArgs, GitlabObserverMessage, GitlabObserverState, MESSAGE_FORWARDING_FAILED,
 };
-use cassini::{client::TcpClientMessage, ClientMessage, UNEXPECTED_MESSAGE_STR};
+use cassini::UNEXPECTED_MESSAGE_STR;
 use common::{
     types::{GitlabData, ResourceLink},
     GROUPS_CONSUMER_TOPIC,
@@ -38,12 +38,9 @@ use gitlab_queries::groups::{
     MultiGroupQueryArguments,
 };
 
-use ractor::{async_trait, registry::where_is, Actor, ActorProcessingErr, ActorRef};
-use reqwest::Client;
+use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef};
 
 use tracing::{debug, error, info, warn};
-
-use crate::BROKER_CLIENT_NAME;
 
 pub struct GitlabGroupObserver;
 

@@ -21,18 +21,15 @@
    DM24-0470
 */
 use crate::{
-    graphql_endpoint, handle_backoff, init_observer_state, send_to_broker, BackoffReason, Command,
-    GitlabObserverArgs, GitlabObserverMessage, GitlabObserverState, BROKER_CLIENT_NAME,
-    GITLAB_JOBS_OBSERVER, GITLAB_PIPELINE_OBSERVER, GITLAB_REPOSITORY_OBSERVER,
-    MESSAGE_FORWARDING_FAILED,
+    handle_backoff, init_observer_state, send_to_broker, BackoffReason, Command,
+    GitlabObserverArgs, GitlabObserverMessage, GitlabObserverState, GITLAB_JOBS_OBSERVER,
+    GITLAB_PIPELINE_OBSERVER, GITLAB_REPOSITORY_OBSERVER, MESSAGE_FORWARDING_FAILED,
 };
-use cassini::{client::TcpClientMessage, ClientMessage};
 use common::types::GitlabData;
 use common::PROJECTS_CONSUMER_TOPIC;
 use cynic::{GraphQlResponse, QueryBuilder};
 use gitlab_queries::projects::{MultiProjectQuery, MultiProjectQueryArguments};
 use ractor::{async_trait, registry::where_is, Actor, ActorProcessingErr, ActorRef};
-use rkyv::rancor::Error;
 use std::time::Duration;
 use tracing::{debug, error, info};
 

@@ -23,22 +23,16 @@
 
 use std::time::Duration;
 
-use cassini::{client::TcpClientMessage, ClientMessage};
-use common::{
-    types::{GitlabData, WithInstance},
-    RUNNERS_CONSUMER_TOPIC,
-};
+use common::{types::GitlabData, RUNNERS_CONSUMER_TOPIC};
 use cynic::{GraphQlResponse, QueryBuilder};
 use gitlab_queries::runners::*;
 
 use crate::{
-    graphql_endpoint, handle_backoff, init_observer_state, send_to_broker, BackoffReason, Command,
+    handle_backoff, init_observer_state, send_to_broker, BackoffReason, Command,
     GitlabObserverArgs, GitlabObserverMessage, GitlabObserverState,
 };
-use ractor::{async_trait, registry::where_is, Actor, ActorProcessingErr, ActorRef};
+use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef};
 use tracing::{debug, error, info, warn};
-
-use crate::BROKER_CLIENT_NAME;
 
 pub struct GitlabRunnerObserver;
 
