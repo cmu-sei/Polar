@@ -8,20 +8,20 @@ default:
   tags:
     - kubernetes
 
-.analyze_image:
-  stage: analysis
-  image: registry.sandbox.labz.s-box.org/sei/polar-mirror/polar-ci:0.1.0
-  variables:
-    IMAGE_NAME: "" # must be overridden
-  script:
-    - skopeo login --username "$CI_REGISTRY_USER" --password "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
-    - skopeo copy "docker://$CI_REGISTRY_IMAGE/$IMAGE_NAME:$CI_COMMIT_SHORT_SHA" docker-archive:image.tar.gz
-    - grype image.tar.gz -o cyclonedx-json=$IMAGE_NAME.grype-scan.json
-    - syft image.tar.gz -o cyclonedx-json=$IMAGE_NAME.sbom.json
-  artifacts:
-    paths:
-      - "*.json"
-    expire_in: 1 week
+# .analyze_image:
+#   stage: analysis
+#   image: registry.sandbox.labz.s-box.org/sei/polar-mirror/polar-ci:0.1.0
+#   variables:
+#     IMAGE_NAME: "" # must be overridden
+#   script:
+#     - skopeo login --username "$CI_REGISTRY_USER" --password "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
+#     - skopeo copy "docker://$CI_REGISTRY_IMAGE/$IMAGE_NAME:$CI_COMMIT_SHORT_SHA" docker-archive:image.tar.gz
+#     - grype image.tar.gz -o cyclonedx-json=$IMAGE_NAME.grype-scan.json
+#     - syft image.tar.gz -o cyclonedx-json=$IMAGE_NAME.sbom.json
+#   artifacts:
+#     paths:
+#       - "*.json"
+#     expire_in: 1 week
 
 build-dev-environment:
   image: registry.sandbox.labz.s-box.org/sei/polar-mirror/nix:2.24.13
@@ -143,30 +143,30 @@ build-workspace:
 
     expire_in: "1 week"
 
-analyze_cassini:
-  extends: .analyze_image
-  variables:
-    IMAGE_NAME: cassini
+# analyze_cassini:
+#   extends: .analyze_image
+#   variables:
+#     IMAGE_NAME: cassini
 
-analyze_gitlab_observer:
-  extends: .analyze_image
-  variables:
-    IMAGE_NAME: polar-gitlab-observer
+# analyze_gitlab_observer:
+#   extends: .analyze_image
+#   variables:
+#     IMAGE_NAME: polar-gitlab-observer
 
-analyze_gitlab_consumer:
-  extends: .analyze_image
-  variables:
-    IMAGE_NAME: polar-gitlab-consumer
+# analyze_gitlab_consumer:
+#   extends: .analyze_image
+#   variables:
+#     IMAGE_NAME: polar-gitlab-consumer
 
-analyze_kube_observer:
-  extends: .analyze_image
-  variables:
-    IMAGE_NAME: polar-kube-observer
+# analyze_kube_observer:
+#   extends: .analyze_image
+#   variables:
+#     IMAGE_NAME: polar-kube-observer
 
-analyze_kube_consumer:
-  extends: .analyze_image
-  variables:
-    IMAGE_NAME: polar-kube-consumer
+# analyze_kube_consumer:
+#   extends: .analyze_image
+#   variables:
+#     IMAGE_NAME: polar-kube-consumer
 
 render-manifests:
   image: registry.sandbox.labz.s-box.org/sei/polar-mirror/polar-ci:0.1.0
