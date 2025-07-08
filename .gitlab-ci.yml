@@ -1,12 +1,27 @@
 stages:
   - environment-setup
   - build
-  - test
+  - analysis
   - render
 
 default:
   tags:
     - kubernetes
+
+.analyze_image:
+  stage: analysis
+  image: registry.sandbox.labz.s-box.org/sei/polar-mirror/polar-ci:0.1.0
+  variables:
+    IMAGE_NAME: "" # must be overridden
+  script:
+    - skopeo login --username "$CI_REGISTRY_USER" --password "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
+    - skopeo copy "docker://$CI_REGISTRY_IMAGE/$IMAGE_NAME:$CI_COMMIT_SHORT_SHA" docker-archive:image.tar.gz
+    - grype image.tar.gz -o cyclonedx-json=$IMAGE_NAME.grype-scan.json
+    - syft image.tar.gz -o cyclonedx-json=$IMAGE_NAME.sbom.json
+  artifacts:
+    paths:
+      - "*.json"
+    expire_in: 1 week
 
 build-dev-environment:
   image: registry.sandbox.labz.s-box.org/sei/polar-mirror/nix:2.24.13
@@ -90,13 +105,6 @@ build-workspace:
     - nix build .#polarPkgs.kubeAgent.observerImage -o kube-observer
     - nix build .#polarPkgs.kubeAgent.consumerImage -o kube-consumer
 
-    # Generatge sboms
-    - syft scan $(readlink -f cassini) -o cyclonedx-json=cassini-sbom.json
-    - syft scan $(readlink -f gitlab-observer) -o cyclonedx-json=gitlab-observer.sbom.json
-    - syft scan $(readlink -f gitlab-consumer) -o cyclonedx-json=gitlab-consumer.sbom.json
-    - syft scan $(readlink -f kube-observer) -o cyclonedx-json=kube-observer.sbom.json
-    - syft scan $(readlink -f kube-consumer) -o cyclonedx-json=kube-consumer.sbom.json
-
     # Vulnerability analysis on our store
     # vulnix returns nonzero exit codes, so we need to get around this.
     # SEE: https://github.com/nix-community/vulnix/issues/79
@@ -134,6 +142,31 @@ build-workspace:
       - vulnix-report.json
 
     expire_in: "1 week"
+
+analyze_cassini:
+  extends: .generate_sbom_template
+  variables:
+    IMAGE_NAME: cassini
+
+analyze_gitlab_observer:
+  extends: .generate_sbom_template
+  variables:
+    IMAGE_NAME: polar-gitlab-observer
+
+analyze_gitlab_consumer:
+  extends: .generate_sbom_template
+  variables:
+    IMAGE_NAME: polar-gitlab-consumer
+
+analyze_kube_observer:
+  extends: .generate_sbom_template
+  variables:
+    IMAGE_NAME: polar-kube-observer
+
+analyze_kube_consumer:
+  extends: .generate_sbom_template
+  variables:
+    IMAGE_NAME: polar-kube-consumer
 
 render-manifests:
   image: registry.sandbox.labz.s-box.org/sei/polar-mirror/polar-ci:0.1.0
