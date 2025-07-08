@@ -144,27 +144,27 @@ build-workspace:
     expire_in: "1 week"
 
 analyze_cassini:
-  extends: .generate_sbom_template
+  extends: .analyze_image
   variables:
     IMAGE_NAME: cassini
 
 analyze_gitlab_observer:
-  extends: .generate_sbom_template
+  extends: .analyze_image
   variables:
     IMAGE_NAME: polar-gitlab-observer
 
 analyze_gitlab_consumer:
-  extends: .generate_sbom_template
+  extends: .analyze_image
   variables:
     IMAGE_NAME: polar-gitlab-consumer
 
 analyze_kube_observer:
-  extends: .generate_sbom_template
+  extends: .analyze_image
   variables:
     IMAGE_NAME: polar-kube-observer
 
 analyze_kube_consumer:
-  extends: .generate_sbom_template
+  extends: .analyze_image
   variables:
     IMAGE_NAME: polar-kube-consumer
 
