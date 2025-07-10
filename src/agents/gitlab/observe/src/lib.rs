@@ -159,7 +159,7 @@ pub struct GitlabObserverArgs {
 /// Helper to init observer_state from args to cut down on repeating the same block for every obvserver
 pub fn init_observer_state(args: GitlabObserverArgs) -> GitlabObserverState {
     return GitlabObserverState::new(
-        graphql_endpoint(&args.gitlab_endpoint),
+        args.gitlab_endpoint.clone(),
         args.token,
         args.web_client,
         args.registration_id,
@@ -209,6 +209,7 @@ pub fn send_to_broker(
         // wrap envelope
         let envelope = WithInstance {
             instance_id: state.instance_uid.clone(),
+            base_url: state.gitlab_endpoint.clone(),
             data,
         };
 
@@ -411,8 +412,8 @@ pub async fn get_all_elements<T: for<'a> Deserialize<'a>>(
 }
 
 pub fn graphql_endpoint(gitlab_endpoint: &str) -> String {
-    format!("{gitlab_endpoint}/graphql")
+    format!("{gitlab_endpoint}/api/graphql")
 }
 pub fn v4_api_endpoint(gitlab_endpoint: &str) -> String {
-    format!("{gitlab_endpoint}/v4")
+    format!("{gitlab_endpoint}/api/v4")
 }

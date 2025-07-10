@@ -23,6 +23,7 @@
 
 use std::time::Duration;
 
+use crate::graphql_endpoint;
 use common::{types::GitlabData, RUNNERS_CONSUMER_TOPIC};
 use cynic::{GraphQlResponse, QueryBuilder};
 use gitlab_queries::runners::*;
@@ -108,7 +109,7 @@ impl Actor for GitlabRunnerObserver {
 
                     match state
                         .web_client
-                        .post(state.gitlab_endpoint.clone())
+                        .post(graphql_endpoint(&state.gitlab_endpoint))
                         .bearer_auth(state.token.clone().unwrap_or_default())
                         .json(&op)
                         .send()
