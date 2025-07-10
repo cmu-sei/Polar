@@ -24,7 +24,7 @@
 use rkyv::{Archive, Deserialize, Serialize};
 use serde::Deserialize as SerdeDeserialize;
 
-#[derive(Deserialize, Serialize, Archive, SerdeDeserialize)]
+#[derive(Deserialize, Serialize, Archive, SerdeDeserialize, Clone)]
 pub struct JiraProject {
     pub id: String,
     pub key: String,

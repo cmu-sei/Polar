@@ -2108,6 +2108,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4a5f13b858c8d314ee3e8f639011f7ccefe71f97f96e50151fb991f267928e2c"
 
 [[package]]
+name = "jira-consumer"
+version = "0.1.0"
+dependencies = [
+ "async-global-executor 2.4.1",
+ "cassini",
+ "exponential-backoff",
+ "futures-lite 1.13.0",
+ "jira_common",
+ "lapin",
+ "neo4rs",
+ "polar",
+ "ractor 0.15.6",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "url",
+ "workspace-hack",
+]
+
+[[package]]
 name = "jira-observer"
 version = "0.1.0"
 dependencies = [

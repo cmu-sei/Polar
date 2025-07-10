@@ -22,29 +22,30 @@
 
 # DM24-0470
 
-[workspace]
-resolver = "2"
-
-members = [
-    "broker",
-    "lib",
-    "gitlab/common",
-    "gitlab/consume",
-    "gitlab/observe", 
-    "jira/common",
-    "jira/consume",
-    "jira/observe", 
-    "workspace-hack",
-    "gitlab/schema",
-    "gitlab/query",
-    "policy-config",
-    "kubernetes/observe",
-    "kubernetes/consume",
-    "kubernetes/common", "provenance", "config-ops"]
-
-[workspace.package]
+[package]
+name = "jira-consumer"
 version = "0.1.0"
 edition = "2021"
 
-[workspace.metadata.crane]
-name = "polar"
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+lapin = "2.2.1"
+tokio = { version = "1", features = ["full"] }
+async-global-executor = "2.3.1"
+futures-lite = "1.13.0"
+serde_json = "1.0"
+url = "2.3.1"
+neo4rs = "=0.8.0"
+jira_common = { path = "../common" }
+tracing = "0.1.41"
+workspace-hack = { version = "0.1", path = "../../workspace-hack" }
+cassini = { path = "../../broker" }
+ractor = { version = "0.15.6", features = ["async-trait"] }
+polar = { path = "../../lib" }
+#jira-queries = { path = "../query" }
+exponential-backoff = "2.1.0"
+
+[[bin]]
+name = "jira-consumer"
+path = "src/entrypoint.rs"

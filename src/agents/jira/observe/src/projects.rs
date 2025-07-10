@@ -21,23 +21,21 @@
    DM24-0470
 */
 use crate::{
-    handle_backoff,
+    handle_backoff, BROKER_CLIENT_NAME,
     Command,
     JiraObserverArgs,
     JiraObserverMessage, JiraObserverState,
     JIRA_PROJECT_OBSERVER
     };
 use cassini::{client::TcpClientMessage, ClientMessage};
-use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef};
-
-//use reqwest::Client;
-//use serde::Deserialize;
+use ractor::{async_trait, registry::where_is, Actor, ActorProcessingErr, ActorRef};
+use jira_common::JIRA_PROJECTS_CONSUMER_TOPIC;
+use rkyv::rancor::Error;
 use std::time::Duration;
-use tracing::{info};
+use tracing::{info, debug};
 use jira_common::types::{
-    JiraProject
+    JiraProject, JiraData
     };
-use tracing::{debug};
 
 pub struct JiraProjectObserver;
 
@@ -110,10 +108,25 @@ impl Actor for JiraProjectObserver {
                             .await?
                              .json::<Vec<JiraProject>>()
                              .await?;
-                        //let mut read_projects = Vec::new();
-                        for project in res {
-                            debug!("{}", project.name);
-                        }
+
+                        let tcp_client =
+                            where_is(BROKER_CLIENT_NAME.to_string())
+                                .expect("Expected to find client");
+
+                        let data = JiraData::Projects(res.clone());
+
+                        let bytes = rkyv::to_bytes::<Error>(&data).unwrap();
+
+                        let msg = ClientMessage::PublishRequest {
+                            topic: JIRA_PROJECTS_CONSUMER_TOPIC.to_string(),
+                            payload: bytes.to_vec(),
+                            registration_id: Some(
+                                state.registration_id.clone(),
+                            ),
+                        };
+                        tcp_client
+                            .send_message(TcpClientMessage::Send(msg))
+                            .expect("Expected to send message");
                     }
                 }
             }
