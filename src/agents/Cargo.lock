@@ -739,6 +739,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "clokwerk"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bd108d365fcb6d7eddf17a6718eb6a33db18ba4178f8cc6b667f480710f10d76"
+dependencies = [
+ "chrono",
+]
+
+[[package]]
 name = "cmake"
 version = "0.1.54"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2097,6 +2106,51 @@ name = "itoa"
 version = "1.0.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4a5f13b858c8d314ee3e8f639011f7ccefe71f97f96e50151fb991f267928e2c"
+
+[[package]]
+name = "jira-observer"
+version = "0.1.0"
+dependencies = [
+ "cassini",
+ "clokwerk",
+ "jira_common",
+ "log",
+ "parse_link_header",
+ "polar",
+ "ractor 0.15.6",
+ "rand 0.9.1",
+ "reqwest",
+ "rkyv 0.8.10",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tokio",
+ "tracing",
+ "tracing-glog",
+ "tracing-subscriber",
+ "url",
+ "workspace-hack",
+]
+
+[[package]]
+name = "jira_common"
+version = "0.1.0"
+dependencies = [
+ "amq-protocol-uri",
+ "cassini",
+ "futures-lite 1.13.0",
+ "lapin",
+ "polar",
+ "ractor 0.15.6",
+ "rkyv 0.8.10",
+ "serde",
+ "serde_json",
+ "sysinfo",
+ "tcp-stream",
+ "tracing",
+ "url",
+ "workspace-hack",
+]
 
 [[package]]
 name = "jobserver"
