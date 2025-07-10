@@ -1,0 +1,103 @@
+#!/bin/env bash
+set -euo pipefail
+
+show_help() {
+  cat <<EOF
+
+Polar Dev Container Help
+────────────────────────
+
+Usage: polar-help [--ssh | --create-user | --container-help]
+
+Available Topics:
+
+  --ssh             Guide to configure and start SSH access (Dropbear)
+  --create-user     Auto-create a local user matching your host environment
+  --container-help  Run this container with sane defaults (volume mounts, ports)
+
+Example:
+
+  polar-help --ssh
+
+EOF
+}
+
+show_ssh() {
+  cat <<EOF
+
+SSH Access with Dropbear
+────────────────────────
+
+Step 1: Start Dropbear inside the container:
+  start-dropbear
+
+Step 2: From the host, connect with:
+  ssh -p 2222 \$USER@127.0.0.1
+
+Step 3: With VS Code or Zed:
+  zed . --ssh=ssh://\$USER@127.0.0.1:2222
+
+Tips:
+- Only key-based auth is supported
+- Place your public key into /workspace/authorized_keys and symlink or copy to ~/.ssh/authorized_keys inside the container
+
+EOF
+}
+
+show_create_user() {
+  cat <<EOF
+
+Creating a Matching Dev User
+────────────────────────────
+
+This container supports automatic user creation on startup using environment variables.
+
+Example (host shell):
+
+  podman run --rm -it --user 0 \\
+    -e CREATE_USER="\$USER" \\
+    -e CREATE_UID="\$(id -u)" \\
+    -e CREATE_GID="\$(id -g)" \\
+    -v \$PWD:/workspace \\
+    polar-dev:latest
+
+What it does:
+- Creates a user inside the container that matches your UID/GID
+- Sets up home directory and Fish shell config
+- Makes interactive tools behave like you're running natively
+
+EOF
+}
+
+show_container_help() {
+  cat <<EOF
+
+Container Startup Tips
+──────────────────────
+
+Recommended podman run flags:
+
+  podman run --rm -it \\
+    --user 0 --userns=keep-id \\
+    -e CREATE_USER="\$USER" \\
+    -e CREATE_UID="\$(id -u)" \\
+    -e CREATE_GID="\$(id -g)" \\
+    -v \$PWD:/workspace \\
+    -p 2222:2223 -p 8080:8080 \\
+    polar-dev:latest
+
+Explanation:
+  - --user 0: needed to create an unprivileged user at container startup
+  - --userns=keep-id: preserves your UID mapping
+  - -v \$PWD:/workspace: mounts your current folder
+  - -p 2222:2223: forwards SSH port
+
+EOF
+}
+
+case "${1:-}" in
+  --ssh) show_ssh ;;
+  --create-user) show_create_user ;;
+  --container-help) show_container_help ;;
+  *) show_help ;;
+esac
