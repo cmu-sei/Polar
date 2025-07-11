@@ -175,7 +175,7 @@ let
     };
 
     polarHelpScript = pkgs.writeShellScriptBin "polar-help" (
-      builtins.readFile ./container-files/polar-help.sh
+      builtins.readFile ./container-files/polar-help
     );
 
     startScript = pkgs.writeShellScriptBin "start.sh" (

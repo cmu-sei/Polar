@@ -28,18 +28,47 @@ show_ssh() {
 SSH Access with Dropbear
 ────────────────────────
 
-Step 1: Start Dropbear inside the container:
+🔹 OPTION 1: Manual Startup (inside the container)
+--------------------------------------------------
+
+Step 1: Copy your public key into /workspace:
+
+  cp ~/.ssh/id_ed25519.pub /workspace/authorized_keys
+
+Step 2: Inside the container:
+
   start-dropbear
 
-Step 2: From the host, connect with:
+Step 3: From the host, connect with:
+
   ssh -p 2222 \$USER@127.0.0.1
 
-Step 3: With VS Code or Zed:
+Step 4: Or launch Zed:
+
   zed . --ssh=ssh://\$USER@127.0.0.1:2222
 
-Tips:
-- Only key-based auth is supported
-- Place your public key into /workspace/authorized_keys and symlink or copy to ~/.ssh/authorized_keys inside the container
+
+🔹 OPTION 2: Automatic Startup via Environment
+---------------------------------------------
+
+Start the container like this (host shell):
+
+  podman run --rm -it \\
+    --user 0 --userns=keep-id \\
+    -v \$PWD:/workspace:rw \\
+    -p 2222:2223 \\
+    -e CREATE_USER="\$USER" \\
+    -e CREATE_UID="\$(id -u)" \\
+    -e CREATE_GID="\$(id -g)" \\
+    -e DROPBEAR_ENABLE=1 \\
+    -e DROPBEAR_PORT=2223 \\
+    -e AUTHORIZED_KEYS_B64="\$(base64 -w0 ~/.ssh/id_ed25519.pub)" \\
+    polar-dev:latest
+
+What this does:
+- Starts Dropbear automatically inside the container
+- Injects your SSH key via env var
+- Lets you connect directly via SSH or Zed
 
 EOF
 }

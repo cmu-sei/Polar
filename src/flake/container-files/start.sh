@@ -122,18 +122,62 @@ if ! pgrep -x nix-daemon >/dev/null ; then
 fi
 
 ##############################################################################
+# 3.5. Optional dropbear auto-start
+##############################################################################
+DROPBEAR_STATUS='autorun not configured — run "start-dropbear" to start manually'
+
+if [[ "${DROPBEAR_ENABLE:-0}" == "1" ]]; then
+  SSH_DIR="/home/$DEV_USER/.ssh"
+  AUTH_KEYS="$SSH_DIR/authorized_keys"
+  RSA_KEY="$SSH_DIR/dropbear_rsa_host_key"
+  ED25519_KEY="$SSH_DIR/dropbear_ed25519_host_key"
+  DROPBEAR_PORT="${DROPBEAR_PORT:-2223}"
+
+  mkdir -p "$SSH_DIR"
+  chmod 700 "$SSH_DIR"
+  chown "$DEV_UID:$DEV_GID" "$SSH_DIR"
+
+  if [[ -n "${AUTHORIZED_KEYS_B64:-}" ]]; then
+    echo "$AUTHORIZED_KEYS_B64" | base64 -d > "$AUTH_KEYS"
+    chmod 600 "$AUTH_KEYS"
+    chown "$DEV_UID:$DEV_GID" "$AUTH_KEYS"
+  else
+    DROPBEAR_STATUS="❌ authorized_keys missing (env var AUTHORIZED_KEYS_B64 not set)"
+  fi
+
+  if [[ ! -f "$RSA_KEY" ]]; then
+    dropbearkey -t rsa -f "$RSA_KEY" > /dev/null
+  fi
+
+  if [[ ! -f "$ED25519_KEY" ]]; then
+    dropbearkey -t ed25519 -f "$ED25519_KEY" > /dev/null
+  fi
+
+  # Run dropbear detached and set up clean flags
+  if [[ -f "$AUTH_KEYS" ]]; then
+    dropbear -E -a \
+      -r "$RSA_KEY" \
+      -r "$ED25519_KEY" \
+      -p "0.0.0.0:$DROPBEAR_PORT" \
+      -P "$SSH_DIR/dropbear.pid" &
+
+    sleep 1  # give it a moment
+    if pgrep -x dropbear >/dev/null 2>&1; then
+      DROPBEAR_STATUS="running on port $DROPBEAR_PORT"
+    else
+      DROPBEAR_STATUS="❌ failed to start (check logs)"
+    fi
+  fi
+fi
+
+##############################################################################
 # 4. summary banner
 ##############################################################################
 echo "───────────────────────────────────────────────────────────────────────────────"
 echo " 🚀  Container ready!"
 echo
 echo " • User ............. $DEV_USER  (uid=$DEV_UID / gid=$DEV_GID)"
-
-if pgrep -x dropbear >/dev/null 2>&1; then
-  echo " • SSH server ....... running on port 2222 (🔑 key-auth only)"
-else
-  echo " • SSH server ....... not running — run 'start-dropbear' to start"
-fi
+echo " • SSH server ....... $DROPBEAR_STATUS"
 
 if mountpoint -q /workspace 2>/dev/null; then
   echo " • Volume mount ..... /workspace is mounted"
@@ -145,10 +189,6 @@ echo
 echo " ✅  Environment configuration complete"
 echo " 🆘  Type 'polar-help' for container usage instructions"
 echo "───────────────────────────────────────────────────────────────────────────────"
-echo "The license for this container can be found in /root/license.txt"
-echo
-
-cowsay "Welcome to the Polar Shell." || echo "Welcome to the Polar Shell."
 
 ##############################################################################
 # 5.  hand control to the user shell
