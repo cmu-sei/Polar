@@ -29,6 +29,7 @@ use tracing::info;
 
 pub mod projects;
 pub mod groups;
+pub mod users;
 pub mod supervisor;
 
 pub const BROKER_CLIENT_NAME: &str = "JIRA_CONSUMER_CLIENT";

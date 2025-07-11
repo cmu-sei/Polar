@@ -23,13 +23,11 @@
 
 pub mod projects;
 pub mod groups;
+pub mod users;
 pub mod supervisor;
 
 use parse_link_header::parse_with_rel;
 use ractor::concurrency::Duration;
-//use ractor::concurrency::JoinHandle;
-//use ractor::ActorRef;
-//use jira_common::types::IdString;
 use rand::rngs::SmallRng;
 use rand::Rng;
 use rand::SeedableRng;
@@ -40,12 +38,11 @@ use reqwest::Method;
 use reqwest::Response;
 use serde::Deserialize;
 use tokio::task::AbortHandle;
-//use tracing::info;
-//use tracing::warn;
 use tracing::{debug, error};
 
 const JIRA_PROJECT_OBSERVER: &str = "jira.observer.projects";
 const JIRA_GROUP_OBSERVER: &str = "jira.observer.groups";
+const JIRA_USER_OBSERVER: &str = "jira.observer.users";
 pub const BROKER_CLIENT_NAME: &str = "jira:observer:web_client";
 const PRIVATE_TOKEN_HEADER_STR: &str = "PRIVATE-TOKEN";
 pub const BACKOFF_RECEIVED_LOG: &str = "{myself:?} received backoff message...";
@@ -141,6 +138,7 @@ pub struct JiraObserverArgs {
 pub enum Command {
     GetProjects(String),
     GetGroups(String),
+    GetUsers(String),
 }
 
 /// Messages that observers send themselves to prompt the retrieval of resources

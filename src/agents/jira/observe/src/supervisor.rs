@@ -15,10 +15,12 @@ use tracing::{debug, info, warn};
 
 use crate::projects::JiraProjectObserver;
 use crate::groups::JiraGroupObserver;
+use crate::users::JiraUserObserver;
 use crate::JiraObserverArgs;
 use crate::BROKER_CLIENT_NAME;
 use crate::JIRA_PROJECT_OBSERVER;
 use crate::JIRA_GROUP_OBSERVER;
+use crate::JIRA_USER_OBSERVER;
 pub struct ObserverSupervisor;
 
 pub struct ObserverSupervisorState {
@@ -155,6 +157,16 @@ impl Actor for ObserverSupervisor {
                 .await
                 {
                     warn!("failed to start group observer {e}")
+                }
+                if let Err(e) = Actor::spawn_linked(
+                    Some(JIRA_USER_OBSERVER.to_string()),
+                    JiraUserObserver,
+                    args.clone(),
+                    myself.clone().into(),
+                )
+                .await
+                {
+                    warn!("failed to start user observer {e}")
                 }
             }
         }

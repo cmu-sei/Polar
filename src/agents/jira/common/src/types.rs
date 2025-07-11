@@ -40,6 +40,13 @@ pub struct JiraGroup {
     pub label: Option<String>,
 }
 
+#[derive(Deserialize, Serialize, Archive, SerdeDeserialize, Clone)]
+pub struct JiraUser {
+    pub name: String,
+    pub key: String,
+    pub html: Option<String>,
+    pub displayName: String,
+}
 
 #[derive(Debug, Serialize, Deserialize, serde::Deserialize, serde::Serialize, Archive, Clone, Default,)]
 pub struct IdString(pub String);
@@ -50,6 +57,7 @@ pub struct IdString(pub String);
 pub enum JiraData {
     Projects(Vec<JiraProject>),
     Groups(Vec<JiraGroup>),
+    Users(Vec<JiraUser>),
 }
 
 /// Helper type to link connection types to a resource's id
