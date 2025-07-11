@@ -32,6 +32,15 @@ pub struct JiraProject {
     pub projectTypeKey: String,
 }
 
+#[derive(Deserialize, Serialize, Archive, SerdeDeserialize, Clone)]
+pub struct JiraGroup {
+    //pub groupId: String,
+    pub name: String,
+    pub html: Option<String>,
+    pub label: Option<String>,
+}
+
+
 #[derive(Debug, Serialize, Deserialize, serde::Deserialize, serde::Serialize, Archive, Clone, Default,)]
 pub struct IdString(pub String);
 
@@ -39,7 +48,8 @@ pub struct IdString(pub String);
 /// The underlying byte vector contains a message meant for some consumer on a given topic
 #[derive(Serialize, Deserialize, Archive)]
 pub enum JiraData {
-    Projects(Vec<JiraProject>)
+    Projects(Vec<JiraProject>),
+    Groups(Vec<JiraGroup>),
 }
 
 /// Helper type to link connection types to a resource's id

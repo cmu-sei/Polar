@@ -25,21 +25,21 @@ use crate::{
     Command,
     JiraObserverArgs,
     JiraObserverMessage, JiraObserverState,
-    JIRA_PROJECT_OBSERVER
+    JIRA_GROUP_OBSERVER
     };
 use cassini::{client::TcpClientMessage, ClientMessage};
 use ractor::{async_trait, registry::where_is, Actor, ActorProcessingErr, ActorRef};
-use jira_common::JIRA_PROJECTS_CONSUMER_TOPIC;
+use jira_common::JIRA_GROUPS_CONSUMER_TOPIC;
 use rkyv::rancor::Error;
 use std::time::Duration;
 use tracing::{info, debug};
 use jira_common::types::{
-    JiraProject, JiraData
+    JiraGroup, JiraData
     };
 
-pub struct JiraProjectObserver;
+pub struct JiraGroupObserver;
 
-impl JiraProjectObserver {
+impl JiraGroupObserver {
     fn observe(myself: ActorRef<JiraObserverMessage>,
                state: &mut JiraObserverState,
                _duration: Duration) {
@@ -47,9 +47,9 @@ impl JiraProjectObserver {
 
         let handle = myself.send_interval(state.backoff_interval, || {
             //build query
-            let op = "/rest/api/2/project";
+            let op = "/rest/api/2/groups/picker";
             // pass query in message
-            JiraObserverMessage::Tick(Command::GetProjects(op.to_string()))
+            JiraObserverMessage::Tick(Command::GetGroups(op.to_string()))
         }).abort_handle();
 
         state.task_handle = Some(handle);
@@ -57,7 +57,7 @@ impl JiraProjectObserver {
     
 }
 #[async_trait]
-impl Actor for JiraProjectObserver {
+impl Actor for JiraGroupObserver {
     type Msg = JiraObserverMessage;
     type State = JiraObserverState;
     type Arguments = JiraObserverArgs;
@@ -85,7 +85,7 @@ impl Actor for JiraProjectObserver {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
 
-        JiraProjectObserver::observe(myself, state, state.base_interval);
+        JiraGroupObserver::observe(myself, state, state.base_interval);
         Ok(())
     }
 
@@ -98,27 +98,51 @@ impl Actor for JiraProjectObserver {
         match message {
             JiraObserverMessage::Tick(command) => {  
                 match command {
-                    Command::GetProjects(op) => {
+                    Command::GetGroups(op) => {
                         debug!("{}", op.to_string());
 
-                        let res = state.web_client
-                            .get(format!("{}{}", state.jira_url, op))
-                            .bearer_auth(format!("{}", state.token.clone().expect("TOKEN")))
-                            .send()
-                            .await?
-                             .json::<Vec<JiraProject>>()
-                             .await?;
+                        let mut all_groups = Vec::new();
+                        let mut start_at = 0;
+                        let max_results = 50;
+                        let query_string = "";
+
+                        loop {
+                            let url = format!(
+                                "{}{}?query={}&startAt={}&maxResults={}",
+                                state.jira_url, op, query_string, start_at, max_results
+                            );
+
+                            let res = state.web_client
+                                .get(&url)
+                                .bearer_auth(format!("{}", state.token.clone().expect("TOKEN")))
+                                .send()
+                                .await?
+                                .json::<serde_json::Value>()
+                                .await?;
+
+                            let groups: Vec<JiraGroup> = serde_json::from_value(res["groups"].clone())?;
+                            let total = res["total"].as_u64().unwrap_or(0);
+                            let fetched = groups.len();
+
+                            all_groups.extend(groups);
+
+                            if (start_at as usize + fetched) >= total as usize {
+                                break;
+                            }
+
+                            start_at += fetched;
+                        }
 
                         let tcp_client =
                             where_is(BROKER_CLIENT_NAME.to_string())
                                 .expect("Expected to find client");
 
-                        let data = JiraData::Projects(res.clone());
+                        let data = JiraData::Groups(all_groups.clone());
 
                         let bytes = rkyv::to_bytes::<Error>(&data).unwrap();
 
                         let msg = ClientMessage::PublishRequest {
-                            topic: JIRA_PROJECTS_CONSUMER_TOPIC.to_string(),
+                            topic: JIRA_GROUPS_CONSUMER_TOPIC.to_string(),
                             payload: bytes.to_vec(),
                             registration_id: Some(
                                 state.registration_id.clone(),
@@ -138,7 +162,7 @@ impl Actor for JiraProjectObserver {
                     // start new loop
                     match handle_backoff(state, reason) {
                         Ok(duration) => {
-                            JiraProjectObserver::observe(myself, state, duration);
+                            JiraGroupObserver::observe(myself, state, duration);
                         }
                         Err(e) => myself.stop(Some(e.to_string()))
                     }   

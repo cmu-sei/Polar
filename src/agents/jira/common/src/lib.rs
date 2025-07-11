@@ -40,6 +40,7 @@ pub mod dispatch;
 pub mod types;
 
 pub const JIRA_PROJECTS_CONSUMER_TOPIC: &str = "jira:consumer:projects";
+pub const JIRA_GROUPS_CONSUMER_TOPIC: &str = "jira:consumer:groups";
 
 // Checks for the existence of a lock file at the given path. Creates lock file if not found.
 #[deprecated]

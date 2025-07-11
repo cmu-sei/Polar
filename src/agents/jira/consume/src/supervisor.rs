@@ -4,6 +4,7 @@ use cassini::client::*;
 use jira_common::dispatch::MessageDispatcher;
 use jira_common::types::JiraData;
 use jira_common::JIRA_PROJECTS_CONSUMER_TOPIC;
+use jira_common::JIRA_GROUPS_CONSUMER_TOPIC;
 use exponential_backoff::Backoff;
 use polar::DISPATCH_ACTOR;
 use ractor::async_trait;
@@ -22,6 +23,7 @@ use tracing::warn;
 
 use crate::get_neo_config;
 use crate::projects::JiraProjectConsumer;
+use crate::groups::JiraGroupConsumer;
 use crate::JiraConsumerArgs;
 use crate::BROKER_CLIENT_NAME;
 
@@ -72,7 +74,23 @@ impl ConsumerSupervisor {
             };
 
             debug!("Restarting actor: {actor_name}, attempt: {count}");
-
+            if actor_name == JIRA_GROUPS_CONSUMER_TOPIC {
+                match Actor::spawn_linked(
+                    Some(JIRA_GROUPS_CONSUMER_TOPIC.to_string()),
+                    JiraGroupConsumer,
+                    args.clone(),
+                    supervisor.clone().into(),
+                )
+                .await
+                {
+                    Ok(_) => break,
+                    // if we have an issue starting the actor, just sleep and try again later
+                    Err(_) => match duration {
+                        Some(duration) => tokio::time::sleep(duration).await,
+                        None => break,
+                    },
+                }
+            }
             if actor_name == JIRA_PROJECTS_CONSUMER_TOPIC {
                 match Actor::spawn_linked(
                     Some(JIRA_PROJECTS_CONSUMER_TOPIC.to_string()),
@@ -193,6 +211,17 @@ impl Actor for ConsumerSupervisor {
                     error!("failed to start projects consumer. {e}");
                     myself.stop(None);
                 }
+                if let Err(e) = Actor::spawn_linked(
+                    Some(JIRA_GROUPS_CONSUMER_TOPIC.to_string()),
+                    JiraGroupConsumer,
+                    args.clone(),
+                    myself.clone().into(),
+                )
+                .await
+                {
+                    error!("failed to start groups consumer. {e}");
+                    myself.stop(None);
+                }
             }
         }
         Ok(())
@@ -270,3 +299,4 @@ impl Actor for ConsumerSupervisor {
         Ok(())
     }
 }
+

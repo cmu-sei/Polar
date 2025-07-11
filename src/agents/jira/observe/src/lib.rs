@@ -22,6 +22,7 @@
 */
 
 pub mod projects;
+pub mod groups;
 pub mod supervisor;
 
 use parse_link_header::parse_with_rel;
@@ -44,6 +45,7 @@ use tokio::task::AbortHandle;
 use tracing::{debug, error};
 
 const JIRA_PROJECT_OBSERVER: &str = "jira.observer.projects";
+const JIRA_GROUP_OBSERVER: &str = "jira.observer.groups";
 pub const BROKER_CLIENT_NAME: &str = "jira:observer:web_client";
 const PRIVATE_TOKEN_HEADER_STR: &str = "PRIVATE-TOKEN";
 pub const BACKOFF_RECEIVED_LOG: &str = "{myself:?} received backoff message...";
@@ -137,7 +139,8 @@ pub struct JiraObserverArgs {
 }
 
 pub enum Command {
-    GetProjects(String)
+    GetProjects(String),
+    GetGroups(String),
 }
 
 /// Messages that observers send themselves to prompt the retrieval of resources
@@ -254,3 +257,4 @@ pub async fn get_all_elements<T: for<'a> Deserialize<'a>>(
 
     return Some(elements);
 }
+
