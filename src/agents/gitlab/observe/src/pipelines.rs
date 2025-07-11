@@ -21,7 +21,7 @@
    DM24-0470
 */
 
-use crate::{init_observer_state, send_to_broker};
+use crate::{graphql_endpoint, init_observer_state, send_to_broker};
 use crate::{
     BackoffReason, Command, GitlabObserverArgs, GitlabObserverMessage, GitlabObserverState,
     GITLAB_PROJECT_OBSERVER,
@@ -81,7 +81,7 @@ impl Actor for GitlabPipelineObserver {
 
                         match state
                             .web_client
-                            .post(state.gitlab_endpoint.clone())
+                            .post(graphql_endpoint(&state.gitlab_endpoint))
                             .bearer_auth(state.token.clone().unwrap_or_default())
                             .json(&op)
                             .send()
@@ -213,7 +213,7 @@ impl Actor for GitlabJobObserver {
 
                         match state
                             .web_client
-                            .post(state.gitlab_endpoint.clone())
+                            .post(graphql_endpoint(&state.gitlab_endpoint))
                             .bearer_auth(state.token.clone().unwrap_or_default())
                             .json(&op)
                             .send()

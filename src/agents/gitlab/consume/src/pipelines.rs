@@ -36,12 +36,15 @@ use tracing::{debug, error, info};
 pub struct GitlabPipelineConsumer;
 
 impl GitlabPipelineConsumer {
-    fn format_artifacts(artifacts: &[CiJobArtifact]) -> String {
+    fn format_artifacts(base_url: &str, artifacts: &[CiJobArtifact]) -> String {
         artifacts
             .iter()
             .map(|artifact| {
+                // Here we format the base_url of the gitlab instance onto the download_url,
+                // gitlab doesn't proivde the instance url as part of it so we do it oursleves here.
+                // This will help us later when we seek to scrape artifact data like job logs, sboms, test results, etc.
                 format!(
-                    r#"{{ artifact_id: "{}", name: "{}", size: "{}", expire_at: "{}", download_path: "{}" }}"#,
+                    r#"{{ artifact_id: "{}", name: "{}", size: "{}", expire_at: "{}", download_path: "{base_url}{}" }}"#,
                     artifact.id,
                     artifact.name.clone().unwrap_or_default(),
                     // TODO: implement display for the enum artifact.file_type,
@@ -172,9 +175,10 @@ impl Actor for GitlabPipelineConsumer {
                             .iter()
                             .map(|pipeline| {
                                 let artifacts = match &pipeline.job_artifacts {
-                                    Some(artifacts) => {
-                                        GitlabPipelineConsumer::format_artifacts(&artifacts)
-                                    }
+                                    Some(artifacts) => GitlabPipelineConsumer::format_artifacts(
+                                        &message.base_url,
+                                        &artifacts,
+                                    ),
                                     None => String::default(),
                                 };
 

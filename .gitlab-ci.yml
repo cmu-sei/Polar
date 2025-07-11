@@ -16,7 +16,9 @@ default:
   script:
     - skopeo login --username "$CI_REGISTRY_USER" --password "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
     - skopeo copy "docker://$CI_REGISTRY_IMAGE/$IMAGE_NAME:$CI_COMMIT_SHORT_SHA" docker-archive:image.tar.gz
-    - grype image.tar.gz -o cyclonedx-json=$IMAGE_NAME.grype-scan.json
+    # TODO: Enable grype database retrieval in CI
+    # - grype image.tar.gz -o cyclonedx-json=$IMAGE_NAME.grype-scan.json
+    #
     - syft image.tar.gz -o cyclonedx-json=$IMAGE_NAME.sbom.json
   artifacts:
     paths:

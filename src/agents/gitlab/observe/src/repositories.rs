@@ -21,6 +21,7 @@
    DM24-0470
 */
 
+use crate::graphql_endpoint;
 use crate::{
     init_observer_state, send_to_broker, BackoffReason, Command, GitlabObserverArgs,
     GitlabObserverMessage, GitlabObserverState, MESSAGE_FORWARDING_FAILED,
@@ -152,7 +153,7 @@ impl Actor for GitlabRepositoryObserver {
 
                         match state
                             .web_client
-                            .post(state.gitlab_endpoint.clone())
+                            .post(graphql_endpoint(&state.gitlab_endpoint))
                             .bearer_auth(state.token.clone().unwrap_or_default())
                             .json(&op)
                             .send()
@@ -260,7 +261,7 @@ impl Actor for GitlabRepositoryObserver {
 
                         match state
                             .web_client
-                            .post(state.gitlab_endpoint.clone())
+                            .post(graphql_endpoint(&state.gitlab_endpoint))
                             .bearer_auth(state.token.clone().unwrap_or_default())
                             .json(&op)
                             .send()

@@ -39,6 +39,7 @@ use rkyv::{Archive, Deserialize, Serialize};
 #[derive(Debug, Clone, Archive, Serialize, Deserialize)]
 pub struct WithInstance<T> {
     pub instance_id: String,
+    pub base_url: String,
     pub data: T,
 }
 

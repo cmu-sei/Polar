@@ -1,6 +1,6 @@
 use crate::{
-    handle_backoff, handle_graphql_errors, init_observer_state, send_to_broker, BackoffReason,
-    Command, GitlabObserverMessage,
+    graphql_endpoint, handle_backoff, handle_graphql_errors, init_observer_state, send_to_broker,
+    BackoffReason, Command, GitlabObserverMessage,
 };
 use crate::{GitlabObserverArgs, GitlabObserverState, MESSAGE_FORWARDING_FAILED};
 use common::types::{GitlabData, GitlabInstance};
@@ -41,7 +41,7 @@ impl MetaObserver {
 
         match state
             .web_client
-            .post(state.gitlab_endpoint.clone())
+            .post(graphql_endpoint(&state.gitlab_endpoint))
             .bearer_auth(state.token.clone().unwrap_or_default())
             .json(&operation)
             .send()
@@ -97,7 +97,7 @@ impl MetaObserver {
 
         match state
             .web_client
-            .post(state.gitlab_endpoint.clone())
+            .post(graphql_endpoint(&state.gitlab_endpoint))
             .bearer_auth(state.token.clone().unwrap_or_default())
             .json(&operation)
             .send()

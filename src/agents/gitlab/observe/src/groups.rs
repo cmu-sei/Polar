@@ -24,7 +24,7 @@
 use ractor::concurrency::Duration;
 
 use crate::{
-    handle_backoff, init_observer_state, send_to_broker, BackoffReason, Command,
+    graphql_endpoint, handle_backoff, init_observer_state, send_to_broker, BackoffReason, Command,
     GitlabObserverArgs, GitlabObserverMessage, GitlabObserverState, MESSAGE_FORWARDING_FAILED,
 };
 use cassini::UNEXPECTED_MESSAGE_STR;
@@ -91,7 +91,7 @@ impl GitlabGroupObserver {
 
         match state
             .web_client
-            .post(state.gitlab_endpoint.clone())
+            .post(graphql_endpoint(&state.gitlab_endpoint))
             .bearer_auth(token)
             .json(&op)
             .send()
@@ -144,7 +144,7 @@ impl GitlabGroupObserver {
 
         match state
             .web_client
-            .post(state.gitlab_endpoint.clone())
+            .post(graphql_endpoint(&state.gitlab_endpoint))
             .bearer_auth(token)
             .json(&op)
             .send()
@@ -200,7 +200,7 @@ impl GitlabGroupObserver {
 
         match state
             .web_client
-            .post(state.gitlab_endpoint.clone())
+            .post(graphql_endpoint(&state.gitlab_endpoint))
             .bearer_auth(token)
             .json(&op)
             .send()
@@ -281,7 +281,7 @@ impl Actor for GitlabGroupObserver {
 
                         match state
                             .web_client
-                            .post(state.gitlab_endpoint.clone())
+                            .post(graphql_endpoint(&state.gitlab_endpoint))
                             .bearer_auth(state.token.clone().unwrap_or_default())
                             .json(&op)
                             .send()

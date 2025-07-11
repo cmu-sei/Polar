@@ -21,6 +21,7 @@
    DM24-0470
 */
 
+use crate::graphql_endpoint;
 use std::time::Duration;
 
 use crate::{
@@ -115,7 +116,7 @@ impl Actor for GitlabUserObserver {
 
                         match state
                             .web_client
-                            .post(state.gitlab_endpoint.clone())
+                            .post(graphql_endpoint(&state.gitlab_endpoint))
                             .bearer_auth(state.token.clone().unwrap_or_default())
                             .json(&op)
                             .send()
