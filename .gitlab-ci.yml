@@ -10,7 +10,7 @@ default:
 
 .analyze_image:
   stage: analysis
-  image: registry.sandbox.labz.s-box.org/sei/polar-mirror/polar-ci:0.1.0
+  image: registry.sandbox.labz.s-box.org/sei/polar-mirror/polar-dev:0.1.0
   variables:
     IMAGE_NAME: "" # must be overridden
   script:
@@ -51,39 +51,16 @@ build-dev-environment:
     - skopeo inspect docker-archive://$(readlink -f ./polar-dev)
     - skopeo copy docker-archive://$(readlink -f ./polar-dev) docker://$CI_REGISTRY_IMAGE/polar-dev:0.1.0
 
-build-ci-environment:
-  image: registry.sandbox.labz.s-box.org/sei/polar-mirror/nix:2.24.13
-  stage: environment-setup
-  rules:
-    - changes:
-        - flake.nix
-        - flake.lock
-        - src/flake/*
-        - .gitlab-ci.yml
-  script:
-    #install needed tools
-    - nix-env --install --attr nixpkgs.skopeo
-    - |
-      mkdir -p "$HOME/.config/nix"
-      printf "experimental-features = nix-command flakes" > "$HOME/.config/nix/nix.conf"
-      mkdir -p "/etc/containers"
-      echo '{"default":[{"type":"insecureAcceptAnything"}]}' > /etc/containers/policy.json
-      git config --global --add safe.directory "$(pwd)"
-    # build dev and testing environments
-    - nix build .#containers.ciContainer -o polar-ci
-
-    #  Use skopeo to inspect and upload our images
-    - skopeo login --username "$CI_REGISTRY_USER" --password "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
-    - skopeo inspect docker-archive://$(readlink -f ./polar-ci)
-    - skopeo copy docker-archive://$(readlink -f ./polar-ci) docker://$CI_REGISTRY_IMAGE/polar-ci:0.1.0
-
 build-workspace:
-  image: registry.sandbox.labz.s-box.org/sei/polar-mirror/polar-ci:0.1.0
+  image: registry.sandbox.labz.s-box.org/sei/polar-mirror/polar-dev:0.1.0
   stage: build
   variables:
     AZURE_REGISTRY: sandboxaksacr.azurecr.us/polar
   script:
     - git config --global --add safe.directory "$(pwd)"
+
+    # run static analysis tooling
+    - sh scripts/static-tools.sh
 
     # build workspace
     - nix build
@@ -121,7 +98,6 @@ build-workspace:
         echo "Nothing found, is the store empty?"
       fi
 
-    - ls -lh
     # Use skopeo to inspect and upload our images
     - skopeo login --username "$CI_REGISTRY_USER" --password "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
     - skopeo copy docker-archive:$(readlink -f cassini) docker://$CI_REGISTRY_IMAGE/cassini:$CI_COMMIT_SHORT_SHA
@@ -140,6 +116,7 @@ build-workspace:
   artifacts:
     when: always
     paths:
+      - output/*
       - "*.sbom.json"
       - vulnix-report.json
 
@@ -171,7 +148,7 @@ analyze_kube_consumer:
     IMAGE_NAME: polar-kube-consumer
 
 render-manifests:
-  image: registry.sandbox.labz.s-box.org/sei/polar-mirror/polar-ci:0.1.0
+  image: registry.sandbox.labz.s-box.org/sei/polar-mirror/polar-dev:0.1.0
   stage: render
   variables:
     TARGET_ENV: sandbox

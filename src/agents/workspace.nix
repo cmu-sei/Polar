@@ -52,6 +52,7 @@ let
     subdirFilesets = lib.mapAttrsToList (name: _: craneLib.fileset.commonCargoSources (workspaceRoot + "/${name}")) subdirs;
 
     # Combine all subdir filesets into one
+    # Any other files needed by source code should be included here
     crateFileset = lib.fileset.unions (subdirFilesets ++ [
       ./Cargo.toml
       ./Cargo.lock

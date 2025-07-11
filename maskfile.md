@@ -53,7 +53,7 @@ project files within the container.
 
 
 ~~~sh
-podman run --rm --name polar-dev --user 0 --userns=keep-id -it -v $(pwd):/workspace:rw -p 2222:2223 polar-dev:latest bash -c "/create-user.sh $(whoami) $(id -u) $(id -g)"
+podman run --rm --name polar-dev --user 0 --userns=keep-id -it -v $(pwd):/workspace:rw -p 2222:2223 polar-dev:latest #bash -c "/create-user.sh $(whoami) $(id -u) $(id -g)"
 ~~~
 ## start-ci
 > Enters the Polar CI container.
