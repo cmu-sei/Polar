@@ -63,6 +63,7 @@ pub enum GitlabData {
     Jobs((String, Vec<GitlabCiJob>)),
     Pipelines((String, Vec<Pipeline>)),
     ProjectPackages((String, Vec<Package>)),
+    PackageFiles((String, Vec<GitlabPackageFile>)),
     ProjectContainerRepositories((String, Vec<ContainerRepository>)),
     ContainerRepositoryTags((String, Vec<ContainerRepositoryTag>)),
     Instance(GitlabInstance),
@@ -105,4 +106,19 @@ pub struct GitlabLicense {
     pub starts_at: String,
     pub expires_at: String,
     pub active_users: u32,
+}
+
+#[derive(
+    Debug, rkyv::Serialize, rkyv::Deserialize, rkyv::Archive, serde::Serialize, serde::Deserialize,
+)]
+/// Representation of a gitlab package file
+pub struct GitlabPackageFile {
+    pub id: u64,
+    pub package_id: u64,
+    pub created_at: String,
+    pub file_name: String,
+    pub size: u64,
+    pub file_md5: Option<String>,
+    pub file_sha1: Option<String>,
+    pub file_sha256: Option<String>,
 }

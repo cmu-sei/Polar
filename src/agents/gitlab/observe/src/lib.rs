@@ -50,6 +50,7 @@ use reqwest::Client;
 use reqwest::Error;
 use reqwest::Method;
 use reqwest::Response;
+use rkyv::Serialize;
 use serde::Deserialize;
 use tokio::task::AbortHandle;
 use tracing::{debug, error};
@@ -416,4 +417,23 @@ pub fn graphql_endpoint(gitlab_endpoint: &str) -> String {
 }
 pub fn v4_api_endpoint(gitlab_endpoint: &str) -> String {
     format!("{gitlab_endpoint}/api/v4")
+}
+/// Helper to parse gitlab gid strings and extract the numeric id as a u64.
+/// Primarily for use with the REST api
+pub fn extract_gitlab_id(global_id: &str) -> Option<u64> {
+    use url::Url;
+
+    // Fallback if `url::Url::parse` can't handle the custom scheme
+    if let Ok(parsed) = Url::parse(global_id) {
+        parsed
+            .path_segments()
+            .and_then(|segments| segments.last())
+            .and_then(|id_str| id_str.parse::<u64>().ok())
+    } else {
+        // Fallback: treat it as "scheme://host/path.../id"
+        global_id
+            .rsplit('/')
+            .next()
+            .and_then(|id_str| id_str.parse::<u64>().ok())
+    }
 }

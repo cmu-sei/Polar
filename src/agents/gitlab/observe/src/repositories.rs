@@ -26,7 +26,7 @@ use crate::{
     init_observer_state, send_to_broker, BackoffReason, Command, GitlabObserverArgs,
     GitlabObserverMessage, GitlabObserverState, MESSAGE_FORWARDING_FAILED,
 };
-use common::types::GitlabData;
+use common::types::{GitlabData, GitlabPackageFile};
 use common::REPOSITORY_CONSUMER_TOPIC;
 use cynic::{GraphQlResponse, QueryBuilder};
 use gitlab_queries::projects::{
@@ -41,6 +41,38 @@ use tracing::{debug, error, info, warn};
 pub struct GitlabRepositoryObserver;
 
 impl GitlabRepositoryObserver {
+    /// helper to quickly scrape package files from gitlab's REST API and pass them t0 the consumer side.
+    async fn get_gitlab_package_files(
+        state: &mut GitlabObserverState,
+        project_gid: &str,
+        package_gid: &str,
+    ) -> Result<(), ActorProcessingErr> {
+        // parse and strip ids
+        let project_id = crate::extract_gitlab_id(project_gid).unwrap();
+        let package_id = crate::extract_gitlab_id(package_gid).unwrap();
+
+        let url = format!(
+            "{}/api/v4/projects/{}/packages/{}/package_files",
+            state.gitlab_endpoint, project_id, package_id
+        );
+        debug!("GET {url}");
+
+        let res = state
+            .web_client
+            .get(&url)
+            .bearer_auth(state.token.clone().unwrap_or_default())
+            .header("Accept", "application/json")
+            .send()
+            .await
+            .unwrap();
+
+        let files: Vec<GitlabPackageFile> = res.json().await.unwrap();
+
+        let data = GitlabData::PackageFiles((package_gid.to_string(), files));
+
+        send_to_broker(state, data, REPOSITORY_CONSUMER_TOPIC)
+    }
+
     async fn get_repository_tags(
         web_client: reqwest::Client,
         full_path: ContainerRepositoryID,
@@ -292,13 +324,12 @@ impl Actor for GitlabRepositoryObserver {
                                                                     Package,
                                                                 > = Vec::new();
 
-                                                                read_packages.extend(
-                                                                    packages.into_iter().map(
-                                                                        |option| option.unwrap(),
-                                                                    ),
-                                                                );
-
-                                                                debug!("Found {} package(s) for project {full_path}", read_packages.len());
+                                                                for package in packages {
+                                                                    let pkg = package.unwrap();
+                                                                    // get package file metadtadta
+                                                                    GitlabRepositoryObserver::get_gitlab_package_files(state, &project.id.0, &pkg.id.0).await.unwrap();
+                                                                    read_packages.push(pkg);
+                                                                }
 
                                                                 let data =
                                                                     GitlabData::ProjectPackages((

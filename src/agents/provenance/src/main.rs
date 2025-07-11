@@ -6,7 +6,10 @@ use ractor::concurrency::Duration;
 use ractor::Actor;
 use ractor::ActorProcessingErr;
 use ractor::ActorRef;
+use reqwest::Client;
+use serde_json::Value;
 use tokio::task::AbortHandle;
+use tracing::debug;
 
 struct ProvenanceActor;
 
@@ -20,6 +23,43 @@ enum ProvenanceActorMessage {
     Link,
 }
 
+impl ProvenanceActor {
+    /// Queries the graph for all `Artifact` nodes with a `name` ending in `.sbom.json`
+    /// and returns their `download_url` values as a vector of strings.
+    /// TODO: Use this fn to fetch sboms
+    pub async fn fetch_and_parse_sboms(graph: &Graph, client: &Client) {
+        let cypher = r#"
+            MATCH (a:Artifact)
+            WHERE a.name ENDS WITH '.sbom.json' AND exists(a.download_url)
+            RETURN a.download_url AS url
+        "#
+        .to_string();
+
+        debug!(cypher);
+
+        let mut result = graph
+            .execute(Query::new(cypher))
+            .await
+            .expect("Failed to execute Cypher query");
+
+        while let Ok(Some(row)) = result.next().await {
+            let url: String = row
+                .get("url")
+                .expect("Missing expected 'url' field in result row");
+
+            // Fetch the SBOM file
+            let resp = client
+                .get(&url)
+                .send()
+                .await
+                .expect("Expected to get SBOM.");
+
+            let json: Value = resp.json().await.expect("Expected to parse json");
+
+            debug!("{json}");
+        }
+    }
+}
 #[async_trait]
 impl Actor for ProvenanceActor {
     type Msg = ProvenanceActorMessage;
@@ -84,6 +124,7 @@ impl Actor for ProvenanceActor {
         tracing::info!("Counting actor handle message...");
 
         match message {
+            //TODO: Add another handler for linking package files in gtlab to container images deployed in k8s and their sboms
             ProvenanceActorMessage::Link => {
                 let query = "
                     MATCH (p:PodContainer)
