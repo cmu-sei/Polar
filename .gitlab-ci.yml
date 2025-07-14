@@ -25,34 +25,38 @@ default:
       - "*.json"
     expire_in: 1 week
 
-build-dev-environment:
-  image: registry.sandbox.labz.s-box.org/sei/polar-mirror/nix:2.24.13
-  stage: environment-setup
-  rules:
-    - changes:
-        - flake.nix
-        - flake.lock
-        - src/flake/*
-        - .gitlab-ci.yml
-  script:
-    #install needed tools
-    - nix-env --install --attr nixpkgs.skopeo
-    - |
-      mkdir -p "$HOME/.config/nix"
-      printf "experimental-features = nix-command flakes" > "$HOME/.config/nix/nix.conf"
-      mkdir -p "/etc/containers"
-      echo '{"default":[{"type":"insecureAcceptAnything"}]}' > /etc/containers/policy.json
-      git config --global --add safe.directory "$(pwd)"
-    # build dev and testing environments
-    - nix build .#containers.devContainer -o polar-dev
+# build-dev-environment:
+#   image: registry.sandbox.labz.s-box.org/sei/polar-mirror/nix:2.24.13
+#   stage: environment-setup
+#   rules:
+#     - changes:
+#         - flake.nix
+#         - flake.lock
+#         - src/flake/*
+#         - .gitlab-ci.yml
+#   script:
+#     #install needed tools
+#     - nix-env --install --attr nixpkgs.skopeo
+#     - |
+#       mkdir -p "$HOME/.config/nix"
+#       printf "experimental-features = nix-command flakes" > "$HOME/.config/nix/nix.conf"
+#       mkdir -p "/etc/containers"
+#       echo '{"default":[{"type":"insecureAcceptAnything"}]}' > /etc/containers/policy.json
+#       git config --global --add safe.directory "$(pwd)"
+#     # build dev and testing environments
+#     - nix build .#containers.devContainer -o polar-dev
 
-    #  Use skopeo to inspect and upload our images
-    - skopeo login --username "$CI_REGISTRY_USER" --password "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
-    - skopeo inspect docker-archive://$(readlink -f ./polar-dev)
-    - skopeo copy docker-archive://$(readlink -f ./polar-dev) docker://$CI_REGISTRY_IMAGE/polar-dev:0.1.0
+#     #  Use skopeo to inspect and upload our images
+#     - skopeo login --username "$CI_REGISTRY_USER" --password "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
+#     - skopeo inspect docker-archive://$(readlink -f ./polar-dev)
+#     - skopeo copy docker-archive://$(readlink -f ./polar-dev) docker://$CI_REGISTRY_IMAGE/polar-dev:0.1.0
 
 build:
-  image: registry.sandbox.labz.s-box.org/sei/polar-mirror/polar-dev:0.1.0
+  image:
+    name: registry.sandbox.labz.s-box.org/sei/polar-mirror/polar-dev:0.1.0
+    entrypoint:
+      - start.sh
+
   stage: build
   variables:
     AZURE_REGISTRY: sandboxaksacr.azurecr.us/polar
@@ -66,38 +70,39 @@ build:
       - "*.sbom.json"
       - vulnix-report.json
     expire_in: "1 week"
-# render-manifests:
-#   image: registry.sandbox.labz.s-box.org/sei/polar-mirror/polar-dev:0.1.0
-#   stage: render
-#   variables:
-#     TARGET_ENV: sandbox
-#   script:
-#     # Clone the chart repo
-#     # NOTE: A deploy key should be used used to enable read/write perms
-#     # An access token will do in the meantime
-#     - git clone --depth 1 "https://$POLAR_DEPLOY_USER:$CHART_REPO_TOKEN@gitlab.sandbox.labz.s-box.org/sei/polar-deploy.git"
 
-#     # Generate helm charts and push them to a hosted repository
-#     - chmod +x ./scripts/render-manifests.sh
-#     # delete old charts to make room for new configurations
-#     - rm -rf polar-deploy/manifests/
+render-manifests:
+  image: registry.sandbox.labz.s-box.org/sei/polar-mirror/polar-ci:0.1.0
+  stage: render
+  variables:
+    TARGET_ENV: sandbox
+  script:
+    # Clone the chart repo
+    # NOTE: A deploy key should be used used to enable read/write perms
+    # An access token will do in the meantime
+    - git clone --depth 1 "https://$POLAR_DEPLOY_USER:$CHART_REPO_TOKEN@gitlab.sandbox.labz.s-box.org/sei/polar-deploy.git"
 
-#     # write new charts
-#     - sh scripts/render-manifests.sh src/deploy/polar polar-deploy/manifests
-#     - cd polar-deploy
+    # Generate helm charts and push them to a hosted repository
+    - chmod +x ./scripts/render-manifests.sh
+    # delete old charts to make room for new configurations
+    - rm -rf polar-deploy/manifests/
 
-#     # Commit and push if there are changes
-#     - |
-#       git config user.email $GITLAB_USER_EMAIL
-#       git config user.name ci-job-$CI_JOB_NAME-$CI_JOB_ID
-#       git add .
+    # write new charts
+    - sh scripts/render-manifests.sh src/deploy/polar polar-deploy/manifests
+    - cd polar-deploy
 
-#       echo "Updated files:"
-#       git diff --name-only --cached
+    # Commit and push if there are changes
+    - |
+      git config user.email $GITLAB_USER_EMAIL
+      git config user.name ci-job-$CI_JOB_NAME-$CI_JOB_ID
+      git add .
 
-#       echo "Writing metadata and pushing upstream..."
-#       export TIMESTAMP=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
-#       envsubst < ../scripts/metadata.yaml.tpl > metadata.yaml
-#       git add metadata.yaml
-#       git commit -m "Update manifests from source commit $CI_COMMIT_SHA"
-#       git push origin "sandbox"
+      echo "Updated files:"
+      git diff --name-only --cached
+
+      echo "Writing metadata and pushing upstream..."
+      export TIMESTAMP=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
+      envsubst < ../scripts/metadata.yaml.tpl > metadata.yaml
+      git add metadata.yaml
+      git commit -m "Update manifests from source commit $CI_COMMIT_SHA"
+      git push origin "sandbox"
