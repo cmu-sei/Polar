@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+
 # Set CI var
 if [[ -n "${CI:-}" && "${CI}" == "true" ]]; then
   # CI is set and true
@@ -11,6 +12,22 @@ fi
 # git won't let nix operate if it doesn't think its safe.
 # TODO: We could elimiante this when we fully own the test runner's configuration.
 git config --global --add safe.directory "$(pwd)"
+
+mkdir -p output/sbom
+
+# TODO: move this to static-tools.sh
+# Run cyclonedx once at the root
+cargo cyclonedx --manifest-path src/agents/Cargo.toml -v -f json
+
+# Move all generated SBOMs into a centralized location
+
+find . -type f -name '*.cdx.json' | while read -r sbom; do
+  mv "$sbom" "output/sbom/$(basename "$sbom")"
+done
+
+# # run static tools
+echo "Running static analysis tooling"
+sh scripts/static-tools.sh --manifest-path src/agents/Cargo.toml
 
 # Build core agent binaries
 nix build

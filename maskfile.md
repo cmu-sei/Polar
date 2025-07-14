@@ -7,13 +7,15 @@ If you have `mask` installed, you can use it to quickly perform these common ope
 ### dev
   > Builds the Polar Dev image. A contaienrized Rust development environment in case you don't want to do local development.
   ~~~sh
-  nix build .#containers.devContainer
+  nix build .#containers.devContainer --show-trace
+  podman load < result
   ~~~
 
 ### ci
   > Builds the Polar Dev image. A contaienrized Rust development environment in case you don't want to do local development.
   ~~~sh
-  nix build .#containers.ciContainer
+  nix build .#containers.ciContainer --show-trace
+  podman load < result
   ~~~
 
 ### cassini
@@ -92,4 +94,18 @@ nix build .#default -o polar
 
 ~~~sh
 sh scripts/render-manifests.sh src/deploy/polar manifests
+~~~
+
+## run-static-analysis
+> uses the `static-tools.sh` script to run various static analysis tools on the rust source code.
+
+~~~sh
+sh scripts/static-tools.sh --manifest-path src/agents/Cargo.toml
+~~~
+
+## run-ci
+> runs the `gitlab-ci.sh` script to run local ci/cd ops
+
+~~~sh
+sh scripts/gitlab-ci.sh
 ~~~
