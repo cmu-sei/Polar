@@ -25,31 +25,31 @@ default:
       - "*.json"
     expire_in: 1 week
 
-# build-dev-environment:
-#   image: registry.sandbox.labz.s-box.org/sei/polar-mirror/nix:2.24.13
-#   stage: environment-setup
-#   rules:
-#     - changes:
-#         - flake.nix
-#         - flake.lock
-#         - src/flake/*
-#         - .gitlab-ci.yml
-#   script:
-#     #install needed tools
-#     - nix-env --install --attr nixpkgs.skopeo
-#     - |
-#       mkdir -p "$HOME/.config/nix"
-#       printf "experimental-features = nix-command flakes" > "$HOME/.config/nix/nix.conf"
-#       mkdir -p "/etc/containers"
-#       echo '{"default":[{"type":"insecureAcceptAnything"}]}' > /etc/containers/policy.json
-#       git config --global --add safe.directory "$(pwd)"
-#     # build dev and testing environments
-#     - nix build .#containers.devContainer -o polar-dev
+build-dev-environment:
+  image: registry.sandbox.labz.s-box.org/sei/polar-mirror/nix:2.24.13
+  stage: environment-setup
+  rules:
+    - changes:
+        - flake.nix
+        - flake.lock
+        - src/flake/*
+        - .gitlab-ci.yml
+  script:
+    #install needed tools
+    - nix-env --install --attr nixpkgs.skopeo
+    - |
+      mkdir -p "$HOME/.config/nix"
+      printf "experimental-features = nix-command flakes" > "$HOME/.config/nix/nix.conf"
+      mkdir -p "/etc/containers"
+      echo '{"default":[{"type":"insecureAcceptAnything"}]}' > /etc/containers/policy.json
+      git config --global --add safe.directory "$(pwd)"
+    # build dev and testing environments
+    - nix build .#containers.devContainer -o polar-dev
 
-#     #  Use skopeo to inspect and upload our images
-#     - skopeo login --username "$CI_REGISTRY_USER" --password "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
-#     - skopeo inspect docker-archive://$(readlink -f ./polar-dev)
-#     - skopeo copy docker-archive://$(readlink -f ./polar-dev) docker://$CI_REGISTRY_IMAGE/polar-dev:0.1.0
+    #  Use skopeo to inspect and upload our images
+    - skopeo login --username "$CI_REGISTRY_USER" --password "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
+    - skopeo inspect docker-archive://$(readlink -f ./polar-dev)
+    - skopeo copy docker-archive://$(readlink -f ./polar-dev) docker://$CI_REGISTRY_IMAGE/polar-dev:0.1.0
 
 build:
   image:
@@ -63,7 +63,7 @@ build:
     # init env
     - start.sh
     # TODO: remove this and add cargo-cyclonedx to the static-tools derviation
-    - cargo install cargo-cyclonedx
+    - cargo install -q cargo-cyclonedx
     - chmod +x -R scripts
     - sh scripts/gitlab-ci.sh
   artifacts:
@@ -80,6 +80,7 @@ render-manifests:
   variables:
     TARGET_ENV: sandbox
   script:
+    - start.sh
     # Clone the chart repo
     # NOTE: A deploy key should be used used to enable read/write perms
     # An access token will do in the meantime

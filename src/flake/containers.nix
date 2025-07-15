@@ -199,6 +199,7 @@ let
         license
         nixConfig
         shellInitFile
+        containerPolicyConfig
         vendorFuncs
       ];
       config = {
