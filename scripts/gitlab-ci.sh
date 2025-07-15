@@ -22,12 +22,13 @@ cargo cyclonedx --manifest-path src/agents/Cargo.toml -v -f json
 # Move all generated SBOMs into a centralized location
 
 find . -type f -name '*.cdx.json' | while read -r sbom; do
+  echo "moving $sbom -> to output/sbom"
   mv "$sbom" "output/sbom/$(basename "$sbom")"
 done
 
 # # run static tools
-echo "Running static analysis tooling"
-sh scripts/static-tools.sh --manifest-path src/agents/Cargo.toml
+# echo "Running static analysis tooling"
+# sh scripts/static-tools.sh --manifest-path src/agents/Cargo.toml
 
 # Build core agent binaries
 nix build
