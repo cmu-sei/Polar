@@ -257,6 +257,7 @@ let
         mkdir -p lib64
         ln -s ${pkgs.stdenv.cc.cc}/lib/ld-linux-x86-64.so.2 lib64/
 
+        mkdir -p var/tmp
         mkdir -p tmp
       '';
     };
