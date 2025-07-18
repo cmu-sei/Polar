@@ -31,7 +31,7 @@ let volumes =
 let observerEnv =
       CommonEnv
       # [
-        , kubernetes.EnvVar::{ name = "OBSERVER_BASE_INTERVAL", value = Some 300 }
+        , kubernetes.EnvVar::{ name = "OBSERVER_BASE_INTERVAL", value = Some "300" }
         , kubernetes.EnvVar::{ name = "GITLAB_ENDPOINT", value = Some values.gitlab.observer.gitlabEndpoint }
         , kubernetes.EnvVar::{
             name = "GITLAB_TOKEN"

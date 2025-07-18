@@ -26,7 +26,7 @@ done
 # sh scripts/static-tools.sh --manifest-path src/agents/Cargo.toml
 
 # Build core agent binaries
-echo building polar images
+echo Building Polar agents...
 nix build --quiet --no-update-lock-file
 
 # Upload binaries to GitLab Package Registry
@@ -41,13 +41,13 @@ for file in result/bin/*; do
 done
 
 # Build Docker images for all agent components
-echo Building agent images
+echo Building Container Images...
 
-nix build .#polarPkgs.cassini.cassiniImage -o cassini
-nix build .#polarPkgs.gitlabAgent.observerImage -o gitlab-observer
-nix build .#polarPkgs.gitlabAgent.consumerImage -o gitlab-consumer
-nix build .#polarPkgs.kubeAgent.observerImage -o kube-observer
-nix build .#polarPkgs.kubeAgent.consumerImage -o kube-consumer
+nix build --quiet .#polarPkgs.cassini.cassiniImage -o cassini
+nix build --quiet .#polarPkgs.gitlabAgent.observerImage -o gitlab-observer
+nix build --quiet .#polarPkgs.gitlabAgent.consumerImage -o gitlab-consumer
+nix build --quiet .#polarPkgs.kubeAgent.observerImage -o kube-observer
+nix build --quiet .#polarPkgs.kubeAgent.consumerImage -o kube-consumer
 
 # Run vulnerability scan
 # vulnix returns nonzero exit codes, so we need to check for ourselves
