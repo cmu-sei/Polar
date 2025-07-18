@@ -17,8 +17,8 @@ let CommonEnv = [
 
 -- Volumes accessible to our gitlab agent
 let volumes =
-      [ 
-        -- our root-ca-secret for communicating with cassini 
+      [
+        -- our root-ca-secret for communicating with cassini
         kubernetes.Volume::{
           , name = values.gitlab.tls.certificateSpec.secretName
           , secret = Some kubernetes.SecretVolumeSource::{
@@ -31,6 +31,7 @@ let volumes =
 let observerEnv =
       CommonEnv
       # [
+        , kubernetes.EnvVar::{ name = "OBSERVER_BASE_INTERVAL", value = Some 300 }
         , kubernetes.EnvVar::{ name = "GITLAB_ENDPOINT", value = Some values.gitlab.observer.gitlabEndpoint }
         , kubernetes.EnvVar::{
             name = "GITLAB_TOKEN"
@@ -48,7 +49,7 @@ let observerVolumeMounts =
       [ kubernetes.VolumeMount::{ name = values.gitlab.tls.certificateSpec.secretName, mountPath = values.tlsPath } ]
     # proxyUtils.ProxyMount proxyCACert
 
-let consumerEnv = CommonEnv # 
+let consumerEnv = CommonEnv #
               [
               , kubernetes.EnvVar::{
                   name = "GRAPH_ENDPOINT"
@@ -60,7 +61,7 @@ let consumerEnv = CommonEnv #
               }
               , kubernetes.EnvVar::{
                   name = "GRAPH_USER"
-                  , value = Some values.gitlab.consumer.graph.graphUsername                       
+                  , value = Some values.gitlab.consumer.graph.graphUsername
               }
               , kubernetes.EnvVar::{
                   name = "GRAPH_PASSWORD"
@@ -74,14 +75,14 @@ let consumerEnv = CommonEnv #
               --     name = "GRAPH_CA_CERT"
               --     , value = Some "/graph/tls/proxy.crt"
               -- }
-                            
+
           ]
 
-let gitlabAgentPod 
+let gitlabAgentPod
   = kubernetes.PodSpec::{
   , imagePullSecrets = Some values.sandboxRegistry.imagePullSecrets
   , containers =
-    [ 
+    [
       , kubernetes.Container::{
           , name = values.gitlab.observer.name
           , image = Some  values.gitlab.observer.image
@@ -111,7 +112,7 @@ let gitlabAgentPod
   , volumes = Some volumes
 }
 
-let 
+let
     deployment =
       kubernetes.Deployment::{
       , metadata = kubernetes.ObjectMeta::{
@@ -133,5 +134,5 @@ let
           }
         }
       }
-    
+
 in  deployment

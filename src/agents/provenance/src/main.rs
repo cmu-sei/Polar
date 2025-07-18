@@ -1,3 +1,4 @@
+use cyclonedx_bom::prelude::*;
 use neo4rs::Graph;
 use neo4rs::Query;
 use polar::get_neo_config;
@@ -10,8 +11,17 @@ use reqwest::Client;
 use serde_json::Value;
 use tokio::task::AbortHandle;
 use tracing::debug;
-
 struct ProvenanceActor;
+
+pub enum Command {
+    Link,
+    LinkPackages,
+}
+
+pub enum ProvenanceActorMessage {
+    Tick(Command),
+    Backoff(Option<String>),
+}
 
 struct ProvenanceActorState {
     graph: Graph,
@@ -19,19 +29,18 @@ struct ProvenanceActorState {
     abort_handle: Option<AbortHandle>,
 }
 
-enum ProvenanceActorMessage {
-    Link,
-}
-
 impl ProvenanceActor {
     /// Queries the graph for all `Artifact` nodes with a `name` ending in `.sbom.json`
     /// and returns their `download_url` values as a vector of strings.
     /// TODO: Use this fn to fetch sboms
-    pub async fn fetch_and_parse_sboms(graph: &Graph, client: &Client) {
+    pub async fn fetch_and_parse_sboms(graph: &Graph) {
+        let client = Client::new();
+
+        // TODO: remove limit after testing, do for all artifacts
         let cypher = r#"
             MATCH (a:Artifact)
-            WHERE a.name ENDS WITH '.sbom.json' AND exists(a.download_url)
-            RETURN a.download_url AS url
+            WHERE a.name ENDS WITH '.cdx.json' AND a.download_path IS NOT NULL LIMIT 10
+            RETURN a.download_path AS path
         "#
         .to_string();
 
@@ -54,9 +63,12 @@ impl ProvenanceActor {
                 .await
                 .expect("Expected to get SBOM.");
 
-            let json: Value = resp.json().await.expect("Expected to parse json");
+            let json = resp.text().await.expect("Expected to parse json");
 
-            debug!("{json}");
+            let bom = Bom::parse_from_json_v1_5(json.as_bytes()).expect("Failed to parse BOM");
+            //TODO: Once we have the sboms, parse into known format and link to gitlabpackages with the same name, so if we find polar-0.1.0 we can link it to the package
+            // Same goes for container images, gitlab packages for polar are versioned with git hashes, if a gitlab package version matches a polar container tag, they should be linked
+            let validation_result = bom.validate();
         }
     }
 }
@@ -78,7 +90,7 @@ impl Actor for ProvenanceActor {
         match neo4rs::Graph::connect(get_neo_config()).await {
             Ok(graph) => Ok(ProvenanceActorState {
                 graph,
-                interval: Duration::from_secs(30),
+                interval: Duration::from_secs(30), // TODO: Make configurable
                 abort_handle: None,
             }),
             Err(e) => Err(ActorProcessingErr::from(e)),
@@ -94,7 +106,9 @@ impl Actor for ProvenanceActor {
 
         state.abort_handle = Some(
             myself
-                .send_interval(state.interval.clone(), || ProvenanceActorMessage::Link)
+                .send_interval(state.interval.clone(), || {
+                    ProvenanceActorMessage::Tick(Command::LinkPackages)
+                })
                 .abort_handle(),
         );
 
@@ -124,26 +138,34 @@ impl Actor for ProvenanceActor {
         tracing::info!("Counting actor handle message...");
 
         match message {
-            //TODO: Add another handler for linking package files in gtlab to container images deployed in k8s and their sboms
-            ProvenanceActorMessage::Link => {
-                let query = "
-                    MATCH (p:PodContainer)
-                    WHERE p.image IS NOT NULL
-                    WITH p, p.image AS image_ref
+            ProvenanceActorMessage::Tick(command) => {
+                match command {
+                    Command::LinkPackages => {
+                        ProvenanceActor::fetch_and_parse_sboms(&state.graph).await;
+                    }
+                    //TODO: Add another handler for linking package files in gtlab to container images deployed in k8s and their sboms
+                    Command::Link => {
+                        let query = "
+                            MATCH (p:PodContainer)
+                            WHERE p.image IS NOT NULL
+                            WITH p, p.image AS image_ref
 
-                    MATCH (tag:ContainerImageTag)
-                    WHERE tag.location = image_ref
+                            MATCH (tag:ContainerImageTag)
+                            WHERE tag.location = image_ref
 
-                    MERGE (p)-[:USES_TAG]->(tag)
-                    RETURN p.name AS pod_name, tag.location AS matched_tag
-                    ";
+                            MERGE (p)-[:USES_TAG]->(tag)
+                            RETURN p.name AS pod_name, tag.location AS matched_tag
+                            ";
 
-                tracing::debug!(query);
+                        tracing::debug!(query);
 
-                if let Err(e) = state.graph.run(Query::new(query.to_string())).await {
-                    tracing::warn!("{e}");
+                        if let Err(e) = state.graph.run(Query::new(query.to_string())).await {
+                            tracing::warn!("{e}");
+                        }
+                    }
                 }
             }
+            _ => todo!("Handle backoff message"),
         }
         Ok(())
     }
