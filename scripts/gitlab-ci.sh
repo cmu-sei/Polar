@@ -26,7 +26,8 @@ done
 # sh scripts/static-tools.sh --manifest-path src/agents/Cargo.toml
 
 # Build core agent binaries
-nix build
+echo building polar images
+nix build --quiet --no-update-lock-file
 
 # Upload binaries to GitLab Package Registry
 for file in result/bin/*; do
@@ -84,40 +85,8 @@ upload_image gitlab-consumer "docker-archive:$(readlink -f gitlab-consumer)" "do
 upload_image kube-observer "docker-archive:$(readlink -f kube-observer)" "docker://$CI_REGISTRY_IMAGE/polar-kube-observer:$CI_COMMIT_SHORT_SHA"
 upload_image kube-consumer "docker-archive:$(readlink -f kube-consumer)" "docker://$CI_REGISTRY_IMAGE/polar-kube-consumer:$CI_COMMIT_SHORT_SHA"
 
-# Upload to Azure Container Registry (if configured)
-echo "Uploading to Azure Container Registry..."
-
-for image in cassini gitlab-observer gitlab-consumer kube-observer kube-consumer; do
-    upload_image "$image" \
-    "docker-archive://$(readlink -f $image)" \
-    "docker://$AZURE_REGISTRY/$image:$CI_COMMIT_SHORT_SHA"
-done
-
-#TODO: Uncomment when we test the build job
-# Clone the chart repo
-# NOTE: A deploy key should be used used to enable read/write perms
-# An access token will do in the meantime
-# git clone --depth 1 "https://$POLAR_DEPLOY_USER:$CHART_REPO_TOKEN@gitlab.sandbox.labz.s-box.org/sei/polar-deploy.git"
-# # Generate helm charts and push them to a hosted repository
-# chmod +x ./scripts/render-manifests.sh
-# # delete old charts to make room for new configurations
-# rm -rf polar-deploy/manifests/
-
-# sh scripts/render-manifests.sh src/deploy/polar polar-deploy/manifests
-# cd polar-deploy
-
-# # Commit and push if there are changes
-
-# git config user.email $GITLAB_USER_EMAIL
-# git config user.name ci-job-$CI_JOB_NAME-$CI_JOB_ID
-# git add .
-
-# echo "Updated files:"
-# git diff --name-only --cached
-
-# echo "Writing metadata and pushing upstream..."
-# export TIMESTAMP=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
-# envsubst < ../scripts/metadata.yaml.tpl > metadata.yaml
-# git add metadata.yaml
-# git commit -m "Update manifests from source commit $CI_COMMIT_SHA"
-# git push origin "sandbox"
+skopeo copy --dest-creds "$ACR_USERNAME:$ACR_TOKEN" docker-archive://$(readlink -f cassini) docker://$AZURE_REGISTRY/cassini:$CI_COMMIT_SHORT_SHA
+skopeo copy --dest-creds "$ACR_USERNAME:$ACR_TOKEN" docker-archive://$(readlink -f gitlab-observer) docker://$AZURE_REGISTRY/polar-gitlab-observer:$CI_COMMIT_SHORT_SHA
+skopeo copy --dest-creds "$ACR_USERNAME:$ACR_TOKEN" docker-archive://$(readlink -f gitlab-consumer) docker://$AZURE_REGISTRY/polar-gitlab-consumer:$CI_COMMIT_SHORT_SHA
+skopeo copy --dest-creds "$ACR_USERNAME:$ACR_TOKEN" docker-archive://$(readlink -f kube-observer) docker://$AZURE_REGISTRY/polar-kube-observer:$CI_COMMIT_SHORT_SHA
+skopeo copy --dest-creds "$ACR_USERNAME:$ACR_TOKEN" docker-archive://$(readlink -f kube-consumer) docker://$AZURE_REGISTRY/polar-kube-consumer:$CI_COMMIT_SHORT_SHA
