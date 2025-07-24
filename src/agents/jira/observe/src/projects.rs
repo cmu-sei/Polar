@@ -114,7 +114,7 @@ impl Actor for JiraProjectObserver {
                                 .expect("Expected to find client");
 
                         let data = JiraData::Projects(res.clone());
-
+                        println!("{:#?}", data);
                         let bytes = rkyv::to_bytes::<Error>(&data).unwrap();
 
                         let msg = ClientMessage::PublishRequest {

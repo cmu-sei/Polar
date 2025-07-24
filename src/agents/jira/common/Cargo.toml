@@ -32,6 +32,7 @@ edition = "2021"
 [dependencies]
 lapin = "2.2.1"
 futures-lite = "1.13.0"
+indexmap = "2.0"
 url = "2.3.1"
 tracing = "0.1.41"
 amq-protocol-uri = "7.1.2"
@@ -43,4 +44,6 @@ workspace-hack = { version = "0.1", path = "../../workspace-hack" }
 ractor = { version="0.15.6", features = ["async-trait"]}
 cassini = { path = "../../broker" }
 polar = {path = "../../lib" }
-rkyv = "0.8.10"
+#rkyv = "0.8.10"
+rkyv = { version = "0.8.10", features = ["std", "alloc"] }
+rkyv_derive = "=0.8.10"

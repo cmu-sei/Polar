@@ -30,10 +30,12 @@ use tracing::info;
 pub mod projects;
 pub mod groups;
 pub mod users;
+pub mod issues;
 pub mod supervisor;
 
 pub const BROKER_CLIENT_NAME: &str = "JIRA_CONSUMER_CLIENT";
 pub const JIRA_USER_CONSUMER: &str = "users";
+pub const JIRA_ISSUE_CONSUMER: &str = "issues";
 
 pub struct JiraConsumerState {
     pub registration_id: String,

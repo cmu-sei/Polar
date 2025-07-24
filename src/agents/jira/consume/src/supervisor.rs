@@ -6,6 +6,7 @@ use jira_common::types::JiraData;
 use jira_common::JIRA_PROJECTS_CONSUMER_TOPIC;
 use jira_common::JIRA_GROUPS_CONSUMER_TOPIC;
 use jira_common::JIRA_USERS_CONSUMER_TOPIC;
+use jira_common::JIRA_ISSUES_CONSUMER_TOPIC;
 use exponential_backoff::Backoff;
 use polar::DISPATCH_ACTOR;
 use ractor::async_trait;
@@ -26,6 +27,7 @@ use crate::get_neo_config;
 use crate::projects::JiraProjectConsumer;
 use crate::groups::JiraGroupConsumer;
 use crate::users::JiraUserConsumer;
+use crate::issues::JiraIssueConsumer;
 use crate::JiraConsumerArgs;
 use crate::BROKER_CLIENT_NAME;
 
@@ -74,7 +76,7 @@ impl ConsumerSupervisor {
                 registration_id,
                 graph_config: graph_config.clone(),
             };
-
+            /*
             debug!("Restarting actor: {actor_name}, attempt: {count}");
             if actor_name == JIRA_GROUPS_CONSUMER_TOPIC {
                 match Actor::spawn_linked(
@@ -93,6 +95,7 @@ impl ConsumerSupervisor {
                     },
                 }
             }
+
             if actor_name == JIRA_PROJECTS_CONSUMER_TOPIC {
                 match Actor::spawn_linked(
                     Some(JIRA_PROJECTS_CONSUMER_TOPIC.to_string()),
@@ -114,6 +117,24 @@ impl ConsumerSupervisor {
                 match Actor::spawn_linked(
                     Some(JIRA_USERS_CONSUMER_TOPIC.to_string()),
                     JiraUserConsumer,
+                    args.clone(),
+                    supervisor.clone().into(),
+                )
+                .await
+                {
+                    Ok(_) => break,
+                    // if we have an issue starting the actor, just sleep and try again later
+                    Err(_) => match duration {
+                        Some(duration) => tokio::time::sleep(duration).await,
+                        None => break,
+                    },
+                }
+            }
+            */
+            if actor_name == JIRA_ISSUES_CONSUMER_TOPIC {
+                match Actor::spawn_linked(
+                    Some(JIRA_ISSUES_CONSUMER_TOPIC.to_string()),
+                    JiraIssueConsumer,
                     args.clone(),
                     supervisor.clone().into(),
                 )
@@ -250,6 +271,18 @@ impl Actor for ConsumerSupervisor {
                 .await
                 {
                     error!("failed to start users consumer. {e}");
+                    myself.stop(None);
+                }
+
+                if let Err(e) = Actor::spawn_linked(
+                    Some(JIRA_ISSUES_CONSUMER_TOPIC.to_string()),
+                    JiraIssueConsumer,
+                    args.clone(),
+                    myself.clone().into(),
+                )
+                .await
+                {
+                    error!("failed to start issues consumer. {e}");
                     myself.stop(None);
                 }
             }

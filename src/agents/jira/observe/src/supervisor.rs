@@ -16,11 +16,13 @@ use tracing::{debug, info, warn};
 use crate::projects::JiraProjectObserver;
 use crate::groups::JiraGroupObserver;
 use crate::users::JiraUserObserver;
+use crate::issues::JiraIssueObserver;
 use crate::JiraObserverArgs;
 use crate::BROKER_CLIENT_NAME;
 use crate::JIRA_PROJECT_OBSERVER;
 use crate::JIRA_GROUP_OBSERVER;
 use crate::JIRA_USER_OBSERVER;
+use crate::JIRA_ISSUE_OBSERVER;
 pub struct ObserverSupervisor;
 
 pub struct ObserverSupervisorState {
@@ -148,6 +150,7 @@ impl Actor for ObserverSupervisor {
                 {
                     warn!("failed to start project observer {e}")
                 }
+                
                 if let Err(e) = Actor::spawn_linked(
                     Some(JIRA_GROUP_OBSERVER.to_string()),
                     JiraGroupObserver,
@@ -167,6 +170,17 @@ impl Actor for ObserverSupervisor {
                 .await
                 {
                     warn!("failed to start user observer {e}")
+                }
+
+                if let Err(e) = Actor::spawn_linked(
+                    Some(JIRA_ISSUE_OBSERVER.to_string()),
+                    JiraIssueObserver,
+                    args.clone(),
+                    myself.clone().into(),
+                )
+                .await
+                {
+                    warn!("failed to start issue observer {e}")
                 }
             }
         }
