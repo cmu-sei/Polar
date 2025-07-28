@@ -1,6 +1,8 @@
 # Common Developer Tasks for Polar
-If you have `mask` installed, you can use it to quickly perform these common operations.
+If you have [mask](https://github.com/jacobdeichert/mask) installed, you can use it to quickly perform these common operations.
+If not, consider installing it to further oxidize your life.
 
+For example, from here in the root of the project, try running `mask build agents` to quickly build the project.
 
 ## build-image
 
@@ -55,7 +57,7 @@ project files within the container.
 
 
 ~~~sh
-podman run --rm --name polar-dev --user 0 --userns=keep-id -it -v $(pwd):/workspace:rw -p 2222:2223 polar-dev:latest #bash -c "/create-user.sh $(whoami) $(id -u) $(id -g)"
+podman run --rm --name polar-dev --user 0 --userns=keep-id -it -v $(pwd):/workspace:rw -p 2222:2223 polar-dev:latest
 ~~~
 ## start-ci
 > Enters the Polar CI container.
@@ -96,7 +98,7 @@ nix build .#default -o polar
 sh scripts/render-manifests.sh src/deploy/polar manifests
 ~~~
 
-## run-static-analysis
+## static-analysis
 > uses the `static-tools.sh` script to run various static analysis tools on the rust source code.
 
 ~~~sh

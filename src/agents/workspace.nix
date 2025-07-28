@@ -4,7 +4,10 @@
 
 let
 
-    craneLib = (crane.mkLib pkgs).overrideToolchain (p: p.rust-bin.nightly.latest.default);
+    craneLib = (crane.mkLib pkgs).overrideToolchain (p: p.rust-bin.nightly.latest.default.override {
+        extensions = [ "rust-src" "rust-std" ];
+        targets = [ "x86_64-unknown-linux-gnu" ];
+    });
 
     src = craneLib.cleanCargoSource ./.;
 
@@ -112,7 +115,12 @@ let
       crateArgs = individualCrateArgs;
     };
 
+    provenanceAgent = import ./provenance/package.nix {
+       inherit pkgs commonPaths craneLib  workspaceFileset cargoArtifacts commonUser;
+       crateArgs = individualCrateArgs;
+    };
+
 in
 {
-  inherit workspacePackages gitlabAgent cassini kubeAgent;
+  inherit workspacePackages gitlabAgent cassini kubeAgent provenanceAgent;
 }

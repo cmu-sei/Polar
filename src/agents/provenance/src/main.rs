@@ -72,6 +72,7 @@ impl ProvenanceActor {
         }
     }
 }
+
 #[async_trait]
 impl Actor for ProvenanceActor {
     type Msg = ProvenanceActorMessage;
@@ -131,7 +132,7 @@ impl Actor for ProvenanceActor {
 
     async fn handle(
         &self,
-        _myself: ActorRef<Self::Msg>,
+        myself: ActorRef<Self::Msg>,
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
@@ -154,13 +155,15 @@ impl Actor for ProvenanceActor {
                             WHERE tag.location = image_ref
 
                             MERGE (p)-[:USES_TAG]->(tag)
-                            RETURN p.name AS pod_name, tag.location AS matched_tag
                             ";
 
                         tracing::debug!(query);
 
                         if let Err(e) = state.graph.run(Query::new(query.to_string())).await {
                             tracing::warn!("{e}");
+                            myself
+                                .send_message(ProvenanceActorMessage::Backoff(Some(e.to_string())))
+                                .expect("Expected to forward message to self");
                         }
                     }
                 }

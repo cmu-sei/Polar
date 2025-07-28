@@ -48,6 +48,7 @@ nix build --quiet .#polarPkgs.gitlabAgent.observerImage -o gitlab-observer
 nix build --quiet .#polarPkgs.gitlabAgent.consumerImage -o gitlab-consumer
 nix build --quiet .#polarPkgs.kubeAgent.observerImage -o kube-observer
 nix build --quiet .#polarPkgs.kubeAgent.consumerImage -o kube-consumer
+nix build --quiet .#polarPkgs.provenanceAgent.image -o provenance
 
 # Run vulnerability scan
 # vulnix returns nonzero exit codes, so we need to check for ourselves
@@ -84,9 +85,11 @@ upload_image gitlab-observer "docker-archive:$(readlink -f gitlab-observer)" "do
 upload_image gitlab-consumer "docker-archive:$(readlink -f gitlab-consumer)" "docker://$CI_REGISTRY_IMAGE/polar-gitlab-consumer:$CI_COMMIT_SHORT_SHA"
 upload_image kube-observer "docker-archive:$(readlink -f kube-observer)" "docker://$CI_REGISTRY_IMAGE/polar-kube-observer:$CI_COMMIT_SHORT_SHA"
 upload_image kube-consumer "docker-archive:$(readlink -f kube-consumer)" "docker://$CI_REGISTRY_IMAGE/polar-kube-consumer:$CI_COMMIT_SHORT_SHA"
+upload_image provenance "docker-archive:$(readlink -f provenance)" "docker://$CI_REGISTRY_IMAGE/polar-provenance-agent:$CI_COMMIT_SHORT_SHA"
 
 skopeo copy --dest-creds "$ACR_USERNAME:$ACR_TOKEN" docker-archive://$(readlink -f cassini) docker://$AZURE_REGISTRY/cassini:$CI_COMMIT_SHORT_SHA
 skopeo copy --dest-creds "$ACR_USERNAME:$ACR_TOKEN" docker-archive://$(readlink -f gitlab-observer) docker://$AZURE_REGISTRY/polar-gitlab-observer:$CI_COMMIT_SHORT_SHA
 skopeo copy --dest-creds "$ACR_USERNAME:$ACR_TOKEN" docker-archive://$(readlink -f gitlab-consumer) docker://$AZURE_REGISTRY/polar-gitlab-consumer:$CI_COMMIT_SHORT_SHA
 skopeo copy --dest-creds "$ACR_USERNAME:$ACR_TOKEN" docker-archive://$(readlink -f kube-observer) docker://$AZURE_REGISTRY/polar-kube-observer:$CI_COMMIT_SHORT_SHA
 skopeo copy --dest-creds "$ACR_USERNAME:$ACR_TOKEN" docker-archive://$(readlink -f kube-consumer) docker://$AZURE_REGISTRY/polar-kube-consumer:$CI_COMMIT_SHORT_SHA
+skopeo copy --dest-creds "$ACR_USERNAME:$ACR_TOKEN" docker-archive://$(readlink -f provenance) docker://$AZURE_REGISTRY/polar-provenance-agent:$CI_COMMIT_SHORT_SHA
