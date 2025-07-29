@@ -34,12 +34,14 @@ use rkyv::rancor::Error;
 use std::time::Duration;
 use tracing::{info, debug};
 use jira_common::types::{
-    JiraIssue, JiraData, JsonString
+    JiraIssue, JiraData, JsonString,
+    JiraField, JiraFieldSchema
     };
 
 use serde_path_to_error;
 use serde_json::Value;
 use std::io::Cursor;
+use std::collections::HashMap;
 
 
 pub struct JiraIssueObserver;
@@ -109,9 +111,25 @@ impl Actor for JiraIssueObserver {
                         let query_string = "''";
                         debug!("Staring to query for issues...");
                         // Load up the fields
+                        let field_url = format!(
+                            "{}/rest/api/2/field", state.jira_url
+                        );
+                        let field_result = state.web_client
+                           .get(&field_url)
+                           .bearer_auth(format!("{}", state.token.clone().expect("TOKEN")))
+                           .send()
+                           .await?
+                           .json::<Vec<JiraField>>()
+                           .await?;
+                        let mut field_map: HashMap<String, JiraField> = HashMap::new();
+                        for field in field_result {
+                            field_map.insert(
+                                field.id.to_string(),
+                                field
+                            );
+                        }
 
                         loop {
-                            //let mut all_issues = Vec::new();
                             let url = format!(
                                 "{}{}?query={}&startAt={}&maxResults={}&expand=changelog",
                                 state.jira_url, op, query_string, start_at, max_results
@@ -127,18 +145,37 @@ impl Actor for JiraIssueObserver {
 
                             let json_data = res["issues"].to_string();
                             let value: Value = serde_json::from_str(&json_data).unwrap();
-                            //let value: serde_json::Value = serde_json::from_str(&json_data.to_string()).unwrap();
-                            //let generic = GenericJson::from(value);
-                            //println!("{:#?}", generic);
 
                             if let Some(items) = value.as_array() {
                                 for issue in items {
+                                    let mut cloned_issue = issue.clone();
+
+                                    // Replace the "customfield_*" with the name
+                                    if let mut fields = cloned_issue.get_mut("fields").expect("FIELDS") {
+                                        let mut replacements = vec![];
+                                        for (key, value) in fields.as_object().unwrap() {
+                                            if let Some(found_field) = field_map.get(key.as_str()) {
+                                                if let new_key = found_field.name.clone() {
+                                                    replacements.push((new_key.to_string(), value.clone()));
+                                                }
+                                            }
+                                        }
+                                        for (new_key, value) in replacements {
+                                            fields[new_key] = value;
+                                        }
+                                        for key in field_map.keys() {
+                                            fields.as_object_mut().unwrap().remove(key);
+                                        }
+                                    }
+
+
+                                    //println!("{:#?}", cloned_issue);
                                     let tcp_client =
                                         where_is(BROKER_CLIENT_NAME.to_string())
                                             .expect("Expected to find client");
-                                    let wrap = JiraData::Issues(JsonString { json: issue.to_string() });
+                                    let wrap = JiraData::Issues(JsonString { json: cloned_issue.to_string() });
                                     let bytes = rkyv::to_bytes::<Error>(&wrap).unwrap();
-                                    println!("{:#?}", wrap);
+
                                     let msg = ClientMessage::PublishRequest {
                                         topic: JIRA_ISSUES_CONSUMER_TOPIC.to_string(),
                                         payload: bytes.to_vec(),

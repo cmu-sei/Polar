@@ -139,7 +139,6 @@ impl Actor for ObserverSupervisor {
                     base_interval: state.base_interval,
                     max_backoff: state.max_backoff_secs,
                 };
-
                 if let Err(e) = Actor::spawn_linked(
                     Some(JIRA_PROJECT_OBSERVER.to_string()),
                     JiraProjectObserver,
@@ -150,7 +149,7 @@ impl Actor for ObserverSupervisor {
                 {
                     warn!("failed to start project observer {e}")
                 }
-                
+
                 if let Err(e) = Actor::spawn_linked(
                     Some(JIRA_GROUP_OBSERVER.to_string()),
                     JiraGroupObserver,
@@ -171,7 +170,6 @@ impl Actor for ObserverSupervisor {
                 {
                     warn!("failed to start user observer {e}")
                 }
-
                 if let Err(e) = Actor::spawn_linked(
                     Some(JIRA_ISSUE_OBSERVER.to_string()),
                     JiraIssueObserver,

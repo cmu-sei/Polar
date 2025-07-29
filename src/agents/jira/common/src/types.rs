@@ -51,6 +51,28 @@ pub struct JiraUser {
     pub displayName: String,
 }
 
+#[derive(Debug, Deserialize, Serialize, Archive, SerdeDeserialize, Clone)]
+pub struct JiraFieldSchema {
+    pub custom: Option<String>,
+    pub customId: Option<f64>,
+    pub items: Option<String>,
+    pub system: Option<String>,
+    pub r#type: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, Archive, SerdeDeserialize, Clone)]
+pub struct JiraField {
+    pub clausNames: Option<Vec<String>>,
+    pub custom: bool,
+    pub id: String,
+    //pub key: String,
+    pub name: String,
+    pub navigable: bool,
+    pub orderable: bool,
+    pub schema: Option<JiraFieldSchema>,
+    pub searchable: bool,
+}
+
 #[derive(Deserialize, Serialize, Archive, SerdeDeserialize, Clone, Debug)]
 pub struct JiraAuthor {
     pub name: String,
@@ -91,7 +113,7 @@ pub struct JiraIssueChangeLog {
 #[derive(Clone, Archive, Serialize, Deserialize, SerdeDeserialize, Debug)]
 #[serde(untagged)]
 pub enum FifthTierField {
-    Option(String),
+    Option(Option<String>),
     Number(f64),
     Bool(bool),
     Null,
@@ -100,8 +122,8 @@ pub enum FifthTierField {
 #[derive(Clone, Archive, Serialize, Deserialize, SerdeDeserialize, Debug)]
 #[serde(untagged)]
 pub enum FourthTierField {
-    Object(HashMap<String, Option<FifthTierField>>),
-    Option(String),
+    Object(HashMap<String, FifthTierField>),
+    Option(Option<String>),
     Number(f64),
     Bool(bool),
     Null,
@@ -110,8 +132,8 @@ pub enum FourthTierField {
 #[derive(Clone, Archive, Serialize, Deserialize, SerdeDeserialize, Debug)]
 #[serde(untagged)]
 pub enum ThirdTierField {
-    Object(HashMap<String, Option<FourthTierField>>),
-    Option(String),
+    Object(HashMap<String, FourthTierField>),
+    Option(Option<String>),
     Number(f64),
     Bool(bool),
     Null,
@@ -120,8 +142,8 @@ pub enum ThirdTierField {
 #[derive(Clone, Archive, Serialize, Deserialize, SerdeDeserialize, Debug)]
 #[serde(untagged)]
 pub enum SecondTierField {
-    Object(HashMap<String, Option<ThirdTierField>>),
-    Option(String),
+    Object(HashMap<String, ThirdTierField>),
+    Option(Option<String>),
     Number(f64),
     Bool(bool),
     Null,
@@ -130,19 +152,19 @@ pub enum SecondTierField {
 #[derive(Clone, Archive, Serialize, Deserialize, SerdeDeserialize,Debug)]
 #[serde(untagged)]
 pub enum FirstTierField {
-    Object(HashMap<String, Option<SecondTierField>>),
-    Option(String),
+    Object(HashMap<String, SecondTierField>),
     Bool(bool),
     Number(f64),
     List(Vec<SecondTierField>),
+    Option(Option<String>),
     Null,
 }
 
 #[derive(Clone, Archive, Serialize, Deserialize, SerdeDeserialize, Debug)]
 #[serde(untagged)]
 pub enum NestedListTypes {
-    Object(HashMap<String, Option<FirstTierField>>),
-    Option(String),
+    Object(HashMap<String, FirstTierField>),
+    Option(Option<String>),
     Number(f64),
     Bool(bool),
     Null,
@@ -151,59 +173,13 @@ pub enum NestedListTypes {
 #[derive(Clone, Archive, Serialize, Deserialize, SerdeDeserialize, Debug)]
 #[serde(untagged)]
 pub enum FieldValue {
-    Object(HashMap<String, Option<FirstTierField>>),
-    Option(String),
+    Object(HashMap<String, FirstTierField>),
+    OptionValue(Option<String>),
     Number(f64),
     Bool(bool),
     List(Vec<NestedListTypes>),
     Null,
 }
-
-/*
-#[derive(Debug, Archive, SerdeDeserialize, Serialize, Deserialize, Clone)]
-pub enum FlatValue {
-    Null,
-    Bool(bool),
-    Number(f64),
-    String(String),
-    Array(Vec<String>), // Flattened
-    Object(HashMap<String, String>), // Flattened
-}
-
-#[derive(Debug, Archive, SerdeDeserialize, Serialize, Deserialize, Clone)]
-pub struct GenericJson {
-    pub fields: HashMap<String, FlatValue>,
-}
-
-impl From<serde_json::Value> for GenericJson {
-    fn from(value: serde_json::Value) -> Self {
-        let mut fields = HashMap::new();
-        if let serde_json::Value::Object(map) = value {
-            for (k, v) in map {
-                fields.insert(k, FlatValue::from(v));
-            }
-        }
-        GenericJson { fields }
-    }
-}
-
-impl From<serde_json::Value> for FlatValue {
-    fn from(value: serde_json::Value) -> Self {
-        match value {
-            serde_json::Value::Null => FlatValue::Null,
-            serde_json::Value::Bool(b) => FlatValue::Bool(b),
-            serde_json::Value::Number(n) => FlatValue::Number(n.as_f64().unwrap_or(0.0)),
-            serde_json::Value::String(s) => FlatValue::String(s),
-            serde_json::Value::Array(arr) => {
-                FlatValue::Array(arr.into_iter().map(|v| serde_json::to_string(&v).unwrap_or_default()).collect())
-            }
-            serde_json::Value::Object(obj) => {
-                FlatValue::Object(obj.into_iter().map(|(k, v)| (k, serde_json::to_string(&v).unwrap_or_default())).collect())
-            }
-        }
-    }
-}
-*/
 
 #[derive(Deserialize, Serialize, Archive, SerdeDeserialize, Clone, Debug)]
 pub struct JiraIssue {
