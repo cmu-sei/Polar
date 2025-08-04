@@ -90,8 +90,8 @@ impl Actor for JiraIssueConsumer {
             field: Option<&FieldValue>,
         ) {
             if let Some(FieldValue::Object(map)) = field {
-                if let Some(FirstTierField::Option(Some(display))) = map.get("displayName") {
-                    cypher.push_str(&format!("MERGE ({}:User {{name: \"{}\"}})\nSET ", role.to_lowercase(), display));
+                if let Some(FirstTierField::Option(Some(display))) = map.get("key") {
+                    cypher.push_str(&format!("MERGE ({}:JiraUser {{key: \"{}\"}})\nSET ", role.to_lowercase(), display));
                     let mut first_one = true;
                     for (key, value_opt) in map {
                         match value_opt {
@@ -116,7 +116,9 @@ impl Actor for JiraIssueConsumer {
                                 cypher.push_str(&format!("{}.`{}` = {} ", role.to_lowercase(), key, v));
                                 first_one = false;
                             }
-                            _ => {}
+                            _ => {
+                                // TODO Handle HashMap/List types
+                            }
                         }
                     }
                     cypher.push_str(&format!("MERGE (u)-[:{}]->(i)\n", role));

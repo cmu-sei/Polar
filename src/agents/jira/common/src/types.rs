@@ -62,7 +62,7 @@ pub struct JiraFieldSchema {
 
 #[derive(Debug, Deserialize, Serialize, Archive, SerdeDeserialize, Clone)]
 pub struct JiraField {
-    pub clausNames: Option<Vec<String>>,
+    pub clauseNames: Option<Vec<String>>,
     pub custom: bool,
     pub id: String,
     //pub key: String,
