@@ -32,8 +32,19 @@ use gitlab_queries::{
     LicenseHistoryEntry, Metadata,
 };
 use gitlab_schema::IdString;
-
 use rkyv::{Archive, Deserialize, Serialize};
+
+/// Associates a data payload with a particular GitLab instance.
+/// This UUID should be generated deterministically (e.g., UUIDv5 from base_url).
+#[derive(Debug, Clone, Archive, Serialize, Deserialize)]
+pub struct WithInstance<T> {
+    pub instance_id: String,
+    pub base_url: String,
+    pub data: T,
+}
+
+/// Envelope type to wrap gitlab data in messages
+pub type GitlabEnvelope = WithInstance<GitlabData>;
 
 /// This enum mostly serves as a way to inform the deserializer what datatype to map the bytes into.
 /// The underlying byte vector contains a message meant for some consumer on a given topic
@@ -52,6 +63,7 @@ pub enum GitlabData {
     Jobs((String, Vec<GitlabCiJob>)),
     Pipelines((String, Vec<Pipeline>)),
     ProjectPackages((String, Vec<Package>)),
+    PackageFiles((String, Vec<GitlabPackageFile>)),
     ProjectContainerRepositories((String, Vec<ContainerRepository>)),
     ContainerRepositoryTags((String, Vec<ContainerRepositoryTag>)),
     Instance(GitlabInstance),
@@ -94,4 +106,19 @@ pub struct GitlabLicense {
     pub starts_at: String,
     pub expires_at: String,
     pub active_users: u32,
+}
+
+#[derive(
+    Debug, rkyv::Serialize, rkyv::Deserialize, rkyv::Archive, serde::Serialize, serde::Deserialize,
+)]
+/// Representation of a gitlab package file
+pub struct GitlabPackageFile {
+    pub id: u64,
+    pub package_id: u64,
+    pub created_at: String,
+    pub file_name: String,
+    pub size: u64,
+    pub file_md5: Option<String>,
+    pub file_sha1: Option<String>,
+    pub file_sha256: Option<String>,
 }

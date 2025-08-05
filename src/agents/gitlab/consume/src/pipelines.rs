@@ -21,34 +21,37 @@
    DM24-0470
 */
 
-
 use crate::{subscribe_to_topic, GitlabConsumerArgs, GitlabConsumerState};
-use polar::{QUERY_COMMIT_FAILED, TRANSACTION_FAILED_ERROR};
 use common::types::GitlabData;
+use common::types::GitlabEnvelope;
 use common::PIPELINE_CONSUMER_TOPIC;
-use gitlab_queries::projects::GitlabCiJob;
 use gitlab_queries::projects::CiJobArtifact;
+use gitlab_queries::projects::GitlabCiJob;
 use gitlab_schema::DateTimeString;
 use neo4rs::Query;
+use polar::{QUERY_COMMIT_FAILED, TRANSACTION_FAILED_ERROR};
 use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef};
-use tracing::{debug, error, info,};
+use tracing::{debug, error, info};
 
 pub struct GitlabPipelineConsumer;
 
 impl GitlabPipelineConsumer {
-    fn format_artifacts(artifacts: &[CiJobArtifact]) -> String {
+    fn format_artifacts(base_url: &str, artifacts: &[CiJobArtifact]) -> String {
         artifacts
             .iter()
             .map(|artifact| {
+                // Here we format the base_url of the gitlab instance onto the download_url,
+                // gitlab doesn't proivde the instance url as part of it so we do it oursleves here.
+                // This will help us later when we seek to scrape artifact data like job logs, sboms, test results, etc.
                 format!(
-                    r#"{{ artifact_id: "{}", name: "{}", size: "{}", expire_at: "{}", download_path: "{}" }}"#,
+                    r#"{{ artifact_id: "{}", name: "{}", size: "{}", expire_at: "{}", download_path: "{base_url}{}" }}"#,
                     artifact.id,
                     artifact.name.clone().unwrap_or_default(),
                     // TODO: implement display for the enum artifact.file_type,
                     artifact.size,
                     artifact.expire_at.clone().unwrap_or_default(),
                     artifact.download_path.clone().unwrap_or_default()
-                    
+
                 )
             })
             .collect::<Vec<_>>()
@@ -58,13 +61,15 @@ impl GitlabPipelineConsumer {
     pub fn format_jobs(jobs: &Vec<GitlabCiJob>) -> String {
         jobs.iter()
             .map(|job| {
-                
                 let id = job.id.as_ref().map_or(String::new(), |v| v.0.clone());
-                let status = job.status.as_ref().map_or(String::new(), |v| format!("{v}"));
+                let status = job
+                    .status
+                    .as_ref()
+                    .map_or(String::new(), |v| format!("{v}"));
                 let runner = match &job.runner {
                     Some(runner) => &runner.id.0,
-                    None => &String::default()
-                };                
+                    None => &String::default(),
+                };
                 let name = job.name.clone().unwrap_or_default();
                 let short_sha = &job.short_sha;
                 let tags = job
@@ -85,7 +90,7 @@ impl GitlabPipelineConsumer {
                 let finished_at = job.finished_at.clone().unwrap_or_default();
                 let duration = job.duration.unwrap_or(0).to_string();
                 let failure_message = job.failure_message.clone().unwrap_or_default();
-    
+
                 format!(
                     r#"{{
                         id: "{id}",
@@ -112,16 +117,14 @@ impl GitlabPipelineConsumer {
                     failure_message = failure_message,
                     runner = runner
                 )
-                
             })
             .collect::<Vec<_>>()
             .join(",\n")
     }
-    
 }
 #[async_trait]
 impl Actor for GitlabPipelineConsumer {
-    type Msg = GitlabData;
+    type Msg = GitlabEnvelope;
     type State = GitlabConsumerState;
     type Arguments = GitlabConsumerArgs;
 
@@ -132,10 +135,17 @@ impl Actor for GitlabPipelineConsumer {
     ) -> Result<Self::State, ActorProcessingErr> {
         debug!("{myself:?} starting, connecting to broker");
         //subscribe to topic
-        match subscribe_to_topic(args.registration_id, PIPELINE_CONSUMER_TOPIC.to_string(), args.graph_config).await {
+        match subscribe_to_topic(
+            args.registration_id,
+            PIPELINE_CONSUMER_TOPIC.to_string(),
+            args.graph_config,
+        )
+        .await
+        {
             Ok(state) => Ok(state),
             Err(e) => {
-                let err_msg = format!("Error subscribing to topic \"{PIPELINE_CONSUMER_TOPIC}\" {e}");
+                let err_msg =
+                    format!("Error subscribing to topic \"{PIPELINE_CONSUMER_TOPIC}\" {e}");
                 Err(ActorProcessingErr::from(err_msg))
             }
         }
@@ -156,24 +166,26 @@ impl Actor for GitlabPipelineConsumer {
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        
         //Expect transaction to start, stop if it doesn't
         match state.graph.start_txn().await {
             Ok(mut transaction) => {
-                match message {
+                match message.data {
                     GitlabData::Pipelines((full_path, pipelines)) => {
                         let pipelines_data = pipelines
-                        .iter()
-                        .map(|pipeline| {
-                            let artifacts = match &pipeline.job_artifacts {
-                                Some(artifacts) => GitlabPipelineConsumer::format_artifacts(&artifacts),
-                                None => String::default(),
-                            };
-                    
-                            // Utility closures for optional fields
+                            .iter()
+                            .map(|pipeline| {
+                                let artifacts = match &pipeline.job_artifacts {
+                                    Some(artifacts) => GitlabPipelineConsumer::format_artifacts(
+                                        &message.base_url,
+                                        &artifacts,
+                                    ),
+                                    None => String::default(),
+                                };
 
-                            format!(
-                                r#"{{
+                                // Utility closures for optional fields
+
+                                format!(
+                                    r#"{{
                                     id: "{id}",
                                     active: "{active}",
                                     created_at: "{created_at}",
@@ -190,27 +202,35 @@ impl Actor for GitlabPipelineConsumer {
                                     latest: "{latest}",
                                     artifacts: [ {artifacts} ]
                                 }}"#,
-                                id = pipeline.id.0,
-                                active = pipeline.active.to_string(),
-                                created_at = pipeline.created_at,
-                                sha = pipeline.sha.clone().unwrap_or_else(|| "unknown".to_string()),
-                                child = pipeline.child.to_string(),
-                                complete = pipeline.complete.to_string(),
-                                duration = pipeline.duration.map_or("unknown".to_string(), |d| d.to_string()),
-                                total_jobs = pipeline.total_jobs.to_string(),
-                                compute_minutes = pipeline.compute_minutes.unwrap_or(0.0),
-                                failure_reason = pipeline.failure_reason.clone().unwrap_or_default(),
-                                finished_at = pipeline.finished_at.clone().unwrap_or(DateTimeString(String::default())),
-                                source = pipeline.source.clone().unwrap_or_default(),
-                                trigger = pipeline.trigger.to_string(),
-                                latest = pipeline.latest.to_string(),
-                                artifacts = artifacts,
-                            )
-                        })
-                        .collect::<Vec<_>>()
-                        .join(",\n");
-                    
-                
+                                    id = pipeline.id.0,
+                                    active = pipeline.active.to_string(),
+                                    created_at = pipeline.created_at,
+                                    sha = pipeline
+                                        .sha
+                                        .clone()
+                                        .unwrap_or_else(|| "unknown".to_string()),
+                                    child = pipeline.child.to_string(),
+                                    complete = pipeline.complete.to_string(),
+                                    duration = pipeline
+                                        .duration
+                                        .map_or("unknown".to_string(), |d| d.to_string()),
+                                    total_jobs = pipeline.total_jobs.to_string(),
+                                    compute_minutes = pipeline.compute_minutes.unwrap_or(0.0),
+                                    failure_reason =
+                                        pipeline.failure_reason.clone().unwrap_or_default(),
+                                    finished_at = pipeline
+                                        .finished_at
+                                        .clone()
+                                        .unwrap_or(DateTimeString(String::default())),
+                                    source = pipeline.source.clone().unwrap_or_default(),
+                                    trigger = pipeline.trigger.to_string(),
+                                    latest = pipeline.latest.to_string(),
+                                    artifacts = artifacts,
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                            .join(",\n");
+
                         let cypher_query = format!(
                             "
                             UNWIND [{pipelines_data}] AS pipeline_data
@@ -230,9 +250,9 @@ impl Actor for GitlabPipelineConsumer {
                                 p.source = pipeline_data.source,
                                 p.trigger = pipeline_data.trigger,
                                 p.latest = pipeline_data.latest
-                                
+
                             MERGE (proj)-[:HAS_PIPELINE]->(p)
-                        
+
                             WITH p, pipeline_data.artifacts AS artifacts
                             UNWIND artifacts AS artifact
                             MERGE (a:Artifact {{ id: artifact.artifact_id }})
@@ -244,26 +264,23 @@ impl Actor for GitlabPipelineConsumer {
                             "
                         );
 
-                    
                         debug!("Executing Cypher: {}", cypher_query);
-                    
+
                         transaction.run(Query::new(cypher_query)).await?;
 
-                    
                         if let Err(e) = transaction.commit().await {
                             error!("Failed to commit pipelines transaction: {:?}", e);
                             // Up to you if you want to stop the actor or recover
                         } else {
                             info!("Committed pipelines batch transaction to database");
                         }
-
                     }
-                   GitlabData::Jobs((pipeline_id, jobs)) => {
-                    
+                    GitlabData::Jobs((pipeline_id, jobs)) => {
                         let cypher_job_list = GitlabPipelineConsumer::format_jobs(&jobs);
-                    
-                        let cypher_query = format!(r#"
-                        
+
+                        let cypher_query = format!(
+                            r#"
+
                         MERGE (p: GitlabPipeline {{id: "{pipeline_id}" }})
                         WITH p
                         UNWIND [{cypher_job_list}] AS job
@@ -288,23 +305,22 @@ impl Actor for GitlabPipelineConsumer {
                             MERGE (j)-[:EXCUTED_BY]-(r)
                         )
 
-                        "#);
+                        "#
+                        );
 
                         debug!("Executing Cypher: {}", cypher_query);
-                    
+
                         transaction.run(Query::new(cypher_query)).await?;
 
-                    
                         if let Err(e) = transaction.commit().await {
                             error!("{QUERY_COMMIT_FAILED}, {e}");
                             // Up to you if you want to stop the actor or recover
                         }
-
-                   }
+                    }
                     _ => (),
-                }        
+                }
             }
-            Err(e) => myself.stop(Some(format!("{TRANSACTION_FAILED_ERROR}. {e}")))
+            Err(e) => myself.stop(Some(format!("{TRANSACTION_FAILED_ERROR}. {e}"))),
         }
 
         Ok(())

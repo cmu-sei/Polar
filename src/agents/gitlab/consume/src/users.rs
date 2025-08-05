@@ -24,7 +24,7 @@
 use crate::{subscribe_to_topic, GitlabConsumerArgs, GitlabConsumerState};
 use polar::{QUERY_COMMIT_FAILED, QUERY_RUN_FAILED, TRANSACTION_FAILED_ERROR};
 
-use common::types::GitlabData;
+use common::types::{GitlabData, GitlabEnvelope};
 use common::USER_CONSUMER_TOPIC;
 use gitlab_schema::DateString;
 use neo4rs::Query;
@@ -35,7 +35,7 @@ pub struct GitlabUserConsumer;
 
 #[async_trait]
 impl Actor for GitlabUserConsumer {
-    type Msg = GitlabData;
+    type Msg = GitlabEnvelope;
     type State = GitlabConsumerState;
     type Arguments = GitlabConsumerArgs;
 
@@ -79,7 +79,7 @@ impl Actor for GitlabUserConsumer {
         //Expect transaction to start, stop if it doesn't
         match state.graph.start_txn().await {
             Ok(mut transaction) => {
-                match message {
+                match message.data {
                     GitlabData::Users(users) => {
                         let users_data = users
                             .iter()
@@ -116,7 +116,7 @@ impl Actor for GitlabUserConsumer {
                             .join(",\n");
 
                         let cypher_query = format!(
-                            "
+                            r#"
                             UNWIND [{users_data}] AS user_data
                             MERGE (user:GitlabUser {{ user_id: user_data.user_id }})
                             SET user.username = user_data.username,
@@ -127,8 +127,14 @@ impl Actor for GitlabUserConsumer {
                                 user.web_url = user_data.web_url,
                                 user.web_path = user_data.web_path,
                                 user.organization = user_data.organization
-                            "
+                            WITH user
+                            MERGE (instance: GitlabInstance {{instance_id: "{}" }})
+                            WITH user, instance
+                            MERGE (instance)-[:OBSERVED_USER]->(user)
+                            "#,
+                            message.instance_id
                         );
+
                         debug!(cypher_query);
                         if let Err(e) = transaction.run(Query::new(cypher_query)).await {
                             error!("{e}");
@@ -136,6 +142,7 @@ impl Actor for GitlabUserConsumer {
                         }
 
                         if let Err(e) = transaction.commit().await {
+                            error!("{e}");
                             myself.stop(Some(QUERY_COMMIT_FAILED.to_string()))
                         }
 
@@ -143,7 +150,6 @@ impl Actor for GitlabUserConsumer {
                     }
                     GitlabData::ProjectMembers(link) => {
                         let nodes = link.connection.nodes.unwrap();
-
                         let project_memberships = nodes
                             .iter()
                             .filter_map(|option| {
@@ -179,34 +185,39 @@ impl Actor for GitlabUserConsumer {
                             .collect::<Vec<_>>()
                             .join(",\n");
 
-                        //write a query that finds the given user, and create a relationship between it and every project we were given
-                        let cypher_query = format!(
-                            "
-                            MATCH (user:GitlabUser {{ user_id: \"{}\" }})
-                            UNWIND [{}] AS project_data
-                            MERGE (project:GitlabProject {{ project_id: project_data.project_id }})
-                            MERGE (user)-[r:MEMBER_OF]->(project)
-                            SET r.access_level = project_data.access_level,
-                                r.created_at = project_data.created_at,
-                                r.expires_at = project_data.expires_at
-                            ",
-                            link.resource_id, project_memberships
-                        );
+                        // TODO: We should check this on the observer side
+                        if !project_memberships.is_empty() {
+                            //write a query that finds the given user, and create a relationship between it and every project we were given
+                            let cypher_query = format!(
+                                r#"
+                                MERGE (user:GitlabUser {{ user_id: "{}" }})
+                                WITH user
+                                UNWIND [{project_memberships}] AS project_data
+                                MERGE (project:GitlabProject {{ project_id: project_data.project_id }})
+                                MERGE (user)-[r:MEMBER_OF]->(project)
+                                SET r.access_level = project_data.access_level,
+                                    r.created_at = project_data.created_at,
+                                    r.expires_at = project_data.expires_at
+                                "#,
+                                link.resource_id,
+                            );
 
-                        debug!(cypher_query);
+                            debug!(cypher_query);
 
-                        if let Err(_) = transaction.run(Query::new(cypher_query)).await {
-                            myself.stop(Some(QUERY_RUN_FAILED.to_string()));
+                            if let Err(e) = transaction.run(Query::new(cypher_query)).await {
+                                error!("{e}");
+                                myself.stop(Some(QUERY_RUN_FAILED.to_string()));
+                            }
+
+                            if let Err(e) = transaction.commit().await {
+                                error!("{e}");
+                                myself.stop(Some(QUERY_COMMIT_FAILED.to_string()));
+                            }
+
+                            info!("Committed transaction to database");
                         }
-
-                        if let Err(_) = transaction.commit().await {
-                            myself.stop(Some(QUERY_COMMIT_FAILED.to_string()));
-                        }
-
-                        info!("Committed transaction to database");
                     }
-
-                    _ => (),
+                    _ => tracing::warn!("Unexpected message {:?}", message.instance_id),
                 }
             }
             Err(e) => myself.stop(Some(format!("{TRANSACTION_FAILED_ERROR}. {e}"))),

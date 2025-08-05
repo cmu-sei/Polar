@@ -22,7 +22,7 @@
 */
 
 use crate::{subscribe_to_topic, GitlabConsumerArgs, GitlabConsumerState};
-use common::types::GitlabData;
+use common::types::{GitlabData, GitlabEnvelope};
 use common::RUNNERS_CONSUMER_TOPIC;
 use neo4rs::Query;
 use polar::{QUERY_COMMIT_FAILED, QUERY_RUN_FAILED, TRANSACTION_FAILED_ERROR};
@@ -34,7 +34,7 @@ pub struct GitlabRunnerConsumer;
 
 #[async_trait]
 impl Actor for GitlabRunnerConsumer {
-    type Msg = GitlabData;
+    type Msg = GitlabEnvelope;
     type State = GitlabConsumerState;
     type Arguments = GitlabConsumerArgs;
 
@@ -76,7 +76,7 @@ impl Actor for GitlabRunnerConsumer {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match state.graph.start_txn().await {
-            Ok(mut transaction) => match message {
+            Ok(mut transaction) => match message.data {
                 GitlabData::Runners(runners) => {
                     let runner_data = runners
                         .iter()
@@ -104,7 +104,7 @@ impl Actor for GitlabRunnerConsumer {
                         .join(",\n");
 
                     let cypher_query = format!(
-                        "
+                        r#"
                             UNWIND [{runner_data}] AS runner_data
                             MERGE (runner:GitlabRunner {{ runner_id: runner_data.runner_id }})
                             SET runner.paused = runner_data.paused,
@@ -113,7 +113,11 @@ impl Actor for GitlabRunnerConsumer {
                                 runner.access_level = runner_data.access_level,
                                 runner.run_untagged = runner_data.run_untagged,
                                 runner.tag_list = runner_data.tag_list
-                            "
+                            MERGE (instance: GitlabInstance {{instance_id: "{}" }})
+                            WITH instance, runner
+                            MERGE (instance)-[:OBSERVED_RUNNER]->(runner)
+                        "#,
+                        message.instance_id
                     );
                     debug!(cypher_query);
                     if let Err(e) = transaction.run(Query::new(cypher_query)).await {

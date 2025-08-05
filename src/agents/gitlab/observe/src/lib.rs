@@ -29,6 +29,9 @@ pub mod runners;
 pub mod supervisor;
 pub mod users;
 
+use cassini::client::TcpClientMessage;
+use cassini::ClientMessage;
+use common::types::{GitlabData, WithInstance};
 use cynic::{GraphQlError, Operation};
 use gitlab_queries::groups::*;
 use gitlab_queries::projects::{MultiProjectQuery, MultiProjectQueryArguments};
@@ -38,7 +41,7 @@ use gitlab_queries::users::{MultiUserQuery, MultiUserQueryArguments};
 use gitlab_schema::IdString;
 use parse_link_header::parse_with_rel;
 use ractor::concurrency::Duration;
-use ractor::ActorRef;
+use ractor::{registry::where_is, ActorProcessingErr, ActorRef};
 use rand::rngs::SmallRng;
 use rand::Rng;
 use rand::SeedableRng;
@@ -47,6 +50,7 @@ use reqwest::Client;
 use reqwest::Error;
 use reqwest::Method;
 use reqwest::Response;
+use rkyv::Serialize;
 use serde::Deserialize;
 use tokio::task::AbortHandle;
 use tracing::{debug, error};
@@ -74,6 +78,8 @@ pub struct GitlabObserverState {
     pub web_client: Client,
     /// ID of the agent's session with the broker
     pub registration_id: String,
+    /// UID of the gitlab insatnce being observered, derived from the base url
+    pub instance_uid: String,
     /// amount of time in seconds the observer will wait before next tick, updated internally by backoff
     backoff_interval: Duration,
     /// Max amount of time the observer will wait before ticking
@@ -97,9 +103,9 @@ impl GitlabObserverState {
         registration_id: String,
         base_interval: Duration,
         max_backoff: Duration,
+        instance_uid: String,
     ) -> Self {
-        //init rng
-
+        //init rng to calculate backoff jitter
         let mut rng = rand::rng();
 
         let small = SmallRng::from_rng(&mut rng);
@@ -112,6 +118,7 @@ impl GitlabObserverState {
             registration_id,
             max_backoff,
             base_interval,
+            instance_uid,
             backoff_interval: base_interval, // start with the base interval
             failed_attempts: 0,
             rng: small,
@@ -147,8 +154,21 @@ pub struct GitlabObserverArgs {
     pub web_client: Client,
     pub max_backoff: u64,
     pub base_interval: u64,
+    pub instance_uid: String,
 }
 
+/// Helper to init observer_state from args to cut down on repeating the same block for every obvserver
+pub fn init_observer_state(args: GitlabObserverArgs) -> GitlabObserverState {
+    return GitlabObserverState::new(
+        args.gitlab_endpoint.clone(),
+        args.token,
+        args.web_client,
+        args.registration_id,
+        Duration::from_secs(args.base_interval),
+        Duration::from_secs(args.max_backoff),
+        args.instance_uid,
+    );
+}
 /// Messages that observers send themselves to prompt the retrieval of resources
 
 /// Queries observers can send
@@ -178,6 +198,43 @@ pub enum BackoffReason {
 pub enum GitlabObserverMessage {
     Tick(Command),
     Backoff(BackoffReason),
+}
+
+pub fn send_to_broker(
+    state: &mut GitlabObserverState,
+    data: GitlabData,
+    topic: &str,
+) -> Result<(), ActorProcessingErr> {
+    // lookup client actor
+    if let Some(client) = where_is(BROKER_CLIENT_NAME.to_string()) {
+        // wrap envelope
+        let envelope = WithInstance {
+            instance_id: state.instance_uid.clone(),
+            base_url: state.gitlab_endpoint.clone(),
+            data,
+        };
+
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&envelope).unwrap();
+
+        let msg = ClientMessage::PublishRequest {
+            topic: topic.to_string(),
+            payload: bytes.to_vec(),
+            registration_id: Some(state.registration_id.clone()),
+        };
+
+        if let Err(e) = client.send_message(TcpClientMessage::Send(msg)) {
+            return Err(ActorProcessingErr::from(format!(
+                "Failed to message TCP client {e}"
+            )));
+        }
+
+        return Ok(());
+    } else {
+        return Err(ActorProcessingErr::from("Failed to locate TCP client"));
+    }
+}
+pub fn derive_instance_id(base_url: &str) -> String {
+    return uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, base_url.as_bytes()).to_string();
 }
 
 pub fn handle_graphql_errors(
@@ -356,8 +413,27 @@ pub async fn get_all_elements<T: for<'a> Deserialize<'a>>(
 }
 
 pub fn graphql_endpoint(gitlab_endpoint: &str) -> String {
-    format!("{gitlab_endpoint}/graphql")
+    format!("{gitlab_endpoint}/api/graphql")
 }
 pub fn v4_api_endpoint(gitlab_endpoint: &str) -> String {
-    format!("{gitlab_endpoint}/v4")
+    format!("{gitlab_endpoint}/api/v4")
+}
+/// Helper to parse gitlab gid strings and extract the numeric id as a u64.
+/// Primarily for use with the REST api
+pub fn extract_gitlab_id(global_id: &str) -> Option<u64> {
+    use url::Url;
+
+    // Fallback if `url::Url::parse` can't handle the custom scheme
+    if let Ok(parsed) = Url::parse(global_id) {
+        parsed
+            .path_segments()
+            .and_then(|segments| segments.last())
+            .and_then(|id_str| id_str.parse::<u64>().ok())
+    } else {
+        // Fallback: treat it as "scheme://host/path.../id"
+        global_id
+            .rsplit('/')
+            .next()
+            .and_then(|id_str| id_str.parse::<u64>().ok())
+    }
 }

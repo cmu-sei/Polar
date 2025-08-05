@@ -157,7 +157,7 @@ let gitlab =
         { name = "polar-gitlab-observer"
         , image =
             "${sandboxRegistry.url}/polar/polar-gitlab-observer:${commitSha}"
-        , gitlabEndpoint = "https://gitlab.sandbox.labz.s-box.org/api"
+        , gitlabEndpoint = "https://gitlab.sandbox.labz.s-box.org"
         , gitlabSecret
         }
       , consumer =

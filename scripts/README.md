@@ -7,3 +7,4 @@ The scripts in this directory are as follows:
   explain a lot.
 * `make-chart.sh` is a script that generates an umbrella helm chart from our dhall configurations.
 * `static-tools.sh` is a script that runs various rust static analysis tools on a given crate or workspace.
+* `gitlab-ci.sh` is a script meant to envelop most of our CI/CD tasks in one go. See our [DevOps manual](../docs/devops.md) for details

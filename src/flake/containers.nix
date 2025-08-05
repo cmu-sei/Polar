@@ -16,33 +16,23 @@ let
     #  Files required by dev-containers.
     #  sets up users and permissions
     # ---------------------------------------------------------------------
-    # define a fixed number of build users;
-    # TODO: Make mroe dynamic? We make one per available CPU in the create-user script
-    buildUserCount = 10;
-
-    nixbldUsers = builtins.genList (n: {
-      name = "nixbld${toString (n + 1)}";
-      uid = 30000 + n;
-      gid = 30000;
-    }) buildUserCount;
-
 
     # Join user entries into each file format
     passwdEntries = builtins.concatStringsSep "\n" (
       ["root:x:0:0::/root:${pkgs.runtimeShell}"]
-      ++ map (u: "${u.name}:x:${toString u.uid}:${toString u.gid}::/var/empty:/sbin/nologin") nixbldUsers
-    );
+    ) + "\n";
 
-    nixldGroupEntry = "nixbld:x:30000:" + (builtins.concatStringsSep "," (map (u: u.name) nixbldUsers));
     groupEntries = builtins.concatStringsSep "\n" (
-      ["root:x:0:" nixldGroupEntry]
-    );
-    nixbldShadow = "nixbld:!:" + (builtins.concatStringsSep "," (map (u: u.name) nixbldUsers)) + ":";
-    gshadowEntries = builtins.concatStringsSep "\n" (
-      ["root:x::" nixbldShadow]
-    );
+      ["root:x:0:"]
+    ) + "\n";
 
-    shadowEntries = "root:!x:::::::"; # unchanged
+    gshadowEntries = builtins.concatStringsSep "\n" (
+      ["root:x::"]
+    ) + "\n";
+
+    shadowEntries = builtins.concatStringsSep "\n" (
+      ["root:!x:::::::"]
+    ) + "\n";
 
     shellsFile = ''
       /bin/sh
@@ -151,7 +141,7 @@ let
     editor      = myNeovimOverlay;
     fishShell   = pkgs.fish;
 
-    # skeleton file for create-user.sh to copy
+    # skeleton file for start.sh to copy
     fishConfig = pkgs.writeTextFile {
       name        = "fish-config";
       destination = "/etc/container-skel/config.fish";
@@ -184,13 +174,13 @@ let
       text        = builtins.readFile ./container-files/.gitconfig;
     };
 
-    # User creation script
-    createUserScript = pkgs.writeTextFile {
-      name        = "create-user.sh";
-      destination = "/create-user.sh";
-      text        = builtins.readFile ./container-files/create-user.sh;
-      executable  = true;
-    };
+    polarHelpScript = pkgs.writeShellScriptBin "polar-help" (
+      builtins.readFile ./container-files/polar-help
+    );
+
+    startScript = pkgs.writeShellScriptBin "start.sh" (
+      builtins.readFile ./container-files/start.sh
+    );
 
     # ---------------------------------------------------------------------
     # Dev container image
@@ -200,7 +190,8 @@ let
       tag  = "latest";
       copyToRoot = [
         baseInfo
-        createUserScript
+        polarHelpScript
+        startScript
         devEnv
         fishConfig
         gitconfig
@@ -208,6 +199,7 @@ let
         license
         nixConfig
         shellInitFile
+        containerPolicyConfig
         vendorFuncs
       ];
       config = {
@@ -254,7 +246,7 @@ let
           "USER=root"
         ];
         Volumes = {};
-        Cmd = [ "/bin/fish" ];
+        Cmd = [ "${startScript}/bin/start.sh" ];
       };
       extraCommands = ''
         # Link the env binary (needed for the check requirements script)
@@ -265,6 +257,7 @@ let
         mkdir -p lib64
         ln -s ${pkgs.stdenv.cc.cc}/lib/ld-linux-x86-64.so.2 lib64/
 
+        mkdir -p var/tmp
         mkdir -p tmp
       '';
     };

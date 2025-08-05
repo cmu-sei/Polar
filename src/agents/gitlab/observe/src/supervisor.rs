@@ -1,7 +1,6 @@
 use cassini::client::*;
 use cassini::TCPClientConfig;
 use common::get_file_as_byte_vec;
-use common::METADATA_CONSUMER_TOPIC;
 use ractor::async_trait;
 use ractor::Actor;
 use ractor::ActorProcessingErr;
@@ -14,6 +13,7 @@ use reqwest::ClientBuilder;
 use tracing::error;
 use tracing::{debug, info, warn};
 
+use crate::derive_instance_id;
 use crate::groups::GitlabGroupObserver;
 use crate::meta::MetaObserver;
 use crate::pipelines::GitlabJobObserver;
@@ -142,6 +142,7 @@ impl Actor for ObserverSupervisor {
                 // set up args for observer actors
                 let args = GitlabObserverArgs {
                     gitlab_endpoint: state.gitlab_endpoint.clone(),
+                    instance_uid: derive_instance_id(&state.gitlab_endpoint),
                     token: state.gitlab_token.clone(),
                     registration_id: registration_id.clone(),
                     web_client: ObserverSupervisor::get_client(state.proxy_ca_cert_file.clone()),

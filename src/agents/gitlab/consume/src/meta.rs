@@ -1,18 +1,18 @@
 use crate::{subscribe_to_topic, GitlabConsumerArgs, GitlabConsumerState};
-use common::types::GitlabData;
+use common::types::{GitlabData, GitlabEnvelope};
 use common::METADATA_CONSUMER_TOPIC;
 use polar::TRANSACTION_FAILED_ERROR;
 
 use neo4rs::Query;
-use polar::{QUERY_COMMIT_FAILED, QUERY_RUN_FAILED};
-use ractor::{concurrency::Duration, Actor, ActorProcessingErr, ActorRef};
+use polar::QUERY_COMMIT_FAILED;
+use ractor::{Actor, ActorProcessingErr, ActorRef};
 use tracing::{debug, error, info};
 
 pub struct MetaConsumer;
 
 #[ractor::async_trait]
 impl Actor for MetaConsumer {
-    type Msg = GitlabData;
+    type Msg = GitlabEnvelope;
 
     type State = GitlabConsumerState;
     type Arguments = GitlabConsumerArgs;
@@ -47,19 +47,23 @@ impl Actor for MetaConsumer {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match state.graph.start_txn().await {
-            Ok(mut transaction) => match message {
+            Ok(mut transaction) => match message.data {
                 GitlabData::Instance(instance) => {
                     let cypher_query = format!(
                         r#"
                             MERGE (instance:GitlabInstance
                             {{
+                                instance_id: "{}",
                                 enterprise: "{}",
                                 version: "{}",
                                 base_url: "{}"
                             }}
                             )
                         "#,
-                        instance.metadata.enterprise, instance.metadata.version, instance.base_url
+                        message.instance_id,
+                        instance.metadata.enterprise,
+                        instance.metadata.version,
+                        instance.base_url
                     );
 
                     debug!("{cypher_query}");
@@ -132,21 +136,25 @@ impl Actor for MetaConsumer {
                     //TODO: Add connection to instance node
                     let cypher_query = format!(
                         r#"
-                         UNWIND [{entries_data}] AS entry
-                         MERGE (lic:LicenseEntry {{ id: entry.id }})
-                         SET lic.createdAt = entry.createdAt,
-                             lic.startsAt = entry.startsAt,
-                             lic.expiresAt = entry.expiresAt,
-                             lic.blockChangesAt = entry.blockChangesAt,
-                             lic.activatedAt = entry.activatedAt,
-                             lic.name = entry.name,
-                             lic.email = entry.email,
-                             lic.company = entry.company,
-                             lic.plan = entry.plan,
-                             lic.type = entry.type,
-                             lic.usersInLicenseCount = entry.usersInLicenseCount
-                         "#,
-                        entries_data = entries_data
+                        UNWIND [{entries_data}] AS entry
+                        MERGE (lic:LicenseEntry {{ id: entry.id }})
+                        SET lic.createdAt = entry.createdAt,
+                            lic.startsAt = entry.startsAt,
+                            lic.expiresAt = entry.expiresAt,
+                            lic.blockChangesAt = entry.blockChangesAt,
+                            lic.activatedAt = entry.activatedAt,
+                            lic.name = entry.name,
+                            lic.email = entry.email,
+                            lic.company = entry.company,
+                            lic.plan = entry.plan,
+                            lic.type = entry.type,
+                            lic.usersInLicenseCount = entry.usersInLicenseCount
+                        WITH lic
+                        MERGE (instance: GitlabInstance {{instance_id: "{}" }})
+                        WITH lic, instance
+                        MERGE (instance)-[:OBSERVED_LICENSE]->(lic)
+                        "#,
+                        message.instance_id
                     );
 
                     debug!("{cypher_query}");

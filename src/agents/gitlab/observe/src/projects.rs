@@ -21,17 +21,15 @@
    DM24-0470
 */
 use crate::{
-    graphql_endpoint, handle_backoff, BackoffReason, Command, GitlabObserverArgs,
-    GitlabObserverMessage, GitlabObserverState, BROKER_CLIENT_NAME, GITLAB_JOBS_OBSERVER,
+    graphql_endpoint, handle_backoff, init_observer_state, send_to_broker, BackoffReason, Command,
+    GitlabObserverArgs, GitlabObserverMessage, GitlabObserverState, GITLAB_JOBS_OBSERVER,
     GITLAB_PIPELINE_OBSERVER, GITLAB_REPOSITORY_OBSERVER, MESSAGE_FORWARDING_FAILED,
 };
-use cassini::{client::TcpClientMessage, ClientMessage};
 use common::types::GitlabData;
 use common::PROJECTS_CONSUMER_TOPIC;
 use cynic::{GraphQlResponse, QueryBuilder};
 use gitlab_queries::projects::{MultiProjectQuery, MultiProjectQueryArguments};
 use ractor::{async_trait, registry::where_is, Actor, ActorProcessingErr, ActorRef};
-use rkyv::rancor::Error;
 use std::time::Duration;
 use tracing::{debug, error, info};
 
@@ -94,15 +92,7 @@ impl Actor for GitlabProjectObserver {
     ) -> Result<Self::State, ActorProcessingErr> {
         debug!("{myself:?} starting, connecting to instance");
 
-        let state = GitlabObserverState::new(
-            graphql_endpoint(&args.gitlab_endpoint),
-            args.token,
-            args.web_client,
-            args.registration_id,
-            Duration::from_secs(args.base_interval),
-            Duration::from_secs(args.max_backoff),
-        );
-        Ok(state)
+        Ok(init_observer_state(args))
     }
 
     async fn post_start(
@@ -127,7 +117,7 @@ impl Actor for GitlabProjectObserver {
                         debug!("{}", op.query);
                         match state
                             .web_client
-                            .post(state.gitlab_endpoint.clone())
+                            .post(graphql_endpoint(&state.gitlab_endpoint))
                             .bearer_auth(state.token.clone().unwrap_or_default())
                             .json(&op)
                             .send()
@@ -205,24 +195,13 @@ impl Actor for GitlabProjectObserver {
                                                 }));
                                             }
 
-                                            let tcp_client =
-                                                where_is(BROKER_CLIENT_NAME.to_string())
-                                                    .expect("Expected to find client");
-
                                             let data = GitlabData::Projects(read_projects.clone());
 
-                                            let bytes = rkyv::to_bytes::<Error>(&data).unwrap();
-
-                                            let msg = ClientMessage::PublishRequest {
-                                                topic: PROJECTS_CONSUMER_TOPIC.to_string(),
-                                                payload: bytes.to_vec(),
-                                                registration_id: Some(
-                                                    state.registration_id.clone(),
-                                                ),
-                                            };
-                                            tcp_client
-                                                .send_message(TcpClientMessage::Send(msg))
-                                                .expect("Expected to send message");
+                                            if let Err(e) =
+                                                send_to_broker(state, data, PROJECTS_CONSUMER_TOPIC)
+                                            {
+                                                return Err(e);
+                                            }
                                         }
                                     }
                                     Err(e) => myself

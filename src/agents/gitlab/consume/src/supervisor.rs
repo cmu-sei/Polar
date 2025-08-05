@@ -55,6 +55,7 @@ pub struct ConsumerSupervisorArgs {
 
 impl ConsumerSupervisor {
     /// Helper to try restarting an actor at least 10 times using an exponential backoff strategy.
+    /// TODO: This function doesn't seem to be helping in its current implementation. Restarts aren't real restarts.
     async fn restart_actor(
         actor_name: String,
         supervisor: ActorRef<ConsumerSupervisorMessage>,

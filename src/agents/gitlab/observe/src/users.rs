@@ -21,23 +21,22 @@
    DM24-0470
 */
 
+use crate::graphql_endpoint;
 use std::time::Duration;
 
 use crate::{
-    graphql_endpoint, handle_backoff, BackoffReason, Command, GitlabObserverArgs,
-    GitlabObserverMessage, GitlabObserverState, BROKER_CLIENT_NAME, MESSAGE_FORWARDING_FAILED,
+    handle_backoff, init_observer_state, send_to_broker, BackoffReason, Command,
+    GitlabObserverArgs, GitlabObserverMessage, GitlabObserverState, BROKER_CLIENT_NAME,
+    MESSAGE_FORWARDING_FAILED,
 };
-use cassini::client::TcpClientMessage;
-use cassini::ClientMessage;
 use common::USER_CONSUMER_TOPIC;
 use cynic::GraphQlResponse;
 
-use ractor::{async_trait, registry::where_is, Actor, ActorProcessingErr, ActorRef};
+use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef};
 
 use common::types::{GitlabData, ResourceLink};
 use cynic::QueryBuilder;
 use gitlab_queries::users::*;
-use rkyv::rancor::Error;
 
 use tracing::{debug, error, info, warn};
 
@@ -88,14 +87,7 @@ impl Actor for GitlabUserObserver {
     ) -> Result<Self::State, ActorProcessingErr> {
         debug!("{myself:?} starting");
 
-        let state = GitlabObserverState::new(
-            graphql_endpoint(&args.gitlab_endpoint),
-            args.token,
-            args.web_client,
-            args.registration_id,
-            Duration::from_secs(args.base_interval),
-            Duration::from_secs(args.max_backoff),
-        );
+        let state = init_observer_state(args);
 
         Ok(state)
     }
@@ -124,7 +116,7 @@ impl Actor for GitlabUserObserver {
 
                         match state
                             .web_client
-                            .post(state.gitlab_endpoint.clone())
+                            .post(graphql_endpoint(&state.gitlab_endpoint))
                             .bearer_auth(state.token.clone().unwrap_or_default())
                             .json(&op)
                             .send()
@@ -166,16 +158,9 @@ impl Actor for GitlabUserObserver {
                                                             //extract user information during iteration
                                                             user.project_memberships.as_ref().map(
                                                                 |connection| {
-                                                                    //send user project connection to project consumer
-                                                                    let client = where_is(
-                                                                        BROKER_CLIENT_NAME.to_string(),
-                                                                    )
-                                                                    .expect(
-                                                                        "Expected to find tcp client",
-                                                                    );
 
-                                                                    let data =
-                                                                        GitlabData::ProjectMembers(
+                                                                    let data
+                                                                        = GitlabData::ProjectMembers(
                                                                             ResourceLink {
                                                                                 resource_id: user
                                                                                     .id
@@ -185,29 +170,7 @@ impl Actor for GitlabUserObserver {
                                                                             },
                                                                         );
 
-                                                                    let bytes =
-                                                                        rkyv::to_bytes::<Error>(&data)
-                                                                            .unwrap();
-
-                                                                    let msg =
-                                                                        ClientMessage::PublishRequest {
-                                                                            topic: USER_CONSUMER_TOPIC
-                                                                                .to_string(),
-                                                                            payload: bytes.to_vec(),
-                                                                            registration_id: Some(
-                                                                                state
-                                                                                    .registration_id
-                                                                                    .clone(),
-                                                                            ),
-                                                                        };
-
-                                                                    client
-                                                                        .send_message(
-                                                                            TcpClientMessage::Send(msg),
-                                                                        )
-                                                                        .expect(
-                                                                            "Expected to send message",
-                                                                        );
+                                                                    send_to_broker(state, data, USER_CONSUMER_TOPIC).map_err(|e| error!("{e}"))
                                                                 },
                                                             );
 
@@ -217,31 +180,12 @@ impl Actor for GitlabUserObserver {
                                                 ));
                                                 }
 
-                                                match where_is(BROKER_CLIENT_NAME.to_string()) {
-                                                    Some(client) => {
-                                                        let data = GitlabData::Users(read_users);
-                                                        // Serializing is as easy as a single function call
-                                                        let bytes =
-                                                            rkyv::to_bytes::<Error>(&data).unwrap();
+                                                let data = GitlabData::Users(read_users);
 
-                                                        let msg = ClientMessage::PublishRequest {
-                                                            topic: USER_CONSUMER_TOPIC.to_string(),
-                                                            payload: bytes.to_vec(),
-                                                            registration_id: Some(
-                                                                state.registration_id.clone(),
-                                                            ),
-                                                        };
-
-                                                        client
-                                                            .send_message(TcpClientMessage::Send(
-                                                                msg,
-                                                            ))
-                                                            .expect("Expected to send message");
-                                                    }
-                                                    None => {
-                                                        let err_msg = "Failed to locate tcp client";
-                                                        error!("{err_msg}");
-                                                    }
+                                                if let Err(e) =
+                                                    send_to_broker(state, data, USER_CONSUMER_TOPIC)
+                                                {
+                                                    return Err(e);
                                                 }
                                             }
                                         }
