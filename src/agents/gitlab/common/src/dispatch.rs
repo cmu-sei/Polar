@@ -1,4 +1,4 @@
-use crate::types::GitlabData;
+use crate::types::GitlabEnvelope;
 use polar::DispatcherMessage;
 use ractor::{async_trait, registry::where_is, Actor, ActorProcessingErr, ActorRef};
 use rkyv::rancor::Error;
@@ -16,9 +16,8 @@ impl MessageDispatcher {
     /// The incoming topic string will inform us of which actor is responsible for handling the message.
     /// Other agents may want to implement DLQ for when consumers aren't present and may return.
     /// For now, we don't need to bother since we're getting new data all the time from gitlab.
-    ///
     pub fn deserialize_and_dispatch(message: Vec<u8>, topic: String) {
-        match rkyv::from_bytes::<GitlabData, Error>(&message) {
+        match rkyv::from_bytes::<GitlabEnvelope, Error>(&message) {
             Ok(message) => {
                 if let Some(consumer) = where_is(topic.clone()) {
                     if let Err(e) = consumer.send_message(message) {

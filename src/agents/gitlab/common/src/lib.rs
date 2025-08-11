@@ -21,12 +21,7 @@ This Software includes and/or makes use of Third-Party Software each subject to 
 DM24-0470
 */
 
-use std::process;
-use std::{
-    fs::{self, File},
-    io::{Read, Write},
-};
-use sysinfo::{Pid, ProcessRefreshKind, System, SystemExt};
+use std::{fs::File, io::Read};
 pub mod dispatch;
 pub mod types;
 
@@ -39,66 +34,6 @@ pub const USER_CONSUMER_TOPIC: &str = "gitlab:consumer:users";
 pub const RUNNERS_CONSUMER_TOPIC: &str = "gitlab:consumer:runners";
 pub const PIPELINE_CONSUMER_TOPIC: &str = "gitlab:consumer:pipelines";
 pub const REPOSITORY_CONSUMER_TOPIC: &str = "gitlab:consumer:repositories";
-
-// Checks for the existence of a lock file at the given path. Creates lock file if not found.
-#[deprecated]
-pub fn create_lock(filepath: &str) -> Result<bool, std::io::Error> {
-    let file_path = std::path::Path::new(filepath);
-    let exists = file_path.exists();
-    if exists == true {
-        // Check if there is a PID in the file and check if that PID is actually
-        // running. If it is running, we're done here. If it's not running, we
-        // need to delete the file. Regardless of whether or not this condition
-        // is true, we need to unconditionally create a new lock file with our
-        // new PID, at that point.
-        if let Ok(mut handle) = File::open(file_path) {
-            let mut bytes_buf = [0u8; 4];
-            let bytes_read = handle.read(&mut bytes_buf).unwrap();
-            if bytes_read == 4 {
-                let my_pid = u32::from_le_bytes(bytes_buf);
-
-                let mut s = System::new_all();
-                let result = s.refresh_process_specifics(
-                    Pid::from(usize::try_from(my_pid).unwrap()),
-                    ProcessRefreshKind::new(),
-                );
-                if result {
-                    // println!("[*] An instance of this observer is still running. No further scheduler action taken at this time. Yielding.");
-                    return Ok(false);
-                } else {
-                    // println!("[*] A lock file was found, but the PID was invalid. Deleting lock file and creating a new one.");
-                    fs::remove_file(file_path)?;
-                }
-            } else {
-                panic!("Lock file contains bad data.")
-            }
-        } else {
-            panic!("We found a lock file but couldn't open it.")
-        }
-    }
-
-    // Create lock file unconditionally, return false
-    let new_handle = File::create(filepath);
-    match new_handle {
-        Ok(mut new_handle) => {
-            // Get current PID.
-            let pid = process::id();
-            let new_pid = u32::to_le_bytes(pid);
-            let write_result = new_handle.write_all(&new_pid);
-            match write_result {
-                Ok(_) => println!("New lock file created with PID: {}", pid),
-                Err(e) => {
-                    println!("Failed to create new lock file.");
-                    return Err(e);
-                }
-            }
-            return Ok(true);
-        }
-        Err(e) => {
-            panic!("[*] Problem creating lock file: {}", e.to_string());
-        }
-    }
-}
 
 /// Helper function to parse a file at a given path and return the raw bytes as a vector
 pub fn get_file_as_byte_vec(filename: &String) -> Result<Vec<u8>, std::io::Error> {

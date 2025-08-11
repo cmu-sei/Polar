@@ -22,7 +22,7 @@
 */
 
 use crate::{subscribe_to_topic, GitlabConsumerArgs, GitlabConsumerState};
-use common::types::GitlabData;
+use common::types::{GitlabData, GitlabEnvelope};
 use common::REPOSITORY_CONSUMER_TOPIC;
 use gitlab_schema::{BigInt, DateTimeString};
 use polar::{QUERY_COMMIT_FAILED, QUERY_RUN_FAILED, TRANSACTION_FAILED_ERROR};
@@ -33,7 +33,7 @@ pub struct GitlabRepositoryConsumer;
 
 #[async_trait]
 impl Actor for GitlabRepositoryConsumer {
-    type Msg = GitlabData;
+    type Msg = GitlabEnvelope;
     type State = GitlabConsumerState;
     type Arguments = GitlabConsumerArgs;
 
@@ -77,7 +77,7 @@ impl Actor for GitlabRepositoryConsumer {
         //Expect transaction to start, stop if it doesn't
         match state.graph.start_txn().await {
             Ok(mut transaction) => {
-                match message {
+                match message.data {
                     GitlabData::ProjectContainerRepositories((full_path, repositories)) => {
                         let repos_data = repositories
                             .iter()
@@ -311,6 +311,51 @@ impl Actor for GitlabRepositoryConsumer {
                         }
 
                         info!("Committed transaction to database");
+                    }
+                    GitlabData::PackageFiles((package_id, files)) => {
+                        let file_data = files
+                            .iter()
+                            .filter_map(|file| {
+
+
+                                Some(format!(
+                                    "{{ id: {id}, package_id: \"{package_id}\", file_name: \"{file_name}\", size: \"{size}\", sha256: \"{sha256}\", created_at: datetime(\"{created_at}\") }}",
+                                    id = file.id,
+                                    file_name = file.file_name,
+                                    size = file.size,
+                                    sha256 = file.file_sha256.as_ref().unwrap(),
+                                    created_at = file.created_at,
+
+                                ))
+                            })
+                            .collect::<Vec<_>>()
+                            .join(",\n");
+
+                        let cypher_query = format!(
+                            "
+                                UNWIND [{file_data}] as file
+                                MERGE (f:PackageFile {{ id: file.id }})
+                                SET f.file_name = file.file_name,
+                                    f.sha256 = file.sha256,
+                                    f.package_id = file.package_id,
+                                    f.size = file.size
+
+                                MERGE (pkg: GitlabPackage {{id: \"{package_id}\" }})
+                                WITH pkg, f
+                                MERGE (pkg)-[:CONTAINS_FILE]->(f)
+                            "
+                        );
+
+                        debug!(cypher_query);
+
+                        if let Err(e) = transaction.run(neo4rs::Query::new(cypher_query)).await {
+                            myself.stop(Some(QUERY_RUN_FAILED.to_string()));
+                        }
+
+                        if let Err(e) = transaction.commit().await {
+                            myself.stop(Some(QUERY_COMMIT_FAILED.to_string()));
+                        }
+                        info!("Committed transaction to database")
                     }
                     _ => (),
                 }

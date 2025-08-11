@@ -21,20 +21,17 @@
    DM24-0470
 */
 
+use crate::{graphql_endpoint, init_observer_state, send_to_broker};
 use crate::{
-    graphql_endpoint, BackoffReason, Command, GitlabObserverArgs, GitlabObserverMessage,
-    GitlabObserverState, BROKER_CLIENT_NAME, GITLAB_PROJECT_OBSERVER,
+    BackoffReason, Command, GitlabObserverArgs, GitlabObserverMessage, GitlabObserverState,
+    GITLAB_PROJECT_OBSERVER,
 };
-use cassini::client::TcpClientMessage;
-use cassini::ClientMessage;
 use common::types::GitlabData;
 use common::PIPELINE_CONSUMER_TOPIC;
 use cynic::GraphQlResponse;
 use cynic::QueryBuilder;
 use gitlab_queries::projects::*;
 use ractor::{async_trait, registry::where_is, Actor, ActorProcessingErr, ActorRef};
-use rkyv::rancor::Error;
-use std::time::Duration;
 use tracing::{debug, error, info, warn};
 
 pub struct GitlabPipelineObserver;
@@ -52,16 +49,7 @@ impl Actor for GitlabPipelineObserver {
     ) -> Result<Self::State, ActorProcessingErr> {
         debug!("{myself:?} starting");
 
-        let state = GitlabObserverState::new(
-            graphql_endpoint(&args.gitlab_endpoint),
-            args.token,
-            args.web_client,
-            args.registration_id,
-            Duration::from_secs(args.base_interval),
-            Duration::from_secs(args.max_backoff),
-        );
-
-        Ok(state)
+        Ok(init_observer_state(args))
     }
 
     async fn post_start(
@@ -93,7 +81,7 @@ impl Actor for GitlabPipelineObserver {
 
                         match state
                             .web_client
-                            .post(state.gitlab_endpoint.clone())
+                            .post(graphql_endpoint(&state.gitlab_endpoint))
                             .bearer_auth(state.token.clone().unwrap_or_default())
                             .json(&op)
                             .send()
@@ -135,40 +123,16 @@ impl Actor for GitlabPipelineObserver {
 
                                                                 debug!("Found {0} pipeline run(s) for project {1}", read_pipelines.len(), full_path);
 
-                                                                let tcp_client = where_is(
-                                                                    BROKER_CLIENT_NAME.to_string(),
-                                                                )
-                                                                .expect("Expected to find client");
-
                                                                 let data = GitlabData::Pipelines((
                                                                     full_path.0,
                                                                     read_pipelines,
                                                                 ));
 
-                                                                let bytes =
-                                                                    rkyv::to_bytes::<Error>(&data)
-                                                                        .unwrap();
-
-                                                                let msg =
-                                                                    ClientMessage::PublishRequest {
-                                                                        topic:
-                                                                            PIPELINE_CONSUMER_TOPIC
-                                                                                .to_string(),
-                                                                        payload: bytes.to_vec(),
-                                                                        registration_id: Some(
-                                                                            state
-                                                                                .registration_id
-                                                                                .clone(),
-                                                                        ),
-                                                                    };
-
-                                                                tcp_client
-                                                                    .send_message(
-                                                                        TcpClientMessage::Send(msg),
-                                                                    )
-                                                                    .expect(
-                                                                        "Expected to send message",
-                                                                    );
+                                                                return send_to_broker(
+                                                                    state,
+                                                                    data,
+                                                                    PIPELINE_CONSUMER_TOPIC,
+                                                                );
                                                             }
                                                         }
                                                     }
@@ -209,16 +173,7 @@ impl Actor for GitlabJobObserver {
     ) -> Result<Self::State, ActorProcessingErr> {
         debug!("{myself:?} starting");
 
-        let state = GitlabObserverState::new(
-            args.gitlab_endpoint,
-            args.token,
-            args.web_client,
-            args.registration_id,
-            Duration::from_secs(args.base_interval),
-            Duration::from_secs(args.max_backoff),
-        );
-
-        Ok(state)
+        Ok(init_observer_state(args))
     }
 
     async fn post_start(
@@ -258,7 +213,7 @@ impl Actor for GitlabJobObserver {
 
                         match state
                             .web_client
-                            .post(state.gitlab_endpoint.clone())
+                            .post(graphql_endpoint(&state.gitlab_endpoint))
                             .bearer_auth(state.token.clone().unwrap_or_default())
                             .json(&op)
                             .send()
@@ -307,22 +262,9 @@ impl Actor for GitlabJobObserver {
                                                                                         job
                                                                                     }));
 
-                                                                                    let tcp_client = where_is(BROKER_CLIENT_NAME.to_string())
-                                                                                    .expect("Expected to find client");
-
                                                                                     let data = GitlabData::Jobs((pipeline.id.0, read_jobs));
 
-                                                                                    let bytes = rkyv::to_bytes::<Error>(&data).unwrap();
-
-                                                                                    let msg = ClientMessage::PublishRequest {
-                                                                                        topic: PIPELINE_CONSUMER_TOPIC.to_string(),
-                                                                                        payload: bytes.to_vec(),
-                                                                                        registration_id: Some(state.registration_id.clone()),
-                                                                                    };
-
-                                                                                    tcp_client
-                                                                                        .send_message(TcpClientMessage::Send(msg))
-                                                                                        .expect("Expected to send message");
+                                                                                    if let Err(e) = send_to_broker(state, data, PIPELINE_CONSUMER_TOPIC) { return Err(e) }
                                                                                 }
                                                                             }
                                                                         }

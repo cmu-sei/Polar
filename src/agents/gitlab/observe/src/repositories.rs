@@ -21,12 +21,12 @@
    DM24-0470
 */
 
+use crate::graphql_endpoint;
 use crate::{
-    graphql_endpoint, BackoffReason, Command, GitlabObserverArgs, GitlabObserverMessage,
-    GitlabObserverState, BROKER_CLIENT_NAME, MESSAGE_FORWARDING_FAILED,
+    init_observer_state, send_to_broker, BackoffReason, Command, GitlabObserverArgs,
+    GitlabObserverMessage, GitlabObserverState, MESSAGE_FORWARDING_FAILED,
 };
-use cassini::{client::TcpClientMessage, ClientMessage};
-use common::types::GitlabData;
+use common::types::{GitlabData, GitlabPackageFile};
 use common::REPOSITORY_CONSUMER_TOPIC;
 use cynic::{GraphQlResponse, QueryBuilder};
 use gitlab_queries::projects::{
@@ -35,13 +35,44 @@ use gitlab_queries::projects::{
     SingleProjectQueryArguments,
 };
 use gitlab_schema::ContainerRepositoryID;
-use ractor::concurrency::Duration;
-use ractor::{async_trait, registry::where_is, Actor, ActorProcessingErr, ActorRef};
+use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef};
 use tracing::{debug, error, info, warn};
 
 pub struct GitlabRepositoryObserver;
 
 impl GitlabRepositoryObserver {
+    /// helper to quickly scrape package files from gitlab's REST API and pass them t0 the consumer side.
+    async fn get_gitlab_package_files(
+        state: &mut GitlabObserverState,
+        project_gid: &str,
+        package_gid: &str,
+    ) -> Result<(), ActorProcessingErr> {
+        // parse and strip ids
+        let project_id = crate::extract_gitlab_id(project_gid).unwrap();
+        let package_id = crate::extract_gitlab_id(package_gid).unwrap();
+
+        let url = format!(
+            "{}/api/v4/projects/{}/packages/{}/package_files",
+            state.gitlab_endpoint, project_id, package_id
+        );
+        debug!("GET {url}");
+
+        let res = state
+            .web_client
+            .get(&url)
+            .bearer_auth(state.token.clone().unwrap_or_default())
+            .header("Accept", "application/json")
+            .send()
+            .await
+            .unwrap();
+
+        let files: Vec<GitlabPackageFile> = res.json().await.unwrap();
+
+        let data = GitlabData::PackageFiles((package_gid.to_string(), files));
+
+        send_to_broker(state, data, REPOSITORY_CONSUMER_TOPIC)
+    }
+
     async fn get_repository_tags(
         web_client: reqwest::Client,
         full_path: ContainerRepositoryID,
@@ -125,16 +156,7 @@ impl Actor for GitlabRepositoryObserver {
         _myself: ActorRef<Self::Msg>,
         args: GitlabObserverArgs,
     ) -> Result<Self::State, ActorProcessingErr> {
-        let state = GitlabObserverState::new(
-            graphql_endpoint(&args.gitlab_endpoint),
-            args.token,
-            args.web_client,
-            args.registration_id,
-            Duration::from_secs(args.base_interval),
-            Duration::from_secs(args.max_backoff),
-        );
-
-        Ok(state)
+        Ok(init_observer_state(args))
     }
 
     async fn post_start(
@@ -163,7 +185,7 @@ impl Actor for GitlabRepositoryObserver {
 
                         match state
                             .web_client
-                            .post(state.gitlab_endpoint.clone())
+                            .post(graphql_endpoint(&state.gitlab_endpoint))
                             .bearer_auth(state.token.clone().unwrap_or_default())
                             .json(&op)
                             .send()
@@ -218,30 +240,9 @@ impl Actor for GitlabRepositoryObserver {
                                                                                 //send tag data
                                                                                 if !tags.is_empty()
                                                                                 {
-                                                                                    match where_is(BROKER_CLIENT_NAME.to_string()) {
-                                                                                        Some(tcp_client) => {
+                                                                                    let data = GitlabData::ContainerRepositoryTags((full_path.clone().to_string(), tags));
 
-                                                                                            let tag_message = GitlabData::ContainerRepositoryTags((full_path.clone().to_string(), tags));
-
-                                                                                            match rkyv::to_bytes::<rkyv::rancor::Error>(&tag_message) {
-                                                                                                Ok(bytes) => {
-                                                                                                    let msg = ClientMessage::PublishRequest {
-                                                                                                        topic: REPOSITORY_CONSUMER_TOPIC.to_string(),
-                                                                                                        payload: bytes.to_vec(),
-                                                                                                        registration_id: Some(state.registration_id.clone()),
-                                                                                                    };
-                                                                                                    tcp_client
-                                                                                                        .send_message(TcpClientMessage::Send(msg))
-                                                                                                        .expect("Expected to send message");
-                                                                                                }
-                                                                                                Err(e) => error!("Failed to serialize data. {e}")
-                                                                                            }
-                                                                                        }
-                                                                                        None => {
-                                                                                            warn!("Couldn't find client to send data, stopping.");
-                                                                                            myself.stop(None)
-                                                                                        }
-                                                                                    }
+                                                                                    if let Err(e) = send_to_broker(state, data, REPOSITORY_CONSUMER_TOPIC) { return Err(e) }
                                                                                 }
                                                                             }
                                                                             Err(e) => warn!("{e}"),
@@ -255,32 +256,15 @@ impl Actor for GitlabRepositoryObserver {
                                                             }
 
                                                             // send off repository data
-
                                                             if !read_repositories.is_empty() {
-                                                                match where_is(
-                                                                    BROKER_CLIENT_NAME.to_string(),
-                                                                ) {
-                                                                    Some(tcp_client) => {
-                                                                        let repo_data = GitlabData::ProjectContainerRepositories((full_path.to_string(), read_repositories));
+                                                                let data = GitlabData::ProjectContainerRepositories((full_path.to_string(), read_repositories));
 
-                                                                        match rkyv::to_bytes::<rkyv::rancor::Error>(&repo_data) {
-                                                                            Ok(bytes) => {
-                                                                                let msg = ClientMessage::PublishRequest {
-                                                                                    topic: REPOSITORY_CONSUMER_TOPIC.to_string(),
-                                                                                    payload: bytes.to_vec(),
-                                                                                    registration_id: Some(state.registration_id.clone()),
-                                                                                };
-                                                                                tcp_client
-                                                                                    .send_message(TcpClientMessage::Send(msg))
-                                                                                    .expect("Expected to send message");
-                                                                            }
-                                                                            Err(e) => error!("Failed to serialize data. {e}")
-                                                                        }
-                                                                    }
-                                                                    None => {
-                                                                        warn!("Couldn't find client to send data, stopping.");
-                                                                        myself.stop(None)
-                                                                    }
+                                                                if let Err(e) = send_to_broker(
+                                                                    state,
+                                                                    data,
+                                                                    REPOSITORY_CONSUMER_TOPIC,
+                                                                ) {
+                                                                    return Err(e);
                                                                 }
                                                             }
                                                         }
@@ -309,7 +293,7 @@ impl Actor for GitlabRepositoryObserver {
 
                         match state
                             .web_client
-                            .post(state.gitlab_endpoint.clone())
+                            .post(graphql_endpoint(&state.gitlab_endpoint))
                             .bearer_auth(state.token.clone().unwrap_or_default())
                             .json(&op)
                             .send()
@@ -340,44 +324,25 @@ impl Actor for GitlabRepositoryObserver {
                                                                     Package,
                                                                 > = Vec::new();
 
-                                                                read_packages.extend(
-                                                                    packages.into_iter().map(
-                                                                        |option| option.unwrap(),
-                                                                    ),
-                                                                );
+                                                                for package in packages {
+                                                                    let pkg = package.unwrap();
+                                                                    // get package file metadtadta
+                                                                    GitlabRepositoryObserver::get_gitlab_package_files(state, &project.id.0, &pkg.id.0).await.unwrap();
+                                                                    read_packages.push(pkg);
+                                                                }
 
-                                                                debug!("Found {} package(s) for project {full_path}", read_packages.len());
+                                                                let data =
+                                                                    GitlabData::ProjectPackages((
+                                                                        full_path.to_string(),
+                                                                        read_packages,
+                                                                    ));
 
-                                                                match where_is(
-                                                                    BROKER_CLIENT_NAME.to_string(),
+                                                                if let Err(e) = send_to_broker(
+                                                                    state,
+                                                                    data,
+                                                                    REPOSITORY_CONSUMER_TOPIC,
                                                                 ) {
-                                                                    Some(client) => {
-                                                                        let data = GitlabData::ProjectPackages((full_path.to_string(), read_packages));
-                                                                        // Serializing is as easy as a single function call
-                                                                        let bytes =
-                                                                            rkyv::to_bytes::<
-                                                                                rkyv::rancor::Error,
-                                                                            >(
-                                                                                &data
-                                                                            )
-                                                                            .unwrap();
-
-                                                                        let msg = ClientMessage::PublishRequest {
-                                                                            topic: REPOSITORY_CONSUMER_TOPIC.to_string(),
-                                                                            payload: bytes.to_vec(),
-                                                                            registration_id: Some(
-                                                                                state.registration_id.clone(),
-                                                                            ),
-                                                                        };
-
-                                                                        client
-                                                                            .send_message(TcpClientMessage::Send(msg))
-                                                                            .expect("Expected to send message");
-                                                                    }
-                                                                    None => {
-                                                                        let err_msg = "Failed to locate tcp client";
-                                                                        error!("{err_msg}");
-                                                                    }
+                                                                    return Err(e);
                                                                 }
                                                             }
                                                         }

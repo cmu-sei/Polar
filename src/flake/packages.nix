@@ -135,6 +135,12 @@ in
       staticanalysis.packages.${system}.default
 
       dotacat.packages.${system}.default
+      vulnix
+      skopeo
+      grype
+      syft
+      sops
+      envsubst
     ];
 
     # Set up the packages we want to include in our CI and testing environments,

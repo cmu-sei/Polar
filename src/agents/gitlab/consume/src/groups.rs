@@ -21,7 +21,7 @@
    DM24-0470
 */
 use crate::{subscribe_to_topic, GitlabConsumerArgs, GitlabConsumerState};
-use common::types::GitlabData;
+use common::types::{GitlabData, GitlabEnvelope};
 use common::GROUPS_CONSUMER_TOPIC;
 use neo4rs::Query;
 use polar::{QUERY_COMMIT_FAILED, QUERY_RUN_FAILED, TRANSACTION_FAILED_ERROR};
@@ -32,7 +32,7 @@ pub struct GitlabGroupConsumer;
 
 #[async_trait]
 impl Actor for GitlabGroupConsumer {
-    type Msg = GitlabData;
+    type Msg = GitlabEnvelope;
     type State = GitlabConsumerState;
     type Arguments = GitlabConsumerArgs;
 
@@ -73,27 +73,36 @@ impl Actor for GitlabGroupConsumer {
     ) -> Result<(), ActorProcessingErr> {
         match state.graph.start_txn().await {
             Ok(mut transaction) => {
-                match message {
+                match message.data {
                     GitlabData::Groups(vec) => {
-                        for g in vec {
-                            let query = format!(
-                                r#"
-                            MERGE (group: GitlabGroup {{ group_id: "{id}" }})
-                            SET group.full_name = "{full_name}",
-                                group.full_path = "{full_path}",
-                                group.created_at = "{created_at}"
-                                "#,
-                                id = g.id,
+                        let group_data = vec.iter().map(|g| {
+                            format!(
+                                r#"{{group_id: "{group_id}", full_path: "{full_path}", full_name: "{full_name}", created_at: "{created_at}" }}"#,
+                                group_id = g.id,
                                 full_name = g.full_name,
                                 full_path = g.full_path,
-                                created_at = g.created_at.unwrap_or_default(),
-                            );
-                            debug!(query);
-                            transaction
-                                .run(Query::new(query))
-                                .await
-                                .expect("Expected to run query on transaction.");
-                        }
+                                created_at = g.created_at.as_ref().unwrap())
+                        })
+                        .collect::<Vec<_>>()
+                        .join(",\n");
+
+                        let query = format!(
+                            r#"
+                                UNWIND [{group_data}] as g
+                                WITH g
+                                MERGE (group: GitlabGroup {{ group_id: g.group_id, full_path: g.full_path, full_name: g.full_name, created_at: g.created_at }})
+                                WITH group
+                                MERGE (instance: GitlabInstance {{instance_id: "{instance_id}" }})
+                                WITH group, instance
+                                MERGE (instance)-[:OBSERVED_GROUP]->(group)
+                            "#,
+                            instance_id = message.instance_id
+                        );
+                        debug!(query);
+                        transaction
+                            .run(Query::new(query))
+                            .await
+                            .expect("Expected to run query on transaction.");
 
                         transaction
                             .commit()
@@ -156,6 +165,7 @@ impl Actor for GitlabGroupConsumer {
                                     r.created_at = membership.created_at,
                                     r.expires_at = membership.expires_at,
                                     r.updated_at = membership.updated_at
+
                                 ",
                                 group_id = link.resource_id
                             );

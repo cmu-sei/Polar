@@ -1,15 +1,29 @@
 stages:
   - environment-setup
   - build
-  - test
+  - analysis
   - render
 
 default:
   tags:
     - kubernetes
 
-variables:
-  CI_IMAGE: "$CI_REGISTRY_IMAGE/polar-ci"
+.analyze_image:
+  stage: analysis
+  image: registry.sandbox.labz.s-box.org/sei/polar-mirror/polar-dev:0.1.0
+  variables:
+    IMAGE_NAME: "" # must be overridden
+  script:
+    - skopeo login --username "$CI_REGISTRY_USER" --password "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
+    - skopeo copy "docker://$CI_REGISTRY_IMAGE/$IMAGE_NAME:$CI_COMMIT_SHORT_SHA" docker-archive:image.tar.gz
+    # TODO: Enable grype database retrieval in CI
+    # - grype image.tar.gz -o cyclonedx-json=$IMAGE_NAME.grype-scan.json
+    #
+    - syft image.tar.gz -o cyclonedx-json=$IMAGE_NAME.sbom.json
+  artifacts:
+    paths:
+      - "*.json"
+    expire_in: 1 week
 
 build-dev-environment:
   image: registry.sandbox.labz.s-box.org/sei/polar-mirror/nix:2.24.13
@@ -37,101 +51,36 @@ build-dev-environment:
     - skopeo inspect docker-archive://$(readlink -f ./polar-dev)
     - skopeo copy docker-archive://$(readlink -f ./polar-dev) docker://$CI_REGISTRY_IMAGE/polar-dev:0.1.0
 
-build-ci-environment:
-  image: registry.sandbox.labz.s-box.org/sei/polar-mirror/nix:2.24.13
-  stage: environment-setup
-  rules:
-    - changes:
-        - flake.nix
-        - flake.lock
-        - src/flake/*
-        - .gitlab-ci.yml
-  script:
-    #install needed tools
-    - nix-env --install --attr nixpkgs.skopeo
-    - |
-      mkdir -p "$HOME/.config/nix"
-      printf "experimental-features = nix-command flakes" > "$HOME/.config/nix/nix.conf"
-      mkdir -p "/etc/containers"
-      echo '{"default":[{"type":"insecureAcceptAnything"}]}' > /etc/containers/policy.json
-      git config --global --add safe.directory "$(pwd)"
-    # build dev and testing environments
-    - nix build .#containers.ciContainer -o polar-ci
-
-    #  Use skopeo to inspect and upload our images
-    - skopeo login --username "$CI_REGISTRY_USER" --password "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
-    - skopeo inspect docker-archive://$(readlink -f ./polar-ci)
-    - skopeo copy docker-archive://$(readlink -f ./polar-ci) docker://$CI_REGISTRY_IMAGE/polar-ci:0.1.0
-
-build-workspace:
-  image: registry.sandbox.labz.s-box.org/sei/polar-mirror/polar-ci:0.1.0
+build:
+  image:
+    name: registry.sandbox.labz.s-box.org/sei/polar-mirror/polar-dev:0.1.0
+    # entrypoint:
+    #   - start.sh
   stage: build
   variables:
     AZURE_REGISTRY: sandboxaksacr.azurecr.us/polar
   script:
-    - git config --global --add safe.directory "$(pwd)"
-
-    # build workspace
-    - nix build
-
-    # upload binary artifacts to our package registry
-    - |
-      for file in result/bin/*; do
-        if [ -f "$file" ]; then
-          filename=$(basename "$file")
-          curl --header "JOB-TOKEN: $CI_JOB_TOKEN" \
-               --upload-file "$file" \
-               "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/polar/$CI_COMMIT_SHORT_SHA/$filename"
-          echo "Uploaded: $filename"
-        fi
-      done
-
-    # using already built dependencies, package and containerize our components.
-    - nix build .#polarPkgs.cassini.cassiniImage -o cassini
-    - nix build .#polarPkgs.gitlabAgent.observerImage -o gitlab-observer
-    - nix build .#polarPkgs.gitlabAgent.consumerImage -o gitlab-consumer
-    - nix build .#polarPkgs.kubeAgent.observerImage -o kube-observer
-    - nix build .#polarPkgs.kubeAgent.consumerImage -o kube-consumer
-
-    # Vulnerability analysis on our store
-    # vulnix returns nonzero exit codes, so we need to get around this.
-    # SEE: https://github.com/nix-community/vulnix/issues/79
-    - vulnix --json result > vulnix-report.json || export VULNIX_EXIT=$?
-    - |
-      if [[ "$VULNIX_EXIT" -eq 2 ]]; then
-        echo "Non-whitelisted vulnerabilities found!"
-      elif [[ "$VULNIX_EXIT" -eq 1 ]]; then
-        echo "Only whitelisted vulnerabilities found."
-      elif [[ "$VULNIX_EXIT" -eq 0 ]]; then
-        echo "Nothing found, is the store empty?"
-      fi
-
-    - ls -lh
-    # Use skopeo to inspect and upload our images
-    - skopeo login --username "$CI_REGISTRY_USER" --password "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
-    - skopeo copy docker-archive:$(readlink -f cassini) docker://$CI_REGISTRY_IMAGE/cassini:$CI_COMMIT_SHORT_SHA
-    - skopeo copy docker-archive:$(readlink -f gitlab-observer) docker://$CI_REGISTRY_IMAGE/polar-gitlab-observer:$CI_COMMIT_SHORT_SHA
-    - skopeo copy docker-archive:$(readlink -f gitlab-consumer) docker://$CI_REGISTRY_IMAGE/polar-gitlab-consumer:$CI_COMMIT_SHORT_SHA
-    - skopeo copy docker-archive:$(readlink -f kube-observer) docker://$CI_REGISTRY_IMAGE/polar-kube-observer:$CI_COMMIT_SHORT_SHA
-    - skopeo copy docker-archive:$(readlink -f kube-consumer) docker://$CI_REGISTRY_IMAGE/polar-kube-consumer:$CI_COMMIT_SHORT_SHA
-
-    # upload to ACR
-    - skopeo copy --dest-creds "$ACR_USERNAME:$ACR_TOKEN" docker-archive://$(readlink -f cassini) docker://$AZURE_REGISTRY/cassini:$CI_COMMIT_SHORT_SHA
-    - skopeo copy --dest-creds "$ACR_USERNAME:$ACR_TOKEN" docker-archive://$(readlink -f gitlab-observer) docker://$AZURE_REGISTRY/polar-gitlab-observer:$CI_COMMIT_SHORT_SHA
-    - skopeo copy --dest-creds "$ACR_USERNAME:$ACR_TOKEN" docker-archive://$(readlink -f gitlab-consumer) docker://$AZURE_REGISTRY/polar-gitlab-consumer:$CI_COMMIT_SHORT_SHA
-    - skopeo copy --dest-creds "$ACR_USERNAME:$ACR_TOKEN" docker-archive://$(readlink -f kube-observer) docker://$AZURE_REGISTRY/polar-kube-observer:$CI_COMMIT_SHORT_SHA
-    - skopeo copy --dest-creds "$ACR_USERNAME:$ACR_TOKEN" docker-archive://$(readlink -f kube-consumer) docker://$AZURE_REGISTRY/polar-kube-consumer:$CI_COMMIT_SHORT_SHA
-
+    # init env
+    - start.sh
+    # TODO: remove this and add cargo-cyclonedx to the static-tools derviation
+    - cargo install -q cargo-cyclonedx
+    - chmod +x -R scripts
+    - sh scripts/gitlab-ci.sh
   artifacts:
+    when: always
     paths:
-      - src/agents/vulnix-report.json
+      - output/*
+      - "*.sbom.json"
+      - vulnix-report.json
+    expire_in: "1 week"
 
 render-manifests:
-  image: registry.sandbox.labz.s-box.org/sei/polar-mirror/polar-ci:0.1.0
+  image: registry.sandbox.labz.s-box.org/sei/polar-mirror/polar-dev:0.1.0
   stage: render
   variables:
     TARGET_ENV: sandbox
   script:
+    - start.sh
     # Clone the chart repo
     # NOTE: A deploy key should be used used to enable read/write perms
     # An access token will do in the meantime

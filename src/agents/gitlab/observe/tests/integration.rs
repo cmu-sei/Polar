@@ -98,11 +98,12 @@ mod tests {
 
         let args = GitlabObserverArgs {
             registration_id: session_id,
-            gitlab_endpoint,
+            gitlab_endpoint: gitlab_endpoint.clone(),
             token: Some(gitlab_token),
             web_client: Client::new(),
             max_backoff: 30,
             base_interval: 10,
+            instance_uid: derive_instance_id(&gitlab_endpoint),
         };
 
         //start users observer

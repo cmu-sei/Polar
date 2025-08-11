@@ -24,7 +24,7 @@
 use crate::{subscribe_to_topic, GitlabConsumerArgs, GitlabConsumerState};
 use polar::{QUERY_COMMIT_FAILED, QUERY_RUN_FAILED, TRANSACTION_FAILED_ERROR};
 
-use common::types::GitlabData;
+use common::types::{GitlabData, GitlabEnvelope};
 use common::PROJECTS_CONSUMER_TOPIC;
 use neo4rs::Query;
 use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef};
@@ -34,7 +34,7 @@ pub struct GitlabProjectConsumer;
 
 #[async_trait]
 impl Actor for GitlabProjectConsumer {
-    type Msg = GitlabData;
+    type Msg = GitlabEnvelope;
     type State = GitlabConsumerState;
     type Arguments = GitlabConsumerArgs;
 
@@ -77,7 +77,7 @@ impl Actor for GitlabProjectConsumer {
     ) -> Result<(), ActorProcessingErr> {
         match state.graph.start_txn().await {
             Ok(mut transaction) => {
-                match message {
+                match message.data {
                     GitlabData::Projects(projects) => {
                         // Create list of projects
                         let project_array = projects.iter()
@@ -103,7 +103,11 @@ impl Actor for GitlabProjectConsumer {
                                 project.full_path = project_data.full_path,
                                 project.created_at = project_data.created_at,
                                 project.last_activity_at = project_data.last_activity_at
-                            "
+                                MERGE (instance: GitlabInstance {{instance_id: \"{}\" }})
+                                WITH  project, instance
+                                MERGE (instance)-[:OBSERVED_PROJECT]->(project)
+                            ",
+                            message.instance_id
                         );
 
                         debug!(cypher_query);

@@ -24,10 +24,10 @@
 use ractor::concurrency::Duration;
 
 use crate::{
-    graphql_endpoint, handle_backoff, BackoffReason, Command, GitlabObserverArgs,
-    GitlabObserverMessage, GitlabObserverState, MESSAGE_FORWARDING_FAILED,
+    graphql_endpoint, handle_backoff, init_observer_state, send_to_broker, BackoffReason, Command,
+    GitlabObserverArgs, GitlabObserverMessage, GitlabObserverState, MESSAGE_FORWARDING_FAILED,
 };
-use cassini::{client::TcpClientMessage, ClientMessage, UNEXPECTED_MESSAGE_STR};
+use cassini::UNEXPECTED_MESSAGE_STR;
 use common::{
     types::{GitlabData, ResourceLink},
     GROUPS_CONSUMER_TOPIC,
@@ -38,12 +38,9 @@ use gitlab_queries::groups::{
     MultiGroupQueryArguments,
 };
 
-use ractor::{async_trait, registry::where_is, Actor, ActorProcessingErr, ActorRef};
-use reqwest::Client;
+use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef};
 
 use tracing::{debug, error, info, warn};
-
-use crate::BROKER_CLIENT_NAME;
 
 pub struct GitlabGroupObserver;
 
@@ -85,16 +82,16 @@ impl GitlabGroupObserver {
 
     // helper to get a group memberships given a query operation
     async fn get_group_members(
-        client: Client,
-        token: String,
-        registration_id: String,
-        endpoint: String,
+        state: &mut GitlabObserverState,
         op: Operation<GroupMembersQuery, GroupPathVariable>,
     ) -> Result<(), String> {
         debug!("Sending query: {:?}", op.query);
 
-        match client
-            .post(endpoint)
+        let token = state.token.clone().unwrap_or_default();
+
+        match state
+            .web_client
+            .post(graphql_endpoint(&state.gitlab_endpoint))
             .bearer_auth(token)
             .json(&op)
             .send()
@@ -119,24 +116,13 @@ impl GitlabGroupObserver {
                     query.group.map(|group| {
                         let conn = group.group_members.unwrap();
 
-                        let client = where_is(BROKER_CLIENT_NAME.to_string())
-                            .expect("Expected to find tcp client");
-
                         let data = GitlabData::GroupMembers(ResourceLink {
                             resource_id: group.id.clone(),
                             connection: conn.clone(),
                         });
 
-                        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&data).unwrap();
-
-                        let msg = ClientMessage::PublishRequest {
-                            topic: GROUPS_CONSUMER_TOPIC.to_string(),
-                            payload: bytes.to_vec(),
-                            registration_id: Some(registration_id),
-                        };
-                        client
-                            .send_message(TcpClientMessage::Send(msg))
-                            .expect("Expected to send message to tcp client!");
+                        send_to_broker(state, data, GROUPS_CONSUMER_TOPIC)
+                            .map_err(|e| error!("{e}"))
                     });
 
                     Ok(())
@@ -149,16 +135,16 @@ impl GitlabGroupObserver {
 
     // helper to get a group memberships given a query operation
     async fn get_group_projects(
-        client: Client,
-        token: String,
-        registration_id: String,
-        endpoint: String,
+        state: &mut GitlabObserverState,
         op: Operation<GroupProjectsQuery, GroupPathVariable>,
     ) -> Result<(), String> {
         debug!("Sending query: {:?}", op.query);
 
-        match client
-            .post(endpoint)
+        let token = state.token.clone().unwrap_or_default();
+
+        match state
+            .web_client
+            .post(graphql_endpoint(&state.gitlab_endpoint))
             .bearer_auth(token)
             .json(&op)
             .send()
@@ -185,24 +171,13 @@ impl GitlabGroupObserver {
                         query.group.map(|group| {
                             let conn = group.projects.unwrap();
 
-                            let client = where_is(BROKER_CLIENT_NAME.to_string())
-                                .expect("Expected to find tcp client");
-
                             let data = GitlabData::GroupProjects(ResourceLink {
                                 resource_id: group.id.clone(),
                                 connection: conn.clone(),
                             });
 
-                            let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&data).unwrap();
-
-                            let msg = ClientMessage::PublishRequest {
-                                topic: GROUPS_CONSUMER_TOPIC.to_string(),
-                                payload: bytes.to_vec(),
-                                registration_id: Some(registration_id),
-                            };
-                            client
-                                .send_message(TcpClientMessage::Send(msg))
-                                .expect("Expected to send message to tcp client!");
+                            send_to_broker(state, data, GROUPS_CONSUMER_TOPIC)
+                                .map_err(|e| error!("{e}"))
                         });
 
                         Ok(())
@@ -216,16 +191,16 @@ impl GitlabGroupObserver {
 
     // helper to get a group memberships given a query operation
     async fn get_group_runners(
-        client: Client,
-        token: String,
-        registration_id: String,
-        endpoint: String,
+        state: &mut GitlabObserverState,
         op: Operation<GroupRunnersQuery, GroupPathVariable>,
     ) -> Result<(), String> {
         debug!("Sending query: {:?}", op.query);
 
-        match client
-            .post(endpoint)
+        let token = state.token.clone().unwrap_or_default();
+
+        match state
+            .web_client
+            .post(graphql_endpoint(&state.gitlab_endpoint))
             .bearer_auth(token)
             .json(&op)
             .send()
@@ -250,24 +225,12 @@ impl GitlabGroupObserver {
                     query.group.map(|group| {
                         let conn = group.runners.unwrap();
 
-                        let client = where_is(BROKER_CLIENT_NAME.to_string())
-                            .expect("Expected to find tcp client");
-
                         let data = GitlabData::GroupRunners(ResourceLink {
                             resource_id: group.id.clone(),
                             connection: conn.clone(),
                         });
 
-                        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&data).unwrap();
-
-                        let msg = ClientMessage::PublishRequest {
-                            topic: GROUPS_CONSUMER_TOPIC.to_string(),
-                            payload: bytes.to_vec(),
-                            registration_id: Some(registration_id),
-                        };
-                        client
-                            .send_message(TcpClientMessage::Send(msg))
-                            .expect("Expected to send message to tcp client!");
+                        return send_to_broker(state, data, GROUPS_CONSUMER_TOPIC);
                     });
 
                     Ok(())
@@ -292,16 +255,7 @@ impl Actor for GitlabGroupObserver {
     ) -> Result<Self::State, ActorProcessingErr> {
         debug!("{myself:?} starting, connecting to instance");
 
-        let state = GitlabObserverState::new(
-            graphql_endpoint(&args.gitlab_endpoint),
-            args.token,
-            args.web_client,
-            args.registration_id,
-            Duration::from_secs(args.base_interval),
-            Duration::from_secs(args.max_backoff),
-        );
-
-        Ok(state)
+        Ok(init_observer_state(args))
     }
 
     async fn post_start(
@@ -327,7 +281,7 @@ impl Actor for GitlabGroupObserver {
 
                         match state
                             .web_client
-                            .post(state.gitlab_endpoint.clone())
+                            .post(graphql_endpoint(&state.gitlab_endpoint))
                             .bearer_auth(state.token.clone().unwrap_or_default())
                             .json(&op)
                             .send()
@@ -367,13 +321,7 @@ impl Actor for GitlabGroupObserver {
                                                                 );
 
                                                             GitlabGroupObserver::get_group_members(
-                                                                state.web_client.clone(),
-                                                                state
-                                                                    .token
-                                                                    .clone()
-                                                                    .unwrap_or_default(),
-                                                                state.registration_id.clone(),
-                                                                state.gitlab_endpoint.clone(),
+                                                                state,
                                                                 get_group_members,
                                                             )
                                                             .await
@@ -389,10 +337,7 @@ impl Actor for GitlabGroupObserver {
                                                                 );
 
                                                             GitlabGroupObserver::get_group_projects(
-                                                                state.web_client.clone(),
-                                                                state.token.clone().unwrap_or_default(),
-                                                                state.registration_id.clone(),
-                                                                state.gitlab_endpoint.clone(),
+                                                                state,
                                                                 get_group_projects,
                                                             )
                                                             .await
@@ -408,13 +353,7 @@ impl Actor for GitlabGroupObserver {
                                                                 );
 
                                                             GitlabGroupObserver::get_group_runners(
-                                                                state.web_client.clone(),
-                                                                state
-                                                                    .token
-                                                                    .clone()
-                                                                    .unwrap_or_default(),
-                                                                state.registration_id.clone(),
-                                                                state.gitlab_endpoint.clone(),
+                                                                state,
                                                                 get_group_runners,
                                                             )
                                                             .await
@@ -427,27 +366,15 @@ impl Actor for GitlabGroupObserver {
 
                                                 info!("Observed {0} group(s)", read_groups.len());
 
-                                                let client =
-                                                    where_is(BROKER_CLIENT_NAME.to_string())
-                                                        .expect("Expected to find tcp client!");
+                                                let data = GitlabData::Groups(read_groups);
 
-                                                let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(
-                                                    &GitlabData::Groups(read_groups),
-                                                )
-                                                .unwrap();
-
-                                                let msg = ClientMessage::PublishRequest {
-                                                    topic: GROUPS_CONSUMER_TOPIC.to_string(),
-                                                    payload: bytes.to_vec(),
-                                                    registration_id: Some(
-                                                        state.registration_id.clone(),
-                                                    ),
-                                                };
-                                                client
-                                                    .send_message(TcpClientMessage::Send(msg))
-                                                    .expect(
-                                                        "Expected to send message to tcp client!",
-                                                    );
+                                                if let Err(e) = send_to_broker(
+                                                    state,
+                                                    data,
+                                                    GROUPS_CONSUMER_TOPIC,
+                                                ) {
+                                                    return Err(e);
+                                                }
                                             }
                                         }
                                     }
