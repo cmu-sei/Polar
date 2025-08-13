@@ -1,0 +1,9 @@
+code-scan:
+  image: <scan-image:tag>
+  rules:
+    - if: $CI_COMMIT_BRANCH == ’main’
+  script:
+    - sonar-scanner -Dsonar.projectKey=$sonarProj \
+                    -Dsonar.token=$sonarToken \
+                    -Dsonar.host.url=$sonarUrl \
+                    -X
