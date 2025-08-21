@@ -20,32 +20,22 @@
 
    DM24-0470
 */
-use std::{env, error::Error};
 use ractor::Actor;
-// use todo_consumer::actors;
-use common::init_logging;
-
+use std::{env, error::Error};
+use web_consumer::actors::{ConsumerSupervisor, ConsumerSupervisorArgs};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    init_logging();
+    polar::init_logging();
 
-    //TODO: Start consumer supervisor
-
-    let client_cert_file = env::var("TLS_CLIENT_CERT").unwrap();
-    let client_private_key_file = env::var("TLS_CLIENT_KEY").unwrap();
-    let ca_cert_file =  env::var("TLS_CA_CERT").unwrap();   
-    let broker_addr = env::var("BROKER_ADDR").unwrap();
-
-    // let args = actors::ConsumerSupervisorArgs {
-        // broker_addr,
-        // client_cert_file,
-        // client_private_key_file,
-        // ca_cert_file: ca_cert_file,
-    // };
-
-    // let (supervisor, handle) = Actor::spawn(Some("TODO_APP_CONSUMER".to_string()), actors::ConsumerSupervisor ,args).await.expect("Expected to start observer agent");
-    // let _ = handle.await;
+    let (_, handle) = Actor::spawn(
+        Some("polar.web.supervisor".to_string()),
+        ConsumerSupervisor,
+        ConsumerSupervisorArgs,
+    )
+    .await
+    .expect("Expected to start observer agent");
+    let _ = handle.await;
 
     Ok(())
 }

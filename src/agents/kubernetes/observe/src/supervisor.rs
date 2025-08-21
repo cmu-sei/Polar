@@ -24,6 +24,8 @@ pub struct ClusterObserverSupervisorState {
 }
 
 pub enum SupervisorMessage {
+    /// Notification message telling the supervisor the client's been registered with the broker.
+    /// This triggers the observer to finish startup and cancels the timeou
     ClientRegistered(String),
 }
 
