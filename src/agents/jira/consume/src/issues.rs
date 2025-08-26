@@ -137,7 +137,8 @@ impl Actor for JiraIssueConsumer {
 
                         let issue: JiraIssue = serde_json::from_str(&issue_json.json)
                             .expect("Failed to deserialize");
-                        issue_cypher.push_str("MERGE (i:Issue {key: \"");
+                        println!("Processing issue:{}", &issue.key);
+                        issue_cypher.push_str("MERGE (i:JiraIssue {key: \"");
                         issue_cypher.push_str(&issue.key);
                         issue_cypher.push_str("\"})");
                         issue_cypher.push('\n');
@@ -177,7 +178,7 @@ impl Actor for JiraIssueConsumer {
                                                         let mut sub_key = String::new();
                                                             second_cypher.push_str(
                                                                 &format!(
-                                                                    "MERGE ( {}{i}:{label} {{ key: \"{}\" }})\nMERGE (i)-[:HAS_{}]->({}{i})",
+                                                                    "MERGE ( {}{i}:JiraIssue_{label} {{ key: \"{}\" }})\nMERGE (i)-[:HAS_{}]->({}{i})",
                                                                     label.to_lowercase(),
                                                                     val,
                                                                     label.to_uppercase(),
@@ -197,7 +198,7 @@ impl Actor for JiraIssueConsumer {
                                                         }
                                                         second_cypher.push_str(
                                                             &format!(
-                                                                "MERGE ( {}{i}:{label} {{ key: \"{}\" }}) SET ",
+                                                                "MERGE ( {}{i}:JiraIssue_{label} {{ key: \"{}\" }}) SET ",
                                                                 label.to_lowercase(),
                                                                 sub_key,
                                                             )
@@ -271,7 +272,7 @@ impl Actor for JiraIssueConsumer {
 
                                             if let Some(FirstTierField::Option(Some(display))) = v.get("name") {
                                                 second_cypher.push_str(
-                                                    "MERGE (t:IssueType {name: \""
+                                                    "MERGE (t:JiraIssueType {name: \""
                                                 );
                                                 second_cypher.push_str(display);
                                                 second_cypher.push_str("\"})\n SET ");
@@ -320,7 +321,7 @@ impl Actor for JiraIssueConsumer {
                                                         match value {
                                                             FirstTierField::Object(val) => {
                                                                 // Check for object first
-                                                                println!("Skipping sub field key Object: {}", subkey);
+                                                                //println!("Skipping sub field key Object: {}", subkey);
                                                             },
                                                             FirstTierField::Option(Some(val)) => {
                                                                 if add_comma {
@@ -354,7 +355,7 @@ impl Actor for JiraIssueConsumer {
                                         } else if key == "parent" {
                                             if let Some(FirstTierField::Option(Some(parent_key))) = v.get("name") {
                                                 second_cypher.push_str(&format!(
-                                                    "MERGE (parent:Issue {{key: \"{}\" }})\n MERGE (i)-[:CHILD_OF]->(parent)\n", parent_key
+                                                    "MERGE (parent:JiraIssue {{key: \"{}\" }})\n MERGE (i)-[:CHILD_OF]->(parent)\n", parent_key
                                                 ));
                                             }
                                         } else {
@@ -362,14 +363,14 @@ impl Actor for JiraIssueConsumer {
                                             let mut first_one = true;
                                             let mut sub_key = String::new();
                                             if let Some(FirstTierField::Option(Some(name))) = v.get("name") {
-                                                sub_key.push_str(name);
+                                                sub_key.push_str(&name.replace('"', "'"));
                                             } else if let Some(FirstTierField::Option(Some(id))) = v.get("id") {
                                                 sub_key.push_str(id);
                                             } else {
                                                 sub_key.push_str(&issue.key);
                                             }
                                             second_cypher.push_str(&format!(
-                                                "MERGE ({}: {} {{key: \"{}\" }})\n SET ",
+                                                "MERGE ({}: JiraIssue_{} {{key: \"{}\" }})\n SET ",
                                                 key.replace(" ", "_").replace("-", "_").to_lowercase(),
                                                 key.replace(" ", "_").replace("-", "_"),
                                                 sub_key
@@ -432,11 +433,82 @@ impl Actor for JiraIssueConsumer {
                                 }
                             }
                         }
+
+                        // Add logic for changelog
+                        let mut changelogs = String::new();
+                        let mut counter: u32 = 0;
+                        for base_item in issue.changelog.histories {
+                            let author = base_item.author;
+                            let created = base_item.created;
+                            for item in base_item.items {
+                                changelogs.push_str(
+                                    &format!(
+                                        "MERGE (cl{}:JiraIssueChangeLog {{baseId: \"{}\", id:{} }}) SET cl{}.author=\"{}\", cl{}.created=\"{}\", cl{}.field=\"{}\", cl{}.fieldtype=\"{}\" ",
+                                        counter.to_string(),
+                                        base_item.id,
+                                        counter.to_string(),
+                                        counter.to_string(),
+                                        author.key,
+                                        counter.to_string(),
+                                        created,
+                                        counter.to_string(),
+                                        item.field,
+                                        counter.to_string(),
+                                        item.fieldtype
+                                    )
+                                );
+
+                                if let Some(option) = item.from {
+                                    changelogs.push_str(
+                                        &format!(
+                                            ", cl{}.from=\"{}\"",
+                                            counter.to_string(),
+                                            option.replace('"', "'")
+                                        )
+                                    );
+                                }
+                                if let Some(option) = item.fromString {
+                                    changelogs.push_str(
+                                        &format!(
+                                            ", cl{}.fromString=\"{}\"",
+                                            counter.to_string(),
+                                            option.replace('"', "'")
+                                        )
+                                    );
+                                }
+                                if let Some(option) = item.to {
+                                    changelogs.push_str(
+                                        &format!(
+                                            ", cl{}.to=\"{}\"",
+                                            counter.to_string(),
+                                            option.replace('"', "'")
+                                        )
+                                    );
+                                }
+                                if let Some(option) = item.toString {
+                                    changelogs.push_str(
+                                        &format!(
+                                            ", cl{}.toString=\"{}\"",
+                                            counter.to_string(),
+                                            option.replace('"', "'")
+                                        )
+                                    );
+                                }
+                                changelogs.push_str("\n");
+                                changelogs.push_str(&format!(
+                                    "MERGE (i)-[:Transitioned]->(cl{})\n",
+                                    counter.to_string(),
+                                    ));
+                                counter += 1;
+                            }
+                        }
+
                         issue_cypher.push('\n');
                         issue_cypher.push_str(&second_cypher);
+                        issue_cypher.push_str(&changelogs);
 
                         if let Err(_e) = transaction.run(Query::new(issue_cypher.clone())).await {
-                            println!("Cypher is:{:?}", issue_cypher);
+                            println!("Cypher is:{}", issue_cypher);
                             println!("Error:{:?}", _e);
                             myself.stop(Some(QUERY_RUN_FAILED.to_string()));
                         }

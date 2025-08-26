@@ -215,6 +215,21 @@ dependencies = [
 
 [[package]]
 name = "async-global-executor"
+version = "2.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "05b1b633a2115cd122d73b955eadd9916c18c8f510ec9cd1686404c60ad1c29c"
+dependencies = [
+ "async-channel",
+ "async-executor",
+ "async-io 2.4.0",
+ "async-lock 3.4.0",
+ "blocking",
+ "futures-lite 2.6.0",
+ "once_cell",
+]
+
+[[package]]
+name = "async-global-executor"
 version = "3.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "13f937e26114b93193065fd44f507aa2e9169ad0cdabbb996920b1fe1ddea7ba"
@@ -233,7 +248,7 @@ version = "2.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9af57045d58eeb1f7060e7025a1631cbc6399e0a1d10ad6735b3d0ea7f8346ce"
 dependencies = [
- "async-global-executor",
+ "async-global-executor 3.1.0",
  "async-trait",
  "executor-trait",
 ]
@@ -2219,10 +2234,11 @@ dependencies = [
  "polar",
  "ractor 0.15.6",
  "rand 0.9.1",
- "reqwest",
+ "reqwest 0.11.27",
  "rkyv 0.8.10",
  "serde",
  "serde_json",
+ "serde_path_to_error",
  "serde_yaml",
  "tokio",
  "tracing",
@@ -2239,10 +2255,12 @@ dependencies = [
  "amq-protocol-uri",
  "cassini",
  "futures-lite 1.13.0",
+ "indexmap",
  "lapin",
  "polar",
  "ractor 0.15.6",
  "rkyv 0.8.10",
+ "rkyv_derive 0.8.10",
  "serde",
  "serde_json",
  "sysinfo",
@@ -4217,6 +4235,16 @@ dependencies = [
  "itoa",
  "memchr",
  "ryu",
+ "serde",
+]
+
+[[package]]
+name = "serde_path_to_error"
+version = "0.1.17"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "59fab13f937fa393d08645bf3a84bdfe86e296747b506ada67bb15f10f218b2a"
+dependencies = [
+ "itoa",
  "serde",
 ]
 
