@@ -337,12 +337,12 @@ impl Actor for Listener {
         //start listening
         let _ = tokio::spawn(async move {
             let mut buf_reader = tokio::io::BufReader::new(reader);
-
             // parse incoming message length, this tells us what size of a message to expect.
-            while let Ok(incoming_msg_length) = buf_reader.read_u32().await {
+            while let Ok(incoming_msg_length) = buf_reader.read_u64().await {
+
                 if incoming_msg_length > 0 {
-                    // createa buffer of exact size, and read data in.
-                    let mut buffer = vec![0; incoming_msg_length as usize];
+                    // create a buffer of exact size, and read data in.
+                    let mut buffer = vec![0u8; incoming_msg_length as usize];
                     if let Ok(_) = buf_reader.read_exact(&mut buffer).await {
                         // use unsafe API for maximum performance
                         match rkyv::access::<ArchivedClientMessage, Error>(&buffer[..]) {
@@ -357,13 +357,14 @@ impl Actor for Listener {
                                         id.clone(),
                                         None,
                                     );
-
                                     myself
                                         .send_message(converted_msg)
                                         .expect("Could not forward message to handler");
                                 }
                             }
-                            Err(e) => warn!("Failed to parse message: {e}"),
+                            Err(e) => {
+                                warn!("Failed to parse message: {e}");
+                            }
                         }
                     }
                 }

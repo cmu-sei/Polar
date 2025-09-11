@@ -43,7 +43,6 @@ use serde_json::Value;
 use std::io::Cursor;
 use std::collections::HashMap;
 
-
 pub struct JiraIssueObserver;
 
 impl JiraIssueObserver {
@@ -168,8 +167,6 @@ impl Actor for JiraIssueObserver {
                                         }
                                     }
 
-
-                                    //println!("{:#?}", cloned_issue);
                                     let tcp_client =
                                         where_is(BROKER_CLIENT_NAME.to_string())
                                             .expect("Expected to find client");
@@ -186,28 +183,10 @@ impl Actor for JiraIssueObserver {
                                     tcp_client
                                         .send_message(TcpClientMessage::Send(msg))
                                         .expect("Expected to send message");
-                                    /*
-                                    let cursor = Cursor::new(issue.to_string());
-                                    let mut deserializer = serde_json::Deserializer::from_reader(cursor);
-                                    let result: Result<JiraIssue, _> = serde_path_to_error::deserialize(&mut deserializer);
-
-                                    match result {
-                                        Ok(issue) => println!("Success"),
-                                        Err(err) => {
-                                            println!("{:#?}", issue);
-                                            println!("Deserialization error: {}", err);
-                                            println!("Error path: {}", err.path());
-                                        }
-                                    }
-                                    */
                                 }
                             }
-
                             let fetched = max_results;
                             let total = res["total"].as_u64().unwrap_or(0);
-
-                            //let issues: Vec<JiraIssue> = serde_json::from_value(res["issues"].clone())?;
-                            //all_issues.extend(issues);
 
                             if (start_at as usize + fetched) >= total as usize {
                                 break;
@@ -215,13 +194,6 @@ impl Actor for JiraIssueObserver {
 
                             start_at += fetched;
                             debug!("Loaded {}...", start_at);
-
-
-
-                            //let data = JiraData::Issues(all_issues.clone());
-                            //println!("Data - ({})", json_data);
-                            //let data = JiraData::Issues(json_data.clone());
-
                         }
                     }
                     _ => (),
