@@ -133,15 +133,16 @@ impl Actor for JiraIssueConsumer {
                         // Create list of issues
                         let mut issue_cypher = String::new();
                         let mut second_cypher = String::new();
-                        let mut first_issue_att = true;
 
+                        let mut first_issue_att = true;
+                        let mut params: HashMap<String, String> = HashMap::new();
                         let issue: JiraIssue = serde_json::from_str(&issue_json.json)
                             .expect("Failed to deserialize");
-                        issue_cypher.push_str("MERGE (i:Issue {key: \"");
-                        issue_cypher.push_str(&issue.key);
-                        issue_cypher.push_str("\"})");
-                        issue_cypher.push('\n');
-                        issue_cypher.push_str("SET ");
+                        println!("Processing issue:{}", &issue.key);
+                        params.insert(String::from("issueKey"), issue.key.clone());
+                        let mut field_count:u32 = 0;
+                        issue_cypher.push_str("MERGE (i:JiraIssue {key: $issueKey})\nSET ");
+
                         for key in issue.fields.keys() {
                             if let Some(value) = issue.fields.get(&key.clone()) {
                                 match value {
@@ -149,7 +150,10 @@ impl Actor for JiraIssueConsumer {
                                         if !first_issue_att {
                                             issue_cypher.push_str(",");
                                         }
-                                        issue_cypher.push_str(&format!("i.`{}` = \"{}\"", &key, v.replace("\"", "'")));
+                                        let new_key = String::from(format!("field{field_count}"));
+                                        field_count += 1;
+                                        params.insert(new_key.clone(), v.to_string());
+                                        issue_cypher.push_str(&format!("i.`{}` = ${new_key}", &key));
                                         first_issue_att = false;
                                     },
                                     FieldValue::Number(v) => {
@@ -169,21 +173,23 @@ impl Actor for JiraIssueConsumer {
                                     FieldValue::List(v) => {
                                         if !v.is_empty() {
                                             //println!("Found({:?}) list:{:?}", key, v);
-                                            let mut label = key.clone().replace(" ", "_").replace("-", "_").replace("/","");
+                                            let mut label = key.clone().replace(" ", "_").replace("-", "_").replace("/","").replace('#', "num");
 
                                             for (i, item) in v.into_iter().enumerate() {
                                                 match item {
                                                     NestedListTypes::Option(Some(val)) => {
                                                         let mut sub_key = String::new();
-                                                            second_cypher.push_str(
-                                                                &format!(
-                                                                    "MERGE ( {}{i}:{label} {{ key: \"{}\" }})\nMERGE (i)-[:HAS_{}]->({}{i})",
-                                                                    label.to_lowercase(),
-                                                                    val,
-                                                                    label.to_uppercase(),
-                                                                    label.to_lowercase(),
-                                                                )
-                                                            );
+                                                        let new_key = String::from(format!("field{field_count}"));
+                                                        field_count += 1;
+                                                        params.insert(new_key.clone(), val.to_string());
+                                                        second_cypher.push_str(
+                                                            &format!(
+                                                                "MERGE ( {}{i}:JiraIssue_{label} {{ key: ${new_key} }})\nMERGE (i)-[:HAS_{}]->({}{i})",
+                                                                label.to_lowercase(),
+                                                                label.to_uppercase(),
+                                                                label.to_lowercase(),
+                                                            )
+                                                        );
                                                     },
                                                     NestedListTypes::Object(the_item) => {
                                                         let mut sub_key = String::new();
@@ -195,11 +201,13 @@ impl Actor for JiraIssueConsumer {
                                                             sub_key.push_str(&issue.key);
                                                             sub_key.push_str(&i.to_string());
                                                         }
+                                                        let new_key = String::from(format!("field{field_count}"));
+                                                        field_count += 1;
+                                                        params.insert(new_key.clone(), sub_key);
                                                         second_cypher.push_str(
                                                             &format!(
-                                                                "MERGE ( {}{i}:{label} {{ key: \"{}\" }}) SET ",
+                                                                "MERGE ( {}{i}:JiraIssue_{label} {{ key: ${new_key} }}) SET ",
                                                                 label.to_lowercase(),
-                                                                sub_key,
                                                             )
                                                         );
                                                         let mut first_one = true;
@@ -210,15 +218,14 @@ impl Actor for JiraIssueConsumer {
                                                                         if !first_one {
                                                                             second_cypher.push_str(",");
                                                                         }
+                                                                        let new_sub_key = String::from(format!("field{field_count}"));
+                                                                        field_count += 1;
+                                                                        params.insert(new_sub_key.clone(), val.to_string());
                                                                         second_cypher.push_str(&format!(
-                                                                            "{}{i}.`{}` = \"",
+                                                                            "{}{i}.`{}` = ${new_sub_key} ",
                                                                             label.to_lowercase(),
                                                                             &attribute,
                                                                             ));
-                                                                        second_cypher.push_str(
-                                                                            &val.replace("\\\"", "'")
-                                                                        );
-                                                                        second_cypher.push_str("\" ");
                                                                         first_one = false;
                                                                     },
                                                                     FirstTierField::Number(val) => {
@@ -271,7 +278,7 @@ impl Actor for JiraIssueConsumer {
 
                                             if let Some(FirstTierField::Option(Some(display))) = v.get("name") {
                                                 second_cypher.push_str(
-                                                    "MERGE (t:IssueType {name: \""
+                                                    "MERGE (t:JiraIssueType {name: \""
                                                 );
                                                 second_cypher.push_str(display);
                                                 second_cypher.push_str("\"})\n SET ");
@@ -283,7 +290,10 @@ impl Actor for JiraIssueConsumer {
                                                                 if !first_one {
                                                                     second_cypher.push_str(",");
                                                                 }
-                                                                second_cypher.push_str(&format!("t.`{}` = \"{}\" ", &subkey, val));
+                                                                let new_key = String::from(format!("field{field_count}"));
+                                                                field_count += 1;
+                                                                params.insert(new_key.clone(), val.to_string());
+                                                                second_cypher.push_str(&format!("t.`{}` = ${new_key} ", &subkey));
                                                                 first_one = false;
                                                             },
                                                             FirstTierField::Number(val) => {
@@ -320,7 +330,7 @@ impl Actor for JiraIssueConsumer {
                                                         match value {
                                                             FirstTierField::Object(val) => {
                                                                 // Check for object first
-                                                                println!("Skipping sub field key Object: {}", subkey);
+                                                                //println!("Skipping sub field key Object: {}", subkey);
                                                             },
                                                             FirstTierField::Option(Some(val)) => {
                                                                 if add_comma {
@@ -354,7 +364,7 @@ impl Actor for JiraIssueConsumer {
                                         } else if key == "parent" {
                                             if let Some(FirstTierField::Option(Some(parent_key))) = v.get("name") {
                                                 second_cypher.push_str(&format!(
-                                                    "MERGE (parent:Issue {{key: \"{}\" }})\n MERGE (i)-[:CHILD_OF]->(parent)\n", parent_key
+                                                    "MERGE (parent:JiraIssue {{key: \"{}\" }})\n MERGE (i)-[:CHILD_OF]->(parent)\n", parent_key
                                                 ));
                                             }
                                         } else {
@@ -368,11 +378,13 @@ impl Actor for JiraIssueConsumer {
                                             } else {
                                                 sub_key.push_str(&issue.key);
                                             }
+                                            let new_key = String::from(format!("field{field_count}"));
+                                            field_count += 1;
+                                            params.insert(new_key.clone(), sub_key);
                                             second_cypher.push_str(&format!(
-                                                "MERGE ({}: {} {{key: \"{}\" }})\n SET ",
+                                                "MERGE ({}: JiraIssue_{} {{key: ${new_key} }})\n SET ",
                                                 key.replace(" ", "_").replace("-", "_").to_lowercase(),
-                                                key.replace(" ", "_").replace("-", "_"),
-                                                sub_key
+                                                key.replace(" ", "_").replace("-", "_")
                                                 ));
 
                                             for attribute in v.keys() {
@@ -382,15 +394,15 @@ impl Actor for JiraIssueConsumer {
                                                             if !first_one {
                                                                 second_cypher.push_str(",");
                                                             }
+                                                            let new_sub_key = String::from(format!("field{field_count}"));
+                                                            field_count += 1;
+                                                            params.insert(new_sub_key.clone(), val.to_string());
                                                             second_cypher.push_str(&format!(
-                                                                "{}.`{}` = \"",
+                                                                "{}.`{}` = ${new_sub_key} ",
                                                                 key.replace(" ", "_").replace("-", "_").to_lowercase(),
                                                                 &attribute,
                                                                 ));
-                                                            second_cypher.push_str(
-                                                                &val.replace("\\\"", "'")
-                                                            );
-                                                            second_cypher.push_str("\" ");
+
                                                             first_one = false;
                                                         },
                                                         FirstTierField::Number(val) => {
@@ -432,11 +444,92 @@ impl Actor for JiraIssueConsumer {
                                 }
                             }
                         }
+
+                        // Add logic for changelog
+                        let mut changelogs = String::new();
+                        let mut counter: u32 = 0;
+                        for base_item in issue.changelog.histories {
+                            let author = base_item.author;
+                            let created = base_item.created;
+                            for item in base_item.items {
+                                let new_sub_key = String::from(format!("field{field_count}"));
+                                field_count += 1;
+                                params.insert(new_sub_key.clone(), author.key.clone());
+                                changelogs.push_str(
+                                    &format!(
+                                        "MERGE (cl{}:JiraIssueChangeLog {{baseId: \"{}\", id:{} }}) SET cl{}.author=${new_sub_key}, cl{}.created=\"{}\", cl{}.field=\"{}\", cl{}.fieldtype=\"{}\" ",
+                                        counter.to_string(),
+                                        base_item.id,
+                                        counter.to_string(),
+                                        counter.to_string(),
+                                        counter.to_string(),
+                                        created,
+                                        counter.to_string(),
+                                        item.field,
+                                        counter.to_string(),
+                                        item.fieldtype
+                                    )
+                                );
+
+                                if let Some(option) = item.from {
+                                    let new_field_key = String::from(format!("field{field_count}"));
+                                    field_count += 1;
+                                    params.insert(new_field_key.clone(), option);
+                                    changelogs.push_str(
+                                        &format!(
+                                            ", cl{}.from=${new_field_key}",
+                                            counter.to_string()
+                                        )
+                                    );
+                                }
+                                if let Some(option) = item.fromString {
+                                    let new_field_key = String::from(format!("field{field_count}"));
+                                    field_count += 1;
+                                    params.insert(new_field_key.clone(), option);
+                                    changelogs.push_str(
+                                        &format!(
+                                            ", cl{}.fromString=${new_field_key}",
+                                            counter.to_string()
+                                        )
+                                    );
+                                }
+                                if let Some(option) = item.to {
+                                    let new_field_key = String::from(format!("field{field_count}"));
+                                    field_count += 1;
+                                    params.insert(new_field_key.clone(), option);
+                                    changelogs.push_str(
+                                        &format!(
+                                            ", cl{}.to=${new_field_key}",
+                                            counter.to_string()
+                                        )
+                                    );
+                                }
+                                if let Some(option) = item.toString {
+                                    let new_field_key = String::from(format!("field{field_count}"));
+                                    field_count += 1;
+                                    params.insert(new_field_key.clone(), option);
+                                    changelogs.push_str(
+                                        &format!(
+                                            ", cl{}.toString=${new_field_key}",
+                                            counter.to_string()
+                                        )
+                                    );
+                                }
+                                changelogs.push_str("\n");
+                                changelogs.push_str(&format!(
+                                    "MERGE (i)-[:Transitioned]->(cl{})\n",
+                                    counter.to_string(),
+                                    ));
+                                counter += 1;
+                            }
+                        }
+
                         issue_cypher.push('\n');
                         issue_cypher.push_str(&second_cypher);
+                        issue_cypher.push_str(&changelogs);
 
-                        if let Err(_e) = transaction.run(Query::new(issue_cypher.clone())).await {
-                            println!("Cypher is:{:?}", issue_cypher);
+                        if let Err(_e) = transaction.run(Query::new(issue_cypher.clone()).params(params)).await {
+                            println!("Cypher is:{}", issue_cypher);
                             println!("Error:{:?}", _e);
                             myself.stop(Some(QUERY_RUN_FAILED.to_string()));
                         }

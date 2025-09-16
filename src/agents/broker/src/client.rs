@@ -285,17 +285,16 @@ impl Actor for TcpClientActor {
                         let mut buffer = Vec::new();
 
                         //get message length as header
-                        let len = bytes.len().to_be_bytes();
+                        let len = (bytes.len() as u64).to_be_bytes();
                         buffer.extend_from_slice(&len);
 
                         //add message to buffer
                         buffer.extend_from_slice(&bytes);
 
                         //write message
-
                         let unwrapped_writer = state.writer.clone().unwrap();
                         let mut writer = unwrapped_writer.lock().await;
-                        if let Err(e) = writer.write(&buffer).await {
+                        if let Err(e) = writer.write_all(&buffer).await {
                             error!("Failed to flush stream {e}, stopping client");
                             myself.stop(Some("UNEXPECTED_DISCONNECT".to_string()))
                         }

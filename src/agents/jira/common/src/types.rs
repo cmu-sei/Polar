@@ -209,7 +209,6 @@ pub enum JiraData {
     Projects(Vec<JiraProject>),
     Groups(Vec<JiraGroup>),
     Users(Vec<JiraUser>),
-    //Issues(Vec<JiraIssue>),
     Issues(JsonString),
 }
 
