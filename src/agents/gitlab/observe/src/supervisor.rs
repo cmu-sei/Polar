@@ -1,5 +1,4 @@
-use cassini::client::*;
-use cassini::TCPClientConfig;
+use cassini_client::*;
 use common::get_file_as_byte_vec;
 use ractor::async_trait;
 use ractor::Actor;

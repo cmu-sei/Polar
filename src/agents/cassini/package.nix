@@ -20,6 +20,15 @@ let
     doCheck = false;
     });
 
+    # TODO: build the test harness
+    harness = craneLib.buildPackage (crateArgs // {
+    inherit cargoArtifacts;
+    cargoExtraArgs = "--bin cassini-harness --locked";
+    src = workspaceFileset ./harness;
+    # Disable tests for now, We'll run them later with env vars and TlsCerts
+    doCheck = false;
+    });
+
     cassiniEnv = pkgs.buildEnv {
         name = "cassini-env";
         paths =  [

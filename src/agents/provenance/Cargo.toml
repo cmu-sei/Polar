@@ -11,7 +11,7 @@ tracing = "0.1.41"
 tracing-glog = "0.4.0"
 tracing-subscriber = { version = "0.3.19", features = ["std", "env-filter"] }
 workspace-hack = { version = "0.1", path = "../workspace-hack" }
-cassini = { path = "../broker" }
+cassini = { path = "../cassini/broker" }
 ractor = { version = "0.15.6", features = ["async-trait"] }
 rkyv = "0.8.10"
 polar = { path = "../lib" }

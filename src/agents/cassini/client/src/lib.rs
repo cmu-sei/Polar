@@ -1,6 +1,4 @@
-use crate::{ArchivedClientMessage, ClientMessage, TCPClientConfig};
-use polar::DispatcherMessage;
-use ractor::registry::where_is;
+use cassini_types::{ArchivedClientMessage, ClientMessage};
 use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef, OutputPort, RpcReplyPort};
 use rkyv::deserialize;
 use rkyv::rancor::Error;
@@ -8,17 +6,55 @@ use rustls::client::WebPkiServerVerifier;
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
 use rustls::ClientConfig;
+use std::env;
 use std::sync::Arc;
-use tokio::io::{split, AsyncReadExt, AsyncWriteExt, BufWriter, ReadHalf, WriteHalf};
+use tokio::io::AsyncWriteExt;
+use tokio::io::{split, AsyncReadExt, BufWriter, ReadHalf, WriteHalf};
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 use tokio_rustls::client::TlsStream;
 use tokio_rustls::TlsConnector;
 use tracing::{debug, error, info, warn};
 
+pub const UNEXPECTED_DISCONNECT: &str = "UNEXPECTED_DISCONNECT";
+
+///
+/// A basse configuration for a TCP Client actor
+pub struct TCPClientConfig {
+    pub broker_endpoint: String,
+    pub server_name: String,
+    pub ca_certificate_path: String,
+    pub client_certificate_path: String,
+    pub client_key_path: String,
+}
+
+impl TCPClientConfig {
+    /// Read filepaths from the environment and return. If we can't read these, we can't start
+    pub fn new() -> Self {
+        let client_certificate_path =
+            env::var("TLS_CLIENT_CERT").expect("Expected a value for TLS_CLIENT_CERT.");
+        let client_key_path =
+            env::var("TLS_CLIENT_KEY").expect("Expected a value for TLS_CLIENT_KEY.");
+        let ca_certificate_path =
+            env::var("TLS_CA_CERT").expect("Expected a value for TLS_CA_CERT.");
+        let broker_endpoint =
+            env::var("BROKER_ADDR").expect("Expected a valid socket address for BROKER_ADDR");
+        let server_name =
+            env::var("CASSINI_SERVER_NAME").expect("Expected a value for CASSINI_SERVER_NAME");
+
+        TCPClientConfig {
+            broker_endpoint,
+            server_name,
+            ca_certificate_path,
+            client_certificate_path,
+            client_key_path,
+        }
+    }
+}
+
 /// Messages handled by the TCP client actor
 pub enum TcpClientMessage {
-    Send(ClientMessage),
+    // Send(ClientMessage),
     RegistrationResponse(String),
     ErrorMessage(String),
     /// Returns the registration id when queried, unlikely to be useful
@@ -27,6 +63,19 @@ pub enum TcpClientMessage {
     /// Message that gets emitted when the client successfully registers with the broker.
     /// It should contain a valid registration uid
     ClientRegistered(String),
+    // attempt to register with the broker, optionally with a registration id to restart a session.
+    Register(Option<String>),
+    /// Publish request from the client.
+    Publish {
+        topic: String,
+        payload: Vec<u8>,
+    },
+    Subscribe(String),
+    /// Unsubscribe request from the client.
+    /// Contains the topic
+    UnsubscribeRequest(String),
+    ///Disconnect, sending a session id to end, if any
+    Disconnect,
 }
 
 /// Actor state for the TCP client
@@ -38,16 +87,59 @@ pub struct TcpClientState {
     registration_id: Option<String>,
     client_config: Arc<ClientConfig>,
     output_port: Arc<OutputPort<String>>,
+    queue_output: Arc<OutputPort<Vec<u8>>>,
 }
 
 pub struct TcpClientArgs {
     pub config: TCPClientConfig,
     pub registration_id: Option<String>,
     pub output_port: Arc<OutputPort<String>>,
+    pub queue_output: Arc<OutputPort<Vec<u8>>>,
 }
 
 /// TCP client actor
 pub struct TcpClientActor;
+
+impl TcpClientActor {
+    /// Send a payload to the broker over the write.
+    pub async fn send_message(
+        message: ClientMessage,
+        state: &mut TcpClientState,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        match rkyv::to_bytes::<Error>(&message) {
+            Ok(bytes) => {
+                //create new buffer
+                let mut buffer = Vec::new();
+
+                //get message length as header
+                let len = (bytes.len() as u64).to_be_bytes();
+                buffer.extend_from_slice(&len);
+
+                //add message to buffer
+                buffer.extend_from_slice(&bytes);
+
+                //write message
+                let unwrapped_writer = state.writer.clone().unwrap();
+                let mut writer = unwrapped_writer.lock().await;
+                if let Err(e) = writer.write_all(&buffer).await {
+                    error!("Failed to flush stream {e}");
+                    return Err(Box::new(e));
+                }
+
+                if let Err(e) = writer.flush().await {
+                    error!("Failed to flush stream {e}");
+                    return Err(Box::new(e));
+                }
+
+                return Ok(());
+            }
+            Err(e) => {
+                warn!("Failed to serialize message. {e}");
+                return Err(Box::new(e));
+            }
+        }
+    }
+}
 
 #[async_trait]
 impl Actor for TcpClientActor {
@@ -108,6 +200,7 @@ impl Actor for TcpClientActor {
             registration_id: args.registration_id,
             client_config: Arc::new(config),
             output_port: args.output_port,
+            queue_output: args.queue_output,
         };
 
         Ok(state)
@@ -141,6 +234,7 @@ impl Actor for TcpClientActor {
                         );
 
                         let cloned_self = myself.clone();
+                        let cloned_queue_out = state.queue_output.clone();
 
                         //start listening
                         let _ = tokio::spawn(async move {
@@ -183,24 +277,7 @@ impl Actor for TcpClientActor {
                                                 } => {
                                                     //new message on topic
                                                     if result.is_ok() {
-                                                        // try to find dispatcher
-                                                        // NOTE: This represents a mandate to name all dispatcher actors with this string
-                                                        // So far, we rely heavily on ractor's actor registry to do lookups to know where data is supposed to go.
-                                                        let dispatcher =
-                                                            where_is("DISPATCH".to_string())
-                                                                .expect(
-                                                                    "Expected to find dispatcher.",
-                                                                );
-                                                        dispatcher
-                                                            .send_message(
-                                                                DispatcherMessage::Dispatch {
-                                                                    message: payload,
-                                                                    topic,
-                                                                },
-                                                            )
-                                                            .expect(
-                                                                "Expected to send to dispatcher",
-                                                            );
+                                                        cloned_queue_out.send(payload);
                                                     } else {
                                                         warn!("Failed to publish message to topic: {topic}");
                                                     }
@@ -241,10 +318,6 @@ impl Actor for TcpClientActor {
                 }
             }
             Err(e) => {
-                // Given that the gitlab consumer recently got an upgrade using an exponential backoff,
-                // perhaps it's time the client actor got one too?
-                // It's not the end of the world if cassini goes down is it?
-                // if it does, it drops messages, but that doesn't mean we have to give up on the client end.
                 error!("Failed to connect to server: {e}");
                 myself.stop(Some("Failed to connect to server: {e}".to_string()));
             }
@@ -252,9 +325,7 @@ impl Actor for TcpClientActor {
 
         //Send registration request
         if let Err(e) =
-            myself.send_message(TcpClientMessage::Send(ClientMessage::RegistrationRequest {
-                registration_id: state.registration_id.clone(),
-            }))
+            myself.send_message(TcpClientMessage::Register(state.registration_id.clone()))
         {
             error!("{e}");
             myself.stop(Some(format!("{e}")));
@@ -262,6 +333,7 @@ impl Actor for TcpClientActor {
 
         Ok(())
     }
+
     async fn post_stop(
         &self,
         myself: ActorRef<Self::Msg>,
@@ -278,35 +350,44 @@ impl Actor for TcpClientActor {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
-            TcpClientMessage::Send(broker_msg) => {
-                match rkyv::to_bytes::<Error>(&broker_msg) {
-                    Ok(bytes) => {
-                        //create new buffer
-                        let mut buffer = Vec::new();
-
-                        //get message length as header
-                        let len = (bytes.len() as u64).to_be_bytes();
-                        buffer.extend_from_slice(&len);
-
-                        //add message to buffer
-                        buffer.extend_from_slice(&bytes);
-
-                        //write message
-                        let unwrapped_writer = state.writer.clone().unwrap();
-                        let mut writer = unwrapped_writer.lock().await;
-                        if let Err(e) = writer.write_all(&buffer).await {
-                            error!("Failed to flush stream {e}, stopping client");
-                            myself.stop(Some("UNEXPECTED_DISCONNECT".to_string()))
-                        }
-
-                        if let Err(e) = writer.flush().await {
-                            error!("Failed to flush stream {e}, stopping client");
-                            myself.stop(Some("UNEXPECTED_DISCONNECT".to_string()))
-                        }
-                    }
-                    Err(e) => {
-                        warn!("Failed to serialize message. {e}")
-                    }
+            TcpClientMessage::Register(registration_id) => {
+                let envelope = ClientMessage::RegistrationRequest { registration_id };
+                if let Err(e) = TcpClientActor::send_message(envelope, state).await {
+                    myself.stop(Some(format!("Unexpected error sending message. {e}")))
+                }
+            }
+            TcpClientMessage::Publish { topic, payload } => {
+                let envelope = ClientMessage::PublishRequest {
+                    topic,
+                    payload,
+                    registration_id: state.registration_id.clone(),
+                };
+                if let Err(e) = TcpClientActor::send_message(envelope, state).await {
+                    myself.stop(Some(format!("Unexpected error sending message. {e}")))
+                }
+            }
+            TcpClientMessage::Subscribe(topic) => {
+                let envelope = ClientMessage::SubscribeRequest {
+                    registration_id: state.registration_id.clone(),
+                    topic,
+                };
+                if let Err(e) = TcpClientActor::send_message(envelope, state).await {
+                    myself.stop(Some(format!("Unexpected error sending message. {e}")))
+                }
+            }
+            TcpClientMessage::Disconnect => {
+                let envelope = ClientMessage::DisconnectRequest(state.registration_id.clone());
+                if let Err(e) = TcpClientActor::send_message(envelope, state).await {
+                    myself.stop(Some(format!("Unexpected error sending message. {e}")))
+                }
+            }
+            TcpClientMessage::UnsubscribeRequest(topic) => {
+                let envelope = ClientMessage::UnsubscribeRequest {
+                    registration_id: state.registration_id.clone(),
+                    topic,
+                };
+                if let Err(e) = TcpClientActor::send_message(envelope, state).await {
+                    myself.stop(Some(format!("Unexpected error sending message. {e}")))
                 }
             }
             TcpClientMessage::RegistrationResponse(registration_id) => {

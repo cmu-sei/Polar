@@ -138,7 +138,7 @@ impl Actor for GitlabRepositoryConsumer {
 
                         info!("Committed transaction to database");
                     }
-                    GitlabData::ContainerRepositoryTags((project_path, tags)) => {
+                    GitlabData::ContainerRepositoryTags((_project_path, tags)) => {
                         let tags_data = tags
                             .iter()
                             .map(|tag| {
@@ -348,11 +348,11 @@ impl Actor for GitlabRepositoryConsumer {
 
                         debug!(cypher_query);
 
-                        if let Err(e) = transaction.run(neo4rs::Query::new(cypher_query)).await {
+                        if let Err(_e) = transaction.run(neo4rs::Query::new(cypher_query)).await {
                             myself.stop(Some(QUERY_RUN_FAILED.to_string()));
                         }
 
-                        if let Err(e) = transaction.commit().await {
+                        if let Err(_e) = transaction.commit().await {
                             myself.stop(Some(QUERY_COMMIT_FAILED.to_string()));
                         }
                         info!("Committed transaction to database")

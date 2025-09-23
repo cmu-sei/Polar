@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use cassini::client::*;
+use cassini_client::*;
 use common::dispatch::MessageDispatcher;
 use common::types::GitlabData;
 use common::GROUPS_CONSUMER_TOPIC;
@@ -49,7 +49,7 @@ pub enum ConsumerSupervisorMessage {
 }
 
 pub struct ConsumerSupervisorArgs {
-    pub client_config: cassini::TCPClientConfig,
+    pub client_config: cassini_client::TCPClientConfig,
     pub graph_config: neo4rs::Config,
 }
 

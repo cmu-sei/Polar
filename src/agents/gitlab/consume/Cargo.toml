@@ -39,7 +39,8 @@ neo4rs = "=0.8.0"
 common = { path = "../common" }
 tracing = "0.1.41"
 workspace-hack = { version = "0.1", path = "../../workspace-hack" }
-cassini = { path = "../../broker" }
+cassini-client = { path = "../../cassini/client" }
+cassini-types = { path = "../../cassini/types" }
 ractor = { version = "0.15.6", features = ["async-trait"] }
 polar = { path = "../../lib" }
 gitlab-queries = { path = "../query" }

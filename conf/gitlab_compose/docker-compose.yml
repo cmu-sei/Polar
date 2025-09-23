@@ -36,6 +36,7 @@ services:
       - "7687:7687"
     volumes:
       - ../neo4j_setup/conf:/var/lib/neo4j/conf
+      - ../neo4j_setup/imports:/var/lib/neo4j/import
       # - ../certs/neo4j/ca_certificate.pem:/var/lib/neo4j/certificates/bolt/trusted/ca.crt
       # - ../certs/neo4j/cert_chain.pem:/var/lib/neo4j/certificates/https/tls.crt
       # - ../certs/neo4j/server_neo4j_key.pem:/var/lib/neo4j/certificates/https/tls.key

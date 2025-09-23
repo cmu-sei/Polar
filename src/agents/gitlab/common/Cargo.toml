@@ -38,7 +38,7 @@ serde = {version = "1", features = ["derive"]}
 serde_json = "1.0"
 workspace-hack = { version = "0.1", path = "../../workspace-hack" }
 ractor = { version="0.15.6", features = ["async-trait"]}
-cassini = { path = "../../broker" }
+cassini-client = { path = "../../cassini/client" }
 polar = {path = "../../lib" }
 cynic = "3.9.1"
 gitlab-queries = { path = "../query" }

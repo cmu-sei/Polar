@@ -13,7 +13,7 @@ serde = { version = "1.0.204", features = ["derive"] }
 tokio = { version = "1.38.1", features = ["full"] }
 ractor = { version = "0.15.6", features = ["async-trait"] }
 serde_json = "1.0.120"
-cassini = { path = "../../broker" }
+cassini = { path = "../../cassini/broker" }
 utoipa = "5.4.0"
 neo4rs = "0.8.0"
 url = "2.5.2"

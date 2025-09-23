@@ -26,7 +26,9 @@
 resolver = "2"
 
 members = [
-    "broker",
+    "cassini/broker",
+    "cassini/client",
+    "cassini/types",
     "lib",
     "gitlab/common",
     "gitlab/consume",
@@ -46,6 +48,7 @@ members = [
     "openapi/observe",
     "openapi/consume",
     "openapi/common",
+    "cassini/harness"
 ]
 
 
