@@ -13,12 +13,12 @@ let
     observer = craneLib.buildPackage (crateArgs  // {
     pname = "web-observer";
     cargoExtraArgs = "--bin web-observer --locked";
-    src = workspaceFileset ./web/observe;
+    src = workspaceFileset ./openapi/observe;
     });
     consumer = craneLib.buildPackage (crateArgs // {
     pname = "web-consumer";
     cargoExtraArgs = "--bin web-consumer --locked";
-    src = workspaceFileset ./web/consume;
+    src = workspaceFileset ./openapi/consume;
     });
 
     observerImage = pkgs.dockerTools.buildImage {
