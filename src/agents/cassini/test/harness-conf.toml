@@ -1,0 +1,11 @@
+#TODO: items and comments
+# A configuration is nice, but the metrics collected should be correlate to the configuratons
+# there should also be a schema for these for validation.
+topic = "throughput"
+msg_size = 4096
+msg_type = "string"
+rate = 5000
+duration = "2m"
+pattern = "burst"   # Driver pattern, reflects user behaivor - are they sending bursts , sporatic messages between an amount of time? or a constant drip?
+burst_size = 10000
+idle_time = "500ms"

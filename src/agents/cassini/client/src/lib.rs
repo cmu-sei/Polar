@@ -12,6 +12,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::io::{split, AsyncReadExt, BufWriter, ReadHalf, WriteHalf};
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
+use tokio::task::AbortHandle;
 use tokio_rustls::client::TlsStream;
 use tokio_rustls::TlsConnector;
 use tracing::{debug, error, info, warn};
@@ -88,6 +89,7 @@ pub struct TcpClientState {
     client_config: Arc<ClientConfig>,
     output_port: Arc<OutputPort<String>>,
     queue_output: Arc<OutputPort<Vec<u8>>>,
+    abort_handle: Option<AbortHandle>, // abort handle switch for the stream read loop
 }
 
 pub struct TcpClientArgs {
@@ -201,6 +203,7 @@ impl Actor for TcpClientActor {
             client_config: Arc::new(config),
             output_port: args.output_port,
             queue_output: args.queue_output,
+            abort_handle: None,
         };
 
         Ok(state)
@@ -237,7 +240,7 @@ impl Actor for TcpClientActor {
                         let cloned_queue_out = state.queue_output.clone();
 
                         //start listening
-                        let _ = tokio::spawn(async move {
+                        let abort_handle = tokio::spawn(async move {
                             let mut buf_reader = tokio::io::BufReader::new(reader);
 
                             while let Ok(incoming_msg_length) = buf_reader.read_u32().await {
@@ -309,7 +312,9 @@ impl Actor for TcpClientActor {
                                     }
                                 }
                             }
-                        });
+                        }).abort_handle();
+
+                        state.abort_handle = Some(abort_handle);
                     }
                     Err(e) => {
                         error!("Failed to establish mTLS connection! {e}");
@@ -376,10 +381,18 @@ impl Actor for TcpClientActor {
                 }
             }
             TcpClientMessage::Disconnect => {
+                info!(
+                    "Received disconnect signal. Ending session {:?}",
+                    state.registration_id
+                );
                 let envelope = ClientMessage::DisconnectRequest(state.registration_id.clone());
                 if let Err(e) = TcpClientActor::send_message(envelope, state).await {
                     myself.stop(Some(format!("Unexpected error sending message. {e}")))
                 }
+                // if we're disconnecting explicitly, we're  good to just stop here.
+                state.abort_handle.as_ref().map(|handle| handle.abort());
+
+                myself.stop(None);
             }
             TcpClientMessage::UnsubscribeRequest(topic) => {
                 let envelope = ClientMessage::UnsubscribeRequest {

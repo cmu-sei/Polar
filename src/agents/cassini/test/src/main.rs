@@ -13,15 +13,13 @@ async fn main() {
     let p_config = AgentConfig {
         topic: "testout".to_string(),
         msg_size: 1024usize,
-        role: Role::Producer,
         rate: 10u32,
-        duration: 30u64,
+        duration: 3u64,
     };
 
     let s_config = AgentConfig {
         topic: "testout".to_string(),
         msg_size: 0,
-        role: Role::Consumer,
         rate: 0,
         duration: 0,
     };
@@ -38,16 +36,21 @@ async fn main() {
 
     let _ = Actor::spawn_linked(
         Some(PRODUCER_ACTOR.to_string()),
-        HarnessAgent,
+        ProducerAgent,
         p_config,
         root.clone().into(),
     )
     .await
     .expect("expected to start the producer and connect");
 
-    let _ = Actor::spawn_linked(None, HarnessAgent, s_config.clone(), root.clone().into())
-        .await
-        .expect("expected to start the producer and connect");
+    let _ = Actor::spawn_linked(
+        Some(SINK_ACTOR.to_string()),
+        SinkAgent,
+        s_config.clone(),
+        root.clone().into(),
+    )
+    .await
+    .expect("expected to start the producer and connect");
 
     let _ = handle.await;
 }
