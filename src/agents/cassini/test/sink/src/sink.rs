@@ -44,7 +44,7 @@ pub struct SinkMetrics {
 pub struct SinkAgent;
 
 pub struct SinkConfig {
-    topic: String,
+    pub topic: String,
     // TODO: What else would we use to configure the sink?
 }
 
@@ -87,7 +87,7 @@ impl Actor for SinkAgent {
         let tcp_cfg = TCPClientConfig::new();
 
         let (client, _) = Actor::spawn_linked(
-            Some("cassini.harness.tcp.sink".to_string()),
+            None,
             TcpClientActor,
             TcpClientArgs {
                 config: tcp_cfg,

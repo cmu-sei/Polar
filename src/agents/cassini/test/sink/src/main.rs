@@ -1,8 +1,8 @@
-use cassini_client::*;
-
 use harness_common::{ArchivedSinkCommand, ProducerMessage, SinkCommand};
+use harness_sink::sink::*;
 use ractor::{
-    Actor, ActorProcessingErr, ActorRef, SupervisionEvent, async_trait, concurrency::JoinHandle,
+    Actor, ActorProcessingErr, ActorRef, OutputPort, SupervisionEvent, async_trait,
+    concurrency::JoinHandle,
 };
 use rkyv::{
     deserialize,
@@ -13,7 +13,7 @@ use rustls::{
     pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject},
     server::WebPkiClientVerifier,
 };
-use std::sync::Arc;
+use std::{process::Output, sync::Arc};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt, BufWriter, ReadHalf, WriteHalf, split},
     net::{TcpListener, TcpStream},
@@ -37,9 +37,6 @@ pub struct SinkServiceArgs {
     pub private_key_file: String,
     pub ca_cert_file: String,
 }
-
-// pub enum SinkServiceMessage {
-// }
 
 #[async_trait]
 impl Actor for SinkService {
@@ -115,6 +112,8 @@ impl Actor for SinkService {
 
         info!("SinkService: Server running on {bind_addr}");
 
+        let cloned_self_ref = myself.clone();
+
         let _ = tokio::spawn(async move {
             while let Ok((stream, peer_addr)) = server.accept().await {
                 match acceptor.accept(stream).await {
@@ -126,6 +125,7 @@ impl Actor for SinkService {
                         let writer = tokio::io::BufWriter::new(writer);
 
                         debug!("New connection from {peer_addr}. Client ID: {client_id}");
+
                         let listener_args = ClientSessionArguments {
                             writer: Arc::new(Mutex::new(writer)),
                             reader: Some(reader),
@@ -193,11 +193,31 @@ impl Actor for SinkService {
 
     async fn handle(
         &self,
-        _: ActorRef<Self::Msg>,
+        myself: ActorRef<Self::Msg>,
         message: Self::Msg,
         _: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        todo!();
+        match message {
+            SinkCommand::TestPlan(plan) => {
+                // start a sink for each producer, if we already have a sink subscriber for that topic, skip
+
+                for config in plan.producers {
+                    let args = SinkConfig {
+                        topic: config.topic.clone(),
+                    };
+
+                    let _ = Actor::spawn_linked(
+                        Some(format!("cassini.harness.sink.{}", config.topic)),
+                        SinkAgent,
+                        args,
+                        myself.clone().into(),
+                    )
+                    .await
+                    .map_err(|_e| ());
+                }
+            }
+            _ => (),
+        }
 
         Ok(())
     }
@@ -210,12 +230,14 @@ struct ClientSessionState {
     reader: Option<ReadHalf<TlsStream<TcpStream>>>,
     client_id: String,
     task_handle: Option<JoinHandle<()>>,
+    // output_port: Arc<OutputPort<SinkCommand>>,
 }
 
 struct ClientSessionArguments {
     writer: Arc<Mutex<BufWriter<WriteHalf<TlsStream<TcpStream>>>>>,
     reader: Option<ReadHalf<TlsStream<TcpStream>>>,
     client_id: String,
+    // output_port: Arc<OutputPort<SinkCommand>>,
 }
 
 impl ClientSession {
@@ -275,6 +297,7 @@ impl Actor for ClientSession {
             reader: args.reader,
             client_id: args.client_id.clone(),
             task_handle: None,
+            // output_port: args.output_port,
         })
     }
 
@@ -301,6 +324,7 @@ impl Actor for ClientSession {
         // TODO: start a timer, if we're not contacted by the producer svc, we should consider it a failed test
 
         //start listening
+
         let handle = tokio::spawn(async move {
             let mut buf_reader = tokio::io::BufReader::new(reader);
             // parse incoming message length, this tells us what size of a message to expect.
@@ -317,6 +341,12 @@ impl Actor for ClientSession {
                                     deserialize::<SinkCommand, Error>(archived)
                                 {
                                     debug!("{deserialized:?}");
+
+                                    myself.try_get_supervisor().map(|service| {
+                                        service
+                                            .send_message(deserialized)
+                                            .expect("Expected to forward command upwards");
+                                    });
                                 }
                             }
                             Err(e) => {

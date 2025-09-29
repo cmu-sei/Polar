@@ -29,6 +29,9 @@ members = [
     "cassini/broker",
     "cassini/client",
     "cassini/types",
+    "cassini/test/common",
+    "cassini/test/producer",
+    "cassini/test/sink",
     "lib",
     "gitlab/common",
     "gitlab/consume",
@@ -48,7 +51,6 @@ members = [
     "openapi/observe",
     "openapi/consume",
     "openapi/common",
-    "cassini/harness"
 ]
 
 

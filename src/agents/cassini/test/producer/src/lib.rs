@@ -1,4 +1,4 @@
-use actors::TestPlan;
+use harness_common::TestPlan;
 use serde_dhall::SimpleValue;
 
 pub mod actors;

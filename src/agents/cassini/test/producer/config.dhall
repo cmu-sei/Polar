@@ -35,14 +35,14 @@ let TestPlan = {
 let steadyProducer: Producer = {
    topic = "steady"
 ,  msgSize = 4096
-,  duration = 30
+,  duration = 10
 ,  pattern = Pattern.Drip { idle_time = 30 }
 }
 
 let burstProducer: Producer = {
    topic = "burst"
 ,  msgSize = 4096
-,  duration = 60
+,  duration = 10
 ,  pattern = Pattern.Burst { burst_size = 10, idle_time = 5 }
 }
 

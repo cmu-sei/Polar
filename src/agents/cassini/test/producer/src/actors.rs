@@ -1,6 +1,7 @@
 use cassini_client::*;
-
 use fake::Fake;
+use harness_common::{MessagePattern, ProducerConfig, TestPlan};
+
 use ractor::{
     async_trait, concurrency::Interval, Actor, ActorProcessingErr, ActorRef, OutputPort,
     SupervisionEvent,
@@ -11,26 +12,6 @@ use tokio::time;
 use tracing::{debug, info};
 
 use crate::client::{SinkClient, SinkClientArgs, SinkClientConfig, SinkClientMessage};
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct TestPlan {
-    producers: Vec<ProducerConfig>,
-}
-/// Messaging pattern that mimics user behavior over the network.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub enum MessagePattern {
-    Burst { idle_time: usize, burst_size: u32 },
-    Drip { idle_time: usize },
-}
-// Config for the supervisor
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct ProducerConfig {
-    pub topic: String,
-    #[serde(alias = "msgSize")]
-    pub msg_size: usize,
-    pub duration: u64,
-    pub pattern: MessagePattern,
-}
 
 // Simple metrics struct
 #[derive(Debug, Default, Serialize, Clone)]
@@ -107,21 +88,28 @@ impl Actor for RootActor {
     ) -> Result<(), ActorProcessingErr> {
         // tODO: When the sink looks healthy, or acks us, start producers
 
-        // let mut count = 0;
-        // for config in &state.test_plan.producers {
-        //     count += 1;
-        //     let (p, _) = Actor::spawn_linked(
-        //         Some(format!("cassini.harness.producer.{count}")),
-        //         ProducerAgent,
-        //         config.to_owned(),
-        //         myself.clone().into(),
-        //     )
-        //     .await
-        //     .expect("Expected to start producer agent");
+        state
+            .sink_client
+            .send_message(SinkClientMessage::Send(
+                harness_common::SinkCommand::TestPlan(state.test_plan.clone()),
+            ))
+            .unwrap();
 
-        //     state.producers.push(p);
-        // }
-        // let _ = handle.await;
+        let mut count = 0;
+        for config in &state.test_plan.producers {
+            count += 1;
+            let (p, _) = Actor::spawn_linked(
+                Some(format!("cassini.harness.producer.{count}")),
+                ProducerAgent,
+                config.to_owned(),
+                myself.clone().into(),
+            )
+            .await
+            .expect("Expected to start producer agent");
+
+            state.producers.push(p);
+        }
+
         Ok(())
     }
 
@@ -197,7 +185,7 @@ impl Actor for ProducerAgent {
         let tcp_cfg = TCPClientConfig::new();
 
         let (client, _) = Actor::spawn_linked(
-            Some("cassini.harness.tcp.producer".to_string()),
+            None,
             TcpClientActor,
             TcpClientArgs {
                 config: tcp_cfg,

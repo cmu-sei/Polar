@@ -1,2 +1,1 @@
-
-mod sink;
+pub mod sink;

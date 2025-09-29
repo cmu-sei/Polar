@@ -1,11 +1,30 @@
 use rkyv::{Archive, Deserialize, Serialize};
 
+#[derive(Clone, Debug, Serialize, Deserialize, Archive, serde::Serialize, serde::Deserialize)]
+pub struct TestPlan {
+    pub producers: Vec<ProducerConfig>,
+}
+/// Messaging pattern that mimics user behavior over the network.
+#[derive(Clone, Debug, Serialize, Deserialize, Archive, serde::Serialize, serde::Deserialize)]
+pub enum MessagePattern {
+    Burst { idle_time: usize, burst_size: u32 },
+    Drip { idle_time: usize },
+}
+// Config for the supervisor
+#[derive(Clone, Debug, Serialize, Deserialize, Archive, serde::Serialize, serde::Deserialize)]
+pub struct ProducerConfig {
+    pub topic: String,
+    #[serde(alias = "msgSize")]
+    pub msg_size: usize,
+    pub duration: u64,
+    pub pattern: MessagePattern,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Archive)]
 pub enum SinkCommand {
     HealthCheck,
-    TestPlan,              // whole plan or subset
-    Start(Option<String>), // tell sink to begin consuming, optionally with a registration id to teest session logic.
-    Stop,                  // tell sink to stop
+    TestPlan(TestPlan), // whole plan or subset
+    Stop,               // tell sink to stop
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Archive)]
