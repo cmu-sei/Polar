@@ -408,7 +408,7 @@ impl Actor for Listener {
 
         let reader = state.reader.take().expect("Reader already taken!");
 
-        //start listenin
+        //start listening
         // TODO: add task handler to state so we can cancel it later?
         let handle = tokio::spawn(async move {
             let mut buf_reader = tokio::io::BufReader::new(reader);
@@ -444,23 +444,6 @@ impl Actor for Listener {
                     }
                 }
             }
-
-            // TODO: So, this is always happening regardless of how the client disconnects..., fix that so intentional disconnects are graceful.
-            // Handle client disconnection, populate state in handler
-            // if let Err(e) = myself.send_message(BrokerMessage::TimeoutMessage {
-            //     client_id: String::default(),
-            //     registration_id: None,
-            //     error: Some("Disconnected".to_string()),
-            // }) {
-            //     myself.stop(Some(e.to_string()));
-            // }
-            //
-            // TODO
-            // Instead of doing this, perhaps the listener manager should respond to when this stream ends.
-            // When the stream ends unexpectedly (we didn't receive a disconnect request
-            // Just stop the listener. When the listener manager detects this, have the listener manager send a message to the session associated with the listener
-            // continue the rest of the timeout flow from here.
-            // myself.stop(Some(TIMEOUT_REASON.to_string()));
         });
 
         // add join handle to state, we'll need to cancel it if a client disconnects
@@ -928,8 +911,6 @@ impl Actor for Listener {
                                 warn!("{SESSION_NOT_FOUND_TXT}: {id}: {e}");
                                 myself.stop(Some("{DISCONNECTED_REASON}".to_string()));
                             }
-
-                            // TODO: Stop the stream read loop task?
                         }
                         None => {
                             warn!("{SESSION_NOT_FOUND_TXT}: {id}");

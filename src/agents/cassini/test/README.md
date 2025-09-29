@@ -4,6 +4,7 @@ A flexible test harness for exercising our message broker under a variety of wor
 
 Unlike one-off integration tests, the harness is designed for **repeatable performance experiments** and **adversarial scenarios** that go beyond correctness checks.
 
+
 ---
 
 ## Why?
@@ -20,13 +21,13 @@ Our integration tests already cover correctness of broker operations (topic crea
 
 ## Concepts
 
-* **Producer Supervisor**
+* **Producer Supervisor(Source)**
 
   * Configurable rate (msgs/sec) and duration.
   * Payloads may be fixed or random (text, numbers, enums).
   * Logs metrics: sent count, errors, time elapsed.
 
-* **Consumer Supervisor**
+* **Consumer Supervisor (Sink)**
 
   * Subscribes to a topic.
   * Collects received messages and verifies integrity (sequence/checksum optional).
@@ -41,13 +42,9 @@ Our integration tests already cover correctness of broker operations (topic crea
 
 ## Usage
 
-The harness is shipped as a single binary confiurable using to be defined schema.
+The sink and producer services are two distinct components of the harness. Both are also configured to leverage mTLS and so must be configured with SSL certificates. See the example.env file at the root of this project for further details.
 
-Note that since it is essentially yet another agent in the network, it should be configured as such. See [the broker README for details](../broker/readme.md)
 
-```bash
-cargo run --bin cassini-harness
-```
 ---
 
 ## Scenarios
@@ -58,11 +55,3 @@ The harness is intended to simulate a wide range of workloads, including:
 * **Batch tests** – fewer, larger payloads.
 * **Topic churn** – rapid create/delete of topics while publishing.
 * **Mixed workloads** – producers and consumers running simultaneously on multiple topics.
-
----
-
-## Development
-
-This project uses [Ractor](https://github.com/slawlor/ractor) for actor supervision. Each producer and consumer is a supervised client actor instance.
-
-This keeps the test harness isolated from broker internals, making it reusable for both integration and performance testing.

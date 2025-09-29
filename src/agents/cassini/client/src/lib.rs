@@ -1,4 +1,5 @@
 use cassini_types::{ArchivedClientMessage, ClientMessage};
+use polar::UNEXPECTED_MESSAGE_STR;
 use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef, OutputPort, RpcReplyPort};
 use rkyv::deserialize;
 use rkyv::rancor::Error;
@@ -417,7 +418,7 @@ impl Actor for TcpClientActor {
                     reply.send(None).expect("Expected to send default string");
                 }
             }
-            _ => todo!(),
+            _ => warn!("{UNEXPECTED_MESSAGE_STR}"),
         }
         Ok(())
     }

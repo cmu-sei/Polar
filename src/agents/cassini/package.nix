@@ -29,11 +29,19 @@ let
     doCheck = false;
     });
 
-    # build the test harness
-    harness = craneLib.buildPackage (crateArgs // {
+    # build the test harness services
+    harnessProducer = craneLib.buildPackage (crateArgs // {
     inherit cargoArtifacts;
-    cargoExtraArgs = "--bin cassini-harness --locked";
-    src = workspaceFileset ./test;
+    cargoExtraArgs = "--bin harness-producer --locked";
+    src = workspaceFileset ./test/producer;
+    # Disable tests for now, We'll run them later with env vars and TlsCerts
+    doCheck = false;
+    });
+
+    harnessSink = craneLib.buildPackage (crateArgs // {
+    inherit cargoArtifacts;
+    cargoExtraArgs = "--bin harness-sink --locked";
+    src = workspaceFileset ./test/sink;
     # Disable tests for now, We'll run them later with env vars and TlsCerts
     doCheck = false;
     });
@@ -72,5 +80,5 @@ let
     };
 in
 {
-  inherit cassini cassiniImage client harness;
+  inherit cassini cassiniImage client harnessProducer harnessSink;
 }
