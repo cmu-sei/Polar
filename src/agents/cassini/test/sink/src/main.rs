@@ -18,8 +18,10 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt, BufWriter, ReadHalf, WriteHalf, split},
     net::{TcpListener, TcpStream},
     sync::Mutex,
+    task::AbortHandle,
 };
 use tokio_rustls::{TlsAcceptor, server::TlsStream};
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 // ============================== Sink Service ============================== //
@@ -27,8 +29,8 @@ use tracing::{debug, error, info, warn};
 pub struct SinkService;
 
 pub struct SinkServiceState {
-    bind_addr: String,
-    server_config: Arc<ServerConfig>,
+    server_handle: AbortHandle,
+    timeout_token: CancellationToken,
 }
 
 pub struct SinkServiceArgs {
@@ -89,22 +91,8 @@ impl Actor for SinkService {
             .with_single_cert(certs, private_key)
             .expect("bad certificate/key");
 
-        //set up state object
-        let state = SinkServiceState {
-            bind_addr: args.bind_addr,
-            server_config: Arc::new(server_config),
-        };
-        info!("SinkService: Agent starting");
-        Ok(state)
-    }
-
-    async fn post_start(
-        &self,
-        myself: ActorRef<Self::Msg>,
-        state: &mut Self::State,
-    ) -> Result<(), ActorProcessingErr> {
-        let bind_addr = state.bind_addr.clone();
-        let acceptor = TlsAcceptor::from(Arc::clone(&state.server_config));
+        let bind_addr = args.bind_addr.clone();
+        let acceptor = TlsAcceptor::from(Arc::new(server_config));
 
         let server = TcpListener::bind(bind_addr.clone())
             .await
@@ -112,9 +100,7 @@ impl Actor for SinkService {
 
         info!("SinkService: Server running on {bind_addr}");
 
-        let cloned_self_ref = myself.clone();
-
-        let _ = tokio::spawn(async move {
+        let server_handle = tokio::spawn(async move {
             while let Ok((stream, peer_addr)) = server.accept().await {
                 match acceptor.accept(stream).await {
                     Ok(stream) => {
@@ -148,8 +134,46 @@ impl Actor for SinkService {
                     }
                 }
             }
-        });
+        })
+        .abort_handle();
 
+        //set up state object
+        let state = SinkServiceState {
+            server_handle,
+            timeout_token: CancellationToken::new(),
+        };
+
+        Ok(state)
+    }
+
+    async fn post_start(
+        &self,
+        myself: ActorRef<Self::Msg>,
+        state: &mut Self::State,
+    ) -> Result<(), ActorProcessingErr> {
+        // await contact from producer service
+        // timeout after configured duration if no contact established
+
+        // TODO: Make configurable
+        let timeout = 30u64;
+        let token = state.timeout_token.clone();
+        let server_handle = state.server_handle.clone();
+        let _ = tokio::spawn(async move {
+            info!("Waiting {timeout} secs for contact from test client.");
+            tokio::select! {
+                // Use cloned token to listen to cancellation requests
+                _ = token.cancelled() => {
+                    info!("Cancelling timeout.")
+                }
+                // wait
+                _ = tokio::time::sleep(std::time::Duration::from_secs(timeout)) => {
+                    error!("Failed to receive contact from test harness. Shutting down.");
+                    server_handle.abort();
+                    myself.stop(Some("TEST_TIMED_OUT".to_string()));
+
+                }
+            }
+        });
         Ok(())
     }
 
@@ -195,10 +219,18 @@ impl Actor for SinkService {
         &self,
         myself: ActorRef<Self::Msg>,
         message: Self::Msg,
-        _: &mut Self::State,
+        state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
             SinkCommand::TestPlan(plan) => {
+                // abort timeout
+                state.timeout_token.cancel();
+
+                info!(
+                    "Received test plan from client. {}",
+                    serde_json::to_string_pretty(&plan).unwrap()
+                );
+                info!("Starting subscribes.");
                 // start a sink for each producer, if we already have a sink subscriber for that topic, skip
 
                 for config in plan.producers {
@@ -215,6 +247,12 @@ impl Actor for SinkService {
                     .await
                     .map_err(|_e| ());
                 }
+            }
+            SinkCommand::Stop => {
+                info!("Shutdown command received. Shutting down.");
+                state.server_handle.abort();
+                myself.stop_children(None);
+                myself.stop(None);
             }
             _ => (),
         }

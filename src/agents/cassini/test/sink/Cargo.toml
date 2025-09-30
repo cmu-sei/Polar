@@ -16,3 +16,5 @@ rustls = { version = "=0.23.25", features = ["aws-lc-rs"] }
 tokio-rustls = "0.26.1"
 rkyv = "0.8.10"
 uuid = { version = "1.11.0", features = ["v4"]}
+
+tokio-util = "0.7.13"

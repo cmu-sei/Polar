@@ -78,7 +78,41 @@ let
         ];
     };
     };
+
+    producerImage = pkgs.dockerTools.buildImage {
+    name = "harness-producer";
+    tag = "latest";
+    copyToRoot = commonPaths ++ [
+        harnessProducer
+    ];
+    uid = commonUser.uid;
+    gid = commonUser.gid;
+
+    config = {
+        User = "${commonUser.uid}:${commonUser.gid}";
+        # Cmd = [ "harness-producer" ];
+        WorkingDir = "/";
+        Env = [];
+    };
+    };
+
+    sinkImage = pkgs.dockerTools.buildImage {
+    name = "harness-sink";
+    tag = "latest";
+    copyToRoot = commonPaths ++ [
+        harnessProducer
+    ];
+    uid = commonUser.uid;
+    gid = commonUser.gid;
+
+    config = {
+        User = "${commonUser.uid}:${commonUser.gid}";
+        # Cmd = [ "harness-sink" ];
+        WorkingDir = "/";
+        Env = [];
+    };
+    };
 in
 {
-  inherit cassini cassiniImage client harnessProducer harnessSink;
+  inherit cassini cassiniImage client harnessProducer harnessSink producerImage sinkImage;
 }

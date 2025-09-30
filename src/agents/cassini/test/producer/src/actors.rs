@@ -1,6 +1,6 @@
 use cassini_client::*;
 use fake::Fake;
-use harness_common::{MessagePattern, ProducerConfig, TestPlan};
+use harness_common::{MessagePattern, ProducerConfig, SinkCommand, TestPlan};
 
 use ractor::{
     async_trait, concurrency::Interval, Actor, ActorProcessingErr, ActorRef, OutputPort,
@@ -29,7 +29,7 @@ pub struct RootActor;
 
 pub struct RootActorState {
     sink_client: ActorRef<SinkClientMessage>,
-    producers: Vec<ActorRef<ProducerMessage>>,
+    producers: u32,
     test_plan: TestPlan,
 }
 
@@ -37,9 +37,14 @@ pub struct RootActorArguments {
     pub test_plan: TestPlan,
 }
 
+pub enum RootActorMessage {
+    /// A quick signal to the supervisor containing the index of the producer that finished
+    ProducerFinished(usize),
+}
+
 #[async_trait]
 impl Actor for RootActor {
-    type Msg = ();
+    type Msg = RootActorMessage;
     type State = RootActorState;
     type Arguments = RootActorArguments;
 
@@ -76,7 +81,7 @@ impl Actor for RootActor {
 
         Ok(RootActorState {
             sink_client,
-            producers: Vec::new(),
+            producers: 0u32,
             test_plan: args.test_plan,
         })
     }
@@ -95,11 +100,13 @@ impl Actor for RootActor {
             ))
             .unwrap();
 
-        let mut count = 0;
+        // Gotta keep track of producers somehow...
+        // so we create a list of them here, and insert
+        // the refs according to the index, starting at 0.
+
         for config in &state.test_plan.producers {
-            count += 1;
             let (p, _) = Actor::spawn_linked(
-                Some(format!("cassini.harness.producer.{count}")),
+                Some(format!("cassini.harness.producer.{}", state.producers)),
                 ProducerAgent,
                 config.to_owned(),
                 myself.clone().into(),
@@ -107,7 +114,7 @@ impl Actor for RootActor {
             .await
             .expect("Expected to start producer agent");
 
-            state.producers.push(p);
+            state.producers += 1;
         }
 
         Ok(())
@@ -116,9 +123,14 @@ impl Actor for RootActor {
     async fn handle(
         &self,
         _myself: ActorRef<Self::Msg>,
-        _message: Self::Msg,
-        _state: &mut Self::State,
+        message: Self::Msg,
+        state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
+        match message {
+            RootActorMessage::ProducerFinished(index) => {
+                state.producers -= 1;
+            }
+        }
         Ok(())
     }
 
@@ -135,9 +147,18 @@ impl Actor for RootActor {
             }
             SupervisionEvent::ActorTerminated(dead_actor, reason, ..) => {
                 tracing::info!("{dead_actor:?} stopped {reason:?}");
-                // stop sink
-                myself.stop_children_and_wait(None, None).await;
-                myself.stop(None);
+                // TODO: Check if there are any children left,
+                // if they're all done, we can tell the sink to start cleaning up and shutdown.
+                //
+                if state.producers == 0 {
+                    info!("Producers concluded. Shutting down");
+                    state
+                        .sink_client
+                        .send_message(SinkClientMessage::Send(SinkCommand::Stop))
+                        .expect("Expected to send command to sink.");
+
+                    // TODO: We can't "just stop" here. So let's get a message back from the sink after telling it to shutdown and act on that
+                }
             }
             other => {
                 tracing::info!("RootActor: received supervisor event '{other}'");
@@ -217,7 +238,7 @@ impl Actor for ProducerAgent {
 
     async fn handle(
         &self,
-        _myself: ActorRef<Self::Msg>,
+        myself: ActorRef<Self::Msg>,
         msg: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
@@ -233,43 +254,39 @@ impl Actor for ProducerAgent {
                         let size = state.cfg.msg_size.clone();
                         let tcp_client = state.tcp_client.clone();
 
-                        info!("Starting test...");
-                        tokio::spawn(async move {
-                            let mut ticker = time::interval(interval);
-                            let end = Instant::now() + duration;
-                            let mut metrics = Metrics::default();
+                        let mut ticker = time::interval(interval);
+                        let end = Instant::now() + duration;
 
-                            while Instant::now() < end {
-                                ticker.tick().await;
+                        while Instant::now() < end {
+                            ticker.tick().await;
 
-                                // TODO:
-                                // Instead of faking the data here, serialize a given value (some arbitrary data structure)
-                                // generate a checksum for it
-                                // wrap it in an envelope
-                                // send it
-                                // create a payload of the desired message size using fake
-                                let faked = (0..=size).fake::<String>();
+                            // TODO:
+                            // Instead of faking the data here, serialize a given value (some arbitrary data structure)
+                            // generate a checksum for it
+                            // wrap it in an envelope
+                            // send it
+                            // create a payload of the desired message size using fake
+                            let faked = (0..=size).fake::<String>();
 
-                                let payload = faked.as_bytes().to_owned();
+                            let payload = faked.as_bytes().to_owned();
 
-                                let message = TcpClientMessage::Publish {
-                                    topic: topic.clone(),
-                                    payload,
-                                };
+                            let message = TcpClientMessage::Publish {
+                                topic: topic.clone(),
+                                payload,
+                            };
 
-                                if let Err(e) = tcp_client.send_message(message) {
-                                    tracing::warn!("Failed to send message {e}");
-                                    metrics.errors += 1;
-                                }
-                                metrics.sent += 1;
+                            if let Err(e) = tcp_client.send_message(message) {
+                                tracing::warn!("Failed to send message {e}");
+                                state.metrics.errors += 1;
                             }
-                            // when done, print metrics and exit
-                            info!("{:?}", metrics);
+                            state.metrics.sent += 1;
+                        }
+                        // when done, print metrics and exit
+                        info!("{:?}", state.metrics);
 
-                            tcp_client
-                                .send_message(TcpClientMessage::Disconnect)
-                                .unwrap();
-                        });
+                        tcp_client
+                            .send_message(TcpClientMessage::Disconnect)
+                            .unwrap();
                     }
                     MessagePattern::Burst {
                         idle_time,
@@ -283,44 +300,59 @@ impl Actor for ProducerAgent {
                         let tcp_client = state.tcp_client.clone();
 
                         info!("Starting test...");
-                        tokio::spawn(async move {
-                            let mut ticker = time::interval(interval);
-                            let end = Instant::now() + duration;
-                            let mut metrics = Metrics::default();
+                        let mut ticker = time::interval(interval);
+                        let end = Instant::now() + duration;
 
-                            while Instant::now() < end {
-                                ticker.tick().await;
+                        while Instant::now() < end {
+                            ticker.tick().await;
 
-                                let faked = (0..=size).fake::<String>();
+                            let faked = (0..=size).fake::<String>();
 
-                                let payload = faked.as_bytes().to_owned();
+                            let payload = faked.as_bytes().to_owned();
 
-                                // send a bulk number of messages
-                                for _ in 1..burst_size {
-                                    let message = TcpClientMessage::Publish {
-                                        topic: topic.clone(),
-                                        payload: payload.clone(),
-                                    };
+                            // send a bulk number of messages
+                            for _ in 1..burst_size {
+                                let message = TcpClientMessage::Publish {
+                                    topic: topic.clone(),
+                                    payload: payload.clone(),
+                                };
 
-                                    if let Err(e) = tcp_client.send_message(message) {
-                                        tracing::warn!("Failed to send message {e}");
-                                        metrics.errors += 1;
-                                    }
-
-                                    metrics.sent += 1;
+                                if let Err(e) = tcp_client.send_message(message) {
+                                    tracing::warn!("Failed to send message {e}");
+                                    state.metrics.errors += 1;
                                 }
-                            }
-                            // when done, print metrics and exit
-                            info!("{:?}", metrics);
 
-                            tcp_client
-                                .send_message(TcpClientMessage::Disconnect)
-                                .unwrap();
-                        });
+                                state.metrics.sent += 1;
+                            }
+                        }
+                        // when done, print metrics and exit
+                        info!("{:?}", state.metrics);
+
+                        tcp_client
+                            .send_message(TcpClientMessage::Disconnect)
+                            .unwrap();
                     }
                 }
             }
         }
+
+        // send a message to the supervisor containing the index of the producer.
+        //
+        let name = myself
+            .get_name()
+            .expect("Expected producer to have been named");
+
+        let index = name
+            .split_terminator(".")
+            .find_map(|s| s.parse::<usize>().ok())
+            .unwrap();
+
+        myself.try_get_supervisor().map(|supervisor| {
+            let msg = RootActorMessage::ProducerFinished(index);
+            supervisor
+                .send_message(msg)
+                .expect("Expected to contact supervisor");
+        });
 
         Ok(())
     }
