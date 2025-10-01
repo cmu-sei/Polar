@@ -1858,6 +1858,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tokio-rustls 0.26.2",
+ "tokio-util",
  "tracing",
  "uuid",
 ]

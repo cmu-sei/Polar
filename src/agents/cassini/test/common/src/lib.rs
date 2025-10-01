@@ -29,9 +29,7 @@ pub enum SinkCommand {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Archive)]
 pub enum ProducerMessage {
-    Ack,
-    HealthOk,
-    HealthErr { reason: String },
-    Ready, // sink has spawned subscribers
+    Ready, // Producer has registered with broker
     Error { reason: String },
+    ShutdownAck, // Sent to the client to signal it to shutdownn
 }

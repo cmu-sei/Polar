@@ -2,7 +2,7 @@ use harness_common::{ArchivedSinkCommand, ProducerMessage, SinkCommand};
 use harness_sink::sink::*;
 use ractor::{
     Actor, ActorProcessingErr, ActorRef, OutputPort, SupervisionEvent, async_trait,
-    concurrency::JoinHandle,
+    concurrency::JoinHandle, registry::where_is,
 };
 use rkyv::{
     deserialize,
@@ -23,6 +23,8 @@ use tokio::{
 use tokio_rustls::{TlsAcceptor, server::TlsStream};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
+
+pub const SINK_CLIENT_SESSION: &str = "cassini.harness.sink.session";
 
 // ============================== Sink Service ============================== //
 
@@ -104,23 +106,23 @@ impl Actor for SinkService {
             while let Ok((stream, peer_addr)) = server.accept().await {
                 match acceptor.accept(stream).await {
                     Ok(stream) => {
-                        let client_id = uuid::Uuid::new_v4().to_string();
+                        // let client_id = uuid::Uuid::new_v4().to_string();
 
                         let (reader, writer) = split(stream);
 
                         let writer = tokio::io::BufWriter::new(writer);
 
-                        debug!("New connection from {peer_addr}. Client ID: {client_id}");
+                        debug!("New connection from {peer_addr}");
 
                         let listener_args = ClientSessionArguments {
                             writer: Arc::new(Mutex::new(writer)),
                             reader: Some(reader),
-                            client_id: client_id.clone(),
+                            // client_id: client_id.clone(),
                         };
 
                         //start listener actor to handle connection
                         let _ = Actor::spawn_linked(
-                            Some(client_id.clone()),
+                            Some(SINK_CLIENT_SESSION.to_string()),
                             ClientSession,
                             listener_args,
                             myself.clone().into(),
@@ -250,8 +252,17 @@ impl Actor for SinkService {
             }
             SinkCommand::Stop => {
                 info!("Shutdown command received. Shutting down.");
+
+                // write back to the producer that we're stopping
+                where_is(SINK_CLIENT_SESSION.to_string()).map(|session| {
+                    session
+                        .send_message(ClientSessionMessage::Send(ProducerMessage::ShutdownAck))
+                        .expect("Expected to send message to client session")
+                });
+
                 state.server_handle.abort();
-                myself.stop_children(None);
+                myself.stop_children_and_wait(None, None).await;
+
                 myself.stop(None);
             }
             _ => (),
@@ -263,10 +274,13 @@ impl Actor for SinkService {
 
 struct ClientSession;
 
+enum ClientSessionMessage {
+    Send(ProducerMessage),
+}
+
 struct ClientSessionState {
     writer: Arc<Mutex<BufWriter<WriteHalf<TlsStream<TcpStream>>>>>,
     reader: Option<ReadHalf<TlsStream<TcpStream>>>,
-    client_id: String,
     task_handle: Option<JoinHandle<()>>,
     // output_port: Arc<OutputPort<SinkCommand>>,
 }
@@ -274,7 +288,6 @@ struct ClientSessionState {
 struct ClientSessionArguments {
     writer: Arc<Mutex<BufWriter<WriteHalf<TlsStream<TcpStream>>>>>,
     reader: Option<ReadHalf<TlsStream<TcpStream>>>,
-    client_id: String,
     // output_port: Arc<OutputPort<SinkCommand>>,
 }
 
@@ -285,7 +298,6 @@ impl ClientSession {
     /// we intend to send and write the amount to the *front* of the buffer to be read first, then write the actual message data to the buffer to be deserialized.
     ///
     async fn write(
-        client_id: String,
         message: ProducerMessage,
         writer: Arc<Mutex<BufWriter<WriteHalf<TlsStream<TcpStream>>>>>,
     ) -> Result<(), Error> {
@@ -304,7 +316,7 @@ impl ClientSession {
                 tokio::spawn(async move {
                     let mut writer = writer.lock().await;
                     if let Err(e) = writer.write_all(&buffer).await {
-                        warn!("Failed to send message to client {client_id}: {e}");
+                        warn!("Failed to send message to client {e}");
                         return Err(rancor::Error::new(e));
                     }
                     Ok(if let Err(e) = writer.flush().await {
@@ -321,7 +333,7 @@ impl ClientSession {
 
 #[async_trait]
 impl Actor for ClientSession {
-    type Msg = ();
+    type Msg = ClientSessionMessage;
     type State = ClientSessionState;
     type Arguments = ClientSessionArguments;
 
@@ -333,7 +345,6 @@ impl Actor for ClientSession {
         Ok(ClientSessionState {
             writer: args.writer,
             reader: args.reader,
-            client_id: args.client_id.clone(),
             task_handle: None,
             // output_port: args.output_port,
         })
@@ -358,9 +369,6 @@ impl Actor for ClientSession {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         let reader = state.reader.take().expect("Reader already taken!");
-
-        // TODO: start a timer, if we're not contacted by the producer svc, we should consider it a failed test
-
         //start listening
 
         let handle = tokio::spawn(async move {
@@ -378,8 +386,6 @@ impl Actor for ClientSession {
                                 if let Ok(deserialized) =
                                     deserialize::<SinkCommand, Error>(archived)
                                 {
-                                    debug!("{deserialized:?}");
-
                                     myself.try_get_supervisor().map(|service| {
                                         service
                                             .send_message(deserialized)
@@ -404,10 +410,17 @@ impl Actor for ClientSession {
 
     async fn handle(
         &self,
-        myself: ActorRef<Self::Msg>,
+        _: ActorRef<Self::Msg>,
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
+        match message {
+            ClientSessionMessage::Send(message) => {
+                ClientSession::write(message, Arc::clone(&state.writer))
+                    .await
+                    .expect("expected to write message to client.");
+            }
+        }
         Ok(())
     }
 }

@@ -1,6 +1,6 @@
 use cassini_client::*;
 use fake::Fake;
-use harness_common::{MessagePattern, ProducerConfig, SinkCommand, TestPlan};
+use harness_common::{MessagePattern, ProducerConfig, ProducerMessage, SinkCommand, TestPlan};
 
 use ractor::{
     async_trait, concurrency::Interval, Actor, ActorProcessingErr, ActorRef, OutputPort,
@@ -40,6 +40,8 @@ pub struct RootActorArguments {
 pub enum RootActorMessage {
     /// A quick signal to the supervisor containing the index of the producer that finished
     ProducerFinished(usize),
+    /// Signal that the sink has shutdown, so the supervisor can exit gracefully.
+    SinkShutdown,
 }
 
 #[async_trait]
@@ -57,6 +59,12 @@ impl Actor for RootActor {
 
         let output_port = std::sync::Arc::new(OutputPort::default());
 
+        // subscribe to output port for the client, at time of writing, the only thing the sink should say back is
+        // a shutdownack, so we can turn that into a reason to stop execution
+        output_port.subscribe(myself.clone(), |message| match message {
+            ProducerMessage::ShutdownAck => Some(RootActorMessage::SinkShutdown),
+            _ => None,
+        });
         let client_args = SinkClientArgs {
             config: SinkClientConfig::new(),
             output_port,
@@ -130,6 +138,11 @@ impl Actor for RootActor {
             RootActorMessage::ProducerFinished(index) => {
                 state.producers -= 1;
             }
+            RootActorMessage::SinkShutdown => {
+                info!("Sink has shut down. Concluding test.");
+                state.sink_client.stop(None);
+                _myself.stop(None);
+            }
         }
         Ok(())
     }
@@ -151,13 +164,12 @@ impl Actor for RootActor {
                 // if they're all done, we can tell the sink to start cleaning up and shutdown.
                 //
                 if state.producers == 0 {
-                    info!("Producers concluded. Shutting down");
+                    //send a message to the sink telling it to shutdown, we'll stop when we hear about it
+                    info!("Producers concluded. Telling sink to shut down");
                     state
                         .sink_client
                         .send_message(SinkClientMessage::Send(SinkCommand::Stop))
                         .expect("Expected to send command to sink.");
-
-                    // TODO: We can't "just stop" here. So let's get a message back from the sink after telling it to shutdown and act on that
                 }
             }
             other => {
@@ -174,13 +186,6 @@ pub struct ProducerState {
     cfg: ProducerConfig,
     metrics: Metrics,
     tcp_client: ActorRef<TcpClientMessage>,
-}
-
-// Messages the supervisor handles
-#[derive(Debug)]
-pub enum ProducerMessage {
-    /// Signal to start sending messages, received after successful registration with the broker
-    Start,
 }
 
 #[async_trait]
@@ -201,7 +206,7 @@ impl Actor for ProducerAgent {
         let queue_output = std::sync::Arc::new(OutputPort::default());
 
         // subscribe self to this port
-        output_port.subscribe(myself.clone(), |_| Some(ProducerMessage::Start));
+        output_port.subscribe(myself.clone(), |_| Some(ProducerMessage::Ready));
 
         let tcp_cfg = TCPClientConfig::new();
 
@@ -243,7 +248,7 @@ impl Actor for ProducerAgent {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match msg {
-            ProducerMessage::Start => {
+            ProducerMessage::Ready => {
                 // here, we take on different actions depending on behavior pattern
                 match state.cfg.pattern {
                     MessagePattern::Drip { idle_time } => {
@@ -334,6 +339,7 @@ impl Actor for ProducerAgent {
                     }
                 }
             }
+            _ => (),
         }
 
         // send a message to the supervisor containing the index of the producer.

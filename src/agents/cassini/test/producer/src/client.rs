@@ -184,6 +184,7 @@ impl Actor for SinkClient {
 
         Ok(state)
     }
+
     async fn post_start(
         &self,
         myself: ActorRef<Self::Msg>,
@@ -226,12 +227,10 @@ impl Actor for SinkClient {
                                                 &buffer[..],
                                             )
                                             .unwrap();
-                                        // And you can always deserialize back to the original type
 
                                         if let Ok(message) =
                                             deserialize::<ProducerMessage, Error>(archived)
                                         {
-                                            debug!("New message from sink {message:?}");
                                             cloned_output_port.send(message);
                                         }
                                     }
