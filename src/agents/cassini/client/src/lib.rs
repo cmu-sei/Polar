@@ -325,6 +325,7 @@ impl Actor for TcpClientActor {
             }
             Err(e) => {
                 error!("Failed to connect to server: {e}");
+                // TODO: Maybe this should be an enum/constant we can match instead?
                 myself.stop(Some("Failed to connect to server: {e}".to_string()));
             }
         };

@@ -100,7 +100,7 @@ let
       busybox
       etc
     ];
-    cassini = import (workspaceRoot + /broker/package.nix) {
+    cassini = import (workspaceRoot + /cassini/package.nix) {
       inherit pkgs commonPaths craneLib  workspaceFileset cargoArtifacts commonUser;
       crateArgs = individualCrateArgs;
     };

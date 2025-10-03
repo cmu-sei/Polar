@@ -249,7 +249,12 @@ impl Actor for SinkClient {
             }
             Err(e) => {
                 error!("Failed to connect to server: {e}");
-                myself.stop(Some("Failed to connect to server: {e}".to_string()));
+                // If we failed to connect to the sink, we should just stop.
+                myself.notify_supervisor(ractor::SupervisionEvent::ActorFailed(
+                    myself.get_cell(),
+                    ActorProcessingErr::from(e),
+                ));
+                myself.stop(None);
             }
         };
         Ok(())

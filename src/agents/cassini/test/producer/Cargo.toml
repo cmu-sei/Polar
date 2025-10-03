@@ -18,3 +18,4 @@ serde_dhall = "0.13.0"
 rustls = { version = "=0.23.25", features = ["aws-lc-rs"] }
 tokio-rustls = "0.26.1"
 rkyv = "0.8.10"
+clap = { version = "4.5.48", features = ["derive"] }

@@ -24,3 +24,4 @@ manifests
 chart/
 .direnv/
 authorized_keys
+*-output.json

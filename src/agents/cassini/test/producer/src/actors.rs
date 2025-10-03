@@ -4,7 +4,10 @@ use harness_common::{
     compute_checksum, Envelope, MessagePattern, ProducerConfig, ProducerMessage, SinkCommand,
     TestPlan,
 };
-use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef, OutputPort, SupervisionEvent};
+use ractor::{
+    async_trait, registry::where_is, Actor, ActorProcessingErr, ActorRef, ActorStatus, OutputPort,
+    SupervisionEvent,
+};
 use serde::Serialize;
 use std::time::{Duration, Instant};
 use tokio::time;
@@ -78,14 +81,6 @@ impl Actor for RootActor {
         .await
         .expect("Expected to start tcp client");
 
-        // contact the sink
-
-        sink_client
-            .send_message(SinkClientMessage::Send(
-                harness_common::SinkCommand::HealthCheck,
-            ))
-            .unwrap();
-
         Ok(RootActorState {
             sink_client,
             producers: 0u32,
@@ -154,10 +149,10 @@ impl Actor for RootActor {
     ) -> Result<(), ActorProcessingErr> {
         match message {
             SupervisionEvent::ActorFailed(dead_actor, panic_msg) => {
-                tracing::info!("{dead_actor:?} failed {panic_msg}");
+                tracing::error!("{dead_actor:?} failed {panic_msg}");
                 myself.stop(None);
             }
-            SupervisionEvent::ActorTerminated(dead_actor, reason, ..) => {
+            SupervisionEvent::ActorTerminated(dead_actor, _, reason) => {
                 tracing::info!("{dead_actor:?} stopped {reason:?}");
                 // TODO: Check if there are any children left,
                 // if they're all done, we can tell the sink to start cleaning up and shutdown.

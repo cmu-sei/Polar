@@ -1,8 +1,15 @@
+use clap::Parser;
 use harness_common::TestPlan;
-use serde_dhall::SimpleValue;
-
 pub mod actors;
 pub mod client;
+
+#[derive(Parser, Debug)]
+#[command(version, about, long_about = None)]
+pub struct Arguments {
+    #[arg(short, long)]
+    /// Path to a valid .dhall configuration file. It will be evaluated to generate a TestPlan
+    pub config: String,
+}
 
 pub fn read_test_config(path: &str) -> TestPlan {
     // let file = File::open(path).expect("Expected to find a test config at {path}");
