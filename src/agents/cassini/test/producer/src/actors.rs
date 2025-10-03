@@ -1,12 +1,11 @@
 use cassini_client::*;
 use fake::Fake;
-use harness_common::{MessagePattern, ProducerConfig, ProducerMessage, SinkCommand, TestPlan};
-
-use ractor::{
-    async_trait, concurrency::Interval, Actor, ActorProcessingErr, ActorRef, OutputPort,
-    SupervisionEvent,
+use harness_common::{
+    compute_checksum, Envelope, MessagePattern, ProducerConfig, ProducerMessage, SinkCommand,
+    TestPlan,
 };
-use serde::{Deserialize, Serialize};
+use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef, OutputPort, SupervisionEvent};
+use serde::Serialize;
 use std::time::{Duration, Instant};
 use tokio::time;
 use tracing::{debug, info};
@@ -39,7 +38,7 @@ pub struct RootActorArguments {
 
 pub enum RootActorMessage {
     /// A quick signal to the supervisor containing the index of the producer that finished
-    ProducerFinished(usize),
+    ProducerFinished,
     /// Signal that the sink has shutdown, so the supervisor can exit gracefully.
     SinkShutdown,
 }
@@ -135,7 +134,7 @@ impl Actor for RootActor {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
-            RootActorMessage::ProducerFinished(index) => {
+            RootActorMessage::ProducerFinished => {
                 state.producers -= 1;
             }
             RootActorMessage::SinkShutdown => {
@@ -262,22 +261,33 @@ impl Actor for ProducerAgent {
                         let mut ticker = time::interval(interval);
                         let end = Instant::now() + duration;
 
+                        let mut seqno = 0;
+
                         while Instant::now() < end {
                             ticker.tick().await;
-
+                            seqno += 1;
                             // TODO:
-                            // Instead of faking the data here, serialize a given value (some arbitrary data structure)
+
                             // generate a checksum for it
                             // wrap it in an envelope
                             // send it
                             // create a payload of the desired message size using fake
                             let faked = (0..=size).fake::<String>();
 
-                            let payload = faked.as_bytes().to_owned();
+                            let checksum = compute_checksum(faked.as_bytes());
+
+                            let envelope = Envelope {
+                                seqno,
+                                data: faked,
+                                checksum,
+                            };
+
+                            let payload = rkyv::to_bytes::<rkyv::rancor::Error>(&envelope)
+                                .expect("Expected to serialize payload to bytes");
 
                             let message = TcpClientMessage::Publish {
                                 topic: topic.clone(),
-                                payload,
+                                payload: payload.into(),
                             };
 
                             if let Err(e) = tcp_client.send_message(message) {
@@ -306,20 +316,31 @@ impl Actor for ProducerAgent {
 
                         info!("Starting test...");
                         let mut ticker = time::interval(interval);
+                        let mut seqno = 0;
                         let end = Instant::now() + duration;
 
                         while Instant::now() < end {
                             ticker.tick().await;
+                            seqno += 1;
 
                             let faked = (0..=size).fake::<String>();
 
-                            let payload = faked.as_bytes().to_owned();
+                            let checksum = compute_checksum(faked.as_bytes());
+
+                            let envelope = Envelope {
+                                seqno,
+                                data: faked,
+                                checksum,
+                            };
+
+                            let payload = rkyv::to_bytes::<rkyv::rancor::Error>(&envelope)
+                                .expect("Expected to serialize payload to bytes");
 
                             // send a bulk number of messages
                             for _ in 1..burst_size {
                                 let message = TcpClientMessage::Publish {
                                     topic: topic.clone(),
-                                    payload: payload.clone(),
+                                    payload: payload.clone().into(),
                                 };
 
                                 if let Err(e) = tcp_client.send_message(message) {
@@ -342,21 +363,9 @@ impl Actor for ProducerAgent {
             _ => (),
         }
 
-        // send a message to the supervisor containing the index of the producer.
-        //
-        let name = myself
-            .get_name()
-            .expect("Expected producer to have been named");
-
-        let index = name
-            .split_terminator(".")
-            .find_map(|s| s.parse::<usize>().ok())
-            .unwrap();
-
         myself.try_get_supervisor().map(|supervisor| {
-            let msg = RootActorMessage::ProducerFinished(index);
             supervisor
-                .send_message(msg)
+                .send_message(RootActorMessage::ProducerFinished)
                 .expect("Expected to contact supervisor");
         });
 

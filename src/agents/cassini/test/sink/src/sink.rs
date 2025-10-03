@@ -1,6 +1,9 @@
 use cassini_client::*;
 
-use harness_common::{ArchivedSinkCommand, ProducerMessage, SinkCommand};
+use harness_common::{
+    ArchivedSinkCommand, Envelope, ProducerMessage, SinkCommand, compute_checksum,
+    validate_checksum,
+};
 use ractor::{
     Actor, ActorProcessingErr, ActorRef, OutputPort, SupervisionEvent, async_trait,
     concurrency::{Duration, Instant, JoinHandle},
@@ -9,17 +12,11 @@ use rkyv::{
     deserialize,
     rancor::{self, Error, Source},
 };
-use rustls::{
-    RootCertStore, ServerConfig,
-    pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject},
-    server::WebPkiClientVerifier,
-};
-use std::sync::Arc;
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt, BufWriter, ReadHalf, WriteHalf, split},
-    net::{TcpListener, TcpStream},
-    sync::Mutex,
-};
+
+use serde_json::Value;
+use std::path::Path;
+use tokio::{fs::OpenOptions, io::AsyncWriteExt};
+
 use tokio_rustls::{TlsAcceptor, server::TlsStream};
 use tracing::{debug, error, info, warn};
 
@@ -59,6 +56,52 @@ pub enum SinkAgentMsg {
     Start,
     Receive(Vec<u8>),
 }
+
+impl SinkAgent {
+    /// Append a JSON value to a file as a single line (NDJSON format).
+    pub async fn append_json_to_file<P: AsRef<Path>>(
+        path: P,
+        value: &Envelope,
+    ) -> tokio::io::Result<()> {
+        // Open or create file in append mode
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .await?;
+
+        // Serialize to compact JSON string
+        let json_str = serde_json::to_string(value).expect("serialization should not fail");
+
+        // Write with trailing newline
+        file.write_all(json_str.as_bytes()).await?;
+        file.write_all(b"\n").await?;
+        file.flush().await?;
+
+        Ok(())
+    }
+
+    pub fn validate_checksums(path: &str) -> std::io::Result<()> {
+        use std::fs::File;
+        use std::io::{BufRead, BufReader};
+
+        let file = File::open(path)?;
+        let reader = BufReader::new(file);
+
+        for (i, line) in reader.lines().enumerate() {
+            let line = line?;
+            let message: Envelope = serde_json::from_str(&line)
+                .unwrap_or_else(|_| panic!("Invalid JSON at line {}", i + 1));
+
+            if !validate_checksum(message.data.as_bytes(), &message.checksum) {
+                error!("Failed to validate checksum for message: {}", message.seqno);
+            }
+        }
+
+        Ok(())
+    }
+}
+
 #[async_trait]
 impl Actor for SinkAgent {
     type Msg = SinkAgentMsg;
@@ -113,9 +156,10 @@ impl Actor for SinkAgent {
         myself: ActorRef<Self::Msg>,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        debug!("{myself:?} stopped.");
-        debug!("{:?}", state.metrics);
-
+        info!("Test run stopped. Validating checksums...");
+        SinkAgent::validate_checksums(format!("{}-output.json", state.cfg.topic).as_str())
+            .expect("Expected to validate checksums");
+        info!("{:?}", state.metrics);
         Ok(())
     }
 
@@ -130,10 +174,24 @@ impl Actor for SinkAgent {
                 let msg = TcpClientMessage::Subscribe(state.cfg.topic.clone());
                 state.tcp_client.send_message(msg).unwrap();
             }
-            SinkAgentMsg::Receive(_payload) => {
+            SinkAgentMsg::Receive(payload) => {
                 state.metrics.received += 1;
 
-                debug!("Received message {}", state.metrics.received);
+                // TODO: Do we want to panic? Or just write the error to disk and move on?
+                // The latter might be ideal.
+                let envelope = rkyv::from_bytes::<Envelope, rancor::Error>(&payload)
+                    .expect("Expected to deserialize successfully");
+
+                debug!(
+                    "Received message {}, in sequence: {}",
+                    state.metrics.received, envelope.seqno
+                );
+                let file_path = format!("{}-output.json", state.cfg.topic);
+
+                // write
+                SinkAgent::append_json_to_file(file_path, &envelope)
+                    .await
+                    .expect("Expected to write to file.");
 
                 let now = Instant::now();
 

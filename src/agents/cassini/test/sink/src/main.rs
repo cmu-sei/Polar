@@ -1,8 +1,8 @@
 use harness_common::{ArchivedSinkCommand, ProducerMessage, SinkCommand};
 use harness_sink::sink::*;
 use ractor::{
-    Actor, ActorProcessingErr, ActorRef, OutputPort, SupervisionEvent, async_trait,
-    concurrency::JoinHandle, registry::where_is,
+    Actor, ActorProcessingErr, ActorRef, SupervisionEvent, async_trait, concurrency::JoinHandle,
+    registry::where_is,
 };
 use rkyv::{
     deserialize,
@@ -13,7 +13,7 @@ use rustls::{
     pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject},
     server::WebPkiClientVerifier,
 };
-use std::{process::Output, sync::Arc};
+use std::sync::Arc;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt, BufWriter, ReadHalf, WriteHalf, split},
     net::{TcpListener, TcpStream},
@@ -205,11 +205,16 @@ impl Actor for SinkService {
                 );
             }
             SupervisionEvent::ActorFailed(actor_cell, _) => {
-                warn!(
+                error!(
                     "Worker agent: {0:?}:{1:?} failed!",
                     actor_cell.get_name(),
                     actor_cell.get_id()
                 );
+                // TODO: When this happens, send a message to the producer client
+                // should we
+                // Kill the whole test
+                // kill the corresponding producer? if so how?
+                // do nothing?
             }
             SupervisionEvent::ProcessGroupChanged(_) => (),
         }

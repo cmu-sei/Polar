@@ -1820,8 +1820,11 @@ dependencies = [
 name = "harness-common"
 version = "0.1.0"
 dependencies = [
+ "hex",
  "rkyv 0.8.10",
  "serde",
+ "serde_json",
+ "sha2",
 ]
 
 [[package]]

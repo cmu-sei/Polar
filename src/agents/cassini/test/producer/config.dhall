@@ -1,9 +1,5 @@
 -- TestPlan.dhall
 
--- Do we need this?
-
-let MessagePayload = { message: Text , checksum: Optional Text }
-
 -- Pattern for message emission
 -- When configured to drip messages, they'll be sent at a constant rate denoted by idle_time between messages,
 -- When configured to send in bursts, the burst_size denotes the amount of messages sent between idle_times
@@ -22,8 +18,6 @@ let Producer =
       , duration  : Natural
       , pattern   : Pattern
       }
-
-
 
 -- A test plan is just a list of producers
 -- TODO: We've discussed potentially splitting the producer and sink components again to enable them to communicate over the wire
