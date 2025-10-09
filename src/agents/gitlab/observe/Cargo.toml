@@ -26,32 +26,32 @@
 name = "gitlab-observer"
 version = "0.1.0"
 edition = "2021"
+license = "MIT"
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1.0"
-reqwest = { version = "0.11.17", features = ["json", "rustls-tls"] }
-url = "2.3.1"
-parse_link_header = "0.3.3"
+reqwest = { workspace = true, features = ["json", "rustls-tls"] }
+url = "2.5.7"
+parse_link_header = { workspace = true }
 common = { path = "../common" }
 tracing = "0.1.41"
-tracing-glog = "0.4.0"
-tracing-subscriber = { version = "0.3.19", features = ["std", "env-filter"] }
-workspace-hack = { version = "0.1", path = "../../workspace-hack" }
+tracing-glog = "0.4.1"
+tracing-subscriber = { version = "0.3.20", features = ["std", "env-filter"] }
 cassini-client = { path = "../../cassini/client" }
 cassini-types = { path = "../../cassini/types" }
-ractor = { version = "0.15.6", features = ["async-trait"] }
-cynic = { version = "3.9.1", features = ["rkyv"] }
+ractor = { version = "0.15.8", features = ["async-trait"] }
+cynic = { version = "3.12.0", features = ["rkyv"] }
 gitlab-queries = { path = "../query" }
 gitlab-schema = { path = "../schema" }
-rkyv = "0.8.10"
+rkyv = { workspace = true }
 polar = { path = "../../lib" }
-rand = { version = "0.9.1", features = ["small_rng"] }
-uuid = { version = "1.17.0", features = ["v5"] }
+rand = { workspace = true, features = ["small_rng"] }
+uuid = { version = "1.18.1", features = ["v5"] }
 
 [build-dependencies]
-cynic-codegen = "3.9.1"
+cynic-codegen = "3.12.0"
 # capnpc = "0.20.1"
 
 [[bin]]

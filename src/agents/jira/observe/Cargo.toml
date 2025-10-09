@@ -26,28 +26,28 @@
 name = "jira-observer"
 version = "0.1.0"
 edition = "2021"
+license = "MIT"
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
 serde = {version = "1", features = ["derive"]}
 serde_path_to_error = "0.1"
 serde_json = "1.0"
-reqwest = {version = "0.11.17", features = ["json", "rustls-tls"]}
-url = "2.3.1"
-parse_link_header = "0.3.3"
+reqwest = { workspace = true, features = ["json", "rustls-tls"]}
+url = "2.5.7"
+parse_link_header = { workspace = true }
 jira_common = {path = "../common"}
 serde_yaml = "0.9"
 clokwerk = "0.4.0"
-log = "0.4.22"
+log = "0.4.28"
 tracing = "0.1.41"
-tracing-glog = "0.4.0"
-tracing-subscriber = { version ="0.3.19", features=["std", "env-filter"]}
-workspace-hack = { version = "0.1", path = "../../workspace-hack" }
+tracing-glog = "0.4.1"
+tracing-subscriber = { version ="0.3.20", features=["std", "env-filter"]}
 cassini = { path = "../../cassini/broker" }
-ractor = { version="0.15.6", features = ["async-trait"]}
-rkyv = "0.8.10"
+ractor = { version="0.15.8", features = ["async-trait"]}
+rkyv = { workspace = true }
 polar = {path = "../../lib"}
-rand = { version = "0.9.1", features = ["small_rng"] }
+rand = { workspace = true, features = ["small_rng"] }
 
 [[bin]]
 name = "jira-observer"

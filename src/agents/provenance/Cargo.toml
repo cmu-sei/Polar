@@ -2,19 +2,19 @@
 name = "provenance"
 version.workspace = true
 edition.workspace = true
+license = "MIT"
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1.0"
 tracing = "0.1.41"
-tracing-glog = "0.4.0"
-tracing-subscriber = { version = "0.3.19", features = ["std", "env-filter"] }
-workspace-hack = { version = "0.1", path = "../workspace-hack" }
+tracing-glog = "0.4.1"
+tracing-subscriber = { version = "0.3.20", features = ["std", "env-filter"] }
 cassini = { path = "../cassini/broker" }
-ractor = { version = "0.15.6", features = ["async-trait"] }
-rkyv = "0.8.10"
+ractor = { version = "0.15.8", features = ["async-trait"] }
+rkyv = { workspace = true }
 polar = { path = "../lib" }
-neo4rs = "=0.8.0"
-reqwest = { version = "0.12.22", features = ["json"] }
+neo4rs = { workspace = true }
+reqwest = { workspace = true, features = ["json"] }
 cyclonedx-bom = "0.8.0"

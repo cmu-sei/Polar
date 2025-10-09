@@ -26,25 +26,25 @@
 name = "common"
 version = "0.1.0"
 edition = "2021"
+license = "MIT"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-futures-lite = "1.13.0"
-url = "2.3.1"
+futures-lite = "2.6.1"
+url = "2.5.7"
 tracing = "0.1.41"
-tcp-stream = "0.28.0"
+tcp-stream = { workspace = true }
 serde = {version = "1", features = ["derive"]}
 serde_json = "1.0"
-workspace-hack = { version = "0.1", path = "../../workspace-hack" }
-ractor = { version="0.15.6", features = ["async-trait"]}
+ractor = { version="0.15.8", features = ["async-trait"]}
 cassini-client = { path = "../../cassini/client" }
 polar = {path = "../../lib" }
-cynic = "3.9.1"
+cynic = "3.12.0"
 gitlab-queries = { path = "../query" }
 gitlab-schema = { path = "../schema" }
-rkyv = "0.8.10"
-uuid = { version = "1.17.0", features = ["v5"] }
+rkyv = { workspace = true }
+uuid = { version = "1.18.1", features = ["v5"] }
 
 [build-dependencies]
-cynic-codegen = "3.9.1"
+cynic-codegen = "3.12.0"

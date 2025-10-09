@@ -2,6 +2,7 @@
 name = "harness-sink"
 version = "0.1.0"
 edition = "2024"
+license = "MIT"
 
 [dependencies]
 harness-common = { path = "../common" }
@@ -12,9 +13,9 @@ tokio = { version = "1.47.1", features = ["full"] }
 cassini-client = { path = "../../client" }
 polar = { path = "../../../lib" }
 tracing = "0.1.41"
-rustls = { version = "=0.23.25", features = ["aws-lc-rs"] }
-tokio-rustls = "0.26.1"
-rkyv = "0.8.10"
-uuid = { version = "1.11.0", features = ["v4"]}
+rustls = { version = "0.23", features = ["aws-lc-rs"] }
+tokio-rustls = "0.26.4"
+rkyv = { workspace = true }
+uuid = { version = "1.18.1", features = ["v4"]}
 
-tokio-util = "0.7.13"
+tokio-util = "0.7.16"
