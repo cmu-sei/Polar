@@ -1,5 +1,6 @@
 use crate::{send_to_client, KubernetesObserverMessage, TCP_CLIENT_NAME};
-use cassini::{client::TcpClientMessage, ClientMessage};
+use cassini_client::TcpClientMessage;
+use cassini_types::ClientMessage;
 use futures::{StreamExt, TryStreamExt};
 use k8s_openapi::api::core::v1::Pod;
 use kube::runtime::watcher;

@@ -1,5 +1,5 @@
-use cassini::client::*;
-use cassini::TCPClientConfig;
+use cassini_client::*;
+use cassini_client::TCPClientConfig;
 use neo4rs::Graph;
 use neo4rs::Query;
 use ractor::async_trait;
@@ -73,6 +73,7 @@ impl Actor for ConsumerSupervisor {
                 config: TCPClientConfig::new(),
                 registration_id: None,
                 output_port,
+                queue_output: None,
             },
             myself.clone().into(),
         )

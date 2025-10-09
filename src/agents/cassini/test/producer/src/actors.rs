@@ -5,7 +5,7 @@ use harness_common::{
     TestPlan,
 };
 use ractor::{
-    async_trait, registry::where_is, Actor, ActorProcessingErr, ActorRef, ActorStatus, OutputPort,
+    async_trait, Actor, ActorProcessingErr, ActorRef, OutputPort,
     SupervisionEvent,
 };
 use serde::Serialize;

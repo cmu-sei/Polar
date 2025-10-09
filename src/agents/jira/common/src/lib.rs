@@ -31,7 +31,7 @@ use std::{
     fs::{self, File},
     io::{Read, Write},
 };
-use sysinfo::{Pid, ProcessRefreshKind, System, SystemExt};
+use sysinfo::{Pid, ProcessRefreshKind, System};
 //use tcp_stream::OwnedTLSConfig;
 //use tracing::{error, info};
 //use url::Url;
@@ -64,7 +64,7 @@ pub fn create_lock(filepath: &str) -> Result<bool, std::io::Error> {
                 let mut s = System::new_all();
                 let result = s.refresh_process_specifics(
                     Pid::from(usize::try_from(my_pid).unwrap()),
-                    ProcessRefreshKind::new(),
+                    ProcessRefreshKind::everything(),
                 );
                 if result {
                     // println!("[*] An instance of this observer is still running. No further scheduler action taken at this time. Yielding.");

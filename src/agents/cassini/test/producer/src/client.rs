@@ -1,6 +1,5 @@
 use harness_common::*;
-use polar::UNEXPECTED_MESSAGE_STR;
-use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef, OutputPort, RpcReplyPort};
+use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef, OutputPort};
 use rkyv::deserialize;
 use rkyv::rancor::Error;
 use rustls::client::WebPkiServerVerifier;

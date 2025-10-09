@@ -2,7 +2,7 @@ use polar::DispatcherMessage;
 use ractor::{async_trait, registry::where_is, Actor, ActorProcessingErr, ActorRef};
 use rkyv::rancor::Error;
 use rkyv::{Archive, Deserialize, Serialize};
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
 /// A genearl enum that can contain variations of data obnserved from an app
 #[derive(Deserialize, Serialize, Archive, Clone)]

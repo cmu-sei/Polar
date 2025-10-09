@@ -3,8 +3,8 @@ pub mod actors;
 pub const BROKER_CLIENT_NAME: &str = "polar.web.tcp.client";
 
 use actors::ApiConsumerState;
-use cassini::client::TcpClientMessage;
-use cassini::ClientMessage;
+use cassini_client::TcpClientMessage;
+use cassini_types::ClientMessage;
 use neo4rs::Error;
 use polar::get_neo_config;
 use ractor::registry::where_is;
@@ -24,7 +24,7 @@ pub async fn subscribe_to_topic(
         .expect("Expected to send tcp client a message");
 
     //load neo config and connect to graph db
-    match neo4rs::Graph::connect(get_neo_config()).await {
+    match neo4rs::Graph::connect(get_neo_config()) {
         Ok(graph) => Ok(ApiConsumerState {
             registration_id: registration_id,
             graph,

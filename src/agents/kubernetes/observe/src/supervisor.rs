@@ -1,5 +1,4 @@
-use cassini::client::{TcpClientActor, TcpClientArgs};
-use cassini::TCPClientConfig;
+use cassini_client::{TcpClientActor, TcpClientArgs, TCPClientConfig};
 use k8s_openapi::api::core::v1::Namespace;
 use kube::Config;
 use kube::{api::ListParams, Api, Client};

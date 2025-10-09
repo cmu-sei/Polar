@@ -1,24 +1,19 @@
 use cassini_client::*;
 
 use harness_common::{
-    ArchivedSinkCommand, Envelope, ProducerMessage, SinkCommand, compute_checksum,
+    Envelope,
     validate_checksum,
 };
 use ractor::{
-    Actor, ActorProcessingErr, ActorRef, OutputPort, SupervisionEvent, async_trait,
-    concurrency::{Duration, Instant, JoinHandle},
+    Actor, ActorProcessingErr, ActorRef, OutputPort, async_trait,
+    concurrency::{Duration, Instant},
 };
-use rkyv::{
-    deserialize,
-    rancor::{self, Error, Source},
-};
+use rkyv::rancor::{self, Source};
 
-use serde_json::Value;
 use std::path::Path;
 use tokio::{fs::OpenOptions, io::AsyncWriteExt};
 
-use tokio_rustls::{TlsAcceptor, server::TlsStream};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info};
 
 // ============================== Sink Actor Definition ============================== //
 //

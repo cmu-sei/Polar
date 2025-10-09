@@ -1,4 +1,4 @@
-use cassini::client::*;
+use cassini_client::*;
 use kube_common::MessageDispatcher;
 use polar::{get_neo_config, DISPATCH_ACTOR};
 use ractor::async_trait;

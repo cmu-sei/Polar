@@ -1,9 +1,9 @@
 use std::time::Duration;
 
 use crate::BROKER_CLIENT_NAME;
-use cassini::client::*;
-use cassini::ClientMessage;
-use cassini::TCPClientConfig;
+use cassini_client::*;
+use cassini_types::ClientMessage;
+use cassini_client::TCPClientConfig;
 use ractor::async_trait;
 use ractor::registry::where_is;
 use ractor::Actor;
@@ -65,6 +65,7 @@ impl Actor for ObserverSupervisor {
                 config: TCPClientConfig::new(),
                 registration_id: None,
                 output_port,
+                queue_output: None,
             },
             myself.clone().into(),
         )

@@ -8,7 +8,6 @@ use ractor::Actor;
 use ractor::ActorProcessingErr;
 use ractor::ActorRef;
 use reqwest::Client;
-use serde_json::Value;
 use tokio::task::AbortHandle;
 use tracing::debug;
 struct ProvenanceActor;
@@ -88,7 +87,7 @@ impl Actor for ProvenanceActor {
 
         // get graph connection
         //TODO: Get some schedule from configuration agent
-        match neo4rs::Graph::connect(get_neo_config()).await {
+        match neo4rs::Graph::connect(get_neo_config()) {
             Ok(graph) => Ok(ProvenanceActorState {
                 graph,
                 interval: Duration::from_secs(30), // TODO: Make configurable
