@@ -26,7 +26,7 @@ use std::time::Duration;
 
 use crate::{
     handle_backoff, init_observer_state, send_to_broker, BackoffReason, Command,
-    GitlabObserverArgs, GitlabObserverMessage, GitlabObserverState, BROKER_CLIENT_NAME,
+    GitlabObserverArgs, GitlabObserverMessage, GitlabObserverState,
     MESSAGE_FORWARDING_FAILED,
 };
 use common::USER_CONSUMER_TOPIC;

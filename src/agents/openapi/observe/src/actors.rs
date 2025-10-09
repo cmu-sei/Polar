@@ -1,8 +1,5 @@
-use std::time::Duration;
-
 use crate::BROKER_CLIENT_NAME;
 use cassini_client::*;
-use cassini_types::ClientMessage;
 use cassini_client::TCPClientConfig;
 use ractor::async_trait;
 use ractor::registry::where_is;
@@ -46,15 +43,16 @@ impl Actor for ObserverSupervisor {
     ) -> Result<Self::State, ActorProcessingErr> {
         debug!("{myself:?} starting");
 
-        // define an output port for the actor to subscribe to
-        let output_port = std::sync::Arc::new(OutputPort::default());
-
         let state = ObserverSupervisorState {
             openapi_endpoint: args.openapi_endpoint,
         };
 
+        // define an output port for the actor to subscribe to
+        let output_port = std::sync::Arc::new(OutputPort::default());
+        let queue_output = std::sync::Arc::new(OutputPort::<Vec<u8>>::default());
+
         // subscribe self to this port
-        output_port.subscribe(myself.clone(), |message| {
+        output_port.subscribe(myself.clone(), |message: String| {
             Some(ObserverSupervisorMessage::ClientRegistered(message))
         });
 
@@ -64,8 +62,8 @@ impl Actor for ObserverSupervisor {
             TcpClientArgs {
                 config: TCPClientConfig::new(),
                 registration_id: None,
-                output_port,
-                queue_output: None,
+                output_port: output_port.clone(),
+                queue_output: queue_output.clone(),
             },
             myself.clone().into(),
         )
@@ -198,7 +196,7 @@ impl Actor for ApiObserver {
 
     async fn handle(
         &self,
-        myself: ActorRef<Self::Msg>,
+        _myself: ActorRef<Self::Msg>,
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
@@ -226,14 +224,13 @@ impl Actor for ApiObserver {
                             .expect("Expected to find TCP client");
 
                         client
-                            .send_message(TcpClientMessage::Send(ClientMessage::PublishRequest {
+                            .send_message(TcpClientMessage::Publish {
                                 topic: "polar.web.consumer".to_string(),
                                 payload: payload.to_vec(),
-                                registration_id: Some(state.registration_id.clone()),
-                            }))
-                            .unwrap();
+                            })
+                            .expect("Expected to send publish message");
                     }
-                    Err(e) => todo!(),
+                    Err(_) => todo!(),
                 }
             }
         }

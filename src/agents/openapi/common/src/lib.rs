@@ -48,8 +48,8 @@ impl Actor for MessageDispatcher {
 
     async fn pre_start(
         &self,
-        myself: ActorRef<Self::Msg>,
-        args: (),
+        _myself: ActorRef<Self::Msg>,
+        _args: (),
     ) -> Result<Self::State, ActorProcessingErr> {
         Ok(DispatcherState)
     }

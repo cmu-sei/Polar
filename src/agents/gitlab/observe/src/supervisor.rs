@@ -110,7 +110,7 @@ impl Actor for ObserverSupervisor {
                 config: args.client_config,
                 registration_id: None,
                 output_port,
-                queue_output: None,
+                queue_output: std::sync::Arc::new(ractor::OutputPort::default()),
             },
             myself.clone().into(),
         )

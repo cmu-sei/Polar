@@ -67,7 +67,7 @@ impl ProvenanceActor {
             let bom = Bom::parse_from_json_v1_5(json.as_bytes()).expect("Failed to parse BOM");
             //TODO: Once we have the sboms, parse into known format and link to gitlabpackages with the same name, so if we find polar-0.1.0 we can link it to the package
             // Same goes for container images, gitlab packages for polar are versioned with git hashes, if a gitlab package version matches a polar container tag, they should be linked
-            let validation_result = bom.validate();
+            let _validation_result = bom.validate();
         }
     }
 }

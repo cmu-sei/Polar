@@ -245,14 +245,13 @@ impl Actor for PodObserver {
                                     object: serialized,
                                 };
 
-                                let payload = serde_json::to_string(&event).unwrap();
+                                let payload = serde_json::to_string(&event).unwrap().into_bytes();
 
                                 let envelope =
-                                    TcpClientMessage::Send(ClientMessage::PublishRequest {
+                                    TcpClientMessage::Publish {
                                         topic,
-                                        payload: payload.into_bytes(),
-                                        registration_id: Some(state.registration_id.clone()),
-                                    });
+                                        payload,
+                                    };
 
                                 // send data for batch processing
 

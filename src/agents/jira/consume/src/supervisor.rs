@@ -1,13 +1,14 @@
 use std::time::Duration;
 
-use cassini::client::*;
+use cassini_client::TcpClientMessage;
+use cassini_client::TCPClientConfig;
 use jira_common::dispatch::MessageDispatcher;
 use jira_common::types::JiraData;
 use jira_common::JIRA_PROJECTS_CONSUMER_TOPIC;
 use jira_common::JIRA_GROUPS_CONSUMER_TOPIC;
 use jira_common::JIRA_USERS_CONSUMER_TOPIC;
 use jira_common::JIRA_ISSUES_CONSUMER_TOPIC;
-use exponential_backoff::Backoff;
+use cassini_backoff::{Backoff, ExponentialBackoff};
 use polar::DISPATCH_ACTOR;
 use ractor::async_trait;
 use ractor::registry::where_is;

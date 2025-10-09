@@ -27,7 +27,9 @@ use crate::{
     JiraObserverMessage, JiraObserverState,
     JIRA_USER_OBSERVER
     };
-use cassini::{client::TcpClientMessage, ClientMessage};
+use cassini_client::TcpClientMessage;
+use cassini_client::TCPClientConfig;
+use cassini_types::ClientMessage;
 use ractor::{async_trait, registry::where_is, Actor, ActorProcessingErr, ActorRef};
 use jira_common::JIRA_USERS_CONSUMER_TOPIC;
 use rkyv::rancor::Error;

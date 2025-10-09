@@ -31,7 +31,7 @@ use std::{
     fs::{self, File},
     io::{Read, Write},
 };
-use sysinfo::{Pid, ProcessRefreshKind, System};
+use sysinfo::{ProcessRefreshKind, System};
 //use tcp_stream::OwnedTLSConfig;
 //use tracing::{error, info};
 //use url::Url;
@@ -49,7 +49,7 @@ pub const JIRA_ISSUES_CONSUMER_TOPIC: &str = "jira:consumer:issues";
 pub fn create_lock(filepath: &str) -> Result<bool, std::io::Error> {
     let file_path = std::path::Path::new(filepath);
     let exists = file_path.exists();
-    if exists == true {
+    if exists {
         // Check if there is a PID in the file and check if that PID is actually
         // running. If it is running, we're done here. If it's not running, we
         // need to delete the file. Regardless of whether or not this condition
@@ -59,18 +59,20 @@ pub fn create_lock(filepath: &str) -> Result<bool, std::io::Error> {
             let mut bytes_buf = [0u8; 4];
             let bytes_read = handle.read(&mut bytes_buf).unwrap();
             if bytes_read == 4 {
-                let my_pid = u32::from_le_bytes(bytes_buf);
+                let _my_pid = u32::from_le_bytes(bytes_buf);
 
                 let mut s = System::new_all();
-                let result = s.refresh_process_specifics(
-                    Pid::from(usize::try_from(my_pid).unwrap()),
+                let result = s.refresh_processes_specifics(
+                    sysinfo::ProcessesToUpdate::All,
+                    true,
                     ProcessRefreshKind::everything(),
                 );
-                if result {
-                    // println!("[*] An instance of this observer is still running. No further scheduler action taken at this time. Yielding.");
+
+                if result > 0 {
+                    // println!("[*] An instance of this observer is still running...");
                     return Ok(false);
                 } else {
-                    // println!("[*] A lock file was found, but the PID was invalid. Deleting lock file and creating a new one.");
+                    // println!("[*] A lock file was found, but the PID was invalid...");
                     fs::remove_file(file_path)?;
                 }
             } else {
@@ -96,7 +98,7 @@ pub fn create_lock(filepath: &str) -> Result<bool, std::io::Error> {
                     return Err(e);
                 }
             }
-            return Ok(true);
+            Ok(true)
         }
         Err(e) => {
             panic!("[*] Problem creating lock file: {}", e.to_string());

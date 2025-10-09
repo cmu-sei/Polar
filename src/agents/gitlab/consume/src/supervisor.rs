@@ -10,7 +10,7 @@ use common::PROJECTS_CONSUMER_TOPIC;
 use common::REPOSITORY_CONSUMER_TOPIC;
 use common::RUNNERS_CONSUMER_TOPIC;
 use common::USER_CONSUMER_TOPIC;
-use exponential_backoff::Backoff;
+use cassini_backoff::{Backoff, ExponentialBackoff};
 use polar::DISPATCH_ACTOR;
 use ractor::async_trait;
 use ractor::registry::where_is;
@@ -205,7 +205,7 @@ impl Actor for ConsumerSupervisor {
                 config: args.client_config,
                 registration_id: None,
                 output_port,
-                queue_output: None,
+                queue_output: std::sync::Arc::new(ractor::OutputPort::default()),
             },
             myself.clone().into(),
         )

@@ -21,7 +21,7 @@
    DM24-0470
 */
 use ractor::Actor;
-use std::{env, error::Error};
+use std::error::Error;
 use web_consumer::actors::{ConsumerSupervisor, ConsumerSupervisorArgs};
 
 #[tokio::main]

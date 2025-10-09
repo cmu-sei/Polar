@@ -63,13 +63,12 @@ name = "polar"
 [workspace.dependencies]
 ahash = "0.8.12"
 async-global-executor-trait = "3.1.0"
-backoff = { git = "https://github.com/daveman1010221/backoff", branch = "master" }
+cassini-backoff = { git = "https://github.com/daveman1010221/backoff", branch = "master" }
 base64 = "0.22.1"
 bitflags = "2.9.4"
 executor-trait = "3.1.0"
 getrandom = "0.3.3"
 k8s-openapi = "0.26"
-kube = "2"
 libloading = "0.8.9"
 neo4rs = { version = "0.9.0-rc.8", git = "https://github.com/neo4j-labs/neo4rs", tag = "v0.9.0-rc.8" }
 parse_link_header = "0.4"
@@ -90,10 +89,12 @@ amq-protocol-uri = { git = "https://github.com/amqp-rs/amq-protocol", tag = "v10
 amq-protocol-tcp = { git = "https://github.com/amqp-rs/amq-protocol", tag = "v10.0.0-rc.3" }
 cassini-client = { path = "cassini/client" }
 cassini-types  = { path = "cassini/types" }
+kube = { version = "2.0.1", default-features = false, features = ["client", "aws-lc-rs", "rustls-tls", "runtime", "derive"] }
 
 [patch.crates-io]
 getrandom = { git = "https://github.com/rust-random/getrandom", tag = "v0.3.3" }
-backoff = { git = "https://github.com/daveman1010221/backoff", branch = "master" }
+cassini-backoff = { git = "https://github.com/daveman1010221/backoff", branch = "master" }
+
 dhall = { git = "https://github.com/daveman1010221/dhall-rust", branch = "modernize-rkyv" }
 serde_dhall = { git = "https://github.com/daveman1010221/dhall-rust", branch = "modernize-rkyv" }
 lapin = { git = "https://github.com/amqp-rs/lapin", tag = "v4.0.0-rc.1" }

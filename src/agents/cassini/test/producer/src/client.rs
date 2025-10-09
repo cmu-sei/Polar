@@ -110,11 +110,11 @@ impl SinkClient {
                     return Err(Box::new(e));
                 }
 
-                return Ok(());
+                Ok(())
             }
             Err(e) => {
                 warn!("Failed to serialize message. {e}");
-                return Err(Box::new(e));
+                Err(Box::new(e))
             }
         }
     }
@@ -270,7 +270,7 @@ impl Actor for SinkClient {
 
     async fn handle(
         &self,
-        myself: ActorRef<Self::Msg>,
+        _myself: ActorRef<Self::Msg>,
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {

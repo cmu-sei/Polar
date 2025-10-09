@@ -4,7 +4,6 @@ pub const BROKER_CLIENT_NAME: &str = "polar.web.tcp.client";
 
 use actors::ApiConsumerState;
 use cassini_client::TcpClientMessage;
-use cassini_types::ClientMessage;
 use neo4rs::Error;
 use polar::get_neo_config;
 use ractor::registry::where_is;
@@ -17,11 +16,9 @@ pub async fn subscribe_to_topic(
     let client =
         where_is(BROKER_CLIENT_NAME.to_owned()).expect("Expected TCP client to be present.");
     client
-        .send_message(TcpClientMessage::Send(ClientMessage::SubscribeRequest {
-            registration_id: Some(registration_id.clone()),
-            topic,
-        }))
+        .send_message(TcpClientMessage::Subscribe(topic.clone()))
         .expect("Expected to send tcp client a message");
+
 
     //load neo config and connect to graph db
     match neo4rs::Graph::connect(get_neo_config()) {

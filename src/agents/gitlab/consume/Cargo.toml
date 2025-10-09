@@ -45,7 +45,7 @@ ractor = { version = "0.15.8", features = ["async-trait"] }
 polar = { path = "../../lib" }
 gitlab-queries = { path = "../query" }
 gitlab-schema = { path = "../schema" }
-backoff = { workspace = true }
+cassini-backoff = { workspace = true }
 
 [[bin]]
 name = "gitlab-consumer"

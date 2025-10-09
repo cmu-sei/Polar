@@ -44,7 +44,7 @@ cassini = { path = "../../cassini/broker" }
 ractor = { version = "0.15.8", features = ["async-trait"] }
 polar = { path = "../../lib" }
 #jira-queries = { path = "../query" }
-backoff = { workspace = true }
+cassini-backoff = { workspace = true }
 
 [[bin]]
 name = "jira-consumer"

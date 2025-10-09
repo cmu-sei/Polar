@@ -1,5 +1,6 @@
-use cassini::client::*;
-use cassini::TCPClientConfig;
+use cassini_client::TcpClientMessage;
+use cassini_client::TCPClientConfig;
+use cassini_types::ClientMessage;
 use jira_common::get_file_as_byte_vec;
 use ractor::async_trait;
 use ractor::Actor;

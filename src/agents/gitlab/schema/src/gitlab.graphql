@@ -75374,27 +75374,27 @@ enum UserState {
   """
   User is active and can use the system.
   """
-  active
+  Active
   """
   User has been blocked by an administrator and cannot use the system.
   """
-  blocked
+  Blocked
   """
   User is no longer active and cannot use the system.
   """
-  deactivated
+  Deactivated
   """
   User is blocked, and their contributions are hidden.
   """
-  banned
+  Banned
   """
   User has been blocked by the system.
   """
-  ldap_blocked
+  LdapBlocked
   """
   User is blocked and pending approval.
   """
-  blocked_pending_approval
+  BlockedPendingApproval
 }
 
 type UserStatus {

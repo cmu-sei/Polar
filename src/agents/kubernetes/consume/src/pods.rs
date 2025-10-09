@@ -223,10 +223,9 @@ impl Actor for PodConsumer {
         let client =
             where_is(BROKER_CLIENT_NAME.to_string()).expect("Expected to find TCP client.");
 
-        client.send_message(TcpClientMessage::Send(ClientMessage::SubscribeRequest {
-            registration_id: Some(args.registration_id.clone()),
-            topic: myself.get_name().unwrap(),
-        }))?;
+        client.send_message(TcpClientMessage::Subscribe(
+            myself.get_name().unwrap()
+        )?;
 
         //load neo config and connect to graph db
 

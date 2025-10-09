@@ -59,14 +59,11 @@ pub async fn subscribe_to_topic(
 ) -> Result<GitlabConsumerState, Box<dyn Error>> {
     let client = where_is(BROKER_CLIENT_NAME.to_string()).expect("Expected to find TCP client.");
 
-    client.send_message(TcpClientMessage::Send(ClientMessage::SubscribeRequest {
-        registration_id: Some(registration_id.clone()),
-        topic,
-    }))?;
+    client.send_message(TcpClientMessage::Subscribe(topic))?;
 
     //load neo config and connect to graph db
 
-    let graph = neo4rs::Graph::connect(config).await?;
+    let graph = neo4rs::Graph::connect(config)?;
 
     Ok(GitlabConsumerState {
         registration_id,

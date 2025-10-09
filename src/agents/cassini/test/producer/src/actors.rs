@@ -107,7 +107,7 @@ impl Actor for RootActor {
         // the refs according to the index, starting at 0.
 
         for config in &state.test_plan.producers {
-            let (p, _) = Actor::spawn_linked(
+            let (_, _) = Actor::spawn_linked(
                 Some(format!("cassini.harness.producer.{}", state.producers)),
                 ProducerAgent,
                 config.to_owned(),

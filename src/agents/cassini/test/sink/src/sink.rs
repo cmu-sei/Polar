@@ -8,7 +8,7 @@ use ractor::{
     Actor, ActorProcessingErr, ActorRef, OutputPort, async_trait,
     concurrency::{Duration, Instant},
 };
-use rkyv::rancor::{self, Source};
+use rkyv::rancor;
 
 use std::path::Path;
 use tokio::{fs::OpenOptions, io::AsyncWriteExt};
@@ -148,7 +148,7 @@ impl Actor for SinkAgent {
 
     async fn post_stop(
         &self,
-        myself: ActorRef<Self::Msg>,
+        _myself: ActorRef<Self::Msg>,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         info!("Test run stopped. Validating checksums...");

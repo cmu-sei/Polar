@@ -18,4 +18,4 @@ cassini = { path = "../../cassini/broker" }
 polar = {path = "../../lib" }
 cynic = "3.12.0"
 rkyv = { workspace = true }
-kube = { workspace = true, default-features = false , features = ["client", "aws-lc-rs", "rustls-tls" ,"runtime", "derive"]}
+kube = { workspace = true }

@@ -134,11 +134,11 @@ impl TcpClientActor {
                     return Err(Box::new(e));
                 }
 
-                return Ok(());
+                Ok(())
             }
             Err(e) => {
                 warn!("Failed to serialize message. {e}");
-                return Err(Box::new(e));
+                Err(Box::new(e))
             }
         }
     }
