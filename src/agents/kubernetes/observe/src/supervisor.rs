@@ -52,6 +52,7 @@ impl ClusterObserverSupervisor {
                         config: args.cassini_client_config,
                         registration_id: None,
                         output_port,
+                        queue_output: std::sync::Arc::new(ractor::OutputPort::default()),
                     },
                     myself.into(),
                 )

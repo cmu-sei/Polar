@@ -27,7 +27,7 @@ pub enum SupervisorMessage {
 }
 
 pub struct ClusterConsumerSupervisorArgs {
-    pub client_config: cassini::TCPClientConfig,
+    pub client_config: cassini_client::TCPClientConfig,
     pub graph_config: neo4rs::Config,
 }
 
@@ -57,6 +57,7 @@ impl Actor for ClusterConsumerSupervisor {
                 config: args.client_config,
                 registration_id: None,
                 output_port,
+                queue_output: std::sync::Arc::new(ractor::OutputPort::default()),
             },
             myself.clone().into(),
         )

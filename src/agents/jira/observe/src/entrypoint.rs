@@ -21,7 +21,7 @@
    DM24-0470
 */
 
-use cassini::TCPClientConfig;
+use cassini_client::TCPClientConfig;
 use jira_observer::*;
 use polar::init_logging;
 use ractor::Actor;

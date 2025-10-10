@@ -22,7 +22,6 @@
 */
 
 use cassini_client::TcpClientMessage;
-use cassini_types::ClientMessage;
 use neo4rs::{Config, ConfigBuilder};
 use ractor::registry::where_is;
 use std::error::Error;
