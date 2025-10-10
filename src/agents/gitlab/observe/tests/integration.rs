@@ -1,8 +1,10 @@
 mod tests {
 
-    use broker::{Broker, BrokerArgs};
-    use cassini::*;
-    use client::{TcpClientActor, TcpClientArgs, TcpClientMessage};
+    use cassini_client::{TcpClientActor, TcpClientArgs, TcpClientMessage};
+    use cassini_broker::broker::{Broker, BrokerArgs};
+    use cassini_broker::BROKER_NAME;
+    use cassini_client::TCPClientConfig;
+
     use gitlab_observer::*;
     use ractor::registry::where_is;
     use ractor::rpc::call;
@@ -56,6 +58,7 @@ mod tests {
                 config: TCPClientConfig::new(),
                 registration_id: None,
                 output_port,
+                queue_output: std::sync::Arc::new(ractor::OutputPort::default()),
             },
         )
         .await
