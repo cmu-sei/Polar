@@ -658,7 +658,17 @@ dependencies = [
 ]
 
 [[package]]
-name = "cassini"
+name = "cassini-backoff"
+version = "0.4.2"
+source = "git+https://github.com/daveman1010221/backoff?branch=master#ba6d71028e000e346df88d0b40447c53d2588f31"
+dependencies = [
+ "getrandom 0.3.3",
+ "instant",
+ "rand",
+]
+
+[[package]]
+name = "cassini-broker"
 version = "0.1.0"
 dependencies = [
  "async-trait",
@@ -676,16 +686,6 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "uuid",
-]
-
-[[package]]
-name = "cassini-backoff"
-version = "0.4.2"
-source = "git+https://github.com/daveman1010221/backoff?branch=master#ba6d71028e000e346df88d0b40447c53d2588f31"
-dependencies = [
- "getrandom 0.3.3",
- "instant",
- "rand",
 ]
 
 [[package]]
@@ -1769,6 +1769,7 @@ dependencies = [
 name = "gitlab-observer"
 version = "0.1.0"
 dependencies = [
+ "cassini-broker",
  "cassini-client",
  "cassini-types",
  "common",
@@ -2436,8 +2437,10 @@ name = "jira-consumer"
 version = "0.1.0"
 dependencies = [
  "async-global-executor",
- "cassini",
  "cassini-backoff",
+ "cassini-broker",
+ "cassini-client",
+ "cassini-types",
  "futures-lite",
  "jira_common",
  "lapin",
@@ -2454,7 +2457,9 @@ dependencies = [
 name = "jira-observer"
 version = "0.1.0"
 dependencies = [
- "cassini",
+ "cassini-broker",
+ "cassini-client",
+ "cassini-types",
  "clokwerk",
  "jira_common",
  "log",
@@ -2480,7 +2485,7 @@ name = "jira_common"
 version = "0.1.0"
 dependencies = [
  "amq-protocol-uri",
- "cassini",
+ "cassini-broker",
  "futures-lite",
  "indexmap 2.11.4",
  "lapin",
@@ -2617,7 +2622,7 @@ name = "kube-common"
 version = "0.1.0"
 dependencies = [
  "amq-protocol-uri",
- "cassini",
+ "cassini-broker",
  "cynic",
  "futures-lite",
  "kube",
@@ -3680,7 +3685,7 @@ dependencies = [
 name = "provenance"
 version = "0.1.0"
 dependencies = [
- "cassini",
+ "cassini-broker",
  "cyclonedx-bom",
  "neo4rs",
  "polar",

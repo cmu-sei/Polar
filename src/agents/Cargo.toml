@@ -93,7 +93,6 @@ kube = { version = "2.0.1", default-features = false, features = ["client", "aws
 
 [patch.crates-io]
 getrandom = { git = "https://github.com/rust-random/getrandom", tag = "v0.3.3" }
-cassini-backoff = { git = "https://github.com/daveman1010221/backoff", branch = "master" }
 
 dhall = { git = "https://github.com/daveman1010221/dhall-rust", branch = "modernize-rkyv" }
 serde_dhall = { git = "https://github.com/daveman1010221/dhall-rust", branch = "modernize-rkyv" }
