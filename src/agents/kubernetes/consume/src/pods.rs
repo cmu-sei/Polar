@@ -22,7 +22,6 @@
 */
 
 use cassini_client::TcpClientMessage;
-use cassini_types::ClientMessage;
 use k8s_openapi::api::core::v1::Pod;
 use kube_common::KubeMessage;
 use neo4rs::Query;
@@ -225,16 +224,18 @@ impl Actor for PodConsumer {
 
         client.send_message(TcpClientMessage::Subscribe(
             myself.get_name().unwrap()
-        )?;
+        ))?;
 
         //load neo config and connect to graph db
-
-        let the_graph = neo4rs::Graph::connect(args.graph_config);
-
-        Ok(KubeConsumerState {
-            registration_id: args.registration_id,
-            the_graph,
-        })
+        match neo4rs::Graph::connect(args.graph_config) {
+            Ok(graph) => Ok(KubeConsumerState {
+                registration_id: args.registration_id,
+                graph,
+            }),
+            Err(e) => Err(ActorProcessingErr::from(format!(
+                "Failed to connect to Neo4j: {e}"
+            ))),
+        }
     }
 
     async fn post_start(

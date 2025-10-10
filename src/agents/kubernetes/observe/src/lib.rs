@@ -2,7 +2,6 @@ pub mod pods;
 pub mod supervisor;
 
 use cassini_client::TcpClientMessage;
-use cassini_types::ClientMessage;
 use ractor::registry::where_is;
 use tracing::warn;
 
