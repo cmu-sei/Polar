@@ -1,5 +1,5 @@
 #![allow(clippy::incompatible_msrv)]
-use cassini::{
+use cassini_broker::{
     broker::{Broker, BrokerArgs},
     BROKER_NAME,
 };
