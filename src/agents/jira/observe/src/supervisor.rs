@@ -1,6 +1,4 @@
-use cassini_client::TcpClientMessage;
-use cassini_client::TCPClientConfig;
-use cassini_types::ClientMessage;
+use cassini_client::{TcpClientActor, TcpClientArgs, TCPClientConfig};
 use jira_common::get_file_as_byte_vec;
 use ractor::async_trait;
 use ractor::Actor;
@@ -103,6 +101,7 @@ impl Actor for ObserverSupervisor {
                 config: args.client_config,
                 registration_id: None,
                 output_port,
+                queue_output: std::sync::Arc::new(ractor::OutputPort::default()),
             },
             myself.clone().into(),
         )

@@ -31,8 +31,7 @@ use neo4rs::Query;
 use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef};
 use tracing::{debug, info};
 use jira_common::types::{
-    JiraIssue, JsonString,
-    JiraField, JiraFieldSchema,
+    JiraIssue,
     FieldValue, FirstTierField,
     NestedListTypes,
     };
@@ -173,12 +172,12 @@ impl Actor for JiraIssueConsumer {
                                     FieldValue::List(v) => {
                                         if !v.is_empty() {
                                             //println!("Found({:?}) list:{:?}", key, v);
-                                            let mut label = key.clone().replace(" ", "_").replace("-", "_").replace("/","").replace('#', "num");
+                                            let label = key.clone().replace(" ", "_").replace("-", "_").replace("/","").replace('#', "num");
 
                                             for (i, item) in v.into_iter().enumerate() {
                                                 match item {
                                                     NestedListTypes::Option(Some(val)) => {
-                                                        let mut sub_key = String::new();
+                                                        let sub_key = String::new();
                                                         let new_key = String::from(format!("field{field_count}"));
                                                         field_count += 1;
                                                         params.insert(new_key.clone(), val.to_string());

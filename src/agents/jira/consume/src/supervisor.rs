@@ -1,7 +1,6 @@
 use std::time::Duration;
 
-use cassini_client::TcpClientMessage;
-use cassini_client::TCPClientConfig;
+use cassini_client::{TcpClientMessage, TcpClientActor, TcpClientArgs};
 use jira_common::dispatch::MessageDispatcher;
 use jira_common::types::JiraData;
 use jira_common::JIRA_PROJECTS_CONSUMER_TOPIC;
@@ -23,6 +22,7 @@ use tracing::debug;
 use tracing::error;
 use tracing::info;
 use tracing::warn;
+use tokio::task::JoinHandle;
 
 use crate::get_neo_config;
 use crate::projects::JiraProjectConsumer;
@@ -44,7 +44,7 @@ pub enum ConsumerSupervisorMessage {
 }
 
 pub struct ConsumerSupervisorArgs {
-    pub client_config: cassini::TCPClientConfig,
+    pub client_config: cassini_client::TCPClientConfig,
     pub graph_config: neo4rs::Config,
 }
 
@@ -55,98 +55,47 @@ impl ConsumerSupervisor {
         supervisor: ActorRef<ConsumerSupervisorMessage>,
         graph_config: neo4rs::Config,
     ) -> Result<ActorRef<JiraData>, String> {
-        // Make attempts to restart
-        // This section could be improved somewhat. The idea of using a hashmap of callback functions was suggested
-        // but this is far more readable. Various typing errors were discovered trying to implement the hashmap.
-        // Also, it'd be more ideal for this consumer to stay alive indefinitely, continuously retrying but that doesn't seem supported w/ this crate.
-        // If the graph isn't back after 5-10 minutes we probably have a serious issue anyway.
+        // Set up an exponential backoff policy
+        let mut backoff = ExponentialBackoff::default();
+        backoff.initial_interval = Duration::from_secs(3);
+        backoff.max_interval = Duration::from_secs(300);
+        backoff.max_elapsed_time = Some(Duration::from_secs(3000)); // roughly 10 attempts
 
-        let attempts = 10;
-        let min = Duration::from_secs(3);
-        let max = Duration::from_secs(300);
         let mut count = 0;
 
-        for duration in Backoff::new(attempts, min, max) {
+        while let Some(duration) = backoff.next_backoff() {
             count += 1;
-            //try starting the actor based on the name
 
             let registration_id = ConsumerSupervisor::get_registration_id()
                 .await
                 .expect("Expected agent to be registered.");
+
             let args = JiraConsumerArgs {
                 registration_id,
                 graph_config: graph_config.clone(),
             };
-            /*
-            debug!("Restarting actor: {actor_name}, attempt: {count}");
-            if actor_name == JIRA_GROUPS_CONSUMER_TOPIC {
-                match Actor::spawn_linked(
-                    Some(JIRA_GROUPS_CONSUMER_TOPIC.to_string()),
-                    JiraGroupConsumer,
-                    args.clone(),
-                    supervisor.clone().into(),
-                )
-                .await
-                {
-                    Ok(_) => break,
-                    // if we have an issue starting the actor, just sleep and try again later
-                    Err(_) => match duration {
-                        Some(duration) => tokio::time::sleep(duration).await,
-                        None => break,
-                    },
-                }
-            }
 
-            if actor_name == JIRA_PROJECTS_CONSUMER_TOPIC {
-                match Actor::spawn_linked(
-                    Some(JIRA_PROJECTS_CONSUMER_TOPIC.to_string()),
-                    JiraProjectConsumer,
-                    args.clone(),
-                    supervisor.clone().into(),
-                )
-                .await
-                {
-                    Ok(_) => break,
-                    // if we have an issue starting the actor, just sleep and try again later
-                    Err(_) => match duration {
-                        Some(duration) => tokio::time::sleep(duration).await,
-                        None => break,
-                    },
-                }
-            }
-            if actor_name == JIRA_USERS_CONSUMER_TOPIC {
-                match Actor::spawn_linked(
-                    Some(JIRA_USERS_CONSUMER_TOPIC.to_string()),
-                    JiraUserConsumer,
-                    args.clone(),
-                    supervisor.clone().into(),
-                )
-                .await
-                {
-                    Ok(_) => break,
-                    // if we have an issue starting the actor, just sleep and try again later
-                    Err(_) => match duration {
-                        Some(duration) => tokio::time::sleep(duration).await,
-                        None => break,
-                    },
-                }
-            }
-            */
-            if actor_name == JIRA_ISSUES_CONSUMER_TOPIC {
-                match Actor::spawn_linked(
-                    Some(JIRA_ISSUES_CONSUMER_TOPIC.to_string()),
-                    JiraIssueConsumer,
-                    args.clone(),
-                    supervisor.clone().into(),
-                )
-                .await
-                {
-                    Ok(_) => break,
-                    // if we have an issue starting the actor, just sleep and try again later
-                    Err(_) => match duration {
-                        Some(duration) => tokio::time::sleep(duration).await,
-                        None => break,
-                    },
+            debug!("Restarting actor: {actor_name}, attempt: {count}");
+
+            let spawn_result: Result<(ActorRef<JiraData>, JoinHandle<()>), ActorProcessingErr> =
+                if actor_name == JIRA_ISSUES_CONSUMER_TOPIC {
+                    Actor::spawn_linked(
+                        Some(JIRA_ISSUES_CONSUMER_TOPIC.to_string()),
+                        JiraIssueConsumer,
+                        args.clone(),
+                        supervisor.clone().into(),
+                    )
+                    .await
+                    .map_err(|e| ActorProcessingErr::from(format!("{e}")))
+                } else {
+                    Err(ActorProcessingErr::from("Unsupported actor name"))
+                };
+
+            match spawn_result {
+                Ok(_) => break,
+                Err(_) => {
+                    warn!("Failed to start actor {actor_name}, retrying in {:?}", duration);
+                    tokio::time::sleep(duration).await;
                 }
             }
         }
@@ -203,6 +152,7 @@ impl Actor for ConsumerSupervisor {
                 config: args.client_config,
                 registration_id: None,
                 output_port,
+                queue_output: std::sync::Arc::new(ractor::OutputPort::default()),
             },
             myself.clone().into(),
         )
