@@ -246,11 +246,7 @@ impl Actor for PodObserver {
 
                                 let payload = serde_json::to_string(&event).unwrap().into_bytes();
 
-                                let envelope =
-                                    TcpClientMessage::Publish {
-                                        topic,
-                                        payload,
-                                    };
+                                let envelope = TcpClientMessage::Publish { topic, payload };
 
                                 // send data for batch processing
 
@@ -266,7 +262,7 @@ impl Actor for PodObserver {
                                     }
                                 }
                             }
-                            Err(e) => todo!(),
+                            Err(_e) => todo!(),
                         }
                     }
                     Err(e) => {

@@ -44,7 +44,7 @@ build-dev-environment:
       echo '{"default":[{"type":"insecureAcceptAnything"}]}' > /etc/containers/policy.json
       git config --global --add safe.directory "$(pwd)"
     # build dev and testing environments
-    - nix build .#containers.devContainer -o polar-dev
+    - nix build .#containers.devContainer --quiet -o polar-dev
 
     #  Use skopeo to inspect and upload our images
     - skopeo login --username "$CI_REGISTRY_USER" --password "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
@@ -77,6 +77,12 @@ build:
 render-manifests:
   image: registry.sandbox.labz.s-box.org/sei/polar-mirror/polar-dev:0.1.0
   stage: render
+  # only run this job on main branch
+  rules:
+    - if: $CI_COMMIT_REF != "main"
+      when: never
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+      when: never
   variables:
     TARGET_ENV: sandbox
   script:

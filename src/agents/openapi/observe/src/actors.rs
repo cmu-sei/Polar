@@ -1,6 +1,6 @@
 use crate::BROKER_CLIENT_NAME;
-use cassini_client::*;
 use cassini_client::TCPClientConfig;
+use cassini_client::*;
 use ractor::async_trait;
 use ractor::registry::where_is;
 use ractor::Actor;
@@ -27,7 +27,7 @@ pub struct ObserverSupervisorArgs {
 }
 
 pub enum ObserverSupervisorMessage {
-    ClientRegistered(String),
+    ClientRegistered,
 }
 
 #[async_trait]
@@ -52,8 +52,8 @@ impl Actor for ObserverSupervisor {
         let queue_output = std::sync::Arc::new(OutputPort::<Vec<u8>>::default());
 
         // subscribe self to this port
-        output_port.subscribe(myself.clone(), |message: String| {
-            Some(ObserverSupervisorMessage::ClientRegistered(message))
+        output_port.subscribe(myself.clone(), |_| {
+            Some(ObserverSupervisorMessage::ClientRegistered)
         });
 
         if let Err(e) = Actor::spawn_linked(
@@ -90,9 +90,8 @@ impl Actor for ObserverSupervisor {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
-            ObserverSupervisorMessage::ClientRegistered(registration_id) => {
+            ObserverSupervisorMessage::ClientRegistered => {
                 let args = ApiObserverArgs {
-                    registration_id,
                     openapi_endpoint: state.openapi_endpoint.clone(),
                 };
 
@@ -149,12 +148,10 @@ pub enum ApiObserverMessage {
 
 pub struct ApiObserverState {
     web_client: Client,
-    registration_id: String,
     openapi_endpoint: String,
 }
 
 pub struct ApiObserverArgs {
-    registration_id: String,
     openapi_endpoint: String,
 }
 
@@ -176,7 +173,6 @@ impl Actor for ApiObserver {
 
         let state = ApiObserverState {
             web_client: client,
-            registration_id: args.registration_id,
             openapi_endpoint: args.openapi_endpoint.clone(),
         };
         Ok(state)

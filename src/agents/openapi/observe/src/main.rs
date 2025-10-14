@@ -10,7 +10,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         openapi_endpoint: env::var("OPENAPI_ENDPOINT").unwrap(),
     };
 
-    let (supervisor, handle) = Actor::spawn(
+    let (_supervisor, handle) = Actor::spawn(
         Some("polar.openapi.supervisor".to_string()),
         ObserverSupervisor,
         args,

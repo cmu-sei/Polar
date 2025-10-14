@@ -9,7 +9,7 @@ Unlike one-off integration tests, the harness is designed for **repeatable perfo
 
 ## Why?
 
-Our integration tests already cover correctness of broker operations (topic creation, deletion, publish/subscribe semantics). The harness extends this by providing:
+Static Integration tests only cover correctness of broker operations (topic creation, deletion, publish/subscribe semantics). The harness extends this by providing:
 
 * **Parameterized message generation** – Control message size, type, rate, and payload entropy.
 * **Supervised producer/consumer actors** – Each client runs under its own supervisor, enabling fault injection and lifecycle management.

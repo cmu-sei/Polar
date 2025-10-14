@@ -193,7 +193,7 @@ impl Actor for SinkService {
                     actor_cell.get_id()
                 );
             }
-            SupervisionEvent::ActorTerminated(actor_cell, boxed_state, reason) => {
+            SupervisionEvent::ActorTerminated(actor_cell, _boxed_state, reason) => {
                 let client_id = actor_cell
                     .get_name()
                     .expect("Expected client listener to have been named");

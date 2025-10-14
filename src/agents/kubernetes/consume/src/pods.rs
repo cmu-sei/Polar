@@ -222,9 +222,7 @@ impl Actor for PodConsumer {
         let client =
             where_is(BROKER_CLIENT_NAME.to_string()).expect("Expected to find TCP client.");
 
-        client.send_message(TcpClientMessage::Subscribe(
-            myself.get_name().unwrap()
-        ))?;
+        client.send_message(TcpClientMessage::Subscribe(myself.get_name().unwrap()))?;
 
         //load neo config and connect to graph db
         match neo4rs::Graph::connect(args.graph_config) {
@@ -266,12 +264,12 @@ impl Actor for PodConsumer {
 
                                 for query in queries {
                                     debug!("{query:?}");
-                                    if let Err(e) = transaction.run(Query::new(query)).await {
+                                    if let Err(_e) = transaction.run(Query::new(query)).await {
                                         myself.stop(Some(QUERY_RUN_FAILED.to_string()));
                                     }
                                 }
 
-                                if let Err(e) = transaction.commit().await {
+                                if let Err(_e) = transaction.commit().await {
                                     myself.stop(Some(QUERY_COMMIT_FAILED.to_string()));
                                 }
 
@@ -294,7 +292,7 @@ impl Actor for PodConsumer {
                                     }
                                 }
 
-                                if let Err(e) = transaction.commit().await {
+                                if let Err(_e) = transaction.commit().await {
                                     myself.stop(Some(QUERY_COMMIT_FAILED.to_string()));
                                 }
 
@@ -331,7 +329,7 @@ impl Actor for PodConsumer {
                                     myself.stop(Some(err));
                                 }
 
-                                if let Err(e) = transaction.commit().await {
+                                if let Err(_e) = transaction.commit().await {
                                     myself.stop(Some(QUERY_COMMIT_FAILED.to_string()));
                                 }
 
@@ -345,7 +343,7 @@ impl Actor for PodConsumer {
                     _ => todo!(),
                 }
             }
-            Err(e) => todo!(), //myself.stop(Some(format!("{TRANSACTION_FAILED_ERROR}. {e}")))
+            Err(_e) => todo!(), //myself.stop(Some(format!("{TRANSACTION_FAILED_ERROR}. {e}")))
         }
 
         Ok(())

@@ -1,13 +1,13 @@
-use cassini_client::*;
 use cassini_client::TCPClientConfig;
+use cassini_client::*;
 use neo4rs::Graph;
 use neo4rs::Query;
+use ractor::async_trait;
 use ractor::Actor;
 use ractor::ActorProcessingErr;
 use ractor::ActorRef;
 use ractor::OutputPort;
 use ractor::SupervisionEvent;
-use ractor::async_trait;
 use tracing::debug;
 use tracing::info;
 use tracing::warn;
@@ -16,8 +16,8 @@ use utoipa::openapi::OpenApi;
 use web_agent_common::AppData;
 use web_agent_common::MessageDispatcher;
 
-use crate::BROKER_CLIENT_NAME;
 use crate::subscribe_to_topic;
+use crate::BROKER_CLIENT_NAME;
 
 /// The supervisor for our consumer actors
 pub struct ConsumerSupervisor;
@@ -39,7 +39,7 @@ impl Actor for ConsumerSupervisor {
     async fn pre_start(
         &self,
         myself: ActorRef<Self::Msg>,
-        args: ConsumerSupervisorArgs,
+        _args: ConsumerSupervisorArgs,
     ) -> Result<Self::State, ActorProcessingErr> {
         debug!("{myself:?} starting");
 
@@ -288,7 +288,6 @@ impl Actor for ApiConsumer {
                     .await
                     .expect("Expected to commit transaction.");
             }
-            _ => todo!(),
         } //end message metch
 
         Ok(())

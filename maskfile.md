@@ -76,6 +76,15 @@ podman compose -f conf/gitlab_compose/docker-compose.yml up -d
 nix build .#default -o polar
 ~~~
 
+
+### cassini
+> Builds all of the polar agents and outputs their binaries
+~~~sh
+nix build .#polarPkgs.cassini.cassini .#polarPkgs.cassini.harnessProducer .#polarPkgs.cassini.harnessSink
+~~~
+
+
+
 ## get-tls
   > Runs the nix derivation to generate TLS certificates for testing.
 

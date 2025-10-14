@@ -199,7 +199,7 @@ impl Actor for MetaObserver {
         match message {
             GitlabObserverMessage::Tick(command) => match command {
                 Command::GetMetadata => {
-                    MetaObserver::get_metadata(state, myself).await;
+                    MetaObserver::get_metadata(state, myself).await.unwrap();
                 }
                 _ => (), // ignore other messages
             },
