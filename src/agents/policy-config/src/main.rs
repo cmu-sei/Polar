@@ -113,3 +113,103 @@ fn main() {
         Err(e) => eprintln!("Error fetching commit: {}", e),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use git2::{Oid, Signature};
+    use tempfile::TempDir;
+
+    #[test]
+    fn test_get_auth_repo_url_formats_correctly() {
+        let url = "https://github.com/org/repo.git";
+        let formatted = get_auth_repo_url(url, "user", "token123");
+        assert_eq!(formatted, "https://user:token123@github.com/org/repo.git");
+    }
+
+    #[test]
+    fn test_get_auth_repo_url_handles_missing_prefix() {
+        let url = "github.com/org/repo.git";
+        let formatted = get_auth_repo_url(url, "user", "token123");
+        assert_eq!(formatted, "https://user:token123@github.com/org/repo.git");
+    }
+
+    #[test]
+    fn test_has_local_changes_detects_changes() {
+        let tmp = TempDir::new().unwrap();
+        let repo = Repository::init(tmp.path()).unwrap();
+
+        // create and commit an initial file
+        let path = tmp.path().join("file.txt");
+        fs::write(&path, "initial").unwrap();
+        let mut index = repo.index().unwrap();
+        index.add_path(Path::new("file.txt")).unwrap();
+        let oid = index.write_tree().unwrap();
+        let sig = Signature::now("Tester", "tester@example.com").unwrap();
+        let tree = repo.find_tree(oid).unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[])
+            .unwrap();
+
+        // modify file to create an uncommitted change
+        fs::write(&path, "modified").unwrap();
+
+        assert_eq!(has_local_changes(&repo).unwrap(), true);
+    }
+
+    #[test]
+    fn test_has_local_changes_is_clean_after_commit() {
+        let tmp = TempDir::new().unwrap();
+        let repo = Repository::init(tmp.path()).unwrap();
+
+        let path = tmp.path().join("clean.txt");
+        fs::write(&path, "data").unwrap();
+
+        let mut index = repo.index().unwrap();
+        index.add_path(Path::new("clean.txt")).unwrap();
+        let oid = index.write_tree().unwrap();
+        let sig = Signature::now("Tester", "tester@example.com").unwrap();
+        let tree = repo.find_tree(oid).unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, "initial commit", &tree, &[])
+            .unwrap();
+
+        assert_eq!(has_local_changes(&repo).unwrap(), false);
+    }
+
+    #[test]
+    fn test_has_diverged_commits_detects_divergence() {
+        let tmp = TempDir::new().unwrap();
+        let repo = Repository::init(tmp.path()).unwrap();
+
+        // Create main branch and initial commit
+        let sig = Signature::now("Tester", "tester@example.com").unwrap();
+        let oid = {
+            let mut index = repo.index().unwrap();
+            fs::write(tmp.path().join("file.txt"), "base").unwrap();
+            index.add_path(Path::new("file.txt")).unwrap();
+            let tree_oid = index.write_tree().unwrap();
+            let tree = repo.find_tree(tree_oid).unwrap();
+            repo.commit(Some("HEAD"), &sig, &sig, "base", &tree, &[])
+                .unwrap()
+        };
+        repo.branch("main", &repo.find_commit(oid).unwrap(), true)
+            .unwrap();
+
+        // Simulate upstream divergence by creating a fake remote ref
+        let commit_oid = repo.head().unwrap().target().unwrap();
+        let refname = "refs/remotes/origin/main";
+        repo.reference(refname, commit_oid, true, "set upstream")
+            .unwrap();
+
+        // Create a new commit on local HEAD to cause divergence
+        fs::write(tmp.path().join("file.txt"), "local change").unwrap();
+        let mut index = repo.index().unwrap();
+        index.add_path(Path::new("file.txt")).unwrap();
+        let tree_oid = index.write_tree().unwrap();
+        let tree = repo.find_tree(tree_oid).unwrap();
+        let parent = repo.find_commit(commit_oid).unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, "local commit", &tree, &[&parent])
+            .unwrap();
+
+        assert!(has_diverged_commits(&repo).unwrap());
+    }
+}
