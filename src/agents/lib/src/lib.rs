@@ -2,7 +2,7 @@ pub const DISPATCH_ACTOR: &str = "DISPATCH";
 pub const TRANSACTION_FAILED_ERROR: &str = "Expected to start a transaction with the graph";
 pub const QUERY_COMMIT_FAILED: &str = "Error committing transaction to graph";
 pub const QUERY_RUN_FAILED: &str = "Error running query on the graph.";
-
+pub const UNEXPECTED_MESSAGE_STR: &str = "Received unexpected message!";
 pub enum DispatcherMessage {
     Dispatch { message: Vec<u8>, topic: String }, // Serialize()
 }

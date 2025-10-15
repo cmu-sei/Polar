@@ -1,5 +1,4 @@
-use cassini::client::{TcpClientActor, TcpClientArgs};
-use cassini::TCPClientConfig;
+use cassini_client::{TcpClientActor, TcpClientArgs, TCPClientConfig};
 use k8s_openapi::api::core::v1::Namespace;
 use kube::Config;
 use kube::{api::ListParams, Api, Client};
@@ -53,6 +52,7 @@ impl ClusterObserverSupervisor {
                         config: args.cassini_client_config,
                         registration_id: None,
                         output_port,
+                        queue_output: std::sync::Arc::new(ractor::OutputPort::default()),
                     },
                     myself.into(),
                 )

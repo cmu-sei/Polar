@@ -14,23 +14,23 @@ use std::fmt;
 #[derive(cynic::Enum, Clone, Copy, Deserialize, Serialize, rkyv::Archive, Debug)]
 #[cynic(schema = "gitlab", rename_all = "None")]
 pub enum UserState {
-    active,
-    banned,
-    blocked,
-    blocked_pending_approval,
-    deactivated,
-    ldap_blocked,
+    Active,
+    Banned,
+    Blocked,
+    BlockedPendingApproval,
+    Deactivated,
+    LdapBlocked,
 }
 
 impl fmt::Display for UserState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let state_str = match self {
-            UserState::active => "active",
-            UserState::banned => "banned",
-            UserState::blocked => "blocked",
-            UserState::blocked_pending_approval => "blocked_pending_approval",
-            UserState::deactivated => "deactivated",
-            UserState::ldap_blocked => "ldap_blocked",
+            UserState::Active => "active",
+            UserState::Banned => "banned",
+            UserState::Blocked => "blocked",
+            UserState::BlockedPendingApproval => "blocked_pending_approval",
+            UserState::Deactivated => "deactivated",
+            UserState::LdapBlocked => "ldap_blocked",
         };
         write!(f, "{}", state_str)
     }
@@ -40,9 +40,7 @@ impl fmt::Display for UserState {
 #[cynic(schema = "gitlab")]
 pub struct UserCoreConnection {
     pub count: i32,
-    // pub edges: Option<Vec<Option<UserCoreEdge>>>,
     pub nodes: Option<Vec<Option<UserCoreFragment>>>,
-    // pub page_info: PageInfo,
 }
 
 #[derive(cynic::QueryFragment)]
@@ -89,7 +87,9 @@ pub struct UserCoreProjects {
 #[derive(cynic::QueryFragment)]
 #[cynic(schema = "gitlab")]
 pub struct UserCoreEdge {
+    #[allow(dead_code)]
     cursor: String,
+    #[allow(dead_code)]
     node: Option<UserCoreFragment>,
 }
 

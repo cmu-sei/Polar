@@ -1,5 +1,5 @@
 use crate::{send_to_client, KubernetesObserverMessage, TCP_CLIENT_NAME};
-use cassini::{client::TcpClientMessage, ClientMessage};
+use cassini_client::TcpClientMessage;
 use futures::{StreamExt, TryStreamExt};
 use k8s_openapi::api::core::v1::Pod;
 use kube::runtime::watcher;
@@ -244,14 +244,9 @@ impl Actor for PodObserver {
                                     object: serialized,
                                 };
 
-                                let payload = serde_json::to_string(&event).unwrap();
+                                let payload = serde_json::to_string(&event).unwrap().into_bytes();
 
-                                let envelope =
-                                    TcpClientMessage::Send(ClientMessage::PublishRequest {
-                                        topic,
-                                        payload: payload.into_bytes(),
-                                        registration_id: Some(state.registration_id.clone()),
-                                    });
+                                let envelope = TcpClientMessage::Publish { topic, payload };
 
                                 // send data for batch processing
 
@@ -267,7 +262,7 @@ impl Actor for PodObserver {
                                     }
                                 }
                             }
-                            Err(e) => todo!(),
+                            Err(_e) => todo!(),
                         }
                     }
                     Err(e) => {

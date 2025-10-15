@@ -27,7 +27,6 @@ use crate::{
     graphql_endpoint, handle_backoff, init_observer_state, send_to_broker, BackoffReason, Command,
     GitlabObserverArgs, GitlabObserverMessage, GitlabObserverState, MESSAGE_FORWARDING_FAILED,
 };
-use cassini::UNEXPECTED_MESSAGE_STR;
 use common::{
     types::{GitlabData, ResourceLink},
     GROUPS_CONSUMER_TOPIC,
@@ -37,7 +36,7 @@ use gitlab_queries::groups::{
     AllGroupsQuery, GroupMembersQuery, GroupPathVariable, GroupProjectsQuery, GroupRunnersQuery,
     MultiGroupQueryArguments,
 };
-
+use polar::UNEXPECTED_MESSAGE_STR;
 use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef};
 
 use tracing::{debug, error, info, warn};

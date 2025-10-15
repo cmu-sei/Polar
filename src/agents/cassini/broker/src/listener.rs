@@ -12,19 +12,20 @@ use tokio::{
     io::{split, AsyncReadExt, AsyncWriteExt, BufWriter, ReadHalf, WriteHalf},
     net::{TcpListener, TcpStream},
     sync::Mutex,
+    task::JoinHandle,
 };
 use tokio_rustls::{server::TlsStream, TlsAcceptor};
 use tracing::{debug, error, info, warn};
 
-use async_trait::async_trait;
-use ractor::{registry::where_is, Actor, ActorProcessingErr, ActorRef, SupervisionEvent};
-
 use crate::{
-    ArchivedClientMessage, BrokerMessage, ClientMessage, BROKER_NAME, BROKER_NOT_FOUND_TXT,
+    BrokerMessage, BROKER_NAME, BROKER_NOT_FOUND_TXT, DISCONNECTED_REASON,
     LISTENER_MGR_NOT_FOUND_TXT, PUBLISH_REQ_FAILED_TXT, REGISTRATION_REQ_FAILED_TXT,
     SESSION_MISSING_REASON_STR, SESSION_NOT_FOUND_TXT, SUBSCRIBE_REQUEST_FAILED_TXT,
     TIMEOUT_REASON,
 };
+use async_trait::async_trait;
+use cassini_types::{ArchivedClientMessage, ClientMessage};
+use ractor::{registry::where_is, Actor, ActorProcessingErr, ActorRef, SupervisionEvent};
 
 use crate::UNEXPECTED_MESSAGE_STR;
 
@@ -33,6 +34,7 @@ use crate::UNEXPECTED_MESSAGE_STR;
 /// given to a worker processes to use to interact with and handle that connection with the client.
 
 pub struct ListenerManager;
+
 pub struct ListenerManagerState {
     bind_addr: String,
     server_config: Arc<ServerConfig>,
@@ -177,12 +179,69 @@ impl Actor for ListenerManager {
                     actor_cell.get_id()
                 );
             }
-            SupervisionEvent::ActorTerminated(actor_cell, _, reason) => {
+            SupervisionEvent::ActorTerminated(actor_cell, boxed_state, reason) => {
+                let client_id = actor_cell
+                    .get_name()
+                    .expect("Expected client listener to have been named");
+
                 info!(
-                    "Worker agent: {0:?}:{1:?} stopped. {reason:?}",
-                    actor_cell.get_name(),
+                    "Client listener: {0}:{1:?} stopped. {reason:?}",
+                    client_id,
                     actor_cell.get_id()
                 );
+
+                if let Some(reason) = reason {
+                    if reason.as_str() == DISCONNECTED_REASON {
+                        // alert the session we have a timeout
+                        boxed_state.map(|mut boxed| {
+                            let state = boxed
+                                .take::<ListenerState>()
+                                .expect("Expected failed listener to have had a state");
+
+                            if let Some(id) = state.registration_id {
+                                // propagate to session agent
+                                match where_is(id.clone()) {
+                                    Some(session) => {
+                                        if let Err(e) =
+                                            session.send_message(BrokerMessage::DisconnectRequest {
+                                                client_id,
+                                                registration_id: Some(id.to_string()),
+                                            })
+                                        {
+                                            warn!("{SESSION_NOT_FOUND_TXT}: {id}: {e}");
+                                        }
+                                    }
+                                    None => {
+                                        warn!("{SESSION_NOT_FOUND_TXT}: {id}");
+                                    }
+                                }
+                            }
+                        });
+                    } else if reason == TIMEOUT_REASON {
+                        // tell the session we're timing out
+                        boxed_state.map(|mut boxed| {
+                            let state = boxed
+                                .take::<ListenerState>()
+                                .expect("Expected failed listener to have had a state");
+
+                            if let Some(registration_id) = state.registration_id {
+                                if let Some(session) = where_is(registration_id.clone()) {
+                                    warn!("{client_id:?} disconnected unexpectedly!");
+
+                                    if let Err(e) =
+                                        session.send_message(BrokerMessage::TimeoutMessage {
+                                            client_id,
+                                            registration_id: Some(registration_id.clone()),
+                                            error: Some(TIMEOUT_REASON.to_string()),
+                                        })
+                                    {
+                                        warn!("{SESSION_NOT_FOUND_TXT}: {registration_id}: {e}");
+                                    }
+                                }
+                            }
+                        });
+                    }
+                }
             }
             SupervisionEvent::ActorFailed(actor_cell, _) => {
                 warn!(
@@ -251,6 +310,7 @@ struct ListenerState {
     reader: Option<ReadHalf<TlsStream<TcpStream>>>,
     client_id: String,
     registration_id: Option<String>,
+    task_handle: Option<JoinHandle<()>>,
 }
 
 struct ListenerArguments {
@@ -317,7 +377,21 @@ impl Actor for Listener {
             reader: args.reader,
             client_id: args.client_id.clone(),
             registration_id: args.registration_id,
+            task_handle: None,
         })
+    }
+
+    async fn post_stop(
+        &self,
+        _myself: ActorRef<Self::Msg>,
+        state: &mut Self::State,
+    ) -> Result<(), ActorProcessingErr> {
+        // stop listening
+        //
+        state.task_handle.as_ref().map(|handle| {
+            handle.abort();
+        });
+        Ok(())
     }
 
     async fn post_start(
@@ -335,11 +409,11 @@ impl Actor for Listener {
         let reader = state.reader.take().expect("Reader already taken!");
 
         //start listening
-        let _ = tokio::spawn(async move {
+        // TODO: add task handler to state so we can cancel it later?
+        let handle = tokio::spawn(async move {
             let mut buf_reader = tokio::io::BufReader::new(reader);
             // parse incoming message length, this tells us what size of a message to expect.
             while let Ok(incoming_msg_length) = buf_reader.read_u64().await {
-
                 if incoming_msg_length > 0 {
                     // create a buffer of exact size, and read data in.
                     let mut buffer = vec![0u8; incoming_msg_length as usize];
@@ -357,6 +431,7 @@ impl Actor for Listener {
                                         id.clone(),
                                         None,
                                     );
+
                                     myself
                                         .send_message(converted_msg)
                                         .expect("Could not forward message to handler");
@@ -369,16 +444,11 @@ impl Actor for Listener {
                     }
                 }
             }
-
-            // Handle client disconnection, populate state in handler
-            if let Err(e) = myself.send_message(BrokerMessage::TimeoutMessage {
-                client_id: String::default(),
-                registration_id: None,
-                error: Some("Disconnected".to_string()),
-            }) {
-                myself.stop(Some(e.to_string()));
-            }
         });
+
+        // add join handle to state, we'll need to cancel it if a client disconnects
+        state.task_handle = Some(handle);
+
         Ok(())
     }
 
@@ -595,7 +665,7 @@ impl Actor for Listener {
                 let _ = Listener::write(state.client_id.clone(), msg, Arc::clone(&state.writer))
                     .await
                     .map_err(|e| {
-                        error!("Failed to write message {e}");
+                        error!("Failed to write message. {e}");
                         if let Err(e) = myself.send_message(BrokerMessage::TimeoutMessage {
                             client_id: String::default(),
                             registration_id: None,
@@ -830,23 +900,18 @@ impl Actor for Listener {
                 client_id,
                 registration_id,
             } => {
-                info!("Client {client_id} disconnected. Ending Session");
-                if registration_id == state.registration_id && registration_id.is_some() {
-                    info!("Client {client_id} disconnected.");
+                if let Some(id) = registration_id {
                     //if we're registered, propagate to session agent
-
-                    let id = registration_id.unwrap();
                     match where_is(id.clone()) {
-                        Some(session) => session
-                            .send_message(BrokerMessage::DisconnectRequest {
+                        Some(session) => {
+                            if let Err(e) = session.send_message(BrokerMessage::DisconnectRequest {
                                 client_id,
                                 registration_id: Some(id.to_string()),
-                            })
-                            .map_err(|e| {
+                            }) {
                                 warn!("{SESSION_NOT_FOUND_TXT}: {id}: {e}");
                                 myself.stop(Some("{DISCONNECTED_REASON}".to_string()));
-                            })
-                            .unwrap(),
+                            }
+                        }
                         None => {
                             warn!("{SESSION_NOT_FOUND_TXT}: {id}");
                             myself.stop(Some("{DISCONNECTED_REASON}".to_string()));
@@ -855,17 +920,15 @@ impl Actor for Listener {
                 } else {
                     // Otherwise, tell supervisor this listener is done
                     match myself.try_get_supervisor() {
-                        Some(broker) => broker
-                            .send_message(BrokerMessage::DisconnectRequest {
+                        Some(broker) => {
+                            if let Err(e) = broker.send_message(BrokerMessage::DisconnectRequest {
                                 client_id,
                                 registration_id: None,
-                            })
-                            .map_err(|e| {
+                            }) {
                                 error!("{LISTENER_MGR_NOT_FOUND_TXT}: {e}");
                                 myself.stop(Some("{DISCONNECTED_REASON}".to_string()));
-                            })
-                            .unwrap(),
-
+                            }
+                        }
                         None => {
                             error!("{LISTENER_MGR_NOT_FOUND_TXT}, ending connection");
                             myself.stop(Some("{DISCONNECTED_REASON}".to_string()));
@@ -873,30 +936,7 @@ impl Actor for Listener {
                     }
                 }
             }
-            BrokerMessage::TimeoutMessage { error, .. } => {
-                //Client timed out, if we were registered, let session know
-                match &state.registration_id {
-                    Some(id) => where_is(id.to_owned()).map_or_else(
-                        || {},
-                        |session| {
-                            warn!("{myself:?} disconnected unexpectedly!");
-                            session
-                                .send_message(BrokerMessage::TimeoutMessage {
-                                    client_id: myself.get_name().unwrap(),
-                                    registration_id: Some(id.clone()),
-                                    error: error,
-                                })
-                                .map_err(|e| {
-                                    warn!("{SESSION_NOT_FOUND_TXT}: {id}: {e}");
-                                })
-                                .unwrap();
-                            myself.stop(Some(TIMEOUT_REASON.to_string()));
-                        },
-                    ),
-                    _ => (),
-                }
-                myself.stop(Some(TIMEOUT_REASON.to_string()));
-            }
+
             _ => {
                 warn!(UNEXPECTED_MESSAGE_STR)
             }

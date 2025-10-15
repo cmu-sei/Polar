@@ -21,7 +21,7 @@ This Software includes and/or makes use of Third-Party Software each subject to 
 DM24-0470
 */
 
-use cassini::TCPClientConfig;
+use cassini_client::TCPClientConfig;
 use polar::get_neo_config;
 use kube_consumer::supervisor;
 use polar::init_logging;

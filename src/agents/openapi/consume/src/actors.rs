@@ -1,19 +1,14 @@
-use cassini::client::*;
-use cassini::TCPClientConfig;
+use cassini_client::TCPClientConfig;
+use cassini_client::*;
 use neo4rs::Graph;
 use neo4rs::Query;
 use ractor::async_trait;
-use ractor::rpc::call;
-use ractor::rpc::CallResult;
 use ractor::Actor;
 use ractor::ActorProcessingErr;
 use ractor::ActorRef;
 use ractor::OutputPort;
 use ractor::SupervisionEvent;
-use std::process::Output;
-use std::time::Duration;
 use tracing::debug;
-use tracing::error;
 use tracing::info;
 use tracing::warn;
 use utoipa::openapi::Deprecated;
@@ -44,7 +39,7 @@ impl Actor for ConsumerSupervisor {
     async fn pre_start(
         &self,
         myself: ActorRef<Self::Msg>,
-        args: ConsumerSupervisorArgs,
+        _args: ConsumerSupervisorArgs,
     ) -> Result<Self::State, ActorProcessingErr> {
         debug!("{myself:?} starting");
 
@@ -60,6 +55,7 @@ impl Actor for ConsumerSupervisor {
 
         // define an output port for the actor to subscribe to
         let output_port = std::sync::Arc::new(OutputPort::default());
+        let queue_output = std::sync::Arc::new(OutputPort::<Vec<u8>>::default());
 
         // subscribe self to this port
         output_port.subscribe(myself.clone(), |message| {
@@ -72,7 +68,8 @@ impl Actor for ConsumerSupervisor {
             TcpClientArgs {
                 config: TCPClientConfig::new(),
                 registration_id: None,
-                output_port,
+                output_port: output_port.clone(),
+                queue_output: queue_output.clone(),
             },
             myself.clone().into(),
         )
@@ -291,7 +288,6 @@ impl Actor for ApiConsumer {
                     .await
                     .expect("Expected to commit transaction.");
             }
-            _ => todo!(),
         } //end message metch
 
         Ok(())

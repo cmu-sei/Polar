@@ -1,7 +1,7 @@
 pub mod pods;
 pub mod supervisor;
 
-use cassini::{client::TcpClientMessage, ClientMessage};
+use cassini_client::TcpClientMessage;
 use ractor::registry::where_is;
 use tracing::warn;
 
@@ -35,12 +35,11 @@ pub struct KubernetesObserverArgs {
     pub namespace: String,
 }
 /// Helper function to send a message to the cassini client actor
-pub fn send_to_client(registration_id: String, topic: String, payload: Vec<u8>) {
-    let envelope = TcpClientMessage::Send(ClientMessage::PublishRequest {
+pub fn send_to_client(_registration_id: String, topic: String, payload: Vec<u8>) {
+    let envelope = TcpClientMessage::Publish {
         topic,
-        payload: payload,
-        registration_id: Some(registration_id),
-    });
+        payload,
+    };
 
     // send data for batch processing
 

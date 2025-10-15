@@ -24,10 +24,10 @@ use crate::{
     handle_backoff, BROKER_CLIENT_NAME,
     Command,
     JiraObserverArgs,
-    JiraObserverMessage, JiraObserverState,
-    JIRA_USER_OBSERVER
+    JiraObserverMessage, JiraObserverState
     };
-use cassini::{client::TcpClientMessage, ClientMessage};
+use cassini_client::TcpClientMessage;
+use cassini_types::ClientMessage;
 use ractor::{async_trait, registry::where_is, Actor, ActorProcessingErr, ActorRef};
 use jira_common::JIRA_USERS_CONSUMER_TOPIC;
 use rkyv::rancor::Error;
@@ -144,13 +144,19 @@ impl Actor for JiraUserObserver {
                         let msg = ClientMessage::PublishRequest {
                             topic: JIRA_USERS_CONSUMER_TOPIC.to_string(),
                             payload: bytes.to_vec(),
-                            registration_id: Some(
-                                state.registration_id.clone(),
-                            ),
+                            registration_id: Some(state.registration_id.clone()),
                         };
+
+                        // serialize the inner message before sending
+                        let payload = rkyv::to_bytes::<rkyv::rancor::Error>(&msg)
+                            .expect("Failed to serialize ClientMessage::PublishRequest");
+
                         tcp_client
-                            .send_message(TcpClientMessage::Send(msg))
-                            .expect("Expected to send message");
+                            .send_message(TcpClientMessage::Publish {
+                                topic: JIRA_USERS_CONSUMER_TOPIC.to_string(),
+                                payload: payload.into_vec(),
+                            })
+                            .expect("Expected to publish message");
                     }
                     _ => (),
                 }

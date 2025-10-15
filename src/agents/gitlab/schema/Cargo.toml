@@ -2,13 +2,13 @@
 name = "gitlab-schema"
 version.workspace = true
 edition.workspace = true
+license = "MIT"
 
 [dependencies]
-workspace-hack = { path = "../../workspace-hack", version = "0.1.0" }
-cynic = { version = "3.9.1", features = ["rkyv"]}
-rkyv = "0.8.10"
+cynic = { version = "3.12.0", features = ["rkyv"]}
+rkyv = { workspace = true }
 serde = { version = "1", features = ["derive"] }
 # chrono = {version = "0.4.39", features = ["rkyv-32"]}
 
 [build-dependencies]
-cynic-codegen = { version = "3.9.1", features = ["rkyv"] }
+cynic-codegen = { version = "3.12.0", features = ["rkyv"] }

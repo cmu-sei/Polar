@@ -2,20 +2,22 @@
 name = "openapi-observer"
 version = "0.1.0"
 edition = "2021"
+license = "MIT"
 
 [dependencies]
 tracing = "0.1.41"
-reqwest = { version = "0.12.5", features = ["json"] }
-serde = { version = "1.0.204", features = ["derive"] }
-tokio = { version = "1.38.1", features = ["full"] }
-serde_json = "1.0.120"
-utoipa = "5.3.1"
-cassini = { path = "../../broker" }
+reqwest = { workspace = true, features = ["json"] }
+serde = { version = "1.0.228", features = ["derive"] }
+tokio = { version = "1.47.1", features = ["full"] }
+serde_json = "1.0.145"
+utoipa = "5.4.0"
 web-agent-common = { path = "../common" }
-ractor = { version = "0.15.6", features = ["async-trait"] }
-rkyv = "0.8.10"
+ractor = { version = "0.15.8", features = ["async-trait"] }
+rkyv = { workspace = true }
 polar = { path = "../../lib" }
 # Fix a vulnerability in a transitive dependency.
 ring = { version = "=0.17.14" }
+cassini-client = { workspace = true }
+cassini-types  = { workspace = true }
 
 native-tls = { version = "=0.2.14" }

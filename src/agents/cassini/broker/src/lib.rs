@@ -1,10 +1,6 @@
-use std::env;
-
+use cassini_types::ClientMessage;
 use ractor::{ActorRef, RpcReplyPort};
-use rkyv::{Archive, Deserialize, Serialize};
-
 pub mod broker;
-pub mod client;
 pub mod listener;
 pub mod session;
 pub mod subscriber;
@@ -35,34 +31,7 @@ pub const LISTENER_MGR_NOT_FOUND_TXT: &str = "Listener Manager not found!";
 pub const TIMEOUT_REASON: &str = "SESSION_TIMEDOUT";
 pub const DISCONNECTED_REASON: &str = "CLIENT_DISCONNECTED";
 pub const DISPATCH_NAME: &str = "DISPATCH";
-///
-/// A basse configuration for a TCP Client actor
-pub struct TCPClientConfig {
-    pub broker_endpoint: String,
-    pub server_name: String,
-    pub ca_certificate_path: String,
-    pub client_certificate_path: String,
-    pub client_key_path: String
-}
 
-impl TCPClientConfig {
-    /// Read filepaths from the environment and return. If we can't read these, we can't start
-    pub fn new() -> Self {
-        let client_certificate_path = env::var("TLS_CLIENT_CERT").expect("Expected a value for TLS_CLIENT_CERT.");
-        let client_key_path = env::var("TLS_CLIENT_KEY").expect("Expected a value for TLS_CLIENT_KEY.");
-        let ca_certificate_path = env::var("TLS_CA_CERT").expect("Expected a value for TLS_CA_CERT.");
-        let broker_endpoint = env::var("BROKER_ADDR").expect("Expected a valid socket address for BROKER_ADDR");
-        let server_name = env::var("CASSINI_SERVER_NAME").expect("Expected a value for CASSINI_SERVER_NAME");
-    
-       TCPClientConfig {
-            broker_endpoint,
-            server_name,
-            ca_certificate_path,
-            client_certificate_path,
-            client_key_path
-        }
-    }
-}
 /// Internal messagetypes for the Broker.
 ///
 #[derive(Debug)]
@@ -164,64 +133,8 @@ pub enum BrokerMessage {
     },
 }
 
-///External Messages for client comms
-/// These messages are serialized/deserialized to/from JSON
-#[derive(Serialize, Deserialize, Archive, Debug, Clone)]
-// #[serde(tag = "type", content = "data")]
-pub enum ClientMessage {
-    RegistrationRequest {
-        registration_id: Option<String>,
-    },
-    RegistrationResponse {
-        registration_id: String, //new and final id for a client successfully registered
-        success: bool,
-        error: Option<String>, // Optional error message if registration failed
-    },
-    /// Publish request from the client.
-    PublishRequest {
-        topic: String,
-        payload: Vec<u8>,
-        registration_id: Option<String>,
-    },
-    /// Publish response to the client.
-    PublishResponse {
-        topic: String,
-        payload: Vec<u8>,
-        result: Result<(), String>,
-    },
-    /// Sent back to actor that made initial publish request
-    PublishRequestAck(String),
-    SubscribeRequest {
-        registration_id: Option<String>,
-        topic: String,
-    },
-    /// Subscribe acknowledgment to the client.
-    SubscribeAcknowledgment {
-        topic: String,
-        result: Result<(), String>, // Ok for success, Err with error message
-    },
-    /// Unsubscribe request from the client.
-    UnsubscribeRequest {
-        registration_id: Option<String>,
-        topic: String,
-    },
-    UnsubscribeAcknowledgment {
-        topic: String,
-        result: Result<(), String>,
-    },
-    ///Disconnect, sending a session id to end, if any
-    DisconnectRequest(Option<String>),
-    ///Mostly for testing purposes, intentional timeout message with a client_id
-    TimeoutMessage(Option<String>),
-    ErrorMessage(String),
-}
-
 impl BrokerMessage {
-    pub fn from_client_message(
-        msg: ClientMessage,
-        client_id: String,
-        _: Option<String>,
-    ) -> Self {
+    pub fn from_client_message(msg: ClientMessage, client_id: String, _: Option<String>) -> Self {
         match msg {
             ClientMessage::RegistrationRequest { registration_id } => {
                 BrokerMessage::RegistrationRequest {
@@ -284,8 +197,7 @@ pub fn parse_host_and_port(endpoint: &str) -> Result<(String, u16), String> {
         format!("https://{}", endpoint) // dummy scheme
     };
 
-    let url = url::Url::parse(&formatted)
-        .map_err(|e| format!("Invalid endpoint URL: {}", e))?;
+    let url = url::Url::parse(&formatted).map_err(|e| format!("Invalid endpoint URL: {}", e))?;
 
     let host = url
         .host_str()

@@ -1,0 +1,27 @@
+[package]
+name = "cassini-broker"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[dependencies]
+async-trait = "0.1.89"
+ractor = { version="0.15.8", features = ["async-trait"]}
+rkyv = { workspace = true }
+tokio = { version = "1.47", features = ["full"] }
+tracing = "0.1.41"
+tracing-glog = "0.4.1"
+tracing-subscriber = { version ="0.3.20", features=["std", "env-filter"]}
+uuid = { version = "1.18.1", features = ["v4"] }
+tokio-util = "0.7.16"
+rustls = { version = "0.23", features = ["aws-lc-rs"] }
+tokio-rustls = "0.26.4"
+polar = { path = "../../lib" }
+cassini-types = {path = "../types"}
+# Fix a vulnerability in a transitive dependency.
+ring = { version = "=0.17.14" }
+url = "2.5.7"
+
+[[bin]]
+name = "cassini-server"
+path = "src/main.rs"

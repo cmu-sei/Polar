@@ -1,0 +1,22 @@
+[package]
+name = "harness-producer"
+version.workspace = true
+edition.workspace = true
+license = "MIT"
+
+[dependencies]
+harness-common = { path = "../common" }
+ractor = { version = "0.15.8", features = ["async-trait"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1.47.1", features = ["full"] }
+cassini-client = { path = "../../client" }
+polar = { path = "../../../lib" }
+fake = "4.4.0"
+rand = { workspace = true }
+tracing = "0.1.41"
+serde_dhall = "0.13.0"
+rustls = { version = "0.23", features = ["aws-lc-rs"] }
+tokio-rustls = "0.26.4"
+rkyv = { workspace = true }
+clap = { version = "4.5.48", features = ["derive"] }

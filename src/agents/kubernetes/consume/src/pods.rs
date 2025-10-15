@@ -21,7 +21,7 @@
    DM24-0470
 */
 
-use cassini::{client::TcpClientMessage, topic, ClientMessage};
+use cassini_client::TcpClientMessage;
 use k8s_openapi::api::core::v1::Pod;
 use kube_common::KubeMessage;
 use neo4rs::Query;
@@ -222,19 +222,18 @@ impl Actor for PodConsumer {
         let client =
             where_is(BROKER_CLIENT_NAME.to_string()).expect("Expected to find TCP client.");
 
-        client.send_message(TcpClientMessage::Send(ClientMessage::SubscribeRequest {
-            registration_id: Some(args.registration_id.clone()),
-            topic: myself.get_name().unwrap(),
-        }))?;
+        client.send_message(TcpClientMessage::Subscribe(myself.get_name().unwrap()))?;
 
         //load neo config and connect to graph db
-
-        let graph = neo4rs::Graph::connect(args.graph_config).await?;
-
-        Ok(KubeConsumerState {
-            registration_id: args.registration_id,
-            graph,
-        })
+        match neo4rs::Graph::connect(args.graph_config) {
+            Ok(graph) => Ok(KubeConsumerState {
+                registration_id: args.registration_id,
+                graph,
+            }),
+            Err(e) => Err(ActorProcessingErr::from(format!(
+                "Failed to connect to Neo4j: {e}"
+            ))),
+        }
     }
 
     async fn post_start(
@@ -265,12 +264,12 @@ impl Actor for PodConsumer {
 
                                 for query in queries {
                                     debug!("{query:?}");
-                                    if let Err(e) = transaction.run(Query::new(query)).await {
+                                    if let Err(_e) = transaction.run(Query::new(query)).await {
                                         myself.stop(Some(QUERY_RUN_FAILED.to_string()));
                                     }
                                 }
 
-                                if let Err(e) = transaction.commit().await {
+                                if let Err(_e) = transaction.commit().await {
                                     myself.stop(Some(QUERY_COMMIT_FAILED.to_string()));
                                 }
 
@@ -293,7 +292,7 @@ impl Actor for PodConsumer {
                                     }
                                 }
 
-                                if let Err(e) = transaction.commit().await {
+                                if let Err(_e) = transaction.commit().await {
                                     myself.stop(Some(QUERY_COMMIT_FAILED.to_string()));
                                 }
 
@@ -330,7 +329,7 @@ impl Actor for PodConsumer {
                                     myself.stop(Some(err));
                                 }
 
-                                if let Err(e) = transaction.commit().await {
+                                if let Err(_e) = transaction.commit().await {
                                     myself.stop(Some(QUERY_COMMIT_FAILED.to_string()));
                                 }
 
@@ -344,7 +343,7 @@ impl Actor for PodConsumer {
                     _ => todo!(),
                 }
             }
-            Err(e) => todo!(), //myself.stop(Some(format!("{TRANSACTION_FAILED_ERROR}. {e}")))
+            Err(_e) => todo!(), //myself.stop(Some(format!("{TRANSACTION_FAILED_ERROR}. {e}")))
         }
 
         Ok(())

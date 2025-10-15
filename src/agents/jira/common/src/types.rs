@@ -22,7 +22,6 @@
 */
 
 use rkyv::{Archive, Deserialize, Serialize, };
-use rkyv::bytecheck::CheckBytes;
 use std::collections::HashMap;
 
 use serde::Deserialize as SerdeDeserialize;

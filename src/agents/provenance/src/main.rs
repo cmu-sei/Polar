@@ -8,7 +8,6 @@ use ractor::Actor;
 use ractor::ActorProcessingErr;
 use ractor::ActorRef;
 use reqwest::Client;
-use serde_json::Value;
 use tokio::task::AbortHandle;
 use tracing::debug;
 struct ProvenanceActor;
@@ -68,7 +67,7 @@ impl ProvenanceActor {
             let bom = Bom::parse_from_json_v1_5(json.as_bytes()).expect("Failed to parse BOM");
             //TODO: Once we have the sboms, parse into known format and link to gitlabpackages with the same name, so if we find polar-0.1.0 we can link it to the package
             // Same goes for container images, gitlab packages for polar are versioned with git hashes, if a gitlab package version matches a polar container tag, they should be linked
-            let validation_result = bom.validate();
+            let _validation_result = bom.validate();
         }
     }
 }
@@ -88,7 +87,7 @@ impl Actor for ProvenanceActor {
 
         // get graph connection
         //TODO: Get some schedule from configuration agent
-        match neo4rs::Graph::connect(get_neo_config()).await {
+        match neo4rs::Graph::connect(get_neo_config()) {
             Ok(graph) => Ok(ProvenanceActorState {
                 graph,
                 interval: Duration::from_secs(30), // TODO: Make configurable

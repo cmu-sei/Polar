@@ -1,0 +1,8 @@
+[package]
+name = "cassini-types"
+version.workspace = true
+edition.workspace = true
+license = "MIT"
+
+[dependencies]
+rkyv = { workspace = true }

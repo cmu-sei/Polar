@@ -1,9 +1,6 @@
-use std::time::Duration;
-
 use crate::BROKER_CLIENT_NAME;
-use cassini::client::*;
-use cassini::ClientMessage;
-use cassini::TCPClientConfig;
+use cassini_client::TCPClientConfig;
+use cassini_client::*;
 use ractor::async_trait;
 use ractor::registry::where_is;
 use ractor::Actor;
@@ -30,7 +27,7 @@ pub struct ObserverSupervisorArgs {
 }
 
 pub enum ObserverSupervisorMessage {
-    ClientRegistered(String),
+    ClientRegistered,
 }
 
 #[async_trait]
@@ -46,16 +43,17 @@ impl Actor for ObserverSupervisor {
     ) -> Result<Self::State, ActorProcessingErr> {
         debug!("{myself:?} starting");
 
-        // define an output port for the actor to subscribe to
-        let output_port = std::sync::Arc::new(OutputPort::default());
-
         let state = ObserverSupervisorState {
             openapi_endpoint: args.openapi_endpoint,
         };
 
+        // define an output port for the actor to subscribe to
+        let output_port = std::sync::Arc::new(OutputPort::default());
+        let queue_output = std::sync::Arc::new(OutputPort::<Vec<u8>>::default());
+
         // subscribe self to this port
-        output_port.subscribe(myself.clone(), |message| {
-            Some(ObserverSupervisorMessage::ClientRegistered(message))
+        output_port.subscribe(myself.clone(), |_| {
+            Some(ObserverSupervisorMessage::ClientRegistered)
         });
 
         if let Err(e) = Actor::spawn_linked(
@@ -64,7 +62,8 @@ impl Actor for ObserverSupervisor {
             TcpClientArgs {
                 config: TCPClientConfig::new(),
                 registration_id: None,
-                output_port,
+                output_port: output_port.clone(),
+                queue_output: queue_output.clone(),
             },
             myself.clone().into(),
         )
@@ -91,9 +90,8 @@ impl Actor for ObserverSupervisor {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
-            ObserverSupervisorMessage::ClientRegistered(registration_id) => {
+            ObserverSupervisorMessage::ClientRegistered => {
                 let args = ApiObserverArgs {
-                    registration_id,
                     openapi_endpoint: state.openapi_endpoint.clone(),
                 };
 
@@ -150,12 +148,10 @@ pub enum ApiObserverMessage {
 
 pub struct ApiObserverState {
     web_client: Client,
-    registration_id: String,
     openapi_endpoint: String,
 }
 
 pub struct ApiObserverArgs {
-    registration_id: String,
     openapi_endpoint: String,
 }
 
@@ -177,7 +173,6 @@ impl Actor for ApiObserver {
 
         let state = ApiObserverState {
             web_client: client,
-            registration_id: args.registration_id,
             openapi_endpoint: args.openapi_endpoint.clone(),
         };
         Ok(state)
@@ -197,7 +192,7 @@ impl Actor for ApiObserver {
 
     async fn handle(
         &self,
-        myself: ActorRef<Self::Msg>,
+        _myself: ActorRef<Self::Msg>,
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
@@ -225,14 +220,13 @@ impl Actor for ApiObserver {
                             .expect("Expected to find TCP client");
 
                         client
-                            .send_message(TcpClientMessage::Send(ClientMessage::PublishRequest {
+                            .send_message(TcpClientMessage::Publish {
                                 topic: "polar.web.consumer".to_string(),
                                 payload: payload.to_vec(),
-                                registration_id: Some(state.registration_id.clone()),
-                            }))
-                            .unwrap();
+                            })
+                            .expect("Expected to send publish message");
                     }
-                    Err(e) => todo!(),
+                    Err(_) => todo!(),
                 }
             }
         }

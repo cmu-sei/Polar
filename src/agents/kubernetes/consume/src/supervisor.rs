@@ -1,4 +1,4 @@
-use cassini::client::*;
+use cassini_client::*;
 use kube_common::MessageDispatcher;
 use polar::{get_neo_config, DISPATCH_ACTOR};
 use ractor::async_trait;
@@ -27,7 +27,7 @@ pub enum SupervisorMessage {
 }
 
 pub struct ClusterConsumerSupervisorArgs {
-    pub client_config: cassini::TCPClientConfig,
+    pub client_config: cassini_client::TCPClientConfig,
     pub graph_config: neo4rs::Config,
 }
 
@@ -57,6 +57,7 @@ impl Actor for ClusterConsumerSupervisor {
                 config: args.client_config,
                 registration_id: None,
                 output_port,
+                queue_output: std::sync::Arc::new(ractor::OutputPort::default()),
             },
             myself.clone().into(),
         )

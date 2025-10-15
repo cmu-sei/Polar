@@ -29,8 +29,7 @@ pub mod runners;
 pub mod supervisor;
 pub mod users;
 
-use cassini::client::TcpClientMessage;
-use cassini::ClientMessage;
+use cassini_client::TcpClientMessage;
 use common::types::{GitlabData, WithInstance};
 use cynic::{GraphQlError, Operation};
 use gitlab_queries::groups::*;
@@ -50,7 +49,6 @@ use reqwest::Client;
 use reqwest::Error;
 use reqwest::Method;
 use reqwest::Response;
-use rkyv::Serialize;
 use serde::Deserialize;
 use tokio::task::AbortHandle;
 use tracing::{debug, error};
@@ -216,13 +214,12 @@ pub fn send_to_broker(
 
         let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&envelope).unwrap();
 
-        let msg = ClientMessage::PublishRequest {
-            topic: topic.to_string(),
-            payload: bytes.to_vec(),
-            registration_id: Some(state.registration_id.clone()),
-        };
 
-        if let Err(e) = client.send_message(TcpClientMessage::Send(msg)) {
+        if let Err(e) = client.send_message(TcpClientMessage::Publish {
+                    topic: topic.to_string(),
+                    payload: bytes.to_vec(),
+                }
+                ) {
             return Err(ActorProcessingErr::from(format!(
                 "Failed to message TCP client {e}"
             )));

@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use cassini::client::*;
+use cassini_client::*;
 use common::dispatch::MessageDispatcher;
 use common::types::GitlabData;
 use common::GROUPS_CONSUMER_TOPIC;
@@ -10,7 +10,7 @@ use common::PROJECTS_CONSUMER_TOPIC;
 use common::REPOSITORY_CONSUMER_TOPIC;
 use common::RUNNERS_CONSUMER_TOPIC;
 use common::USER_CONSUMER_TOPIC;
-use exponential_backoff::Backoff;
+use cassini_backoff::{Backoff, ExponentialBackoff};
 use polar::DISPATCH_ACTOR;
 use ractor::async_trait;
 use ractor::registry::where_is;
@@ -49,36 +49,34 @@ pub enum ConsumerSupervisorMessage {
 }
 
 pub struct ConsumerSupervisorArgs {
-    pub client_config: cassini::TCPClientConfig,
+    pub client_config: cassini_client::TCPClientConfig,
     pub graph_config: neo4rs::Config,
 }
 
 impl ConsumerSupervisor {
     /// Helper to try restarting an actor at least 10 times using an exponential backoff strategy.
     /// TODO: This function doesn't seem to be helping in its current implementation. Restarts aren't real restarts.
+        /// Helper to try restarting an actor at least 10 times using an exponential backoff strategy.
     async fn restart_actor(
         actor_name: String,
         supervisor: ActorRef<ConsumerSupervisorMessage>,
         graph_config: neo4rs::Config,
     ) -> Result<ActorRef<GitlabData>, String> {
-        // Make attempts to restart
-        // This section could be improved somewhat. The idea of using a hashmap of callback functions was suggested
-        // but this is far more readable. Various typing errors were discovered trying to implement the hashmap.
-        // Also, it'd be more ideal for this consumer to stay alive indefinitely, continuously retrying but that doesn't seem supported w/ this crate.
-        // If the graph isn't back after 5-10 minutes we probably have a serious issue anyway.
+        // Configure the exponential backoff policy
+        let mut backoff = ExponentialBackoff::default();
+        backoff.initial_interval = Duration::from_secs(3);
+        backoff.max_interval = Duration::from_secs(300);
+        backoff.max_elapsed_time = Some(Duration::from_secs(3000)); // ~10 tries
 
-        let attempts = 10;
-        let min = Duration::from_secs(3);
-        let max = Duration::from_secs(300);
         let mut count = 0;
 
-        for duration in Backoff::new(attempts, min, max) {
+        while let Some(duration) = backoff.next_backoff() {
             count += 1;
-            //try starting the actor based on the name
 
             let registration_id = ConsumerSupervisor::get_registration_id()
                 .await
                 .expect("Expected agent to be registered.");
+
             let args = GitlabConsumerArgs {
                 registration_id,
                 graph_config: graph_config.clone(),
@@ -86,69 +84,55 @@ impl ConsumerSupervisor {
 
             debug!("Restarting actor: {actor_name}, attempt: {count}");
 
-            if actor_name == USER_CONSUMER_TOPIC {
-                match Actor::spawn_linked(
-                    Some(USER_CONSUMER_TOPIC.to_string()),
-                    GitlabUserConsumer,
-                    args.clone(),
-                    supervisor.clone().into(),
-                )
-                .await
-                {
-                    Ok(_) => break,
-                    // if we have an issue starting the actor, just sleep and try again later
-                    Err(_) => match duration {
-                        Some(duration) => tokio::time::sleep(duration).await,
-                        None => break,
-                    },
+            // match on actor_name to spawn the right consumer
+            let spawn_result = match actor_name.as_str() {
+                USER_CONSUMER_TOPIC => {
+                    Actor::spawn_linked(
+                        Some(USER_CONSUMER_TOPIC.to_string()),
+                        GitlabUserConsumer,
+                        args.clone(),
+                        supervisor.clone().into(),
+                    )
+                    .await
                 }
-            } else if actor_name == PROJECTS_CONSUMER_TOPIC {
-                match Actor::spawn_linked(
-                    Some(PROJECTS_CONSUMER_TOPIC.to_string()),
-                    GitlabProjectConsumer,
-                    args.clone(),
-                    supervisor.clone().into(),
-                )
-                .await
-                {
-                    Ok(_) => break,
-                    // if we have an issue starting the actor, just sleep and try again later
-                    Err(_) => match duration {
-                        Some(duration) => tokio::time::sleep(duration).await,
-                        None => break,
-                    },
+                PROJECTS_CONSUMER_TOPIC => {
+                    Actor::spawn_linked(
+                        Some(PROJECTS_CONSUMER_TOPIC.to_string()),
+                        GitlabProjectConsumer,
+                        args.clone(),
+                        supervisor.clone().into(),
+                    )
+                    .await
                 }
-            } else if actor_name == GROUPS_CONSUMER_TOPIC {
-                match Actor::spawn_linked(
-                    Some(GROUPS_CONSUMER_TOPIC.to_string()),
-                    GitlabGroupConsumer,
-                    args.clone(),
-                    supervisor.clone().into(),
-                )
-                .await
-                {
-                    Ok(_) => break,
-                    // if we have an issue starting the actor, just sleep and try again later
-                    Err(_) => match duration {
-                        Some(duration) => tokio::time::sleep(duration).await,
-                        None => break,
-                    },
+                GROUPS_CONSUMER_TOPIC => {
+                    Actor::spawn_linked(
+                        Some(GROUPS_CONSUMER_TOPIC.to_string()),
+                        GitlabGroupConsumer,
+                        args.clone(),
+                        supervisor.clone().into(),
+                    )
+                    .await
                 }
-            } else if actor_name == RUNNERS_CONSUMER_TOPIC {
-                match Actor::spawn_linked(
-                    Some(RUNNERS_CONSUMER_TOPIC.to_string()),
-                    GitlabRunnerConsumer,
-                    args.clone(),
-                    supervisor.clone().into(),
-                )
-                .await
-                {
-                    Ok(_) => break,
-                    // if we have an issue starting the actor, just sleep and try again later
-                    Err(_) => match duration {
-                        Some(duration) => tokio::time::sleep(duration).await,
-                        None => break,
-                    },
+                RUNNERS_CONSUMER_TOPIC => {
+                    Actor::spawn_linked(
+                        Some(RUNNERS_CONSUMER_TOPIC.to_string()),
+                        GitlabRunnerConsumer,
+                        args.clone(),
+                        supervisor.clone().into(),
+                    )
+                    .await
+                }
+                _ => return Err(format!("Unsupported actor name: {actor_name}")),
+            };
+
+            match spawn_result {
+                Ok(_) => break,
+                Err(_) => {
+                    warn!(
+                        "Failed to start actor {actor_name}, retrying in {:?} (attempt {count})",
+                        duration
+                    );
+                    tokio::time::sleep(duration).await;
                 }
             }
         }
@@ -205,6 +189,7 @@ impl Actor for ConsumerSupervisor {
                 config: args.client_config,
                 registration_id: None,
                 output_port,
+                queue_output: std::sync::Arc::new(ractor::OutputPort::default()),
             },
             myself.clone().into(),
         )

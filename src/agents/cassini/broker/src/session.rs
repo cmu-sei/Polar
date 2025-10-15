@@ -564,7 +564,7 @@ impl Actor for SessionAgent {
                 registration_id,
             } => {
                 //client disconnected, clean up after it then die with honor
-                debug!("client {client_id} disconnected");
+                info!("client {client_id} disconnected");
                 match myself.try_get_supervisor() {
                     Some(manager) => manager
                         .send_message(BrokerMessage::DisconnectRequest {

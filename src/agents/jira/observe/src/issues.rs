@@ -24,23 +24,21 @@ use crate::{
     handle_backoff, BROKER_CLIENT_NAME,
     Command,
     JiraObserverArgs,
-    JiraObserverMessage, JiraObserverState,
-    JIRA_ISSUE_OBSERVER
+    JiraObserverMessage, JiraObserverState
     };
-use cassini::{client::TcpClientMessage, ClientMessage};
+use cassini_client::TcpClientMessage;
+use cassini_types::ClientMessage;
 use ractor::{async_trait, registry::where_is, Actor, ActorProcessingErr, ActorRef};
 use jira_common::JIRA_ISSUES_CONSUMER_TOPIC;
 use rkyv::rancor::Error;
 use std::time::Duration;
 use tracing::{info, debug};
 use jira_common::types::{
-    JiraIssue, JiraData, JsonString,
-    JiraField, JiraFieldSchema
+    JiraData, JsonString,
+    JiraField
     };
 
-use serde_path_to_error;
 use serde_json::Value;
-use std::io::Cursor;
 use std::collections::HashMap;
 
 pub struct JiraIssueObserver;
@@ -150,7 +148,7 @@ impl Actor for JiraIssueObserver {
                                     let mut cloned_issue = issue.clone();
 
                                     // Replace the "customfield_*" with the name
-                                    if let mut fields = cloned_issue.get_mut("fields").expect("FIELDS") {
+                                    if let fields = cloned_issue.get_mut("fields").expect("FIELDS") {
                                         let mut replacements = vec![];
                                         for (key, value) in fields.as_object().unwrap() {
                                             if let Some(found_field) = field_map.get(key.as_str()) {
@@ -176,13 +174,20 @@ impl Actor for JiraIssueObserver {
                                     let msg = ClientMessage::PublishRequest {
                                         topic: JIRA_ISSUES_CONSUMER_TOPIC.to_string(),
                                         payload: bytes.to_vec(),
-                                        registration_id: Some(
-                                            state.registration_id.clone(),
-                                        ),
+                                        registration_id: Some(state.registration_id.clone()),
                                     };
+
+                                    // Serialize the inner client message before sending
+                                    let payload = rkyv::to_bytes::<rkyv::rancor::Error>(&msg)
+                                        .expect("Failed to serialize ClientMessage::PublishRequest");
+
                                     tcp_client
-                                        .send_message(TcpClientMessage::Send(msg))
-                                        .expect("Expected to send message");
+                                        .send_message(TcpClientMessage::Publish {
+                                            topic: JIRA_ISSUES_CONSUMER_TOPIC.to_string(),
+                                            payload: payload.into_vec(),
+                                        })
+                                        .expect("Expected to publish message");
+
                                 }
                             }
                             let fetched = max_results;

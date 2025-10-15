@@ -26,25 +26,26 @@
 name = "gitlab-consumer"
 version = "0.1.0"
 edition = "2021"
+license = "MIT"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-lapin = "2.2.1"
+lapin = { workspace = true }
 tokio = { version = "1", features = ["full"] }
-futures-lite = "1.13.0"
+futures-lite = "2.6.1"
 serde_json = "1.0"
-url = "2.3.1"
-neo4rs = "=0.8.0"
+url = "2.5.7"
+neo4rs = { workspace = true }
 common = { path = "../common" }
 tracing = "0.1.41"
-workspace-hack = { version = "0.1", path = "../../workspace-hack" }
-cassini = { path = "../../broker" }
-ractor = { version = "0.15.6", features = ["async-trait"] }
+cassini-client = { path = "../../cassini/client" }
+cassini-types = { path = "../../cassini/types" }
+ractor = { version = "0.15.8", features = ["async-trait"] }
 polar = { path = "../../lib" }
 gitlab-queries = { path = "../query" }
 gitlab-schema = { path = "../schema" }
-exponential-backoff = "2.1.0"
+cassini-backoff = { workspace = true }
 
 [[bin]]
 name = "gitlab-consumer"

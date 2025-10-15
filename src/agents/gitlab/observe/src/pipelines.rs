@@ -146,7 +146,7 @@ impl Actor for GitlabPipelineObserver {
                                     }
                                 }
                             }
-                            Err(e) => {}
+                            Err(e) => todo!(),
                         }
                     }
                     _ => todo!(),
