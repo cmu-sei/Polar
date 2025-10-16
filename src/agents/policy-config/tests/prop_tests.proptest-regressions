@@ -1,0 +1,11 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 702caaba1ea043c89a89f87f19cd87a33a300d9f13d174e4725df36307df044d # shrinks to user = "ꨀ", token = "A-AAA", domain = "github.com", org = "A", repo = "-"
+cc c12461fa49ba658df68d5515853a490a13fd8cea7e8afd8506ae43e51cde55b0 # shrinks to n = 1
+cc f6fc637a890c48a36b6db2d4a4bf25241c772a77b4b6061dc9e3c630229216e9 # shrinks to _message = ""
+cc e6f9e56a67735d63553016662cf6a4f1bea6f504a80927ff773fcde25684b877 # shrinks to new_content = "\u{1}\tȺ"
+cc 66215a91d97cdfe2804568315924a33e9f049ef43cf6d859cff66546d372e724 # shrinks to new_content = ":%Ⱥ"
