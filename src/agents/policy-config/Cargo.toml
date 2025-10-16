@@ -6,3 +6,7 @@ license = "MIT"
 
 [dependencies]
 git2 = "0.20.2"
+
+[dev-dependencies]
+tempfile = "3.23.0"
+proptest = "1.8.0"
