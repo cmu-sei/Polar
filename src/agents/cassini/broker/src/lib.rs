@@ -86,9 +86,13 @@ pub enum BrokerMessage {
     /// Sent to session actors to forward messages to their clients.
     /// Messages that fail to be delivered for some reason are kept in their queues.
     PushMessage {
-        reply: RpcReplyPort<Result<(), String>>,
+        // reply: RpcReplyPort<Result<(), String>>,
         payload: Vec<u8>,
         topic: String,
+    },
+    /// Sent back to subscription actors if sessions fail to forward messages to the client for requeueing
+    PushMessageFailed {
+        payload: Vec<u8>,
     },
     /// Subscribe acknowledgment to the client.
     SubscribeAcknowledgment {

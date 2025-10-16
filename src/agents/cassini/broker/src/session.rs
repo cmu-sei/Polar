@@ -1,4 +1,4 @@
-use crate::UNEXPECTED_MESSAGE_STR;
+use crate::{get_subscriber_name, UNEXPECTED_MESSAGE_STR};
 use crate::{
     BrokerMessage, BROKER_NOT_FOUND_TXT, CLIENT_NOT_FOUND_TXT, PUBLISH_REQ_FAILED_TXT,
     REGISTRATION_REQ_FAILED_TXT, SUBSCRIBE_REQUEST_FAILED_TXT, TIMEOUT_REASON,
@@ -424,31 +424,28 @@ impl Actor for SessionAgent {
                     }
                 }
             }
-            BrokerMessage::PushMessage {
-                reply,
-                payload,
-                topic,
-            } => {
+            BrokerMessage::PushMessage { payload, topic } => {
                 //push to client
-                if let Ok(_) = state
+                if let Err(_e) = state
                     .client_ref
                     .send_message(BrokerMessage::PublishResponse {
-                        topic,
+                        topic: topic.clone(),
                         payload: payload.clone(),
                         result: Ok(()),
                     })
                 {
-                    if let Err(e) = reply.send(Ok(())) {
-                        warn!("Failed to reply to subscriber! Subscriber not available: {e} Client may need to resubscribe")
-                    }
-                } else {
-                    let err_msg = format!("{PUBLISH_REQ_FAILED_TXT}: {CLIENT_NOT_FOUND_TXT}");
-                    warn!("{err_msg}");
-                    if let Err(e) = reply.send(Err(err_msg)) {
-                        warn!(
-                            "{}",
-                            format!("{PUBLISH_REQ_FAILED_TXT}: {CLIENT_NOT_FOUND_TXT}: {e}")
-                        )
+                    warn!("{PUBLISH_REQ_FAILED_TXT}: {CLIENT_NOT_FOUND_TXT}");
+                    if let Some(subscriber) = where_is(get_subscriber_name(
+                        &myself.get_name().expect("Expected session to be named."),
+                        &topic,
+                    )) {
+                        // if we can't DLQ the message because the subscriber died, a client either unsubscribed, or it crashed.
+                        // Either way, nothing we can do about it.
+
+                        subscriber
+                            .send_message(BrokerMessage::PushMessageFailed { payload })
+                            .inspect_err(|_| warn!("Failed to DLQ message on topic {topic}"))
+                            .ok();
                     }
                 }
             }
