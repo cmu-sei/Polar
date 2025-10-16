@@ -4,7 +4,6 @@ use crate::{
     PUBLISH_REQ_FAILED_TXT, REGISTRATION_REQ_FAILED_TXT, SESSION_NOT_FOUND_TXT,
     SUBSCRIBE_REQUEST_FAILED_TXT, TIMEOUT_REASON,
 };
-use ractor::rpc::{call, CallResult};
 use ractor::{
     async_trait, registry::where_is, Actor, ActorProcessingErr, ActorRef, SupervisionEvent,
 };
@@ -284,34 +283,12 @@ impl Actor for SubscriberAgent {
                         Some(session) => {
                             info!("Forwarding missed messages to session: {id}");
                             while let Some(msg) = &state.dead_letter_queue.pop_front() {
-                                match call(
-                                    &session,
-                                    |reply| BrokerMessage::PushMessage {
-                                        reply,
-                                        payload: msg.clone().to_vec(),
-                                        topic: state.topic.clone(),
-                                    },
-                                    None,
-                                )
-                                .await
-                                .expect("Expected to forward message to subscriber")
-                                {
-                                    CallResult::Success(result) => {
-                                        if let Err(_) = result {
-                                            //session couldn't talk to listener, add message to DLQ
-                                            warn!("{REGISTRATION_REQ_FAILED_TXT} Session not available.");
-                                            state.dead_letter_queue.push_back(msg.clone().to_vec());
-                                            debug!("Subscriber: {myself:?} queue has {0} message(s) waiting", state.dead_letter_queue.len());
-                                        }
-                                    }
-                                    CallResult::Timeout => {
-                                        error!("{REGISTRATION_REQ_FAILED_TXT}: Session timed out");
-                                        // myself.stop(Some("{PUBLISH_REQ_FAILED_TXT}: Session timed out".to_string()));
-                                    }
-                                    CallResult::SenderError => {
-                                        error!("{REGISTRATION_REQ_FAILED_TXT}: {SESSION_NOT_FOUND_TXT}: The transmission channel was dropped without any message(s) being sent");
-                                        // myself.stop(Some("{REGISTRATION_REQ_FAILED_TXT}: {SESSION_NOT_FOUND_TXT}".to_string()));
-                                    }
+                                if let Err(e) = session.send_message(BrokerMessage::PushMessage {
+                                    payload: msg.to_owned(),
+                                    topic: state.topic.clone(),
+                                }) {
+                                    warn!("Failed to forward message to subscriber! {e} Ending subscription");
+                                    myself.stop(None);
                                 }
                             }
                         }
@@ -322,49 +299,39 @@ impl Actor for SubscriberAgent {
                 }
             }
             BrokerMessage::PublishResponse { topic, payload, .. } => {
-                let id = state.registration_id.clone();
-                let t = topic.clone();
-                let p = payload.clone();
-                tracing::debug!("New message on topic: {topic}, forwarding to session: {id}");
-                if let Some(session) = where_is(id.clone()) {
-                    match call(
-                        &session,
-                        |reply| BrokerMessage::PushMessage {
-                            reply,
-                            payload: p,
-                            topic,
-                        },
-                        None,
-                    )
-                    .await
-                    .expect("Expected to forward message to subscriber")
+                tracing::debug!(
+                    "New message on topic: {topic}, forwarding to session: {}",
+                    state.registration_id
+                );
+                if let Some(session) = where_is(state.registration_id.clone()) {
+                    //  Forward the message, if we get an error message back from the session later.
+                    //  DLQ the message for later
+                    //  if we fail to send a message to a session, it's probably dead, either because of a timeout or disconnect, either way, message can drop
+                    if let Err(e) =
+                        session.send_message(BrokerMessage::PushMessage { payload, topic })
                     {
-                        CallResult::Success(result) => {
-                            if let Err(_e) = result {
-                                //session couldn't talk to listener, add message to DLQ
-                                state.dead_letter_queue.push_back(payload.clone());
-                                debug!(
-                                    "{t} queue has {0} message(s) waiting",
-                                    state.dead_letter_queue.len()
-                                );
-                            }
-                        }
-                        CallResult::Timeout => {
-                            error!("{PUBLISH_REQ_FAILED_TXT}: Session timed out");
-                            myself.stop(Some(
-                                "{PUBLISH_REQ_FAILED_TXT}: Session timed out".to_string(),
-                            ));
-                        }
-                        CallResult::SenderError => {
-                            error!("{PUBLISH_REQ_FAILED_TXT}: {SESSION_NOT_FOUND_TXT}");
-                            myself.stop(Some("{PUBLISH_REQ_FAILED_TXT}: {SESSION_NOT_FOUND_TXT}: The transmission channel was dropped without any message(s) being sent".to_string()));
-                        }
+                        warn!("Failed to forward message to subscirber! {e} Ending subscription");
+                        myself.stop(None);
                     }
                 } else {
                     error!("{PUBLISH_REQ_FAILED_TXT}: {SESSION_NOT_FOUND_TXT}");
                 }
             }
-            _ => warn!(UNEXPECTED_MESSAGE_STR),
+            BrokerMessage::PushMessageFailed { payload } => {
+                //session couldn't talk to listener, add message to DLQ
+                state.dead_letter_queue.push_back(payload.clone());
+                debug!(
+                    "Subscriber {0} queue has {1} message(s) waiting",
+                    myself
+                        .get_name()
+                        .expect("Expected subscriber to have been named."),
+                    state.dead_letter_queue.len()
+                );
+            }
+            _ => {
+                warn!(UNEXPECTED_MESSAGE_STR);
+                warn!("{message:?}");
+            }
         }
         Ok(())
     }

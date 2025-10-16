@@ -29,20 +29,20 @@ let TestPlan = {
 let steadyProducer: Producer = {
    topic = "steady"
 ,  msgSize = 4096
-,  duration = 10
-,  pattern = Pattern.Drip { idle_time = 30 }
+,  duration = 60
+,  pattern = Pattern.Drip { idle_time = 367 }
 }
 
-let burstProducer: Producer = {
-   topic = "burst"
-,  msgSize = 4096
-,  duration = 10
-,  pattern = Pattern.Burst { burst_size = 10, idle_time = 5 }
-}
+--let burstProducer: Producer = {
+--   topic = "burst"
+--,  msgSize = 4096
+--,  duration = 10
+--,  pattern = Pattern.Burst { burst_size = 10, idle_time = 5 }
+--}
 
 
 let plan: TestPlan = {
-    producers = [ steadyProducer, burstProducer ]
+    producers = [ steadyProducer ]
 }
 
 in plan

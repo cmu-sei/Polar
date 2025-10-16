@@ -4,11 +4,9 @@ use harness_common::{
     compute_checksum, Envelope, MessagePattern, ProducerConfig, ProducerMessage, SinkCommand,
     TestPlan,
 };
-use ractor::{
-    async_trait, Actor, ActorProcessingErr, ActorRef, OutputPort,
-    SupervisionEvent,
-};
+use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef, OutputPort, SupervisionEvent};
 use serde::Serialize;
+use serde_json::to_string_pretty;
 use std::time::{Duration, Instant};
 use tokio::time;
 use tracing::{debug, info};
@@ -261,12 +259,12 @@ impl Actor for ProducerAgent {
                         while Instant::now() < end {
                             ticker.tick().await;
                             seqno += 1;
-                            // TODO:
 
-                            // generate a checksum for it
+                            // generate a checksum for the message
                             // wrap it in an envelope
                             // send it
                             // create a payload of the desired message size using fake
+
                             let faked = (0..=size).fake::<String>();
 
                             let checksum = compute_checksum(faked.as_bytes());
@@ -291,8 +289,13 @@ impl Actor for ProducerAgent {
                             }
                             state.metrics.sent += 1;
                         }
+
                         // when done, print metrics and exit
-                        info!("{:?}", state.metrics);
+                        info!(
+                            "{}",
+                            to_string_pretty(&state.metrics)
+                                .expect("expected to serialize to json")
+                        );
 
                         tcp_client
                             .send_message(TcpClientMessage::Disconnect)
@@ -347,7 +350,11 @@ impl Actor for ProducerAgent {
                             }
                         }
                         // when done, print metrics and exit
-                        info!("{:?}", state.metrics);
+                        info!(
+                            "{}",
+                            to_string_pretty(&state.metrics)
+                                .expect("expected to serialize to json")
+                        );
 
                         tcp_client
                             .send_message(TcpClientMessage::Disconnect)

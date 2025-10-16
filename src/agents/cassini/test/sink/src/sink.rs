@@ -1,16 +1,14 @@
 use cassini_client::*;
 
-use harness_common::{
-    Envelope,
-    validate_checksum,
-};
+use harness_common::{Envelope, validate_checksum};
 use ractor::{
     Actor, ActorProcessingErr, ActorRef, OutputPort, async_trait,
     concurrency::{Duration, Instant},
 };
 use rkyv::rancor;
+use serde_json::to_string_pretty;
 
-use std::path::Path;
+use std::path::{Display, Path};
 use tokio::{fs::OpenOptions, io::AsyncWriteExt};
 
 use tracing::{debug, error, info};
@@ -19,7 +17,7 @@ use tracing::{debug, error, info};
 //
 
 // Metrics tracked by the sink
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, serde::Serialize)]
 pub struct SinkMetrics {
     /// messages received
     pub received: usize,
@@ -154,7 +152,10 @@ impl Actor for SinkAgent {
         info!("Test run stopped. Validating checksums...");
         SinkAgent::validate_checksums(format!("{}-output.json", state.cfg.topic).as_str())
             .expect("Expected to validate checksums");
-        info!("{:?}", state.metrics);
+        info!(
+            "{}",
+            to_string_pretty(&state.metrics).expect("expected to serialize to json")
+        );
         Ok(())
     }
 
