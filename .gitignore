@@ -25,3 +25,4 @@ chart/
 .direnv/
 authorized_keys
 *-output.json
+env.fish
