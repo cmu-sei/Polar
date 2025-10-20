@@ -18,10 +18,10 @@ The goal of the project is to provide a reliable, scalable, and secure messaging
 - **Session Management**: Clients maintain session state, such as a unique session ID, for handling subscriptions and reconnections.
 
 ### Security
-- **mTLS Communication**: 
+- **mTLS Communication**:
   - Server and client authenticate each other using certificates signed by a trusted root Certificate Authority (CA).
   - Ensures encrypted communication and prevents unauthorized connections.
-  
+
 ### Extensibility
 - **Actor Integration**: The broker is designed to work seamlessly with other actors in a Rust project, supporting custom message types and patterns.
 
@@ -38,7 +38,7 @@ The goal of the project is to provide a reliable, scalable, and secure messaging
     - *Sessions* are actors primarily responsible for communicating with all other actors in the architecture and storing additional metadata about the client connection. When a client is registered, all messages go through these actors.
 - **Subscriber Manager**: As its name suggests, this supervisor is responsible for managing subscription actors that represent all connected client subscriptions to a particular *topic*
     - *Subscribers* are actors that represent a client's subscriptions. They are responsible for actually forwarding new messages published to the session they're resposible for.
-- **Topic Manager**: This supervisor manages the actual topics the clients wish to publish messages to and read from. 
+- **Topic Manager**: This supervisor manages the actual topics the clients wish to publish messages to and read from.
     - *Topic* actors are responsible for managing the actual message queues for individual topics.
 
 
@@ -60,7 +60,7 @@ Ensure the following environment variables are set before trying to run cassini
 ```bash
 # The address the broker server will bind and listen for connections to
 # for example  127.0.0.1:8080 to listen on your host system's local port 8080
-export CASSINI_BIND_ADDR="" 
+export CASSINI_BIND_ADDR=""
 
 # The absolute file path to the ca_certificates.pem file created by TLS_GEN.
 # Used by the Rust binaries to recognize eachother through TLS
@@ -92,11 +92,4 @@ export TLS_SERVER_KEY=""
    The client sends a `DisconnectRequest`, and the broker cleans up the associated session actor and any subscriptions associated with it.
 
 ## Testing
-
-There is a small suite of avaialble integration tests to demonstrate how a client can interact with the message broker. To run, ensure you have generated some CA certificates using the means described
-in the documentation, and set the environment variables detailed there to valid paths.
-
-**NOTE:** This suite uses a setup test called `test_init` to "unit test" the broker's initialization, and needs be run for the other tests to pass, else they will timeout and fail.
-
-You can run the tests with `cargo test` or, if you want to run the individually, you can run `cargo test -- test_init test_tcp_client_connect` for example.
-
+[Check out the README for our test harness](..test/README.md)

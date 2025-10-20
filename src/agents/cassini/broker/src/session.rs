@@ -122,8 +122,7 @@ impl Actor for SessionManager {
                             listener_ref.send_message(BrokerMessage::RegistrationResponse {
                                 registration_id: None,
                                 client_id: client_id.clone(),
-                                success: false,
-                                error: Some(err_msg.clone()),
+                                result: Err(err_msg.clone()),
                             })
                         {
                             error!("{err_msg}: {e}");
@@ -304,8 +303,7 @@ impl Actor for SessionAgent {
             .send_message(BrokerMessage::RegistrationResponse {
                 registration_id: Some(registration_id),
                 client_id,
-                success: true,
-                error: None,
+                result: Ok(()),
             })
             .expect("Expected to send message to client listener");
 
@@ -336,8 +334,7 @@ impl Actor for SessionAgent {
                             .send_message(BrokerMessage::RegistrationResponse {
                                 registration_id: registration_id.clone(),
                                 client_id: client_id.clone(),
-                                success: true,
-                                error: None,
+                                result: Ok(()),
                             })
                             .expect("Expected to send ack to listener");
                         // Alert session manager we've got our listener so it doesn't potentially kill it
@@ -348,8 +345,7 @@ impl Actor for SessionAgent {
                                     manager.send_message(BrokerMessage::RegistrationResponse {
                                         registration_id: registration_id.clone(),
                                         client_id: client_id.clone(),
-                                        success: true,
-                                        error: None,
+                                        result: Ok(()),
                                     })
                                 {
                                     let err_msg = format!(
@@ -361,8 +357,7 @@ impl Actor for SessionAgent {
                                         BrokerMessage::RegistrationResponse {
                                             registration_id: None,
                                             client_id: client_id.clone(),
-                                            success: false,
-                                            error: Some(err_msg.clone()),
+                                            result: Err(err_msg.clone()),
                                         },
                                     ) {
                                         error!("{err_msg}: {listener_err}");

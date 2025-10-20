@@ -10,8 +10,7 @@ pub enum ClientMessage {
     },
     RegistrationResponse {
         registration_id: String, //new and final id for a client successfully registered
-        success: bool,
-        error: Option<String>, // Optional error message if registration failed
+        result: Result<(), String>,
     },
     /// Publish request from the client.
     PublishRequest {

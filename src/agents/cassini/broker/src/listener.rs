@@ -266,8 +266,7 @@ impl Actor for ListenerManager {
             BrokerMessage::RegistrationResponse {
                 registration_id,
                 client_id,
-                success,
-                error,
+                result,
             } => {
                 //forwward registration_id back to listener to signal success
                 debug!("Forwarding registration ack to listener: {client_id}");
@@ -276,8 +275,7 @@ impl Actor for ListenerManager {
                     .send_message(BrokerMessage::RegistrationResponse {
                         registration_id,
                         client_id,
-                        success,
-                        error,
+                        result,
                     })
                     .expect("Failed to forward message to client: {client_id}");
             }
@@ -477,8 +475,7 @@ impl Actor for Listener {
                             error!("{err_msg}");
                             let msg = ClientMessage::RegistrationResponse {
                                 registration_id: String::default(),
-                                success: false,
-                                error: Some(err_msg.clone()),
+                                result: Err(err_msg.clone()),
                             };
 
                             let _ = Listener::write(client_id, msg, Arc::clone(&state.writer))
@@ -493,8 +490,7 @@ impl Actor for Listener {
                         error!("{err_msg}");
                         let msg = ClientMessage::RegistrationResponse {
                             registration_id: String::default(),
-                            success: false,
-                            error: Some(err_msg.clone()),
+                            result: Err(err_msg.clone()),
                         };
 
                         let _ = Listener::write(client_id, msg, Arc::clone(&state.writer))
@@ -516,17 +512,15 @@ impl Actor for Listener {
             BrokerMessage::RegistrationResponse {
                 registration_id,
                 client_id,
-                success,
-                error,
+                result,
             } => {
-                if success {
+                if result.is_ok() {
                     debug!("Successfully registered with id: {registration_id:?}");
                     state.registration_id = registration_id.clone();
 
                     let msg = ClientMessage::RegistrationResponse {
                         registration_id: registration_id.unwrap(),
-                        success: true,
-                        error: None,
+                        result: Ok(()),
                     };
 
                     let _ = Listener::write(client_id, msg, Arc::clone(&state.writer))
@@ -543,11 +537,10 @@ impl Actor for Listener {
                             }
                         });
                 } else {
-                    let err_msg = format!("{REGISTRATION_REQ_FAILED_TXT}: {error:?}");
+                    let err_msg = format!("{REGISTRATION_REQ_FAILED_TXT}: {}", result.unwrap_err());
                     let msg = ClientMessage::RegistrationResponse {
                         registration_id: String::default(),
-                        success: false,
-                        error: Some(err_msg.clone()),
+                        result: Err(err_msg.clone()),
                     };
 
                     let _ = Listener::write(client_id, msg, Arc::clone(&state.writer))

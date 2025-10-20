@@ -49,8 +49,7 @@ pub enum BrokerMessage {
     RegistrationResponse {
         registration_id: Option<String>, //new and final id for a client successfully registered
         client_id: String,
-        success: bool,
-        error: Option<String>, // Optional error message if registration failed
+        result: Result<(), String>,
     },
     /// Publish request from the client.
     PublishRequest {
@@ -181,7 +180,7 @@ impl BrokerMessage {
             },
             // Handle unexpected messages
             _ => {
-                todo!()
+                todo!("Handle a conversion case between broker messages and client messages")
             }
         }
     }

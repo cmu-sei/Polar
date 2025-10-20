@@ -17,7 +17,7 @@ use ractor::{
     rpc::{call, CallResult::Success},
     Actor, ActorProcessingErr, ActorRef, SupervisionEvent,
 };
-use tracing::{debug, info, warn};
+use tracing::{debug, info, span, warn, Level};
 
 // ============================== Broker Supervisor Actor Definition ============================== //
 
@@ -114,8 +114,7 @@ impl Actor for Broker {
         .await
         .expect("The Broker cannot initialize without the SubscriberManager. Panicking.");
 
-        let state = BrokerState;
-        Ok(state)
+        Ok(BrokerState)
     }
 
     async fn handle_supervisor_evt(
@@ -177,10 +176,6 @@ impl Actor for Broker {
         myself: ActorRef<Self::Msg>,
         _: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        // Vaughn, for these lifecycle events where we don't intend to do much
-        // (yet), maybe we could make these debug!(...), so we can cut down on
-        // some of the verbosity, unless someone has the logging turned up to
-        // eleven.
         debug!("Broker: Started {myself:?}");
         Ok(())
     }
@@ -223,8 +218,7 @@ impl Actor for Broker {
                                     .send_message(BrokerMessage::RegistrationResponse {
                                         registration_id: Some(id.clone()),
                                         client_id: client_id.clone(),
-                                        success: false,
-                                        error: Some(err_msg),
+                                        result: Err(err_msg),
                                     })
                                     .unwrap();
                             }

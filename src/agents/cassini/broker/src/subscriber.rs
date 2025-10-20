@@ -96,7 +96,7 @@ impl Actor for SubscriberManager {
                         warn!("{err_msg}");
 
                         if let Some(listener) = where_is(client_id.clone()) {
-                            listener.send_message(BrokerMessage::RegistrationResponse { registration_id: Some(registration_id.clone()), client_id: client_id.clone(), success: false, error: Some(err_msg.clone()) })
+                            listener.send_message(BrokerMessage::RegistrationResponse { registration_id: Some(registration_id.clone()), client_id: client_id.clone(), result: Err(err_msg.clone()) })
                             .map_err(|e| {
                                 warn!("{err_msg}: {e}");
                             }).unwrap()
