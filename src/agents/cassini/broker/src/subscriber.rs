@@ -8,7 +8,8 @@ use ractor::{
     async_trait, registry::where_is, Actor, ActorProcessingErr, ActorRef, SupervisionEvent,
 };
 use std::collections::VecDeque;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, trace, trace_span, warn};
+use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 pub const SUBSCRIBER_NOT_FOUND_TXT: &str = "Subscriber not found!";
 
@@ -73,7 +74,19 @@ impl Actor for SubscriberManager {
             BrokerMessage::RegistrationRequest {
                 registration_id,
                 client_id,
+                trace_ctx,
             } => {
+                let span =
+                    trace_span!("subscriber_manager.handle_registration_request", %client_id);
+                if let Some(ctx) = trace_ctx {
+                    span.set_parent(ctx.clone()).ok();
+                }
+                let _ = span.enter();
+
+                trace!(
+                    "Subscriber manager for received registration request for client {client_id}"
+                );
+
                 //find all subscribers for a given registration id
                 registration_id.map(|registration_id: String| {
                     tracing::info!("Gathering Subscriptions for session {registration_id}");
@@ -87,7 +100,7 @@ impl Actor for SubscriberManager {
                             cloned_session_id.eq(sub_id)
                             }) {
                             //notify so they dump unsent messages
-                            if let Err(e) = subscriber.send_message(BrokerMessage::RegistrationRequest { registration_id: Some(registration_id.clone()), client_id: client_id.clone()}) {
+                            if let Err(e) = subscriber.send_message(BrokerMessage::RegistrationRequest { registration_id: Some(registration_id.clone()), client_id: client_id.clone(), trace_ctx: Some(span.context())}) {
                                 warn!("{REGISTRATION_REQ_FAILED_TXT}: {SUBSCRIBER_NOT_FOUND_TXT}: {e}")
                             }
                         }
@@ -96,7 +109,7 @@ impl Actor for SubscriberManager {
                         warn!("{err_msg}");
 
                         if let Some(listener) = where_is(client_id.clone()) {
-                            listener.send_message(BrokerMessage::RegistrationResponse { registration_id: Some(registration_id.clone()), client_id: client_id.clone(), result: Err(err_msg.clone()) })
+                            listener.send_message(BrokerMessage::RegistrationResponse { registration_id: Some(registration_id.clone()), client_id: client_id.clone(), result: Err(err_msg.clone()), trace_ctx: Some(span.context())})
                             .map_err(|e| {
                                 warn!("{err_msg}: {e}");
                             }).unwrap()
@@ -181,15 +194,11 @@ impl Actor for SubscriberManager {
             BrokerMessage::TimeoutMessage {
                 registration_id, ..
             } => {
-                if let Some(registration_id) = registration_id {
-                    SubscriberManager::forget_subscriptions(
-                        registration_id,
-                        myself.clone(),
-                        Some(TIMEOUT_REASON.to_string()),
-                    );
-                } else {
-                    warn!(" Failed to process timeout request! registration_id missing!")
-                }
+                SubscriberManager::forget_subscriptions(
+                    registration_id,
+                    myself.clone(),
+                    Some(TIMEOUT_REASON.to_string()),
+                );
             }
             _ => warn!(UNEXPECTED_MESSAGE_STR, "{message:?}"),
         }
@@ -275,8 +284,18 @@ impl Actor for SubscriberAgent {
     ) -> Result<(), ActorProcessingErr> {
         match message {
             BrokerMessage::RegistrationRequest {
-                registration_id, ..
+                registration_id,
+                client_id,
+                trace_ctx,
             } => {
+                let span = trace_span!("subscriber.handle_publish_request", %client_id);
+                if let Some(ctx) = trace_ctx {
+                    span.set_parent(ctx).ok();
+                }
+                let _enter = span.enter();
+
+                trace!("Subscriber actor received reigstration request for client {client_id}");
+
                 //A client reconnected, push messages built up in DLQ to client
                 if let Some(id) = registration_id {
                     match where_is(id.clone()) {
@@ -286,6 +305,7 @@ impl Actor for SubscriberAgent {
                                 if let Err(e) = session.send_message(BrokerMessage::PushMessage {
                                     payload: msg.to_owned(),
                                     topic: state.topic.clone(),
+                                    trace_ctx: Some(span.context()),
                                 }) {
                                     warn!("Failed to forward message to subscriber! {e} Ending subscription");
                                     myself.stop(None);
@@ -298,23 +318,40 @@ impl Actor for SubscriberAgent {
                     }
                 }
             }
-            BrokerMessage::PublishResponse { topic, payload, .. } => {
-                tracing::debug!(
+            BrokerMessage::PublishResponse {
+                topic,
+                payload,
+                trace_ctx,
+                result,
+            } => {
+                let span = trace_span!("subscriber.handle_publish_response" ,%topic);
+                if let Some(ctx) = trace_ctx {
+                    span.set_parent(ctx).ok();
+                }
+                let _enter = span.enter();
+
+                trace!("Subscriber actor received publish response for topic \"{topic}\"");
+
+                debug!(
                     "New message on topic: {topic}, forwarding to session: {}",
                     state.registration_id
                 );
+
                 if let Some(session) = where_is(state.registration_id.clone()) {
                     //  Forward the message, if we get an error message back from the session later.
                     //  DLQ the message for later
                     //  if we fail to send a message to a session, it's probably dead, either because of a timeout or disconnect, either way, message can drop
-                    if let Err(e) =
-                        session.send_message(BrokerMessage::PushMessage { payload, topic })
-                    {
+                    if let Err(e) = session.send_message(BrokerMessage::PushMessage {
+                        payload,
+                        topic,
+                        trace_ctx: Some(span.context()),
+                    }) {
                         warn!("Failed to forward message to subscirber! {e} Ending subscription");
                         myself.stop(None);
                     }
                 } else {
-                    error!("{PUBLISH_REQ_FAILED_TXT}: {SESSION_NOT_FOUND_TXT}");
+                    warn!("{PUBLISH_REQ_FAILED_TXT}: {SESSION_NOT_FOUND_TXT} Ending subscription");
+                    myself.stop(None);
                 }
             }
             BrokerMessage::PushMessageFailed { payload } => {

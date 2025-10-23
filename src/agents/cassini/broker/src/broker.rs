@@ -17,8 +17,8 @@ use ractor::{
     rpc::{call, CallResult::Success},
     Actor, ActorProcessingErr, ActorRef, SupervisionEvent,
 };
-use tracing::{debug, info, span, warn, Level};
-
+use tracing::{debug, info, trace, trace_span, warn};
+use tracing_opentelemetry::OpenTelemetrySpanExt;
 // ============================== Broker Supervisor Actor Definition ============================== //
 
 pub struct Broker;
@@ -199,8 +199,16 @@ impl Actor for Broker {
             BrokerMessage::RegistrationRequest {
                 registration_id,
                 client_id,
+                trace_ctx,
             } => {
-                debug!("Received Registration Request from client: {client_id:?}");
+                // Start a new span linked to the parent trace if available.
+                let span = trace_span!("broker.handle_registration_request", %client_id);
+                if let Some(ctx) = trace_ctx.clone() {
+                    span.set_parent(ctx.clone()).ok();
+                }
+                let _ = span.enter();
+                info!("Received Registration Request from client: {client_id:?}");
+
                 match registration_id {
                     Some(id) => {
                         // We were provided some session id, find it and forward the request.
@@ -209,6 +217,7 @@ impl Actor for Broker {
                         if let Err(e) = session.send_message(BrokerMessage::RegistrationRequest {
                             registration_id: Some(id.clone()),
                             client_id: client_id.clone(),
+                            trace_ctx: Some(span.context()),
                         }) {
                             let err_msg = format!(
                                 "{REGISTRATION_REQ_FAILED_TXT}: {SESSION_NOT_FOUND_TXT}: {e}"
@@ -219,6 +228,7 @@ impl Actor for Broker {
                                         registration_id: Some(id.clone()),
                                         client_id: client_id.clone(),
                                         result: Err(err_msg),
+                                        trace_ctx: Some(span.context()),
                                     })
                                     .unwrap();
                             }
@@ -232,6 +242,7 @@ impl Actor for Broker {
                             .send_message(BrokerMessage::RegistrationRequest {
                                 registration_id: Some(id.clone()),
                                 client_id: client_id.clone(),
+                                trace_ctx: Some(span.context()),
                             })
                             .expect("Expected to send message");
                     }
@@ -243,6 +254,7 @@ impl Actor for Broker {
                             .send_message(BrokerMessage::RegistrationRequest {
                                 registration_id: registration_id.clone(),
                                 client_id: client_id.clone(),
+                                trace_ctx: Some(span.context()),
                             })
                             .expect("Expected to send message to session manager.");
                     }
@@ -434,79 +446,79 @@ impl Actor for Broker {
                 registration_id,
                 topic,
                 payload,
+                trace_ctx,
             } => {
+                let span = trace_span!("broker.handle_publish_request");
+                if let Some(ctx) = trace_ctx {
+                    span.set_parent(ctx).ok();
+                }
+                let _enter = span.enter();
+
+                trace!("Broker actor received publish request for session {registration_id} for topic \"{topic}\"");
                 //publish to topic
-                if let Some(registration_id) = registration_id {
-                    match where_is(topic.clone()) {
-                        Some(actor) => {
-                            if let Err(e) = actor.send_message(BrokerMessage::PublishRequest {
-                                registration_id: Some(registration_id.clone()),
-                                topic: topic.clone(),
-                                payload: payload.clone(),
-                            }) {
-                                warn!("{PUBLISH_REQ_FAILED_TXT}: {e}");
-                                //send err to session
-                                if let Some(session) = where_is(registration_id.clone()) {
-                                    if let Err(e) =
-                                        session.send_message(BrokerMessage::PublishResponse {
-                                            topic,
-                                            payload: payload.clone(),
-                                            result: Err(e.to_string()),
-                                        })
-                                    {
-                                        warn!("{PUBLISH_REQ_FAILED_TXT} {e}");
-                                    }
+                match where_is(topic.clone()) {
+                    Some(actor) => {
+                        if let Err(e) = actor.send_message(BrokerMessage::PublishRequest {
+                            registration_id: registration_id.clone(),
+                            topic: topic.clone(),
+                            payload: payload.clone(),
+                            trace_ctx: Some(span.context()),
+                        }) {
+                            warn!("{PUBLISH_REQ_FAILED_TXT}: {e}");
+                            //send err to session
+                            if let Some(session) = where_is(registration_id.clone()) {
+                                if let Err(e) =
+                                    session.send_message(BrokerMessage::PublishResponse {
+                                        topic,
+                                        payload: payload.clone(),
+                                        result: Err(e.to_string()),
+                                        trace_ctx: Some(span.context()),
+                                    })
+                                {
+                                    warn!("{PUBLISH_REQ_FAILED_TXT} {e}");
                                 }
                             }
                         }
-                        None => {
-                            // topic doesn't exist
+                    }
+                    None => {
+                        // topic doesn't exist
+                        debug!("Topic: \"{topic}\" doesn't appear to exist, forwarding publish request to topic manager.");
+                        if let Some(manager) = where_is(TOPIC_MANAGER_NAME.to_string()) {
+                            // We can't publish a message to a topic if a queue hasn't been created to hold it,
+                            // So tell topic mgr to add one, await it to complete, then let the client know we were successful.
+                            // TODO:
+                            // There's probably a better way to do this. Just send a message to the topic manager, and it:
+                            //
+                            // starts a topic actor with that message
+                            // forwards the publish request to it, then, should that send succeed,
+                            // send a message back to the client indicating success.
 
-                            if let Some(manager) = where_is(TOPIC_MANAGER_NAME.to_string()) {
-                                //tell topicmgr to add one, await it to complete,
-                                match call(
-                                    &manager,
-                                    |reply| BrokerMessage::AddTopic {
-                                        reply,
-                                        registration_id: None,
-                                        topic: topic.clone(),
-                                    },
-                                    None,
-                                )
-                                .await
-                                .expect("{PUBLISH_REQ_FAILED_TXT}: {TOPIC_MGR_NOT_FOUND_TXT}")
-                                {
-                                    Success(add_topic_result) => {
-                                        match add_topic_result {
-                                            Ok(topic_actor) => {
-                                                //push message to that topic
-                                                if let Err(e) = topic_actor.send_message(
-                                                    BrokerMessage::PublishRequest {
-                                                        registration_id: Some(
-                                                            registration_id.clone(),
-                                                        ),
-                                                        topic: topic.clone(),
-                                                        payload: payload.clone(),
-                                                    },
-                                                ) {
-                                                    warn!("{PUBLISH_REQ_FAILED_TXT}: {e}");
-                                                    //send err to session
-                                                    if let Some(session) =
-                                                        where_is(registration_id.clone())
-                                                    {
-                                                        if let Err(e) = session.send_message(
-                                                            BrokerMessage::PublishResponse {
-                                                                topic,
-                                                                payload: payload.clone(),
-                                                                result: Err(e.to_string()),
-                                                            },
-                                                        ) {
-                                                            warn!("{PUBLISH_REQ_FAILED_TXT} {e}");
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                            Err(e) => {
+                            match call(
+                                &manager,
+                                |reply| BrokerMessage::AddTopic {
+                                    reply,
+                                    registration_id: None,
+                                    topic: topic.clone(),
+                                    trace_ctx: Some(span.context()),
+                                },
+                                None,
+                            )
+                            .await
+                            .expect("{PUBLISH_REQ_FAILED_TXT}: {TOPIC_MGR_NOT_FOUND_TXT}")
+                            {
+                                Success(add_topic_result) => {
+                                    match add_topic_result {
+                                        Ok(topic_actor) => {
+                                            //push message to that topic
+                                            if let Err(e) = topic_actor.send_message(
+                                                BrokerMessage::PublishRequest {
+                                                    registration_id: registration_id.clone(),
+                                                    topic: topic.clone(),
+                                                    payload: payload.clone(),
+                                                    trace_ctx: Some(span.context()),
+                                                },
+                                            ) {
+                                                warn!("{PUBLISH_REQ_FAILED_TXT}: {e}");
                                                 //send err to session
                                                 if let Some(session) =
                                                     where_is(registration_id.clone())
@@ -516,6 +528,7 @@ impl Actor for Broker {
                                                             topic,
                                                             payload: payload.clone(),
                                                             result: Err(e.to_string()),
+                                                            trace_ctx: Some(span.context()),
                                                         },
                                                     ) {
                                                         warn!("{PUBLISH_REQ_FAILED_TXT} {e}");
@@ -523,10 +536,27 @@ impl Actor for Broker {
                                                 }
                                             }
                                         }
+                                        Err(e) => {
+                                            //send err to session
+                                            if let Some(session) = where_is(registration_id.clone())
+                                            {
+                                                if let Err(e) = session.send_message(
+                                                    BrokerMessage::PublishResponse {
+                                                        topic,
+                                                        payload: payload.clone(),
+                                                        result: Err(e.to_string()),
+                                                        trace_ctx: Some(span.context()),
+                                                    },
+                                                ) {
+                                                    warn!("{PUBLISH_REQ_FAILED_TXT} {e}");
+                                                }
+                                            }
+                                        }
                                     }
-                                    _ => {
-                                        todo!("Failed to communicate with critical actor for some reason, respond")
-                                    }
+                                }
+                                _ => {
+                                    // TODO: This will probably never happen, the aforementioned alternative approach would probably make this code moot.
+                                    todo!("Failed to communicate with critical actor for some reason, respond")
                                 }
                             }
                         }
@@ -537,16 +567,26 @@ impl Actor for Broker {
                 topic,
                 payload,
                 result,
-            } => match where_is(SUBSCRIBER_MANAGER_NAME.to_owned()) {
-                Some(actor) => actor
-                    .send_message(BrokerMessage::PublishResponse {
-                        topic,
-                        payload,
-                        result,
-                    })
-                    .expect("Failed to forward notification to subscriber manager"),
-                None => tracing::error!("Failed to lookup subscriber manager!"),
-            },
+                trace_ctx,
+            } => {
+                let span = trace_span!("broker.handle_publish_request");
+                if let Some(ctx) = trace_ctx {
+                    span.set_parent(ctx).ok();
+                }
+                let _enter = span.enter();
+
+                match where_is(SUBSCRIBER_MANAGER_NAME.to_owned()) {
+                    Some(actor) => actor
+                        .send_message(BrokerMessage::PublishResponse {
+                            topic,
+                            payload,
+                            result,
+                            trace_ctx: Some(span.context()),
+                        })
+                        .expect("Failed to forward notification to subscriber manager"),
+                    None => tracing::error!("Failed to lookup subscriber manager!"),
+                }
+            }
             BrokerMessage::ErrorMessage { error, .. } => {
                 warn!("Error Received: {error}");
             }

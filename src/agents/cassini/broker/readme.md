@@ -77,6 +77,8 @@ export TLS_SERVER_KEY=""
 #export TLS_CLIENT_CERT=""
 # The absolute file path to the client key - MUST BE IN PEM FORMAT
 #export TLS_CLIENT_KEY=""
+# Cassini and other agents rely on the RUST_LOG variable to configure logging verbosity
+export RUST_LOG="info"
 ```
 
 
@@ -90,6 +92,7 @@ export TLS_SERVER_KEY=""
 
 3. **Disconnect Gracefully**:
    The client sends a `DisconnectRequest`, and the broker cleans up the associated session actor and any subscriptions associated with it.
+
 
 ## Testing
 [Check out the README for our test harness](..test/README.md)

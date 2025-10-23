@@ -1,9 +1,10 @@
 use crate::UNEXPECTED_MESSAGE_STR;
 use crate::{get_subscriber_name, BrokerMessage, PUBLISH_REQ_FAILED_TXT};
 use ractor::registry::where_is;
-use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef};
+use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef, OutputPort};
 use std::collections::{HashMap, VecDeque};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, trace, trace_span, warn};
+use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 pub const TOPIC_ADD_FAILED_TXT: &str = "Failed to add topic \"{topic}!\"";
 
@@ -101,52 +102,70 @@ impl Actor for TopicManager {
                 registration_id,
                 topic,
                 payload,
+                trace_ctx,
             } => {
-                match registration_id {
-                    Some(registration_id) => {
-                        //forward request to topic agent
-                        if let Some(topic_actor) = state.topics.get(&topic.clone()) {
-                            topic_actor
-                                .send_message(BrokerMessage::PublishRequest {
-                                    registration_id: Some(registration_id),
-                                    topic,
-                                    payload,
-                                })
-                                .expect("Failed for forward publish request")
-                        } else {
-                            warn!("No agent set to handle topic: {topic}, starting new agent...");
+                let span = trace_span!("topic_manager.handle_publish_request");
+                if let Some(ctx) = trace_ctx {
+                    span.set_parent(ctx).ok();
+                }
+                let _enter = span.enter();
 
-                            match Actor::spawn_linked(
-                                Some(topic.clone()),
-                                TopicAgent,
-                                TopicAgentArgs { subscribers: None },
-                                myself.clone().into(),
-                            )
-                            .await
-                            {
-                                Ok((actor, _)) => {
-                                    state.topics.insert(topic.clone(), actor.clone());
-                                }
-                                Err(e) => {
-                                    tracing::error!("Failed to start actor for topic: {topic}");
-                                    //TOOD: send error message here
-                                    match myself.try_get_supervisor() {
-                                        Some(broker) => broker
-                                            .send_message(BrokerMessage::ErrorMessage {
-                                                client_id: registration_id.clone(),
-                                                error: e.to_string(),
-                                            })
-                                            .unwrap(),
-                                        None => todo!(),
-                                    }
-                                }
+                trace!("Topic manager received publish request for \"{topic}\"");
+
+                //forward request to topic agent
+                if let Some(topic_actor) = state.topics.get(&topic.clone()) {
+                    topic_actor
+                        .send_message(BrokerMessage::PublishRequest {
+                            registration_id,
+                            topic,
+                            payload,
+                            trace_ctx: Some(span.context()),
+                        })
+                        .expect("Failed for forward publish request")
+                } else {
+                    info!("Creating topic: \"{topic}\".");
+
+                    match Actor::spawn_linked(
+                        Some(topic.clone()),
+                        TopicAgent,
+                        TopicAgentArgs { subscribers: None },
+                        myself.clone().into(),
+                    )
+                    .await
+                    {
+                        Ok((actor, _)) => {
+                            state.topics.insert(topic.clone(), actor.clone());
+                        }
+                        Err(e) => {
+                            tracing::error!("Failed to start actor for topic: {topic}");
+                            //TOOD: send error message here
+                            match myself.try_get_supervisor() {
+                                Some(broker) => broker
+                                    .send_message(BrokerMessage::ErrorMessage {
+                                        client_id: registration_id.clone(),
+                                        error: e.to_string(),
+                                    })
+                                    .unwrap(),
+                                None => todo!(),
                             }
                         }
                     }
-                    None => warn!("Received publish request from unknown session. {payload:?}"),
                 }
             }
-            BrokerMessage::PublishResponse { topic, payload, .. } => {
+            BrokerMessage::PublishResponse {
+                topic,
+                payload,
+                trace_ctx,
+                ..
+            } => {
+                let span = trace_span!("topic_manager.handle_publish_request");
+                if let Some(ctx) = trace_ctx {
+                    span.set_parent(ctx).ok();
+                }
+                let _enter = span.enter();
+
+                trace!("Topic manager received publish response for \"{topic}\"");
+
                 //forward to broker
                 match myself.try_get_supervisor() {
                     Some(broker) => broker
@@ -154,6 +173,7 @@ impl Actor for TopicManager {
                             topic,
                             payload,
                             result: Result::Ok(()),
+                            trace_ctx: Some(span.context()),
                         })
                         .expect("Expected to forward message to broker"),
                     None => todo!(),
@@ -163,17 +183,28 @@ impl Actor for TopicManager {
                 reply,
                 registration_id,
                 topic,
+                trace_ctx,
             } => {
+                let span = trace_span!("topic_manager.handle_publish_request");
+                if let Some(ctx) = trace_ctx {
+                    span.set_parent(ctx).ok();
+                }
+                let _enter = span.enter();
+
+                trace!("topic manager received add topic command for topic \"{topic}\"");
+
                 // add some topic, optionally on behalf of a session
                 if let Some(registration_id) = registration_id {
                     let mut subscribers = Vec::new();
                     subscribers.push(format!("{}:{}", registration_id.clone(), topic.clone()));
 
+                    // TODO: We want to move to use OutputPorts for the subscribers instead of having topics keep a list.
+                    // Create an output port here, subscribe the session actor to it by looking it up, and go from there
                     match Actor::spawn_linked(
                         Some(topic.clone()),
                         TopicAgent,
                         TopicAgentArgs {
-                            subscribers: Some(subscribers),
+                            subscribers: Some(subscribers), // TODO: replace with an output port
                         },
                         myself.clone().into(),
                     )
@@ -191,7 +222,7 @@ impl Actor for TopicManager {
                     match Actor::spawn_linked(
                         Some(topic.clone()),
                         TopicAgent,
-                        TopicAgentArgs { subscribers: None },
+                        TopicAgentArgs { subscribers: None }, // TODO: Replace with an outputPort anyway
                         myself.clone().into(),
                     )
                     .await
@@ -219,6 +250,8 @@ struct TopicAgent;
 struct TopicAgentState {
     subscribers: Vec<String>,
     queue: VecDeque<Vec<u8>>,
+    /// An output port used to pass messages that come in on the topic to subscribers.
+    topic_output: OutputPort<Vec<u8>>,
 }
 
 pub struct TopicAgentArgs {
@@ -270,47 +303,57 @@ impl Actor for TopicAgent {
                 registration_id,
                 topic,
                 payload,
+                trace_ctx,
             } => {
-                match registration_id {
-                    Some(registration_id) => {
-                        //alert subscribers
-                        if !state.subscribers.is_empty() {
-                            for subscriber in &state.subscribers {
-                                if let Some(actor) = where_is(subscriber.to_string()) {
-                                    if let Err(e) =
-                                        actor.send_message(BrokerMessage::PublishResponse {
-                                            topic: topic.clone(),
-                                            payload: payload.clone(),
-                                            result: Ok(()),
-                                        })
-                                    {
-                                        warn!("{PUBLISH_REQ_FAILED_TXT}: {e}")
-                                    }
-                                } else {
-                                    warn!("{PUBLISH_REQ_FAILED_TXT}: failed to lookup subscriber for {registration_id}")
-                                }
+                let span = trace_span!("topic.handle_publish_request");
+                if let Some(ctx) = trace_ctx {
+                    span.set_parent(ctx).ok();
+                }
+                let _enter = span.enter();
+
+                trace!("Topic agent received publish request for \"{topic}\"");
+
+                //alert subscribers
+                if !state.subscribers.is_empty() {
+                    // TODO: We can just use output ports here...So let's do that.
+                    for subscriber in &state.subscribers {
+                        if let Some(actor) = where_is(subscriber.to_string()) {
+                            if let Err(e) = actor.send_message(BrokerMessage::PublishResponse {
+                                topic: topic.clone(),
+                                payload: payload.clone(),
+                                result: Ok(()),
+                                trace_ctx: Some(span.context()),
+                            }) {
+                                warn!("{PUBLISH_REQ_FAILED_TXT}: {e}")
                             }
                         } else {
-                            //queue message
-                            state.queue.push_back(payload);
-                            info!("{}", format!("New message on topic \"{0:?}\", queue has {1} message(s) waiting.",myself.get_name(), state.queue.len()));
+                            warn!("{PUBLISH_REQ_FAILED_TXT}: failed to lookup subscriber for {registration_id}")
                         }
+                    }
+                } else {
+                    //queue message
+                    state.queue.push_back(payload);
+                    info!(
+                        "{}",
+                        format!(
+                            "New message on topic \"{0:?}\", queue has {1} message(s) waiting.",
+                            myself.get_name(),
+                            state.queue.len()
+                        )
+                    );
+                }
 
-                        //send ACK to session that made the request
-                        match where_is(registration_id.clone()) {
-                            Some(session) => {
-                                if let Err(e) =
-                                    session.send_message(BrokerMessage::PublishRequestAck(topic))
-                                {
-                                    warn!("Failed to send publish Ack to session! {e}")
-                                }
-                            }
-                            None => warn!("Failed to lookup session {registration_id}"),
+                //send ACK to session that made the request
+                match where_is(registration_id.clone()) {
+                    Some(session) => {
+                        if let Err(e) = session.send_message(BrokerMessage::PublishRequestAck {
+                            topic: topic,
+                            trace_ctx: Some(span.context()),
+                        }) {
+                            warn!("Failed to send publish Ack to session! {e}")
                         }
                     }
-                    None => {
-                        warn!("Received publish request from unknown session: {payload:?}");
-                    }
+                    None => warn!("Failed to lookup session {registration_id}"),
                 }
             }
             BrokerMessage::Subscribe {
@@ -328,6 +371,7 @@ impl Actor for TopicAgent {
                             topic: topic.clone(),
                             payload: msg.to_vec(),
                             result: Ok(()),
+                            // trace_ctx: Some(span.context()),
                         }) {
                             warn!("{PUBLISH_REQ_FAILED_TXT}: {e}");
                         }

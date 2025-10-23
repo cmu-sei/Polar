@@ -1,4 +1,5 @@
 use cassini_types::ClientMessage;
+use opentelemetry::Context;
 use ractor::{ActorRef, RpcReplyPort};
 pub mod broker;
 pub mod listener;
@@ -16,7 +17,7 @@ pub const SUBSCRIBER_MANAGER_NAME: &str = "SUBSCRIBER_MANAGER";
 
 pub const ACTOR_STARTUP_MSG: &str = "Started {myself:?}";
 pub const UNEXPECTED_MESSAGE_STR: &str = "Received unexpected message!";
-
+pub const SESSION_NOT_NAMED: &str = "Expected session to have been named.";
 pub const SESSION_MISSING_REASON_STR: &str = "SESSION_MISSING";
 pub const SESSION_NOT_FOUND_TXT: &str = "Session not found!";
 pub const CLIENT_NOT_FOUND_TXT: &str = "Listener not found!";
@@ -33,7 +34,7 @@ pub const DISCONNECTED_REASON: &str = "CLIENT_DISCONNECTED";
 pub const DISPATCH_NAME: &str = "DISPATCH";
 
 /// Internal messagetypes for the Broker.
-///
+/// Activities that flow froma ctor to actor can optionally containing a tracing context in order to measure timespans.
 #[derive(Debug)]
 pub enum BrokerMessage {
     /// Registration request from the client.
@@ -44,30 +45,47 @@ pub enum BrokerMessage {
         //Id for a new, potentially unauthenticated/unauthorized client client
         registration_id: Option<String>,
         client_id: String,
+        trace_ctx: Option<Context>,
     },
+    /// Helper variant to start a session and re/initialize it with a new client connection + tracing context
+    InitSession {
+        client_id: String,
+        trace_ctx: Option<Context>,
+    },
+    /// TODO: Do we care to keep this around?
+    /// A heartbeat tick messgae sent by sessions to track uptime
+    HeartbeatTick,
     /// Registration response to the client after attempting registration
     RegistrationResponse {
-        registration_id: Option<String>, //new and final id for a client successfully registered
+        // TODO: Make the result contain the new registration id, its presence would signify success.
+        registration_id: Option<String>,
         client_id: String,
         result: Result<(), String>,
+        trace_ctx: Option<Context>,
     },
     /// Publish request from the client.
     PublishRequest {
-        registration_id: Option<String>, //TODO: Reemove option, listener checks for registration_id before forwarding
+        registration_id: String,
         topic: String,
         payload: Vec<u8>,
+        trace_ctx: Option<Context>,
     },
     /// Publish response to the client.
     PublishResponse {
         topic: String,
         payload: Vec<u8>,
-        result: Result<(), String>, // Ok for success, Err with error message
+        result: Result<(), String>,
+        trace_ctx: Option<Context>,
     },
-    PublishRequestAck(String),
+    /// Message sent to the client to let them know they successfully published a message
+    PublishRequestAck {
+        topic: String,
+        trace_ctx: Option<Context>,
+    },
     PublishResponseAck,
     /// Subscribe request from the client.
     SubscribeRequest {
-        registration_id: Option<String>,
+        registration_id: String,
         topic: String,
     },
     /// Sent to the subscriber manager to create a new subscriber actor to handle pushing messages to the client.
@@ -77,10 +95,14 @@ pub enum BrokerMessage {
         topic: String,
         registration_id: String,
     },
+    /// instructs the topic manager to create a new topic actor,
+    /// optionally at the behest of a session client during the processing of a SubscribeRequest
+    /// which would also prompt the creation of a subscriber agent for that topic.
     AddTopic {
         reply: RpcReplyPort<Result<ActorRef<BrokerMessage>, String>>,
         registration_id: Option<String>,
         topic: String,
+        trace_ctx: Option<Context>,
     },
     /// Sent to session actors to forward messages to their clients.
     /// Messages that fail to be delivered for some reason are kept in their queues.
@@ -88,6 +110,7 @@ pub enum BrokerMessage {
         // reply: RpcReplyPort<Result<(), String>>,
         payload: Vec<u8>,
         topic: String,
+        trace_ctx: Option<Context>,
     },
     /// Sent back to subscription actors if sessions fail to forward messages to the client for requeueing
     PushMessageFailed {
@@ -131,18 +154,20 @@ pub enum BrokerMessage {
     },
     TimeoutMessage {
         client_id: String,
-        registration_id: Option<String>, //name of the session agent that died
+        ///name of the session agent that died
+        registration_id: String,
         error: Option<String>,
     },
 }
 
 impl BrokerMessage {
-    pub fn from_client_message(msg: ClientMessage, client_id: String, _: Option<String>) -> Self {
+    pub fn from_client_message(msg: ClientMessage, client_id: String) -> Self {
         match msg {
             ClientMessage::RegistrationRequest { registration_id } => {
                 BrokerMessage::RegistrationRequest {
                     registration_id,
                     client_id,
+                    trace_ctx: None,
                 }
             }
             ClientMessage::PublishRequest {

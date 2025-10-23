@@ -24,17 +24,17 @@ async fn main() {
     let tracer = opentelemetry::global::tracer("cassini_trace");
 
     // TODO: We copied this from a ractor example, but is this format the one we want to use?
-    let fmt = tracing_subscriber::fmt::Layer::default()
-        .with_ansi(stderr().is_terminal())
-        .with_writer(std::io::stderr)
-        .event_format(Glog::default().with_timer(tracing_glog::LocalTime::default()))
-        .fmt_fields(GlogFields::default().compact());
+    // let fmt = tracing_subscriber::fmt::Layer::default()
+    //     .with_ansi(stderr().is_terminal())
+    //     .with_writer(std::io::stderr)
+    //     .event_format(Glog::default().with_timer(tracing_glog::LocalTime::default()))
+    //     .fmt_fields(GlogFields::default().compact());
 
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 
     tracing_subscriber::registry()
         .with(filter)
-        .with(fmt)
+        .with(tracing_subscriber::fmt::layer())
         .with(tracing_opentelemetry::layer().with_tracer(tracer))
         .init();
 
