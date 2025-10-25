@@ -8,15 +8,17 @@ pub enum ClientMessage {
     RegistrationRequest {
         registration_id: Option<String>,
     },
+    /// Response to an attempt to register.
+    /// Ok contains the value of the registration id,
+    /// Err should contain an error message
     RegistrationResponse {
-        registration_id: String, //new and final id for a client successfully registered
-        result: Result<(), String>,
+        result: Result<String, String>,
     },
     /// Publish request from the client.
     PublishRequest {
         topic: String,
         payload: Vec<u8>,
-        registration_id: Option<String>,
+        registration_id: String,
     },
     /// Publish response to the client.
     PublishResponse {
@@ -27,7 +29,7 @@ pub enum ClientMessage {
     /// Sent back to actor that made initial publish request
     PublishRequestAck(String),
     SubscribeRequest {
-        registration_id: Option<String>,
+        registration_id: String,
         topic: String,
     },
     /// Subscribe acknowledgment to the client.
@@ -37,7 +39,7 @@ pub enum ClientMessage {
     },
     /// Unsubscribe request from the client.
     UnsubscribeRequest {
-        registration_id: Option<String>,
+        registration_id: String,
         topic: String,
     },
     UnsubscribeAcknowledgment {
@@ -46,7 +48,5 @@ pub enum ClientMessage {
     },
     ///Disconnect, sending a session id to end, if any
     DisconnectRequest(Option<String>),
-    ///Mostly for testing purposes, intentional timeout message with a client_id
-    TimeoutMessage(Option<String>),
     ErrorMessage(String),
 }

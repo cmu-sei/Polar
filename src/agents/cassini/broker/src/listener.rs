@@ -25,7 +25,7 @@ use tokio::{
     task::JoinHandle,
 };
 use tokio_rustls::{server::TlsStream, TlsAcceptor};
-use tracing::{debug, error, info, trace, trace_span, warn, Level};
+use tracing::{debug, error, info, trace, trace_span, warn};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 // ============================== Listener Manager ============================== //
@@ -230,7 +230,7 @@ impl Actor for ListenerManager {
                                     if let Err(e) =
                                         session.send_message(BrokerMessage::TimeoutMessage {
                                             client_id,
-                                            registration_id: Some(registration_id.clone()),
+                                            registration_id: registration_id.clone(),
                                             error: Some(TIMEOUT_REASON.to_string()),
                                         })
                                     {
@@ -263,7 +263,6 @@ impl Actor for ListenerManager {
     ) -> Result<(), ActorProcessingErr> {
         match message {
             BrokerMessage::RegistrationResponse {
-                registration_id,
                 client_id,
                 result,
                 trace_ctx,
@@ -275,13 +274,13 @@ impl Actor for ListenerManager {
                 trace_ctx.clone().map(|ctx| span.set_parent(ctx));
                 span.enter();
 
+                trace!("Listener manager has received a registration response.");
                 //forwward registration_id back to listener to signal success
                 info!("Forwarding registration ack to listener: {client_id}");
 
                 where_is(client_id.clone())
                     .unwrap()
                     .send_message(BrokerMessage::RegistrationResponse {
-                        registration_id,
                         client_id,
                         result,
                         trace_ctx: trace_ctx.clone(),
@@ -497,13 +496,14 @@ impl Actor for Listener {
                             );
                             error!("{err_msg}");
                             let msg = ClientMessage::RegistrationResponse {
-                                registration_id: String::default(),
                                 result: Err(err_msg.clone()),
                             };
 
-                            let _ = Listener::write(client_id, msg, Arc::clone(&state.writer))
+                            Listener::write(client_id, msg, Arc::clone(&state.writer))
                                 .await
-                                .map_err(|e| error!("Failed to write message {e}"));
+                                .map_err(|e| error!("Failed to write message {e}"))
+                                .ok();
+
                             myself.stop(Some(err_msg));
                         }
                     }
@@ -514,28 +514,28 @@ impl Actor for Listener {
                             format!("{REGISTRATION_REQ_FAILED_TXT}: {BROKER_NOT_FOUND_TXT}");
                         error!("{err_msg}");
                         let msg = ClientMessage::RegistrationResponse {
-                            registration_id: String::default(),
                             result: Err(err_msg.clone()),
                         };
 
-                        let _ = Listener::write(client_id, msg, Arc::clone(&state.writer))
+                        Listener::write(client_id, msg, Arc::clone(&state.writer))
                             .await
                             .map_err(|e| {
                                 error!("Failed to write message {e}");
                                 if let Err(e) = myself.send_message(BrokerMessage::TimeoutMessage {
-                                    client_id: String::default(),
-                                    registration_id: None,
+                                    client_id: myself.get_name().unwrap(),
+                                    registration_id: registration_id.unwrap(),
                                     error: Some(e.to_string()),
                                 }) {
                                     myself.stop(Some(e.to_string()));
                                 }
-                            });
+                            })
+                            .ok();
+
                         myself.stop(Some(err_msg));
                     }
                 }
             }
             BrokerMessage::RegistrationResponse {
-                registration_id,
                 client_id,
                 result,
                 trace_ctx,
@@ -548,50 +548,49 @@ impl Actor for Listener {
 
                 trace!("Listener actor received registration response");
 
-                // TODO: Make the result contain the new registration id, its presence would signify success.
-                // At the moment, all this says is clone a potentially empty Option
-                if result.is_ok() {
-                    state.registration_id = registration_id.clone();
+                match result {
+                    Ok(registration_id) => {
+                        state.registration_id = Some(registration_id.clone());
 
-                    let msg = ClientMessage::RegistrationResponse {
-                        registration_id: registration_id.unwrap(),
-                        result: Ok(()),
-                    };
+                        let msg = ClientMessage::RegistrationResponse {
+                            result: Ok(registration_id),
+                        };
 
-                    Listener::write(client_id, msg, Arc::clone(&state.writer))
-                        .await
-                        .map_err(|e| {
-                            error!("Failed to write message {e}");
-                            if let Err(e) = myself.send_message(BrokerMessage::TimeoutMessage {
-                                client_id: String::default(),
-                                registration_id: state.registration_id.clone().unwrap(),
-                                error: Some(e.to_string()),
-                            }) {
-                                error!("Failed to forwad message to handler {e}");
-                                myself.stop(Some(e.to_string()));
-                            }
-                        })
-                        .ok();
-                } else {
-                    let err_msg = format!("{REGISTRATION_REQ_FAILED_TXT}: {}", result.unwrap_err());
-                    let msg = ClientMessage::RegistrationResponse {
-                        registration_id: String::default(),
-                        result: Err(err_msg.clone()),
-                    };
+                        Listener::write(client_id, msg, Arc::clone(&state.writer))
+                            .await
+                            .map_err(|e| {
+                                error!("Failed to write message {e}");
+                                if let Err(e) = myself.send_message(BrokerMessage::TimeoutMessage {
+                                    client_id: myself.get_name().unwrap(),
+                                    registration_id: state.registration_id.clone().unwrap(),
+                                    error: Some(e.to_string()),
+                                }) {
+                                    error!("Failed to forwad message to handler {e}");
+                                    myself.stop(Some(e.to_string()));
+                                }
+                            })
+                            .ok();
+                    }
+                    Err(error) => {
+                        let err_msg = format!("{REGISTRATION_REQ_FAILED_TXT}: {error}");
+                        let msg = ClientMessage::RegistrationResponse {
+                            result: Err(err_msg.clone()),
+                        };
 
-                    Listener::write(client_id, msg, Arc::clone(&state.writer))
-                        .await
-                        .map_err(|e| {
-                            error!("Failed to write message {e}");
-                            if let Err(e) = myself.send_message(BrokerMessage::TimeoutMessage {
-                                client_id: String::default(),
-                                registration_id: state.registration_id.clone().unwrap(),
-                                error: Some(e.to_string()),
-                            }) {
-                                myself.stop(Some(e.to_string()));
-                            }
-                        })
-                        .ok();
+                        Listener::write(client_id, msg, Arc::clone(&state.writer))
+                            .await
+                            .map_err(|e| {
+                                error!("Failed to write message {e}");
+                                if let Err(e) = myself.send_message(BrokerMessage::TimeoutMessage {
+                                    client_id: myself.get_name().unwrap(),
+                                    registration_id: state.registration_id.clone().unwrap(),
+                                    error: Some(e.to_string()),
+                                }) {
+                                    myself.stop(Some(e.to_string()));
+                                }
+                            })
+                            .ok();
+                    }
                 }
             }
             BrokerMessage::PublishRequest {
@@ -621,7 +620,7 @@ impl Actor for Listener {
                             Some(session) => {
                                 if let Err(e) =
                                     session.send_message(BrokerMessage::PublishRequest {
-                                        registration_id,
+                                        registration_id: registration_id.clone(),
                                         topic: topic.clone(),
                                         payload: payload.clone(),
                                         trace_ctx: Some(otel_ctx),
@@ -645,8 +644,8 @@ impl Actor for Listener {
                                         error!("Failed to write message {e} Connection to client likely timed out.");
                                         if let Err(e) =
                                             myself.send_message(BrokerMessage::TimeoutMessage {
-                                                client_id: String::default(),
-                                                registration_id: None,
+                                                client_id: myself.get_name().unwrap(),
+                                                registration_id ,
                                                 error: Some(e.to_string()),
                                             })
                                         {
@@ -655,7 +654,6 @@ impl Actor for Listener {
                                     })
                                     .ok();
                                     // we can consider this the end of trying to publish
-                                    drop(_enter);
                                 }
                             }
                             None => {
@@ -668,7 +666,7 @@ impl Actor for Listener {
                                     )),
                                 };
 
-                                let _ = Listener::write(
+                                Listener::write(
                                     state.client_id.clone(),
                                     msg,
                                     Arc::clone(&state.writer),
@@ -678,15 +676,15 @@ impl Actor for Listener {
                                     error!("Failed to write message {e}");
                                     if let Err(e) =
                                         myself.send_message(BrokerMessage::TimeoutMessage {
-                                            client_id: String::default(),
-                                            registration_id: None,
+                                            client_id: myself.get_name().unwrap(),
+                                            registration_id,
                                             error: Some(e.to_string()),
                                         })
                                     {
                                         myself.stop(Some(e.to_string()));
                                     }
-                                });
-                                drop(_enter);
+                                })
+                                .ok();
                             }
                         }
                     } else {
@@ -695,23 +693,19 @@ impl Actor for Listener {
                         warn!("{err_msg}");
                         let msg = ClientMessage::ErrorMessage(err_msg);
 
-                        let _ = Listener::write(
-                            state.client_id.clone(),
-                            msg,
-                            Arc::clone(&state.writer),
-                        )
-                        .await
-                        .map_err(|e| {
-                            error!("Failed to write message {e}");
-                            if let Err(e) = myself.send_message(BrokerMessage::TimeoutMessage {
-                                client_id: String::default(),
-                                registration_id: None,
-                                error: Some(e.to_string()),
-                            }) {
-                                myself.stop(Some(e.to_string()));
-                            }
-                        });
-                        drop(_enter);
+                        Listener::write(state.client_id.clone(), msg, Arc::clone(&state.writer))
+                            .await
+                            .map_err(|e| {
+                                error!("Failed to write message {e}");
+                                if let Err(e) = myself.send_message(BrokerMessage::TimeoutMessage {
+                                    client_id: myself.get_name().unwrap(),
+                                    registration_id,
+                                    error: Some(e.to_string()),
+                                }) {
+                                    myself.stop(Some(e.to_string()));
+                                }
+                            })
+                            .ok();
                     }
                 } else {
                     let err_msg =
@@ -719,19 +713,19 @@ impl Actor for Listener {
                     warn!("{err_msg}");
                     let msg = ClientMessage::ErrorMessage(err_msg);
 
-                    let _ =
-                        Listener::write(state.client_id.clone(), msg, Arc::clone(&state.writer))
-                            .await
-                            .map_err(|e| {
-                                error!("Failed to write message {e}");
-                                if let Err(e) = myself.send_message(BrokerMessage::TimeoutMessage {
-                                    client_id: String::default(),
-                                    registration_id: None,
-                                    error: Some(e.to_string()),
-                                }) {
-                                    myself.stop(Some(e.to_string()));
-                                }
-                            });
+                    Listener::write(state.client_id.clone(), msg, Arc::clone(&state.writer))
+                        .await
+                        .map_err(|e| {
+                            error!("Failed to write message {e}");
+                            if let Err(e) = myself.send_message(BrokerMessage::TimeoutMessage {
+                                client_id: myself.get_name().unwrap(),
+                                registration_id,
+                                error: Some(e.to_string()),
+                            }) {
+                                myself.stop(Some(e.to_string()));
+                            }
+                        })
+                        .ok();
                 }
             }
             BrokerMessage::PublishResponse {
@@ -759,7 +753,7 @@ impl Actor for Listener {
                     .map_err(|e| {
                         error!("Failed to write message. {e}");
                         if let Err(e) = myself.send_message(BrokerMessage::TimeoutMessage {
-                            client_id: String::default(),
+                            client_id: myself.get_name().unwrap(),
                             registration_id: state
                                 .registration_id
                                 .clone()
@@ -785,7 +779,7 @@ impl Actor for Listener {
                     .map_err(|e| {
                         error!("Failed to write message {e}");
                         if let Err(e) = myself.send_message(BrokerMessage::TimeoutMessage {
-                            client_id: String::default(),
+                            client_id: myself.get_name().unwrap(),
                             registration_id: state.registration_id.clone().unwrap(),
                             error: Some(e.to_string()),
                         }) {
@@ -809,7 +803,7 @@ impl Actor for Listener {
                     .map_err(|e| {
                         error!("Failed to write message {e}");
                         if let Err(e) = myself.send_message(BrokerMessage::TimeoutMessage {
-                            client_id: String::default(),
+                            client_id: myself.get_name().unwrap(),
                             registration_id: state.registration_id.clone().unwrap(),
                             error: Some(e.to_string()),
                         }) {
@@ -821,15 +815,33 @@ impl Actor for Listener {
             BrokerMessage::SubscribeRequest {
                 registration_id,
                 topic,
+                trace_ctx,
             } => {
+                let span = trace_span!("listener.handle_subscribe_request", %topic);
+                let _enter = span.enter();
+
+                trace!("listener received subscribe request for topic \"{topic}\"");
+
                 //Got request to subscribe from client, confirm we've been registered
-                if registration_id == state.registration_id && registration_id.is_some() {
-                    let id = registration_id.unwrap();
+                // TODO: is there a better way to check that we're registered AND the message is coming from our actual client?
+                // the connection is mTLS encrypted TCP...but I'd rather be paranoid.
+                // let id = state
+                //     .registration_id
+                //     .clone()
+                //     .take_if(|client_session_id| registration_id == client_session_id).unwrap_or_else(||
+                //         todo!("Here's where we'd respond, chances are the client sent a registration_id that didn't match ours")
+                //     );
+
+                if state.registration_id.is_some()
+                    && (registration_id == state.registration_id.clone().unwrap())
+                {
+                    let id = state.registration_id.clone().unwrap();
                     match where_is(id.clone()) {
                         Some(session) => {
                             if let Err(e) = session.send_message(BrokerMessage::SubscribeRequest {
-                                registration_id: Some(id),
+                                registration_id: id,
                                 topic,
+                                trace_ctx: Some(span.context()),
                             }) {
                                 let err_msg = format!(
                                     "{SUBSCRIBE_REQUEST_FAILED_TXT}: {SESSION_NOT_FOUND_TXT}: {e}"
@@ -847,7 +859,7 @@ impl Actor for Listener {
                                     error!("Failed to write message {e}");
                                     if let Err(e) =
                                         myself.send_message(BrokerMessage::TimeoutMessage {
-                                            client_id: String::default(),
+                                            client_id: myself.get_name().unwrap(),
                                             registration_id: state.registration_id.clone().unwrap(),
                                             error: Some(e.to_string()),
                                         })
@@ -867,7 +879,7 @@ impl Actor for Listener {
                                 ),
                             };
 
-                            let _ = Listener::write(
+                            Listener::write(
                                 state.client_id.clone(),
                                 msg,
                                 Arc::clone(&state.writer),
@@ -876,13 +888,15 @@ impl Actor for Listener {
                             .map_err(|e| {
                                 error!("Failed to write message {e}");
                                 if let Err(e) = myself.send_message(BrokerMessage::TimeoutMessage {
-                                    client_id: String::default(),
-                                    registration_id: None,
+                                    client_id: myself.get_name().unwrap(),
+                                    registration_id: state.registration_id.clone().unwrap(),
                                     error: Some(e.to_string()),
                                 }) {
                                     myself.stop(Some(e.to_string()));
                                 }
-                            });
+                            })
+                            .ok();
+
                             myself.stop(Some(SESSION_MISSING_REASON_STR.to_string()));
                         }
                     }
@@ -896,32 +910,33 @@ impl Actor for Listener {
                         ),
                     };
 
-                    let _ =
-                        Listener::write(state.client_id.clone(), msg, Arc::clone(&state.writer))
-                            .await
-                            .map_err(|e| {
-                                error!("Failed to write message {e}");
-                                if let Err(e) = myself.send_message(BrokerMessage::TimeoutMessage {
-                                    client_id: String::default(),
-                                    registration_id: None,
-                                    error: Some(e.to_string()),
-                                }) {
-                                    myself.stop(Some(e.to_string()));
-                                }
-                            });
+                    Listener::write(state.client_id.clone(), msg, Arc::clone(&state.writer))
+                        .await
+                        .map_err(|e| {
+                            error!("Failed to write message {e}");
+                            if let Err(e) = myself.send_message(BrokerMessage::TimeoutMessage {
+                                client_id: myself.get_name().unwrap(),
+                                registration_id,
+                                error: Some(e.to_string()),
+                            }) {
+                                myself.stop(Some(e.to_string()));
+                            }
+                        })
+                        .ok();
                 }
             }
             BrokerMessage::UnsubscribeRequest {
                 registration_id,
                 topic,
             } => {
-                if registration_id == state.registration_id && registration_id.is_some() {
-                    let id = registration_id.unwrap();
-                    match where_is(id.clone()) {
+                if state.registration_id.is_some()
+                    && (registration_id == state.registration_id.clone().unwrap())
+                {
+                    match where_is(registration_id.clone()) {
                         Some(session) => {
                             if let Err(e) =
                                 session.send_message(BrokerMessage::UnsubscribeRequest {
-                                    registration_id: Some(id),
+                                    registration_id: registration_id.clone(),
                                     topic,
                                 })
                             {
@@ -930,7 +945,7 @@ impl Actor for Listener {
                                 );
                                 error!("{err_msg}");
                                 let msg = ClientMessage::ErrorMessage(err_msg);
-                                let _ = Listener::write(
+                                Listener::write(
                                     state.client_id.clone(),
                                     msg,
                                     Arc::clone(&state.writer),
@@ -940,14 +955,15 @@ impl Actor for Listener {
                                     error!("Failed to write message {e}");
                                     if let Err(e) =
                                         myself.send_message(BrokerMessage::TimeoutMessage {
-                                            client_id: String::default(),
-                                            registration_id: None,
+                                            client_id: myself.get_name().unwrap(),
+                                            registration_id,
                                             error: Some(e.to_string()),
                                         })
                                     {
                                         myself.stop(Some(e.to_string()));
                                     }
-                                });
+                                })
+                                .ok();
                             }
                         }
                         None => {
@@ -955,7 +971,7 @@ impl Actor for Listener {
                                 format!("{SUBSCRIBE_REQUEST_FAILED_TXT}: {SESSION_NOT_FOUND_TXT}");
                             error!("{err_msg}");
                             let msg = ClientMessage::ErrorMessage(err_msg);
-                            let _ = Listener::write(
+                            Listener::write(
                                 state.client_id.clone(),
                                 msg,
                                 Arc::clone(&state.writer),
@@ -964,13 +980,14 @@ impl Actor for Listener {
                             .map_err(|e| {
                                 error!("Failed to write message {e}");
                                 if let Err(e) = myself.send_message(BrokerMessage::TimeoutMessage {
-                                    client_id: String::default(),
-                                    registration_id: None,
+                                    client_id: myself.get_name().unwrap(),
+                                    registration_id,
                                     error: Some(e.to_string()),
                                 }) {
                                     myself.stop(Some(e.to_string()));
                                 }
-                            });
+                            })
+                            .ok();
                         }
                     }
                 } else {
@@ -993,8 +1010,8 @@ impl Actor for Listener {
                     .map_err(|e| {
                         error!("Failed to write message {e}");
                         if let Err(e) = myself.send_message(BrokerMessage::TimeoutMessage {
-                            client_id: String::default(),
-                            registration_id: None,
+                            client_id: myself.get_name().unwrap(),
+                            registration_id,
                             error: Some(e.to_string()),
                         }) {
                             myself.stop(Some(e.to_string()));

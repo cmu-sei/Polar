@@ -250,8 +250,8 @@ struct TopicAgent;
 struct TopicAgentState {
     subscribers: Vec<String>,
     queue: VecDeque<Vec<u8>>,
-    /// An output port used to pass messages that come in on the topic to subscribers.
-    topic_output: OutputPort<Vec<u8>>,
+    // TODO: An output port used to pass messages that come in on the topic to subscribers.
+    // topic_output: OutputPort<Vec<u8>>,
 }
 
 pub struct TopicAgentArgs {
@@ -360,18 +360,26 @@ impl Actor for TopicAgent {
                 reply,
                 registration_id,
                 topic,
+                trace_ctx,
             } => {
+                let span = trace_span!("topic.handle_subscribe_request", %registration_id);
+                trace_ctx.map(|ctx| span.set_parent(ctx));
+                let _ = span.enter();
+
+                trace!("Topic agent \"{topic}\" received subscribe directive");
+
                 let sub_id = get_subscriber_name(&registration_id, &topic);
                 debug!("Adding {sub_id} to subscriber list");
                 state.subscribers.push(sub_id.clone());
                 //send any waiting messages
+                // TODO:  Replace with outputport send() call
                 if let Some(subscriber) = where_is(sub_id.clone()) {
                     while let Some(msg) = &state.queue.pop_front() {
                         if let Err(e) = subscriber.send_message(BrokerMessage::PublishResponse {
                             topic: topic.clone(),
                             payload: msg.to_vec(),
                             result: Ok(()),
-                            // trace_ctx: Some(span.context()),
+                            trace_ctx: Some(span.context()),
                         }) {
                             warn!("{PUBLISH_REQ_FAILED_TXT}: {e}");
                         }
@@ -385,12 +393,10 @@ impl Actor for TopicAgent {
                 registration_id,
                 topic,
             } => {
-                if let Some(registration_id) = registration_id {
-                    let sub_id = get_subscriber_name(&registration_id, &topic);
-                    if let Ok(i) = state.subscribers.binary_search(&sub_id) {
-                        state.subscribers.remove(i);
-                        info!("Removed session {registration_id} from subscribers.")
-                    }
+                let sub_id = get_subscriber_name(&registration_id, &topic);
+                if let Ok(i) = state.subscribers.binary_search(&sub_id) {
+                    state.subscribers.remove(i);
+                    info!("Removed session {registration_id} from subscribers.")
                 }
             }
             _ => {

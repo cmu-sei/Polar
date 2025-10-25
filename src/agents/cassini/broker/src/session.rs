@@ -135,7 +135,6 @@ impl Actor for SessionManager {
 
                         if let Err(e) =
                             listener_ref.send_message(BrokerMessage::RegistrationResponse {
-                                registration_id: None,
                                 client_id: client_id.clone(),
                                 result: Err(err_msg.clone()),
                                 trace_ctx: Some(span.context()),
@@ -150,25 +149,25 @@ impl Actor for SessionManager {
                 }
             }
             BrokerMessage::RegistrationResponse {
-                registration_id, ..
+                result, trace_ctx, ..
             } => {
                 //A client has (re)registered. Cancel timeout thread
+                let span = trace_span!("Session manager received registration response.");
+                trace_ctx.map(|ctx| span.set_parent(ctx));
+                let _ = span.enter();
 
-                if let Some(registration_id) = registration_id {
-                    // Find the given session by its id and cancel the cleanup task for it
-                    match where_is(registration_id.clone()) {
-                        Some(_) => {
+                result
+                    .map(|registration_id| {
+                        // Find the given session by its id and cancel the cleanup task for it
+                        where_is(registration_id.clone()).map(|_| {
                             if let Some(token) = &state.cancellation_tokens.get(&registration_id) {
                                 debug!("Aborting session cleanup for {registration_id}");
                                 token.cancel();
                                 state.cancellation_tokens.remove(&registration_id);
                             }
-                        }
-                        None => {
-                            warn!("No session found for id {registration_id}");
-                        }
-                    }
-                }
+                        });
+                    })
+                    .ok();
             }
             BrokerMessage::DisconnectRequest {
                 client_id,
@@ -198,44 +197,42 @@ impl Actor for SessionManager {
                 registration_id,
                 error,
             } => {
-                if let Some(registration_id) = registration_id {
-                    if let Some(session) = state.sessions.get(&registration_id) {
-                        warn!("Session {registration_id} timing out, waiting for reconnect...");
-                        let ref_clone = session.agent_ref.clone();
-                        let token = CancellationToken::new();
+                if let Some(session) = state.sessions.get(&registration_id) {
+                    warn!("Session {registration_id} timing out, waiting for reconnect...");
+                    let ref_clone = session.agent_ref.clone();
+                    let token = CancellationToken::new();
 
-                        state
-                            .cancellation_tokens
-                            .insert(registration_id.clone(), token.clone());
-                        let timeout = state.session_timeout.clone();
-                        let _ = tokio::spawn(async move {
-                            tokio::select! {
-                                // Use cloned token to listen to cancellation requests
-                                _ = token.cancelled() => {
-                                    // The timer was cancelled, task can shut down
-                                }
-                                // wait before killing session
-                                _ = tokio::time::sleep(std::time::Duration::from_secs(timeout)) => {
-                                    //tell the broker a session has timed out so it let's other actors know
-                                    match myself.try_get_supervisor() {
-                                        Some(manager) => {
-                                            info!("Ending session {ref_clone:?}");
-                                            manager.send_message(BrokerMessage::TimeoutMessage {
-                                                client_id,
-                                                registration_id: Some(registration_id),
-                                                error })
-                                                .expect("Expected to forward to manager")
-                                        }
-
-                                        None => warn!("Could not find broker supervisor!")
-                                    }
-                                    // stop session
-                                    ref_clone.stop(Some(TIMEOUT_REASON.to_string()));
-
-                                }
+                    state
+                        .cancellation_tokens
+                        .insert(registration_id.clone(), token.clone());
+                    let timeout = state.session_timeout.clone();
+                    let _ = tokio::spawn(async move {
+                        tokio::select! {
+                            // Use cloned token to listen to cancellation requests
+                            _ = token.cancelled() => {
+                                // The timer was cancelled, task can shut down
                             }
-                        });
-                    }
+                            // wait before killing session
+                            _ = tokio::time::sleep(std::time::Duration::from_secs(timeout)) => {
+                                //tell the broker a session has timed out so it let's other actors know
+                                match myself.try_get_supervisor() {
+                                    Some(manager) => {
+                                        info!("Ending session {ref_clone:?}");
+                                        manager.send_message(BrokerMessage::TimeoutMessage {
+                                            client_id,
+                                            registration_id,
+                                            error })
+                                            .expect("Expected to forward to manager")
+                                    }
+
+                                    None => warn!("Could not find broker supervisor!")
+                                }
+                                // stop session
+                                ref_clone.stop(Some(TIMEOUT_REASON.to_string()));
+
+                            }
+                        }
+                    });
                 }
             }
             _ => {
@@ -275,6 +272,7 @@ impl Actor for SessionManager {
 pub struct SessionAgent;
 
 pub struct SessionAgentArgs {
+    /// Reference to the listener for the session
     pub client_ref: ActorRef<BrokerMessage>,
 }
 pub struct SessionAgentState {
@@ -292,12 +290,6 @@ impl Actor for SessionAgent {
         _myself: ActorRef<Self::Msg>,
         args: Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
-        // //parse args. if any
-        // let state = SessionAgentState {
-        //     client_ref: args.client_ref.clone(),
-        //     broker: args.broker_ref,
-        // };
-
         Ok(SessionAgentState {
             client_ref: args.client_ref,
         })
@@ -323,9 +315,7 @@ impl Actor for SessionAgent {
                 client_id,
             } => {
                 let span = trace_span!("handle_registration_request", %client_id);
-                if let Some(ctx) = trace_ctx.clone() {
-                    span.set_parent(ctx.clone()).ok();
-                };
+                span.set_parent(span.context()).ok();
                 let _ = span.enter();
 
                 info!("Started session {myself:?} for client {client_id}");
@@ -334,13 +324,10 @@ impl Actor for SessionAgent {
                 state
                     .client_ref
                     .cast(BrokerMessage::RegistrationResponse {
-                        registration_id: Some(
-                            myself.get_name().expect(
-                                "Expected session to have been named with a registration ID",
-                            ),
-                        ),
                         client_id,
-                        result: Ok(()),
+                        result: Ok(myself
+                            .get_name()
+                            .expect("Expected session to have been named with a registration ID")),
                         trace_ctx: Some(span.context()),
                     })
                     .ok();
@@ -357,8 +344,8 @@ impl Actor for SessionAgent {
                 let _ = span.enter();
 
                 trace!(
-                    "Session {} received registration request from client {client_id}",
-                    myself.get_name().expect()
+                    "Session {:?} received registration request from client {client_id}",
+                    myself.get_name()
                 );
 
                 //A a new connection has been established, update state to send messages to new listener actor
@@ -371,9 +358,8 @@ impl Actor for SessionAgent {
                         state
                             .client_ref
                             .send_message(BrokerMessage::RegistrationResponse {
-                                registration_id: registration_id.clone(),
                                 client_id: client_id.clone(),
-                                result: Ok(()),
+                                result: Ok(myself.get_name().unwrap()),
                                 trace_ctx: trace_ctx.clone(),
                             })
                             .expect("Expected to send ack to listener");
@@ -383,9 +369,8 @@ impl Actor for SessionAgent {
                                 //continue registration
                                 if let Err(manager_send_err) =
                                     manager.send_message(BrokerMessage::RegistrationResponse {
-                                        registration_id: registration_id.clone(),
                                         client_id: client_id.clone(),
-                                        result: Ok(()),
+                                        result: Ok(myself.get_name().unwrap()),
                                         trace_ctx: trace_ctx.clone(),
                                     })
                                 {
@@ -396,7 +381,6 @@ impl Actor for SessionAgent {
                                     // if we fail to contact manager, send failure
                                     if let Err(listener_err) = state.client_ref.send_message(
                                         BrokerMessage::RegistrationResponse {
-                                            registration_id: None,
                                             client_id: client_id.clone(),
                                             result: Err(err_msg.clone()),
                                             trace_ctx: trace_ctx.clone(),
@@ -407,7 +391,7 @@ impl Actor for SessionAgent {
                                         if let Err(fwd_err) =
                                             myself.send_message(BrokerMessage::TimeoutMessage {
                                                 client_id,
-                                                registration_id,
+                                                registration_id: myself.get_name().unwrap(),
                                                 error: Some(format!("{err_msg} {listener_err}")),
                                             })
                                         {
@@ -435,9 +419,7 @@ impl Actor for SessionAgent {
             } => {
                 //forward to broker
                 let span = trace_span!("session.handle_publish_request", %registration_id);
-                if let Some(ctx) = trace_ctx {
-                    span.set_parent(ctx).ok();
-                }
+                trace_ctx.map(|ctx| span.set_parent(ctx).ok());
                 let _enter = span.enter();
 
                 trace!("Session {registration_id} received publish request for topic {topic}");
@@ -480,11 +462,13 @@ impl Actor for SessionAgent {
                     }
                 });
             }
-            BrokerMessage::PushMessage { payload, topic } => {
+            BrokerMessage::PushMessage {
+                payload,
+                topic,
+                trace_ctx,
+            } => {
                 let span = trace_span!("session.handle_publish_request");
-                if let Some(ctx) = trace_ctx {
-                    span.set_parent(ctx).ok();
-                }
+                trace_ctx.map(|ctx| span.set_parent(ctx));
                 let _enter = span.enter();
 
                 trace!("Session actor received push message directive for session {} for topic \"{topic}\"", myself.get_name().unwrap());
@@ -515,12 +499,10 @@ impl Actor for SessionAgent {
             }
             BrokerMessage::PublishRequestAck { topic, trace_ctx } => {
                 let span = trace_span!("session.handle_publish_request");
-                if let Some(ctx) = trace_ctx {
-                    span.set_parent(ctx).ok();
-                }
+                trace_ctx.map(|ctx| span.set_parent(ctx));
                 let _enter = span.enter();
 
-                trace!("Session received Publish request acknowledgement for topic \"{topic\"}");
+                trace!("Session received Publish request acknowledgement for topic \"{topic}\"");
 
                 if let Err(e) = state
                     .client_ref
@@ -543,11 +525,13 @@ impl Actor for SessionAgent {
             BrokerMessage::SubscribeRequest {
                 registration_id,
                 topic,
+                trace_ctx,
             } => {
                 where_is(BROKER_NAME.to_string()).inspect(|broker| {
                     if let Err(e) = broker.send_message(BrokerMessage::SubscribeRequest {
                         registration_id,
                         topic,
+                        trace_ctx,
                     }) {
                         error!("{SUBSCRIBE_REQUEST_FAILED_TXT} {BROKER_NOT_FOUND_TXT}");
 
@@ -556,11 +540,10 @@ impl Actor for SessionAgent {
                                 .client_ref
                                 .get_name()
                                 .expect("Expected client to have been named with a client ID"),
-                            registration_id: Some(
-                                myself
-                                    .get_name()
-                                    .expect("Expected to have been named with a registration ID"),
-                            ),
+                            registration_id: myself
+                                .get_name()
+                                .expect("Expected to have been named with a registration ID"),
+
                             error: Some(format!("{e}")),
                         }) {
                             error!("{e}: {fwd_err}");
@@ -581,11 +564,10 @@ impl Actor for SessionAgent {
                     }) {
                         if let Err(fwd_err) = myself.send_message(BrokerMessage::TimeoutMessage {
                             client_id: state.client_ref.get_name().unwrap_or_default(),
-                            registration_id: Some(
-                                myself
-                                    .get_name()
-                                    .expect("Expected to have been named with a registration ID"),
-                            ),
+                            registration_id: myself
+                                .get_name()
+                                .expect("Expected to have been named with a registration ID"),
+
                             error: Some(format!("{e}")),
                         }) {
                             error!("{e}: {fwd_err}");
@@ -612,7 +594,7 @@ impl Actor for SessionAgent {
 
                     if let Err(fwd_err) = myself.send_message(BrokerMessage::TimeoutMessage {
                         client_id: state.client_ref.get_name().unwrap_or_default(),
-                        registration_id: Some(myself.get_name().unwrap_or_default()),
+                        registration_id: myself.get_name().unwrap(),
                         error: Some(format!("{e}")),
                     }) {
                         error!("{e}: {fwd_err}");
@@ -624,7 +606,12 @@ impl Actor for SessionAgent {
                 registration_id,
                 topic,
                 result,
+                trace_ctx,
             } => {
+                let span = trace_span!("session.handle_subscribe_request", %registration_id);
+                trace_ctx.map(|ctx| span.set_parent(ctx));
+                span.enter();
+
                 if let Err(e) =
                     state
                         .client_ref
@@ -632,6 +619,7 @@ impl Actor for SessionAgent {
                             registration_id,
                             topic,
                             result,
+                            trace_ctx: Some(span.context()),
                         })
                 {
                     if let Err(fwd_err) = myself.send_message(BrokerMessage::TimeoutMessage {
@@ -639,7 +627,7 @@ impl Actor for SessionAgent {
                             .client_ref
                             .get_name()
                             .expect("Expected client to have been named with a client ID"),
-                        registration_id: Some(myself.get_name().unwrap_or_default()),
+                        registration_id: myself.get_name().unwrap_or_default(),
                         error: Some(format!("{e}")),
                     }) {
                         error!("{e}: {fwd_err}");

@@ -109,7 +109,7 @@ impl Actor for SubscriberManager {
                         warn!("{err_msg}");
 
                         if let Some(listener) = where_is(client_id.clone()) {
-                            listener.send_message(BrokerMessage::RegistrationResponse { registration_id: Some(registration_id.clone()), client_id: client_id.clone(), result: Err(err_msg.clone()), trace_ctx: Some(span.context())})
+                            listener.send_message(BrokerMessage::RegistrationResponse { client_id: client_id.clone(), result: Err(err_msg.clone()), trace_ctx: Some(span.context())})
                             .map_err(|e| {
                                 warn!("{err_msg}: {e}");
                             }).unwrap()
@@ -122,6 +122,7 @@ impl Actor for SubscriberManager {
                 reply,
                 registration_id,
                 topic,
+                trace_ctx,
             } => {
                 let subscriber_id = get_subscriber_name(&registration_id, &topic);
                 // start new subscriber actor for session
@@ -152,30 +153,22 @@ impl Actor for SubscriberManager {
                 registration_id,
                 topic,
             } => {
-                match registration_id {
-                    Some(id) => {
-                        let subscriber_name = format!("{id}:{topic}");
-                        if let Some(subscriber) = where_is(subscriber_name.clone()) {
-                            subscriber.stop(Some("UNSUBSCRIBED".to_string()));
-                            //send ack
-                            let id_clone = id.clone();
-                            where_is(id).map_or_else(
-                                || error!("Could not find session for client: {id_clone}"),
-                                |session| {
-                                    session
-                                        .send_message(BrokerMessage::UnsubscribeAcknowledgment {
-                                            registration_id: id_clone.clone(),
-                                            topic,
-                                            result: Ok(()),
-                                        })
-                                        .expect("expected to send ack to session");
-                                },
-                            );
-                        } else {
-                            warn!("Session agent {id} not subscribed to topic {topic}");
-                        }
-                    }
-                    None => todo!(),
+                let subscriber_name = format!("{registration_id}:{topic}");
+                if let Some(subscriber) = where_is(subscriber_name.clone()) {
+                    subscriber.stop(Some("UNSUBSCRIBED".to_string()));
+                    //send ack
+
+                    where_is(registration_id.clone()).map(|session| {
+                        session
+                            .send_message(BrokerMessage::UnsubscribeAcknowledgment {
+                                registration_id,
+                                topic,
+                                result: Ok(()),
+                            })
+                            .expect("expected to send ack to session");
+                    });
+                } else {
+                    warn!("Session agent {registration_id} not subscribed to topic {topic}");
                 }
             }
             BrokerMessage::DisconnectRequest {

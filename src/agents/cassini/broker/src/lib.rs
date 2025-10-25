@@ -56,11 +56,12 @@ pub enum BrokerMessage {
     /// A heartbeat tick messgae sent by sessions to track uptime
     HeartbeatTick,
     /// Registration response to the client after attempting registration
+    /// Ok result contains new registration id,
+    /// Err shoudl contain an error message
     RegistrationResponse {
-        // TODO: Make the result contain the new registration id, its presence would signify success.
-        registration_id: Option<String>,
         client_id: String,
-        result: Result<(), String>,
+
+        result: Result<String, String>,
         trace_ctx: Option<Context>,
     },
     /// Publish request from the client.
@@ -87,6 +88,7 @@ pub enum BrokerMessage {
     SubscribeRequest {
         registration_id: String,
         topic: String,
+        trace_ctx: Option<Context>,
     },
     /// Sent to the subscriber manager to create a new subscriber actor to handle pushing messages to the client.
     /// If successful, the associated topic actor is notified, adding the id of the new actor to it's subscriber list
@@ -94,6 +96,7 @@ pub enum BrokerMessage {
         reply: RpcReplyPort<Result<String, String>>,
         topic: String,
         registration_id: String,
+        trace_ctx: Option<Context>,
     },
     /// instructs the topic manager to create a new topic actor,
     /// optionally at the behest of a session client during the processing of a SubscribeRequest
@@ -121,10 +124,11 @@ pub enum BrokerMessage {
         registration_id: String,
         topic: String,
         result: Result<(), String>, // Ok for success, Err with error message
+        trace_ctx: Option<Context>,
     },
     /// Unsubscribe request from the client.
     UnsubscribeRequest {
-        registration_id: Option<String>,
+        registration_id: String,
         topic: String,
     },
     /// Unsubscribe acknowledgment to the client.
@@ -178,6 +182,7 @@ impl BrokerMessage {
                 registration_id,
                 topic,
                 payload,
+                trace_ctx: None,
             },
             ClientMessage::SubscribeRequest {
                 topic,
@@ -185,6 +190,7 @@ impl BrokerMessage {
             } => BrokerMessage::SubscribeRequest {
                 registration_id,
                 topic,
+                trace_ctx: None,
             },
             ClientMessage::UnsubscribeRequest {
                 registration_id,
@@ -197,11 +203,6 @@ impl BrokerMessage {
             ClientMessage::DisconnectRequest(registration_id) => BrokerMessage::DisconnectRequest {
                 client_id,
                 registration_id,
-            },
-            ClientMessage::TimeoutMessage(registration_id) => BrokerMessage::TimeoutMessage {
-                client_id,
-                registration_id,
-                error: None,
             },
             // Handle unexpected messages
             _ => {
