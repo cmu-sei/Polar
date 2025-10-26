@@ -34,7 +34,9 @@ pub const DISCONNECTED_REASON: &str = "CLIENT_DISCONNECTED";
 pub const DISPATCH_NAME: &str = "DISPATCH";
 
 /// Internal messagetypes for the Broker.
-/// Activities that flow froma ctor to actor can optionally containing a tracing context in order to measure timespans.
+/// Activities that flow from an actor will also be traced leveraging Contexts,
+/// These are optional because they aren't initialzied until the listener begins to handle the message
+/// Because of this, they will be often left out of the listener's handler at first
 #[derive(Debug)]
 pub enum BrokerMessage {
     /// Registration request from the client.
@@ -141,6 +143,7 @@ pub enum BrokerMessage {
     DisconnectRequest {
         client_id: String,
         registration_id: Option<String>,
+        trace_ctx: Option<Context>,
     },
     /// Error message to the client.
     ErrorMessage {
@@ -161,6 +164,7 @@ pub enum BrokerMessage {
         ///name of the session agent that died
         registration_id: String,
         error: Option<String>,
+        // trace_ctx: Option<Context>,
     },
 }
 
@@ -203,6 +207,7 @@ impl BrokerMessage {
             ClientMessage::DisconnectRequest(registration_id) => BrokerMessage::DisconnectRequest {
                 client_id,
                 registration_id,
+                trace_ctx: None,
             },
             // Handle unexpected messages
             _ => {

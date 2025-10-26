@@ -17,6 +17,7 @@ use ractor::{
     rpc::{call, CallResult::Success},
     Actor, ActorProcessingErr, ActorRef, SupervisionEvent,
 };
+use rustls::client;
 use tracing::{debug, info, trace, trace_span, warn};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 // ============================== Broker Supervisor Actor Definition ============================== //
@@ -207,7 +208,8 @@ impl Actor for Broker {
                     span.set_parent(ctx.clone()).ok();
                 }
                 let _ = span.enter();
-                info!("Received Registration Request from client: {client_id:?}");
+
+                trace!("Broker actor received registration request");
 
                 match registration_id {
                     Some(id) => {
@@ -265,11 +267,13 @@ impl Actor for Broker {
                 trace_ctx,
             } => {
                 //Look for existing subscriber actor.
-                let span = trace_span!("broker.handle_subscribe_requesat", %registration_id);
+                let span =
+                    trace_span!("broker.handle_subscribe_requesat", %registration_id, %topic);
                 trace_ctx.map(|ctx| span.set_parent(ctx));
-                span.enter();
+                let _g = span.enter();
 
-                trace!("Broker received subscribe request message. For topic \"{topic}\"");
+                trace!("Broker received subscribe request message");
+
                 match where_is(get_subscriber_name(&registration_id, &topic)) {
                     Some(_) => {
                         //Send success message, session already subscribed
@@ -440,7 +444,7 @@ impl Actor for Broker {
                 where_is(registration_id.clone()).map(|session_agent_ref| {
                     let span = trace_span!("broker.handle_subscribe_request", %registration_id);
                     trace_ctx.map(|ctx| span.set_parent(ctx));
-                    span.enter();
+                    let _ = span.enter();
 
                     trace!(
                         "Broker Received SubscribeAcknolwedgement message for topic \"{topic}\""
@@ -607,7 +611,14 @@ impl Actor for Broker {
             BrokerMessage::DisconnectRequest {
                 client_id,
                 registration_id,
+                trace_ctx,
             } => {
+                let span = trace_span!("broker.handle_disconnect_request", %client_id);
+                if let Some(ctx) = trace_ctx {
+                    span.set_parent(ctx).ok();
+                }
+                let _enter = span.enter();
+
                 //start cleanup
                 info!("Cleaning up session {registration_id:?}");
                 let subscriber_mgr = where_is(SUBSCRIBER_MANAGER_NAME.to_string())
@@ -616,6 +627,7 @@ impl Actor for Broker {
                     .send_message(BrokerMessage::DisconnectRequest {
                         client_id: client_id.clone(),
                         registration_id: registration_id.clone(),
+                        trace_ctx: Some(span.context()),
                     })
                     .expect("Expected to forward message");
 
@@ -627,6 +639,7 @@ impl Actor for Broker {
                     .send_message(BrokerMessage::DisconnectRequest {
                         client_id: client_id.clone(),
                         registration_id,
+                        trace_ctx: Some(span.context()),
                     })
                     .expect("Expected to forward message");
             }

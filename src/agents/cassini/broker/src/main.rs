@@ -4,15 +4,8 @@ use cassini_broker::{
     BROKER_NAME,
 };
 use ractor::Actor;
-use std::{
-    env,
-    io::{stderr, IsTerminal},
-};
-use tracing_glog::Glog;
-use tracing_glog::GlogFields;
-use tracing_opentelemetry::OpenTelemetrySpanExt;
+use std::env;
 use tracing_subscriber::filter::EnvFilter;
-use tracing_subscriber::Registry;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 // ============================== Main ============================== //

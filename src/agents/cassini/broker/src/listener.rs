@@ -172,7 +172,7 @@ impl Actor for ListenerManager {
     ) -> Result<(), ActorProcessingErr> {
         match msg {
             SupervisionEvent::ActorStarted(actor_cell) => {
-                info!(
+                debug!(
                     "Worker agent: {0:?}:{1:?} started",
                     actor_cell.get_name(),
                     actor_cell.get_id()
@@ -183,40 +183,46 @@ impl Actor for ListenerManager {
                     .get_name()
                     .expect("Expected client listener to have been named");
 
-                info!(
+                debug!(
                     "Client listener: {0}:{1:?} stopped. {reason:?}",
                     client_id,
                     actor_cell.get_id()
                 );
 
                 if let Some(reason) = reason {
-                    if reason.as_str() == DISCONNECTED_REASON {
-                        // alert the session we have a timeout
-                        boxed_state.map(|mut boxed| {
-                            let state = boxed
-                                .take::<ListenerState>()
-                                .expect("Expected failed listener to have had a state");
+                    // TODO: I think this code is dead,
+                    // when a registered listener disconnects, it should send a message to the session itself and leave the manager out of it.
+                    // If the listener wasn't registered, then it could send a disconnectrequest to the manager itself and it would stop the child actor in the handle() fn
+                    // if reason.as_str() == DISCONNECTED_REASON {
+                    //     // alert the session we have a timeout
+                    //     boxed_state.map(|mut boxed| {
+                    //         let state = boxed
+                    //             .take::<ListenerState>()
+                    //             .expect("Expected failed listener to have had a state");
 
-                            if let Some(id) = state.registration_id {
-                                // propagate to session agent
-                                match where_is(id.clone()) {
-                                    Some(session) => {
-                                        if let Err(e) =
-                                            session.send_message(BrokerMessage::DisconnectRequest {
-                                                client_id,
-                                                registration_id: Some(id.to_string()),
-                                            })
-                                        {
-                                            warn!("{SESSION_NOT_FOUND_TXT}: {id}: {e}");
-                                        }
-                                    }
-                                    None => {
-                                        warn!("{SESSION_NOT_FOUND_TXT}: {id}");
-                                    }
-                                }
-                            }
-                        });
-                    } else if reason == TIMEOUT_REASON {
+                    //         if let Some(id) = state.registration_id {
+                    //             // propagate to session agent
+                    //             match where_is(id.clone()) {
+                    //                 Some(session) => {
+                    //                     if let Err(e) =
+                    //                         session.send_message(BrokerMessage::DisconnectRequest {
+                    //                             client_id,
+                    //                             registration_id: Some(id.to_string()),
+                    //                             trace_Ctx: None,
+                    //                         })
+                    //                     {
+                    //                         warn!("{SESSION_NOT_FOUND_TXT}: {id}: {e}");
+                    //                     }
+                    //                 }
+                    //                 None => {
+                    //                     warn!("{SESSION_NOT_FOUND_TXT}: {id}");
+                    //                 }
+                    //             }
+                    //         }
+                    //     });
+                    // // If a listener stopped unexpectdly, say, due to a connection timeout, we need to respond properly.
+                    //
+                    if reason == TIMEOUT_REASON {
                         // tell the session we're timing out
                         boxed_state.map(|mut boxed| {
                             let state = boxed
@@ -287,7 +293,16 @@ impl Actor for ListenerManager {
                     })
                     .expect("Failed to forward message to client: {client_id}");
             }
-            BrokerMessage::DisconnectRequest { client_id, .. } => {
+            BrokerMessage::DisconnectRequest {
+                client_id,
+                trace_ctx,
+                ..
+            } => {
+                let span = trace_span!("listener_manager.handle_disconnect_request");
+                trace_ctx.map(|ctx| span.set_parent(span.context()));
+                let _g = span.enter();
+
+                trace!("listener manager received disconnect request");
                 match where_is(client_id.clone()) {
                     Some(listener) => listener.stop(Some("{DISCONNECTED_REASON}".to_string())),
                     None => warn!("Couldn't find listener {client_id}"),
@@ -389,14 +404,16 @@ impl Actor for Listener {
 
     async fn post_stop(
         &self,
-        _myself: ActorRef<Self::Msg>,
+        myself: ActorRef<Self::Msg>,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         // stop listening
-        //
+
         state.task_handle.as_ref().map(|handle| {
             handle.abort();
         });
+
+        info!("Client {} disconnected.", myself.get_name().unwrap());
         Ok(())
     }
 
@@ -449,6 +466,8 @@ impl Actor for Listener {
                     }
                 }
             }
+
+            // TODO: on disconnect, send timeout mesage to supervisor, or just die with a specified reason?
         });
 
         // add join handle to state, we'll need to cancel it if a client disconnects
@@ -472,7 +491,7 @@ impl Actor for Listener {
                 // start the beginning of registration logging flow, this span context should be the root
                 // of the logging tree
                 // since all interactions from the client start here, here's where we begin logging it
-                let span = trace_span!("handle_registration_request", %client_id);
+                let span = trace_span!("listener.handle_registration_request", %client_id);
                 let otel_ctx = span.context();
                 let _enter = span.enter();
                 //send message to session that it has a new listener for it to get messages from
@@ -790,13 +809,16 @@ impl Actor for Listener {
             BrokerMessage::SubscribeAcknowledgment {
                 registration_id,
                 topic,
-                ..
+                trace_ctx,
+                result,
             } => {
-                debug!("Agent successfully subscribed to topic: {topic}");
-                let msg = ClientMessage::SubscribeAcknowledgment {
-                    topic,
-                    result: Result::Ok(()),
-                };
+                let span = trace_span!("listener.handle_subscribe_request");
+                trace_ctx.map(|ctx| span.set_parent(ctx));
+                let _g = span.enter();
+
+                trace!("Listener received subscribe acknolwedgement");
+
+                let msg = ClientMessage::SubscribeAcknowledgment { topic, result };
 
                 Listener::write(registration_id.clone(), msg, Arc::clone(&state.writer))
                     .await
@@ -815,12 +837,13 @@ impl Actor for Listener {
             BrokerMessage::SubscribeRequest {
                 registration_id,
                 topic,
-                trace_ctx,
+                ..
             } => {
-                let span = trace_span!("listener.handle_subscribe_request", %topic);
+                let span =
+                    trace_span!("listener.handle_subscribe_request", %registration_id, %topic);
                 let _enter = span.enter();
 
-                trace!("listener received subscribe request for topic \"{topic}\"");
+                trace!("listener received subscribe request");
 
                 //Got request to subscribe from client, confirm we've been registered
                 // TODO: is there a better way to check that we're registered AND the message is coming from our actual client?
@@ -1021,7 +1044,13 @@ impl Actor for Listener {
             BrokerMessage::DisconnectRequest {
                 client_id,
                 registration_id,
+                ..
             } => {
+                let span = trace_span!("listener.handle_disconnect_request", %client_id);
+                let _g = span.enter();
+
+                trace!("Listener received disconnect request message from client.");
+
                 if let Some(id) = registration_id {
                     //if we're registered, propagate to session agent
                     match where_is(id.clone()) {
@@ -1029,6 +1058,7 @@ impl Actor for Listener {
                             if let Err(e) = session.send_message(BrokerMessage::DisconnectRequest {
                                 client_id,
                                 registration_id: Some(id.to_string()),
+                                trace_ctx: Some(span.context()),
                             }) {
                                 warn!("{SESSION_NOT_FOUND_TXT}: {id}: {e}");
                                 myself.stop(Some("{DISCONNECTED_REASON}".to_string()));
@@ -1046,6 +1076,7 @@ impl Actor for Listener {
                             if let Err(e) = broker.send_message(BrokerMessage::DisconnectRequest {
                                 client_id,
                                 registration_id: None,
+                                trace_ctx: Some(span.context()),
                             }) {
                                 error!("{LISTENER_MGR_NOT_FOUND_TXT}: {e}");
                                 myself.stop(Some("{DISCONNECTED_REASON}".to_string()));

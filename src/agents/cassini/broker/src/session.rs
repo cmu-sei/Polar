@@ -92,13 +92,16 @@ impl Actor for SessionManager {
                     span.set_parent(parent).ok();
                 }
                 let _ = span.enter();
+
+                trace!("Session manager received registration request");
+
                 // Start a brand new session: Create an ID. Spawn a new session
                 // to store the ID. If for some reason we can't create a new
                 // session, we kick the failure back to the client's listener
                 // directly, so that they can handle the error.
                 let new_id = Uuid::new_v4().to_string();
 
-                info!("SessionManager: Starting session for client: {client_id} with registration ID {new_id}");
+                info!("Starting session for client: {client_id} with registration ID {new_id}");
 
                 //find client, attach its reference to new session args
                 if let Some(listener_ref) = where_is(client_id.clone()) {
@@ -156,6 +159,8 @@ impl Actor for SessionManager {
                 trace_ctx.map(|ctx| span.set_parent(ctx));
                 let _ = span.enter();
 
+                trace!("Session manager received registration response message.");
+
                 result
                     .map(|registration_id| {
                         // Find the given session by its id and cancel the cleanup task for it
@@ -172,7 +177,13 @@ impl Actor for SessionManager {
             BrokerMessage::DisconnectRequest {
                 client_id,
                 registration_id,
+                trace_ctx,
             } => {
+                let span = trace_span!("session_manager.handle_disconnect_request", %client_id);
+                trace_ctx.map(|ctx| span.set_parent(ctx));
+                let _g = span.enter();
+
+                trace!("session manager recoieved disconnect request");
                 //forward to broker, kill session
                 if let Some(registration_id) = registration_id {
                     match where_is(registration_id.clone()) {
@@ -185,6 +196,7 @@ impl Actor for SessionManager {
                             .send_message(BrokerMessage::DisconnectRequest {
                                 client_id,
                                 registration_id: Some(registration_id),
+                                trace_ctx: Some(span.context()),
                             })
                             .expect("Expected to forward message"),
 
@@ -197,6 +209,12 @@ impl Actor for SessionManager {
                 registration_id,
                 error,
             } => {
+                // let span = trace_span!("session_manager.handle_timeout", %client_id);
+                // trace_ctx.map(|ctx| span.set_parent(ctx));
+                // let _g = span.enter();
+
+                trace!("session manager recoieved disconnect request");
+
                 if let Some(session) = state.sessions.get(&registration_id) {
                     warn!("Session {registration_id} timing out, waiting for reconnect...");
                     let ref_clone = session.agent_ref.clone();
@@ -318,7 +336,7 @@ impl Actor for SessionAgent {
                 span.set_parent(span.context()).ok();
                 let _ = span.enter();
 
-                info!("Started session {myself:?} for client {client_id}");
+                trace!("Session {myself:?} received init message.");
 
                 //send ack to client listener
                 state
@@ -333,9 +351,9 @@ impl Actor for SessionAgent {
                     .ok();
             }
             BrokerMessage::RegistrationRequest {
-                registration_id,
                 client_id,
                 trace_ctx,
+                ..
             } => {
                 let span = trace_span!("session.handle_registration_request", %client_id);
                 if let Some(ctx) = trace_ctx.clone() {
@@ -344,11 +362,11 @@ impl Actor for SessionAgent {
                 let _ = span.enter();
 
                 trace!(
-                    "Session {:?} received registration request from client {client_id}",
-                    myself.get_name()
+                    "Session {} received registration request from client {client_id}",
+                    myself.get_name().unwrap()
                 );
 
-                //A a new connection has been established, update state to send messages to new listener actor
+                // A new connection has been established, update state to send messages to new listener actor
                 match where_is(client_id.clone()) {
                     Some(listener) => {
                         state.client_ref = ActorRef::from(listener);
@@ -527,11 +545,18 @@ impl Actor for SessionAgent {
                 topic,
                 trace_ctx,
             } => {
+                let span =
+                    trace_span!("session.handle_subscribe_request", %registration_id ,%topic);
+                trace_ctx.map(|ctx| span.set_parent(ctx));
+                let _g = span.enter();
+
+                trace!("Session agent recevied subscribe request.");
+
                 where_is(BROKER_NAME.to_string()).inspect(|broker| {
                     if let Err(e) = broker.send_message(BrokerMessage::SubscribeRequest {
                         registration_id,
                         topic,
-                        trace_ctx,
+                        trace_ctx: Some(span.context()),
                     }) {
                         error!("{SUBSCRIBE_REQUEST_FAILED_TXT} {BROKER_NOT_FOUND_TXT}");
 
@@ -608,9 +633,12 @@ impl Actor for SessionAgent {
                 result,
                 trace_ctx,
             } => {
-                let span = trace_span!("session.handle_subscribe_request", %registration_id);
+                let span =
+                    trace_span!("session.handle_subscribe_request", %registration_id, %topic);
                 trace_ctx.map(|ctx| span.set_parent(ctx));
-                span.enter();
+                let _g = span.enter();
+
+                trace!("Session received a subscribe acknowledgement message");
 
                 if let Err(e) =
                     state
@@ -638,14 +666,21 @@ impl Actor for SessionAgent {
             BrokerMessage::DisconnectRequest {
                 client_id,
                 registration_id,
+                trace_ctx,
             } => {
                 //client disconnected, clean up after it then die with honor
+                let span = trace_span!("session.handle_disconnect_request");
+                trace_ctx.map(|ctx| span.set_parent(ctx));
+                let _g = span.enter();
+
+                trace!("session received disconnect request.");
                 info!("client {client_id} disconnected");
                 match myself.try_get_supervisor() {
                     Some(manager) => manager
                         .send_message(BrokerMessage::DisconnectRequest {
                             client_id,
                             registration_id,
+                            trace_ctx: Some(span.context()),
                         })
                         .expect("Expected to forward to manager"),
                     None => tracing::error!("Couldn't find supervisor."),

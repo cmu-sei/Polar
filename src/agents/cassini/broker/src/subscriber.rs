@@ -124,8 +124,15 @@ impl Actor for SubscriberManager {
                 topic,
                 trace_ctx,
             } => {
+                let span = trace_span!("subscriber_manager.handle_subscribe_request", %registration_id, %topic);
+                trace_ctx.map(|ctx| span.set_parent(ctx));
+                let _g = span.enter();
+
+                trace!("Subscriber manager received subscribe command.");
+
                 let subscriber_id = get_subscriber_name(&registration_id, &topic);
                 // start new subscriber actor for session
+                // TODO: Instead of replying over an RPC port, we should just send message back to the broker saying that we did it.
                 match Actor::spawn_linked(
                     Some(subscriber_id.clone()),
                     SubscriberAgent,
