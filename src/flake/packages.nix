@@ -111,16 +111,16 @@ in
         targets = [ "wasm32-unknown-unknown" ];
       }))
 
-      wasm-pack
-      wasmtime
-      wasmer
-      wasmer-pack
-      wasm-bindgen-cli_0_2_100
-      cargo-leptos
+      #wasm-pack
+      #wasmtime
+      #wasmer
+      #wasmer-pack
+      #wasm-bindgen-cli_0_2_100
+      #cargo-leptos
       cargo-binutils
-      cargo-wasi
+      #cargo-wasi
       pkg-config
-      trunk
+      #trunk
       util-linux
 
       # The last editor you'll ever use
