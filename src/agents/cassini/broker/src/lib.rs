@@ -132,6 +132,7 @@ pub enum BrokerMessage {
     UnsubscribeRequest {
         registration_id: String,
         topic: String,
+        trace_ctx: Option<Context>,
     },
     /// Unsubscribe acknowledgment to the client.
     UnsubscribeAcknowledgment {
@@ -202,6 +203,7 @@ impl BrokerMessage {
             } => BrokerMessage::UnsubscribeRequest {
                 registration_id,
                 topic,
+                trace_ctx: None,
             },
 
             ClientMessage::DisconnectRequest(registration_id) => BrokerMessage::DisconnectRequest {

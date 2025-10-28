@@ -159,7 +159,14 @@ impl Actor for SubscriberManager {
             BrokerMessage::UnsubscribeRequest {
                 registration_id,
                 topic,
+                trace_ctx,
             } => {
+                let span = trace_span!("subscriber_manager.handle_unsubscribe_request", %registration_id, %topic);
+                trace_ctx.map(|ctx| span.set_parent(ctx));
+                let _g = span.enter();
+
+                trace!("subscriber maanger received unsubscribe request.");
+
                 let subscriber_name = format!("{registration_id}:{topic}");
                 if let Some(subscriber) = where_is(subscriber_name.clone()) {
                     subscriber.stop(Some("UNSUBSCRIBED".to_string()));
@@ -179,8 +186,15 @@ impl Actor for SubscriberManager {
                 }
             }
             BrokerMessage::DisconnectRequest {
-                registration_id, ..
+                client_id,
+                registration_id,
+                trace_ctx,
+                ..
             } => {
+                let span = trace_span!("subscriber_manager.handle_disconnect_request", %client_id );
+                trace_ctx.map(|ctx| span.set_parent(ctx));
+                let _g = span.enter();
+
                 if let Some(registration_id) = registration_id {
                     SubscriberManager::forget_subscriptions(
                         registration_id,

@@ -1,7 +1,7 @@
 use crate::UNEXPECTED_MESSAGE_STR;
 use crate::{get_subscriber_name, BrokerMessage, PUBLISH_REQ_FAILED_TXT};
 use ractor::registry::where_is;
-use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef, OutputPort};
+use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef};
 use std::collections::{HashMap, VecDeque};
 use tracing::{debug, error, info, trace, trace_span, warn};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
@@ -392,7 +392,15 @@ impl Actor for TopicAgent {
             BrokerMessage::UnsubscribeRequest {
                 registration_id,
                 topic,
+                trace_ctx,
             } => {
+                let span =
+                    trace_span!("topic.handle_unsubscribe_request", %registration_id, %topic);
+                trace_ctx.map(|ctx| span.set_parent(ctx));
+                let _g = span.enter();
+
+                trace!("topic actor received unsubscribe request.");
+
                 let sub_id = get_subscriber_name(&registration_id, &topic);
                 if let Ok(i) = state.subscribers.binary_search(&sub_id) {
                     state.subscribers.remove(i);

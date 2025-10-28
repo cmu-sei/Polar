@@ -333,7 +333,7 @@ impl Actor for SessionAgent {
                 client_id,
             } => {
                 let span = trace_span!("handle_registration_request", %client_id);
-                span.set_parent(span.context()).ok();
+                trace_ctx.map(|ctx| span.set_parent(ctx));
                 let _ = span.enter();
 
                 trace!("Session {myself:?} received init message.");
@@ -581,11 +581,20 @@ impl Actor for SessionAgent {
             BrokerMessage::UnsubscribeRequest {
                 registration_id,
                 topic,
+                trace_ctx,
             } => {
+                let span =
+                    trace_span!("session.handle_unsubscribe_request", %registration_id ,%topic);
+                trace_ctx.map(|ctx| span.set_parent(ctx));
+                let _g = span.enter();
+
+                trace!("session received unsubscribe request");
+
                 where_is(BROKER_NAME.to_string()).map(|broker| {
                     if let Err(e) = broker.send_message(BrokerMessage::UnsubscribeRequest {
                         registration_id,
                         topic,
+                        trace_ctx: Some(span.context()),
                     }) {
                         if let Err(fwd_err) = myself.send_message(BrokerMessage::TimeoutMessage {
                             client_id: state.client_ref.get_name().unwrap_or_default(),
@@ -669,7 +678,7 @@ impl Actor for SessionAgent {
                 trace_ctx,
             } => {
                 //client disconnected, clean up after it then die with honor
-                let span = trace_span!("session.handle_disconnect_request");
+                let span = trace_span!("session.handle_disconnect_request", %client_id);
                 trace_ctx.map(|ctx| span.set_parent(ctx));
                 let _g = span.enter();
 

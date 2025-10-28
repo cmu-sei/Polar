@@ -1,9 +1,8 @@
 use crate::UNEXPECTED_MESSAGE_STR;
 use crate::{
-    BrokerMessage, BROKER_NAME, BROKER_NOT_FOUND_TXT, DISCONNECTED_REASON,
-    LISTENER_MGR_NOT_FOUND_TXT, PUBLISH_REQ_FAILED_TXT, REGISTRATION_REQ_FAILED_TXT,
-    SESSION_MISSING_REASON_STR, SESSION_NOT_FOUND_TXT, SUBSCRIBE_REQUEST_FAILED_TXT,
-    TIMEOUT_REASON,
+    BrokerMessage, BROKER_NAME, BROKER_NOT_FOUND_TXT, LISTENER_MGR_NOT_FOUND_TXT,
+    PUBLISH_REQ_FAILED_TXT, REGISTRATION_REQ_FAILED_TXT, SESSION_MISSING_REASON_STR,
+    SESSION_NOT_FOUND_TXT, SUBSCRIBE_REQUEST_FAILED_TXT, TIMEOUT_REASON,
 };
 use async_trait::async_trait;
 use cassini_types::{ArchivedClientMessage, ClientMessage};
@@ -299,7 +298,7 @@ impl Actor for ListenerManager {
                 ..
             } => {
                 let span = trace_span!("listener_manager.handle_disconnect_request");
-                trace_ctx.map(|ctx| span.set_parent(span.context()));
+                trace_ctx.map(|ctx| span.set_parent(ctx));
                 let _g = span.enter();
 
                 trace!("listener manager received disconnect request");
@@ -312,9 +311,7 @@ impl Actor for ListenerManager {
                 Some(listener) => listener.stop(Some(TIMEOUT_REASON.to_string())),
                 None => warn!("Couldn't find listener {client_id}"),
             },
-            _ => {
-                todo!()
-            }
+            _ => (),
         }
         Ok(())
     }
@@ -432,7 +429,6 @@ impl Actor for Listener {
         let reader = state.reader.take().expect("Reader already taken!");
 
         //start listening
-        // TODO: add task handler to state so we can cancel it later?
         let handle = tokio::spawn(async move {
             let mut buf_reader = tokio::io::BufReader::new(reader);
             // parse incoming message length, this tells us what size of a message to expect.
@@ -467,7 +463,8 @@ impl Actor for Listener {
                 }
             }
 
-            // TODO: on disconnect, send timeout mesage to supervisor, or just die with a specified reason?
+            // TODO: on disconnect, die with honor or allow other events to capture it?
+            // myself.stop(Some(TIMEOUT_REASON.to_string()));
         });
 
         // add join handle to state, we'll need to cancel it if a client disconnects
@@ -951,7 +948,14 @@ impl Actor for Listener {
             BrokerMessage::UnsubscribeRequest {
                 registration_id,
                 topic,
+                ..
             } => {
+                let span =
+                    trace_span!("listener.handle_unsubscribe_request", %registration_id, %topic);
+                let _g = span.enter();
+
+                trace!("listener received unsubscribe request");
+
                 if state.registration_id.is_some()
                     && (registration_id == state.registration_id.clone().unwrap())
                 {
@@ -961,6 +965,7 @@ impl Actor for Listener {
                                 session.send_message(BrokerMessage::UnsubscribeRequest {
                                     registration_id: registration_id.clone(),
                                     topic,
+                                    trace_ctx: Some(span.context()),
                                 })
                             {
                                 let err_msg = format!(

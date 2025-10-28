@@ -17,7 +17,6 @@ use ractor::{
     rpc::{call, CallResult::Success},
     Actor, ActorProcessingErr, ActorRef, SupervisionEvent,
 };
-use rustls::client;
 use tracing::{debug, info, trace, trace_span, warn};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 // ============================== Broker Supervisor Actor Definition ============================== //
@@ -415,12 +414,21 @@ impl Actor for Broker {
             BrokerMessage::UnsubscribeRequest {
                 registration_id,
                 topic,
+                trace_ctx,
             } => {
+                let span =
+                    trace_span!("broker.handle_unsubscribe_request", %registration_id ,%topic);
+                trace_ctx.map(|ctx| span.set_parent(ctx));
+                let _g = span.enter();
+
+                trace!("broker received unsubscribe request");
+
                 //find topic actor, tell it to forget session
                 if let Some(topic_actor) = where_is(topic.clone()) {
                     if let Err(_e) = topic_actor.send_message(BrokerMessage::UnsubscribeRequest {
                         registration_id: registration_id.clone(),
                         topic: topic.clone(),
+                        trace_ctx: Some(span.context()),
                     }) {
                         warn!("Failed to find topic to unsubscribe to")
                     }
@@ -431,9 +439,11 @@ impl Actor for Broker {
                         .send_message(BrokerMessage::UnsubscribeRequest {
                             registration_id: registration_id.clone(),
                             topic: topic.clone(),
+                            trace_ctx: Some(span.context()),
                         })
                         .expect("Error sending message to subscriber manager.");
                 }
+                // TODO: If no topic exists, we should send an unsubscribe ACK to let it succeed
             }
             BrokerMessage::SubscribeAcknowledgment {
                 registration_id,
