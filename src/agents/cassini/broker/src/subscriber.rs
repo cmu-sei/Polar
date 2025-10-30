@@ -77,11 +77,11 @@ impl Actor for SubscriberManager {
                 trace_ctx,
             } => {
                 let span =
-                    trace_span!("subscriber_manager.handle_registration_request", %client_id);
+                    trace_span!("subscriber_manager.handle_client_reregistration", %client_id);
                 if let Some(ctx) = trace_ctx {
                     span.set_parent(ctx.clone()).ok();
                 }
-                let _ = span.enter();
+                let _g = span.enter();
 
                 trace!(
                     "Subscriber manager for received registration request for client {client_id}"
@@ -89,7 +89,7 @@ impl Actor for SubscriberManager {
 
                 //find all subscribers for a given registration id
                 registration_id.map(|registration_id: String| {
-                    tracing::info!("Gathering Subscriptions for session {registration_id}");
+                    info!("Gathering Subscriptions for session {registration_id}");
                     if let Some(_) = where_is(registration_id.clone()) {
                         let cloned_session_id = registration_id.clone();
                         for subscriber in myself.get_children()
@@ -133,6 +133,8 @@ impl Actor for SubscriberManager {
                 let subscriber_id = get_subscriber_name(&registration_id, &topic);
                 // start new subscriber actor for session
                 // TODO: Instead of replying over an RPC port, we should just send message back to the broker saying that we did it.
+                // drop the span guard before we start a new actor.
+                drop(_g);
                 match Actor::spawn_linked(
                     Some(subscriber_id.clone()),
                     SubscriberAgent,
@@ -302,13 +304,13 @@ impl Actor for SubscriberAgent {
                 client_id,
                 trace_ctx,
             } => {
-                let span = trace_span!("subscriber.handle_publish_request", %client_id);
+                let span = trace_span!("subscriber.handle_registration_request", %client_id);
                 if let Some(ctx) = trace_ctx {
                     span.set_parent(ctx).ok();
                 }
                 let _enter = span.enter();
 
-                trace!("Subscriber actor received reigstration request for client {client_id}");
+                trace!("Subscriber actor received registration request for client {client_id}");
 
                 //A client reconnected, push messages built up in DLQ to client
                 if let Some(id) = registration_id {
@@ -336,9 +338,9 @@ impl Actor for SubscriberAgent {
                 topic,
                 payload,
                 trace_ctx,
-                result,
+                ..
             } => {
-                let span = trace_span!("subscriber.handle_publish_response" ,%topic);
+                let span = trace_span!("subscriber.dequeue_messages" ,%topic);
                 if let Some(ctx) = trace_ctx {
                     span.set_parent(ctx).ok();
                 }

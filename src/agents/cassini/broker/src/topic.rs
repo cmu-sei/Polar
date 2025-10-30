@@ -59,6 +59,7 @@ impl Actor for TopicManager {
         };
 
         if let Some(topics) = args.topics {
+            // TODO: Any span to drop here??
             for topic in topics {
                 //start topic actors for that topic
 
@@ -124,6 +125,8 @@ impl Actor for TopicManager {
                         .expect("Failed for forward publish request")
                 } else {
                     info!("Creating topic: \"{topic}\".");
+
+                    drop(_enter);
 
                     match Actor::spawn_linked(
                         Some(topic.clone()),
@@ -200,6 +203,7 @@ impl Actor for TopicManager {
 
                     // TODO: We want to move to use OutputPorts for the subscribers instead of having topics keep a list.
                     // Create an output port here, subscribe the session actor to it by looking it up, and go from there
+                    drop(_enter);
                     match Actor::spawn_linked(
                         Some(topic.clone()),
                         TopicAgent,
@@ -219,6 +223,7 @@ impl Actor for TopicManager {
                     }
                 } else {
                     // Just create a new topic agent
+                    drop(_enter);
                     match Actor::spawn_linked(
                         Some(topic.clone()),
                         TopicAgent,
@@ -305,7 +310,7 @@ impl Actor for TopicAgent {
                 payload,
                 trace_ctx,
             } => {
-                let span = trace_span!("topic.handle_publish_request");
+                let span = trace_span!("topic.dequeue_messages");
                 if let Some(ctx) = trace_ctx {
                     span.set_parent(ctx).ok();
                 }

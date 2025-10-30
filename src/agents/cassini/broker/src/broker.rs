@@ -17,7 +17,7 @@ use ractor::{
     rpc::{call, CallResult::Success},
     Actor, ActorProcessingErr, ActorRef, SupervisionEvent,
 };
-use tracing::{debug, info, trace, trace_span, warn};
+use tracing::{debug, trace, trace_span, warn};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 // ============================== Broker Supervisor Actor Definition ============================== //
 
@@ -52,7 +52,7 @@ impl Actor for Broker {
         myself: ActorRef<Self::Msg>,
         args: BrokerArgs,
     ) -> Result<Self::State, ActorProcessingErr> {
-        tracing::info!("Broker: Starting {myself:?}");
+        debug!("Broker: Starting {myself:?}");
 
         let listener_manager_args = ListenerManagerArgs {
             bind_addr: args.bind_addr,
@@ -206,7 +206,6 @@ impl Actor for Broker {
                 if let Some(ctx) = trace_ctx.clone() {
                     span.set_parent(ctx.clone()).ok();
                 }
-                let _ = span.enter();
 
                 trace!("Broker actor received registration request");
 
@@ -630,7 +629,7 @@ impl Actor for Broker {
                 let _enter = span.enter();
 
                 //start cleanup
-                info!("Cleaning up session {registration_id:?}");
+                debug!("Cleaning up session {registration_id:?}");
                 let subscriber_mgr = where_is(SUBSCRIBER_MANAGER_NAME.to_string())
                     .expect(SUBSCRIBER_MGR_NOT_FOUND_TXT);
                 subscriber_mgr

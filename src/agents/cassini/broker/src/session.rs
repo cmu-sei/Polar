@@ -91,7 +91,7 @@ impl Actor for SessionManager {
                 if let Some(parent) = trace_ctx {
                     span.set_parent(parent).ok();
                 }
-                let _ = span.enter();
+                let _g = span.enter();
 
                 trace!("Session manager received registration request");
 
@@ -105,6 +105,8 @@ impl Actor for SessionManager {
 
                 //find client, attach its reference to new session args
                 if let Some(listener_ref) = where_is(client_id.clone()) {
+                    // drop the span guard before await call
+                    drop(_g);
                     //start new session
                     if let Ok((session_agent, _)) = Actor::spawn_linked(
                         Some(new_id.clone()),
@@ -332,7 +334,7 @@ impl Actor for SessionAgent {
                 trace_ctx,
                 client_id,
             } => {
-                let span = trace_span!("handle_registration_request", %client_id);
+                let span = trace_span!("session.init", %client_id);
                 trace_ctx.map(|ctx| span.set_parent(ctx));
                 let _ = span.enter();
 
@@ -485,7 +487,7 @@ impl Actor for SessionAgent {
                 topic,
                 trace_ctx,
             } => {
-                let span = trace_span!("session.handle_publish_request");
+                let span = trace_span!("session.dequeue_messages");
                 trace_ctx.map(|ctx| span.set_parent(ctx));
                 let _enter = span.enter();
 
