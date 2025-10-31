@@ -2,7 +2,6 @@ use cassini_types::ClientMessage;
 use opentelemetry::Context;
 use ractor::{ActorRef, RpcReplyPort};
 
-use std::env;
 pub mod broker;
 pub mod listener;
 pub mod session;
@@ -93,7 +92,7 @@ pub fn init_logging() {
 /// Activities that flow from an actor will also be traced leveraging Contexts,
 /// These are optional because they aren't initialzied until the listener begins to handle the message
 /// Because of this, they will be often left out of the listener's handler at first
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum BrokerMessage {
     /// Registration request from the client.
     /// When a client connects over TCP, it cannot send messages until it receives a registrationID and a session has been created for it
@@ -151,7 +150,6 @@ pub enum BrokerMessage {
     /// Sent to the subscriber manager to create a new subscriber actor to handle pushing messages to the client.
     /// If successful, the associated topic actor is notified, adding the id of the new actor to it's subscriber list
     Subscribe {
-        reply: RpcReplyPort<Result<String, String>>,
         topic: String,
         registration_id: String,
         trace_ctx: Option<Context>,
@@ -160,7 +158,6 @@ pub enum BrokerMessage {
     /// optionally at the behest of a session client during the processing of a SubscribeRequest
     /// which would also prompt the creation of a subscriber agent for that topic.
     AddTopic {
-        reply: RpcReplyPort<Result<ActorRef<BrokerMessage>, String>>,
         registration_id: Option<String>,
         topic: String,
         trace_ctx: Option<Context>,

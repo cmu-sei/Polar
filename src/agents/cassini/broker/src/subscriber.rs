@@ -119,12 +119,12 @@ impl Actor for SubscriberManager {
                 });
             }
             BrokerMessage::Subscribe {
-                reply,
                 registration_id,
                 topic,
                 trace_ctx,
             } => {
-                let span = trace_span!("subscriber_manager.handle_subscribe_request", %registration_id, %topic);
+                let span =
+                    trace_span!("subscriber_manager.handle_subscribe", %registration_id, %topic);
                 trace_ctx.map(|ctx| span.set_parent(ctx));
                 let _g = span.enter();
 
@@ -132,30 +132,17 @@ impl Actor for SubscriberManager {
 
                 let subscriber_id = get_subscriber_name(&registration_id, &topic);
                 // start new subscriber actor for session
-                // TODO: Instead of replying over an RPC port, we should just send message back to the broker saying that we did it.
-                // drop the span guard before we start a new actor.
+
+                // drop the span guard here. We're through
                 drop(_g);
-                match Actor::spawn_linked(
+                Actor::spawn_linked(
                     Some(subscriber_id.clone()),
                     SubscriberAgent,
                     (),
                     myself.clone().into(),
                 )
                 .await
-                {
-                    Ok(_) => {
-                        if let Err(e) = reply.send(Ok(subscriber_id)) {
-                            error!("{SUBSCRIBE_REQUEST_FAILED_TXT}, {e}");
-                            myself.stop(None);
-                        }
-                    }
-                    Err(e) => {
-                        if let Err(e) = reply.send(Err(e.to_string())) {
-                            error!("{SUBSCRIBE_REQUEST_FAILED_TXT}, Couldn't communicate with broker, {e}");
-                            myself.stop(None);
-                        }
-                    }
-                }
+                .ok();
             }
 
             BrokerMessage::UnsubscribeRequest {
@@ -349,7 +336,7 @@ impl Actor for SubscriberAgent {
                 trace!("Subscriber actor received publish response for topic \"{topic}\"");
 
                 debug!(
-                    "New message on topic: {topic}, forwarding to session: {}",
+                    "New message on topic: \"{topic}\", forwarding to session: {}",
                     state.registration_id
                 );
 
@@ -366,7 +353,7 @@ impl Actor for SubscriberAgent {
                         myself.stop(None);
                     }
                 } else {
-                    warn!("{PUBLISH_REQ_FAILED_TXT}: {SESSION_NOT_FOUND_TXT} Ending subscription");
+                    warn!("{SESSION_NOT_FOUND_TXT} Ending subscription");
                     myself.stop(None);
                 }
             }

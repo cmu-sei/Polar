@@ -88,9 +88,7 @@ impl Actor for SessionManager {
             } => {
                 let span =
                     tracing::trace_span!("session_manager.handle_registration_request", %client_id);
-                if let Some(parent) = trace_ctx {
-                    span.set_parent(parent).ok();
-                }
+                trace_ctx.map(|ctx| span.set_parent(ctx));
                 let _g = span.enter();
 
                 trace!("Session manager received registration request");
@@ -118,6 +116,12 @@ impl Actor for SessionManager {
                     )
                     .await
                     {
+                        // let success_span = tracing::trace_span!("session_manager.handle_registration_request", %client_id);
+                        // trace_ctx.map(|ctx| success_span.set_parent(ctx));
+                        // let _g = span.enter();
+
+                        // trace!("Session manager successfully started new session actor.");
+
                         state.sessions.insert(
                             new_id.clone(),
                             Session {

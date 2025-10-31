@@ -6,7 +6,6 @@ use crate::{
 };
 use async_trait::async_trait;
 use cassini_types::{ArchivedClientMessage, ClientMessage};
-use opentelemetry::{trace::TraceContextExt, Context};
 use ractor::{registry::where_is, Actor, ActorProcessingErr, ActorRef, SupervisionEvent};
 use rkyv::{
     deserialize,
@@ -25,7 +24,7 @@ use tokio::{
     task::JoinHandle,
 };
 use tokio_rustls::{server::TlsStream, TlsAcceptor};
-use tracing::{debug, error, info, trace, trace_span, warn};
+use tracing::{debug, debug_span, error, info, info_span, trace, trace_span, warn};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 // ============================== Listener Manager ============================== //
@@ -57,6 +56,9 @@ impl Actor for ListenerManager {
         myself: ActorRef<Self::Msg>,
         args: ListenerManagerArgs,
     ) -> Result<Self::State, ActorProcessingErr> {
+        let span = debug_span!("listener_manager.init");
+        span.enter();
+
         debug!("ListenerManager: Starting {myself:?}");
 
         // install default crypto provider
@@ -113,14 +115,18 @@ impl Actor for ListenerManager {
         myself: ActorRef<Self::Msg>,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
+        let span = info_span!("listener_manager.serve");
+        let _g = span.enter();
+
         let bind_addr = state.bind_addr.clone();
         let acceptor = TlsAcceptor::from(Arc::clone(&state.server_config));
 
+        drop(_g);
         let server = TcpListener::bind(bind_addr.clone())
             .await
             .expect("could not start tcp listener");
 
-        info!("ListenerManager: Server running on {bind_addr}");
+        info!("Server running on {bind_addr}");
 
         // Handle incoming connections on a seperate thread so the listener manager doesn't get blocked
         let _ = tokio::spawn(async move {
