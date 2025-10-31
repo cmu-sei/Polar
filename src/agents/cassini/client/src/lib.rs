@@ -19,6 +19,8 @@ use tokio_rustls::TlsConnector;
 use tracing::{debug, error, info, warn};
 
 pub const UNEXPECTED_DISCONNECT: &str = "UNEXPECTED_DISCONNECT";
+pub const REGISTRATION_EXPECTED: &str =
+    "Expected client to be registered to conduct this operation.";
 
 ///
 /// A basse configuration for a TCP Client actor
@@ -260,18 +262,19 @@ impl Actor for TcpClientActor {
                                         {
                                             match message {
                                                 ClientMessage::RegistrationResponse {
-                                                    registration_id,
-                                                    success,
-                                                    error,
+                                                    result
                                                 } => {
-                                                    if success {
-                                                        info!("Successfully began session with id: {registration_id}");
-                                                        //emit registration event for consumers
-                                                        cloned_self.send_message(TcpClientMessage::RegistrationResponse(registration_id)).expect("Could not forward message to {myself:?");
-                                                    } else {
-                                                        warn!("Failed to register session with the server. {error:?}");
-                                                        //TODO: We practically never fail to register unless there's some sort of connection error.
-                                                        // Should this change, how do we want to react?
+                                                    match result {
+                                                        Ok(registration_id) => {
+                                                            info!("Successfully began session with id: {registration_id}");
+                                                            //emit registration event for consumers
+                                                            cloned_self.send_message(TcpClientMessage::RegistrationResponse(registration_id)).expect("Could not forward message to {myself:?");
+                                                        }
+                                                        Err(e) => {
+                                                            info!("Failed to register session with the server. {e}");
+                                                            //TODO: We practically never fail to register unless there's some sort of connection error.
+                                                            // Should this change, how do we want to react?
+                                                        }
                                                     }
                                                 }
                                                 ClientMessage::PublishResponse {
@@ -356,6 +359,8 @@ impl Actor for TcpClientActor {
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
+        // TODO: Decide whether we want to risk panicing using "expect",
+        // do we want to ever permit a client to send messages to conduct operations that should be restricted to registered users?
         match message {
             TcpClientMessage::Register(registration_id) => {
                 let envelope = ClientMessage::RegistrationRequest { registration_id };
@@ -367,7 +372,7 @@ impl Actor for TcpClientActor {
                 let envelope = ClientMessage::PublishRequest {
                     topic,
                     payload,
-                    registration_id: state.registration_id.clone(),
+                    registration_id: state.registration_id.clone().expect(REGISTRATION_EXPECTED),
                 };
                 if let Err(e) = TcpClientActor::send_message(envelope, state).await {
                     myself.stop(Some(format!("Unexpected error sending message. {e}")))
@@ -375,7 +380,7 @@ impl Actor for TcpClientActor {
             }
             TcpClientMessage::Subscribe(topic) => {
                 let envelope = ClientMessage::SubscribeRequest {
-                    registration_id: state.registration_id.clone(),
+                    registration_id: state.registration_id.clone().expect(REGISTRATION_EXPECTED),
                     topic,
                 };
                 if let Err(e) = TcpClientActor::send_message(envelope, state).await {
@@ -398,7 +403,7 @@ impl Actor for TcpClientActor {
             }
             TcpClientMessage::UnsubscribeRequest(topic) => {
                 let envelope = ClientMessage::UnsubscribeRequest {
-                    registration_id: state.registration_id.clone(),
+                    registration_id: state.registration_id.clone().expect(REGISTRATION_EXPECTED),
                     topic,
                 };
                 if let Err(e) = TcpClientActor::send_message(envelope, state).await {

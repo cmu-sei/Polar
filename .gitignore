@@ -29,13 +29,5 @@ env.fish
 src/agents/cassini/test/producer/config.dhall
 
 # ephemeral bullshit - do not check this in
-
-ca_certificates/
-client/
-server/
-
+.env.nuon
 my.env
-
-cassini
-producer
-sink

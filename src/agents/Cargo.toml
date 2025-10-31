@@ -30,6 +30,7 @@ members = [
     "cassini/client",
     "cassini/types",
     "cassini/test/common",
+    "cassini/test/control",
     "cassini/test/producer",
     "cassini/test/sink",
     "lib",

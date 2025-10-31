@@ -1,5 +1,6 @@
 use cassini_types::ClientMessage;
-use ractor::{ActorRef, RpcReplyPort};
+use opentelemetry::Context;
+
 pub mod broker;
 pub mod listener;
 pub mod session;
@@ -16,7 +17,7 @@ pub const SUBSCRIBER_MANAGER_NAME: &str = "SUBSCRIBER_MANAGER";
 
 pub const ACTOR_STARTUP_MSG: &str = "Started {myself:?}";
 pub const UNEXPECTED_MESSAGE_STR: &str = "Received unexpected message!";
-
+pub const SESSION_NOT_NAMED: &str = "Expected session to have been named.";
 pub const SESSION_MISSING_REASON_STR: &str = "SESSION_MISSING";
 pub const SESSION_NOT_FOUND_TXT: &str = "Session not found!";
 pub const CLIENT_NOT_FOUND_TXT: &str = "Listener not found!";
@@ -32,9 +33,65 @@ pub const TIMEOUT_REASON: &str = "SESSION_TIMEDOUT";
 pub const DISCONNECTED_REASON: &str = "CLIENT_DISCONNECTED";
 pub const DISPATCH_NAME: &str = "DISPATCH";
 
+pub fn init_logging() {
+    use opentelemetry::{global, KeyValue};
+    use opentelemetry_otlp::Protocol;
+    use opentelemetry_otlp::WithExportConfig;
+    use opentelemetry_sdk::Resource;
+    use tracing_subscriber::filter::EnvFilter;
+    use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+
+    // ========
+    // --- Initialize tracing + OpenTelemetry ---
+
+    let jaeger_otlp_endpoint = std::env::var("JAEGER_OTLP_ENDPOINT")
+        .unwrap_or("http://localhost:4318/v1/traces".to_string());
+
+    // Initialize OTLP exporter using HTTP binary protocol
+    let otlp_exporter = opentelemetry_otlp::SpanExporter::builder()
+        .with_http()
+        .with_protocol(Protocol::HttpBinary)
+        .with_endpoint(jaeger_otlp_endpoint)
+        .build()
+        .expect("Expected to build OTLP exporter for tracing.");
+
+    // Create a tracer provider with the exporter and name the service for jaeger
+    let tracer_provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
+        .with_batch_exporter(otlp_exporter)
+        .with_resource(
+            Resource::builder_empty()
+                .with_attributes([KeyValue::new("service.name", "cassini-server")])
+                .build(),
+        )
+        .build();
+
+    // Set it as the global provider
+    global::set_tracer_provider(tracer_provider);
+
+    let tracer = global::tracer("cassini_trace");
+
+    // TODO: We copied this from a ractor example, but is this format the one we want to use?
+    // let fmt = tracing_subscriber::fmt::Layer::default()
+    //     .with_ansi(stderr().is_terminal())
+    //     .with_writer(std::io::stderr)
+    //     .event_format(Glog::default().with_timer(tracing_glog::LocalTime::default()))
+    //     .fmt_fields(GlogFields::default().compact());
+
+    // Set up a filter for logs,
+    // by default we'll set the logging to info level if RUST_LOG isn't set in the environment.
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+
+    tracing_subscriber::registry()
+        .with(filter)
+        .with(tracing_subscriber::fmt::layer())
+        .with(tracing_opentelemetry::layer().with_tracer(tracer))
+        .init();
+}
 /// Internal messagetypes for the Broker.
-///
-#[derive(Debug)]
+/// Activities that flow from an actor will also be traced leveraging Contexts,
+/// These are optional because they aren't initialzied until the listener begins to handle the message
+/// Because of this, they will be often left out of the listener's handler at first
+#[derive(Debug, Clone)]
 pub enum BrokerMessage {
     /// Registration request from the client.
     /// When a client connects over TCP, it cannot send messages until it receives a registrationID and a session has been created for it
@@ -44,44 +101,65 @@ pub enum BrokerMessage {
         //Id for a new, potentially unauthenticated/unauthorized client client
         registration_id: Option<String>,
         client_id: String,
+        trace_ctx: Option<Context>,
     },
-    /// Registration response to the client after attempting registration
-    RegistrationResponse {
-        registration_id: Option<String>, //new and final id for a client successfully registered
+    /// Helper variant to start a session and re/initialize it with a new client connection + tracing context
+    InitSession {
         client_id: String,
-        success: bool,
-        error: Option<String>, // Optional error message if registration failed
+        trace_ctx: Option<Context>,
+    },
+    /// TODO: Do we care to keep this around?
+    /// A heartbeat tick messgae sent by sessions to track uptime
+    HeartbeatTick,
+    /// Registration response to the client after attempting registration
+    /// Ok result contains new registration id,
+    /// Err shoudl contain an error message
+    RegistrationResponse {
+        client_id: String,
+
+        result: Result<String, String>,
+        trace_ctx: Option<Context>,
     },
     /// Publish request from the client.
     PublishRequest {
-        registration_id: Option<String>, //TODO: Reemove option, listener checks for registration_id before forwarding
+        registration_id: String,
         topic: String,
         payload: Vec<u8>,
+        trace_ctx: Option<Context>,
     },
     /// Publish response to the client.
     PublishResponse {
         topic: String,
         payload: Vec<u8>,
-        result: Result<(), String>, // Ok for success, Err with error message
+        result: Result<(), String>,
+        trace_ctx: Option<Context>,
     },
-    PublishRequestAck(String),
+    /// Message sent to the client to let them know they successfully published a message
+    PublishRequestAck {
+        topic: String,
+        trace_ctx: Option<Context>,
+    },
     PublishResponseAck,
     /// Subscribe request from the client.
     SubscribeRequest {
-        registration_id: Option<String>,
+        registration_id: String,
         topic: String,
+        trace_ctx: Option<Context>,
     },
     /// Sent to the subscriber manager to create a new subscriber actor to handle pushing messages to the client.
     /// If successful, the associated topic actor is notified, adding the id of the new actor to it's subscriber list
     Subscribe {
-        reply: RpcReplyPort<Result<String, String>>,
         topic: String,
         registration_id: String,
+        trace_ctx: Option<Context>,
     },
+    /// instructs the topic manager to create a new topic actor,
+    /// optionally at the behest of a session client during the processing of a SubscribeRequest
+    /// which would also prompt the creation of a subscriber agent for that topic.
     AddTopic {
-        reply: RpcReplyPort<Result<ActorRef<BrokerMessage>, String>>,
         registration_id: Option<String>,
         topic: String,
+        trace_ctx: Option<Context>,
     },
     /// Sent to session actors to forward messages to their clients.
     /// Messages that fail to be delivered for some reason are kept in their queues.
@@ -89,6 +167,7 @@ pub enum BrokerMessage {
         // reply: RpcReplyPort<Result<(), String>>,
         payload: Vec<u8>,
         topic: String,
+        trace_ctx: Option<Context>,
     },
     /// Sent back to subscription actors if sessions fail to forward messages to the client for requeueing
     PushMessageFailed {
@@ -99,11 +178,13 @@ pub enum BrokerMessage {
         registration_id: String,
         topic: String,
         result: Result<(), String>, // Ok for success, Err with error message
+        trace_ctx: Option<Context>,
     },
     /// Unsubscribe request from the client.
     UnsubscribeRequest {
-        registration_id: Option<String>,
+        registration_id: String,
         topic: String,
+        trace_ctx: Option<Context>,
     },
     /// Unsubscribe acknowledgment to the client.
     UnsubscribeAcknowledgment {
@@ -115,6 +196,7 @@ pub enum BrokerMessage {
     DisconnectRequest {
         client_id: String,
         registration_id: Option<String>,
+        trace_ctx: Option<Context>,
     },
     /// Error message to the client.
     ErrorMessage {
@@ -132,18 +214,21 @@ pub enum BrokerMessage {
     },
     TimeoutMessage {
         client_id: String,
-        registration_id: Option<String>, //name of the session agent that died
+        ///name of the session agent that died
+        registration_id: String,
         error: Option<String>,
+        // trace_ctx: Option<Context>,
     },
 }
 
 impl BrokerMessage {
-    pub fn from_client_message(msg: ClientMessage, client_id: String, _: Option<String>) -> Self {
+    pub fn from_client_message(msg: ClientMessage, client_id: String) -> Self {
         match msg {
             ClientMessage::RegistrationRequest { registration_id } => {
                 BrokerMessage::RegistrationRequest {
                     registration_id,
                     client_id,
+                    trace_ctx: None,
                 }
             }
             ClientMessage::PublishRequest {
@@ -154,6 +239,7 @@ impl BrokerMessage {
                 registration_id,
                 topic,
                 payload,
+                trace_ctx: None,
             },
             ClientMessage::SubscribeRequest {
                 topic,
@@ -161,6 +247,7 @@ impl BrokerMessage {
             } => BrokerMessage::SubscribeRequest {
                 registration_id,
                 topic,
+                trace_ctx: None,
             },
             ClientMessage::UnsubscribeRequest {
                 registration_id,
@@ -168,20 +255,17 @@ impl BrokerMessage {
             } => BrokerMessage::UnsubscribeRequest {
                 registration_id,
                 topic,
+                trace_ctx: None,
             },
 
             ClientMessage::DisconnectRequest(registration_id) => BrokerMessage::DisconnectRequest {
                 client_id,
                 registration_id,
-            },
-            ClientMessage::TimeoutMessage(registration_id) => BrokerMessage::TimeoutMessage {
-                client_id,
-                registration_id,
-                error: None,
+                trace_ctx: None,
             },
             // Handle unexpected messages
             _ => {
-                todo!()
+                todo!("Handle a conversion case between broker messages and client messages")
             }
         }
     }
