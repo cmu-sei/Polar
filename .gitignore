@@ -29,5 +29,5 @@ env.fish
 src/agents/cassini/test/producer/config.dhall
 
 # ephemeral bullshit - do not check this in
-
+.env.nuon
 my.env

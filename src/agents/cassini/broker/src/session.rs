@@ -507,15 +507,12 @@ impl Actor for SessionAgent {
 
                 trace!("Session actor received push message directive for session {} for topic \"{topic}\"", myself.get_name().unwrap());
                 //push to client
-                if let Err(_e) = state
-                    .client_ref
-                    .send_message(BrokerMessage::PublishResponse {
-                        topic: topic.clone(),
-                        payload: payload.clone(),
-                        result: Ok(()),
-                        trace_ctx: Some(span.context()),
-                    })
-                {
+                if let Err(_e) = state.client_ref.cast(BrokerMessage::PublishResponse {
+                    topic: topic.clone(),
+                    payload: payload.clone(),
+                    result: Ok(()),
+                    trace_ctx: Some(span.context()),
+                }) {
                     warn!("{PUBLISH_REQ_FAILED_TXT}: {CLIENT_NOT_FOUND_TXT}");
                     if let Some(subscriber) = where_is(get_subscriber_name(
                         &myself.get_name().expect("Expected session to be named."),

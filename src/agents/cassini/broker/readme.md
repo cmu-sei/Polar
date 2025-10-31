@@ -81,6 +81,7 @@ export TLS_SERVER_KEY=""
 export RUST_LOG="info"
 
 # OTLP endpoint to export logs to the jaeger UI service, if desired.
+# The broker will default to using this endpoint even if this value is unset.
 export JAEGER_OTLP_ENDPOINT="http://localhost:4318/v1/traces"
 
 ```
@@ -88,7 +89,10 @@ export JAEGER_OTLP_ENDPOINT="http://localhost:4318/v1/traces"
 
 ## Example Usage
 
+**Jaeger Log Tracing**
 If you'd like to visualize logs using the Jaeger UI. Run a local container image using the command below. (feel free to use Podamn or some other preferred container runtime).
+
+If not, no worries, the broker will run without it and spill logs to stdout.
 
 ```bash
 podman run --rm --name jaeger -p 16686:16686 -p 4317:4317 -p 4318:4318 -p 5778:5778 -p 9411:9411 -e COLLECTOR_OTLP_ENABLED=true cr.jaegertracing.io/jaegertracing/jaeger:2.11.0
