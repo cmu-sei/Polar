@@ -218,6 +218,9 @@ let
           "CMAKE_MAKE_PROGRAM=/bin/make"
           "COREUTILS=${pkgs.uutils-coreutils-noprefix}"
 
+          # tell clang-sys / bindgen where to find libclang
+          "LIBCLANG_PATH=${pkgs.llvmPackages_19.libclang.lib}/lib"
+
           "LANG=en_US.UTF-8"
           "TZ=UTC"
           "MANPAGER=sh -c 'col -bx | bat --language man --style plain'"
