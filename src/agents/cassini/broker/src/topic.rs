@@ -296,12 +296,12 @@ impl Actor for TopicAgent {
                 registration_id,
                 topic,
                 payload,
-                trace_ctx,
+                ..
             } => {
                 let span = trace_span!("topic.dequeue_messages");
-                if let Some(ctx) = trace_ctx {
-                    span.set_parent(ctx).ok();
-                }
+                // explicitly break publishing context and start one to trace dequeue flow.
+                span.set_parent(opentelemetry::Context::new()).ok();
+
                 let _enter = span.enter();
 
                 trace!("Topic agent received publish request for \"{topic}\"");
@@ -318,9 +318,6 @@ impl Actor for TopicAgent {
                     }
                     None => warn!("Failed to lookup session {registration_id}"),
                 }
-
-                //alert subscribers
-                debug!("Forwarding message to subscribers.");
 
                 //alert subscribers
                 if !state.subscribers.is_empty() {
@@ -348,10 +345,7 @@ impl Actor for TopicAgent {
                         )
                     );
                 }
-                // state.topic_output.send(payload);
-                //
             }
-            // TODO: I think I also killed this code, the Topic manager handles this.
             BrokerMessage::Subscribe {
                 registration_id,
                 topic,

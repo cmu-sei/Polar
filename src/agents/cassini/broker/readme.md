@@ -91,14 +91,7 @@ export JAEGER_OTLP_ENDPOINT="http://localhost:4318/v1/traces"
 If you'd like to visualize logs using the Jaeger UI. Run a local container image using the command below. (feel free to use Podamn or some other preferred container runtime).
 
 ```bash
-podman run --rm --name jaeger \
-  -p 16686:16686 \
-  -p 4317:4317 \
-  -p 4318:4318 \
-  -p 5778:5778 \
-  -p 9411:9411 \
-  -e COLLECTOR_OTLP_ENABLED=true \
-  cr.jaegertracing.io/jaegertracing/jaeger:2.11.0
+podman run --rm --name jaeger -p 16686:16686 -p 4317:4317 -p 4318:4318 -p 5778:5778 -p 9411:9411 -e COLLECTOR_OTLP_ENABLED=true cr.jaegertracing.io/jaegertracing/jaeger:2.11.0
 ```
 
 

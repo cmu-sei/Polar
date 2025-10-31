@@ -199,7 +199,7 @@ impl Actor for Broker {
                 trace_ctx,
             } => {
                 // Start a new span linked to the parent trace if available.
-                let span = trace_span!("broker.handle_registration_request", %client_id);
+                let span = trace_span!("broker.handle_registration_request", client_id = client_id);
                 if let Some(ctx) = trace_ctx.clone() {
                     span.set_parent(ctx.clone()).ok();
                 }

@@ -6,6 +6,7 @@ use crate::{
 };
 use async_trait::async_trait;
 use cassini_types::{ArchivedClientMessage, ClientMessage};
+use opentelemetry::Context;
 use ractor::{registry::where_is, Actor, ActorProcessingErr, ActorRef, SupervisionEvent};
 use rkyv::{
     deserialize,
@@ -24,9 +25,8 @@ use tokio::{
     task::JoinHandle,
 };
 use tokio_rustls::{server::TlsStream, TlsAcceptor};
-use tracing::{debug, debug_span, error, info, info_span, trace, trace_span, warn};
+use tracing::{debug, debug_span, error, info, info_span, instrument, trace, trace_span, warn};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
-
 // ============================== Listener Manager ============================== //
 /// The actual listener/server process. When clients connect to the server, their stream is split and
 /// given to a worker processes to use to interact with and handle that connection with the client.
@@ -57,7 +57,7 @@ impl Actor for ListenerManager {
         args: ListenerManagerArgs,
     ) -> Result<Self::State, ActorProcessingErr> {
         let span = debug_span!("listener_manager.init");
-        span.enter();
+        let _g = span.enter();
 
         debug!("ListenerManager: Starting {myself:?}");
 
@@ -92,7 +92,7 @@ impl Actor for ListenerManager {
                 args.private_key_file
             ));
 
-        tracing::debug!("ListenerManager: Building configuration for mTLS ");
+        debug!("ListenerManager: Building configuration for mTLS ");
 
         let server_config = ServerConfig::builder()
             .with_client_cert_verifier(verifier)
@@ -351,6 +351,7 @@ impl Listener {
     /// writing binary data over the wire requires us to be specific about what we expect on the other side. So we note the length of the message
     /// we intend to send and write the amount to the *front* of the buffer to be read first, then write the actual message data to the buffer to be deserialized.
     ///
+    #[instrument(level = "trace", fields(client_id=client_id))]
     async fn write(
         client_id: String,
         message: ClientMessage,
@@ -367,6 +368,8 @@ impl Listener {
 
                 //add message to buffer
                 buffer.extend_from_slice(&bytes);
+
+                trace!("writing {} byte(s) to client.", buffer.len());
 
                 tokio::spawn(async move {
                     let mut writer = writer.lock().await;
@@ -426,6 +429,9 @@ impl Actor for Listener {
         myself: ActorRef<Self::Msg>,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
+        let span = info_span!("listener.init");
+        let _g = span.enter();
+
         info!(
             "Listener: Listener started for client_id: {}",
             state.client_id.clone()
@@ -495,8 +501,14 @@ impl Actor for Listener {
                 // start the beginning of registration logging flow, this span context should be the root
                 // of the logging tree
                 // since all interactions from the client start here, here's where we begin logging it
-                let span = trace_span!("listener.handle_registration_request", %client_id);
-                let _enter = span.enter();
+                let span = trace_span!(
+                    "listener.handle_registration_request",
+                    client_id = client_id
+                );
+                // explicitly break context so we get a new trace for each new request
+                // We'll do this for every message or execution flow that happens across persistent actors
+                span.set_parent(Context::new()).ok();
+                let _g = span.enter();
                 //send message to session that it has a new listener for it to get messages from
                 //forward to broker to perform any auth and potentially resume session
                 trace!(
@@ -521,6 +533,7 @@ impl Actor for Listener {
                                 result: Err(err_msg.clone()),
                             };
 
+                            drop(_g);
                             Listener::write(client_id, msg, Arc::clone(&state.writer))
                                 .await
                                 .map_err(|e| error!("Failed to write message {e}"))
@@ -556,14 +569,16 @@ impl Actor for Listener {
                         myself.stop(Some(err_msg));
                     }
                 }
-                drop(_enter);
             }
             BrokerMessage::RegistrationResponse {
                 client_id,
                 result,
                 trace_ctx,
             } => {
-                let span = trace_span!("listener.handle_registration_response", %client_id);
+                let span = trace_span!(
+                    "listener.handle_registration_response",
+                    client_id = client_id
+                );
                 trace_ctx.map(|ctx| span.set_parent(ctx));
                 let _g = span.enter();
 
@@ -625,8 +640,10 @@ impl Actor for Listener {
                 ..
             } => {
                 let span = trace_span!("listener.handle_publish_request", %registration_id);
+                // explicitly break context so we get a new trace for each new request
+                span.set_parent(Context::new()).ok();
                 let otel_ctx = span.context();
-                let _enter = span.enter();
+                let _g = span.enter();
 
                 trace!(
                     "listener {client_id} received publish request for topic {topic}",
@@ -658,6 +675,8 @@ impl Actor for Listener {
                                             "{PUBLISH_REQ_FAILED_TXT}: {SESSION_NOT_FOUND_TXT}: {e}"
                                         )),
                                     };
+
+                                    drop(_g);
 
                                     Listener::write(
                                         state.client_id.clone(),
@@ -691,6 +710,7 @@ impl Actor for Listener {
                                     )),
                                 };
 
+                                drop(_g);
                                 Listener::write(
                                     state.client_id.clone(),
                                     msg,
@@ -718,6 +738,7 @@ impl Actor for Listener {
                         warn!("{err_msg}");
                         let msg = ClientMessage::ErrorMessage(err_msg);
 
+                        drop(_g);
                         Listener::write(state.client_id.clone(), msg, Arc::clone(&state.writer))
                             .await
                             .map_err(|e| {
@@ -738,6 +759,7 @@ impl Actor for Listener {
                     warn!("{err_msg}");
                     let msg = ClientMessage::ErrorMessage(err_msg);
 
+                    drop(_g);
                     Listener::write(state.client_id.clone(), msg, Arc::clone(&state.writer))
                         .await
                         .map_err(|e| {
@@ -798,7 +820,7 @@ impl Actor for Listener {
                 }
                 let _g = span.enter();
 
-                trace!("listener received publishresponse for topic \"{topic}\"",);
+                trace!("listener received a publish request acknowledgement for topic \"{topic}\"",);
 
                 let msg = ClientMessage::PublishRequestAck(topic);
 
@@ -853,6 +875,8 @@ impl Actor for Listener {
             } => {
                 let span =
                     trace_span!("listener.handle_subscribe_request", %registration_id, %topic);
+                // explicitly break context so we get a new trace for each new request
+                span.set_parent(Context::new()).ok();
                 let _g = span.enter();
 
                 trace!("listener received subscribe request");
@@ -970,6 +994,8 @@ impl Actor for Listener {
             } => {
                 let span =
                     trace_span!("listener.handle_unsubscribe_request", %registration_id, %topic);
+                // explicitly break context so we get a new trace for each new request
+                span.set_parent(Context::new()).ok();
                 let _g = span.enter();
 
                 trace!("listener received unsubscribe request");
@@ -1070,6 +1096,7 @@ impl Actor for Listener {
                 ..
             } => {
                 let span = trace_span!("listener.handle_disconnect_request", %client_id);
+                span.set_parent(Context::new()).ok();
                 let _g = span.enter();
 
                 trace!("Listener received disconnect request message from client.");
