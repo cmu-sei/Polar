@@ -686,6 +686,7 @@ dependencies = [
 name = "cassini-client"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "async-trait",
  "cassini-types",
  "polar",

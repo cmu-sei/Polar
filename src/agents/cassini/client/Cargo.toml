@@ -21,3 +21,4 @@ cassini-types = { path = "../types" }
 # Fix a vulnerability in a transitive dependency.
 ring = { version = "=0.17.14" }
 url = "2.5.7"
+anyhow = "1.0.100"

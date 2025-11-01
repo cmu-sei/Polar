@@ -1,5 +1,4 @@
 use cassini_types::{ArchivedClientMessage, ClientMessage};
-use polar::UNEXPECTED_MESSAGE_STR;
 use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef, OutputPort, RpcReplyPort};
 use rkyv::deserialize;
 use rkyv::rancor::Error;
@@ -16,7 +15,7 @@ use tokio::sync::Mutex;
 use tokio::task::AbortHandle;
 use tokio_rustls::client::TlsStream;
 use tokio_rustls::TlsConnector;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, info_span, warn};
 
 pub const UNEXPECTED_DISCONNECT: &str = "UNEXPECTED_DISCONNECT";
 pub const REGISTRATION_EXPECTED: &str =
@@ -30,6 +29,15 @@ pub struct TCPClientConfig {
     pub ca_certificate_path: String,
     pub client_certificate_path: String,
     pub client_key_path: String,
+}
+
+pub enum RegistrationState {
+    Unregistered,
+    /// Eventually, we might want to a stronger type definition for the registration token
+    /// perhaps one day we'll treat it as a true secret and add some protections?
+    Registered {
+        registration_id: String,
+    },
 }
 
 impl TCPClientConfig {
@@ -68,7 +76,7 @@ pub enum TcpClientMessage {
     /// It should contain a valid registration uid
     ClientRegistered(String),
     // attempt to register with the broker, optionally with a registration id to restart a session.
-    Register(Option<String>),
+    Register,
     /// Publish request from the client.
     Publish {
         topic: String,
@@ -88,7 +96,7 @@ pub struct TcpClientState {
     server_name: String,
     writer: Option<Arc<Mutex<BufWriter<WriteHalf<TlsStream<TcpStream>>>>>>,
     reader: Option<ReadHalf<TlsStream<TcpStream>>>, // Use Option to allow taking ownership
-    registration_id: Option<String>,
+    registration: RegistrationState,
     client_config: Arc<ClientConfig>,
     output_port: Arc<OutputPort<String>>,
     queue_output: Arc<OutputPort<Vec<u8>>>,
@@ -157,53 +165,83 @@ impl Actor for TcpClientActor {
         _: ActorRef<Self::Msg>,
         args: TcpClientArgs,
     ) -> Result<Self::State, ActorProcessingErr> {
-        info!("Starting TCP Client ");
-        // install default crypto provider
-        let provider = rustls::crypto::aws_lc_rs::default_provider().install_default();
-        if let Err(_) = provider {
-            debug!("Crypto provider configured");
+        let _span = info_span!("cassini.tcp-client.init").entered();
+        info!("Starting TCP Client");
+
+        // --- 1. Initialize crypto provider once ---
+        match rustls::crypto::aws_lc_rs::default_provider().install_default() {
+            Ok(_) => warn!("Default crypto provider installed (this should only happen once)"),
+            Err(_) => debug!("Crypto provider already configured"),
         }
 
+        // --- 2. Load CA certificate into root store ---
         let mut root_cert_store = rustls::RootCertStore::empty();
-        let _ = root_cert_store.add(
-            CertificateDer::from_pem_file(args.config.ca_certificate_path.clone()).expect(
-                &format!(
-                    "Expected to read CA cert as a PEM file from {}",
-                    args.config.ca_certificate_path
-                ),
-            ),
-        );
+        let ca_path = &args.config.ca_certificate_path;
 
-        let client_cert = CertificateDer::from_pem_file(
-            args.config.client_certificate_path.clone(),
-        )
-        .expect(&format!(
-            "Expected to read client cert as a PEM file from {}",
-            args.config.client_certificate_path
-        ));
-        let private_key =
-            PrivateKeyDer::from_pem_file(args.config.client_key_path.clone()).expect(&format!(
-                "Expected to read client key as a PEM file from {}",
-                args.config.client_certificate_path
-            ));
+        let ca_cert = CertificateDer::from_pem_file(ca_path).map_err(|e| {
+            ActorProcessingErr::from(anyhow::anyhow!(
+                "Failed to read CA certificate from {ca_path}: {e}"
+            ))
+        })?;
+
+        root_cert_store.add(ca_cert).map_err(|e| {
+            ActorProcessingErr::from(anyhow::anyhow!(
+                "Failed to add CA certificate to root store: {e}"
+            ))
+        })?;
+
+        // --- 3. Build WebPKI verifier ---
         let verifier = WebPkiServerVerifier::builder(Arc::new(root_cert_store))
             .build()
-            .expect("Expected to build client verifier");
+            .map_err(|e| {
+                ActorProcessingErr::from(anyhow::anyhow!("Failed to build WebPKI verifier: {e}"))
+            })?;
+
+        // --- 4. Load client cert and key ---
         let mut certs = Vec::new();
+        let cert_path = &args.config.client_certificate_path;
+        let key_path = &args.config.client_key_path;
+
+        let client_cert = CertificateDer::from_pem_file(cert_path).map_err(|e| {
+            ActorProcessingErr::from(anyhow::anyhow!(
+                "Failed to read client certificate from {cert_path}: {e}"
+            ))
+        })?;
+
         certs.push(client_cert);
 
-        let config = rustls::ClientConfig::builder()
+        let private_key = PrivateKeyDer::from_pem_file(key_path).map_err(|e| {
+            ActorProcessingErr::from(anyhow::anyhow!(
+                "Failed to read client private key from {key_path}: {e}"
+            ))
+        })?;
+
+        // --- 5. Build Rustls client config ---
+        let client_config = rustls::ClientConfig::builder()
             .with_webpki_verifier(verifier)
             .with_client_auth_cert(certs, private_key)
-            .unwrap();
+            .map_err(|e| {
+                ActorProcessingErr::from(anyhow::anyhow!(
+                    "Failed to build Rustls client config: {e}"
+                ))
+            })?;
 
+        // --- 6. Determine registration state ---
+        let registration = match args.registration_id {
+            Some(id) => RegistrationState::Registered {
+                registration_id: id,
+            },
+            None => RegistrationState::Unregistered,
+        };
+
+        // --- 7. Construct final state ---
         let state = TcpClientState {
             bind_addr: args.config.broker_endpoint,
             server_name: args.config.server_name,
             reader: None,
             writer: None,
-            registration_id: args.registration_id,
-            client_config: Arc::new(config),
+            registration,
+            client_config: Arc::new(client_config),
             output_port: args.output_port,
             queue_output: args.queue_output,
             abort_handle: None,
@@ -211,6 +249,7 @@ impl Actor for TcpClientActor {
 
         Ok(state)
     }
+
     async fn post_start(
         &self,
         myself: ActorRef<Self::Msg>,
@@ -266,7 +305,6 @@ impl Actor for TcpClientActor {
                                                 } => {
                                                     match result {
                                                         Ok(registration_id) => {
-                                                            info!("Successfully began session with id: {registration_id}");
                                                             //emit registration event for consumers
                                                             cloned_self.send_message(TcpClientMessage::RegistrationResponse(registration_id)).expect("Could not forward message to {myself:?");
                                                         }
@@ -327,18 +365,17 @@ impl Actor for TcpClientActor {
                 }
             }
             Err(e) => {
-                error!("Failed to connect to server: {e}");
+                let err = format!("Failed to connect to server: {e}");
+                error!("{err}");
                 // TODO: Maybe this should be an enum/constant we can match instead?
-                myself.stop(Some("Failed to connect to server: {e}".to_string()));
+                return Err(ActorProcessingErr::from(err));
             }
         };
 
         //Send registration request
-        if let Err(e) =
-            myself.send_message(TcpClientMessage::Register(state.registration_id.clone()))
-        {
+        if let Err(e) = myself.send_message(TcpClientMessage::Register) {
             error!("{e}");
-            myself.stop(Some(format!("{e}")));
+            return Err(ActorProcessingErr::from(e));
         }
 
         Ok(())
@@ -359,72 +396,100 @@ impl Actor for TcpClientActor {
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        // TODO: Decide whether we want to risk panicing using "expect",
-        // do we want to ever permit a client to send messages to conduct operations that should be restricted to registered users?
-        match message {
-            TcpClientMessage::Register(registration_id) => {
-                let envelope = ClientMessage::RegistrationRequest { registration_id };
-                if let Err(e) = TcpClientActor::send_message(envelope, state).await {
-                    myself.stop(Some(format!("Unexpected error sending message. {e}")))
-                }
-            }
-            TcpClientMessage::Publish { topic, payload } => {
-                let envelope = ClientMessage::PublishRequest {
-                    topic,
-                    payload,
-                    registration_id: state.registration_id.clone().expect(REGISTRATION_EXPECTED),
+        match (&mut state.registration, message) {
+            // If we're unregistered, register
+            (RegistrationState::Unregistered, TcpClientMessage::Register) => {
+                let envelope = ClientMessage::RegistrationRequest {
+                    registration_id: None,
                 };
                 if let Err(e) = TcpClientActor::send_message(envelope, state).await {
                     myself.stop(Some(format!("Unexpected error sending message. {e}")))
                 }
             }
-            TcpClientMessage::Subscribe(topic) => {
-                let envelope = ClientMessage::SubscribeRequest {
-                    registration_id: state.registration_id.clone().expect(REGISTRATION_EXPECTED),
-                    topic,
+            // We might've initialized with a registration id,
+            // but we need to actually tell the broker to restore our session.
+            (RegistrationState::Registered { registration_id }, TcpClientMessage::Register) => {
+                let envelope = ClientMessage::RegistrationRequest {
+                    registration_id: Some(registration_id.to_owned()),
                 };
                 if let Err(e) = TcpClientActor::send_message(envelope, state).await {
                     myself.stop(Some(format!("Unexpected error sending message. {e}")))
                 }
             }
-            TcpClientMessage::Disconnect => {
-                info!(
-                    "Received disconnect signal. Ending session {:?}",
-                    state.registration_id
-                );
-                let envelope = ClientMessage::DisconnectRequest(state.registration_id.clone());
-                if let Err(e) = TcpClientActor::send_message(envelope, state).await {
-                    myself.stop(Some(format!("Unexpected error sending message. {e}")))
-                }
-                // if we're disconnecting explicitly, we're  good to just stop here.
-                state.abort_handle.as_ref().map(|handle| handle.abort());
-
-                myself.stop(None);
+            (
+                RegistrationState::Registered { registration_id },
+                TcpClientMessage::GetRegistrationId(reply),
+            ) => {
+                // in this case, no one should be asking for the session id if we're not registered, but if they do, we'll ignore them.
+                // We also don't really care if they fail to receive it, this actor is useless on its own.
+                reply.send(Some(registration_id.to_owned())).ok();
             }
-            TcpClientMessage::UnsubscribeRequest(topic) => {
-                let envelope = ClientMessage::UnsubscribeRequest {
-                    registration_id: state.registration_id.clone().expect(REGISTRATION_EXPECTED),
-                    topic,
+            (
+                RegistrationState::Unregistered,
+                TcpClientMessage::RegistrationResponse(registration_id),
+            ) => {
+                // update state and send
+                state.registration = RegistrationState::Registered {
+                    registration_id: registration_id.clone(),
                 };
-                if let Err(e) = TcpClientActor::send_message(envelope, state).await {
-                    myself.stop(Some(format!("Unexpected error sending message. {e}")))
-                }
-            }
-            TcpClientMessage::RegistrationResponse(registration_id) => {
-                state.registration_id = Some(registration_id.clone());
                 // emit event
                 state.output_port.send(registration_id);
             }
-            TcpClientMessage::GetRegistrationId(reply) => {
-                if let Some(registration_id) = &state.registration_id {
-                    reply
-                        .send(Some(registration_id.to_owned()))
-                        .expect("Expected to send registration_id to reply port");
-                } else {
-                    reply.send(None).expect("Expected to send default string");
+
+            // ignore all other messages while unregistered.
+            (RegistrationState::Unregistered, _) => {
+                warn!("Ignoring message, client is unregistered with a cassini instance.");
+            }
+            (RegistrationState::Registered { registration_id }, message) => {
+                // handle message variants
+                match message {
+                    TcpClientMessage::Publish { topic, payload } => {
+                        let envelope = ClientMessage::PublishRequest {
+                            topic,
+                            payload,
+                            registration_id: registration_id.to_owned(),
+                        };
+                        if let Err(e) = TcpClientActor::send_message(envelope, state).await {
+                            myself.stop(Some(format!("Unexpected error sending message. {e}")))
+                        }
+                    }
+                    TcpClientMessage::Subscribe(topic) => {
+                        let envelope = ClientMessage::SubscribeRequest {
+                            registration_id: registration_id.to_owned(),
+                            topic,
+                        };
+                        if let Err(e) = TcpClientActor::send_message(envelope, state).await {
+                            myself.stop(Some(format!("Unexpected error sending message. {e}")))
+                        }
+                    }
+                    TcpClientMessage::Disconnect => {
+                        info!("Received disconnect signal. Shutting down client.",);
+                        let envelope =
+                            ClientMessage::DisconnectRequest(Some(registration_id.to_owned()));
+                        if let Err(e) = TcpClientActor::send_message(envelope, state).await {
+                            myself.stop(Some(format!("Unexpected error sending message. {e}")))
+                        }
+                        // if we're disconnecting explicitly, we're  good to just stop here.
+                        state.abort_handle.as_ref().map(|handle| handle.abort());
+
+                        myself.stop(None);
+                    }
+                    TcpClientMessage::UnsubscribeRequest(topic) => {
+                        let envelope = ClientMessage::UnsubscribeRequest {
+                            registration_id: registration_id.to_owned(),
+                            topic,
+                        };
+                        if let Err(e) = TcpClientActor::send_message(envelope, state).await {
+                            myself.stop(Some(format!("Unexpected error sending message. {e}")))
+                        }
+                    }
+                    TcpClientMessage::ErrorMessage(error) => {
+                        warn!("Received error from broker: {error}");
+                    }
+                    // other variats handled elsewhere
+                    _ => (),
                 }
             }
-            _ => warn!("{UNEXPECTED_MESSAGE_STR}"),
         }
         Ok(())
     }
