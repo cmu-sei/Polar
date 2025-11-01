@@ -47,9 +47,7 @@ rand = { workspace = true, features = ["small_rng"] }
 uuid = { version = "1.18.1", features = ["v5"] }
 
 # --- Cassini ecosystem ---
-cassini-broker = { path = "../../cassini/broker" }
 cassini-client = { path = "../../cassini/client" }
-cassini-types  = { path = "../../cassini/types" }
 polar          = { path = "../../lib" }
 
 # --- GitLab-specific shared crates ---

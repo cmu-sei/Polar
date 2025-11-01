@@ -11,7 +11,6 @@ serde_json = "1.0"
 tracing = "0.1.41"
 tracing-glog = "0.4.1"
 tracing-subscriber = { version = "0.3.20", features = ["std", "env-filter"] }
-cassini-broker = { path = "../cassini/broker" }
 ractor = { version = "0.15.8", features = ["async-trait"] }
 rkyv = { workspace = true }
 polar = { path = "../lib" }

@@ -37,7 +37,6 @@ parse_link_header = { workspace = true }
 rand = { workspace = true, features = ["small_rng"] }
 
 # --- Cassini ecosystem ---
-cassini-broker = { path = "../../cassini/broker" }
 cassini-client = { path = "../../cassini/client" }
 cassini-types  = { path = "../../cassini/types" }
 polar = { path = "../../lib" }

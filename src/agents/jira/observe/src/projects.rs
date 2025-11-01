@@ -21,40 +21,42 @@
    DM24-0470
 */
 use crate::{
-    handle_backoff, BROKER_CLIENT_NAME,
-    Command,
-    JiraObserverArgs,
-    JiraObserverMessage, JiraObserverState
-    };
+    handle_backoff, Command, JiraObserverArgs, JiraObserverMessage, JiraObserverState,
+    BROKER_CLIENT_NAME,
+};
 use cassini_client::TcpClientMessage;
 use cassini_types::ClientMessage;
-use ractor::{async_trait, registry::where_is, Actor, ActorProcessingErr, ActorRef};
+use jira_common::types::{JiraData, JiraProject};
 use jira_common::JIRA_PROJECTS_CONSUMER_TOPIC;
+use ractor::{async_trait, registry::where_is, Actor, ActorProcessingErr, ActorRef};
 use rkyv::rancor::Error;
 use std::time::Duration;
-use tracing::{info, debug};
-use jira_common::types::{
-    JiraProject, JiraData
-    };
+use tracing::{debug, info};
 
 pub struct JiraProjectObserver;
 
 impl JiraProjectObserver {
-    fn observe(myself: ActorRef<JiraObserverMessage>,
-               state: &mut JiraObserverState,
-               _duration: Duration) {
-        info!("Observing every {} seconds", state.backoff_interval.as_secs());
+    fn observe(
+        myself: ActorRef<JiraObserverMessage>,
+        state: &mut JiraObserverState,
+        _duration: Duration,
+    ) {
+        info!(
+            "Observing every {} seconds",
+            state.backoff_interval.as_secs()
+        );
 
-        let handle = myself.send_interval(state.backoff_interval, || {
-            //build query
-            let op = "/rest/api/2/project";
-            // pass query in message
-            JiraObserverMessage::Tick(Command::GetProjects(op.to_string()))
-        }).abort_handle();
+        let handle = myself
+            .send_interval(state.backoff_interval, || {
+                //build query
+                let op = "/rest/api/2/project";
+                // pass query in message
+                JiraObserverMessage::Tick(Command::GetProjects(op.to_string()))
+            })
+            .abort_handle();
 
         state.task_handle = Some(handle);
     }
-    
 }
 #[async_trait]
 impl Actor for JiraProjectObserver {
@@ -70,21 +72,21 @@ impl Actor for JiraProjectObserver {
         debug!("{myself:?} starting, connecting to instance");
 
         let state = JiraObserverState::new(
-            args.jira_url, 
-            args.token, 
-            args.web_client, 
-            args.registration_id, 
-            Duration::from_secs(args.base_interval), 
-            Duration::from_secs(args.max_backoff));
+            args.jira_url,
+            args.token,
+            args.web_client,
+            args.registration_id,
+            Duration::from_secs(args.base_interval),
+            Duration::from_secs(args.max_backoff),
+        );
         Ok(state)
     }
-    
+
     async fn post_start(
         &self,
         myself: ActorRef<Self::Msg>,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-
         JiraProjectObserver::observe(myself, state, state.base_interval);
         Ok(())
     }
@@ -96,22 +98,22 @@ impl Actor for JiraProjectObserver {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
-            JiraObserverMessage::Tick(command) => {  
+            JiraObserverMessage::Tick(command) => {
                 match command {
                     Command::GetProjects(op) => {
                         debug!("{}", op.to_string());
 
-                        let res = state.web_client
+                        let res = state
+                            .web_client
                             .get(format!("{}{}", state.jira_url, op))
                             .bearer_auth(format!("{}", state.token.clone().expect("TOKEN")))
                             .send()
                             .await?
-                             .json::<Vec<JiraProject>>()
-                             .await?;
+                            .json::<Vec<JiraProject>>()
+                            .await?;
 
-                        let tcp_client =
-                            where_is(BROKER_CLIENT_NAME.to_string())
-                                .expect("Expected to find client");
+                        let tcp_client = where_is(BROKER_CLIENT_NAME.to_string())
+                            .expect("Expected to find client");
 
                         let data = JiraData::Projects(res.clone());
                         println!("{:#?}", data);
@@ -120,7 +122,7 @@ impl Actor for JiraProjectObserver {
                         let msg = ClientMessage::PublishRequest {
                             topic: JIRA_PROJECTS_CONSUMER_TOPIC.to_string(),
                             payload: bytes.to_vec(),
-                            registration_id: Some(state.registration_id.clone()),
+                            registration_id: state.registration_id.clone(),
                         };
 
                         // Serialize the inner client message before sending
@@ -133,7 +135,6 @@ impl Actor for JiraProjectObserver {
                                 payload: payload.into_vec(),
                             })
                             .expect("Expected to publish message");
-
                     }
                     _ => (),
                 }
@@ -147,8 +148,8 @@ impl Actor for JiraProjectObserver {
                         Ok(duration) => {
                             JiraProjectObserver::observe(myself, state, duration);
                         }
-                        Err(e) => myself.stop(Some(e.to_string()))
-                    }   
+                        Err(e) => myself.stop(Some(e.to_string())),
+                    }
                 }
             }
         }
