@@ -59,16 +59,18 @@ pub fn read_test_config(path: &str) -> TestPlan {
 
 /// Helper to run an instance of the broker in another thread.
 /// TODO: ensure that the environment is sound?
-pub async fn spawn_broker(control: ActorRef<HarnessControllerMessage>) -> AbortHandle {
+pub async fn spawn_broker(
+    control: ActorRef<HarnessControllerMessage>,
+    broker_path: String,
+) -> AbortHandle {
     return tokio::spawn(async move {
         tracing::info!("Spawning broker...");
         // TODO: change path to be either an ENV var or a CLI rargument
-        let mut child =
-            Command::new("/Users/vacoates/projects/Polar/src/agents/target/debug/cassini-server")
-                .stdout(Stdio::inherit())
-                .stderr(Stdio::inherit())
-                .spawn()
-                .expect("failed to spawn broker");
+        let mut child = Command::new(broker_path)
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .expect("failed to spawn broker");
 
         let status = child.wait().await.expect("broker crashed");
         tracing::warn!(?status, "Broker exited");

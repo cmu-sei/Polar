@@ -186,7 +186,7 @@ impl Actor for HarnessController {
         state.server_handle = Some(server_handle);
 
         tracing::info!("Starting cassini server...");
-        let broker = crate::spawn_broker(myself.clone()).await;
+        let broker = crate::spawn_broker(myself.clone(), state.broker_path.clone()).await;
         state.broker = Some(broker.clone());
 
         // Sleep to wait for for the broker to wake up
