@@ -1,11 +1,8 @@
-use crate::broker::Broker;
 use crate::UNEXPECTED_MESSAGE_STR;
 use crate::{get_subscriber_name, BrokerMessage, PUBLISH_REQ_FAILED_TXT};
 use ractor::registry::where_is;
 use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef, OutputPort};
-use rkyv::DeserializeUnsized;
 use std::collections::{HashMap, VecDeque};
-use std::hash::Hash;
 use tracing::{debug, error, info, trace, trace_span, warn};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
@@ -202,11 +199,7 @@ impl Actor for TopicManager {
                 trace!("topic manager received add topic command for topic \"{topic}\"");
 
                 // Just create a new topic agent
-                let topic_output = OutputPort::<Vec<u8>>::default();
 
-                // subscribe subscribe the subscriber to the topic port.
-                // \I admit this is a little crazy, but I think thats just life with a borrow checker.
-                let cloned_topic = topic.clone();
                 if let Some(registration_id) = registration_id {
                     let mut subscribers = Vec::new();
                     subscribers.push(get_subscriber_name(&registration_id, &topic));

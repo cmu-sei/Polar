@@ -1,4 +1,31 @@
+use clap::Parser;
+use harness_common::{HarnessControllerMessage, TestPlan};
+use ractor::ActorRef;
+use std::process::Stdio;
+use tokio::{process::Command, task::AbortHandle};
 pub mod service;
+
+#[derive(Parser, Debug)]
+#[command(version, about, long_about = None)]
+pub struct Arguments {
+    #[arg(short, long)]
+    /// Path to a valid .dhall configuration file. It will be evaluated to generate a TestPlan
+    pub config: String,
+    // #[arg(
+    //     long,
+    //     env = "BROKER_PATH",
+    //     default_value = "./target/debug/cassini-server"
+    // )]
+    // broker_path: String,
+    // #[arg(
+    //     long,
+    //     env = "PRODUCER_PATH",
+    //     default_value = "./target/debug/harness-producer"
+    // )]
+    // producer_path: String,
+    // #[arg(long, env = "SINK_PATH", default_value = "./target/debug/harness-sink")]
+    // sink_path: String,
+}
 
 pub fn init_logging() {
     let dir = tracing_subscriber::filter::Directive::from(tracing::Level::DEBUG);
@@ -25,4 +52,36 @@ pub fn init_logging() {
 
     let subscriber = Registry::default().with(filter).with(fmt);
     tracing::subscriber::set_global_default(subscriber).expect("to set global subscriber");
+}
+
+pub fn read_test_config(path: &str) -> TestPlan {
+    // let file = File::open(path).expect("Expected to find a test config at {path}");
+
+    let dhall_str =
+        std::fs::read_to_string(path).expect("Expected to find dhall configuration at {path}");
+
+    let config: TestPlan = serde_dhall::from_str(&dhall_str).parse().unwrap();
+
+    return config;
+}
+
+/// Helper to run an instance of the broker in another thread.
+/// TODO: ensure that the environment is sound?
+pub async fn spawn_broker(control: ActorRef<HarnessControllerMessage>) -> AbortHandle {
+    return tokio::spawn(async move {
+        tracing::info!("Spawning broker...");
+        // TODO: change path to be either an ENV var or a CLI rargument
+        let mut child = Command::new("cassini-server")
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .expect("failed to spawn broker");
+
+        let status = child.wait().await.expect("broker crashed");
+        tracing::warn!(?status, "Broker exited");
+        let _ = control.cast(HarnessControllerMessage::Error {
+            reason: "Broker crashed".to_string(),
+        });
+    })
+    .abort_handle();
 }

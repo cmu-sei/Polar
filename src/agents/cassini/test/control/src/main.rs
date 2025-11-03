@@ -12,33 +12,26 @@
 // }
 
 // control_plane/src/main.rs
+
+use clap::Parser;
 use harness_controller::service::*;
+use harness_controller::{read_test_config, Arguments};
 use ractor::Actor;
 use std::env;
-use std::process::Stdio;
-use tokio::process::Command;
 use tokio::sync::mpsc;
-use tokio::time::{sleep, Duration};
-
+use tracing::info;
 #[tokio::main]
 async fn main() {
     harness_controller::init_logging();
 
+    let args = Arguments::parse();
+    let test_plan = read_test_config(&args.config);
 
-    // Channel for internal orchestration / logging (optional)
-    let (event_tx, mut event_rx) = mpsc::unbounded_channel::<String>();
-
-    // --- Step 1: Start Broker ---
-    // println!("Launching Broker...");
-    // let mut broker = Command::new("./target/debug/cassini-server")
-    //     .stdout(Stdio::inherit())
-    //     .stderr(Stdio::inherit())
-    //     .spawn()
-    //     .expect("Failed to launch broker");
-
-    // Optionally wait a little for broker to initialize
-    // TODO: healthcheck cassini instead..whenever we implement one
-    // sleep(Duration::from_millis(500)).await;
+    // For now, just print out the config in JSON
+    tracing::info!(
+        "Using configuration:\n{}",
+        serde_json::to_string_pretty(&test_plan).unwrap()
+    );
 
     // --- Step 2: Start C and C server ---
     let server_cert_file = env::var("TLS_SERVER_CERT_CHAIN")
@@ -54,6 +47,7 @@ async fn main() {
         server_cert_file,
         private_key_file,
         ca_cert_file,
+        test_plan,
     };
 
     let (_controller, handle) = Actor::spawn(
@@ -101,7 +95,7 @@ async fn main() {
     // let _ = sink.kill().await;
     // let _ = broker.kill().await;
 
-    println!("Control Plane: Shutdown complete.");
+    info!("Control Plane: Shutdown complete.");
 }
 
 // #[tokio::main]

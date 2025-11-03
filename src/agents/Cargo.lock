@@ -1857,10 +1857,15 @@ name = "harness-common"
 version = "0.1.0"
 dependencies = [
  "hex",
+ "ractor",
  "rkyv 0.8.12",
+ "rustls",
  "serde",
  "serde_json",
  "sha2",
+ "tokio",
+ "tokio-rustls",
+ "tracing",
 ]
 
 [[package]]
@@ -1868,12 +1873,14 @@ name = "harness-controller"
 version = "0.1.0"
 dependencies = [
  "cassini-client",
+ "clap",
  "harness-common",
  "polar",
  "ractor",
  "rkyv 0.8.12",
  "rustls",
  "serde",
+ "serde_dhall",
  "serde_json",
  "tokio",
  "tokio-rustls",
@@ -1889,7 +1896,6 @@ name = "harness-producer"
 version = "0.1.0"
 dependencies = [
  "cassini-client",
- "clap",
  "fake",
  "harness-common",
  "polar",
@@ -1902,6 +1908,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tokio-rustls",
+ "tokio-util",
  "tracing",
 ]
 

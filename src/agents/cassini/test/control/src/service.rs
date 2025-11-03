@@ -1,4 +1,4 @@
-use harness_common::{ArchivedSinkCommand, ProducerMessage, SinkCommand};
+use harness_common::{ArchivedHarnessControllerMessage, HarnessControllerMessage, TestPlan};
 use ractor::{
     async_trait, concurrency::JoinHandle, Actor, ActorProcessingErr, ActorRef, SupervisionEvent,
 };
@@ -12,6 +12,8 @@ use rustls::{
     RootCertStore, ServerConfig,
 };
 use std::sync::Arc;
+use std::{process::Stdio, time::Duration};
+use tokio::process::Command;
 use tokio::{
     io::{split, AsyncReadExt, AsyncWriteExt, BufWriter, ReadHalf, WriteHalf},
     net::{TcpListener, TcpStream},
@@ -19,7 +21,6 @@ use tokio::{
     task::AbortHandle,
 };
 use tokio_rustls::{server::TlsStream, TlsAcceptor};
-use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 pub const SINK_CLIENT_SESSION: &str = "cassini.harness.session";
@@ -29,7 +30,13 @@ pub const SINK_CLIENT_SESSION: &str = "cassini.harness.session";
 pub struct HarnessController;
 
 pub struct HarnessControllerState {
-    server_handle: AbortHandle,
+    bind_addr: String,
+    server_config: ServerConfig,
+    pub test_plan: TestPlan,
+    server_handle: Option<AbortHandle>,
+    broker: Option<AbortHandle>,
+    producer: Option<AbortHandle>,
+    sink: Option<AbortHandle>,
 }
 
 pub struct HarnessControllerArgs {
@@ -37,11 +44,12 @@ pub struct HarnessControllerArgs {
     pub server_cert_file: String,
     pub private_key_file: String,
     pub ca_cert_file: String,
+    pub test_plan: TestPlan,
 }
 
 #[async_trait]
 impl Actor for HarnessController {
-    type Msg = ();
+    type Msg = HarnessControllerMessage;
     type State = HarnessControllerState;
     type Arguments = HarnessControllerArgs;
 
@@ -90,14 +98,37 @@ impl Actor for HarnessController {
             .with_single_cert(certs, private_key)
             .expect("bad certificate/key");
 
-        let bind_addr = args.bind_addr.clone();
-        let acceptor = TlsAcceptor::from(Arc::new(server_config));
+        //set up state object
+        let state = HarnessControllerState {
+            bind_addr: args.bind_addr,
+            server_config,
+            test_plan: args.test_plan,
+            server_handle: None,
+            broker: None,
+            producer: None,
+            sink: None,
+        };
 
-        let server = TcpListener::bind(bind_addr.clone())
+        Ok(state)
+    }
+
+    async fn post_start(
+        &self,
+        myself: ActorRef<Self::Msg>,
+        state: &mut Self::State,
+    ) -> Result<(), ActorProcessingErr> {
+        debug!("{myself:?} started.");
+
+        let acceptor = TlsAcceptor::from(Arc::new(state.server_config.clone()));
+
+        let server = TcpListener::bind(state.bind_addr.clone())
             .await
             .expect("could not start tcp listener");
 
-        info!("HarnessController: Server running on {bind_addr}");
+        info!("HarnessController: Server running on {}", state.bind_addr);
+
+        let plan = state.test_plan.clone();
+        let cloned_self = myself.clone();
 
         let server_handle = tokio::spawn(async move {
             while let Ok((stream, peer_addr)) = server.accept().await {
@@ -118,14 +149,21 @@ impl Actor for HarnessController {
                         };
 
                         //start listener actor to handle connection
-                        let _ = Actor::spawn_linked(
+                        let (client, _) = Actor::spawn_linked(
                             Some(client_id),
                             ClientSession,
                             listener_args,
-                            myself.clone().into(),
+                            cloned_self.clone().into(),
                         )
                         .await
                         .expect("Failed to start listener for new connection");
+
+                        // send test plan
+                        client
+                            .cast(ClientSessionMessage::Send(
+                                HarnessControllerMessage::TestPlan { plan: plan.clone() },
+                            ))
+                            .ok();
                     }
                     Err(e) => {
                         //We probably got pinged or something, ignore but log the attempt.
@@ -136,40 +174,56 @@ impl Actor for HarnessController {
         })
         .abort_handle();
 
-        //set up state object
-        let state = HarnessControllerState { server_handle };
+        state.server_handle = Some(server_handle);
 
-        Ok(state)
-    }
+        tracing::info!("Starting cassini server...");
+        let broker = crate::spawn_broker(myself.clone()).await;
+        state.broker = Some(broker.clone());
 
-    async fn post_start(
-        &self,
-        myself: ActorRef<Self::Msg>,
-        state: &mut Self::State,
-    ) -> Result<(), ActorProcessingErr> {
-        debug!("{myself:?} started.");
-        // TODO: Copy this to client services, harness and sink so they don't hang around w/o a control plane
-        // TODO: Make configurable
-        // let timeout = 30u64;
-        // let token = state.timeout_token.clone();
-        // let server_handle = state.server_handle.clone();
+        // Sleep to wait for for the broker to wake up
+        //
+        std::thread::sleep(Duration::from_secs(3));
 
-        // let _ = tokio::spawn(async move {
-        //     info!("Waiting {timeout} secs for contact from test client.");
-        //     tokio::select! {
-        //         // Use cloned token to listen to cancellation requests
-        //         _ = token.cancelled() => {
-        //             info!("Cancelling timeout.")
-        //         }
-        //         // wait
-        //         _ = tokio::time::sleep(std::time::Duration::from_secs(timeout)) => {
-        //             error!("Failed to receive contact from test harness. Shutting down.");
-        //             server_handle.abort();
-        //             myself.stop(Some("TEST_TIMED_OUT".to_string()));
+        // binaries are currently named aptly.
+        // harness-sink
+        // harness-producer
+        // I guess there's not much sense in writing two fns.
+        let cloned_self = myself.clone();
+        let producer = tokio::spawn(async move {
+            tracing::info!("Spawning producer service");
+            let mut child = Command::new("harness-producer")
+                .stdout(Stdio::inherit())
+                .stderr(Stdio::inherit())
+                .spawn()
+                .expect("failed to spawn harness");
 
-        //         }
-        //     }
-        // });
+            let status = child.wait().await.expect("harness {binary} crashed");
+            tracing::warn!(?status, "Harness producer exited");
+
+            let _ = cloned_self.cast(HarnessControllerMessage::Error {
+                reason: "harness {binary} crashed".to_string(),
+            });
+        })
+        .abort_handle();
+
+        let cloned_self = myself.clone();
+        let sink = tokio::spawn(async move {
+            tracing::info!("Spawning producer service");
+            let mut child = Command::new("harness-sink")
+                .stdout(Stdio::inherit())
+                .stderr(Stdio::inherit())
+                .spawn()
+                .expect("failed to spawn harness");
+
+            let status = child.wait().await.expect("harness {binary} crashed");
+            tracing::warn!(?status, "Harness sink exited");
+
+            let _ = cloned_self.cast(HarnessControllerMessage::Error {
+                reason: "harness {binary} crashed".to_string(),
+            });
+        })
+        .abort_handle();
+
         Ok(())
     }
 
@@ -178,7 +232,10 @@ impl Actor for HarnessController {
         myself: ActorRef<Self::Msg>,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        state.server_handle.abort();
+        //shutdown processes
+        state.server_handle.as_ref().map(|handle| handle.abort());
+
+        state.broker.as_ref().map(|handle| handle.abort());
 
         debug!("{myself:?} stopped");
 
@@ -216,11 +273,7 @@ impl Actor for HarnessController {
                     actor_cell.get_name(),
                     actor_cell.get_id()
                 );
-                // TODO: When this happens, send a message to the producer client
-                // should we
-                // Kill the whole test
-                // kill the corresponding producer? if so how?
-                // do nothing?
+                todo!("When this happens, we should shut everything down gracefully.");
             }
             SupervisionEvent::ProcessGroupChanged(_) => (),
         }
@@ -236,6 +289,11 @@ impl Actor for HarnessController {
     ) -> Result<(), ActorProcessingErr> {
         debug!("{myself:?} Received a message");
 
+        match message {
+            HarnessControllerMessage::ShutdownAck => myself.stop(Some("TEST_COMPLETE".to_string())),
+            _ => (),
+        }
+
         Ok(())
     }
 }
@@ -243,7 +301,7 @@ impl Actor for HarnessController {
 struct ClientSession;
 
 enum ClientSessionMessage {
-    Send(ProducerMessage),
+    Send(HarnessControllerMessage),
 }
 
 struct ClientSessionState {
@@ -266,7 +324,7 @@ impl ClientSession {
     /// we intend to send and write the amount to the *front* of the buffer to be read first, then write the actual message data to the buffer to be deserialized.
     ///
     async fn write(
-        message: ProducerMessage,
+        message: HarnessControllerMessage,
         writer: Arc<Mutex<BufWriter<WriteHalf<TlsStream<TcpStream>>>>>,
     ) -> Result<(), Error> {
         match rkyv::to_bytes::<Error>(&message) {
@@ -337,8 +395,10 @@ impl Actor for ClientSession {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         let reader = state.reader.take().expect("Reader already taken!");
-        //start listening
+        let cloned_self = myself.clone();
 
+        //start listening
+        debug!("client listening...");
         let handle = tokio::spawn(async move {
             let mut buf_reader = tokio::io::BufReader::new(reader);
             // parse incoming message length, this tells us what size of a message to expect.
@@ -348,13 +408,13 @@ impl Actor for ClientSession {
                     let mut buffer = vec![0u8; incoming_msg_length as usize];
                     if let Ok(_) = buf_reader.read_exact(&mut buffer).await {
                         // use unsafe API for maximum performance
-                        match rkyv::access::<ArchivedSinkCommand, Error>(&buffer[..]) {
+                        match rkyv::access::<ArchivedHarnessControllerMessage, Error>(&buffer[..]) {
                             Ok(archived) => {
                                 // deserialize back to the original type
                                 if let Ok(deserialized) =
-                                    deserialize::<SinkCommand, Error>(archived)
+                                    deserialize::<HarnessControllerMessage, Error>(archived)
                                 {
-                                    myself.try_get_supervisor().map(|service| {
+                                    cloned_self.try_get_supervisor().map(|service| {
                                         service
                                             .send_message(deserialized)
                                             .expect("Expected to forward command upwards");
@@ -372,6 +432,19 @@ impl Actor for ClientSession {
 
         // add join handle to state, we'll need to cancel it if a client disconnects
         state.task_handle = Some(handle);
+
+        // // send client service its client_id
+        // let client_id = myself
+        //     .get_name()
+        //     .expect("Expected client session to be named");
+
+        // debug!("issuing client id.");
+        // ClientSession::write(
+        //     HarnessControllerMessage::ClientRegistered(client_id),
+        //     state.writer.clone(),
+        // )
+        // .await
+        // .ok();
 
         Ok(())
     }
@@ -393,33 +466,33 @@ impl Actor for ClientSession {
     }
 }
 
-#[tokio::main]
-async fn main() {
-    use std::env;
-    polar::init_logging();
+// #[tokio::main]
+// async fn main() {
+//     use std::env;
+//     polar::init_logging();
 
-    let server_cert_file = env::var("TLS_SERVER_CERT_CHAIN")
-        .expect("Expected a value for the TLS_SERVER_CERT_CHAIN environment variable.");
-    let private_key_file = env::var("TLS_SERVER_KEY")
-        .expect("Expected a value for the TLS_SERVER_KEY environment variable.");
-    let ca_cert_file = env::var("TLS_CA_CERT")
-        .expect("Expected a value for the TLS_CA_CERT environment variable.");
-    let bind_addr = env::var("SINK_BIND_ADDR").unwrap_or(String::from("0.0.0.0:3000"));
+//     let server_cert_file = env::var("TLS_SERVER_CERT_CHAIN")
+//         .expect("Expected a value for the TLS_SERVER_CERT_CHAIN environment variable.");
+//     let private_key_file = env::var("TLS_SERVER_KEY")
+//         .expect("Expected a value for the TLS_SERVER_KEY environment variable.");
+//     let ca_cert_file = env::var("TLS_CA_CERT")
+//         .expect("Expected a value for the TLS_CA_CERT environment variable.");
+//     let bind_addr = env::var("SINK_BIND_ADDR").unwrap_or(String::from("0.0.0.0:3000"));
 
-    let args = HarnessControllerArgs {
-        bind_addr,
-        server_cert_file,
-        private_key_file,
-        ca_cert_file,
-    };
+//     let args = HarnessControllerArgs {
+//         bind_addr,
+//         server_cert_file,
+//         private_key_file,
+//         ca_cert_file,
+//     };
 
-    let (_, handle) = Actor::spawn(
-        Some("cassini.harness.sink.svc".to_string()),
-        HarnessController,
-        args,
-    )
-    .await
-    .expect("Expected to start sink server");
+//     let (_, handle) = Actor::spawn(
+//         Some("cassini.harness.sink.svc".to_string()),
+//         HarnessController,
+//         args,
+//     )
+//     .await
+//     .expect("Expected to start sink server");
 
-    handle.await.unwrap();
-}
+//     handle.await.unwrap();
+// }
