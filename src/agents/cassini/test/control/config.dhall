@@ -26,11 +26,12 @@ let TestPlan = {
     producers : List Producer
 }
 
+
 let steadyProducer: Producer = {
    topic = "steady"
 ,  msgSize = 4096
 ,  duration = 60
-,  pattern = Pattern.Drip { idle_time = 367 }
+,  pattern = Pattern.Drip { idle_time = 1 }
 }
 
 --let burstProducer: Producer = {
@@ -38,6 +39,7 @@ let steadyProducer: Producer = {
 --,  msgSize = 4096
 --,  duration = 10
 --,  pattern = Pattern.Burst { burst_size = 10, idle_time = 5 }
+--
 --}
 
 

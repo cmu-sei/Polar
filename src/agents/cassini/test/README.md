@@ -21,6 +21,9 @@ Static Integration tests only cover correctness of broker operations (topic crea
 
 ## Concepts
 
+* **Harness Controller**
+  * Reads in initial Dhall test plan and distributes to local (or remote) instances of producer and consumer services.
+
 * **Producer Supervisor(Source)**
 
   * Configurable rate (msgs/sec) and duration.

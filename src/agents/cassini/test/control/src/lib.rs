@@ -11,20 +11,12 @@ pub struct Arguments {
     #[arg(short, long)]
     /// Path to a valid .dhall configuration file. It will be evaluated to generate a TestPlan
     pub config: String,
-    // #[arg(
-    //     long,
-    //     env = "BROKER_PATH",
-    //     default_value = "./target/debug/cassini-server"
-    // )]
-    // broker_path: String,
-    // #[arg(
-    //     long,
-    //     env = "PRODUCER_PATH",
-    //     default_value = "./target/debug/harness-producer"
-    // )]
-    // producer_path: String,
-    // #[arg(long, env = "SINK_PATH", default_value = "./target/debug/harness-sink")]
-    // sink_path: String,
+    #[arg(long, default_value = "./target/debug/cassini-server")]
+    pub broker_path: String,
+    #[arg(long, default_value = "./target/debug/harness-producer")]
+    pub producer_path: String,
+    #[arg(long, default_value = "./target/debug/harness-sink")]
+    pub sink_path: String,
 }
 
 pub fn init_logging() {
@@ -71,11 +63,12 @@ pub async fn spawn_broker(control: ActorRef<HarnessControllerMessage>) -> AbortH
     return tokio::spawn(async move {
         tracing::info!("Spawning broker...");
         // TODO: change path to be either an ENV var or a CLI rargument
-        let mut child = Command::new("cassini-server")
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .expect("failed to spawn broker");
+        let mut child =
+            Command::new("/Users/vacoates/projects/Polar/src/agents/target/debug/cassini-server")
+                .stdout(Stdio::inherit())
+                .stderr(Stdio::inherit())
+                .spawn()
+                .expect("failed to spawn broker");
 
         let status = child.wait().await.expect("broker crashed");
         tracing::warn!(?status, "Broker exited");

@@ -47,11 +47,6 @@ pub enum HarnessControllerMessage {
     Shutdown, // stop a service
 }
 
-// #[derive(Debug, Clone, Serialize, Deserialize, Archive)]
-// pub enum ProducerMessage {
-
-// }
-
 ///A general message envelope that gets exchanged between the sink and producer.
 /// Dhall already has strong typing, so testers can describe structured values with guaranteed shape.
 /// We can import their Dhall config in Rust and convert it to JSON.

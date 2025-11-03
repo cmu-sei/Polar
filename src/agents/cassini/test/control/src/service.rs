@@ -37,6 +37,9 @@ pub struct HarnessControllerState {
     broker: Option<AbortHandle>,
     producer: Option<AbortHandle>,
     sink: Option<AbortHandle>,
+    sink_path: String,
+    broker_path: String,
+    producer_path: String,
 }
 
 pub struct HarnessControllerArgs {
@@ -45,6 +48,9 @@ pub struct HarnessControllerArgs {
     pub private_key_file: String,
     pub ca_cert_file: String,
     pub test_plan: TestPlan,
+    pub sink_path: String,
+    pub broker_path: String,
+    pub producer_path: String,
 }
 
 #[async_trait]
@@ -107,6 +113,9 @@ impl Actor for HarnessController {
             broker: None,
             producer: None,
             sink: None,
+            sink_path: args.sink_path,
+            broker_path: args.broker_path,
+            producer_path: args.producer_path,
         };
 
         Ok(state)
@@ -181,17 +190,20 @@ impl Actor for HarnessController {
         state.broker = Some(broker.clone());
 
         // Sleep to wait for for the broker to wake up
-        //
-        std::thread::sleep(Duration::from_secs(3));
+        // TODO: Replace with a handshake to cassini, and when it responds as healthy, we continue the test
+        std::thread::sleep(Duration::from_secs(5));
 
         // binaries are currently named aptly.
         // harness-sink
         // harness-producer
         // I guess there's not much sense in writing two fns.
+        // TODO: add a handshake, and when it responds as healthy, we continue the test
         let cloned_self = myself.clone();
+        let cloned_path = state.producer_path.clone();
+
         let producer = tokio::spawn(async move {
-            tracing::info!("Spawning producer service");
-            let mut child = Command::new("harness-producer")
+            tracing::info!("Spawning producer service at {cloned_path}");
+            let mut child = Command::new(cloned_path)
                 .stdout(Stdio::inherit())
                 .stderr(Stdio::inherit())
                 .spawn()
@@ -207,9 +219,12 @@ impl Actor for HarnessController {
         .abort_handle();
 
         let cloned_self = myself.clone();
+        let cloned_path = state.sink_path.clone();
+
+        // TODO: add a handshake, and when it responds as healthy, we continue the test
         let sink = tokio::spawn(async move {
-            tracing::info!("Spawning producer service");
-            let mut child = Command::new("harness-sink")
+            tracing::info!("Spawning producer service at {cloned_path}");
+            let mut child = Command::new(cloned_path)
                 .stdout(Stdio::inherit())
                 .stderr(Stdio::inherit())
                 .spawn()
