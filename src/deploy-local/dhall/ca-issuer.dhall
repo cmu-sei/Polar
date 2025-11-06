@@ -1,0 +1,5 @@
+{ apiVersion = "cert-manager.io/v1"
+, kind = "Issuer"
+, metadata = { name = "ca-issuer", namespace = "polar" }
+, spec.selfSigned = {=}
+}

@@ -1,0 +1,6 @@
+{ apiVersion = "v1"
+, kind = "Secret"
+, metadata = { name = "polar-graph-pw", namespace = "polar" }
+, stringData.secret = "changeit"
+, type = "Opaque"
+}
