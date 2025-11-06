@@ -1,0 +1,94 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  annotations:
+    sidecar.istio.io/inject: 'false'
+  name: kubernetes-agent
+  namespace: polar
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      name: kubernetes-agent
+  template:
+    metadata:
+      labels:
+        name: kubernetes-agent
+      name: kubernetes-agent
+    spec:
+      containers:
+        - env:
+            - name: TLS_CA_CERT
+              value: /etc/tls/ca.crt
+            - name: TLS_CLIENT_CERT
+              value: /etc/tls/tls.crt
+            - name: TLS_CLIENT_KEY
+              value: /etc/tls/tls.key
+            - name: BROKER_ADDR
+              value: cassini-ip-svc.polar.svc.cluster.local:8080
+            - name: CASSINI_SERVER_NAME
+              value: cassini-ip-svc.polar.svc.cluster.local
+            - name: KUBE_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  key: token
+                  name: kube-observer-sa-token
+          image: polar-kube-observer:latest
+          imagePullPolicy: IfNotPresent
+          name: kube-observer
+          securityContext:
+            capabilities:
+              drop:
+                - ALL
+            runAsGroup: 1000
+            runAsNonRoot: true
+            runAsUser: 1000
+          volumeMounts:
+            - mountPath: /etc/tls
+              name: client-tls
+            - mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+              name: kube-observer-sa-token
+        - env:
+            - name: TLS_CA_CERT
+              value: /etc/tls/ca.crt
+            - name: TLS_CLIENT_CERT
+              value: /etc/tls/tls.crt
+            - name: TLS_CLIENT_KEY
+              value: /etc/tls/tls.key
+            - name: BROKER_ADDR
+              value: cassini-ip-svc.polar.svc.cluster.local:8080
+            - name: CASSINI_SERVER_NAME
+              value: cassini-ip-svc.polar.svc.cluster.local
+            - name: GRAPH_ENDPOINT
+              value: neo4j://polar-db-svc.polar-db.svc.cluster.local:7687
+            - name: GRAPH_DB
+              value: neo4j
+            - name: GRAPH_USER
+              value: neo4j
+            - name: GRAPH_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  key: secret
+                  name: polar-graph-pw
+          image: polar-kube-consumer:latest
+          imagePullPolicy: IfNotPresent
+          name: kube-consumer
+          securityContext:
+            capabilities:
+              drop:
+                - ALL
+            runAsGroup: 1000
+            runAsNonRoot: true
+            runAsUser: 1000
+          volumeMounts:
+            - mountPath: /etc/tls
+              name: client-tls
+              readOnly: true
+      serviceAccountName: kube-observer-sa
+      volumes:
+        - name: client-tls
+          secret:
+            secretName: client-tls
+        - name: kube-observer-sa-token
+          secret:
+            secretName: kube-observer-sa-token
