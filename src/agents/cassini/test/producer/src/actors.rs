@@ -11,7 +11,7 @@ use serde::Serialize;
 use serde_json::to_string_pretty;
 use std::time::{Duration, Instant};
 use tokio::time;
-use tokio_util::CancellationToken;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 const PRODUCER_FINISHED_SUCCESSFULLY: &str = "PRODUCER_FINISHED_SUCCESSFULLY";
 // const PRODUCER_ENCOUNTERED_ERROR: &str = "PRODUCER_ENCOUNTERED_ERROR";
@@ -75,8 +75,8 @@ impl Actor for RootActor {
 
     async fn post_start(
         &self,
-        _: ActorRef<Self::Msg>,
-        _: &mut Self::State,
+        myself: ActorRef<Self::Msg>,
+        state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         // TODO: Make configurable?
         let timeout = 60;
