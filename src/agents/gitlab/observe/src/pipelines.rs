@@ -21,6 +21,7 @@
    DM24-0470
 */
 
+use crate::MESSAGE_FORWARDING_FAILED;
 use crate::{graphql_endpoint, init_observer_state, send_to_broker};
 use crate::{
     BackoffReason, Command, GitlabObserverArgs, GitlabObserverMessage, GitlabObserverState,
@@ -146,7 +147,14 @@ impl Actor for GitlabPipelineObserver {
                                     }
                                 }
                             }
-                            Err(e) => todo!(),
+                            Err(e) => {
+                                warn!("Failed to fetch pipelines: {e}");
+                                myself
+                                    .send_message(GitlabObserverMessage::Backoff(
+                                        BackoffReason::GitlabUnreachable(e.to_string()),
+                                    ))
+                                    .expect(MESSAGE_FORWARDING_FAILED);
+                            }
                         }
                     }
                     _ => todo!(),
