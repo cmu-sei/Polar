@@ -1,3 +1,5 @@
+use serde::{Deserialize, Serialize};
+
 pub const DISPATCH_ACTOR: &str = "DISPATCH";
 pub const TRANSACTION_FAILED_ERROR: &str = "Expected to start a transaction with the graph";
 pub const QUERY_COMMIT_FAILED: &str = "Error committing transaction to graph";
@@ -78,4 +80,24 @@ pub fn get_neo_config() -> neo4rs::Config {
     };
 
     config
+}
+
+/// A canonical reference to a container image
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct ContainerImageReference {
+    pub registry: String,
+    pub repository: String,
+    pub tag: Option<String>,
+    pub digest: Option<String>,
+}
+
+impl ContainerImageReference {
+    /// Returns a canonical reference to the container image.
+    pub fn canonical(&self) -> String {
+        match (&self.tag, &self.digest) {
+            (Some(tag), _) => format!("{}/{}:{}", self.registry, self.repository, tag),
+            (None, Some(digest)) => format!("{}/{}@{}", self.registry, self.repository, digest),
+            _ => format!("{}/{}", self.registry, self.repository),
+        }
+    }
 }

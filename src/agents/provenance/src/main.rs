@@ -145,15 +145,16 @@ impl Actor for ProvenanceActor {
                     }
                     //TODO: Add another handler for linking package files in gtlab to container images deployed in k8s and their sboms
                     Command::Link => {
+                        // Invariant: “Every observed container image in the system has a canonical reference node.”
                         let query = "
-                            MATCH (p:PodContainer)
-                            WHERE p.image IS NOT NULL
-                            WITH p, p.image AS image_ref
-
+                            MATCH (ref:ContainerImageReference)
+                            WITH ref
                             MATCH (tag:ContainerImageTag)
-                            WHERE tag.location = image_ref
+                            WITH tag
+                            WHERE ref.normalized = tag.location
+                            MERGE (ref)<-[:IDENTIFIES]-(tag)
 
-                            MERGE (p)-[:USES_TAG]->(tag)
+
                             ";
 
                         tracing::debug!(query);

@@ -144,8 +144,27 @@ pub fn pods_to_cypher(pods: &[Pod]) -> Vec<String> {
             for container in containers {
                 if let Some(image) = &container.image {
                     if seen_images.insert(image.clone()) {
-                        statements
-                            .push(format!("MERGE (img:PodContainer {{ image: '{}' }})", image));
+                        statements.push(format!(
+                            "
+                            // Ensure a PodContainer node for this pod+container
+                            MERGE (p:Pod {{ name: '{pod_name}', namespace: '{namespace}' }})
+                            MERGE (c:PodContainer {{ name: '{container_name}', namespace: '{namespace}', pod_name: '{pod_name}' }})
+                            SET c.image = '{image}'
+
+                            // Create canonical image reference
+                            MERGE (ref:ContainerImageReference {{ normalized: '{image}' }})
+                            ON CREATE SET ref.discovered_by = 'k8s_consumer', ref.first_seen = timestamp()
+
+                            // Link container to image reference
+                            MERGE (c)-[:USES_REFERENCE]->(ref)
+
+                            // Link pod to container
+                            MERGE (p)-[:HAS_CONTAINER]->(c)
+
+                                ",
+                                container_name = container.name.as_str(),
+                                image = image.as_str()
+                        ));
                     }
                     statements.push(format!(
                         "MATCH (p:Pod {{ name: '{}', namespace: '{}' }}), \

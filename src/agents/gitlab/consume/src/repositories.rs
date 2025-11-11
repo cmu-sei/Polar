@@ -199,10 +199,13 @@ impl Actor for GitlabRepositoryConsumer {
                             t.repo_path = tag.repo_path
                             WITH t
 
-                            // TODO: This doesn't seem to be getting applied generally, investigate why
+                            // normalize into ImageReference
+                            MERGE (ref:ContainerImageReference {{ normalized: tag.location }})
+                            MERGE (t)-[:IDENTIFIES]->(ref)
+
+                            // optional: link back to repository
                             MATCH (r:ContainerRepository {{ path: t.repo_path }})
-                            WITH r,t
-                            MERGE (t)-[:CONTAINS_TAG]->(r)
+                            MERGE (ref)-[:CONTAINS_TAG]->(r)
                         "#
                         );
 
