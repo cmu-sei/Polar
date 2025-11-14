@@ -45,7 +45,7 @@ polar = { path = "../../lib" }
 gitlab-queries = { path = "../query" }
 gitlab-schema = { path = "../schema" }
 cassini-backoff = { workspace = true }
-
+rkyv = { workspace = true }
 [[bin]]
 name = "gitlab-consumer"
 path = "src/entrypoint.rs"

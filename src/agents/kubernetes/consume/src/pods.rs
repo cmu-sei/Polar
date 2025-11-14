@@ -25,8 +25,9 @@ use cassini_client::TcpClientMessage;
 use k8s_openapi::api::core::v1::Pod;
 use kube_common::KubeMessage;
 use neo4rs::Query;
-use polar::{QUERY_COMMIT_FAILED, QUERY_RUN_FAILED};
-use ractor::{async_trait, registry::where_is, Actor, ActorProcessingErr, ActorRef};
+use polar::{ProvenanceEvent, PROVENANCE_DISCOVERY_TOPIC, QUERY_COMMIT_FAILED, QUERY_RUN_FAILED};
+use ractor::{async_trait, registry::where_is, rpc::cast, Actor, ActorProcessingErr, ActorRef};
+use rkyv::rancor;
 use serde_json::from_value;
 use tracing::{debug, error, info};
 
@@ -165,6 +166,33 @@ pub fn pods_to_cypher(pods: &[Pod]) -> Vec<String> {
                                 container_name = container.name.as_str(),
                                 image = image.as_str()
                         ));
+
+                        // emit a message to the provenance discovery agent that we saw an image.
+                        // For k8s, the canonical image name is the best we've got, so the resolver will have to take care of finding out where it really came from.
+                        where_is(BROKER_CLIENT_NAME.to_string()).map(|client| {
+                            let event = ProvenanceEvent::image_ref(image, None);
+
+                            match rkyv::to_bytes::<rancor::Error>(&event) {
+                                Ok(payload) => {
+                                    let message = TcpClientMessage::Publish {
+                                        topic: PROVENANCE_DISCOVERY_TOPIC.to_string(),
+                                        payload: payload.into(),
+                                    };
+
+                                    cast(&client, message)
+                                        .map_err(|e| {
+                                            error!("Failed to forward message to broker. {e}")
+                                            // if we fail to talk to the client, we might be ok dropping the message and retrying after the supervisor restarts.
+                                        })
+                                        .ok();
+                                }
+                                Err(e) => {
+                                    error!("Failed to serialize event. {e}");
+                                    // If we fail to serialize, should we retry? Drop the message? Or stop?
+                                    todo!("Handle failure to serialize event.");
+                                }
+                            }
+                        });
                     }
                     statements.push(format!(
                         "MATCH (p:Pod {{ name: '{}', namespace: '{}' }}), \

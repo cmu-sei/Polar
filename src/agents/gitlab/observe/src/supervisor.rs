@@ -51,31 +51,6 @@ pub struct ObserverSupervisorArgs {
     pub max_backoff_secs: u64,
 }
 
-impl ObserverSupervisor {
-    /// Build reqwest client, optionally with a proxy CA certificate
-    fn get_client(proxy_ca_cert_path: Option<String>) -> Client {
-        match proxy_ca_cert_path {
-            Some(path) => {
-                let cert_data = get_file_as_byte_vec(&path)
-                    .expect("Expected to find a proxy CA certificate at {path}");
-                let root_cert = Certificate::from_pem(&cert_data)
-                    .expect("Expected {path} to be in PEM format.");
-
-                info!("Found PROXY_CA_CERT at: {path}, Configuring web client...");
-
-                ClientBuilder::new()
-                    .add_root_certificate(root_cert)
-                    .use_rustls_tls()
-                    .build()
-                    .expect("Expected to build web client with proxy CA certificate")
-            }
-            None => ClientBuilder::new()
-                .build()
-                .expect("Expected to build web client."),
-        }
-    }
-}
-
 pub enum SupervisorMessage {
     /// Notification message telling the supervisor the client's been registered with the broker.
     /// This triggers the observer to finish startup and cancels the timeout
@@ -145,7 +120,7 @@ impl Actor for ObserverSupervisor {
                     instance_uid: derive_instance_id(&state.gitlab_endpoint),
                     token: state.gitlab_token.clone(),
                     registration_id: registration_id.clone(),
-                    web_client: ObserverSupervisor::get_client(state.proxy_ca_cert_file.clone()),
+                    web_client: polar::get_web_client(),
                     base_interval: state.base_interval,
                     max_backoff: state.max_backoff_secs,
                 };

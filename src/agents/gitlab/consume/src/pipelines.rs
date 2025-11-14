@@ -20,7 +20,9 @@
 
    DM24-0470
 */
+use cassini_client::TcpClientMessage;
 
+use crate::BROKER_CLIENT_NAME;
 use crate::{subscribe_to_topic, GitlabConsumerArgs, GitlabConsumerState};
 use common::types::GitlabData;
 use common::types::GitlabEnvelope;
@@ -29,28 +31,72 @@ use gitlab_queries::projects::CiJobArtifact;
 use gitlab_queries::projects::GitlabCiJob;
 use gitlab_schema::DateTimeString;
 use neo4rs::Query;
+use polar::ProvenanceEvent;
+use polar::PROVENANCE_DISCOVERY_TOPIC;
 use polar::{QUERY_COMMIT_FAILED, TRANSACTION_FAILED_ERROR};
-use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef};
+use ractor::{async_trait, registry::where_is, rpc::cast, Actor, ActorProcessingErr, ActorRef};
 use tracing::{debug, error, info};
+
+fn dowwnload_path(base_url: &str, download_url: &str) -> String {
+    format!("{base_url}{download_url}")
+}
 
 pub struct GitlabPipelineConsumer;
 
 impl GitlabPipelineConsumer {
+    /// Determine if an artifact should be emitted to the resolver
+    /// Here, we rely somewhat on convention, but we also check for specific file extensions.
+    fn artifact_should_emit(name: &str) -> bool {
+        name.ends_with(".cdx.json")
+            || name.ends_with(".sbom.json")
+            || name.ends_with("flake.lock")
+            || name.ends_with("cargo.lock")
+    }
+
     fn format_artifacts(base_url: &str, artifacts: &[CiJobArtifact]) -> String {
         artifacts
             .iter()
             .map(|artifact| {
+                // TODO: while we're at it, we shoud emit an event to the discovery topic that we found an artifact
+                // IFF that artifact is one we care about.
+
+                //handle whether the artifact can actually be resolved...if it can't then there's no download path, nothing we can do.
+                if let Some(name) = &artifact.name {
+                    if GitlabPipelineConsumer::artifact_should_emit(name) {
+                        if let Some(download_path) = &artifact.download_path {
+                            if let Some(client) = ractor::registry::where_is(BROKER_CLIENT_NAME.to_string()) {
+                                let event = ProvenanceEvent::sbom_ref(download_path, Some(artifact.id.to_string()));
+
+                                match rkyv::to_bytes::<rkyv::rancor::Error>(&event) {
+                                    Ok(payload) => {
+                                        let message = TcpClientMessage::Publish {
+                                            topic: PROVENANCE_DISCOVERY_TOPIC.to_string(),
+                                            payload: payload.into(),
+                                        };
+                                        cast(&client, message).ok();
+                                    }
+                                    Err(e) => {
+                                        error!("Failed to serialize event: {}", e);
+                                    }
+                                }
+                            }
+                        } else {
+                            debug!("Skipping artifact {} because it has no download path", artifact.id);
+                        }
+                    }
+                }
+
                 // Here we format the base_url of the gitlab instance onto the download_url,
                 // gitlab doesn't proivde the instance url as part of it so we do it oursleves here.
                 // This will help us later when we seek to scrape artifact data like job logs, sboms, test results, etc.
                 format!(
-                    r#"{{ artifact_id: "{}", name: "{}", size: "{}", expire_at: "{}", download_path: "{base_url}{}" }}"#,
+                    r#"{{ artifact_id: "{}", name: "{}", size: "{}", expire_at: "{}", download_path: "{download_path}" }}"#,
                     artifact.id,
                     artifact.name.clone().unwrap_or_default(),
                     // TODO: implement display for the enum artifact.file_type,
                     artifact.size,
                     artifact.expire_at.clone().unwrap_or_default(),
-                    artifact.download_path.clone().unwrap_or_default()
+                    download_path = dowwnload_path(base_url, artifact.download_path.as_ref().unwrap_or(&String::new()))
 
                 )
             })

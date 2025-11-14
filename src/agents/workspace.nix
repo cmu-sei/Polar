@@ -115,12 +115,17 @@ let
       crateArgs = individualCrateArgs;
     };
 
-    provenanceAgent = import ./provenance/package.nix {
+    webAgent = import ./openapi/package.nix {
+      inherit pkgs commonPaths craneLib  workspaceFileset cargoArtifacts commonUser;
+      crateArgs = individualCrateArgs;
+    };
+
+    provenance = import ./provenance/package.nix {
        inherit pkgs commonPaths craneLib  workspaceFileset cargoArtifacts commonUser;
        crateArgs = individualCrateArgs;
     };
 
 in
 {
-  inherit workspacePackages gitlabAgent cassini kubeAgent provenanceAgent;
+  inherit workspacePackages gitlabAgent cassini kubeAgent webAgent provenance;
 }
