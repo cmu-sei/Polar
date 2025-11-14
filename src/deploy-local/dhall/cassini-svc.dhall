@@ -1,0 +1,9 @@
+{ apiVersion = "v1"
+, kind = "Service"
+, metadata = { name = "cassini-ip-svc", namespace = "polar" }
+, spec =
+  { ports = [ { name = "cassini-tcp", port = 8080, targetPort = 8080 } ]
+  , selector.name = "cassini"
+  , type = "ClusterIP"
+  }
+}
