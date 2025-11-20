@@ -3,8 +3,8 @@ use cassini_client::{TCPClientConfig, TcpClientActor, TcpClientArgs, TcpClientMe
 use fake::Fake;
 use harness_common::{
     client::{HarnessClient, HarnessClientArgs, HarnessClientConfig, HarnessClientMessage},
-    compute_checksum, ConnectionState, Envelope, HarnessControllerMessage, MessagePattern,
-    ProducerConfig, TestPlan,
+    compute_checksum, get_instenace_id, Agent, ConnectionState, Envelope, HarnessControllerMessage,
+    MessagePattern, Producer,
 };
 use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef, OutputPort, SupervisionEvent};
 use serde::Serialize;
@@ -78,15 +78,17 @@ impl Actor for RootActor {
         myself: ActorRef<Self::Msg>,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        // TODO: Make configurable?
+        let client_id = get_instenace_id();
+
         let timeout = 60;
         let token = state.timeout_token.clone();
+
         let _ = tokio::spawn(async move {
             info!("Waiting {timeout} secs for contact from controller.");
             tokio::select! {
                 // Use cloned token to listen to cancellation requests
                 _ = token.cancelled() => {
-                    info!("Cancelling timeout.")
+                    info!("Cancelling timeout.");
                 }
                 // wait
                 _ = tokio::time::sleep(std::time::Duration::from_secs(timeout)) => {
@@ -106,26 +108,33 @@ impl Actor for RootActor {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
-            HarnessControllerMessage::ClientRegistered(id) => {
-                info!("Received client id \"{id}\"");
-                state.registration = harness_common::ConnectionState::Registered { client_id: id };
-            }
-            HarnessControllerMessage::TestPlan { plan } => {
+            HarnessControllerMessage::ClientRegistered { client_id } => {
                 state.timeout_token.cancel();
+                info!("Received client id \"{client_id}\"");
+                state.registration = harness_common::ConnectionState::Registered {
+                    client_id: client_id.clone(),
+                };
+                info!("Notifying controller of ready state");
 
-                debug!(
-                    "{myself:?} Received test plan:\n{plan}",
-                    plan = serde_json::to_string_pretty(&plan).unwrap()
+                let msg = HarnessClientMessage::Send(HarnessControllerMessage::ProducerReady {
+                    client_id,
+                });
+                state.harness_client.cast(msg).ok();
+            }
+            HarnessControllerMessage::StartProducers { producers } => {
+                info!(
+                    "{myself:?} starting producers:\n{}",
+                    serde_json::to_string_pretty(&producers).unwrap()
                 );
                 // Gotta keep track of producers somehow...
                 // so we create a list of them here, and insert
                 // the refs according to the index, starting at 0.
 
-                for config in &plan.producers {
+                for producer in &producers {
                     let (_, _) = Actor::spawn_linked(
                         Some(format!("cassini.harness.producer.{}", state.producers)),
                         ProducerAgent,
-                        config.to_owned(),
+                        producer.to_owned(),
                         myself.clone().into(),
                     )
                     .await
@@ -197,20 +206,21 @@ impl Actor for RootActor {
 pub struct ProducerAgent;
 
 pub struct ProducerState {
-    cfg: ProducerConfig,
+    cfg: Producer,
     metrics: Metrics,
     tcp_client: ActorRef<TcpClientMessage>,
 }
 
 pub enum ProducerMessage {
     Start, // trigger tests
+    Produce(),
 }
 
 #[async_trait]
 impl Actor for ProducerAgent {
     type Msg = ProducerMessage;
     type State = ProducerState;
-    type Arguments = ProducerConfig;
+    type Arguments = Producer;
 
     async fn pre_start(
         &self,

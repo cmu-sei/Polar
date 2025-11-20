@@ -1,7 +1,104 @@
 use rkyv::{Archive, Deserialize, Serialize};
+use serde::{Deserialize as SerdeDeserialze, Serialize as SerdeSerialize};
 use sha2::{Digest, Sha256};
-
 pub mod client;
+
+/// ---------------------------
+/// Environment
+/// ---------------------------
+#[derive(Debug, Clone, Serialize, Deserialize, Archive, SerdeSerialize, SerdeDeserialze)]
+pub struct Environment {
+    pub cassini: CassiniConfig,
+    pub neo4j: Neo4jConfig,
+    pub registry: RegistryConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Archive, SerdeSerialize, SerdeDeserialze)]
+pub struct CassiniConfig {
+    pub tag: String,
+    pub ca_cert_path: String,
+    pub server_cert_path: String,
+    pub server_key_path: String,
+    pub jager_host: Option<String>,
+    pub log_level: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Archive, SerdeSerialize, SerdeDeserialze)]
+pub struct Neo4jConfig {
+    pub enable: bool,
+    pub version: String,
+    pub config: Option<String>, // Optional Text
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Archive, SerdeSerialize, SerdeDeserialze)]
+pub struct RegistryConfig {
+    pub enable: bool,
+    pub version: String,
+    pub port: u64,
+}
+
+/// ---------------------------
+/// Agent (union)
+/// ---------------------------
+/// Dhall union = Rust enum with tagged representation.
+#[derive(Debug, Clone, Serialize, Deserialize, Archive, SerdeSerialize, SerdeDeserialze)]
+pub enum Agent {
+    /// Producer definition, contains a path to a .dhall config.
+    ProducerAgent,
+    SinkAgent,
+    ResolverAgent,
+    GitlabConsumer,
+    KubeConsumer,
+    LinkerAgent,
+    Observer,
+}
+
+/// ---------------------------
+/// Action (union with records)
+/// ---------------------------
+/// Using `serde(tag="type", content="data")` cleanly separates variants.
+#[derive(Debug, Clone, Serialize, Deserialize, Archive, SerdeSerialize, SerdeDeserialze)]
+pub enum Action {
+    /// StartActor
+    StartAgent {
+        agent: Agent,
+        config: Option<String>,
+    },
+
+    /// Inject fake GitLab artifact events
+    EmitGitlabEvent { json: String },
+
+    /// Inject fake kube API state
+    EmitKubeEvent { json: String },
+
+    /// Sleep N seconds
+    Sleep(u64),
+
+    /// Assert Cypher query result count
+    #[allow(non_snake_case)]
+    AssertGraph { cypher: String, expectRows: u64 },
+
+    /// Assert that sink received N events on topic
+    AssertEvent { topic: String, count: u64 },
+}
+
+/// ---------------------------
+/// Phase
+/// ---------------------------
+#[derive(Debug, Clone, Serialize, Deserialize, Archive, SerdeSerialize, SerdeDeserialze)]
+pub struct Phase {
+    pub name: String,
+    pub actions: Vec<Action>,
+}
+
+/// ---------------------------
+/// TestPlan
+/// ---------------------------
+#[derive(Debug, Clone, Serialize, Deserialize, Archive, SerdeSerialize, SerdeDeserialze)]
+pub struct TestPlan {
+    pub environment: Environment,
+    pub phases: Vec<Phase>,
+}
 
 pub enum ConnectionState {
     NotContacted,
@@ -9,8 +106,8 @@ pub enum ConnectionState {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Archive, serde::Serialize, serde::Deserialize)]
-pub struct TestPlan {
-    pub producers: Vec<ProducerConfig>,
+pub struct ProducerConfig {
+    pub producers: Vec<Producer>,
     // pub payload: serde_json::Value,
 }
 /// Messaging pattern that mimics user behavior over the network.
@@ -21,7 +118,7 @@ pub enum MessagePattern {
 }
 // Config for the supervisor
 #[derive(Clone, Debug, Serialize, Deserialize, Archive, serde::Serialize, serde::Deserialize)]
-pub struct ProducerConfig {
+pub struct Producer {
     pub topic: String,
     #[serde(alias = "msgSize")]
     pub msg_size: usize,
@@ -31,13 +128,21 @@ pub struct ProducerConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Archive)]
 pub enum HarnessControllerMessage {
-    /// Message sent to clients to give them a token to id themselves by, mostly for convenience
-    ClientRegistered(String),
-    TestPlanRequest {
+    /// Message sent to clients to give them a token to id themselves by
+    ClientRegistered {
         client_id: String,
     },
-    TestPlan {
-        plan: TestPlan,
+    ProducerReady {
+        client_id: String,
+    },
+    SinkReady {
+        client_id: String,
+    },
+    StartProducers {
+        producers: Vec<Producer>,
+    },
+    StartSinks {
+        topics: Vec<String>,
     },
     Error {
         reason: String,
@@ -68,4 +173,8 @@ pub fn compute_checksum(payload: &[u8]) -> String {
 pub fn validate_checksum(payload: &[u8], expected: &str) -> bool {
     let actual = compute_checksum(payload);
     actual == expected
+}
+
+pub fn get_instenace_id() -> String {
+    uuid::Uuid::new_v4().to_string()
 }

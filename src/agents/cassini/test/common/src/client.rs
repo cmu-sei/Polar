@@ -1,4 +1,4 @@
-use ractor::{Actor, ActorProcessingErr, ActorRef, OutputPort, async_trait};
+use ractor::{Actor, ActorProcessingErr, ActorRef, async_trait};
 use rkyv::deserialize;
 use rkyv::rancor::Error;
 use rustls::ClientConfig;
@@ -23,7 +23,7 @@ pub const UNEXPECTED_DISCONNECT: &str = "UNEXPECTED_DISCONNECT";
 ///
 /// A base configuration for a TCP Client actor
 pub struct HarnessClientConfig {
-    pub sink_endpoint: String,
+    pub server_endpoint: String,
     pub server_name: String,
     pub ca_certificate_path: String,
     pub client_certificate_path: String,
@@ -39,13 +39,13 @@ impl HarnessClientConfig {
             env::var("TLS_CLIENT_KEY").expect("Expected a value for TLS_CLIENT_KEY.");
         let ca_certificate_path =
             env::var("TLS_CA_CERT").expect("Expected a value for TLS_CA_CERT.");
-        let sink_endpoint =
-            env::var("SINK_ADDR").expect("Expected a valid socket address for SINK_ADDR");
+        let server_endpoint =
+            env::var("HARNESS_ADDR").expect("Expected a valid socket address for HARNESS_ADDR");
         let server_name =
-            env::var("SINK_SERVER_NAME").expect("Expected a value for SINK_SERVER_NAME");
+            env::var("HARNESS_SERVER_NAME").expect("Expected a value for HARNESS_SERVER_NAME");
 
         HarnessClientConfig {
-            sink_endpoint,
+            server_endpoint,
             server_name,
             ca_certificate_path,
             client_certificate_path,
@@ -172,7 +172,7 @@ impl Actor for HarnessClient {
             .unwrap();
 
         let state = HarnessClientState {
-            bind_addr: args.config.sink_endpoint,
+            bind_addr: args.config.server_endpoint,
             server_name: args.config.server_name,
             reader: None,
             writer: None,

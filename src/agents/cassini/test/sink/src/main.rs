@@ -134,24 +134,21 @@ impl Actor for SinkService {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
-            HarnessControllerMessage::TestPlan { plan } => {
+            HarnessControllerMessage::StartSinks { topics } => {
                 // abort timeout
                 state.timeout_token.cancel();
 
-                info!(
-                    "Received test plan from client. {}",
-                    serde_json::to_string_pretty(&plan).unwrap()
-                );
-                info!("Starting subscribes.");
                 // start a sink for each producer, if we already have a sink subscriber for that topic, skip
 
-                for config in plan.producers {
+                for topic in topics {
+                    info!("Starting sink for topic: \"{topic}\"",);
+
                     let args = SinkConfig {
-                        topic: config.topic.clone(),
+                        topic: topic.clone(),
                     };
 
                     let _ = Actor::spawn_linked(
-                        Some(format!("cassini.harness.sink.{}", config.topic)),
+                        Some(format!("cassini.harness.sink.{}", topic)),
                         SinkAgent,
                         args,
                         myself.clone().into(),

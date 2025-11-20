@@ -20,15 +20,6 @@ let
     doCheck = false;
     });
 
-    # build the client
-    client = craneLib.buildPackage (crateArgs // {
-    inherit cargoArtifacts;
-    cargoExtraArgs = "--lib cassini-client --locked";
-    src = workspaceFileset ./client;
-    # Disable tests for now, We'll run them later with env vars and TlsCerts
-    doCheck = false;
-    });
-
     # build the test harness services
     harnessProducer = craneLib.buildPackage (crateArgs // {
     inherit cargoArtifacts;
@@ -46,25 +37,20 @@ let
     doCheck = false;
     });
 
-    cassiniEnv = pkgs.buildEnv {
-        name = "cassini-env";
-        paths =  [
-            pkgs.bashInteractiveFHS
-            pkgs.busybox
-            cassini
-        ];
+    # cassiniEnv = pkgs.buildEnv {
+    #     name = "cassini-env";
+    #     paths =  [ cassini ];
 
-        pathsToLink = [
-            "/bin"
-            "/etc/ssl/certs"
-        ];
-    };
+    #     pathsToLink = [
+    #         "/bin"
+    #     ];
+    # };
 
     cassiniImage = pkgs.dockerTools.buildImage {
     name = "cassini";
     tag = "latest";
     copyToRoot = commonPaths ++ [
-        cassiniEnv
+        cassini
     ];
     uid = commonUser.uid;
     gid = commonUser.gid;
@@ -73,9 +59,8 @@ let
         User = "${commonUser.uid}:${commonUser.gid}";
         Cmd = [ "cassini-server" ];
         WorkingDir = "/";
-        Env = [
-        "CASSINI_BIND_ADDR=0.0.0.0:8080"
-        ];
+        # Vars are always set at container runtime, others have defaults.
+        Env = [];
     };
     };
 
@@ -114,5 +99,5 @@ let
     };
 in
 {
-  inherit cassini cassiniImage client harnessProducer harnessSink producerImage sinkImage;
+  inherit cassini cassiniImage harnessProducer harnessSink producerImage sinkImage;
 }

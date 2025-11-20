@@ -1,5 +1,3 @@
--- TestPlan.dhall
-
 -- Pattern for message emission
 -- When configured to drip messages, they'll be sent at a constant rate denoted by idle_time between messages,
 -- When configured to send in bursts, the burst_size denotes the amount of messages sent between idle_times
@@ -19,14 +17,8 @@ let Producer =
       , pattern   : Pattern
       }
 
--- A test plan is just a list of producers
--- TODO: We've discussed potentially splitting the producer and sink components again to enable them to communicate over the wire
--- This is probably where some of those configurations would be best suited.
-let TestPlan = {
-    producers : List Producer
-}
 
-
+--define some producers, we'll derive sink configuration from here.
 let steadyProducer: Producer = {
    topic = "steady"
 ,  msgSize = 4096
@@ -34,17 +26,6 @@ let steadyProducer: Producer = {
 ,  pattern = Pattern.Drip { idle_time = 1 }
 }
 
---let burstProducer: Producer = {
---   topic = "burst"
---,  msgSize = 4096
---,  duration = 10
---,  pattern = Pattern.Burst { burst_size = 10, idle_time = 5 }
---
---}
+let producers = [ steadyProducer ]
 
-
-let plan: TestPlan = {
-    producers = [ steadyProducer ]
-}
-
-in plan
+in producers

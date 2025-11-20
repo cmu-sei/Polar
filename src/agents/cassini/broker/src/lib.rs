@@ -6,6 +6,7 @@ pub mod listener;
 pub mod session;
 pub mod subscriber;
 pub mod topic;
+pub mod web_server;
 
 /// Constant names of core supervisors, should remain constant
 /// as they are used to conduct lookups in the ractor registry
@@ -14,6 +15,7 @@ pub const LISTENER_MANAGER_NAME: &str = "LISTENER_MANAGER";
 pub const SESSION_MANAGER_NAME: &str = "SESSION_MANAGER";
 pub const TOPIC_MANAGER_NAME: &str = "TOPIC_MANAGER";
 pub const SUBSCRIBER_MANAGER_NAME: &str = "SUBSCRIBER_MANAGER";
+pub const WEB_SERVER_NAME: &str = "HTTP_SERVER";
 
 pub const ACTOR_STARTUP_MSG: &str = "Started {myself:?}";
 pub const UNEXPECTED_MESSAGE_STR: &str = "Received unexpected message!";

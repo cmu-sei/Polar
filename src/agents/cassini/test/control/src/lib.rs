@@ -3,6 +3,8 @@ use harness_common::{HarnessControllerMessage, TestPlan};
 use ractor::ActorRef;
 use std::process::Stdio;
 use tokio::{process::Command, task::AbortHandle};
+
+pub mod images;
 pub mod service;
 
 #[derive(Parser, Debug)]
@@ -11,12 +13,15 @@ pub struct Arguments {
     #[arg(short, long)]
     /// Path to a valid .dhall configuration file. It will be evaluated to generate a TestPlan
     pub config: String,
-    #[arg(long, default_value = "./target/debug/cassini-server")]
-    pub broker_path: String,
-    #[arg(long, default_value = "./target/debug/harness-producer")]
-    pub producer_path: String,
-    #[arg(long, default_value = "./target/debug/harness-sink")]
-    pub sink_path: String,
+
+    #[arg(long, default_value = "127.0.0.1:3030")]
+    pub bind_addr: String,
+    // #[arg(long, default_value = "./target/debug/cassini-server")]
+    // pub broker_path: String,
+    // #[arg(long, default_value = "./target/debug/harness-producer")]
+    // pub producer_path: String,
+    // #[arg(long, default_value = "./target/debug/harness-sink")]
+    // pub sink_path: String,
 }
 
 pub fn init_logging() {
@@ -46,15 +51,16 @@ pub fn init_logging() {
     tracing::subscriber::set_global_default(subscriber).expect("to set global subscriber");
 }
 
-pub fn read_test_config(path: &str) -> TestPlan {
+pub fn read_test_config(path: &str) -> Result<TestPlan, String> {
     // let file = File::open(path).expect("Expected to find a test config at {path}");
 
     let dhall_str =
         std::fs::read_to_string(path).expect("Expected to find dhall configuration at {path}");
 
-    let config: TestPlan = serde_dhall::from_str(&dhall_str).parse().unwrap();
-
-    return config;
+    return match serde_dhall::from_str(&dhall_str).parse::<TestPlan>() {
+        Ok(config) => Ok(config),
+        Err(e) => Err(e.to_string()),
+    };
 }
 
 /// Helper to run an instance of the broker in another thread.

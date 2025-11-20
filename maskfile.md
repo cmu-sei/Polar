@@ -25,7 +25,7 @@ Our team primarily uses `podman` as a container runtime. So feel free to `alias`
   echo "building cassini image..."
   nix build .#polarPkgs.cassini.cassiniImage -o cassini
   echo "loading image..."
-  podman load < result
+  podman load < cassini
   ~~~
 
 ### gitlab
@@ -78,12 +78,16 @@ nix build .#default -o polar
 
 
 ### cassini
-> Builds all of the polar agents and outputs their binaries
+> Builds the cassini message broker
 ~~~sh
-nix build .#polarPkgs.cassini.cassini .#polarPkgs.cassini.harnessProducer .#polarPkgs.cassini.harnessSink
+nix build .#polarPkgs.cassini.cassini
 ~~~
 
-
+### harness
+> Builds the polar test harness' core components. Including the controller, source, and sink agents.
+~~~sh
+nix build .#polarPkgs.cassini.harnessController .#polarPkgs.cassini.harnessProducer .#polarPkgs.cassini.harnessSink
+~~~
 
 ## get-tls
   > Runs the nix derivation to generate TLS certificates for testing.

@@ -1,8 +1,8 @@
 use crate::UNEXPECTED_MESSAGE_STR;
 use crate::{
     get_subscriber_name, BrokerMessage, CLIENT_NOT_FOUND_TXT, DISCONNECTED_REASON,
-    PUBLISH_REQ_FAILED_TXT, REGISTRATION_REQ_FAILED_TXT, SESSION_NOT_FOUND_TXT,
-    SUBSCRIBE_REQUEST_FAILED_TXT, TIMEOUT_REASON,
+    REGISTRATION_REQ_FAILED_TXT, SESSION_NOT_FOUND_TXT, SUBSCRIBE_REQUEST_FAILED_TXT,
+    TIMEOUT_REASON,
 };
 use ractor::{
     async_trait, registry::where_is, Actor, ActorProcessingErr, ActorRef, SupervisionEvent,

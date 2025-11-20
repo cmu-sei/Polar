@@ -89,7 +89,7 @@ MERGE (ref:ImageReference {
 MERGE (img)-[:IDENTIFIES]->(ref)
 ```
 
-If another agent — say the ACR consumer — ingests the same reference, the graph automatically merges them through the shared `ImageReference`. No orchestration or central coordination is required.
+If another agent — say the gitlab consumer — ingests the same reference, the graph automatically merges them through the shared `ImageReference`. No orchestration or central coordination is required.
 
 ---
 

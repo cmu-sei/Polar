@@ -4,7 +4,8 @@ use crate::{
     session::{SessionManager, SessionManagerArgs},
     subscriber::SubscriberManager,
     topic::{TopicManager, TopicManagerArgs},
-    LISTENER_MGR_NOT_FOUND_TXT, UNEXPECTED_MESSAGE_STR,
+    web_server::{AxumServer, AxumServerArgs},
+    LISTENER_MGR_NOT_FOUND_TXT, UNEXPECTED_MESSAGE_STR, WEB_SERVER_NAME,
 };
 use crate::{
     BrokerMessage, LISTENER_MANAGER_NAME, PUBLISH_REQ_FAILED_TXT, REGISTRATION_REQ_FAILED_TXT,
@@ -67,8 +68,7 @@ impl Actor for Broker {
             listener_manager_args,
             myself.clone().into(),
         )
-        .await
-        .expect("The Broker cannot initialize without the ListenerManager. Panicking.");
+        .await?;
 
         // Set default timeout for sessions, or use args
         let mut session_timeout: u64 = 90;
@@ -86,8 +86,7 @@ impl Actor for Broker {
             },
             myself.clone().into(),
         )
-        .await
-        .expect("The Broker cannot initialize without the SessionManager. Panicking.");
+        .await?;
 
         let topic_mgr_args = TopicManagerArgs { topics: None };
 
@@ -98,8 +97,7 @@ impl Actor for Broker {
             topic_mgr_args,
             myself.clone().into(),
         )
-        .await
-        .expect("The Broker cannot initialize without the TopicManager. Panicking.");
+        .await?;
 
         // Subscribers Supervisor
         Actor::spawn_linked(
@@ -108,8 +106,22 @@ impl Actor for Broker {
             (),
             myself.clone().into(),
         )
-        .await
-        .expect("The Broker cannot initialize without the SubscriberManager. Panicking.");
+        .await?;
+
+        // start HTTP webserver
+        // For now, we'll only run it on localhost to enable test harness testing and basic debugging.
+        // If we want to expose and add functionality to it in the future beyond that, much work will be needed to secure it.
+        let server_args = AxumServerArgs {
+            bind_addr: "127.0.0.1:3000".to_string(),
+        };
+
+        Actor::spawn_linked(
+            Some(WEB_SERVER_NAME.to_string()),
+            AxumServer,
+            server_args,
+            myself.clone().into(),
+        )
+        .await?;
 
         Ok(BrokerState)
     }

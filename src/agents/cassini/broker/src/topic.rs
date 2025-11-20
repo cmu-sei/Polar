@@ -1,7 +1,7 @@
 use crate::UNEXPECTED_MESSAGE_STR;
 use crate::{get_subscriber_name, BrokerMessage, PUBLISH_REQ_FAILED_TXT};
 use ractor::registry::where_is;
-use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef, OutputPort};
+use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef};
 use std::collections::{HashMap, VecDeque};
 use tracing::{debug, error, info, trace, trace_span, warn};
 use tracing_opentelemetry::OpenTelemetrySpanExt;

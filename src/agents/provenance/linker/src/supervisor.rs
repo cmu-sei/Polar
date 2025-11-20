@@ -1,14 +1,11 @@
-use std::collections::HashMap;
 use std::time::Duration;
 
-use crate::{
-    linker::{ProvenanceLinker, ProvenanceLinkerArgs},
-    PROVENANCE_LIKER_NAME,
-};
+use crate::linker::{ProvenanceLinker, ProvenanceLinkerArgs};
 use neo4rs::Graph;
 use polar::get_neo_config;
-use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef, ActorStatus, SupervisionEvent};
-use tracing::{debug, info, warn};
+use provenance_common::PROVENANCE_LINKER_NAME;
+use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef, SupervisionEvent};
+use tracing::debug;
 
 // === Messages ===
 pub enum ProvenanceSupervisorMsg {
@@ -57,7 +54,7 @@ impl Actor for ProvenanceSupervisor {
         };
 
         let _ = Actor::spawn_linked(
-            Some(PROVENANCE_LIKER_NAME.to_string()),
+            Some(PROVENANCE_LINKER_NAME.to_string()),
             ProvenanceLinker,
             linker_args,
             myself.clone().into(),
@@ -70,9 +67,9 @@ impl Actor for ProvenanceSupervisor {
 
     async fn handle(
         &self,
-        myself: ActorRef<Self::Msg>,
-        msg: ProvenanceSupervisorMsg,
-        state: &mut Self::State,
+        _myself: ActorRef<Self::Msg>,
+        _msg: ProvenanceSupervisorMsg,
+        _state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         Ok(())
     }
