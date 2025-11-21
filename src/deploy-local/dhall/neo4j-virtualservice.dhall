@@ -1,0 +1,19 @@
+{ apiVersion = "networking.istio.io/v1"
+, kind = "VirtualService"
+, metadata = { name = "polar-db-vs", namespace = "polar-db" }
+, spec =
+  { gateways = [ "istio-system/public" ]
+  , hosts = [ "graph-db.local" ]
+  , http =
+    [ { match = [ { uri.prefix = "/" } ]
+      , route =
+        [ { destination =
+            { host = "polar-db-svc.polar-db.svc.cluster.local"
+            , port.number = 7473
+            }
+          }
+        ]
+      }
+    ]
+  }
+}
