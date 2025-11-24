@@ -37,7 +37,7 @@ Step 1: Copy your public key into /workspace:
 
 Step 2: Inside the container:
 
-  start-dropbear
+  ssh-start
 
 Step 3: From the host, connect with:
 
@@ -69,6 +69,9 @@ What this does:
 - Starts Dropbear automatically inside the container
 - Injects your SSH key via env var
 - Lets you connect directly via SSH or Zed
+
+When you're done with ssh, you can manage it like a normal job in your shell
+(fg %1; ctrl-c) or use 'ssh-stop' to end the process.
 
 EOF
 }
