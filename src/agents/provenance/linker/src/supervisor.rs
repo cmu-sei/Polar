@@ -1,23 +1,30 @@
-use std::collections::HashMap;
+use std::process::Output;
 use std::time::Duration;
+use std::{collections::HashMap, sync::Arc};
 
 use crate::{
     linker::{ProvenanceLinker, ProvenanceLinkerArgs},
     PROVENANCE_LIKER_NAME,
 };
+use cassini_client::{TCPClientConfig, TcpClientArgs};
 use neo4rs::Graph;
-use polar::get_neo_config;
-use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef, ActorStatus, SupervisionEvent};
+use polar::{get_neo_config, QueueOutput};
+use ractor::port::output;
+use ractor::{
+    async_trait, Actor, ActorProcessingErr, ActorRef, ActorStatus, OutputPort, SupervisionEvent,
+};
 use tracing::{debug, info, warn};
 
 // === Messages ===
 pub enum ProvenanceSupervisorMsg {
-    RestartChild(String),
     Stop,
+    Init,
 }
 // === Supervisor state ===
 pub struct ProvenanceSupervisorState {
     pub graph: Graph,
+    pub broker_client: ActorRef<cassini_client::TcpClientMessage>,
+    pub queue_output: QueueOutput,
 }
 
 // === Supervisor definition ===
@@ -36,12 +43,37 @@ impl Actor for ProvenanceSupervisor {
         _: (),
     ) -> Result<Self::State, ActorProcessingErr> {
         // get graph connection
-        //TODO: Connect to cassini and await some some schedule from configuration agent
-        //
-        match neo4rs::Graph::connect(get_neo_config()) {
-            Ok(graph) => Ok(ProvenanceSupervisorState { graph }),
-            Err(e) => Err(ActorProcessingErr::from(e)),
-        }
+
+        let graph = neo4rs::Graph::connect(get_neo_config()?)?;
+
+        let events_output = Arc::new(OutputPort::default());
+        let queue_output = Arc::new(OutputPort::default());
+
+        events_output.subscribe(myself.clone(), |_id| Some(ProvenanceSupervisorMsg::Init));
+        let client_config = TCPClientConfig::new()?;
+        // start client
+        let client_args = TcpClientArgs {
+            config: client_config,
+            registration_id: None,
+            events_output,
+            queue_output: queue_output.clone(),
+        };
+
+        let (broker_client, _) = Actor::spawn_linked(
+            Some("provenance.linker.tcp".to_string()),
+            cassini_client::TcpClientActor,
+            client_args,
+            myself.clone().into(),
+        )
+        .await?;
+
+        let s = ProvenanceSupervisorState {
+            graph,
+            broker_client,
+            queue_output,
+        };
+
+        Ok(s)
     }
 
     async fn post_start(
@@ -50,20 +82,6 @@ impl Actor for ProvenanceSupervisor {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         debug!("{myself:?} started.");
-
-        let linker_args = ProvenanceLinkerArgs {
-            graph: state.graph.clone(),
-            interval: Duration::from_secs(30),
-        };
-
-        let _ = Actor::spawn_linked(
-            Some(PROVENANCE_LIKER_NAME.to_string()),
-            ProvenanceLinker,
-            linker_args,
-            myself.clone().into(),
-        )
-        .await
-        .expect("Failed to start actor!");
 
         Ok(())
     }
@@ -74,6 +92,28 @@ impl Actor for ProvenanceSupervisor {
         msg: ProvenanceSupervisorMsg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
+        match msg {
+            ProvenanceSupervisorMsg::Init => {
+                let linker_args = ProvenanceLinkerArgs {
+                    graph: state.graph.clone(),
+                    interval: Duration::from_secs(30),
+                };
+
+                let (linker, _) = Actor::spawn_linked(
+                    Some(PROVENANCE_LIKER_NAME.to_string()),
+                    ProvenanceLinker,
+                    linker_args,
+                    myself.clone().into(),
+                )
+                .await?;
+
+                // topic is known, there is only one consumer here, so we don't use it
+                state.queue_output.subscribe(linker, |(payload, _topic)| {
+                    ProvenanceLinker::handle_message(payload)
+                });
+            }
+            _ => todo!(),
+        }
         Ok(())
     }
 

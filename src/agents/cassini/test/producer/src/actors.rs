@@ -220,15 +220,15 @@ impl Actor for ProducerAgent {
         debug!("{myself:?} starting");
 
         // define an output port for the actor to subscribe to
-        let output_port = std::sync::Arc::new(OutputPort::default());
+        let events_output = std::sync::Arc::new(OutputPort::default());
         let queue_output = std::sync::Arc::new(OutputPort::default());
 
         // subscribe self to this port
         // message doesn't matter, we just need to wait until the cassini client
         // registers to trigger the tests.
-        output_port.subscribe(myself.clone(), |_| Some(ProducerMessage::Start));
+        events_output.subscribe(myself.clone(), |_| Some(ProducerMessage::Start));
 
-        let tcp_cfg = TCPClientConfig::new();
+        let tcp_cfg = TCPClientConfig::new()?;
 
         let (client, _) = Actor::spawn_linked(
             Some(format!("{}.tcp.client", myself.get_name().unwrap())),
@@ -236,7 +236,7 @@ impl Actor for ProducerAgent {
             TcpClientArgs {
                 config: tcp_cfg,
                 registration_id: None,
-                output_port,
+                events_output,
                 queue_output,
             },
             myself.clone().into(),

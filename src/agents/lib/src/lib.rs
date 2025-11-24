@@ -1,11 +1,16 @@
+use ractor::OutputPort;
 use reqwest::{Certificate, Client, ClientBuilder};
 use serde::{Deserialize, Serialize};
 use std::io::Read;
+use std::sync::Arc;
 use tracing::{debug, info};
+
+/// wrapper definition for a ractor outputport where a raw message payload and a topic can be piped to a necessary dispatcher
+pub type QueueOutput = Arc<OutputPort<(Vec<u8>, String)>>;
 
 /// name of the agent responsible receiving provenance events related to discovery of certain artifacts.
 /// Including container images and software bill of materials.
-pub const PROVENANCE_DISCOVERY_TOPIC: &str = "polar.provenance.discovery";
+pub const PROVENANCE_DISCOVERY_TOPIC: &str = "polar.provenance.resolver";
 pub const PROVENANCE_LINKER_TOPIC: &str = "polar.provenance.linker";
 
 pub const DISPATCH_ACTOR: &str = "DISPATCH";
@@ -111,8 +116,6 @@ pub enum DispatcherMessage {
 }
 
 pub fn init_logging() {
-    let dir = tracing_subscriber::filter::Directive::from(tracing::Level::DEBUG);
-
     use std::io::stderr;
     use std::io::IsTerminal;
     use tracing_glog::Glog;
@@ -127,11 +130,7 @@ pub fn init_logging() {
         .event_format(Glog::default().with_timer(tracing_glog::LocalTime::default()))
         .fmt_fields(GlogFields::default().compact());
 
-    let filter = vec![dir]
-        .into_iter()
-        .fold(EnvFilter::from_default_env(), |filter, directive| {
-            filter.add_directive(directive)
-        });
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 
     let subscriber = Registry::default().with(filter).with(fmt);
     tracing::subscriber::set_global_default(subscriber).expect("to set global subscriber");
@@ -172,20 +171,16 @@ pub fn get_web_client() -> Client {
 /// GRAPH_USER - the username to authenticate with the database
 /// GRAPH_ENDPOINT - endpoint of the database
 /// GRAPH_CA_CERT - an optional proxy CA certificate if needed to connect to the neo4j instance.
-pub fn get_neo_config() -> neo4rs::Config {
-    let database_name = std::env::var("GRAPH_DB")
-        .expect("Expected to get a neo4j database. GRAPH_DB variable not set.");
-    let neo_user = std::env::var("GRAPH_USER").expect("No GRAPH_USER value set for Neo4J.");
-    let neo_password =
-        std::env::var("GRAPH_PASSWORD").expect("No GRAPH_PASSWORD provided for Neo4J.");
-    let neo4j_endpoint = std::env::var("GRAPH_ENDPOINT").expect("No GRAPH_ENDPOINT provided.");
-    tracing::info!("Using Neo4j database at {neo4j_endpoint}");
+pub fn get_neo_config() -> Result<neo4rs::Config, ractor::ActorProcessingErr> {
+    let database_name = std::env::var("GRAPH_DB")?;
+    let neo_user = std::env::var("GRAPH_USER")?;
+    let neo_password = std::env::var("GRAPH_PASSWORD")?;
+    let neo4j_endpoint = std::env::var("GRAPH_ENDPOINT")?;
+    info!("Using Neo4j database at {neo4j_endpoint}");
 
     let config = match std::env::var("GRAPH_CA_CERT") {
         Ok(client_certificate) => {
-            tracing::info!(
-                "Found GRAPH_CA_CERT at {client_certificate}. Configuring graph client."
-            );
+            info!("Found GRAPH_CA_CERT at {client_certificate}. Configuring graph client.");
             neo4rs::ConfigBuilder::default()
                 .uri(neo4j_endpoint)
                 .user(neo_user)
@@ -208,7 +203,7 @@ pub fn get_neo_config() -> neo4rs::Config {
             .expect("Expected to build neo4rs configuration"),
     };
 
-    config
+    Ok(config)
 }
 
 /// A canonical reference to a container image

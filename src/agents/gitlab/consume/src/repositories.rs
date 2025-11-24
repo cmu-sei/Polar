@@ -158,6 +158,7 @@ impl Actor for GitlabRepositoryConsumer {
                                 // we discovered a container image tag
                                 where_is(BROKER_CLIENT_NAME.to_string()).map(|client| {
                                     // serialize and send the event
+                                    info!("Forwarding provenance event to {PROVENANCE_DISCOVERY_TOPIC}");
                                     match rkyv::to_bytes::<rkyv::rancor::Error>(&event) {
                                         Ok(payload) => {
                                             let message = TcpClientMessage::Publish {
@@ -231,11 +232,12 @@ impl Actor for GitlabRepositoryConsumer {
                             WITH t
 
                             // normalize into ImageReference
-                            MERGE (ref:ContainerImageReference {{ normalized: tag.location }})
+                            MERGE (ref:ContainerImageReference {{ normalized: t.location, digest: t.digest, created_at: t.created_at, total_size: t.total_size, media_type: t.media_type }})
                             MERGE (t)-[:IDENTIFIES]->(ref)
-
+                            WITH t
                             // optional: link back to repository
                             MATCH (r:ContainerRepository {{ path: t.repo_path }})
+                            WITH r
                             MERGE (ref)-[:CONTAINS_TAG]->(r)
                         "#
                         );
@@ -246,8 +248,6 @@ impl Actor for GitlabRepositoryConsumer {
                             error!("Failed to commit transaction to database: {}", e);
                             return Err(ActorProcessingErr::from(e));
                         }
-
-                        info!("Committed transaction to database");
                     }
                     GitlabData::ProjectPackages((project_path, packages)) => {
                         let packages_list = packages

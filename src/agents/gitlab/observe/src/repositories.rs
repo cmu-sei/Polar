@@ -36,6 +36,7 @@ use gitlab_queries::projects::{
 };
 use gitlab_schema::ContainerRepositoryID;
 use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef};
+use serde_json::from_str;
 use tracing::{debug, error, info, warn};
 
 pub struct GitlabRepositoryObserver;
@@ -78,69 +79,62 @@ impl GitlabRepositoryObserver {
         full_path: ContainerRepositoryID,
         gitlab_token: String,
         gitlab_endpoint: String,
-    ) -> Result<Vec<ContainerRepositoryTag>, String> {
+    ) -> Result<Vec<ContainerRepositoryTag>, ActorProcessingErr> {
         let op = ContainerRepositoryDetailsQuery::build(ContainerRepositoryDetailsArgs {
             id: full_path.clone(),
         });
-        debug!("Getting tags for path: {full_path}");
+        info!("Getting tags for path: {full_path}");
         debug!("{}", op.query);
 
-        match web_client
+        let response = web_client
             .post(gitlab_endpoint)
             .bearer_auth(gitlab_token)
             .json(&op)
             .send()
-            .await
-        {
-            Ok(response) => {
-                match response
-                    .json::<GraphQlResponse<ContainerRepositoryDetailsQuery>>()
-                    .await
-                {
-                    Ok(deserialized_response) => {
-                        if let Some(errors) = deserialized_response.errors {
-                            let combined = errors
-                                .into_iter()
-                                .map(|e| format!("{e:?}"))
-                                .collect::<Vec<_>>()
-                                .join("\n");
+            .await?;
 
-                            warn!("Received GraphQL errors:\n{combined}");
-                            // Return or propagate as needed, e.g.:
-                            Err(combined)
-                        } else if let Some(data) = deserialized_response.data {
-                            if let Some(details) = data.container_repository {
-                                match details.tags {
-                                    Some(connection) => {
-                                        match connection.nodes {
-                                            Some(tags) => {
-                                                let mut read_tags = Vec::new();
+        let response_text = response.text().await?;
 
-                                                for option in tags {
-                                                    if let Some(tag) = option {
-                                                        read_tags.push(tag);
-                                                    }
-                                                }
+        let deserialized_response =
+            from_str::<GraphQlResponse<ContainerRepositoryDetailsQuery>>(&response_text)?;
 
-                                                // return list
-                                                Ok(read_tags)
-                                            }
-                                            None => Err(String::from("No data found")),
-                                        }
+        if let Some(errors) = deserialized_response.errors {
+            let combined = errors
+                .into_iter()
+                .map(|e| format!("{e:?}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+
+            warn!("Received GraphQL errors:\n{combined}");
+            // Return or propagate as needed, e.g.:
+            return Err(ActorProcessingErr::from(combined));
+        } else if let Some(data) = deserialized_response.data {
+            if let Some(details) = data.container_repository {
+                match details.tags {
+                    Some(connection) => {
+                        match connection.nodes {
+                            Some(tags) => {
+                                let mut read_tags = Vec::new();
+
+                                for option in tags {
+                                    if let Some(tag) = option {
+                                        read_tags.push(tag);
                                     }
-                                    None => Err(String::from("No data found")),
                                 }
-                            } else {
-                                Err(String::from("No data found"))
+
+                                // return list
+                                Ok(read_tags)
                             }
-                        } else {
-                            Err(String::from("No data found."))
+                            None => Err(ActorProcessingErr::from("No data found")),
                         }
                     }
-                    Err(e) => Err(e.to_string()),
+                    None => Err(ActorProcessingErr::from("No data found")),
                 }
+            } else {
+                Err(ActorProcessingErr::from("No data found"))
             }
-            Err(e) => Err(e.to_string()),
+        } else {
+            Err(ActorProcessingErr::from("No data found."))
         }
     }
 }
@@ -232,7 +226,7 @@ impl Actor for GitlabRepositoryObserver {
                                                                             state.web_client.clone(),
                                                                             id,
                                                                             state.token.clone().unwrap_or_default(),
-                                                                            state.gitlab_endpoint.clone())
+                                                                            graphql_endpoint(&state.gitlab_endpoint))
                                                                             .await;
 
                                                                         match result {

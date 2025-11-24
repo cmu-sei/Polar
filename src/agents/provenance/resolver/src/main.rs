@@ -1,10 +1,22 @@
 use cassini_client::{TCPClientConfig, TcpClientActor, TcpClientArgs, TcpClientMessage};
-use oci_client::{manifest::OciManifest, secrets::RegistryAuth, Client as OciClient, Reference};
-use polar::{DispatcherMessage, ProvenanceEvent, DISPATCH_ACTOR, PROVENANCE_LINKER_TOPIC};
+use oci_client::{
+    client::{Certificate, CertificateEncoding, ClientConfig},
+    manifest::{OciImageManifest, OciManifest},
+    secrets::RegistryAuth,
+    Client as OciClient, Reference, RegistryOperation,
+};
+use polar::{
+    get_file_as_byte_vec, DispatcherMessage, ProvenanceEvent, QueueOutput, DISPATCH_ACTOR,
+    PROVENANCE_DISCOVERY_TOPIC, PROVENANCE_LINKER_TOPIC,
+};
 use provenance_common::{MessageDispatcher, RESOLVER_CLIENT_NAME, RESOLVER_SUPERVISOR_NAME};
-use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef, OutputPort};
+use ractor::{
+    async_trait, factory::queues::Queue, Actor, ActorProcessingErr, ActorRef, OutputPort,
+    SupervisionEvent,
+};
 use reqwest::Client as WebClient;
-use std::str::FromStr;
+use rkyv::Resolver;
+use std::{env, str::FromStr};
 use tracing::{debug, error, info, trace, warn};
 
 pub const BROKER_CLIENT_NAME: &str = "polar.provenance.resolver.tcp";
@@ -15,6 +27,7 @@ pub struct ResolverSupervisor;
 #[derive(Clone)]
 pub struct ResolverSupervisorState {
     cassini_client: ActorRef<TcpClientMessage>,
+    queue_output: QueueOutput,
 }
 
 #[derive(Debug, Clone)]
@@ -35,73 +48,46 @@ impl Actor for ResolverSupervisor {
     ) -> Result<Self::State, ActorProcessingErr> {
         debug!("{myself:?} starting");
 
-        let (dispatcher, _) = Actor::spawn_linked(
-            Some(DISPATCH_ACTOR.to_string()),
-            MessageDispatcher,
-            (),
-            myself.clone().into(),
-        )
-        .await
-        .map_err(|err| {
-            error!("Failed to spawn dispatcher: {}", err);
-            return ActorProcessingErr::from(err);
-        })?;
-
-        let registration_output = std::sync::Arc::new(OutputPort::default());
+        let events_output = std::sync::Arc::new(OutputPort::default());
+        let queue_output = std::sync::Arc::new(OutputPort::default());
 
         //subscribe to registration event
-        registration_output.subscribe(myself.clone(), |_registration_id| {
+        events_output.subscribe(myself.clone(), |_registration_id| {
             //TODO: feel free to store the registration id in state in case the connection dies
             // so we can reconnect and resume session
             Some(ResolverSupervisorMsg::Initialize)
         });
 
-        let queue_output = std::sync::Arc::new(OutputPort::default());
+        let config = TCPClientConfig::new()?;
 
-        // subscribe the dispatcher
-        queue_output.subscribe(dispatcher, |payload| {
-            // when we get messages off the queue, we need to deserialize it,
-            // then forward directly to the resolver.
-            // if it's NOT a provenance event, it probably isn't for us
-            // In the future, it might be some new configuration, we'll have to handle this alter.
-            // For now, though pass in an empty topic, as the dispatcher will discard it.
-            Some(DispatcherMessage::Dispatch {
-                message: payload,
-                topic: RESOLVER_CLIENT_NAME.to_string(),
-            })
-        });
-
-        let config = TCPClientConfig::new();
-
-        return match Actor::spawn_linked(
+        let (cassini_client, _) = Actor::spawn_linked(
             Some(BROKER_CLIENT_NAME.to_string()),
             TcpClientActor,
             TcpClientArgs {
                 config,
                 registration_id: None,
-                output_port: registration_output,
-                queue_output: queue_output,
+                events_output,
+                queue_output: queue_output.clone(),
             },
             myself.clone().into(),
         )
-        .await
-        {
-            Ok((client, _handle)) => {
-                let state = ResolverSupervisorState {
-                    cassini_client: client,
-                };
-                Ok(state)
-            }
-            Err(e) => Err(ActorProcessingErr::from(e)),
+        .await?;
+
+        let state = ResolverSupervisorState {
+            cassini_client,
+            queue_output,
         };
+
+        Ok(state)
     }
 
     async fn post_start(
         &self,
-        _myself: ActorRef<Self::Msg>,
-        _state: &mut Self::State,
+        myself: ActorRef<Self::Msg>,
+        state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         // Perform any post-start initialization tasks here
+
         Ok(())
     }
 
@@ -119,14 +105,42 @@ impl Actor for ResolverSupervisor {
                     cassini_client: state.cassini_client.clone(),
                 };
 
-                let (_resolver, _) = Actor::spawn_linked(
-                    Some(RESOLVER_CLIENT_NAME.to_string()),
+                let (resolver, _) = Actor::spawn_linked(
+                    Some(PROVENANCE_DISCOVERY_TOPIC.to_string()),
                     ResolverAgent,
                     args,
                     myself.clone().into(),
                 )
-                .await
-                .expect("Failed to spawn resolver agent");
+                .await?;
+
+                // subscribe the dispatcher
+                state.queue_output.subscribe(resolver, |(message, _topic)| {
+                    // when we get messages off the queue, we need to deserialize it,
+                    // then forward directly to the resolver.
+                    // if it's NOT a provenance event, it probably isn't for us
+                    // In the future, it might be some new configuration, we'll have to handle this alter.
+                    // For now, though pass in an empty topic, as the dispatcher will discard it.
+                    ResolverAgent::deserialize_payload(message)
+                });
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    async fn handle_supervisor_evt(
+        &self,
+        myself: ActorRef<Self::Msg>,
+        event: SupervisionEvent,
+        _state: &mut Self::State,
+    ) -> Result<(), ActorProcessingErr> {
+        match event {
+            SupervisionEvent::ActorFailed(name, _reason) => {
+                error!("Actor {name:?} failed! {_reason:?}");
+                myself.stop(None);
+            }
+            SupervisionEvent::ActorTerminated(name, state, reason) => {
+                warn!("Actor {name:?} terminated! {reason:?}");
             }
             _ => {}
         }
@@ -137,7 +151,25 @@ impl Actor for ResolverSupervisor {
 // --- Resolver Agent ---
 pub struct ResolverAgent;
 
+type RegistryCredentials = (String, String);
+
 impl ResolverAgent {
+    pub fn get_registry_credentials() -> Result<RegistryCredentials, ActorProcessingErr> {
+        let username = env::var("REGISTRY_USERNAME")?;
+        let password = env::var("REGISTRY_PASSWORD")?;
+
+        Ok((username, password))
+    }
+
+    pub fn deserialize_payload(payload: Vec<u8>) -> Option<ProvenanceEvent> {
+        if let Ok(event) = rkyv::from_bytes::<ProvenanceEvent, rkyv::rancor::Error>(&payload) {
+            Some(event)
+        } else {
+            warn!("Failed to deserialize message into provenance event.");
+            None
+        }
+    }
+
     fn build_oci_auth(reference: &Reference) -> RegistryAuth {
         use docker_credential::CredentialRetrievalError;
         use docker_credential::DockerCredential;
@@ -146,6 +178,7 @@ impl ResolverAgent {
             .strip_suffix('/')
             .unwrap_or_else(|| reference.resolve_registry());
 
+        debug!("Loading configuration for regisry: {server}");
         // Retrieve oci registry credentials from docker config, if no credentials are found, use anonymous auth.
         // This implie a config.json is set somewhere
         // TODO: what if I don't want to read that?
@@ -155,7 +188,7 @@ impl ResolverAgent {
             Err(CredentialRetrievalError::NoCredentialConfigured) => RegistryAuth::Anonymous,
             Err(e) => panic!("Error handling docker configuration file: {e}"),
             Ok(DockerCredential::UsernamePassword(username, password)) => {
-                debug!(username, "Found oci registry credentials");
+                debug!(username, password, "Found oci registry credentials");
                 RegistryAuth::Basic(username, password)
             }
             Ok(DockerCredential::IdentityToken(_)) => {
@@ -165,29 +198,42 @@ impl ResolverAgent {
         }
     }
 
-    async fn inspect_image(image_ref: &str) -> Result<OciManifest, ActorProcessingErr> {
+    async fn inspect_image(image_ref: &str) -> Result<OciImageManifest, ActorProcessingErr> {
+        debug!("attempting to resolve image: {image_ref}");
         // Parse the image reference, e.g., "ghcr.io/myorg/myimage:latest"
-        match oci_client::Reference::from_str(image_ref) {
-            Ok(reference) => {
-                let auth = ResolverAgent::build_oci_auth(&reference);
+        let reference = oci_client::Reference::from_str(image_ref)?;
 
-                // Create ORAS client (by default supports HTTPS and OCI registries)
-                // TODO: what if we want HTTP, or some other configurations
-                // Shouldn't we instantiate beforehand and keep it in state?
-                let client = OciClient::default();
+        let auth = ResolverAgent::build_oci_auth(&reference);
 
-                // // Retrieve the manifest descriptor for this reference
-                let (manifest, hash) = client
-                    .pull_manifest(&reference, &auth)
-                    .await
-                    .expect("Cannot pull manifest");
+        // Create ORAS client (by default supports HTTPS and OCI registries)
+        // optionally, read in a proxy cert
+        //
+        let client = match std::env::var("PROXY_CA_CERT") {
+            Ok(cert_path) => {
+                let data = get_file_as_byte_vec(&cert_path)?;
+                info!("Configuring OCI client with proxy cert found at {cert_path}");
+                let cert = Certificate {
+                    encoding: CertificateEncoding::Pem,
+                    data,
+                };
+                let client_config = ClientConfig {
+                    extra_root_certificates: vec![cert],
+                    ..ClientConfig::default()
+                };
 
-                debug!("Resolved manifest for {image_ref} with hash {hash}");
-
-                Ok(manifest)
+                OciClient::new(client_config)
             }
-            Err(e) => return Err(ActorProcessingErr::from(e)),
-        }
+            Err(_) => OciClient::default(),
+        };
+
+        client
+            .auth(&reference, &auth, RegistryOperation::Pull)
+            .await?;
+
+        let (manifest, _digest, _config) =
+            client.pull_manifest_and_config(&reference, &auth).await?;
+
+        Ok(manifest)
     }
 }
 
@@ -221,10 +267,16 @@ impl Actor for ResolverAgent {
 
     async fn post_start(
         &self,
-        _myself: ActorRef<Self::Msg>,
-        _state: &mut Self::State,
+        myself: ActorRef<Self::Msg>,
+        state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        // Perform any post-start initialization tasks here
+        //subscribe to topic on the broker
+        //
+        state.cassini_client.cast(TcpClientMessage::Subscribe(
+            myself
+                .get_name()
+                .expect("Expected actor to have been named."),
+        ))?;
         Ok(())
     }
 
@@ -236,17 +288,22 @@ impl Actor for ResolverAgent {
     ) -> Result<(), ActorProcessingErr> {
         match msg {
             ProvenanceEvent::ImageRefDiscovered { id, uri } => {
+                debug!("Received provenance event!");
                 let image_data = ResolverAgent::inspect_image(&uri).await?;
+
+                debug!("Resolved image: \n {img}", img = image_data.to_string());
+
+                let digest = image_data.config.digest;
+                let media_type = image_data.config.media_type;
 
                 // forward image data to the linker
                 let message = ProvenanceEvent::ImageRefResolved {
                     id,
-                    digest: image_data.to_string(),
-                    media_type: image_data.content_type().to_owned(),
+                    digest,
+                    media_type,
                 };
 
-                let payload = rkyv::to_bytes::<rkyv::rancor::Error>(&message)
-                    .expect("Expected to serialize message");
+                let payload = rkyv::to_bytes::<rkyv::rancor::Error>(&message)?;
 
                 state
                     .cassini_client

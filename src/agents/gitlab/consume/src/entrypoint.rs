@@ -21,8 +21,7 @@ This Software includes and/or makes use of Third-Party Software each subject to 
 DM24-0470
 */
 
-use cassini_client::TCPClientConfig;
-use gitlab_consumer::{get_neo_config, supervisor};
+use gitlab_consumer::supervisor::ConsumerSupervisor;
 use polar::init_logging;
 use ractor::Actor;
 use std::error::Error;
@@ -31,17 +30,10 @@ use std::error::Error;
 async fn main() -> Result<(), Box<dyn Error>> {
     init_logging();
 
-    let client_config = TCPClientConfig::new();
-
-    let args = supervisor::ConsumerSupervisorArgs {
-        client_config,
-        graph_config: get_neo_config(),
-    };
-
     let (_, handle) = Actor::spawn(
         Some("gitlab.supervisor.consumer".to_string()),
-        supervisor::ConsumerSupervisor,
-        args,
+        ConsumerSupervisor,
+        (),
     )
     .await
     .expect("Expected to start observer agent");

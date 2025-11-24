@@ -2,12 +2,14 @@ use cyclonedx_bom::prelude::*;
 use neo4rs::Graph;
 use neo4rs::Query;
 use polar::get_neo_config;
+use polar::ProvenanceEvent;
 use ractor::async_trait;
 use ractor::concurrency::Duration;
 use ractor::Actor;
 use ractor::ActorProcessingErr;
 use ractor::ActorRef;
 use reqwest::Client;
+use rkyv::rancor;
 use tokio::task::AbortHandle;
 use tracing::{debug, error, info, warn};
 
@@ -17,8 +19,33 @@ use crate::ArtifactType;
 /// Potential planes include build, runtime, and artifact, where semantic continuity isn't always possible.
 pub struct ProvenanceLinker;
 
-pub enum Command {
-    LinkContainerImages,
+impl ProvenanceLinker {
+    pub fn handle_message(payload: Vec<u8>) -> Option<LinkerCommand> {
+        if let Ok(event) = rkyv::from_bytes::<ProvenanceEvent, rancor::Error>(&payload) {
+            match event {
+                ProvenanceEvent::ImageRefResolved {
+                    id,
+                    digest,
+                    media_type,
+                } => Some(LinkerCommand::LinkContainerImages {
+                    id,
+                    digest,
+                    media_type,
+                }),
+                _ => todo!(),
+            }
+        } else {
+            warn!("Failed to deserialize message into provenance event.");
+            None
+        }
+    }
+}
+pub enum LinkerCommand {
+    LinkContainerImages {
+        id: String,
+        digest: String,
+        media_type: String,
+    },
     LinkPackages,
     LinkArtifacts {
         artifact_id: String,
@@ -26,11 +53,6 @@ pub enum Command {
         related_names: Vec<NormalizedString>,
         version: NormalizedString,
     },
-}
-
-pub enum ProvenanceLinkerMessage {
-    Tick(Command),
-    Backoff(Option<String>),
 }
 
 pub struct ProvenanceLinkerState {
@@ -99,7 +121,7 @@ impl ProvenanceLinker {
 
 #[async_trait]
 impl Actor for ProvenanceLinker {
-    type Msg = ProvenanceLinkerMessage;
+    type Msg = LinkerCommand;
     type State = ProvenanceLinkerState;
     type Arguments = ProvenanceLinkerArgs;
 
@@ -122,30 +144,6 @@ impl Actor for ProvenanceLinker {
         myself: ActorRef<Self::Msg>,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        tracing::info!("{:?} Starting loop", myself.get_name());
-
-        state.abort_handle = Some(
-            myself
-                .send_interval(state.interval.clone(), || {
-                    ProvenanceLinkerMessage::Tick(Command::LinkPackages)
-                })
-                .abort_handle(),
-        );
-
-        Ok(())
-    }
-
-    async fn post_stop(
-        &self,
-        myself: ActorRef<Self::Msg>,
-        state: &mut Self::State,
-    ) -> Result<(), ActorProcessingErr> {
-        if let Some(handle) = &state.abort_handle {
-            handle.abort()
-        }
-
-        tracing::info!("{myself:?} stopped successfully.");
-
         Ok(())
     }
 
@@ -158,50 +156,50 @@ impl Actor for ProvenanceLinker {
         tracing::info!("Counting actor handle message...");
 
         match message {
-            ProvenanceLinkerMessage::Tick(command) => {
-                match command {
-                    Command::LinkArtifacts {
-                        artifact_id,
-                        artifact_type,
-                        related_names,
-                        version,
-                    } => {
-                        ProvenanceLinker::link_sboms(
-                            &state.graph,
-                            artifact_id,
-                            artifact_type,
-                            related_names,
-                            version,
-                        )
-                        .await
-                        .expect("Expected to link sboms");
-                    }
-                    //TODO: Add another handler for linking package files in gtlab to container images deployed in k8s and their sboms
-                    Command::LinkContainerImages => {
-                        // Invariant: “Every observed container image in the system has a canonical reference node.”
-                        let query = "
-                            MATCH (ref:ContainerImageReference)
-                            WITH ref
-                            MATCH (tag:ContainerImageTag)
-                            WITH tag
-                            WHERE ref.normalized = tag.location
-                            MERGE (ref)<-[:IDENTIFIES]-(tag)
-                            ";
-
-                        tracing::debug!(query);
-
-                        if let Err(e) = state.graph.run(Query::new(query.to_string())).await {
-                            tracing::warn!("{e}");
-                            myself
-                                .send_message(ProvenanceLinkerMessage::Backoff(Some(e.to_string())))
-                                .expect("Expected to forward message to self");
-                        }
-                    }
-
-                    _ => todo!("Handle other commands"),
-                }
+            LinkerCommand::LinkArtifacts {
+                artifact_id,
+                artifact_type,
+                related_names,
+                version,
+            } => {
+                ProvenanceLinker::link_sboms(
+                    &state.graph,
+                    artifact_id,
+                    artifact_type,
+                    related_names,
+                    version,
+                )
+                .await
+                .expect("Expected to link sboms");
             }
-            _ => todo!("Handle backoff message"),
+            //TODO: Add another handler for linking package files in gtlab to container images deployed in k8s and their sboms
+            LinkerCommand::LinkContainerImages {
+                id,
+                digest,
+                media_type,
+            } => {
+                todo!()
+                // Invariant: “Every observed container image in the system has a canonical reference node.”
+                // let query = "
+                //     MATCH (ref:ContainerImageReference)
+                //     WITH ref
+                //     MATCH (tag:ContainerImageTag)
+                //     WITH tag
+                //     WHERE ref.normalized = tag.location
+                //     MERGE (ref)<-[:IDENTIFIES]-(tag)
+                //     ";
+
+                // tracing::debug!(query);
+
+                // if let Err(e) = state.graph.run(Query::new(query.to_string())).await {
+                //     tracing::warn!("{e}");
+                //     myself
+                //         .send_message(ProvenanceLinkerMessage::Backoff(Some(e.to_string())))
+                //         .expect("Expected to forward message to self");
+                // }
+            }
+
+            _ => todo!("Handle other commands"),
         }
         Ok(())
     }

@@ -3997,6 +3997,7 @@ name = "provenance-linker"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "cassini-client",
  "cyclonedx-bom",
  "neo4rs",
  "polar",

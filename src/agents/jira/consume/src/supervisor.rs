@@ -1,13 +1,15 @@
 use std::time::Duration;
 
-use cassini_client::{TcpClientMessage, TcpClientActor, TcpClientArgs};
+use cassini_backoff::{Backoff, ExponentialBackoff};
+use cassini_client::TCPClientConfig;
+use cassini_client::{TcpClientActor, TcpClientArgs, TcpClientMessage};
 use jira_common::dispatch::MessageDispatcher;
 use jira_common::types::JiraData;
-use jira_common::JIRA_PROJECTS_CONSUMER_TOPIC;
 use jira_common::JIRA_GROUPS_CONSUMER_TOPIC;
-use jira_common::JIRA_USERS_CONSUMER_TOPIC;
 use jira_common::JIRA_ISSUES_CONSUMER_TOPIC;
-use cassini_backoff::{Backoff, ExponentialBackoff};
+use jira_common::JIRA_PROJECTS_CONSUMER_TOPIC;
+use jira_common::JIRA_USERS_CONSUMER_TOPIC;
+use polar::DispatcherMessage;
 use polar::DISPATCH_ACTOR;
 use ractor::async_trait;
 use ractor::registry::where_is;
@@ -18,17 +20,17 @@ use ractor::ActorProcessingErr;
 use ractor::ActorRef;
 use ractor::OutputPort;
 use ractor::SupervisionEvent;
+use tokio::task::JoinHandle;
 use tracing::debug;
 use tracing::error;
 use tracing::info;
 use tracing::warn;
-use tokio::task::JoinHandle;
 
 use crate::get_neo_config;
-use crate::projects::JiraProjectConsumer;
 use crate::groups::JiraGroupConsumer;
-use crate::users::JiraUserConsumer;
 use crate::issues::JiraIssueConsumer;
+use crate::projects::JiraProjectConsumer;
+use crate::users::JiraUserConsumer;
 use crate::JiraConsumerArgs;
 use crate::BROKER_CLIENT_NAME;
 
@@ -41,11 +43,6 @@ pub struct ConsumerSupervisorState {
 pub enum ConsumerSupervisorMessage {
     /// TCP client successfully registered with the broker
     ClientRegistered(String),
-}
-
-pub struct ConsumerSupervisorArgs {
-    pub client_config: cassini_client::TCPClientConfig,
-    pub graph_config: neo4rs::Config,
 }
 
 impl ConsumerSupervisor {
@@ -94,7 +91,10 @@ impl ConsumerSupervisor {
             match spawn_result {
                 Ok(_) => break,
                 Err(_) => {
-                    warn!("Failed to start actor {actor_name}, retrying in {:?}", duration);
+                    warn!(
+                        "Failed to start actor {actor_name}, retrying in {:?}",
+                        duration
+                    );
                     tokio::time::sleep(duration).await;
                 }
             }
@@ -129,53 +129,55 @@ impl ConsumerSupervisor {
 impl Actor for ConsumerSupervisor {
     type Msg = ConsumerSupervisorMessage;
     type State = ConsumerSupervisorState;
-    type Arguments = ConsumerSupervisorArgs;
+    type Arguments = ();
 
     async fn pre_start(
         &self,
         myself: ActorRef<Self::Msg>,
-        args: ConsumerSupervisorArgs,
+        args: (),
     ) -> Result<Self::State, ActorProcessingErr> {
         debug!("{myself:?} starting");
 
-        let output_port = std::sync::Arc::new(OutputPort::default());
+        let events_output = std::sync::Arc::new(OutputPort::default());
+        let queue_output = std::sync::Arc::new(ractor::OutputPort::default());
 
+        // start dispatcher
+        let (dispatcher, _) = Actor::spawn_linked(
+            Some(DISPATCH_ACTOR.to_string()),
+            MessageDispatcher,
+            (),
+            myself.clone().into(),
+        )
+        .await?;
         //subscribe
-        output_port.subscribe(myself.clone(), |message| {
+        queue_output.subscribe(dispatcher, |(message, topic)| {
+            Some(DispatcherMessage::Dispatch { message, topic })
+        });
+
+        events_output.subscribe(myself.clone(), |message| {
             Some(ConsumerSupervisorMessage::ClientRegistered(message))
         });
 
-        match Actor::spawn_linked(
+        let client_config = TCPClientConfig::new()?;
+
+        let (_client, _) = Actor::spawn_linked(
             Some(BROKER_CLIENT_NAME.to_string()),
             TcpClientActor,
             TcpClientArgs {
-                config: args.client_config,
+                config: client_config,
                 registration_id: None,
-                output_port,
-                queue_output: std::sync::Arc::new(ractor::OutputPort::default()),
+                events_output,
+                queue_output,
             },
             myself.clone().into(),
         )
-        .await
-        {
-            Ok(_) => {
-                let state = ConsumerSupervisorState {
-                    graph_config: get_neo_config(),
-                };
+        .await?;
 
-                // start dispatcher
-                let _ = Actor::spawn_linked(
-                    Some(DISPATCH_ACTOR.to_string()),
-                    MessageDispatcher,
-                    (),
-                    myself.clone().into(),
-                )
-                .await
-                .expect("Expected to start dispatcher");
-                Ok(state)
-            }
-            Err(e) => Err(ActorProcessingErr::from(e)),
-        }
+        let state = ConsumerSupervisorState {
+            graph_config: get_neo_config(),
+        };
+
+        Ok(state)
     }
 
     async fn handle(
@@ -313,4 +315,3 @@ impl Actor for ConsumerSupervisor {
         Ok(())
     }
 }
-

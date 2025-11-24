@@ -109,18 +109,18 @@ impl Actor for SinkAgent {
         debug!("{myself:?} starting");
 
         // define an output port for the actor to subscribe to
-        let output_port = std::sync::Arc::new(OutputPort::default());
+        let events_output = std::sync::Arc::new(OutputPort::default());
         let queue_output = std::sync::Arc::new(OutputPort::default());
 
         // subscribe self to this port
-        output_port.subscribe(myself.clone(), |_| Some(SinkAgentMsg::Start));
+        events_output.subscribe(myself.clone(), |_| Some(SinkAgentMsg::Start));
 
         // subscribe to the messaging queue, when acting as a sink, messages will be deserialized and analyzed
-        queue_output.subscribe(myself.clone(), |message: Vec<u8>| {
+        queue_output.subscribe(myself.clone(), |(message, _topic)| {
             Some(SinkAgentMsg::Receive(message))
         });
 
-        let tcp_cfg = TCPClientConfig::new();
+        let tcp_cfg = TCPClientConfig::new()?;
 
         let (client, _) = Actor::spawn_linked(
             None,
@@ -128,7 +128,7 @@ impl Actor for SinkAgent {
             TcpClientArgs {
                 config: tcp_cfg,
                 registration_id: None,
-                output_port,
+                events_output,
                 queue_output,
             },
             myself.clone().into(),

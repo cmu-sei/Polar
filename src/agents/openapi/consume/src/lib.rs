@@ -19,9 +19,10 @@ pub async fn subscribe_to_topic(
         .send_message(TcpClientMessage::Subscribe(topic.clone()))
         .expect("Expected to send tcp client a message");
 
+    let config = get_neo_config().unwrap();
 
     //load neo config and connect to graph db
-    match neo4rs::Graph::connect(get_neo_config()) {
+    match neo4rs::Graph::connect(config) {
         Ok(graph) => Ok(ApiConsumerState {
             registration_id: registration_id,
             graph,

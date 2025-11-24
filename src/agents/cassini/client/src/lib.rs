@@ -42,25 +42,20 @@ pub enum RegistrationState {
 
 impl TCPClientConfig {
     /// Read filepaths from the environment and return. If we can't read these, we can't start
-    pub fn new() -> Self {
-        let client_certificate_path =
-            env::var("TLS_CLIENT_CERT").expect("Expected a value for TLS_CLIENT_CERT.");
-        let client_key_path =
-            env::var("TLS_CLIENT_KEY").expect("Expected a value for TLS_CLIENT_KEY.");
-        let ca_certificate_path =
-            env::var("TLS_CA_CERT").expect("Expected a value for TLS_CA_CERT.");
-        let broker_endpoint =
-            env::var("BROKER_ADDR").expect("Expected a valid socket address for BROKER_ADDR");
-        let server_name =
-            env::var("CASSINI_SERVER_NAME").expect("Expected a value for CASSINI_SERVER_NAME");
+    pub fn new() -> Result<Self, ActorProcessingErr> {
+        let client_certificate_path = env::var("TLS_CLIENT_CERT")?;
+        let client_key_path = env::var("TLS_CLIENT_KEY")?;
+        let ca_certificate_path = env::var("TLS_CA_CERT")?;
+        let broker_endpoint = env::var("BROKER_ADDR")?;
+        let server_name = env::var("CASSINI_SERVER_NAME")?;
 
-        TCPClientConfig {
+        Ok(TCPClientConfig {
             broker_endpoint,
             server_name,
             ca_certificate_path,
             client_certificate_path,
             client_key_path,
-        }
+        })
     }
 }
 
@@ -98,16 +93,17 @@ pub struct TcpClientState {
     reader: Option<ReadHalf<TlsStream<TcpStream>>>, // Use Option to allow taking ownership
     registration: RegistrationState,
     client_config: Arc<ClientConfig>,
-    output_port: Arc<OutputPort<String>>,
-    queue_output: Arc<OutputPort<Vec<u8>>>,
+    events_output: Arc<OutputPort<String>>,
+    /// Output port where message payloads and the topic it came from is piped to a dispatcher
+    queue_output: Arc<OutputPort<(Vec<u8>, String)>>,
     abort_handle: Option<AbortHandle>, // abort handle switch for the stream read loop
 }
 
 pub struct TcpClientArgs {
     pub config: TCPClientConfig,
     pub registration_id: Option<String>,
-    pub output_port: Arc<OutputPort<String>>,
-    pub queue_output: Arc<OutputPort<Vec<u8>>>,
+    pub events_output: Arc<OutputPort<String>>,
+    pub queue_output: Arc<OutputPort<(Vec<u8>, String)>>,
 }
 
 /// TCP client actor
@@ -242,7 +238,7 @@ impl Actor for TcpClientActor {
             writer: None,
             registration,
             client_config: Arc::new(client_config),
-            output_port: args.output_port,
+            events_output: args.events_output,
             queue_output: args.queue_output,
             abort_handle: None,
         };
@@ -322,7 +318,7 @@ impl Actor for TcpClientActor {
                                                 } => {
                                                     //new message on topic
                                                     if result.is_ok() {
-                                                        cloned_queue_out.send(payload);
+                                                        cloned_queue_out.send((payload, topic));
                                                     } else {
                                                         warn!("Failed to publish message to topic: {topic}");
                                                     }
@@ -433,7 +429,7 @@ impl Actor for TcpClientActor {
                     registration_id: registration_id.clone(),
                 };
                 // emit event
-                state.output_port.send(registration_id);
+                state.events_output.send(registration_id);
             }
 
             // ignore all other messages while unregistered.
