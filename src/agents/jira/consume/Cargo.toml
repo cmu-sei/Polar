@@ -35,7 +35,6 @@ neo4rs = { workspace = true }
 cassini-backoff = { workspace = true }
 
 # Cassini internal crates
-cassini-broker = { path = "../../cassini/broker" }
 cassini-client = { path = "../../cassini/client" }
 cassini-types  = { path = "../../cassini/types" }
 

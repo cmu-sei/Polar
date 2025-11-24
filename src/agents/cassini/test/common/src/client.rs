@@ -1,27 +1,28 @@
-use harness_common::*;
-use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef, OutputPort};
+use ractor::{Actor, ActorProcessingErr, ActorRef, OutputPort, async_trait};
 use rkyv::deserialize;
 use rkyv::rancor::Error;
+use rustls::ClientConfig;
 use rustls::client::WebPkiServerVerifier;
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
-use rustls::ClientConfig;
 use std::env;
 use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
-use tokio::io::{split, AsyncReadExt, BufWriter, ReadHalf, WriteHalf};
+use tokio::io::{AsyncReadExt, BufWriter, ReadHalf, WriteHalf, split};
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 use tokio::task::AbortHandle;
-use tokio_rustls::client::TlsStream;
 use tokio_rustls::TlsConnector;
+use tokio_rustls::client::TlsStream;
 use tracing::{debug, error, info, warn};
+
+use crate::{ArchivedHarnessControllerMessage, HarnessControllerMessage};
 
 pub const UNEXPECTED_DISCONNECT: &str = "UNEXPECTED_DISCONNECT";
 
 ///
 /// A base configuration for a TCP Client actor
-pub struct SinkClientConfig {
+pub struct HarnessClientConfig {
     pub sink_endpoint: String,
     pub server_name: String,
     pub ca_certificate_path: String,
@@ -29,7 +30,7 @@ pub struct SinkClientConfig {
     pub client_key_path: String,
 }
 
-impl SinkClientConfig {
+impl HarnessClientConfig {
     /// Read filepaths from the environment and return. If we can't read these, we can't start
     pub fn new() -> Self {
         let client_certificate_path =
@@ -43,7 +44,7 @@ impl SinkClientConfig {
         let server_name =
             env::var("SINK_SERVER_NAME").expect("Expected a value for SINK_SERVER_NAME");
 
-        SinkClientConfig {
+        HarnessClientConfig {
             sink_endpoint,
             server_name,
             ca_certificate_path,
@@ -53,37 +54,36 @@ impl SinkClientConfig {
     }
 }
 
-pub struct SinkClientArgs {
-    pub config: SinkClientConfig,
-    pub output_port: Arc<OutputPort<ProducerMessage>>,
+pub struct HarnessClientArgs {
+    pub config: HarnessClientConfig,
 }
 
 /// Actor state for the TCP client
-pub struct SinkClientState {
+pub struct HarnessClientState {
     bind_addr: String,
     server_name: String,
     writer: Option<Arc<Mutex<BufWriter<WriteHalf<TlsStream<TcpStream>>>>>>,
     reader: Option<ReadHalf<TlsStream<TcpStream>>>, // Use Option to allow taking ownership
-    output_port: Arc<OutputPort<ProducerMessage>>,
+    // output_port: Arc<OutputPort<HarnessControllerMessage>>,
     abort_handle: Option<AbortHandle>, // abort handle switch for the stream read loop
     client_config: Arc<ClientConfig>,  // tls client configuration
 }
 
 /// Messages handled by the TCP client actor
 #[derive(Debug)]
-pub enum SinkClientMessage {
-    Send(SinkCommand),
+pub enum HarnessClientMessage {
+    Send(HarnessControllerMessage),
     // Disconnect,
 }
 
 /// TCP client actor
-pub struct SinkClient;
+pub struct HarnessClient;
 
-impl SinkClient {
+impl HarnessClient {
     /// Send a payload to the sink over the wire.
     pub async fn send_message(
-        message: SinkCommand,
-        state: &mut SinkClientState,
+        message: HarnessControllerMessage,
+        state: &mut HarnessClientState,
     ) -> Result<(), Box<dyn std::error::Error>> {
         match rkyv::to_bytes::<Error>(&message) {
             Ok(bytes) => {
@@ -121,15 +121,15 @@ impl SinkClient {
 }
 
 #[async_trait]
-impl Actor for SinkClient {
-    type Msg = SinkClientMessage;
-    type State = SinkClientState;
-    type Arguments = SinkClientArgs;
+impl Actor for HarnessClient {
+    type Msg = HarnessClientMessage;
+    type State = HarnessClientState;
+    type Arguments = HarnessClientArgs;
 
     async fn pre_start(
         &self,
         _: ActorRef<Self::Msg>,
-        args: SinkClientArgs,
+        args: HarnessClientArgs,
     ) -> Result<Self::State, ActorProcessingErr> {
         info!("Starting TCP Client ");
         // install default crypto provider
@@ -171,13 +171,12 @@ impl Actor for SinkClient {
             .with_client_auth_cert(certs, private_key)
             .unwrap();
 
-        let state = SinkClientState {
+        let state = HarnessClientState {
             bind_addr: args.config.sink_endpoint,
             server_name: args.config.server_name,
             reader: None,
             writer: None,
             client_config: Arc::new(config),
-            output_port: args.output_port,
             abort_handle: None,
         };
 
@@ -212,7 +211,6 @@ impl Actor for SinkClient {
                             state.reader.take().expect("Reader already taken!"),
                         );
 
-                        let cloned_output_port = state.output_port.clone();
                         //start listening
                         let abort_handle = tokio::spawn(async move {
                             let mut buf_reader = tokio::io::BufReader::new(reader);
@@ -221,16 +219,23 @@ impl Actor for SinkClient {
                                 if incoming_msg_length > 0 {
                                     let mut buffer = vec![0; incoming_msg_length as usize];
                                     if let Ok(_) = buf_reader.read_exact(&mut buffer).await {
-                                        let archived =
-                                            rkyv::access::<ArchivedProducerMessage, Error>(
-                                                &buffer[..],
-                                            )
-                                            .unwrap();
 
-                                        if let Ok(message) =
-                                            deserialize::<ProducerMessage, Error>(archived)
-                                        {
-                                            cloned_output_port.send(message);
+                                        match rkyv::access::<ArchivedHarnessControllerMessage, Error>(&buffer[..]) {
+                                            Ok(archived) => {
+                                                // deserialize back to the original type
+                                                if let Ok(deserialized) =
+                                                    deserialize::<HarnessControllerMessage, Error>(archived)
+                                                {
+                                                    myself.try_get_supervisor().map(|service| {
+                                                        service
+                                                            .send_message(deserialized)
+                                                            .expect("Expected to forward command upwards");
+                                                    });
+                                                }
+                                            }
+                                            Err(e) => {
+                                                warn!("Failed to parse message: {e}");
+                                            }
                                         }
                                     }
                                 }
@@ -275,8 +280,8 @@ impl Actor for SinkClient {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
-            SinkClientMessage::Send(command) => {
-                SinkClient::send_message(command, state)
+            HarnessClientMessage::Send(command) => {
+                HarnessClient::send_message(command, state)
                     .await
                     .expect("Expected to send message successfully");
             }

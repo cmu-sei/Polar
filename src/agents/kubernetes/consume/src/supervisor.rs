@@ -1,5 +1,6 @@
 use cassini_client::*;
 use kube_common::MessageDispatcher;
+use polar::DispatcherMessage;
 use polar::{get_neo_config, DISPATCH_ACTOR};
 use ractor::async_trait;
 use ractor::Actor;
@@ -26,64 +27,67 @@ pub enum SupervisorMessage {
     ClientRegistered(String),
 }
 
-pub struct ClusterConsumerSupervisorArgs {
-    pub client_config: cassini_client::TCPClientConfig,
-    pub graph_config: neo4rs::Config,
-}
+// pub struct ClusterConsumerSupervisorArgs {
+//     pub client_config: cassini_client::TCPClientConfig,
+//     pub graph_config: neo4rs::Config,
+// }
 
 #[async_trait]
 impl Actor for ClusterConsumerSupervisor {
     type Msg = SupervisorMessage;
     type State = ClusterConsumerSupervisorState;
-    type Arguments = ClusterConsumerSupervisorArgs;
+    type Arguments = ();
 
     async fn pre_start(
         &self,
         myself: ActorRef<Self::Msg>,
-        args: ClusterConsumerSupervisorArgs,
+        args: (),
     ) -> Result<Self::State, ActorProcessingErr> {
         debug!("{myself:?} starting");
 
-        let output_port = std::sync::Arc::new(ractor::OutputPort::default());
+        let graph_config = get_neo_config()?;
+        let events_output = std::sync::Arc::new(ractor::OutputPort::default());
+        let queue_output = std::sync::Arc::new(ractor::OutputPort::default());
 
-        output_port.subscribe(myself.clone(), |message| {
+        let (dispatcher, _) = Actor::spawn_linked(
+            Some(DISPATCH_ACTOR.to_string()),
+            MessageDispatcher,
+            (),
+            myself.clone().into(),
+        )
+        .await?;
+
+        //subscribe dispatcher
+        //
+        queue_output.subscribe(dispatcher, |(payload, topic)| {
+            Some(DispatcherMessage::Dispatch {
+                message: payload,
+                topic,
+            })
+        });
+
+        events_output.subscribe(myself.clone(), |message| {
             Some(SupervisorMessage::ClientRegistered(message))
         });
 
-        match Actor::spawn_linked(
+        let client_config = TCPClientConfig::new()?;
+
+        let (_client, _) = Actor::spawn_linked(
             Some(BROKER_CLIENT_NAME.to_string()),
             TcpClientActor,
             TcpClientArgs {
-                config: args.client_config,
+                config: client_config,
                 registration_id: None,
-                output_port,
-                queue_output: std::sync::Arc::new(ractor::OutputPort::default()),
+                events_output,
+                queue_output: queue_output.clone(),
             },
             myself.clone().into(),
         )
-        .await
-        {
-            Ok(_) => {
-                let state = ClusterConsumerSupervisorState {
-                    graph_config: get_neo_config(),
-                };
+        .await?;
 
-                let _ = Actor::spawn_linked(
-                    Some(DISPATCH_ACTOR.to_string()),
-                    MessageDispatcher,
-                    (),
-                    myself.clone().into(),
-                )
-                .await
-                .expect("Expected to start dispatcher");
+        let state = ClusterConsumerSupervisorState { graph_config };
 
-                Ok(state)
-            }
-            Err(e) => {
-                error!("{e}");
-                Err(ActorProcessingErr::from(e))
-            }
-        }
+        Ok(state)
     }
 
     async fn handle(

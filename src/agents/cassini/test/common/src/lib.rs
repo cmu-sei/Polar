@@ -1,6 +1,13 @@
 use rkyv::{Archive, Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+pub mod client;
+
+pub enum ConnectionState {
+    NotContacted,
+    Registered { client_id: String },
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, Archive, serde::Serialize, serde::Deserialize)]
 pub struct TestPlan {
     pub producers: Vec<ProducerConfig>,
@@ -23,17 +30,21 @@ pub struct ProducerConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Archive)]
-pub enum SinkCommand {
-    HealthCheck,
-    TestPlan(TestPlan), // whole plan or subset
-    Stop,               // tell sink to stop
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Archive)]
-pub enum ProducerMessage {
-    Ready, // Producer has registered with broker
-    Error { reason: String },
-    ShutdownAck, // Sent to the client to signal it to shutdownn
+pub enum HarnessControllerMessage {
+    /// Message sent to clients to give them a token to id themselves by, mostly for convenience
+    ClientRegistered(String),
+    TestPlanRequest {
+        client_id: String,
+    },
+    TestPlan {
+        plan: TestPlan,
+    },
+    Error {
+        reason: String,
+    },
+    /// sent when a serivce receives a shutdown, allowing the harness to finish and do cleanup tasks
+    ShutdownAck,
+    Shutdown, // stop a service
 }
 
 ///A general message envelope that gets exchanged between the sink and producer.

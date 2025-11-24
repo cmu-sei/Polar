@@ -1,24 +1,18 @@
-use kube_observer::supervisor::{ClusterObserverSupervisor, ClusterObserverSupervisorArgs};
+use cassini_client::TCPClientConfig;
+use kube_observer::supervisor::ClusterObserverSupervisor;
 use ractor::Actor;
 use tracing::error;
-use cassini_client::TCPClientConfig;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     polar::init_logging();
 
-    // Infer the runtime environment and try to create a Kubernetes Client
-    let cassini_client_config = TCPClientConfig::new();
-
-    let args = ClusterObserverSupervisorArgs {
-        cassini_client_config,
-    };
-
     // Start kubernetes supervisor
+    // TODO: REMOVE THIS WHENEVER WE WANT TO OBSERVE MORE CLUSTERS AT ONCE
     match Actor::spawn(
         Some("kubernetes.minikube.observer.supervisor".to_string()),
         ClusterObserverSupervisor,
-        args,
+        (),
     )
     .await
     {

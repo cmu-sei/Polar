@@ -8,7 +8,8 @@ use ractor::{
     async_trait, registry::where_is, Actor, ActorProcessingErr, ActorRef, SupervisionEvent,
 };
 use std::collections::VecDeque;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, trace, trace_span, warn};
+use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 pub const SUBSCRIBER_NOT_FOUND_TXT: &str = "Subscriber not found!";
 
@@ -73,10 +74,22 @@ impl Actor for SubscriberManager {
             BrokerMessage::RegistrationRequest {
                 registration_id,
                 client_id,
+                trace_ctx,
             } => {
+                let span =
+                    trace_span!("subscriber_manager.handle_client_reregistration", %client_id);
+                if let Some(ctx) = trace_ctx {
+                    span.set_parent(ctx.clone()).ok();
+                }
+                let _g = span.enter();
+
+                trace!(
+                    "Subscriber manager for received registration request for client {client_id}"
+                );
+
                 //find all subscribers for a given registration id
                 registration_id.map(|registration_id: String| {
-                    tracing::info!("Gathering Subscriptions for session {registration_id}");
+                    info!("Gathering Subscriptions for session {registration_id}");
                     if let Some(_) = where_is(registration_id.clone()) {
                         let cloned_session_id = registration_id.clone();
                         for subscriber in myself.get_children()
@@ -87,7 +100,7 @@ impl Actor for SubscriberManager {
                             cloned_session_id.eq(sub_id)
                             }) {
                             //notify so they dump unsent messages
-                            if let Err(e) = subscriber.send_message(BrokerMessage::RegistrationRequest { registration_id: Some(registration_id.clone()), client_id: client_id.clone()}) {
+                            if let Err(e) = subscriber.send_message(BrokerMessage::RegistrationRequest { registration_id: Some(registration_id.clone()), client_id: client_id.clone(), trace_ctx: Some(span.context())}) {
                                 warn!("{REGISTRATION_REQ_FAILED_TXT}: {SUBSCRIBER_NOT_FOUND_TXT}: {e}")
                             }
                         }
@@ -96,7 +109,7 @@ impl Actor for SubscriberManager {
                         warn!("{err_msg}");
 
                         if let Some(listener) = where_is(client_id.clone()) {
-                            listener.send_message(BrokerMessage::RegistrationResponse { registration_id: Some(registration_id.clone()), client_id: client_id.clone(), success: false, error: Some(err_msg.clone()) })
+                            listener.send_message(BrokerMessage::RegistrationResponse { client_id: client_id.clone(), result: Err(err_msg.clone()), trace_ctx: Some(span.context())})
                             .map_err(|e| {
                                 warn!("{err_msg}: {e}");
                             }).unwrap()
@@ -106,68 +119,71 @@ impl Actor for SubscriberManager {
                 });
             }
             BrokerMessage::Subscribe {
-                reply,
                 registration_id,
                 topic,
+                trace_ctx,
             } => {
+                let span =
+                    trace_span!("subscriber_manager.handle_subscribe", %registration_id, %topic);
+                trace_ctx.map(|ctx| span.set_parent(ctx));
+                let _g = span.enter();
+
+                trace!("Subscriber manager received subscribe command.");
+
                 let subscriber_id = get_subscriber_name(&registration_id, &topic);
                 // start new subscriber actor for session
-                match Actor::spawn_linked(
+
+                // drop the span guard here. We're through
+                drop(_g);
+                Actor::spawn_linked(
                     Some(subscriber_id.clone()),
                     SubscriberAgent,
                     (),
                     myself.clone().into(),
                 )
                 .await
-                {
-                    Ok(_) => {
-                        if let Err(e) = reply.send(Ok(subscriber_id)) {
-                            error!("{SUBSCRIBE_REQUEST_FAILED_TXT}, {e}");
-                            myself.stop(None);
-                        }
-                    }
-                    Err(e) => {
-                        if let Err(e) = reply.send(Err(e.to_string())) {
-                            error!("{SUBSCRIBE_REQUEST_FAILED_TXT}, Couldn't communicate with broker, {e}");
-                            myself.stop(None);
-                        }
-                    }
-                }
+                .ok();
             }
 
             BrokerMessage::UnsubscribeRequest {
                 registration_id,
                 topic,
+                trace_ctx,
             } => {
-                match registration_id {
-                    Some(id) => {
-                        let subscriber_name = format!("{id}:{topic}");
-                        if let Some(subscriber) = where_is(subscriber_name.clone()) {
-                            subscriber.stop(Some("UNSUBSCRIBED".to_string()));
-                            //send ack
-                            let id_clone = id.clone();
-                            where_is(id).map_or_else(
-                                || error!("Could not find session for client: {id_clone}"),
-                                |session| {
-                                    session
-                                        .send_message(BrokerMessage::UnsubscribeAcknowledgment {
-                                            registration_id: id_clone.clone(),
-                                            topic,
-                                            result: Ok(()),
-                                        })
-                                        .expect("expected to send ack to session");
-                                },
-                            );
-                        } else {
-                            warn!("Session agent {id} not subscribed to topic {topic}");
-                        }
-                    }
-                    None => todo!(),
+                let span = trace_span!("subscriber_manager.handle_unsubscribe_request", %registration_id, %topic);
+                trace_ctx.map(|ctx| span.set_parent(ctx));
+                let _g = span.enter();
+
+                trace!("subscriber maanger received unsubscribe request.");
+
+                let subscriber_name = format!("{registration_id}:{topic}");
+                if let Some(subscriber) = where_is(subscriber_name.clone()) {
+                    subscriber.stop(Some("UNSUBSCRIBED".to_string()));
+                    //send ack
+
+                    where_is(registration_id.clone()).map(|session| {
+                        session
+                            .send_message(BrokerMessage::UnsubscribeAcknowledgment {
+                                registration_id,
+                                topic,
+                                result: Ok(()),
+                            })
+                            .expect("expected to send ack to session");
+                    });
+                } else {
+                    warn!("Session agent {registration_id} not subscribed to topic {topic}");
                 }
             }
             BrokerMessage::DisconnectRequest {
-                registration_id, ..
+                client_id,
+                registration_id,
+                trace_ctx,
+                ..
             } => {
+                let span = trace_span!("subscriber_manager.handle_disconnect_request", %client_id );
+                trace_ctx.map(|ctx| span.set_parent(ctx));
+                let _g = span.enter();
+
                 if let Some(registration_id) = registration_id {
                     SubscriberManager::forget_subscriptions(
                         registration_id,
@@ -181,15 +197,11 @@ impl Actor for SubscriberManager {
             BrokerMessage::TimeoutMessage {
                 registration_id, ..
             } => {
-                if let Some(registration_id) = registration_id {
-                    SubscriberManager::forget_subscriptions(
-                        registration_id,
-                        myself.clone(),
-                        Some(TIMEOUT_REASON.to_string()),
-                    );
-                } else {
-                    warn!(" Failed to process timeout request! registration_id missing!")
-                }
+                SubscriberManager::forget_subscriptions(
+                    registration_id,
+                    myself.clone(),
+                    Some(TIMEOUT_REASON.to_string()),
+                );
             }
             _ => warn!(UNEXPECTED_MESSAGE_STR, "{message:?}"),
         }
@@ -275,8 +287,18 @@ impl Actor for SubscriberAgent {
     ) -> Result<(), ActorProcessingErr> {
         match message {
             BrokerMessage::RegistrationRequest {
-                registration_id, ..
+                registration_id,
+                client_id,
+                trace_ctx,
             } => {
+                let span = trace_span!("subscriber.handle_registration_request", %client_id);
+                if let Some(ctx) = trace_ctx {
+                    span.set_parent(ctx).ok();
+                }
+                let _enter = span.enter();
+
+                trace!("Subscriber actor received registration request for client {client_id}");
+
                 //A client reconnected, push messages built up in DLQ to client
                 if let Some(id) = registration_id {
                     match where_is(id.clone()) {
@@ -286,6 +308,7 @@ impl Actor for SubscriberAgent {
                                 if let Err(e) = session.send_message(BrokerMessage::PushMessage {
                                     payload: msg.to_owned(),
                                     topic: state.topic.clone(),
+                                    trace_ctx: Some(span.context()),
                                 }) {
                                     warn!("Failed to forward message to subscriber! {e} Ending subscription");
                                     myself.stop(None);
@@ -298,23 +321,40 @@ impl Actor for SubscriberAgent {
                     }
                 }
             }
-            BrokerMessage::PublishResponse { topic, payload, .. } => {
-                tracing::debug!(
-                    "New message on topic: {topic}, forwarding to session: {}",
+            BrokerMessage::PublishResponse {
+                topic,
+                payload,
+                trace_ctx,
+                ..
+            } => {
+                let span = trace_span!("subscriber.dequeue_messages" ,%topic);
+                if let Some(ctx) = trace_ctx {
+                    span.set_parent(ctx).ok();
+                }
+                let _enter = span.enter();
+
+                trace!("Subscriber actor received publish response for topic \"{topic}\"");
+
+                debug!(
+                    "New message on topic: \"{topic}\", forwarding to session: {}",
                     state.registration_id
                 );
+
                 if let Some(session) = where_is(state.registration_id.clone()) {
                     //  Forward the message, if we get an error message back from the session later.
                     //  DLQ the message for later
                     //  if we fail to send a message to a session, it's probably dead, either because of a timeout or disconnect, either way, message can drop
-                    if let Err(e) =
-                        session.send_message(BrokerMessage::PushMessage { payload, topic })
-                    {
+                    if let Err(e) = session.send_message(BrokerMessage::PushMessage {
+                        payload,
+                        topic,
+                        trace_ctx: Some(span.context()),
+                    }) {
                         warn!("Failed to forward message to subscirber! {e} Ending subscription");
                         myself.stop(None);
                     }
                 } else {
-                    error!("{PUBLISH_REQ_FAILED_TXT}: {SESSION_NOT_FOUND_TXT}");
+                    warn!("{SESSION_NOT_FOUND_TXT} Ending subscription");
+                    myself.stop(None);
                 }
             }
             BrokerMessage::PushMessageFailed { payload } => {

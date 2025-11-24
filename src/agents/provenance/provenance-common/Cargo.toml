@@ -1,0 +1,10 @@
+[package]
+name = "provenance-common"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+ractor = {version = "0.15.8", features = ["async-trait"]}
+rkyv = { workspace = true}
+tracing = "0.1.41"
+polar = { path = "../../lib"}

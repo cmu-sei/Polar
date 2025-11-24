@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use cassini_backoff::{Backoff, ExponentialBackoff};
 use cassini_client::*;
 use common::dispatch::MessageDispatcher;
 use common::types::GitlabData;
@@ -10,7 +11,7 @@ use common::PROJECTS_CONSUMER_TOPIC;
 use common::REPOSITORY_CONSUMER_TOPIC;
 use common::RUNNERS_CONSUMER_TOPIC;
 use common::USER_CONSUMER_TOPIC;
-use cassini_backoff::{Backoff, ExponentialBackoff};
+use polar::DispatcherMessage;
 use polar::DISPATCH_ACTOR;
 use ractor::async_trait;
 use ractor::registry::where_is;
@@ -26,7 +27,6 @@ use tracing::error;
 use tracing::info;
 use tracing::warn;
 
-use crate::get_neo_config;
 use crate::groups::GitlabGroupConsumer;
 use crate::meta::MetaConsumer;
 use crate::pipelines::GitlabPipelineConsumer;
@@ -36,6 +36,7 @@ use crate::runners::GitlabRunnerConsumer;
 use crate::users::GitlabUserConsumer;
 use crate::GitlabConsumerArgs;
 use crate::BROKER_CLIENT_NAME;
+use polar::get_neo_config;
 
 pub struct ConsumerSupervisor;
 
@@ -48,15 +49,12 @@ pub enum ConsumerSupervisorMessage {
     ClientRegistered(String),
 }
 
-pub struct ConsumerSupervisorArgs {
-    pub client_config: cassini_client::TCPClientConfig,
-    pub graph_config: neo4rs::Config,
-}
+// pub struct ConsumerSupervisorArgs;
 
 impl ConsumerSupervisor {
     /// Helper to try restarting an actor at least 10 times using an exponential backoff strategy.
     /// TODO: This function doesn't seem to be helping in its current implementation. Restarts aren't real restarts.
-        /// Helper to try restarting an actor at least 10 times using an exponential backoff strategy.
+    /// Helper to try restarting an actor at least 10 times using an exponential backoff strategy.
     async fn restart_actor(
         actor_name: String,
         supervisor: ActorRef<ConsumerSupervisorMessage>,
@@ -166,66 +164,71 @@ impl ConsumerSupervisor {
 impl Actor for ConsumerSupervisor {
     type Msg = ConsumerSupervisorMessage;
     type State = ConsumerSupervisorState;
-    type Arguments = ConsumerSupervisorArgs;
+    type Arguments = ();
 
     async fn pre_start(
         &self,
         myself: ActorRef<Self::Msg>,
-        args: ConsumerSupervisorArgs,
+        _args: (),
     ) -> Result<Self::State, ActorProcessingErr> {
         debug!("{myself:?} starting");
 
-        let output_port = std::sync::Arc::new(OutputPort::default());
-
+        let events_output = std::sync::Arc::new(OutputPort::default());
+        let queue_output = std::sync::Arc::new(ractor::OutputPort::default());
         //subscribe
-        output_port.subscribe(myself.clone(), |message| {
+        events_output.subscribe(myself.clone(), |message| {
             Some(ConsumerSupervisorMessage::ClientRegistered(message))
         });
 
-        match Actor::spawn_linked(
+        let client_config = TCPClientConfig::new()?;
+
+        let (_broker_client, _) = Actor::spawn_linked(
             Some(BROKER_CLIENT_NAME.to_string()),
             TcpClientActor,
             TcpClientArgs {
-                config: args.client_config,
+                config: client_config,
                 registration_id: None,
-                output_port,
-                queue_output: std::sync::Arc::new(ractor::OutputPort::default()),
+                events_output,
+                queue_output: queue_output.clone(),
             },
             myself.clone().into(),
         )
-        .await
-        {
-            Ok(_) => {
-                let state = ConsumerSupervisorState {
-                    graph_config: get_neo_config(),
-                };
+        .await?;
 
-                // start dispatcher
-                let _ = Actor::spawn_linked(
-                    Some(DISPATCH_ACTOR.to_string()),
-                    MessageDispatcher,
-                    (),
-                    myself.clone().into(),
-                )
-                .await
-                .expect("Expected to start dispatcher");
-                Ok(state)
-            }
-            Err(e) => Err(ActorProcessingErr::from(e)),
-        }
+        let graph_config = get_neo_config()?;
+        let state = ConsumerSupervisorState {
+            graph_config: graph_config,
+        };
+        // start dispatcher
+        let (dispatcher, _) = Actor::spawn_linked(
+            Some(DISPATCH_ACTOR.to_string()),
+            MessageDispatcher,
+            (),
+            myself.clone().into(),
+        )
+        .await?;
+
+        queue_output.subscribe(dispatcher, |(payload, topic)| {
+            Some(DispatcherMessage::Dispatch {
+                message: payload,
+                topic,
+            })
+        });
+
+        Ok(state)
     }
 
     async fn handle(
         &self,
         myself: ActorRef<Self::Msg>,
         message: Self::Msg,
-        _: &mut Self::State,
+        state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
             ConsumerSupervisorMessage::ClientRegistered(registration_id) => {
                 let args = GitlabConsumerArgs {
                     registration_id,
-                    graph_config: get_neo_config(),
+                    graph_config: state.graph_config.clone(),
                 };
 
                 if let Err(e) = Actor::spawn_linked(
@@ -318,7 +321,7 @@ impl Actor for ConsumerSupervisor {
     ) -> Result<(), ActorProcessingErr> {
         match msg {
             SupervisionEvent::ActorStarted(actor_cell) => {
-                info!(
+                debug!(
                     "CONSUMER_SUPERVISOR: {0:?}:{1:?} started",
                     actor_cell.get_name(),
                     actor_cell.get_id()
@@ -328,7 +331,7 @@ impl Actor for ConsumerSupervisor {
                 // we no actors start w/o names
                 let actor_name = actor_cell.get_name().unwrap();
 
-                info!(
+                warn!(
                     "CONSUMER_SUPERVISOR: {0:?}:{1:?} terminated. {reason:?}",
                     actor_name,
                     actor_cell.get_id()
@@ -354,7 +357,7 @@ impl Actor for ConsumerSupervisor {
                 // we no actors start w/o names
                 let actor_name = actor_cell.get_name().unwrap();
 
-                warn!(
+                error!(
                     "Consumer_SUPERVISOR: {0:?}:{1:?} failed! {e:?}",
                     actor_name,
                     actor_cell.get_id()

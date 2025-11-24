@@ -1,0 +1,24 @@
+[package]
+name = "harness-controller"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+harness-common = { path = "../common" }
+ractor = { version = "0.15.8", features = ["async-trait"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1.47.1", features = ["full"] }
+cassini-client = { path = "../../client" }
+polar = { path = "../../../lib" }
+tracing = "0.1.41"
+rustls = { version = "0.23", features = ["aws-lc-rs"] }
+tokio-rustls = "0.26.4"
+rkyv = { workspace = true }
+uuid = { version = "1.18.1", features = ["v4"]}
+serde_dhall = "0.13.0"
+tokio-util = "0.7.16"
+tracing-glog = "0.4.1"
+tracing-subscriber = "0.3.20"
+
+clap = { version = "4.5.48", features = ["derive"] }

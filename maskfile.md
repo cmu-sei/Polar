@@ -2,21 +2,19 @@
 If you have [mask](https://github.com/jacobdeichert/mask) installed, you can use it to quickly perform these common operations.
 If not, consider installing it to further oxidize your life.
 
-For example, from here in the root of the project, try running `mask build agents` to quickly build the project.
+For example, from here in the root of the project, try running `mask build agents` to quickly build the cargo workspace with nix.
+this will give you all the binaries we have defined for the project.
+
+Our team primarily uses `podman` as a container runtime. So feel free to `alias` it for your favorite/compatible runtime.
 
 ## build-image
 
 ### dev
   > Builds the Polar Dev image. A contaienrized Rust development environment in case you don't want to do local development.
   ~~~sh
+  echo "Building the Polar development environment. This may take a moment."
   nix build .#containers.devContainer --show-trace
-  podman load < result
-  ~~~
-
-### ci
-  > Builds the Polar Dev image. A contaienrized Rust development environment in case you don't want to do local development.
-  ~~~sh
-  nix build .#containers.ciContainer --show-trace
+  echo "Loading the development image."
   podman load < result
   ~~~
 
@@ -24,25 +22,29 @@ For example, from here in the root of the project, try running `mask build agent
   > Build's cassini's container image
 
   ~~~sh
-  nix build --eval-system x86_64-linux --show-trace .#polarPkgs.cassini.cassiniImage
+  echo "building cassini image..."
+  nix build .#polarPkgs.cassini.cassiniImage -o cassini
+  echo "loading image..."
   podman load < result
   ~~~
 
 ### gitlab
   > builds the gitlab agents and their images
   ~~~sh
-  nix build --eval-system x86_64-linux --show-trace .#polarPkgs.gitlabAgent.observerImage -o gitlab-observer
-  nix build --eval-system x86_64-linux --show-trace .#polarPkgs.gitlabAgent.consumerImage -o gitlab-consumer
-
+  echo "Building gitlab agent images..."
+  nix build .#polarPkgs.gitlabAgent.observerImage -o gitlab-observer
+  nix build .#polarPkgs.gitlabAgent.consumerImage -o gitlab-consumer
+  echo "loading images..."
   podman load < gitlab-observer
   podman load < gitlab-consumer
   ~~~
 ### kube
   > builds the kube agents and their  images
   ~~~sh
-  nix build --eval-system x86_64-linux --show-trace .#polarPkgs.kubeAgent.kubeObserverImage -o kube-observer
-  nix build --eval-system x86_64-linux --show-trace .#polarPkgs.kubeAgent.kubeConsumerImage -o kube-consumer
-
+  echo "Building kubernetes agent images..."
+  nix build .#polarPkgs.kubeAgent.observerImage -o kube-observer
+  nix build .#polarPkgs.kubeAgent.consumerImage -o kube-consumer
+  echo "loading images..."
   podman load < kube-observer
   podman load < kube-consumer
   ~~~
@@ -50,9 +52,7 @@ For example, from here in the root of the project, try running `mask build agent
 ## start-dev
   > Enters the Polar Dev container.
 
-  The `create-user` script will set the user within the container and then
-  drop into the fish shell. Replace `/path/to/your/project` with the path to
-  your project directory. This command mounts your project directory into the
+  This command mounts your project directory into the
   container at the `/workspace` directory, allowing you to work on your
   project files within the container.
 
@@ -97,6 +97,7 @@ nix build .#polarPkgs.cassini.cassini .#polarPkgs.cassini.harnessProducer .#pola
 ## render
 
 > Uses the `render-manifests.sh` script to render all manifests in the polar/deploy repository, ensure you have the proper environment variables set.
+  See [the deployment docs](src/deploy/README.md) for details.
 
 ~~~sh
 sh scripts/render-manifests.sh src/deploy/polar manifests
@@ -109,9 +110,10 @@ sh scripts/render-manifests.sh src/deploy/polar manifests
 sh scripts/static-tools.sh --manifest-path src/agents/Cargo.toml
 ~~~
 
-## run-ci
+<!--TODO: We should bring this capability back at some point-->
+<!--## run-ci
 > runs the `gitlab-ci.sh` script to run local ci/cd ops
 
 ~~~sh
 sh scripts/gitlab-ci.sh
-~~~
+~~~-->

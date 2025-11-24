@@ -40,13 +40,12 @@ neo4rs = { workspace = true }
 common = { path = "../common" }
 tracing = "0.1.41"
 cassini-client = { path = "../../cassini/client" }
-cassini-types = { path = "../../cassini/types" }
 ractor = { version = "0.15.8", features = ["async-trait"] }
 polar = { path = "../../lib" }
 gitlab-queries = { path = "../query" }
 gitlab-schema = { path = "../schema" }
 cassini-backoff = { workspace = true }
-
+rkyv = { workspace = true }
 [[bin]]
 name = "gitlab-consumer"
 path = "src/entrypoint.rs"

@@ -18,10 +18,10 @@ The goal of the project is to provide a reliable, scalable, and secure messaging
 - **Session Management**: Clients maintain session state, such as a unique session ID, for handling subscriptions and reconnections.
 
 ### Security
-- **mTLS Communication**: 
+- **mTLS Communication**:
   - Server and client authenticate each other using certificates signed by a trusted root Certificate Authority (CA).
   - Ensures encrypted communication and prevents unauthorized connections.
-  
+
 ### Extensibility
 - **Actor Integration**: The broker is designed to work seamlessly with other actors in a Rust project, supporting custom message types and patterns.
 
@@ -38,7 +38,7 @@ The goal of the project is to provide a reliable, scalable, and secure messaging
     - *Sessions* are actors primarily responsible for communicating with all other actors in the architecture and storing additional metadata about the client connection. When a client is registered, all messages go through these actors.
 - **Subscriber Manager**: As its name suggests, this supervisor is responsible for managing subscription actors that represent all connected client subscriptions to a particular *topic*
     - *Subscribers* are actors that represent a client's subscriptions. They are responsible for actually forwarding new messages published to the session they're resposible for.
-- **Topic Manager**: This supervisor manages the actual topics the clients wish to publish messages to and read from. 
+- **Topic Manager**: This supervisor manages the actual topics the clients wish to publish messages to and read from.
     - *Topic* actors are responsible for managing the actual message queues for individual topics.
 
 
@@ -60,7 +60,7 @@ Ensure the following environment variables are set before trying to run cassini
 ```bash
 # The address the broker server will bind and listen for connections to
 # for example  127.0.0.1:8080 to listen on your host system's local port 8080
-export CASSINI_BIND_ADDR="" 
+export CASSINI_BIND_ADDR=""
 
 # The absolute file path to the ca_certificates.pem file created by TLS_GEN.
 # Used by the Rust binaries to recognize eachother through TLS
@@ -77,26 +77,29 @@ export TLS_SERVER_KEY=""
 #export TLS_CLIENT_CERT=""
 # The absolute file path to the client key - MUST BE IN PEM FORMAT
 #export TLS_CLIENT_KEY=""
+# Cassini and other agents rely on the RUST_LOG variable to configure logging verbosity
+export RUST_LOG="info"
+
+# OTLP endpoint to export logs to the jaeger UI service, if desired.
+# The broker will default to using this endpoint even if this value is unset.
+export JAEGER_OTLP_ENDPOINT="http://localhost:4318/v1/traces"
+
 ```
 
 
 ## Example Usage
 
-1. **Publish a Message**:
-   The client sends a `PublishRequest` to the broker with a topic and payload. The broker routes the message to all subscribed clients.
+**Jaeger Log Tracing**
+If you'd like to visualize logs using the Jaeger UI. Run a local container image using the command below. (feel free to use Podamn or some other preferred container runtime).
 
-2. **Subscribe to a Topic**:
-   The client sends a `SubscribeRequest` to the broker. Once subscribed, the client receives messages published to the specified topic.
+If not, no worries, the broker will run without it and spill logs to stdout.
 
-3. **Disconnect Gracefully**:
-   The client sends a `DisconnectRequest`, and the broker cleans up the associated session actor and any subscriptions associated with it.
+```bash
+podman run --rm --name jaeger -p 16686:16686 -p 4317:4317 -p 4318:4318 -p 5778:5778 -p 9411:9411 -e COLLECTOR_OTLP_ENABLED=true cr.jaegertracing.io/jaegertracing/jaeger:2.11.0
+```
 
-## Testing
 
-There is a small suite of avaialble integration tests to demonstrate how a client can interact with the message broker. To run, ensure you have generated some CA certificates using the means described
-in the documentation, and set the environment variables detailed there to valid paths.
+Run the broker server with `cargo run --bin cassini-server`
 
-**NOTE:** This suite uses a setup test called `test_init` to "unit test" the broker's initialization, and needs be run for the other tests to pass, else they will timeout and fail.
-
-You can run the tests with `cargo test` or, if you want to run the individually, you can run `cargo test -- test_init test_tcp_client_connect` for example.
-
+### Testing
+[Check out the README for our test harness](..test/README.md)

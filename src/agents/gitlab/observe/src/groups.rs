@@ -22,6 +22,7 @@
 */
 
 use ractor::concurrency::Duration;
+use serde_json::from_str;
 
 use crate::{
     graphql_endpoint, handle_backoff, init_observer_state, send_to_broker, BackoffReason, Command,
@@ -96,38 +97,51 @@ impl GitlabGroupObserver {
             .send()
             .await
         {
-            Ok(response) => match response.json::<GraphQlResponse<GroupMembersQuery>>().await {
-                Ok(deserialized) => {
-                    if let Some(errors) = deserialized.errors {
-                        let errors = errors
-                            .iter()
-                            .map(|error| error.to_string())
-                            .collect::<Vec<_>>()
-                            .join("\n");
+            Ok(response) => {
+                // extract text
+                match response.text().await {
+                    Ok(content) => {
+                        debug!("Received response: {}", content);
 
-                        error!("Failed to query instance! {errors}");
-                        return Err(errors);
+                        match from_str::<GraphQlResponse<GroupMembersQuery>>(&content) {
+                            Ok(deserialized) => {
+                                if let Some(errors) = deserialized.errors {
+                                    let errors = errors
+                                        .iter()
+                                        .map(|error| error.to_string())
+                                        .collect::<Vec<_>>()
+                                        .join("\n");
+
+                                    error!("Failed to query instance! {errors}");
+                                    return Err(errors);
+                                }
+
+                                let query = deserialized
+                                    .data
+                                    .expect("Expected there to be something here");
+                                query.group.map(|group| {
+                                    let conn = group.group_members.unwrap();
+
+                                    let data = GitlabData::GroupMembers(ResourceLink {
+                                        resource_id: group.id.clone(),
+                                        connection: conn.clone(),
+                                    });
+
+                                    send_to_broker(state, data, GROUPS_CONSUMER_TOPIC)
+                                        .map_err(|e| error!("{e}"))
+                                });
+
+                                Ok(())
+                            }
+                            Err(e) => {
+                                error!("{e}");
+                                Err(e.to_string())
+                            }
+                        }
                     }
-
-                    let query = deserialized
-                        .data
-                        .expect("Expected there to be something here");
-                    query.group.map(|group| {
-                        let conn = group.group_members.unwrap();
-
-                        let data = GitlabData::GroupMembers(ResourceLink {
-                            resource_id: group.id.clone(),
-                            connection: conn.clone(),
-                        });
-
-                        send_to_broker(state, data, GROUPS_CONSUMER_TOPIC)
-                            .map_err(|e| error!("{e}"))
-                    });
-
-                    Ok(())
+                    Err(e) => Err(e.to_string()),
                 }
-                Err(e) => Err(e.to_string()),
-            },
+            }
             Err(e) => Err(e.to_string()),
         }
     }
@@ -319,12 +333,14 @@ impl Actor for GitlabGroupObserver {
                                                                     },
                                                                 );
 
-                                                            GitlabGroupObserver::get_group_members(
+                                                            if let Err(e) = GitlabGroupObserver::get_group_members(
                                                                 state,
                                                                 get_group_members,
                                                             )
                                                             .await
-                                                            .unwrap();
+                                                            {
+                                                                return Err(ActorProcessingErr::from(e))
+                                                            }
 
                                                             let get_group_projects =
                                                                 GroupProjectsQuery::build(
@@ -335,12 +351,14 @@ impl Actor for GitlabGroupObserver {
                                                                     },
                                                                 );
 
-                                                            GitlabGroupObserver::get_group_projects(
+                                                            if let Err(e) = GitlabGroupObserver::get_group_projects(
                                                                 state,
                                                                 get_group_projects,
                                                             )
                                                             .await
-                                                            .unwrap();
+                                                            {
+                                                                return Err(ActorProcessingErr::from(e));
+                                                            }
 
                                                             let get_group_runners =
                                                                 GroupRunnersQuery::build(
@@ -351,12 +369,13 @@ impl Actor for GitlabGroupObserver {
                                                                     },
                                                                 );
 
-                                                            GitlabGroupObserver::get_group_runners(
+                                                            if let Err(e) =GitlabGroupObserver::get_group_runners(
                                                                 state,
                                                                 get_group_runners,
                                                             )
-                                                            .await
-                                                            .unwrap();
+                                                            .await {
+                                                                return Err(ActorProcessingErr::from(e));
+                                                            }
 
                                                             read_groups.push(group);
                                                         }

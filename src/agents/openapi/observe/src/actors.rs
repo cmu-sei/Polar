@@ -48,22 +48,24 @@ impl Actor for ObserverSupervisor {
         };
 
         // define an output port for the actor to subscribe to
-        let output_port = std::sync::Arc::new(OutputPort::default());
-        let queue_output = std::sync::Arc::new(OutputPort::<Vec<u8>>::default());
+        let events_output = std::sync::Arc::new(OutputPort::default());
+        let queue_output = std::sync::Arc::new(OutputPort::default());
 
         // subscribe self to this port
-        output_port.subscribe(myself.clone(), |_| {
+        events_output.subscribe(myself.clone(), |_| {
             Some(ObserverSupervisorMessage::ClientRegistered)
         });
+
+        let config = TCPClientConfig::new()?;
 
         if let Err(e) = Actor::spawn_linked(
             Some(BROKER_CLIENT_NAME.to_string()),
             TcpClientActor,
             TcpClientArgs {
-                config: TCPClientConfig::new(),
+                config,
                 registration_id: None,
-                output_port: output_port.clone(),
-                queue_output: queue_output.clone(),
+                events_output,
+                queue_output,
             },
             myself.clone().into(),
         )

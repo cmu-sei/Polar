@@ -8,9 +8,13 @@ The `render-manifests.sh` script (located under the `scripts` folder) automates 
 - **Linting and Template Verification** with Helm.
 - **Safe GitOps Deployments** by generating Helm artifacts that can be stored and deployed consistently.
 
+## On Kubernetes
 
 ### GitOps & Immutability
 To maintain immutability, we commit the kubernetes manifests to a versioned, accessed controlled git repository. All secrets are then handled per [our secrets management poilicy](../../docs/architecture/secrets-management.md).
+
+[In the near-future, we'll package our manifests as OCI artifacts instead to save overhead.](https://github.com/cmu-sei/Polar/issues/77)
+
 
 ### Why Immutability Matters
 By ensuring the kubernetes manifest is generated **before deployment and committed to Git**, we:
@@ -24,18 +28,17 @@ To accomplish this, we leverage some of the following tooling.
 - **Dhall-to-YAML** (`dhall-to-yaml`): Converts Dhall configurations into Kubernetes YAML.
 - A `neo4j.conf` file to configure neo4j.
 - [Minikube](https://minikube.sigs.k8s.io/docs/start/) - Initially used for local testing, feel free to use your own!
-- Some client and server certificates from a trusted authroity. For testing, consider [generating your own](../agents/README.md)
+- Some client and server certificates from a trusted authority. For testing, consider [generating your own](../agents/README.md)
 - A Personal Access Token for a Gitlab instance with, at minimum, read permissions for apis, registries, and repositories.
 - Container images for neo4j, cassini, and the gitlab agent should also be present. [See the documentation for info on building them](../agents/README.md). You can use your own preferred neo4j container image.
 - [cert-manager ](https://cert-manager.io/docs/installation/)
 - [sops](https://github.com/getsops/sops)
 
-## Usage
-We run the script to generate a kubernetes manifest from Dhall configurations using this command in our CI
 
+We run the script to generate a kubernetes manifest from Dhall configurations using this command in our CI
   `sh scripts/render-manifests.sh src/deploy/polar polar-deploy/manifests`
 
-**NOTE:** If you've got `just` installed, you can `just render` the files instead.
+We recommend that any individuals who wish to deploy our services take a similar approach within their own constraints.
 
 ## Flux and Continuous Deployment
 

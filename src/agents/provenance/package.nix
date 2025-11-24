@@ -9,28 +9,51 @@
 }:
 
 let
-    bin = craneLib.buildPackage (crateArgs // {
-        pname = "provenance";
-        cargoExtraArgs= "--bin provenance --locked";
+
+    linkerBin = craneLib.buildPackage (crateArgs // {
+        pname = "provenance-linker";
+        cargoExtraArgs= "--bin provenance-linker --locked";
         src = workspaceFileset ./provenance;
     });
 
-    image = pkgs.dockerTools.buildImage {
-        name = "polar-provenance-agent";
+    linkerImage = pkgs.dockerTools.buildImage {
+        name = "provenance-linker-agent";
         tag = "latest";
-        copyToRoot = commonPaths ++ [bin];
+        copyToRoot = commonPaths ++ [linkerBin];
         uid = commonUser.uid;
         gid = commonUser.gid;
 
         config = {
             User = "${commonUser.uid}:${commonUser.gid}";
-            Cmd = [ "provenance" ];
+            Cmd = [ "provenance-linker" ];
             WorkingDir = "/";
             Env = [ ];
         };
     };
 
+    resolverBin = craneLib.buildPackage (crateArgs // {
+        pname = "linker";
+        cargoExtraArgs= "--bin provenance-resolver --locked";
+        src = workspaceFileset ./provenance;
+    });
+
+    resolverImage = pkgs.dockerTools.buildImage {
+        name = "provenance-resolver-agent";
+        tag = "latest";
+        copyToRoot = commonPaths ++ [resolverBin];
+        uid = commonUser.uid;
+        gid = commonUser.gid;
+
+        config = {
+            User = "${commonUser.uid}:${commonUser.gid}";
+            Cmd = [ "provenance-resolver" ];
+            WorkingDir = "/";
+            Env = [ ];
+        };
+    };
+
+
 in
 {
-  inherit bin image;
+  inherit linkerBin resolverBin linkerImage resolverImage;
 }

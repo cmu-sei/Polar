@@ -9,6 +9,7 @@ use ractor::SupervisionEvent;
 use reqwest::Certificate;
 use reqwest::Client;
 use reqwest::ClientBuilder;
+use std::env;
 use tracing::error;
 use tracing::{debug, info, warn};
 
@@ -42,39 +43,13 @@ pub struct ObserverSupervisorState {
     pub proxy_ca_cert_file: Option<String>,
 }
 
-pub struct ObserverSupervisorArgs {
-    pub client_config: TCPClientConfig,
-    pub gitlab_endpoint: String,
-    pub gitlab_token: Option<String>,
-    pub proxy_ca_cert_file: Option<String>,
-    pub base_interval: u64,
-    pub max_backoff_secs: u64,
-}
-
-impl ObserverSupervisor {
-    /// Build reqwest client, optionally with a proxy CA certificate
-    fn get_client(proxy_ca_cert_path: Option<String>) -> Client {
-        match proxy_ca_cert_path {
-            Some(path) => {
-                let cert_data = get_file_as_byte_vec(&path)
-                    .expect("Expected to find a proxy CA certificate at {path}");
-                let root_cert = Certificate::from_pem(&cert_data)
-                    .expect("Expected {path} to be in PEM format.");
-
-                info!("Found PROXY_CA_CERT at: {path}, Configuring web client...");
-
-                ClientBuilder::new()
-                    .add_root_certificate(root_cert)
-                    .use_rustls_tls()
-                    .build()
-                    .expect("Expected to build web client with proxy CA certificate")
-            }
-            None => ClientBuilder::new()
-                .build()
-                .expect("Expected to build web client."),
-        }
-    }
-}
+// pub struct ObserverSupervisorArgs {
+//     pub gitlab_endpoint: String,
+//     pub gitlab_token: Option<String>,
+//     pub proxy_ca_cert_file: Option<String>,
+//     pub base_interval: u64,
+//     pub max_backoff_secs: u64,
+// }
 
 pub enum SupervisorMessage {
     /// Notification message telling the supervisor the client's been registered with the broker.
@@ -86,49 +61,60 @@ pub enum SupervisorMessage {
 impl Actor for ObserverSupervisor {
     type Msg = SupervisorMessage;
     type State = ObserverSupervisorState;
-    type Arguments = ObserverSupervisorArgs;
+    type Arguments = ();
 
     async fn pre_start(
         &self,
         myself: ActorRef<Self::Msg>,
-        args: ObserverSupervisorArgs,
+        args: (),
     ) -> Result<Self::State, ActorProcessingErr> {
         debug!("{myself:?} starting");
 
-        // define an output port for the actor to subscribe to
-        let output_port = std::sync::Arc::new(OutputPort::default());
+        let gitlab_endpoint = url::Url::parse(env::var("GITLAB_ENDPOINT")?.as_str())?;
 
+        let gitlab_token = env::var("GITLAB_TOKEN")?;
+
+        // Helpful for looking at services behind a proxy
+        let proxy_ca_cert_file = env::var("PROXY_CA_CERT").ok();
+
+        let base_interval: u64 = env::var("OBSERVER_BASE_INTERVAL")
+            .expect("Expected to read a value for OBSERVER_BASE_INTERVAL")
+            .parse()
+            .unwrap_or(300); // 5 minute default
+
+        // define an output port for the actor to subscribe to
+        let events_output = std::sync::Arc::new(OutputPort::default());
+        let queue_output = std::sync::Arc::new(ractor::OutputPort::default());
         // subscribe self to this port
-        output_port.subscribe(myself.clone(), |message| {
+        events_output.subscribe(myself.clone(), |message| {
             Some(SupervisorMessage::ClientRegistered(message))
         });
 
-        match Actor::spawn_linked(
+        // TODO: we don't make the observer respond to any configuration outputs or messages from the queue YET,
+        // When we do, start a dispatcher, subscribe it to the queue_output, and go from there.
+        //\
+        let client_config = TCPClientConfig::new()?;
+
+        let (_client, _) = Actor::spawn_linked(
             Some(BROKER_CLIENT_NAME.to_string()),
             TcpClientActor,
             TcpClientArgs {
-                config: args.client_config,
+                config: client_config,
                 registration_id: None,
-                output_port,
-                queue_output: std::sync::Arc::new(ractor::OutputPort::default()),
+                events_output,
+                queue_output,
             },
             myself.clone().into(),
         )
-        .await
-        {
-            // set up and return state
-            Ok(_) => Ok(ObserverSupervisorState {
-                gitlab_endpoint: args.gitlab_endpoint.clone(),
-                gitlab_token: args.gitlab_token.clone(),
-                base_interval: args.base_interval,
-                max_backoff_secs: args.max_backoff_secs,
-                proxy_ca_cert_file: args.proxy_ca_cert_file,
-            }),
-            Err(e) => {
-                error!("{e}");
-                Err(ActorProcessingErr::from(e))
-            }
-        }
+        .await?;
+
+        Ok(ObserverSupervisorState {
+            gitlab_endpoint: gitlab_endpoint.to_string(),
+            gitlab_token: Some(gitlab_token),
+            base_interval,
+            max_backoff_secs: 6000, // TODO: make configurable, but this is ok for now
+            proxy_ca_cert_file,
+        })
     }
 
     async fn handle(
@@ -145,7 +131,7 @@ impl Actor for ObserverSupervisor {
                     instance_uid: derive_instance_id(&state.gitlab_endpoint),
                     token: state.gitlab_token.clone(),
                     registration_id: registration_id.clone(),
-                    web_client: ObserverSupervisor::get_client(state.proxy_ca_cert_file.clone()),
+                    web_client: polar::get_web_client(),
                     base_interval: state.base_interval,
                     max_backoff: state.max_backoff_secs,
                 };

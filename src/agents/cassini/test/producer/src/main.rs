@@ -1,26 +1,25 @@
-use clap::Parser;
-use harness_producer::{actors::*, read_test_config, Arguments};
+use harness_common::client::HarnessClientConfig;
+use harness_producer::actors::*;
 use ractor::Actor;
+use tracing::info;
 
 #[tokio::main]
 async fn main() {
-    let args = Arguments::parse();
-
     polar::init_logging();
 
-    let config = read_test_config(&args.config);
+    info!("Producer Agent Starting up.");
 
-    // For now, just print out the config in JSON
-    tracing::info!(
-        "Using configuration:\n{}",
-        serde_json::to_string_pretty(&config).unwrap()
-    );
+    let client_config = HarnessClientConfig::new();
 
-    let args = RootActorArguments { test_plan: config };
-
-    let (_, handle) = Actor::spawn(None, RootActor, args)
-        .await
-        .expect("Expected harness supervisor to start.");
+    let (_, handle) = Actor::spawn(
+        Some("cassini.harness.producer.supervisor".to_string()),
+        RootActor,
+        RootActorArguments {
+            tcp_client_config: client_config,
+        },
+    )
+    .await
+    .expect("Expected harness supervisor to start.");
 
     handle
         .await

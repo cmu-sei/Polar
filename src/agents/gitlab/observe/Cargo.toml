@@ -38,8 +38,6 @@ reqwest = { workspace = true, features = ["json", "rustls-tls"] }
 url = "2.5.7"
 parse_link_header = { workspace = true }
 tracing = "0.1.41"
-tracing-glog = "0.4.1"
-tracing-subscriber = { version = "0.3.20", features = ["std", "env-filter"] }
 ractor = { version = "0.15.8", features = ["async-trait"] }
 cynic = { version = "3.12.0", features = ["rkyv"] }
 rkyv = { workspace = true }
@@ -47,9 +45,7 @@ rand = { workspace = true, features = ["small_rng"] }
 uuid = { version = "1.18.1", features = ["v5"] }
 
 # --- Cassini ecosystem ---
-cassini-broker = { path = "../../cassini/broker" }
 cassini-client = { path = "../../cassini/client" }
-cassini-types  = { path = "../../cassini/types" }
 polar          = { path = "../../lib" }
 
 # --- GitLab-specific shared crates ---

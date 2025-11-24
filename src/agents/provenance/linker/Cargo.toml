@@ -1,5 +1,5 @@
 [package]
-name = "provenance"
+name = "provenance-linker"
 version.workspace = true
 edition.workspace = true
 license = "MIT"
@@ -9,12 +9,12 @@ tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1.0"
 tracing = "0.1.41"
-tracing-glog = "0.4.1"
-tracing-subscriber = { version = "0.3.20", features = ["std", "env-filter"] }
-cassini-broker = { path = "../cassini/broker" }
 ractor = { version = "0.15.8", features = ["async-trait"] }
 rkyv = { workspace = true }
-polar = { path = "../lib" }
+polar = { path = "../../lib" }
 neo4rs = { workspace = true }
 reqwest = { workspace = true, features = ["json"] }
 cyclonedx-bom = "0.8.0"
+anyhow = "1.0.100"
+provenance-common = { path = "../provenance-common/" }
+cassini-client = { path = "../../cassini/client" }

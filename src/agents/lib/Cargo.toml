@@ -13,3 +13,7 @@ serde = {version = "1", features = ["derive"]}
 # rkyv = { workspace = true }
 ractor = { version = "0.15.8", features = ["async-trait"] }
 neo4rs = { workspace = true }
+rkyv = { workspace = true }
+uuid = "1.18.1"
+
+reqwest = { workspace = true, features = ["json", "rustls-tls"] }

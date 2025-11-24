@@ -1,36 +1,50 @@
 use crate::projects::ProjectMemberConnection;
 use crate::PageInfo;
-use cynic::*;
+use cynic::Id;
 use gitlab_schema::gitlab::{self as schema};
 use gitlab_schema::DateString;
 use gitlab_schema::DateTimeString;
+use rkyv::Archive;
 use rkyv::Deserialize;
 use rkyv::Serialize;
-use std::fmt;
 
-/// NOTE: Cynic matches rust variants up to their equivalent SCREAMING_SNAKE_CASE GraphQL variants.
-/// This behaviour is disabled because the gitlab schema goes against this
-/// TODO: Disable warnings on this datatype
-#[derive(cynic::Enum, Clone, Copy, Deserialize, Serialize, rkyv::Archive, Debug)]
+use std::fmt;
+/// -----------------  CAUTION!!!!!! DO NOT CHANGE THESE VARIANTS UNLESS THE UNDERLYING SCHEMA HAS CHANGED  -----------------
+///
+/// typically, rust enums should be named in UpperCamelCase, but the gitlab graphql schema breaks convention by not using SCREAMING_SNAKE_CASE for this enum.
+/// Cynic tries to match rust variants up to their equivalent SCREAMING_SNAKE_CASE GraphQL variants when provided with a typical pascalcase enum.
+/// However, it will fail unless we match the schema directly.
+/// REFERENECE: https://cynic-rs.dev/derives/enums
+#[derive(cynic::Enum, Clone, Copy, Deserialize, Serialize, Archive, Debug)]
 #[cynic(schema = "gitlab", rename_all = "None")]
 pub enum UserState {
-    Active,
-    Banned,
-    Blocked,
-    BlockedPendingApproval,
-    Deactivated,
-    LdapBlocked,
+    #[allow(non_camel_case_types)]
+    active,
+    #[allow(non_camel_case_types)]
+    banned,
+    #[allow(non_camel_case_types)]
+    blocked,
+    #[allow(non_camel_case_types)]
+    blocked_pending_approval,
+    #[allow(non_camel_case_types)]
+    deactivated,
+    #[allow(non_camel_case_types)]
+    ldap_blocked,
+    #[allow(non_camel_case_types)]
+    #[cynic(fallback)]
+    unknown,
 }
 
 impl fmt::Display for UserState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let state_str = match self {
-            UserState::Active => "active",
-            UserState::Banned => "banned",
-            UserState::Blocked => "blocked",
-            UserState::BlockedPendingApproval => "blocked_pending_approval",
-            UserState::Deactivated => "deactivated",
-            UserState::LdapBlocked => "ldap_blocked",
+            UserState::active => "active",
+            UserState::banned => "banned",
+            UserState::blocked => "blocked",
+            UserState::blocked_pending_approval => "blocked_pending_approval",
+            UserState::deactivated => "deactivated",
+            UserState::ldap_blocked => "ldap_blocked",
+            UserState::unknown => "unknown",
         };
         write!(f, "{}", state_str)
     }

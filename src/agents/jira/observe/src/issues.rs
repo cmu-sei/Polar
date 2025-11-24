@@ -21,22 +21,17 @@
    DM24-0470
 */
 use crate::{
-    handle_backoff, BROKER_CLIENT_NAME,
-    Command,
-    JiraObserverArgs,
-    JiraObserverMessage, JiraObserverState
-    };
+    handle_backoff, Command, JiraObserverArgs, JiraObserverMessage, JiraObserverState,
+    BROKER_CLIENT_NAME,
+};
 use cassini_client::TcpClientMessage;
 use cassini_types::ClientMessage;
-use ractor::{async_trait, registry::where_is, Actor, ActorProcessingErr, ActorRef};
+use jira_common::types::{JiraData, JiraField, JsonString};
 use jira_common::JIRA_ISSUES_CONSUMER_TOPIC;
+use ractor::{async_trait, registry::where_is, Actor, ActorProcessingErr, ActorRef};
 use rkyv::rancor::Error;
 use std::time::Duration;
-use tracing::{info, debug};
-use jira_common::types::{
-    JiraData, JsonString,
-    JiraField
-    };
+use tracing::{debug, info};
 
 use serde_json::Value;
 use std::collections::HashMap;
@@ -44,21 +39,27 @@ use std::collections::HashMap;
 pub struct JiraIssueObserver;
 
 impl JiraIssueObserver {
-    fn observe(myself: ActorRef<JiraObserverMessage>,
-               state: &mut JiraObserverState,
-               _duration: Duration) {
-        info!("Observing every {} seconds", state.backoff_interval.as_secs());
+    fn observe(
+        myself: ActorRef<JiraObserverMessage>,
+        state: &mut JiraObserverState,
+        _duration: Duration,
+    ) {
+        info!(
+            "Observing every {} seconds",
+            state.backoff_interval.as_secs()
+        );
 
-        let handle = myself.send_interval(state.backoff_interval, || {
-            //build query
-            let op = "/rest/api/2/search?";
-            // pass query in message
-            JiraObserverMessage::Tick(Command::GetIssues(op.to_string()))
-        }).abort_handle();
+        let handle = myself
+            .send_interval(state.backoff_interval, || {
+                //build query
+                let op = "/rest/api/2/search?";
+                // pass query in message
+                JiraObserverMessage::Tick(Command::GetIssues(op.to_string()))
+            })
+            .abort_handle();
 
         state.task_handle = Some(handle);
     }
-    
 }
 #[async_trait]
 impl Actor for JiraIssueObserver {
@@ -74,21 +75,21 @@ impl Actor for JiraIssueObserver {
         debug!("{myself:?} starting, connecting to instance");
 
         let state = JiraObserverState::new(
-            args.jira_url, 
-            args.token, 
-            args.web_client, 
-            args.registration_id, 
-            Duration::from_secs(args.base_interval), 
-            Duration::from_secs(args.max_backoff));
+            args.jira_url,
+            args.token,
+            args.web_client,
+            args.registration_id,
+            Duration::from_secs(args.base_interval),
+            Duration::from_secs(args.max_backoff),
+        );
         Ok(state)
     }
-    
+
     async fn post_start(
         &self,
         myself: ActorRef<Self::Msg>,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-
         JiraIssueObserver::observe(myself, state, state.base_interval);
         Ok(())
     }
@@ -100,7 +101,7 @@ impl Actor for JiraIssueObserver {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
-            JiraObserverMessage::Tick(command) => {  
+            JiraObserverMessage::Tick(command) => {
                 match command {
                     Command::GetIssues(op) => {
                         let mut start_at = 0;
@@ -108,22 +109,18 @@ impl Actor for JiraIssueObserver {
                         let query_string = "''";
                         debug!("Staring to query for issues...");
                         // Load up the fields
-                        let field_url = format!(
-                            "{}/rest/api/2/field", state.jira_url
-                        );
-                        let field_result = state.web_client
-                           .get(&field_url)
-                           .bearer_auth(format!("{}", state.token.clone().expect("TOKEN")))
-                           .send()
-                           .await?
-                           .json::<Vec<JiraField>>()
-                           .await?;
+                        let field_url = format!("{}/rest/api/2/field", state.jira_url);
+                        let field_result = state
+                            .web_client
+                            .get(&field_url)
+                            .bearer_auth(format!("{}", state.token.clone().expect("TOKEN")))
+                            .send()
+                            .await?
+                            .json::<Vec<JiraField>>()
+                            .await?;
                         let mut field_map: HashMap<String, JiraField> = HashMap::new();
                         for field in field_result {
-                            field_map.insert(
-                                field.id.to_string(),
-                                field
-                            );
+                            field_map.insert(field.id.to_string(), field);
                         }
 
                         loop {
@@ -132,7 +129,8 @@ impl Actor for JiraIssueObserver {
                                 state.jira_url, op, query_string, start_at, max_results
                             );
                             debug!("{}", url.to_string());
-                            let res = state.web_client
+                            let res = state
+                                .web_client
                                 .get(&url)
                                 .bearer_auth(format!("{}", state.token.clone().expect("TOKEN")))
                                 .send()
@@ -148,12 +146,14 @@ impl Actor for JiraIssueObserver {
                                     let mut cloned_issue = issue.clone();
 
                                     // Replace the "customfield_*" with the name
-                                    if let fields = cloned_issue.get_mut("fields").expect("FIELDS") {
+                                    if let fields = cloned_issue.get_mut("fields").expect("FIELDS")
+                                    {
                                         let mut replacements = vec![];
                                         for (key, value) in fields.as_object().unwrap() {
                                             if let Some(found_field) = field_map.get(key.as_str()) {
                                                 if let new_key = found_field.name.clone() {
-                                                    replacements.push((new_key.to_string(), value.clone()));
+                                                    replacements
+                                                        .push((new_key.to_string(), value.clone()));
                                                 }
                                             }
                                         }
@@ -165,21 +165,24 @@ impl Actor for JiraIssueObserver {
                                         }
                                     }
 
-                                    let tcp_client =
-                                        where_is(BROKER_CLIENT_NAME.to_string())
-                                            .expect("Expected to find client");
-                                    let wrap = JiraData::Issues(JsonString { json: cloned_issue.to_string() });
+                                    let tcp_client = where_is(BROKER_CLIENT_NAME.to_string())
+                                        .expect("Expected to find client");
+                                    let wrap = JiraData::Issues(JsonString {
+                                        json: cloned_issue.to_string(),
+                                    });
                                     let bytes = rkyv::to_bytes::<Error>(&wrap).unwrap();
 
                                     let msg = ClientMessage::PublishRequest {
                                         topic: JIRA_ISSUES_CONSUMER_TOPIC.to_string(),
                                         payload: bytes.to_vec(),
-                                        registration_id: Some(state.registration_id.clone()),
+                                        registration_id: state.registration_id.clone(),
                                     };
 
                                     // Serialize the inner client message before sending
                                     let payload = rkyv::to_bytes::<rkyv::rancor::Error>(&msg)
-                                        .expect("Failed to serialize ClientMessage::PublishRequest");
+                                        .expect(
+                                            "Failed to serialize ClientMessage::PublishRequest",
+                                        );
 
                                     tcp_client
                                         .send_message(TcpClientMessage::Publish {
@@ -187,7 +190,6 @@ impl Actor for JiraIssueObserver {
                                             payload: payload.into_vec(),
                                         })
                                         .expect("Expected to publish message");
-
                                 }
                             }
                             let fetched = max_results;
@@ -213,8 +215,8 @@ impl Actor for JiraIssueObserver {
                         Ok(duration) => {
                             JiraIssueObserver::observe(myself, state, duration);
                         }
-                        Err(e) => myself.stop(Some(e.to_string()))
-                    }   
+                        Err(e) => myself.stop(Some(e.to_string())),
+                    }
                 }
             }
         }

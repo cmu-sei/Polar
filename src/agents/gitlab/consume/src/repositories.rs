@@ -21,12 +21,18 @@
    DM24-0470
 */
 
-use crate::{subscribe_to_topic, GitlabConsumerArgs, GitlabConsumerState};
+use crate::{subscribe_to_topic, GitlabConsumerArgs, GitlabConsumerState, BROKER_CLIENT_NAME};
+use cassini_client::TcpClientMessage;
 use common::types::{GitlabData, GitlabEnvelope};
 use common::REPOSITORY_CONSUMER_TOPIC;
 use gitlab_schema::{BigInt, DateTimeString};
-use polar::{QUERY_COMMIT_FAILED, QUERY_RUN_FAILED, TRANSACTION_FAILED_ERROR};
-use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef};
+use neo4rs::Query;
+use polar::{
+    ProvenanceEvent, PROVENANCE_DISCOVERY_TOPIC, QUERY_COMMIT_FAILED, QUERY_RUN_FAILED,
+    TRANSACTION_FAILED_ERROR,
+};
+use ractor::{async_trait, registry::where_is, rpc::cast, Actor, ActorProcessingErr, ActorRef};
+use tracing::error;
 use tracing::{debug, info};
 
 pub struct GitlabRepositoryConsumer;
@@ -142,6 +148,32 @@ impl Actor for GitlabRepositoryConsumer {
                         let tags_data = tags
                             .iter()
                             .map(|tag| {
+                                // So, I'm not the HUGEST fan of doing this operation here
+                                // My gut tells me this should happen AFTER the query is already complete and executed
+                                // But that would mean making neo4j suffer under multiple queries vs batch processing.
+                                // If we notice too much of a slowdown from this step, we can probably bite that bullet.
+                                let event = ProvenanceEvent::image_ref(&tag.location, None);
+
+                                // emit message here informing the resolver (and eventually, the provenance linker) that
+                                // we discovered a container image tag
+                                where_is(BROKER_CLIENT_NAME.to_string()).map(|client| {
+                                    // serialize and send the event
+                                    info!("Forwarding provenance event to {PROVENANCE_DISCOVERY_TOPIC}");
+                                    match rkyv::to_bytes::<rkyv::rancor::Error>(&event) {
+                                        Ok(payload) => {
+                                            let message = TcpClientMessage::Publish {
+                                                topic: PROVENANCE_DISCOVERY_TOPIC.to_string(),
+                                                payload: payload.into(),
+                                            };
+
+                                            cast(&client, message).ok();
+                                        }
+                                        Err(e) => {
+                                            error!("Failed to serialize event: {}", e);
+                                        }
+                                    }
+                                });
+
                                 // ContainerRepository paths are always in the form of <namespace>/<project_name>/<image_name>
                                 // so we should be able to take advantage of this and strip the tag off
                                 // and use that to find our matching repo node
@@ -199,24 +231,23 @@ impl Actor for GitlabRepositoryConsumer {
                             t.repo_path = tag.repo_path
                             WITH t
 
-                            // TODO: This doesn't seem to be getting applied generally, investigate why
+                            // normalize into ImageReference
+                            MERGE (ref:ContainerImageReference {{ normalized: t.location, digest: t.digest, created_at: t.created_at, total_size: t.total_size, media_type: t.media_type }})
+                            MERGE (t)-[:IDENTIFIES]->(ref)
+                            WITH t
+                            // optional: link back to repository
                             MATCH (r:ContainerRepository {{ path: t.repo_path }})
-                            WITH r,t
-                            MERGE (t)-[:CONTAINS_TAG]->(r)
+                            WITH r
+                            MERGE (ref)-[:CONTAINS_TAG]->(r)
                         "#
                         );
 
                         debug!(cypher_query);
 
-                        if let Err(_) = transaction.run(neo4rs::Query::new(cypher_query)).await {
-                            myself.stop(Some(QUERY_RUN_FAILED.to_string()));
+                        if let Err(e) = transaction.run(Query::new(cypher_query)).await {
+                            error!("Failed to commit transaction to database: {}", e);
+                            return Err(ActorProcessingErr::from(e));
                         }
-
-                        if let Err(_) = transaction.commit().await {
-                            myself.stop(Some(QUERY_COMMIT_FAILED.to_string()));
-                        }
-
-                        info!("Committed transaction to database");
                     }
                     GitlabData::ProjectPackages((project_path, packages)) => {
                         let packages_list = packages

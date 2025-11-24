@@ -30,6 +30,7 @@ members = [
     "cassini/client",
     "cassini/types",
     "cassini/test/common",
+    "cassini/test/control",
     "cassini/test/producer",
     "cassini/test/sink",
     "lib",
@@ -45,11 +46,12 @@ members = [
     "kubernetes/observe",
     "kubernetes/consume",
     "kubernetes/common",
-    "provenance",
+    "provenance/linker",
+    "provenance/resolver",
     "config-ops",
     "openapi/observe",
     "openapi/consume",
-    "openapi/common",
+    "openapi/common", "provenance/provenance-common",
 ]
 
 

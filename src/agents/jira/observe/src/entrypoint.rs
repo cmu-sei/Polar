@@ -25,30 +25,29 @@ use cassini_client::TCPClientConfig;
 use jira_observer::*;
 use polar::init_logging;
 use ractor::Actor;
+use std::env;
+use std::error::Error;
 use tracing::error;
-use std::{env};
-use std::{error::Error};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     init_logging();
 
-    let client_config = TCPClientConfig::new();
-
     let jira_url = env::var("JIRA_URL").expect("Expected to find a value for JIRA_URL. Please provide a valid url to a jira server, ex 'http://hostname/jira'.");
     let jira_token = env::var("JIRA_TOKEN").expect("Expected to find a value for JIRA_TOKEN.");
     // Helpful for looking at services behind a proxy
-    let proxy_ca_cert_file = match env::var("PROXY_CA_CERT") { Ok(path) => Some(path), Err(_) => None };
- 
+    let proxy_ca_cert_file = match env::var("PROXY_CA_CERT") {
+        Ok(path) => Some(path),
+        Err(_) => None,
+    };
+
     let args = supervisor::ObserverSupervisorArgs {
-        client_config,
         jira_url,
         jira_token: Some(jira_token),
         proxy_ca_cert_file,
         // TODO: read these from configuration
         base_interval: 300,
         max_backoff_secs: 6000,
-        
     };
 
     match Actor::spawn(
@@ -56,11 +55,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
         supervisor::ObserverSupervisor,
         args,
     )
-    .await {
+    .await
+    {
         Ok((_, handle)) => {
             let _ = handle.await;
-        },
-        Err(e) => error!("{e}")
+        }
+        Err(e) => error!("{e}"),
     }
 
     Ok(())

@@ -1,4 +1,4 @@
-use cassini_client::{TcpClientActor, TcpClientArgs, TCPClientConfig};
+use cassini_client::{TCPClientConfig, TcpClientActor, TcpClientArgs};
 use jira_common::get_file_as_byte_vec;
 use ractor::async_trait;
 use ractor::Actor;
@@ -12,16 +12,16 @@ use reqwest::ClientBuilder;
 use tracing::error;
 use tracing::{debug, info, warn};
 
-use crate::projects::JiraProjectObserver;
 use crate::groups::JiraGroupObserver;
-use crate::users::JiraUserObserver;
 use crate::issues::JiraIssueObserver;
+use crate::projects::JiraProjectObserver;
+use crate::users::JiraUserObserver;
 use crate::JiraObserverArgs;
 use crate::BROKER_CLIENT_NAME;
-use crate::JIRA_PROJECT_OBSERVER;
 use crate::JIRA_GROUP_OBSERVER;
-use crate::JIRA_USER_OBSERVER;
 use crate::JIRA_ISSUE_OBSERVER;
+use crate::JIRA_PROJECT_OBSERVER;
+use crate::JIRA_USER_OBSERVER;
 pub struct ObserverSupervisor;
 
 pub struct ObserverSupervisorState {
@@ -34,7 +34,6 @@ pub struct ObserverSupervisorState {
 }
 
 pub struct ObserverSupervisorArgs {
-    pub client_config: TCPClientConfig,
     pub jira_url: String,
     pub jira_token: Option<String>,
     pub proxy_ca_cert_file: Option<String>,
@@ -87,21 +86,26 @@ impl Actor for ObserverSupervisor {
         debug!("{myself:?} starting");
 
         // define an output port for the actor to subscribe to
-        let output_port = std::sync::Arc::new(OutputPort::default());
+        let events_output = std::sync::Arc::new(OutputPort::default());
+
+        // TODO: Subscribe a dispatcher when we need to use these messages
+        let queue_output = std::sync::Arc::new(OutputPort::default());
 
         // subscribe self to this port
-        output_port.subscribe(myself.clone(), |message| {
+        events_output.subscribe(myself.clone(), |message| {
             Some(SupervisorMessage::ClientRegistered(message))
         });
+
+        let config = TCPClientConfig::new()?;
 
         match Actor::spawn_linked(
             Some(BROKER_CLIENT_NAME.to_string()),
             TcpClientActor,
             TcpClientArgs {
-                config: args.client_config,
+                config,
                 registration_id: None,
-                output_port,
-                queue_output: std::sync::Arc::new(ractor::OutputPort::default()),
+                events_output,
+                queue_output,
             },
             myself.clone().into(),
         )

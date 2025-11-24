@@ -1,4 +1,4 @@
-use cassini_client::{TcpClientActor, TcpClientArgs, TCPClientConfig};
+use cassini_client::{TCPClientConfig, TcpClientActor, TcpClientArgs};
 use k8s_openapi::api::core::v1::Namespace;
 use kube::Config;
 use kube::{api::ListParams, Api, Client};
@@ -14,10 +14,6 @@ use kube_common::KUBERNETES_OBSERVER;
 
 pub struct ClusterObserverSupervisor;
 
-pub struct ClusterObserverSupervisorArgs {
-    pub cassini_client_config: TCPClientConfig,
-}
-
 pub struct ClusterObserverSupervisorState {
     kube_client: kube::Client,
 }
@@ -31,7 +27,7 @@ pub enum SupervisorMessage {
 impl ClusterObserverSupervisor {
     pub async fn init(
         kube_config: Config,
-        args: ClusterObserverSupervisorArgs,
+        args: (),
         myself: ActorRef<SupervisorMessage>,
     ) -> Result<ClusterObserverSupervisorState, ActorProcessingErr> {
         // try to create a client and auth with the kube api
@@ -39,9 +35,12 @@ impl ClusterObserverSupervisor {
             Ok(kube_client) => {
                 debug!("Kubernetes client initialized");
 
-                let output_port = std::sync::Arc::new(OutputPort::default());
+                let client_config = TCPClientConfig::new()?;
 
-                output_port.subscribe(myself.clone(), |message| {
+                let events_output = std::sync::Arc::new(OutputPort::default());
+                let queue_output = std::sync::Arc::new(OutputPort::default());
+
+                events_output.subscribe(myself.clone(), |message| {
                     Some(SupervisorMessage::ClientRegistered(message))
                 });
 
@@ -49,10 +48,10 @@ impl ClusterObserverSupervisor {
                     Some(TCP_CLIENT_NAME.to_string()),
                     TcpClientActor,
                     TcpClientArgs {
-                        config: args.cassini_client_config,
+                        config: client_config,
                         registration_id: None,
-                        output_port,
-                        queue_output: std::sync::Arc::new(ractor::OutputPort::default()),
+                        events_output,
+                        queue_output,
                     },
                     myself.into(),
                 )
@@ -94,12 +93,12 @@ impl ClusterObserverSupervisor {
 impl Actor for ClusterObserverSupervisor {
     type Msg = SupervisorMessage;
     type State = ClusterObserverSupervisorState;
-    type Arguments = ClusterObserverSupervisorArgs;
+    type Arguments = ();
 
     async fn pre_start(
         &self,
         myself: ActorRef<Self::Msg>,
-        args: ClusterObserverSupervisorArgs,
+        args: (),
     ) -> Result<Self::State, ActorProcessingErr> {
         // Read Kubernetes credentials and other data from the environment
         info!("{myself:?} starting");

@@ -70,43 +70,6 @@ pub async fn subscribe_to_topic(
     })
 }
 
-pub fn get_neo_config() -> Config {
-    let database_name = std::env::var("GRAPH_DB")
-        .expect("Expected to get a neo4j database. GRAPH_DB variable not set.");
-    let neo_user = std::env::var("GRAPH_USER").expect("No GRAPH_USER value set for Neo4J.");
-    let neo_password =
-        std::env::var("GRAPH_PASSWORD").expect("No GRAPH_PASSWORD provided for Neo4J.");
-    let neo4j_endpoint = std::env::var("GRAPH_ENDPOINT").expect("No GRAPH_ENDPOINT provided.");
-    info!("Using Neo4j database at {neo4j_endpoint}");
-
-    let config = match std::env::var("GRAPH_CA_CERT") {
-        Ok(client_certificate) => {
-            info!("Found GRAPH_CA_CERT at {client_certificate}. Configuring graph client.");
-            ConfigBuilder::default()
-                .uri(neo4j_endpoint)
-                .user(neo_user)
-                .password(neo_password)
-                .db(database_name)
-                .fetch_size(500)
-                .with_client_certificate(client_certificate)
-                .max_connections(10)
-                .build()
-                .expect("Expected to build neo4rs configuration")
-        }
-        Err(_) => ConfigBuilder::default()
-            .uri(neo4j_endpoint)
-            .user(neo_user)
-            .password(neo_password)
-            .db(database_name)
-            .fetch_size(500)
-            .max_connections(10)
-            .build()
-            .expect("Expected to build neo4rs configuration"),
-    };
-
-    config
-}
-
 #[derive(Debug)]
 pub enum CrashReason {
     CaCertReadError(String), // error when reading CA cert

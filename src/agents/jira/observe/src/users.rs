@@ -21,40 +21,42 @@
    DM24-0470
 */
 use crate::{
-    handle_backoff, BROKER_CLIENT_NAME,
-    Command,
-    JiraObserverArgs,
-    JiraObserverMessage, JiraObserverState
-    };
+    handle_backoff, Command, JiraObserverArgs, JiraObserverMessage, JiraObserverState,
+    BROKER_CLIENT_NAME,
+};
 use cassini_client::TcpClientMessage;
 use cassini_types::ClientMessage;
-use ractor::{async_trait, registry::where_is, Actor, ActorProcessingErr, ActorRef};
+use jira_common::types::{JiraData, JiraUser};
 use jira_common::JIRA_USERS_CONSUMER_TOPIC;
+use ractor::{async_trait, registry::where_is, Actor, ActorProcessingErr, ActorRef};
 use rkyv::rancor::Error;
 use std::time::Duration;
-use tracing::{info, debug};
-use jira_common::types::{
-    JiraUser, JiraData
-    };
+use tracing::{debug, info};
 
 pub struct JiraUserObserver;
 
 impl JiraUserObserver {
-    fn observe(myself: ActorRef<JiraObserverMessage>,
-               state: &mut JiraObserverState,
-               _duration: Duration) {
-        info!("Observing every {} seconds", state.backoff_interval.as_secs());
+    fn observe(
+        myself: ActorRef<JiraObserverMessage>,
+        state: &mut JiraObserverState,
+        _duration: Duration,
+    ) {
+        info!(
+            "Observing every {} seconds",
+            state.backoff_interval.as_secs()
+        );
 
-        let handle = myself.send_interval(state.backoff_interval, || {
-            //build query
-            let op = "/rest/api/2/user/picker";
-            // pass query in message
-            JiraObserverMessage::Tick(Command::GetUsers(op.to_string()))
-        }).abort_handle();
+        let handle = myself
+            .send_interval(state.backoff_interval, || {
+                //build query
+                let op = "/rest/api/2/user/picker";
+                // pass query in message
+                JiraObserverMessage::Tick(Command::GetUsers(op.to_string()))
+            })
+            .abort_handle();
 
         state.task_handle = Some(handle);
     }
-    
 }
 #[async_trait]
 impl Actor for JiraUserObserver {
@@ -70,21 +72,21 @@ impl Actor for JiraUserObserver {
         debug!("{myself:?} starting, connecting to instance");
 
         let state = JiraObserverState::new(
-            args.jira_url, 
-            args.token, 
-            args.web_client, 
-            args.registration_id, 
-            Duration::from_secs(args.base_interval), 
-            Duration::from_secs(args.max_backoff));
+            args.jira_url,
+            args.token,
+            args.web_client,
+            args.registration_id,
+            Duration::from_secs(args.base_interval),
+            Duration::from_secs(args.max_backoff),
+        );
         Ok(state)
     }
-    
+
     async fn post_start(
         &self,
         myself: ActorRef<Self::Msg>,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-
         JiraUserObserver::observe(myself, state, state.base_interval);
         Ok(())
     }
@@ -96,11 +98,9 @@ impl Actor for JiraUserObserver {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
-            JiraObserverMessage::Tick(command) => {  
+            JiraObserverMessage::Tick(command) => {
                 match command {
                     Command::GetUsers(op) => {
-
-
                         let mut all_users = Vec::new();
                         let mut start_at = 0;
                         let max_results = 50;
@@ -112,7 +112,8 @@ impl Actor for JiraUserObserver {
                                 state.jira_url, op, query_string, start_at, max_results
                             );
                             debug!("{}", url.to_string());
-                            let res = state.web_client
+                            let res = state
+                                .web_client
                                 .get(&url)
                                 .bearer_auth(format!("{}", state.token.clone().expect("TOKEN")))
                                 .send()
@@ -120,7 +121,8 @@ impl Actor for JiraUserObserver {
                                 .json::<serde_json::Value>()
                                 .await?;
 
-                            let users: Vec<JiraUser> = serde_json::from_value(res["users"].clone())?;
+                            let users: Vec<JiraUser> =
+                                serde_json::from_value(res["users"].clone())?;
                             let total = res["total"].as_u64().unwrap_or(0);
                             let fetched = users.len();
 
@@ -133,9 +135,8 @@ impl Actor for JiraUserObserver {
                             start_at += fetched;
                         }
 
-                        let tcp_client =
-                            where_is(BROKER_CLIENT_NAME.to_string())
-                                .expect("Expected to find client");
+                        let tcp_client = where_is(BROKER_CLIENT_NAME.to_string())
+                            .expect("Expected to find client");
 
                         let data = JiraData::Users(all_users.clone());
 
@@ -144,7 +145,7 @@ impl Actor for JiraUserObserver {
                         let msg = ClientMessage::PublishRequest {
                             topic: JIRA_USERS_CONSUMER_TOPIC.to_string(),
                             payload: bytes.to_vec(),
-                            registration_id: Some(state.registration_id.clone()),
+                            registration_id: state.registration_id.clone(),
                         };
 
                         // serialize the inner message before sending
@@ -170,8 +171,8 @@ impl Actor for JiraUserObserver {
                         Ok(duration) => {
                             JiraUserObserver::observe(myself, state, duration);
                         }
-                        Err(e) => myself.stop(Some(e.to_string()))
-                    }   
+                        Err(e) => myself.stop(Some(e.to_string())),
+                    }
                 }
             }
         }

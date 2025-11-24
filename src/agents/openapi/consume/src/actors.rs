@@ -54,21 +54,23 @@ impl Actor for ConsumerSupervisor {
         .expect("Expected to start dispatcher");
 
         // define an output port for the actor to subscribe to
-        let output_port = std::sync::Arc::new(OutputPort::default());
-        let queue_output = std::sync::Arc::new(OutputPort::<Vec<u8>>::default());
+        let events_output = std::sync::Arc::new(OutputPort::default());
+        let queue_output = std::sync::Arc::new(OutputPort::default());
 
         // subscribe self to this port
-        output_port.subscribe(myself.clone(), |message| {
+        events_output.subscribe(myself.clone(), |message| {
             Some(ConsumerSupervisorMessage::ClientRegistered(message))
         });
+
+        let config = TCPClientConfig::new()?;
 
         if let Err(e) = Actor::spawn_linked(
             Some(BROKER_CLIENT_NAME.to_string()),
             TcpClientActor,
             TcpClientArgs {
-                config: TCPClientConfig::new(),
+                config,
                 registration_id: None,
-                output_port: output_port.clone(),
+                events_output: events_output.clone(),
                 queue_output: queue_output.clone(),
             },
             myself.clone().into(),
