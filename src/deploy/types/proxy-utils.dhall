@@ -46,4 +46,19 @@ let ProxyEnv =
           , None = [] : List kubernetes.EnvVar.Type
           }
           cert
-in  { ProxyVolume, ProxyMount, ProxyEnv }
+-- Sets the GRAPH_CA_CERT env var to point to a proxy cert that might sit in front of neo4j
+
+let GraphProxyEnv =
+    λ(cert : Optional Text) →
+        merge
+        { Some =
+            λ(_ : Text) →
+                [ kubernetes.EnvVar::{
+                    , name = "GRAPH_CA_CERT"
+                    , value = Some "/etc/tls/proxy/proxy.crt"
+                }
+                ]
+        , None = [] : List kubernetes.EnvVar.Type
+        }
+        cert
+in  { ProxyVolume, ProxyMount, ProxyEnv, GraphProxyEnv }

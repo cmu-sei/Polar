@@ -182,11 +182,11 @@ impl Actor for ProvenanceLinker {
                 digest,
                 media_type,
             } => {
-                // todo!()
                 // Invariant: “Every observed container image in the system has a canonical reference node.”
+                info!("Updating reference to container: {uri} with id: {id}");
                 let query = format!(
                     r#"
-                    MERGE (ref:ContainerImageReference {{id: '{id}', normalized: '{uri}', digest: '{digest}', media_type: '{media_type}' }})
+                    MERGE (ref:ContainerImageReference {{id: '{id}', normalized: '{uri}', digest: '{digest}', media_type: '{media_type}' last_updated: timestamp()}})
 
                     WITH ref
                     MATCH (tag:ContainerImageTag)

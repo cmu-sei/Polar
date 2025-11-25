@@ -43,28 +43,36 @@ done
 # Build Docker images for all agent components
 echo Building Container Images...
 
+echo Building Cassini
 nix build --quiet .#polarPkgs.cassini.cassiniImage -o cassini
+echo Building the Gitlab Observer
 nix build --quiet .#polarPkgs.gitlabAgent.observerImage -o gitlab-observer
+echo Building the Gitlab Consumer
 nix build --quiet .#polarPkgs.gitlabAgent.consumerImage -o gitlab-consumer
+echo Building the Kubernetes Observer
 nix build --quiet .#polarPkgs.kubeAgent.observerImage -o kube-observer
+echo Building the Kubernetes Consumer
 nix build --quiet .#polarPkgs.kubeAgent.consumerImage -o kube-consumer
+echo Building the Provenance Linker
 nix build --quiet .#polarPkgs.provenance.linkerImage -o linker
+echo Building the Provenance Resolver
 nix build --quiet .#polarPkgs.provenance.resolverImage -o resolver
 
 # Run vulnerability scan
 # vulnix returns nonzero exit codes, so we need to check for ourselves
+# TODO: We're getting blocked by firewalls (again), unfreeze this when that gets handled.
 # SEE: https://github.com/nix-community/vulnix/issues/79
-set +e
-vulnix --json result > vulnix-report.json
-VULNIX_EXIT=$?
-set -e
+# set +e
+# vulnix --json result > vulnix-report.json
+# VULNIX_EXIT=$?
+# set -e
 
-case $VULNIX_EXIT in
-  2) echo "Non-whitelisted vulnerabilities found!" ;;
-  1) echo "Only whitelisted vulnerabilities found." ;;
-  0) echo "No vulnerabilities detected (store might be empty)." ;;
-  *) echo "Unexpected vulnix exit code: $VULNIX_EXIT" ;;
-esac
+# case $VULNIX_EXIT in
+#   2) echo "Non-whitelisted vulnerabilities found!" ;;
+#   1) echo "Only whitelisted vulnerabilities found." ;;
+#   0) echo "No vulnerabilities detected (store might be empty)." ;;
+#   *) echo "Unexpected vulnix exit code: $VULNIX_EXIT" ;;
+# esac
 
 # Skopeo image upload utility
 function upload_image() {
