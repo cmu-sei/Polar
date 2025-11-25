@@ -3,7 +3,8 @@
 , metadata.name = "kube-observer-read"
 , rules =
   [ { apiGroups = [ "" ]
-    , resources = [ "namespaces", "pods", "services", "nodes", "deployments", "configmaps" ]
+    , resources =
+      [ "namespaces", "pods", "services", "nodes", "deployments", "configmaps" ]
     , verbs = [ "get", "list", "watch" ]
     }
   ]

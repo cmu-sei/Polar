@@ -14,7 +14,7 @@
       { containers =
         [ { env =
             [ { name = "SSL_CERT_FILE"
-              , value = Some "/etc/site/gitlab-crt.crt"
+              , value = Some "/etc/site/gitlab.crt"
               , valueFrom = None { secretKeyRef : { key : Text, name : Text } }
               }
             , { name = "PROXY_CA_CERT"
@@ -46,7 +46,7 @@
               , valueFrom = None { secretKeyRef : { key : Text, name : Text } }
               }
             , { name = "GITLAB_ENDPOINT"
-              , value = Some "https://gitlab.server.local"
+              , value = Some "https://YOUR_GITLAB_HOST"
               , valueFrom = None { secretKeyRef : { key : Text, name : Text } }
               }
             , { name = "GITLAB_TOKEN"
@@ -56,7 +56,7 @@
               }
             ]
           , image = "polar-gitlab-observer:latest"
-          , imagePullPolicy = "IfNotPresent"
+          , imagePullPolicy = "Always"
           , name = "polar-gitlab-observer"
           , securityContext =
             { capabilities.drop = [ "ALL" ]
@@ -120,7 +120,7 @@
               }
             ]
           , image = "polar-gitlab-consumer:latest"
-          , imagePullPolicy = "IfNotPresent"
+          , imagePullPolicy = "Always"
           , name = "polar-gitlab-consumer"
           , securityContext =
             { capabilities.drop = [ "ALL" ]

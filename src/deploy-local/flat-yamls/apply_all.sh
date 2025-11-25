@@ -25,3 +25,4 @@ kubectl apply -f gitlab-agent-deployment.yaml
 kubectl apply -f kube-agent-sa.yaml
 kubectl apply -f kube-token.yaml
 kubectl apply -f kube-agent-deployment.yaml
+kubectl apply -f storage-class.yaml

@@ -1,7 +1,5 @@
 { apiVersion = "v1"
-, data.`gitlab-crt.crt`
-  =
-    "INSERT_BASE64_CONTENT"
+, data.`gitlab.crt` = "INSERT_YOUR_BASE64_STRING"
 , kind = "Secret"
 , metadata =
   { creationTimestamp = None <>, name = "gitlab-crt", namespace = "polar" }

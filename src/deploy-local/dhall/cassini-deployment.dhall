@@ -15,7 +15,7 @@
             , { name = "CASSINI_BIND_ADDR", value = "0.0.0.0:8080" }
             ]
           , image = "cassini:latest"
-          , imagePullPolicy = "IfNotPresent"
+          , imagePullPolicy = "Always"
           , name = "cassini"
           , ports = [ { containerPort = 8080 } ]
           , securityContext =

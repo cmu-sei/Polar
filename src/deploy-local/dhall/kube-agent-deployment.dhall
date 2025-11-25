@@ -42,7 +42,7 @@
               }
             ]
           , image = "polar-kube-observer:latest"
-          , imagePullPolicy = "IfNotPresent"
+          , imagePullPolicy = "Always"
           , name = "kube-observer"
           , securityContext =
             { capabilities.drop = [ "ALL" ]
@@ -102,7 +102,7 @@
               }
             ]
           , image = "polar-kube-consumer:latest"
-          , imagePullPolicy = "IfNotPresent"
+          , imagePullPolicy = "Always"
           , name = "kube-consumer"
           , securityContext =
             { capabilities.drop = [ "ALL" ]

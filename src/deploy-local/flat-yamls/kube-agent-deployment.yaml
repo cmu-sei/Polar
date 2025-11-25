@@ -34,7 +34,7 @@ spec:
                   key: token
                   name: kube-observer-sa-token
           image: polar-kube-observer:latest
-          imagePullPolicy: IfNotPresent
+          imagePullPolicy: Always
           name: kube-observer
           securityContext:
             capabilities:
@@ -71,7 +71,7 @@ spec:
                   key: secret
                   name: polar-graph-pw
           image: polar-kube-consumer:latest
-          imagePullPolicy: IfNotPresent
+          imagePullPolicy: Always
           name: kube-consumer
           securityContext:
             capabilities:
