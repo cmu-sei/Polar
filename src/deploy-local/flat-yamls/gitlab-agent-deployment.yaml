@@ -43,7 +43,7 @@ spec:
                   name: gitlab-secret
           image: polar-gitlab-observer:latest
           name: polar-gitlab-observer
-          imagePullPolicy: IfNotPresent
+          imagePullPolicy: Always
           securityContext:
             capabilities:
               drop:
@@ -83,7 +83,7 @@ spec:
                   key: secret
                   name: polar-graph-pw
           image: polar-gitlab-consumer:latest
-          imagePullPolicy: IfNotPresent
+          imagePullPolicy: Always
           name: polar-gitlab-consumer
           securityContext:
             capabilities:
