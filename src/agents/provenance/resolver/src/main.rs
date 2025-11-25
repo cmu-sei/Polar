@@ -1,7 +1,14 @@
 use cassini_client::{TCPClientConfig, TcpClientActor, TcpClientArgs, TcpClientMessage};
 use oci_client::{
     client::{Certificate, CertificateEncoding, ClientConfig},
-    manifest::{OciImageManifest, OciManifest},
+    manifest::{
+        OciImageManifest, OciManifest, IMAGE_CONFIG_MEDIA_TYPE, IMAGE_DOCKER_CONFIG_MEDIA_TYPE,
+        IMAGE_DOCKER_LAYER_GZIP_MEDIA_TYPE, IMAGE_DOCKER_LAYER_TAR_MEDIA_TYPE,
+        IMAGE_LAYER_GZIP_MEDIA_TYPE, IMAGE_LAYER_MEDIA_TYPE,
+        IMAGE_LAYER_NONDISTRIBUTABLE_GZIP_MEDIA_TYPE, IMAGE_LAYER_NONDISTRIBUTABLE_MEDIA_TYPE,
+        IMAGE_MANIFEST_LIST_MEDIA_TYPE, IMAGE_MANIFEST_MEDIA_TYPE, OCI_IMAGE_INDEX_MEDIA_TYPE,
+        OCI_IMAGE_MEDIA_TYPE, WASM_CONFIG_MEDIA_TYPE, WASM_LAYER_MEDIA_TYPE,
+    },
     secrets::RegistryAuth,
     Client as OciClient, Reference, RegistryOperation,
 };
@@ -16,7 +23,7 @@ use ractor::{
 };
 use reqwest::Client as WebClient;
 use rkyv::Resolver;
-use std::{env, str::FromStr};
+use std::{env, str::FromStr, sync::OnceLock};
 use tracing::{debug, error, info, trace, warn};
 
 pub const BROKER_CLIENT_NAME: &str = "polar.provenance.resolver.tcp";
@@ -151,17 +158,16 @@ impl Actor for ResolverSupervisor {
 // --- Resolver Agent ---
 pub struct ResolverAgent;
 
-type RegistryCredentials = (String, String);
+// type RegistryCredentials = (String, String);
 
 impl ResolverAgent {
-    pub fn get_registry_credentials() -> Result<RegistryCredentials, ActorProcessingErr> {
-        let username = env::var("REGISTRY_USERNAME")?;
-        let password = env::var("REGISTRY_PASSWORD")?;
+    // fn get_registry_credentials() -> Result<RegistryCredentials, ActorProcessingErr> {
+    //     let username = env::var("REGISTRY_USERNAME")?;
+    //     let password = env::var("REGISTRY_PASSWORD")?;
+    //     Ok((username, password))
+    // }
 
-        Ok((username, password))
-    }
-
-    pub fn deserialize_payload(payload: Vec<u8>) -> Option<ProvenanceEvent> {
+    fn deserialize_payload(payload: Vec<u8>) -> Option<ProvenanceEvent> {
         if let Ok(event) = rkyv::from_bytes::<ProvenanceEvent, rkyv::rancor::Error>(&payload) {
             Some(event)
         } else {
@@ -170,45 +176,146 @@ impl ResolverAgent {
         }
     }
 
-    fn build_oci_auth(reference: &Reference) -> RegistryAuth {
-        use docker_credential::CredentialRetrievalError;
-        use docker_credential::DockerCredential;
-        let server = reference
-            .resolve_registry()
-            .strip_suffix('/')
-            .unwrap_or_else(|| reference.resolve_registry());
+    fn resolve_registry_auth(reference: &Reference) -> RegistryAuth {
+        use docker_credential::{self, CredentialRetrievalError, DockerCredential};
+        let registry = reference.resolve_registry();
+        debug!("Resolving OCI credentials for registry: {}", registry);
 
-        debug!("Loading configuration for regisry: {server}");
-        // Retrieve oci registry credentials from docker config, if no credentials are found, use anonymous auth.
-        // This implie a config.json is set somewhere
-        // TODO: what if I don't want to read that?
-        // Skopeo would've done the same thing, so I suppose this is a good practice to go with conventions.
-        match docker_credential::get_credential(server) {
-            Err(CredentialRetrievalError::ConfigNotFound) => RegistryAuth::Anonymous,
-            Err(CredentialRetrievalError::NoCredentialConfigured) => RegistryAuth::Anonymous,
-            Err(e) => panic!("Error handling docker configuration file: {e}"),
-            Ok(DockerCredential::UsernamePassword(username, password)) => {
-                debug!(username, password, "Found oci registry credentials");
-                RegistryAuth::Basic(username, password)
-            }
-            Ok(DockerCredential::IdentityToken(_)) => {
-                warn!("Cannot use contents of docker config, identity token not supported. Using anonymous auth");
-                RegistryAuth::Anonymous
+        let base = Self::normalize_registry_host(registry);
+        let candidates = Self::build_registry_candidates(&base);
+
+        for candidate in candidates {
+            debug!("Attempting docker-credential lookup for key: {}", candidate);
+
+            match docker_credential::get_credential(&candidate) {
+                Ok(DockerCredential::UsernamePassword(u, p)) => {
+                    debug!(
+                        username = u,
+                        password = p,
+                        "Resolved credentials from docker config for key {}",
+                        candidate
+                    );
+                    return RegistryAuth::Basic(u, p);
+                }
+                Ok(DockerCredential::IdentityToken(_)) => {
+                    // TODO: really? Should we error out here too?
+                    warn!(
+                        "IdentityToken returned for {} — unusable for ORAS. Skipping.",
+                        candidate
+                    );
+                    continue;
+                }
+                Err(CredentialRetrievalError::ConfigNotFound) => {
+                    debug!("docker config not found — skipping remaining candidates and using anonymous authentication");
+                    return RegistryAuth::Anonymous;
+                }
+                Err(CredentialRetrievalError::NoCredentialConfigured) => {
+                    debug!(
+                        "No credentials for key {} — using anonymous authentication",
+                        candidate
+                    );
+                    return RegistryAuth::Anonymous;
+                }
+                Err(e) => {
+                    error!("Error reading docker credentials for {}: {}", candidate, e);
+                    todo!("file was malformed or something, unrecoverable and should be handled.")
+                }
             }
         }
+
+        warn!(
+            "No usable credentials — falling back to anonymous for {}",
+            base
+        );
+        RegistryAuth::Anonymous
     }
 
-    async fn inspect_image(image_ref: &str) -> Result<OciImageManifest, ActorProcessingErr> {
+    fn normalize_registry_host(s: &str) -> String {
+        s.trim()
+            .trim_end_matches('/')
+            .trim_start_matches("https://")
+            .trim_start_matches("http://")
+            .to_string()
+    }
+
+    fn build_registry_candidates(base: &str) -> Vec<String> {
+        vec![
+            base.to_string(),
+            format!("https://{}", base),
+            format!("http://{}", base),
+            format!("{}/", base),
+            format!("https://{}/", base),
+            format!("http://{}/", base),
+            format!("{}/v1/", base),
+            format!("https://{}/v1/", base),
+            format!("http://{}/v1/", base),
+        ]
+    }
+
+    async fn inspect_image(
+        image_ref: &str,
+        client: &OciClient,
+    ) -> Result<(OciManifest, String), ActorProcessingErr> {
         debug!("attempting to resolve image: {image_ref}");
         // Parse the image reference, e.g., "ghcr.io/myorg/myimage:latest"
         let reference = oci_client::Reference::from_str(image_ref)?;
 
-        let auth = ResolverAgent::build_oci_auth(&reference);
+        let auth = Self::resolve_registry_auth(&reference);
 
-        // Create ORAS client (by default supports HTTPS and OCI registries)
-        // optionally, read in a proxy cert
-        //
-        let client = match std::env::var("PROXY_CA_CERT") {
+        client
+            .auth(&reference, &auth, RegistryOperation::Pull)
+            .await?;
+
+        // --- CAUTION ---
+        // DOn't touch this unless we have to
+        // Basically, the oci_client is trying to be "helpful" by enforcing that the platform of the image manifest we're pulling matches the hose
+        // we clearly don't care about that because we just need the data, so we have to pull it straight out w/o invoking their logic
+        // To that end, we need to specify accepted media types, which for us, is all of them.;
+        // let media_types = vec![
+        //     OCI_IMAGE_MEDIA_TYPE,
+        //     WASM_LAYER_MEDIA_TYPE,
+        //     IMAGE_LAYER_MEDIA_TYPE,
+        //     WASM_CONFIG_MEDIA_TYPE,
+        //     IMAGE_CONFIG_MEDIA_TYPE,
+        //     IMAGE_MANIFEST_MEDIA_TYPE,
+        //     OCI_IMAGE_INDEX_MEDIA_TYPE,
+        //     IMAGE_LAYER_GZIP_MEDIA_TYPE,
+        //     IMAGE_DOCKER_CONFIG_MEDIA_TYPE,
+        //     IMAGE_MANIFEST_LIST_MEDIA_TYPE,
+        //     IMAGE_DOCKER_LAYER_TAR_MEDIA_TYPE,
+        //     IMAGE_DOCKER_LAYER_GZIP_MEDIA_TYPE,
+        //     IMAGE_LAYER_NONDISTRIBUTABLE_MEDIA_TYPE,
+        //     IMAGE_LAYER_NONDISTRIBUTABLE_GZIP_MEDIA_TYPE,
+        // ];
+
+        Ok(client.pull_manifest(&reference, &auth).await?)
+    }
+}
+
+pub struct ResolverAgentArgs {
+    pub cassini_client: ActorRef<TcpClientMessage>,
+}
+
+pub struct ResolverAgentState {
+    pub cassini_client: ActorRef<TcpClientMessage>,
+    pub web_client: WebClient,
+    pub oci_client: OciClient,
+}
+
+#[async_trait]
+impl Actor for ResolverAgent {
+    type Msg = ProvenanceEvent;
+    type State = ResolverAgentState;
+    type Arguments = ResolverAgentArgs;
+
+    async fn pre_start(
+        &self,
+        _myself: ActorRef<Self::Msg>,
+        args: Self::Arguments,
+    ) -> Result<Self::State, ActorProcessingErr> {
+        info!("ResolverAgent started");
+
+        let oci_client = match std::env::var("PROXY_CA_CERT") {
             Ok(cert_path) => {
                 let data = get_file_as_byte_vec(&cert_path)?;
                 info!("Configuring OCI client with proxy cert found at {cert_path}");
@@ -226,41 +333,10 @@ impl ResolverAgent {
             Err(_) => OciClient::default(),
         };
 
-        client
-            .auth(&reference, &auth, RegistryOperation::Pull)
-            .await?;
-
-        let (manifest, _digest, _config) =
-            client.pull_manifest_and_config(&reference, &auth).await?;
-
-        Ok(manifest)
-    }
-}
-
-pub struct ResolverAgentArgs {
-    pub cassini_client: ActorRef<TcpClientMessage>,
-}
-
-pub struct ResolverAgentState {
-    pub cassini_client: ActorRef<TcpClientMessage>,
-    pub web_client: WebClient,
-}
-#[async_trait]
-impl Actor for ResolverAgent {
-    type Msg = ProvenanceEvent;
-    type State = ResolverAgentState;
-    type Arguments = ResolverAgentArgs;
-
-    async fn pre_start(
-        &self,
-        _myself: ActorRef<Self::Msg>,
-        args: Self::Arguments,
-    ) -> Result<Self::State, ActorProcessingErr> {
-        info!("ResolverAgent started");
-
         let state = ResolverAgentState {
             cassini_client: args.cassini_client,
             web_client: polar::get_web_client(),
+            oci_client,
         };
         Ok(state)
     }
@@ -289,29 +365,27 @@ impl Actor for ResolverAgent {
         match msg {
             ProvenanceEvent::ImageRefDiscovered { id, uri } => {
                 debug!("Received provenance event!");
-                let image_data = ResolverAgent::inspect_image(&uri).await?;
+                let (manifest, digest) =
+                    ResolverAgent::inspect_image(&uri, &state.oci_client).await?;
 
-                debug!("Resolved image: \n {img}", img = image_data.to_string());
+                debug!("Resolved image: \n {manifest:?}");
 
-                let digest = image_data.config.digest;
-                let media_type = image_data.config.media_type;
+                let media_type = manifest.content_type().to_owned();
 
                 // forward image data to the linker
                 let message = ProvenanceEvent::ImageRefResolved {
                     id,
+                    uri,
                     digest,
                     media_type,
                 };
 
                 let payload = rkyv::to_bytes::<rkyv::rancor::Error>(&message)?;
 
-                state
-                    .cassini_client
-                    .cast(TcpClientMessage::Publish {
-                        topic: PROVENANCE_LINKER_TOPIC.to_string(),
-                        payload: payload.into(),
-                    })
-                    .ok();
+                state.cassini_client.cast(TcpClientMessage::Publish {
+                    topic: PROVENANCE_LINKER_TOPIC.to_string(),
+                    payload: payload.into(),
+                })?;
             }
             _ => todo!(),
         }

@@ -30,6 +30,7 @@ use ractor::{async_trait, registry::where_is, rpc::cast, Actor, ActorProcessingE
 use rkyv::rancor;
 use serde_json::from_value;
 use tracing::{debug, error, info};
+use uuid::Uuid;
 
 use crate::{KubeConsumerArgs, KubeConsumerState, BROKER_CLIENT_NAME};
 

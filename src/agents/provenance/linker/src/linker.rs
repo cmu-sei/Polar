@@ -25,10 +25,12 @@ impl ProvenanceLinker {
             match event {
                 ProvenanceEvent::ImageRefResolved {
                     id,
+                    uri,
                     digest,
                     media_type,
                 } => Some(LinkerCommand::LinkContainerImages {
                     id,
+                    uri,
                     digest,
                     media_type,
                 }),
@@ -43,6 +45,7 @@ impl ProvenanceLinker {
 pub enum LinkerCommand {
     LinkContainerImages {
         id: String,
+        uri: String,
         digest: String,
         media_type: String,
     },
@@ -175,28 +178,27 @@ impl Actor for ProvenanceLinker {
             //TODO: Add another handler for linking package files in gtlab to container images deployed in k8s and their sboms
             LinkerCommand::LinkContainerImages {
                 id,
+                uri,
                 digest,
                 media_type,
             } => {
-                todo!()
+                // todo!()
                 // Invariant: “Every observed container image in the system has a canonical reference node.”
-                // let query = "
-                //     MATCH (ref:ContainerImageReference)
-                //     WITH ref
-                //     MATCH (tag:ContainerImageTag)
-                //     WITH tag
-                //     WHERE ref.normalized = tag.location
-                //     MERGE (ref)<-[:IDENTIFIES]-(tag)
-                //     ";
+                let query = format!(
+                    r#"
+                    MERGE (ref:ContainerImageReference {{id: '{id}', normalized: '{uri}', digest: '{digest}', media_type: '{media_type}' }})
 
-                // tracing::debug!(query);
+                    WITH ref
+                    MATCH (tag:ContainerImageTag)
+                    WITH tag
+                    WHERE ref.normalized = tag.location
+                    MERGE (ref)<-[:IDENTIFIES]-(tag)
+                    "#
+                );
 
-                // if let Err(e) = state.graph.run(Query::new(query.to_string())).await {
-                //     tracing::warn!("{e}");
-                //     myself
-                //         .send_message(ProvenanceLinkerMessage::Backoff(Some(e.to_string())))
-                //         .expect("Expected to forward message to self");
-                // }
+                tracing::debug!(query);
+
+                state.graph.run(Query::new(query.to_string())).await?;
             }
 
             _ => todo!("Handle other commands"),

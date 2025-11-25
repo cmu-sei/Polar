@@ -8,7 +8,7 @@ use crate::{
 };
 use cassini_client::{TCPClientConfig, TcpClientArgs};
 use neo4rs::Graph;
-use polar::{get_neo_config, QueueOutput};
+use polar::{get_neo_config, QueueOutput, PROVENANCE_LINKER_TOPIC};
 use ractor::port::output;
 use ractor::{
     async_trait, Actor, ActorProcessingErr, ActorRef, ActorStatus, OutputPort, SupervisionEvent,
@@ -94,6 +94,14 @@ impl Actor for ProvenanceSupervisor {
     ) -> Result<(), ActorProcessingErr> {
         match msg {
             ProvenanceSupervisorMsg::Init => {
+                // subscribe to topic
+                //
+                state
+                    .broker_client
+                    .cast(cassini_client::TcpClientMessage::Subscribe(
+                        PROVENANCE_LINKER_TOPIC.to_string(),
+                    ))?;
+
                 let linker_args = ProvenanceLinkerArgs {
                     graph: state.graph.clone(),
                     interval: Duration::from_secs(30),

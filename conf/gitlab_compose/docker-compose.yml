@@ -43,7 +43,21 @@ services:
       # - ../certs/neo4j/cert_chain.pem:/var/lib/neo4j/certificates/bolt/tls.crt
       # - ../certs/neo4j/server_neo4j_key.pem:/var/lib/neo4j/certificates/bolt/tls.key
 
+  jaeger:
+    image: cr.jaegertracing.io/jaegertracing/jaeger:2.11.0
+    ports:
+      - 4317:4317
+      - 4318:4318
+      - 5778:5778
+      - 9411:9411
+    networks:
+      - polar
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+
   cassini:
+    depends_on:
+      - jaeger
     image: cassini:latest
     networks:
       - polar

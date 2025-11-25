@@ -58,6 +58,7 @@ pub enum ProvenanceEvent {
     /// `media_type`: MIME type of the image manifest (e.g. `"application/vnd.oci.image.manifest.v1+json"`).
     ImageRefResolved {
         id: String,
+        uri: String,
         digest: String,
         media_type: String,
     },

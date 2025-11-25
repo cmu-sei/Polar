@@ -138,87 +138,69 @@ impl Actor for ObserverSupervisor {
 
                 //TODO: Should other observers wait until the meta observer is online and observing?
                 // TODO: decide which observers to start based off of some configuration
-                if let Err(e) = Actor::spawn_linked(
+                Actor::spawn_linked(
                     Some(META_OBSERVER.to_string()),
                     MetaObserver,
                     args.clone(),
                     myself.clone().into(),
                 )
-                .await
-                {
-                    warn!("failed to start meta observer {e}")
-                }
+                .await?;
 
-                if let Err(e) = Actor::spawn_linked(
+                Actor::spawn_linked(
                     Some(GITLAB_USERS_OBSERVER.to_string()),
                     GitlabUserObserver,
                     args.clone(),
                     myself.clone().into(),
                 )
-                .await
-                {
-                    warn!("failed to start users observer {e}")
-                }
-                if let Err(e) = Actor::spawn_linked(
+                .await?;
+
+                Actor::spawn_linked(
                     Some(GITLAB_PROJECT_OBSERVER.to_string()),
                     GitlabProjectObserver,
                     args.clone(),
                     myself.clone().into(),
                 )
-                .await
-                {
-                    warn!("failed to start project observer {e}")
-                }
-                if let Err(e) = Actor::spawn_linked(
+                .await?;
+
+                Actor::spawn_linked(
                     Some(GITLAB_PIPELINE_OBSERVER.to_string()),
                     GitlabPipelineObserver,
                     args.clone(),
                     myself.clone().into(),
                 )
-                .await
-                {
-                    warn!("failed to start project observer {e}")
-                }
-                if let Err(e) = Actor::spawn_linked(
+                .await?;
+
+                Actor::spawn_linked(
                     Some(GITLAB_JOBS_OBSERVER.to_string()),
                     GitlabJobObserver,
                     args.clone(),
                     myself.clone().into(),
                 )
-                .await
-                {
-                    warn!("failed to start project observer {e}")
-                }
-                if let Err(e) = Actor::spawn_linked(
+                .await?;
+
+                Actor::spawn_linked(
                     Some(GITLAB_GROUPS_OBSERVER.to_string()),
                     GitlabGroupObserver,
                     args.clone(),
                     myself.clone().into(),
                 )
-                .await
-                {
-                    warn!("failed to start group observer {e}")
-                }
-                if let Err(e) = Actor::spawn_linked(
+                .await?;
+
+                Actor::spawn_linked(
                     Some(GITLAB_RUNNER_OBSERVER.to_string()),
                     GitlabRunnerObserver,
                     args.clone(),
                     myself.clone().into(),
                 )
-                .await
-                {
-                    warn!("failed to start runner observer {e}")
-                }
-                if let Err(e) = Actor::spawn_linked(
+                .await?;
+
+                Actor::spawn_linked(
                     Some(GITLAB_REPOSITORY_OBSERVER.to_string()),
                     GitlabRepositoryObserver,
                     args.clone(),
                     myself.clone().into(),
                 )
-                .await
-                {
-                    warn!("failed to start runner observer {e}")
-                }
+                .await?;
             }
         }
         Ok(())
