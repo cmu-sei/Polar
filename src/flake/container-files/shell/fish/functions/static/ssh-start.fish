@@ -1,4 +1,4 @@
-function start-dropbear
+function ssh-start
     set ssh_dir ~/.ssh
     set auth_keys $ssh_dir/authorized_keys
     set rsa_key $ssh_dir/dropbear_rsa_host_key

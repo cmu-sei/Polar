@@ -124,7 +124,7 @@ fi
 ##############################################################################
 # 3.5. Optional dropbear auto-start
 ##############################################################################
-DROPBEAR_STATUS='autorun not configured — run "start-dropbear" to start manually'
+DROPBEAR_STATUS='autorun not configured — run "ssh-start" to start manually'
 
 if [[ "${DROPBEAR_ENABLE:-0}" == "1" ]]; then
   SSH_DIR="/home/$DEV_USER/.ssh"
