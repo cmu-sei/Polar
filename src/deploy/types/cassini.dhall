@@ -6,85 +6,23 @@
 let kubernetes = ./kubernetes.dhall
 let mtls = ../path/to/mtls.dhall
 
-in 
-{ Type = 
-    { name : Text
-    , namespace : Text
-    , image : Text
-    , imagePullSecrets : List Text
-    , port : Natural
-    , service : { name : Text, type : Text }
-    , tls : 
-        { certificateRequestName : Text
-        , certificateSpec :
-          { commonName : Text
-          , dnsNames : List Text
-          , duration : Text
-          , issuerRef : { kind : Text, name : Text }
-          , renewBefore : Text
-          , secretName : Text
-          }
-        }
-    , environment : List kubernetes.EnvVar.Type
-    , containerSecurityContext : kubernetes.SecurityContext.Type
-    , podAnnotations : List Text
-    , volumes : List kubernetes.Volume.Type
-    , volumeMounts : List kubernetes.VolumeMount.Type
-    }
-, default =
-    λ(namespace : Text) →
-    let cassiniPort = 8080
-
-    let cassiniDNSName = "${"cassini-ip-svc"}.${namespace}.svc.cluster.local"
-
-    let cassiniServerCertificateSecret = "cassini-tls"
-
-    in 
-    { name = "cassini"
-    , namespace = namespace
-    , image = "${sandboxRegistry.url}/polar/cassini:${chart.appVersion}"
-    , imagePullSecrets = sandboxRegistry.imagePullSecrets
-    , port = cassiniPort
-    , service = { name = "cassini-ip-svc", type = "ClusterIP" }
-    , tls = {
-        certificateRequestName = "cassini-certificate",
-        certificateSpec = {
-            commonName = mtls.commonName,
-            dnsNames = [ cassiniDNSName ],
-            duration = "2160h",
-            issuerRef = { kind = "Issuer", name = mtls.leafIssuerName },
-            renewBefore = "360h",
-            secretName = cassiniServerCertificateSecret
-        }
+let Cassini = {
+ name : Text
+, image : Text
+, ports : { http: Natural, tcp: Natural }
+-- We use cert manager handle certificate issuance, so this configuration is mostly centered
+-- around configuring it and letting us pass values around.
+, tls :
+    { certificateRequestName : Text
+    , certificateSpec :
+      { commonName : Text -- Common name of the certificate issuer
+      , dnsNames : List Text -- DNS names to associate with the certificate
+      , duration : Text -- How long the certis should be valid for
+      , issuerRef : { kind : Text, name : Text } -- Reference to the cert manager certificate issuer
+      , renewBefore : Text
+      , secretName : Text -- the name that should be used for the secret containing the cert/key pair
       }
-    , containerSecurityContext = 
-        kubernetes.SecurityContext::{
-        , runAsGroup = Some 1000
-        , runAsNonRoot = Some True
-        , runAsUser = Some 1000
-        , capabilities = Some kubernetes.Capabilities::{
-            drop = Some [ "ALL" ]
-          }
-        }
-    , podAnnotations = [ RejectSidecarAnnotation ]
-    , environment = [
-        kubernetes.EnvVar::{ name = "TLS_CA_CERT", value = Some mtls.caCertPath },
-        kubernetes.EnvVar::{ name = "TLS_SERVER_CERT_CHAIN", value = Some mtls.serverCertPath },
-        kubernetes.EnvVar::{ name = "TLS_SERVER_KEY", value = Some mtls.serverKeyPath },
-        kubernetes.EnvVar::{ name = "CASSINI_BIND_ADDR", value = Some "0.0.0.0:${Natural/show cassiniPort}" }
-      ]
-    , volumes = [
-        kubernetes.Volume::{
-        , name = cassiniServerCertificateSecret,
-        , secret = Some kubernetes.SecretVolumeSource::{ secretName = Some cassiniServerCertificateSecret }
-        }
-      ]
-    , volumeMounts = [
-        kubernetes.VolumeMount::{
-          name = cassiniServerCertificateSecret,
-          mountPath = tlsPath,
-          readOnly = Some True
-        }
-      ]
     }
 }
+
+in Cassini

@@ -2,7 +2,7 @@ let kubernetes = ../../types/kubernetes.dhall
 let values = ../values.dhall
 
 
-let 
+let
     deployment =
       kubernetes.Deployment::{
       , metadata = kubernetes.ObjectMeta::{
@@ -22,12 +22,17 @@ let
           , spec = Some kubernetes.PodSpec::{
             , imagePullSecrets = Some values.sandboxRegistry.imagePullSecrets
             , containers =
-              [ 
+              [
                 kubernetes.Container::{
                 , name = "cassini"
                 , image = Some values.cassini.image
-                , securityContext = Some values.cassini.containerSecurityContext
-                , env = Some values.cassini.environment 
+                , securityContext = Some kubernetes.SecurityContext::{
+                  , runAsGroup = Some 1000
+                  , runAsNonRoot = Some True
+                  , runAsUser = Some 1000
+                  , capabilities = Some kubernetes.Capabilities::{ drop = Some [ "ALL" ] }
+                  }t
+                , env = Some values.cassini.environment
                 , ports = Some
                   [ kubernetes.ContainerPort::{ containerPort = values.cassini.port } ]
                 , volumeMounts = Some values.cassini.volumeMounts
@@ -39,5 +44,5 @@ let
           }
         }
       }
-    
+
 in  deployment

@@ -17,7 +17,7 @@ To maintain immutability, we commit the kubernetes manifests to a versioned, acc
 
 
 ### Why Immutability Matters
-By ensuring the kubernetes manifest is generated **before deployment and committed to Git**, we:
+By ensuring the kubernetes manifest is generated **before deployment and version controlled**, we:
 - Avoid deployment drift caused by manual `helm install` changes.
 - Ensure the desired configuration is deployed across environments.
 - Enable rollbacks to previous **known-good** kubernetes manifest versions.
@@ -62,6 +62,8 @@ Then there are the variables needed for actually deploying Polar's services.
 
 `GITLAB_USER` - A username for authenticating with gitlab, particularly for flux's uses
 `GITLAB_TOKEN` - A token for authenticating with gitlab.
-`NEO4J_AUTH` - The default credentials for the Neo4J instance.
+`NEO4J_AUTH` - The default credentials for the Neo4J instance. Stored in a "username/password" foramt.
+`CI_COMMIT_SHORT_SHA` - The 7 character short commit sha, used as a tag for most of our image's services by default. (This is populated automatically by Gitlab when running in CI)
+`OCI_REGISTRY_AUTH` - A config.json file, stored as a string, containing credentials to one or more OCI artifact registries. This is used by the resolver agent to authenticate.
 
 Each of Polar's services will also need environment variables of their own when deployed. See their README files for details.
