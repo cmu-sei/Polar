@@ -1,8 +1,0 @@
-apiVersion: v1
-data:
-  gitlab.crt: INSERT_YOUR_BASE64_STRING
-kind: Secret
-metadata:
-  creationTimestamp: null
-  name: gitlab-crt
-  namespace: polar

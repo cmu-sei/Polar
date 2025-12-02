@@ -1,13 +1,12 @@
 
 let kubernetes = ../../types/kubernetes.dhall
-let values = ../values.dhall
+let Constants = ./constants.dhall
 
-let Namespace = kubernetes.Namespace::{
+in
+kubernetes.Namespace::{
     apiVersion = "v1"
     , kind = "Namespace"
     , metadata = kubernetes.ObjectMeta::{
-        name = Some values.namespace
+        name = Some Constants.PolarNamespace
     }
 }
-
-in Namespace

@@ -1,2 +1,0 @@
--- TODO: a file creating a config.json secret to be used to authenticate with any preferred registries
--- this secret will be mounted as part of the deployment

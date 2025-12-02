@@ -71,6 +71,10 @@
 
         # get certificates for mtls
         tlsCerts = pkgs.callPackage ./src/flake/gen-certs.nix { inherit pkgs; };
+
+        devShells = import ./src/flake/shell.nix {
+          inherit system pkgs rust-overlay;
+        };
       in
       {
         packages = {
@@ -78,6 +82,6 @@
           default = polarPkgs.workspacePackages;
         };
 
-        # devShells.default = devShell;
+        devShells.default = containers.devShells.default;
       });
 }

@@ -17,7 +17,7 @@ To maintain immutability, we commit the kubernetes manifests to a versioned, acc
 
 
 ### Why Immutability Matters
-By ensuring the kubernetes manifest is generated **before deployment and committed to Git**, we:
+By ensuring the kubernetes manifest is generated **before deployment and version controlled**, we:
 - Avoid deployment drift caused by manual `helm install` changes.
 - Ensure the desired configuration is deployed across environments.
 - Enable rollbacks to previous **known-good** kubernetes manifest versions.
@@ -35,10 +35,15 @@ To accomplish this, we leverage some of the following tooling.
 - [sops](https://github.com/getsops/sops)
 
 
-We run the script to generate a kubernetes manifest from Dhall configurations using this command in our CI
-  `sh scripts/render-manifests.sh src/deploy/polar polar-deploy/manifests`
+## Layout
+We follow a pretty typical layout here, where all desired deployment environments are separated by directory.
+From here,  we define a simple `types` library containing code to define types and values used across environments. We also import others.
 
-We recommend that any individuals who wish to deploy our services take a similar approach within their own constraints.
+When we want to deploy one of these environments, we run the script to generate a kubernetes manifest from Dhall configurations using this command in our CI
+  `sh scripts/render-manifests.sh src/deploy/<environment> <output-dir>`
+
+We recommend that anyone who to deploy our services take a similar approach within their own constraints.
+
 
 ## Flux and Continuous Deployment
 
@@ -62,6 +67,8 @@ Then there are the variables needed for actually deploying Polar's services.
 
 `GITLAB_USER` - A username for authenticating with gitlab, particularly for flux's uses
 `GITLAB_TOKEN` - A token for authenticating with gitlab.
-`NEO4J_AUTH` - The default credentials for the Neo4J instance.
+`NEO4J_AUTH` - The default credentials for the Neo4J instance. Stored in a "username/password" foramt.
+`CI_COMMIT_SHORT_SHA` - The 7 character short commit sha, used as a tag for most of our image's services by default. (This is populated automatically by Gitlab when running in CI)
+`OCI_REGISTRY_AUTH` - A config.json file, stored as a string, containing credentials to one or more OCI artifact registries. This is used by the resolver agent to authenticate.
 
 Each of Polar's services will also need environment variables of their own when deployed. See their README files for details.

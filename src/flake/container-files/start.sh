@@ -78,7 +78,7 @@ fi
 # still as root inside the container, create a group for the build users
 echo "nixbld:x:30000:" >> /etc/group
 echo "nixbld:x::"      >> /etc/gshadow
-
+echo "extra-trusted-users = $user" >> /etc/nix/nix.conf
 # Detect CPU count (see table above)
 cpus=$(command -v nproc >/dev/null 2>&1 && nproc || getconf _NPROCESSORS_ONLN)
 

@@ -1,5 +1,6 @@
 -- Some re-useable functions to append relevant data depending on whether a path to a proxy certificate was provided.
 let kubernetes = ./kubernetes.dhall
+let Constants = ./constants.dhall
 
 let ProxyVolume =
       λ(cert : Optional Text) →
@@ -61,4 +62,20 @@ let GraphProxyEnv =
         , None = [] : List kubernetes.EnvVar.Type
         }
         cert
-in  { ProxyVolume, ProxyMount, ProxyEnv, GraphProxyEnv }
+
+let mkProxySecret =
+      \(b64 : Text) ->
+      \(name : Text) ->
+      \(namespace : Text) ->
+        { apiVersion = "v1"
+        , kind = "Secret"
+        , metadata =
+            { creationTimestamp = None Text
+            , name = name
+            , namespace = namespace
+            }
+        , data =
+            { `proxy.pem` = b64 }
+        }
+
+in  { mkProxySecret, ProxyVolume, ProxyMount, ProxyEnv, GraphProxyEnv  }

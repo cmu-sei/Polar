@@ -104,7 +104,6 @@ if [ "$CI_COMMIT_REF_NAME" = "main" ]; then
     skopeo copy docker-archive://$(readlink -f gitlab-consumer) docker://$AZURE_REGISTRY/polar-gitlab-consumer:$CI_COMMIT_SHORT_SHA
     skopeo copy docker-archive://$(readlink -f kube-observer) docker://$AZURE_REGISTRY/polar-kube-observer:$CI_COMMIT_SHORT_SHA
     skopeo copy docker-archive://$(readlink -f kube-consumer) docker://$AZURE_REGISTRY/polar-kube-consumer:$CI_COMMIT_SHORT_SHA
-    skopeo copy docker-archive://$(readlink -f provenance) docker://$AZURE_REGISTRY/polar-provenance-agent:$CI_COMMIT_SHORT_SHA
     skopeo copy docker-archive://$(readlink -f linker) docker://$AZURE_REGISTRY/polar-linker-agent:$CI_COMMIT_SHORT_SHA
     skopeo copy docker-archive://$(readlink -f resolver) docker://$AZURE_REGISTRY/polar-resolver-agent:$CI_COMMIT_SHORT_SHA
 fi
