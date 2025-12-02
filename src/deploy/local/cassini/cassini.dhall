@@ -1,8 +1,8 @@
-let kubernetes = ../types/kubernetes.dhall
+let kubernetes = ../../types/kubernetes.dhall
 
-let Constants = ../types/constants.dhall
+let Constants = ../../types/constants.dhall
 
-let values = ./values.dhall
+let values = ../values.dhall
 
 let serviceSpec =
       kubernetes.ServiceSpec::{
@@ -118,6 +118,9 @@ let deployment =
           }
         }
       }
+
+
+
 
 in  [ kubernetes.Resource.Service cassiniService
     , kubernetes.Resource.Deployment deployment

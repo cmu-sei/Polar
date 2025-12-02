@@ -68,7 +68,7 @@ let polarAgentCertificateSpec =
       , duration = "2160h"
       , issuerRef = { kind = "Issuer", name = mtls.leafIssuerName }
       , renewBefore = "360h"
-      , secretName = "client-tls"
+      , secretName = "cassini-tls"
       }
 
 let CassiniServerCertificateSecret = "cassini-tls"

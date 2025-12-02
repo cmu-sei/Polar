@@ -105,10 +105,6 @@ echo "Writing manifests into $OUTPUT_DIR"
 
 mkdir -p "$OUTPUT_DIR"
 
-echo "[INFO] Converting global environment manifests"
-convert_dhall_to_yaml "$DHALL_ROOT/global" "$OUTPUT_DIR"
-
-
 # Process child charts
 echo "🔍 Discovering and generating manifests..."
 for SERVICE_DIR in "$DHALL_ROOT"/*/; do

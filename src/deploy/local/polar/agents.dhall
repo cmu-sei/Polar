@@ -1,21 +1,20 @@
+let Agent = ../../types/agents.dhall
 
-let Agent = ../types/agents.dhall
+let kubernetes = ../../types/kubernetes.dhall
 
-let kubernetes = ../types/kubernetes.dhall
+let Constants = ../../types/constants.dhall
 
-let Constants = ../types/constants.dhall
+let ProxyUtils = ../../types/proxy-utils.dhall
 
-let ProxyUtils = ../types/proxy-utils.dhall
-
-let proxyCACert = Some Constants.mtls.proxyCertificate
+let proxyCACert = None Text
 
 let deploymentName = Constants.ProvenanceDeploymentName
 
+let values = ../values.dhall
 let linker
     : Agent.ProvenanceLinker
     = { name = Constants.ProvenanceLinkerName
-      , image =
-          "${Constants.SandboxRegistry.url}/polar/polar-linker-agent:${Constants.commitSha}"
+      , image = "provenance-linker-agent:latest"
       , graph = Constants.graphConfig
       , tls = Constants.commonClientTls
       }
@@ -23,16 +22,57 @@ let linker
 let resolver
     : Agent.ProvenanceResolver
     = { name = Constants.ProvenanceLinkerName
-      , image =
-          "${Constants.SandboxRegistry.url}/polar/polar-resolver-agent:${Constants.commitSha}"
+      , image = "provenance-resolver-agent:latest"
       , tls = Constants.commonClientTls
       }
 
-let volumes = [ Constants.ClientTlsVolume ] # ProxyUtils.ProxyVolume proxyCACert
+let volumes =
+      [ Constants.ClientTlsVolume ] # ProxyUtils.ProxyVolume proxyCACert
 
-let linkerEnv = Constants.commonClientEnv
+let neo4jEnvVars =
+      [ kubernetes.EnvVar::{
+        , name = "GRAPH_ENDPOINT"
+        , value = Some values.neo4jBoltAddr
+        }
+      , kubernetes.EnvVar::{
+        , name = "GRAPH_DB"
+        , value = Some Constants.graphConfig.graphDB
+        }
+      , kubernetes.EnvVar::{
+        , name = "GRAPH_USER"
+        , value = Some Constants.graphConfig.graphUsername
+        }
+      , kubernetes.EnvVar::{
+        , name = "GRAPH_PASSWORD"
+        , valueFrom = Some kubernetes.EnvVarSource::{
+          , secretKeyRef = Some kubernetes.SecretKeySelector::{
+            , name = Some "polar-graph-pw"
+            , key = Constants.neo4jSecret.key
+            }
+          }
+        }
+      ]
+
+let linkerEnv = Constants.commonClientEnv # neo4jEnvVars
 
 let resolverEnv = Constants.commonClientEnv # ProxyUtils.ProxyEnv proxyCACert
+
+let resolverSecret =
+      kubernetes.Secret::{
+      , apiVersion = "v1"
+      , kind = "Secret"
+      , metadata = kubernetes.ObjectMeta::{
+        , name = Some Constants.OciRegistrySecret.name
+        , namespace = Some Constants.PolarNamespace
+        }
+      , stringData = Some
+        [ { mapKey = Constants.OciRegistrySecret.name
+          , mapValue = Constants.OciRegistrySecret.value
+          }
+        ]
+      , immutable = Some True
+      , type = Some "Opaque"
+      }
 
 let linkerVolumeMounts =
       [ kubernetes.VolumeMount::{
@@ -51,11 +91,11 @@ let resolverVolumeMounts =
 
 let spec =
       kubernetes.PodSpec::{
-      , imagePullSecrets = Some Constants.SandboxRegistry.imagePullSecrets
       , containers =
         [ kubernetes.Container::{
           , name = Constants.ProvenanceLinkerName
           , image = Some linker.image
+          , imagePullPolicy = Some "Never"
           , securityContext = Some Constants.DropAllCapSecurityContext
           , env = Some linkerEnv
           , volumeMounts = Some linkerVolumeMounts
@@ -63,6 +103,7 @@ let spec =
         , kubernetes.Container::{
           , name = Constants.ProvenanceResolverName
           , image = Some resolver.image
+          , imagePullPolicy = Some "Never"
           , securityContext = Some Constants.DropAllCapSecurityContext
           , env = Some resolverEnv
           , volumeMounts = Some resolverVolumeMounts

@@ -64,5 +64,8 @@ let neo4j =
         }
       }
 
+let neo4jDNSName = "${Constants.neo4jServiceName}.${Constants.GraphNamespace}.svc.cluster.local"
 
-in  { cassini, clientTlsConfig, neo4j }
+let neo4jBoltAddr = "neo4j://${neo4jDNSName}:${Natural/show neo4j.ports.bolt}"
+
+in  { cassini, clientTlsConfig, neo4j , neo4jDNSName, neo4jBoltAddr }

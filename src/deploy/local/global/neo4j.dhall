@@ -1,9 +1,9 @@
-let kubernetes = ../types/kubernetes.dhall
+let kubernetes = ../../types/kubernetes.dhall
 
-let Constants = ../types/constants.dhall
-let values = ./values.dhall
-let setupScript = ../../../scripts/setup-neo4j.sh as Text
-let configContent = ../../conf/neo4j-no-ssl.conf as Text
+let Constants = ../../types/constants.dhall
+let values = ../values.dhall
+let setupScript = ../../../../scripts/setup-neo4j.sh as Text
+let configContent = ../../../conf/neo4j-no-ssl.conf as Text
 
 let instanceName = "polar-neo4j"
 let namespace =
