@@ -35,10 +35,15 @@ To accomplish this, we leverage some of the following tooling.
 - [sops](https://github.com/getsops/sops)
 
 
-We run the script to generate a kubernetes manifest from Dhall configurations using this command in our CI
-  `sh scripts/render-manifests.sh src/deploy/polar polar-deploy/manifests`
+## Layout
+We follow a pretty typical layout here, where all desired deployment environments are separated by directory.
+From here,  we define a simple `types` library containing code to define types and values used across environments. We also import others.
 
-We recommend that any individuals who wish to deploy our services take a similar approach within their own constraints.
+When we want to deploy one of these environments, we run the script to generate a kubernetes manifest from Dhall configurations using this command in our CI
+  `sh scripts/render-manifests.sh src/deploy/<environment> <output-dir>`
+
+We recommend that anyone who to deploy our services take a similar approach within their own constraints.
+
 
 ## Flux and Continuous Deployment
 

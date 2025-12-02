@@ -1,5 +1,0 @@
-{ apiVersion = "v1"
-, kind = "Secret"
-, metadata = { name = "gitlab-secret", namespace = "polar" }
-, stringData.token = "INSERT_YOUR_TOKEN"
-}

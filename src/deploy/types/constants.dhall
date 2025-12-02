@@ -2,6 +2,7 @@ let kubernetes = ./kubernetes.dhall
 
 let Agent = ./agents.dhall
 
+-- TODO: Define a set of constants for environment variable strings
 let commitSha = env:CI_COMMIT_SHORT_SHA as Text ? "latest"
 
 let SandboxRegistry =
@@ -11,9 +12,21 @@ let SandboxRegistry =
       }
 
 let PolarNamespace = "polar"
+let GraphNamespace = "polar-db"
 
+let neo4jConfigmapName = "neo4j-config"
 let graphSecretName = "polar-graph-pw"
-
+let neo4jSecret =
+      kubernetes.SecretKeySelector::{
+      , key = "secret"
+      , name = Some "neo4j-secret"
+      }
+let neo4jSecretEnv = kubernetes.EnvVar::{
+          , name = "NEO4J_AUTH"
+          , valueFrom = Some kubernetes.EnvVarSource::{
+            , secretKeyRef = Some neo4jSecret
+            }
+          }
 let RejectSidecarAnnotation =
       { mapKey = "sidecar.istio.io/inject", mapValue = "false" }
 
@@ -78,11 +91,7 @@ let deployRepository =
         }
       }
 
-let graphSecret =
-      kubernetes.SecretKeySelector::{
-      , key = "secret"
-      , name = Some "neo4j-secret"
-      }
+
 
 let graphPassword =
       kubernetes.SecretKeySelector::{
@@ -94,7 +103,7 @@ let graphConfig
     : Agent.GraphConfig
     = { graphDB = "neo4j"
       , graphUsername = "neo4j"
-      , graphPassword = graphSecret
+      , graphPassword = neo4jSecret
       }
 
 let DropAllCapSecurityContext =
@@ -139,6 +148,10 @@ let ClientTlsVolumeMount =
       , mountPath = tlsPath
       }
 
+let neo4jServiceName = "polar-db-svc"
+
+let neo4jDNSName = "${neo4jServiceName}.${GraphNamespace}.svc.cluster.local"
+
 let ProvenanceDeploymentName = "polar-provenance"
 
 let ProvenanceLinkerName = "provenance-linker"
@@ -158,10 +171,13 @@ in  { commitSha
     , commonClientTls
     , ClientTlsVolume
     , PolarNamespace
+    , GraphNamespace
     , sandboxHostSuffix
     , gitRepoSecret
     , deployRepository
-    , graphSecret
+    , neo4jConfigmapName
+    , neo4jSecret
+    , neo4jServiceName
     , graphPassword
     , graphConfig
     , DropAllCapSecurityContext

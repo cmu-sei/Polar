@@ -1,10 +1,11 @@
 -- types/Cassini.dhall
 {-
-  This describes the full configuration needed to deploy Cassini
+  This describes the full configuration needed to deploy an instance of Cassini
+  Further configurations specific to the deployment and pod can be provided in the manifest
+  TODO: Specify some reasonable constants for things like image, ports, tls stuff
 -}
 
 let kubernetes = ./kubernetes.dhall
-let mtls = ../path/to/mtls.dhall
 
 let Cassini = {
  name : Text

@@ -25,7 +25,7 @@
 services:
   neo4j:
     user: 7474:7474
-    image: registry1.dso.mil/ironbank/opensource/neo4j/neo4j:5.26.2
+    image: neo4j/neo4j:5.26.2
     restart: never
     environment:
       - NEO4J_AUTH=neo4j/somepassword

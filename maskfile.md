@@ -94,13 +94,15 @@ nix build .#polarPkgs.cassini.cassini .#polarPkgs.cassini.harnessProducer .#pola
   ls -alh certs
   ~~~
 
-## render
+## render (mode) (environment) (output_dir)
 
 > Uses the `render-manifests.sh` script to render all manifests in the polar/deploy repository, ensure you have the proper environment variables set.
   See [the deployment docs](src/deploy/README.md) for details.
 
 ~~~sh
-sh scripts/render-manifests.sh src/deploy/polar manifests
+    export SECRETS_MODE=$mode
+    echo SECRETS_MODE=$mode
+    sh scripts/render-manifests.sh "src/deploy/$environment" $output_dir
 ~~~
 
 ## static-analysis

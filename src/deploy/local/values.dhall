@@ -1,0 +1,68 @@
+-- Some values specific to the environment
+let Constants = ../types/constants.dhall
+
+let Cassini = ../types/cassini.dhall
+
+let Agents = ../types/agents.dhall
+
+let cassini
+    : Cassini
+    = { name = "cassini"
+      , image = "cassini:latest"
+      , ports = { http = 3000, tcp = 8080 }
+      , tls =
+        { certificateRequestName = "cassini-certificate"
+        , certificateSpec =
+          { commonName = Constants.mtls.commonName
+          , dnsNames = [ Constants.cassiniDNSName ]
+          , duration = "2160h"
+          , issuerRef =
+            { kind = "Issuer", name = Constants.mtls.leafIssuerName }
+          , renewBefore = "360h"
+          , secretName = Constants.CassiniServerCertificateSecret
+          }
+        }
+      }
+
+let clientTlsConfig
+    : Agents.ClientTlsConfig
+    = { broker_endpoint = Constants.cassiniDNSName
+      , server_name = Constants.mtls.commonName
+      , client_certificate_path = Constants.mtls.certPath
+      , client_key_path = Constants.mtls.keyPath
+      , client_ca_cert_path = Constants.mtls.caCertPath
+      }
+
+let neo4jPorts = { http = 7474, bolt = 7687 }
+
+let neo4jHomePath = "/var/lib/neo4j"
+
+let neo4j =
+      { name = "polar-neo4j"
+      , hostName = "neo4j"
+      , namespace = Constants.GraphNamespace
+      , image = "neo4j:5.26.2"
+      , configVolume = "neo4j-config-copy"
+      , certificatesVolume = "neo4j-certificates"
+      , confDir = "/var/lib/neo4j/conf"
+      , certDir = "/var/lib/neo4j/certificates"
+      , ports = { http = 7474, bolt = 7687 }
+      , config = { name = "neo4j-config", path = "/var/lib/neo4j/conf" }
+      , volumes =
+        { data =
+          { name = "polar-db-data"
+          , storageClassName = Some "standard"
+          , storageSize = "10Gi"
+          , mountPath = "/var/lib/neo4j/data"
+          }
+        , logs =
+          { name = "polar-db-logs"
+          , storageClassName = Some "standard"
+          , storageSize = "10Gi"
+          , mountPath = "/var/lib/neo4j/logs"
+          }
+        }
+      }
+
+
+in  { cassini, clientTlsConfig, neo4j }
