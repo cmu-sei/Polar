@@ -78,7 +78,9 @@ fi
 # 3. build users
 ##############################################################################
 # set current user as trusted
-echo "extra-trusted-users = $USER" >> /etc/nix/nix.conf
+# append newline so we don't add onto the last one
+printf "\n" >> /etc/nix/nix.conf
+printf "extra-trusted-users = $USER" >> /etc/nix/nix.conf
 # still as root inside the container, create a group for the build users
 echo "nixbld:x:30000:" >> /etc/group
 echo "nixbld:x::"      >> /etc/gshadow
