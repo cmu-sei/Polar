@@ -264,10 +264,6 @@ let
         mkdir -p tmp
       '';
     };
-    };
-
-
-
 
 in {
   inherit devContainer;
