@@ -13,7 +13,7 @@ in kubernetes.Secret::{
 , type       = Some "kubernetes.io/dockerconfigjson"
 , data       = Some
     [ { mapKey = ".dockerconfigjson"
-      , mapValue = "REPLACE_WITH_BASE64"  -- you insert final base64 string here
+      , mapValue = env:OCI_REGISTRY_AUTH as TEXT
       }
     ]
 }
