@@ -264,52 +264,13 @@ let
         mkdir -p tmp
       '';
     };
-
-    ciContainer = pkgs.dockerTools.buildImage {
-      name = "polar-ci";
-      tag  = "latest";
-      copyToRoot = [
-        ciEnv
-        baseInfo
-        gitconfig
-        license
-        nixConfig
-        containerPolicyConfig
-      ];
-      config = {
-        WorkingDir = "/workspace";
-        Env = [
-          "COREUTILS=${pkgs.uutils-coreutils-noprefix}"
-          "LANG=en_US.UTF-8"
-          "TZ=UTC"
-          "MANPAGER=sh -c 'col -bx | bat --language man --style plain'"
-          "MANPATH=${pkgs.man-db}/share/man:$MANPATH"
-          "LOCALE_ARCHIVE=${pkgs.glibcLocalesUtf8}/lib/locale/locale-archive"
-
-          "PATH=$PATH:/bin:/usr/bin:${ciEnv}/bin:/root/.cargo/bin"
-          "SSL_CERT_DIR=/etc/ssl/certs"
-          # Add certificates to allow for cargo to download files from the
-          # internet. May have to adjust this for FIPS.
-          "SSL_CERT_FILE=/etc/ssl/certs/ca-bundle.crt"
-          "USER=root"
-        ];
-        Volumes = {};
-        Cmd = [ "/bin/bash" ];
-      };
-      extraCommands = ''
-        # Link the env binary (needed for the check requirements script)
-        mkdir -p usr/bin
-        ln -s ${pkgs.coreutils}/bin/env usr/bin/env
-        mkdir -p var/tmp
-        mkdir -p tmp
-      '';
     };
 
 
 
 
 in {
-  inherit devContainer ciContainer;
+  inherit devContainer;
 
   devShells.default = pkgs.mkShell {
     name = "polar-devshell";

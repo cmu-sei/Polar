@@ -54,7 +54,7 @@ create_user() {
     chmod u+w /home/$user
 
     # set environment variable explicitly
-    export USER = $user
+    export $USER = $user
 }
 
 ##############################################################################
@@ -63,7 +63,8 @@ create_user() {
 (( EUID == 0 )) || die "please run as root"
 
 # If all three env vars are set, create the user
-if [[ -n "${CREATE_USER:-}" && -n "${CR_UID" "$CREATE_GID"
+if [[ -n "${CREATE_USER:-}" && -n "${CREATE_UID:-}" && -n "${CREATE_GID:-}" ]]; then
+    create_user "$CREATE_USER" "$CREATE_UID" "$CREATE_GID"
     DEV_USER=$CREATE_USER
     DEV_UID=$CREATE_UID
     DEV_GID=$CREATE_GID

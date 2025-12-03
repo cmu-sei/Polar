@@ -6,7 +6,7 @@ in { apiVersion = "source.toolkit.fluxcd.io/v1"
 , spec =
   { interval = "10m"
   , ref.tag = "sandbox"
-  , url = values.sandboxRegistry.url
+  , url = "oci://${values.sandboxRegistry.url}/polar/polar-manifests"
   , secretRef = { name = "flux-repo-secret" }
   }
 }
