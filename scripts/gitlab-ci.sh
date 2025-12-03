@@ -88,9 +88,13 @@ function upload_image() {
 
 # don't upload images unless we're deploying them
 if [ "$CI_COMMIT_REF_NAME" = "main" ]; then
+    #
+    echo "Logging into Artifact registries"
     skopeo login --username "$CI_REGISTRY_USER" --password "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
     skopeo login --username "$ACR_USERNAME" --password "$ACR_TOKEN" "$AZURE_REGISTRY"
 
+    oras login --username "$CI_REGISTRY_USER" --password "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
+    oras login --username "$ACR_USERNAME" --password "$ACR_TOKEN" "$AZURE_REGISTRY"
     upload_image cassini "docker-archive:$(readlink -f cassini)" "docker://$CI_REGISTRY_IMAGE/cassini:$CI_COMMIT_SHORT_SHA"
     upload_image gitlab-observer "docker-archive:$(readlink -f gitlab-observer)" "docker://$CI_REGISTRY_IMAGE/polar-gitlab-observer:$CI_COMMIT_SHORT_SHA"
     upload_image gitlab-consumer "docker-archive:$(readlink -f gitlab-consumer)" "docker://$CI_REGISTRY_IMAGE/polar-gitlab-consumer:$CI_COMMIT_SHORT_SHA"
@@ -106,4 +110,22 @@ if [ "$CI_COMMIT_REF_NAME" = "main" ]; then
     skopeo copy docker-archive://$(readlink -f kube-consumer) docker://$AZURE_REGISTRY/polar-kube-consumer:$CI_COMMIT_SHORT_SHA
     skopeo copy docker-archive://$(readlink -f linker) docker://$AZURE_REGISTRY/polar-linker-agent:$CI_COMMIT_SHORT_SHA
     skopeo copy docker-archive://$(readlink -f resolver) docker://$AZURE_REGISTRY/polar-resolver-agent:$CI_COMMIT_SHORT_SHA
+
+    echo "Generating deployment manifests for revision $CI_COMMIT_SHORT_SHA"
+    # Generate helm charts and push them to a hosted repository
+    chmod +x ./scripts/render-manifests.sh
+    SECRETS_MODE=strict
+    sh scripts/render-manifests.sh strict src/deploy/sandbox manifests
+
+    echo "uploading deployment manifests"
+    # use oras to turn them into an oci artifact and upload
+    oras push \
+    $CI_REGISTRY/polar-manifests:$CI_COMMIT_SHORT_SHA \
+     ./manifests/:application/vnd.kubernetes.manifests.layer.v1+tar
+
+
+    echo "uploading deployment artifact to $AZURE_REGISTRY"
+    oras push \
+    $AZURE_REGISTRY/polar-manifests:sandbox \
+     ./manifests/:application/vnd.kubernetes.manifests.layer.v1+tar
 fi

@@ -8,23 +8,6 @@ default:
   tags:
     - kubernetes
 
-.analyze_image:
-  stage: analysis
-  image: registry.sandbox.labz.s-box.org/sei/polar-mirror/polar-dev:0.1.0
-  variables:
-    IMAGE_NAME: "" # must be overridden
-  script:
-    - skopeo login --username "$CI_REGISTRY_USER" --password "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
-    - skopeo copy "docker://$CI_REGISTRY_IMAGE/$IMAGE_NAME:$CI_COMMIT_SHORT_SHA" docker-archive:image.tar.gz
-    # TODO: Enable grype database retrieval in CI
-    # - grype image.tar.gz -o cyclonedx-json=$IMAGE_NAME.grype-scan.json
-    #
-    - syft image.tar.gz -o cyclonedx-json=$IMAGE_NAME.sbom.json
-  artifacts:
-    paths:
-      - "*.json"
-    expire_in: 1 week
-
 build-dev-environment:
   image: registry.sandbox.labz.s-box.org/sei/polar-mirror/nix:2.24.13
   stage: environment-setup
@@ -54,8 +37,6 @@ build-dev-environment:
 build:
   image:
     name: registry.sandbox.labz.s-box.org/sei/polar-mirror/polar-dev:0.1.0
-    # entrypoint:
-    #   - start.sh
   stage: build
   variables:
     AZURE_REGISTRY: sandboxaksacr.azurecr.us/polar
@@ -72,47 +53,5 @@ build:
       - output/*
       - "*.sbom.json"
       - vulnix-report.json
+      - manifests/*
     expire_in: "1 week"
-
-render-manifests:
-  image: registry.sandbox.labz.s-box.org/sei/polar-mirror/polar-dev:0.1.0
-  stage: render
-  # only run this job on main branch
-  rules:
-    - if: $CI_COMMIT_REF != "main"
-      when: never
-    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
-      when: never
-  variables:
-    TARGET_ENV: sandbox
-  script:
-    - start.sh
-    # Clone the chart repo
-    # NOTE: A deploy key should be used used to enable read/write perms
-    # An access token will do in the meantime
-    - git clone --depth 1 "https://$POLAR_DEPLOY_USER:$CHART_REPO_TOKEN@gitlab.sandbox.labz.s-box.org/sei/polar-deploy.git"
-
-    # Generate helm charts and push them to a hosted repository
-    - chmod +x ./scripts/render-manifests.sh
-    # delete old charts to make room for new configurations
-    - rm -rf polar-deploy/manifests/
-
-    # write new charts
-    - sh scripts/render-manifests.sh src/deploy/polar polar-deploy/manifests
-    - cd polar-deploy
-
-    # Commit and push if there are changes
-    - |
-      git config user.email $GITLAB_USER_EMAIL
-      git config user.name ci-job-$CI_JOB_NAME-$CI_JOB_ID
-      git add .
-
-      echo "Updated files:"
-      git diff --name-only --cached
-
-      echo "Writing metadata and pushing upstream..."
-      export TIMESTAMP=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
-      envsubst < ../scripts/metadata.yaml.tpl > metadata.yaml
-      git add metadata.yaml
-      git commit -m "Update manifests from source commit $CI_COMMIT_SHA"
-      git push origin "sandbox"

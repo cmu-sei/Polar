@@ -111,25 +111,13 @@ in
         targets = [ "wasm32-unknown-unknown" ];
       }))
 
-      #wasm-pack
-      #wasmtime
-      #wasmer
-      #wasmer-pack
-      #wasm-bindgen-cli_0_2_100
-      #cargo-leptos
+
       cargo-binutils
-      #cargo-wasi
       pkg-config
-      #trunk
       util-linux
 
       # The last editor you'll ever use
       zed
-
-      # Put any extra packages or libraries you need here. For example,
-      # if working on a Rust project that requires a linear algebra
-      # package:
-      # openblas
 
       # -- Static Analysis Tools --
       staticanalysis.packages.${system}.default
@@ -140,7 +128,7 @@ in
       grype
       syft
       sops
-      envsubst
+      oras
     ];
 
     # Set up the packages we want to include in our CI and testing environments,
