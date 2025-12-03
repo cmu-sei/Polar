@@ -112,10 +112,15 @@ if [ "$CI_COMMIT_REF_NAME" = "main" ]; then
     skopeo copy docker-archive://$(readlink -f resolver) docker://$AZURE_REGISTRY/polar-resolver-agent:$CI_COMMIT_SHORT_SHA
 
     echo "Generating deployment manifests for revision $CI_COMMIT_SHORT_SHA"
-    # Generate helm charts and push them to a hosted repository
+    # Generate kubernetes manifests and push them to a hosted repository
     chmod +x ./scripts/render-manifests.sh
+
+    # Explicitly enable strict secrets mode - this will encrypt any secret manifests
+    # --CAUTION --
+    # DO NOT REMOVE THIS FLAG, IT MUST BE SET TO RUN THE `render-manifests` scripts
+    #
     SECRETS_MODE=strict
-    sh scripts/render-manifests.sh strict src/deploy/sandbox manifests
+    sh scripts/render-manifests.sh src/deploy/sandbox manifests
 
     echo "uploading deployment manifests"
     # use oras to turn them into an oci artifact and upload

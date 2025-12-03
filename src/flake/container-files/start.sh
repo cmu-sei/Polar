@@ -52,6 +52,9 @@ create_user() {
     chown -R "$uid:$gid" /home/$user
     chmod -R 755 /home/$user
     chmod u+w /home/$user
+
+    # set environment variable explicitly
+    export USER = $user
 }
 
 ##############################################################################
@@ -60,8 +63,7 @@ create_user() {
 (( EUID == 0 )) || die "please run as root"
 
 # If all three env vars are set, create the user
-if [[ -n "${CREATE_USER:-}" && -n "${CREATE_UID:-}" && -n "${CREATE_GID:-}" ]]; then
-    create_user "$CREATE_USER" "$CREATE_UID" "$CREATE_GID"
+if [[ -n "${CREATE_USER:-}" && -n "${CR_UID" "$CREATE_GID"
     DEV_USER=$CREATE_USER
     DEV_UID=$CREATE_UID
     DEV_GID=$CREATE_GID
@@ -74,11 +76,11 @@ fi
 ##############################################################################
 # 3. build users
 ##############################################################################
-
+# set current user as trusted
+echo "extra-trusted-users = $USER" >> /etc/nix/nix.conf
 # still as root inside the container, create a group for the build users
 echo "nixbld:x:30000:" >> /etc/group
 echo "nixbld:x::"      >> /etc/gshadow
-echo "extra-trusted-users = $user" >> /etc/nix/nix.conf
 # Detect CPU count (see table above)
 cpus=$(command -v nproc >/dev/null 2>&1 && nproc || getconf _NPROCESSORS_ONLN)
 
