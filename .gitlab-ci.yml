@@ -42,7 +42,7 @@ build:
     AZURE_REGISTRY: sandboxaksacr.azurecr.us/polar
   script:
     # init env
-    - start.sh
+    # - start.sh
     # TODO: remove this and add cargo-cyclonedx to the static-tools derviation
     - cargo install -q cargo-cyclonedx
     - chmod +x -R scripts
