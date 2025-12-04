@@ -51,7 +51,7 @@ let deploymentSpec =
       , volumes = Some values.cassini.volumes
       }
 
-in  kubernetes.Deployment::{
+let deployment = kubernetes.Deployment::{
     , metadata = kubernetes.ObjectMeta::{
       , name = Some values.cassini.name
       , namespace = Some values.namespace
@@ -71,3 +71,5 @@ in  kubernetes.Deployment::{
         }
       }
     }
+
+in [ kubernetes.Resource.Service service, kubernetes.Resource.Deployment deployment ]
