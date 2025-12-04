@@ -1,5 +1,6 @@
 let kubernetes = ../../types/kubernetes.dhall
 let Constants = ../../types/constants.dhall
+let Functions = ../../types.functions.dhall
 
 let namespace = kubernetes.Namespace::{
       , apiVersion = "v1"
