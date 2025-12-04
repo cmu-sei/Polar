@@ -165,13 +165,33 @@ let neo4jCredentialSecret = kubernetes.Secret::{
       , kind = "Secret"
       , metadata = kubernetes.ObjectMeta::{
           name = Some "polar-graph-pw"
-          , namespace = Some Constants.PolarNamespace
+          , namespace = Some PolarNamespace
           }
        , immutable = Some True
-      , stringData = Some [ { mapKey = Constants.neo4jSecret.key, mapValue = env:GRAPH_PASSWORD as Text } ]
+      , stringData = Some [ { mapKey = neo4jSecret.key, mapValue = env:GRAPH_PASSWORD as Text } ]
       , type = Some "Opaque"
       }
-in  { commitSha
+
+let graphClientEnvVars = [      kubernetes.EnvVar::{
+        , name = "GRAPH_DB"
+        , value = Some graphConfig.graphDB
+        }
+      , kubernetes.EnvVar::{
+        , name = "GRAPH_USER"
+        , value = Some graphConfig.graphUsername
+        }
+      , kubernetes.EnvVar::{
+        , name = "GRAPH_PASSWORD"
+        , valueFrom = Some kubernetes.EnvVarSource::{
+          , secretKeyRef = Some kubernetes.SecretKeySelector::{
+            , name = Some "polar-graph-pw"
+            , key = neo4jSecret.key
+            }
+          }
+        }
+      ]
+
+      in  { commitSha
     , SandboxRegistry
     , graphSecretName
     , tlsPath
@@ -190,6 +210,7 @@ in  { commitSha
     , neo4jServiceName
     , graphPassword
     , graphConfig
+    , graphClientEnvVars
     , DropAllCapSecurityContext
     , cassiniPort
     , cassiniService

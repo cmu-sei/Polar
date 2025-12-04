@@ -30,5 +30,5 @@ src/agents/cassini/test/producer/config.dhall
 
 # ephemeral bullshit - do not check this in
 my.env
-env.nu
+.env.nuon
 ci.env

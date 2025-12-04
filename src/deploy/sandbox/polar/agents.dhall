@@ -331,6 +331,27 @@ let kubeAgentDeployment =
         }
       }
 
+---- PROVENANCE ---
+-- A secret value contianing the docker config.json we want to use to give the resolver access to registries
+      let resolverOciSecret =
+            kubernetes.Secret::{
+            , apiVersion = "v1"
+            , kind = "Secret"
+            , metadata = kubernetes.ObjectMeta::{
+              , name = Some Constants.OciRegistrySecret.name
+              , namespace = Some Constants.PolarNamespace
+              }
+            , stringData = Some
+              [ { mapKey = "config.json"
+                , mapValue = env:DOCKER_AUTH_JSON as Text
+                }
+              ]
+            , immutable = Some True
+            , type = Some "Opaque"
+            }
+
+
+
 let proxyCACert = Some values.mtls.proxyCertificate
 
 let deploymentName = Constants.ProvenanceDeploymentName
@@ -352,11 +373,19 @@ let resolver
       , tls = Constants.commonClientTls
       }
 
-let volumes = [ Constants.ClientTlsVolume ] # proxyUtils.ProxyVolume proxyCACert
+let volumes = [
+    kubernetes.Volume::{
+    , name = Constants.OciRegistrySecret.name
+    , secret = Some kubernetes.SecretVolumeSource::{
+    , secretName = Some Constants.OciRegistrySecret.name
+    }
+}
+, Constants.ClientTlsVolume ] # proxyUtils.ProxyVolume proxyCACert
 
 let linkerEnv = Constants.commonClientEnv # Constants.graphClientEnvVars # [ values.graphEndpointEnvVar ]
 
-let resolverEnv = Constants.commonClientEnv # proxyUtils.ProxyEnv proxyCACert
+let resolverEnv = Constants.commonClientEnv # proxyUtils.ProxyEnv proxyCACert # [  kubernetes.EnvVar::{ name = "DOCKER_CONFIG", value = Some "/home/polar/.docker/config.json" } ]
+
 
 let linkerVolumeMounts =
       [ kubernetes.VolumeMount::{
@@ -370,25 +399,13 @@ let resolverVolumeMounts =
           , name = Constants.CassiniServerCertificateSecret
           , mountPath = Constants.tlsPath
           }
+          , kubernetes.VolumeMount::{
+          , name = Constants.OciRegistrySecret.name
+          , mountPath = "/home/polar/.docker/"
+          }
         ]
       # proxyUtils.ProxyMount proxyCACert
 
-let resolverOciSecret =
-      kubernetes.Secret::{
-      , apiVersion = "v1"
-      , kind = "Secret"
-      , metadata = kubernetes.ObjectMeta::{
-        , name = Some Constants.OciRegistrySecret.name
-        , namespace = Some Constants.PolarNamespace
-        }
-      , stringData = Some
-        [ { mapKey = Constants.OciRegistrySecret.name
-          , mapValue = Constants.OciRegistrySecret.value
-          }
-        ]
-      , immutable = Some True
-      , type = Some "Opaque"
-      }
 
 let spec =
       kubernetes.PodSpec::{
