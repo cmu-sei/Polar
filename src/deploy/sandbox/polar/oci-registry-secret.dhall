@@ -1,25 +1,12 @@
+
 let kubernetes = ../../types/kubernetes.dhall
 let values = ../values.dhall
 
 let Constants = ../../types/constants.dhall
 
-let token = kubernetes.Secret::{
-apiVersion = "v1"
-, kind = "Secret"
-, metadata = kubernetes.ObjectMeta::{
-    name = Some "polar-graph-pw"
-    , namespace = Some values.namespace
-    }
--- , data : Optional (List { mapKey : Text, mapValue : Text })
--- , immutable = Some True
-, stringData = Some [ { mapKey = values.graphSecret.key, mapValue = env:GRAPH_PASSWORD as Text } ]
-, type = Some "Opaque"
-}
-
 -- This is the secret to be used by flux to authenticate with our azure registry to download our deployment artifact
 -- All in all, it's probably easier to just write down the command, but better that we know the format ahead of time.
-
-let ociRegistrySecret = kubernetes.Secret::{
+in kubernetes.Secret::{
   apiVersion = "v1"
 , kind       = "Secret"
 , metadata   = kubernetes.ObjectMeta::{
@@ -33,5 +20,3 @@ let ociRegistrySecret = kubernetes.Secret::{
       }
     ]
 }
-
-in [ kubernetes.Resource.Secret token, kubernetes.Resource.Secret ociRegistrySecret ]
