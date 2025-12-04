@@ -2,20 +2,24 @@
 set -euo pipefail
 
 # CI is set and true
-echo "Running CI job: ${CI_JOB_NAME:-"local-ci"}:${CI_JOB_ID:-"0"} on branch ${CI_COMMIT_BRANCH:-$(git rev-parse HEAD)}"
+echo "Running CI job: ${CI_JOB_NAME:-"local-ci"}:${CI_JOB_ID:-"0"} on branch ${CI_COMMIT_BRANCH:-$CI_COMMIT_SHORT_SHA}"
+
+# git won't let nix operate if it doesn't think its safe.
+# TODO: We could elimiante this when we fully own the test runner's configuration.
+git config --global --add safe.directory "$(pwd)"
 
 mkdir -p output/sbom
 
 # TODO: move this to static-tools.sh
 # Run cyclonedx once at the root
-# cargo cyclonedx --manifest-path src/agents/Cargo.toml -v -f json
+cargo cyclonedx --manifest-path src/agents/Cargo.toml -v -f json
 
-# # Move all generated SBOMs into a centralized location
+# Move all generated SBOMs into a centralized location
 
-# find . -type f -name '*.cdx.json' | while read -r sbom; do
-#   echo "moving $sbom -> to output/sbom"
-#   mv "$sbom" "output/sbom/$(basename "$sbom")"
-# done
+find . -type f -name '*.cdx.json' | while read -r sbom; do
+  echo "moving $sbom -> to output/sbom"
+  mv "$sbom" "output/sbom/$(basename "$sbom")"
+done
 
 # # run static tools
 # echo "Running static analysis tooling"
@@ -25,16 +29,16 @@ mkdir -p output/sbom
 echo Building Polar agents...
 nix build --quiet --no-update-lock-file
 
-# # Upload binaries to GitLab Package Registry
-# for file in result/bin/*; do
-#     if [[ -f "$file" ]]; then
-#       filename=$(basename "$file")
-#       curl --header "JOB-TOKEN: $CI_JOB_TOKEN" \
-#            --upload-file "$file" \
-#            "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/polar/$CI_COMMIT_SHORT_SHA/$filename"
-#       echo "Uploaded binary: $filename"
-#     fi
-# done
+# Upload binaries to GitLab Package Registry
+for file in result/bin/*; do
+    if [[ -f "$file" ]]; then
+      filename=$(basename "$file")
+      curl --header "JOB-TOKEN: $CI_JOB_TOKEN" \
+           --upload-file "$file" \
+           "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/polar/$CI_COMMIT_SHORT_SHA/$filename"
+      echo "Uploaded binary: $filename"
+    fi
+done
 
 # Build Docker images for all agent components
 echo Building Container Images...
