@@ -94,7 +94,8 @@ if [ "$CI_COMMIT_REF_NAME" = "main" ]; then
     skopeo login --username "$ACR_USERNAME" --password "$ACR_TOKEN" "$AZURE_REGISTRY"
 
     oras login --username "$CI_REGISTRY_USER" --password "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
-    oras login --username "$ACR_USERNAME" --password "$ACR_TOKEN" "$AZURE_REGISTRY"
+    oras login --username "$ACR_USERNAME" --password "$ACR_TOKEN" "sandboxaksacr.azurecr.us"
+
     upload_image cassini "docker-archive:$(readlink -f cassini)" "docker://$CI_REGISTRY_IMAGE/cassini:$CI_COMMIT_SHORT_SHA"
     upload_image gitlab-observer "docker-archive:$(readlink -f gitlab-observer)" "docker://$CI_REGISTRY_IMAGE/polar-gitlab-observer:$CI_COMMIT_SHORT_SHA"
     upload_image gitlab-consumer "docker-archive:$(readlink -f gitlab-consumer)" "docker://$CI_REGISTRY_IMAGE/polar-gitlab-consumer:$CI_COMMIT_SHORT_SHA"

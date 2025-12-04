@@ -58,7 +58,7 @@ Our team primarily uses `podman` as a container runtime. So feel free to `alias`
 
 
   ~~~sh
-  podman run --rm --name polar-dev --user 0 --userns=keep-id -it -v $(pwd):/workspace:rw -p 2222:2223 polar-dev:latest
+  podman run --rm --name polar-dev --user 0 --userns=keep-id -it -v $(pwd):/workspace:rw -p 2222:2223 polar-dev:0.1.0
   ~~~
 
 ## start-compose
