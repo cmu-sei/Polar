@@ -15,5 +15,3 @@ apiVersion = "v1"
 , stringData = Some [ { mapKey = values.graphSecret.key, mapValue = env:GRAPH_PASSWORD as Text } ]
 , type = Some "Opaque"
 }
-
--
