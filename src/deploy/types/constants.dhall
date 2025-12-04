@@ -160,7 +160,17 @@ let ProvenanceResolverName = "provenance-resolver"
 
 let OciRegistrySecret =
       { name = "oci-registry-auth", value = env:OCI_REGISTRY_AUTH as Text }
-
+let neo4jCredentialSecret = kubernetes.Secret::{
+      apiVersion = "v1"
+      , kind = "Secret"
+      , metadata = kubernetes.ObjectMeta::{
+          name = Some "polar-graph-pw"
+          , namespace = Some Constants.PolarNamespace
+          }
+       , immutable = Some True
+      , stringData = Some [ { mapKey = Constants.neo4jSecret.key, mapValue = env:GRAPH_PASSWORD as Text } ]
+      , type = Some "Opaque"
+      }
 in  { commitSha
     , SandboxRegistry
     , graphSecretName

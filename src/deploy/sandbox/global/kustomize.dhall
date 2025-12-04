@@ -1,6 +1,6 @@
 let values = ../values.dhall
 
-let kustomize = { apiVersion = "kustomize.toolkit.fluxcd.io/v1"
+let kustomize = { apiVersion = "kustomize.toolkit.fluxcd.io/v1beta2"
 , kind = "Kustomization"
 , metadata = { name = "polar", namespace = values.namespace }
 , spec =

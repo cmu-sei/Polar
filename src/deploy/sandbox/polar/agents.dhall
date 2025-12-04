@@ -354,7 +354,7 @@ let resolver
 
 let volumes = [ Constants.ClientTlsVolume ] # proxyUtils.ProxyVolume proxyCACert
 
-let linkerEnv = Constants.commonClientEnv
+let linkerEnv = Constants.commonClientEnv # Constants.graphClientEnvVars # [ values.graphEndpointEnvVar ]
 
 let resolverEnv = Constants.commonClientEnv # proxyUtils.ProxyEnv proxyCACert
 

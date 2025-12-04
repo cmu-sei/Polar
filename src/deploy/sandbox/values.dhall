@@ -274,6 +274,12 @@ let neo4jBoltAddr = "neo4j://${neo4jDNSName}:7687"
 
 let neo4jUiAddr = "${neo4jDNSName}:${Natural/show neo4jPorts.https}"
 
+let graphEndpointEnvVar = kubernetes.EnvVar::{
+        , name = "GRAPH_ENDPOINT"
+        , value = Some neo4jBoltAddr
+        }
+
+
 in  { namespace
     , deployRepository
     , sandboxHostSuffix
@@ -286,6 +292,7 @@ in  { namespace
     , neo4jPorts
     , neo4j
     , graphSecret
+    , graphEndpointEnvVar
     , neo4jDNSName
     , neo4jUiAddr
     , neo4jBoltAddr
