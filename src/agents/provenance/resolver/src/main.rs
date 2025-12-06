@@ -266,28 +266,6 @@ impl ResolverAgent {
             .auth(&reference, &auth, RegistryOperation::Pull)
             .await?;
 
-        // --- CAUTION ---
-        // DOn't touch this unless we have to
-        // Basically, the oci_client is trying to be "helpful" by enforcing that the platform of the image manifest we're pulling matches the hose
-        // we clearly don't care about that because we just need the data, so we have to pull it straight out w/o invoking their logic
-        // To that end, we need to specify accepted media types, which for us, is all of them.;
-        // let media_types = vec![
-        //     OCI_IMAGE_MEDIA_TYPE,
-        //     WASM_LAYER_MEDIA_TYPE,
-        //     IMAGE_LAYER_MEDIA_TYPE,
-        //     WASM_CONFIG_MEDIA_TYPE,
-        //     IMAGE_CONFIG_MEDIA_TYPE,
-        //     IMAGE_MANIFEST_MEDIA_TYPE,
-        //     OCI_IMAGE_INDEX_MEDIA_TYPE,
-        //     IMAGE_LAYER_GZIP_MEDIA_TYPE,
-        //     IMAGE_DOCKER_CONFIG_MEDIA_TYPE,
-        //     IMAGE_MANIFEST_LIST_MEDIA_TYPE,
-        //     IMAGE_DOCKER_LAYER_TAR_MEDIA_TYPE,
-        //     IMAGE_DOCKER_LAYER_GZIP_MEDIA_TYPE,
-        //     IMAGE_LAYER_NONDISTRIBUTABLE_MEDIA_TYPE,
-        //     IMAGE_LAYER_NONDISTRIBUTABLE_GZIP_MEDIA_TYPE,
-        // ];
-
         Ok(client.pull_manifest(&reference, &auth).await?)
     }
 }

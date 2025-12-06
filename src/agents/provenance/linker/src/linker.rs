@@ -1,3 +1,4 @@
+use cassini_client::TcpClientMessage;
 use cyclonedx_bom::prelude::*;
 use neo4rs::Graph;
 use neo4rs::Query;
@@ -5,6 +6,8 @@ use polar::get_neo_config;
 use polar::ProvenanceEvent;
 use ractor::async_trait;
 use ractor::concurrency::Duration;
+use ractor::concurrency::Interval;
+use ractor::registry::where_is;
 use ractor::Actor;
 use ractor::ActorProcessingErr;
 use ractor::ActorRef;
@@ -14,6 +17,7 @@ use tokio::task::AbortHandle;
 use tracing::{debug, error, info, warn};
 
 use crate::ArtifactType;
+use crate::BROKER_CLIENT_NAME;
 
 /// An actor responsible for connecting distinct knowledge graph domains.
 /// Potential planes include build, runtime, and artifact, where semantic continuity isn't always possible.
@@ -156,8 +160,6 @@ impl Actor for ProvenanceLinker {
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        tracing::info!("Counting actor handle message...");
-
         match message {
             LinkerCommand::LinkArtifacts {
                 artifact_id,
@@ -165,6 +167,7 @@ impl Actor for ProvenanceLinker {
                 related_names,
                 version,
             } => {
+                tracing::trace!("Recevied a LinkArtifacts directive");
                 ProvenanceLinker::link_sboms(
                     &state.graph,
                     artifact_id,
@@ -182,26 +185,25 @@ impl Actor for ProvenanceLinker {
                 digest,
                 media_type,
             } => {
+                tracing::trace!("Recevied a LinkContainerImages directive");
                 // Invariant: “Every observed container image in the system has a canonical reference node.”
-                info!("Updating reference to container: {uri} with id: {id}");
+                debug!("Updating reference to container: {uri} with id: {id}");
                 let query = format!(
                     r#"
-                    MERGE (ref:ContainerImageReference {{id: '{id}', normalized: '{uri}', digest: '{digest}', media_type: '{media_type}' last_updated: timestamp()}})
-
+                    MERGE (ref:ContainerImageReference {{id: '{id}', normalized: '{uri}', digest: '{digest}', media_type: '{media_type}', last_updated: timestamp()}})
                     WITH ref
                     MATCH (tag:ContainerImageTag)
+                        WHERE tag.location = ref.normalized
                     WITH tag
-                    WHERE ref.normalized = tag.location
                     MERGE (ref)<-[:IDENTIFIES]-(tag)
                     "#
                 );
-
                 tracing::debug!(query);
 
                 state.graph.run(Query::new(query.to_string())).await?;
             }
-
-            _ => todo!("Handle other commands"),
+            // TODO: handle other commands as they arise
+            _ => warn!("Received unexpected message"),
         }
         Ok(())
     }

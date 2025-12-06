@@ -65,7 +65,7 @@ Our team primarily uses `podman` as a container runtime. So feel free to `alias`
 > Starts the docker compose file to start up the docker compose for local testing. Runs in background
 
 ~~~sh
-podman compose -f conf/gitlab_compose/docker-compose.yml up -d
+podman compose -f src/conf/docker-compose.yml up -d
 ~~~
 
 ## build
@@ -124,7 +124,7 @@ podman run --rm \
 --name polar-dev \
 --env-file=ci.env  \
 --env CI_COMMIT_REF_NAME=$(git symbolic-ref --short HEAD) \
---env CI_COMMIT_SHORT_SHA=$(git rev-parse --short HEAD) \
+--env CI_COMMIT_SHORT_SHA=$(git rev-parse --short=8 HEAD) \ # gitlab, the CI we use, explicitly takes 8 chars
 --env SSL_CERT_FILE="./src/conf/certs/proxy-ca.pem" \
 --user 0 \
 --userns=keep-id \

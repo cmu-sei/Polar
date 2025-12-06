@@ -1,8 +1,8 @@
 use ractor::OutputPort;
 use reqwest::{Certificate, Client, ClientBuilder};
 use serde::{Deserialize, Serialize};
-use std::io::Read;
 use std::sync::Arc;
+use std::{io::Read, thread::JoinHandle};
 use tracing::{debug, info};
 
 /// wrapper definition for a ractor outputport where a raw message payload and a topic can be piped to a necessary dispatcher
@@ -93,7 +93,7 @@ pub enum ProvenanceEvent {
 
 impl ProvenanceEvent {
     /// constructor to generate a new image reference event, granting a UUID unless one is provided.
-    pub fn image_ref(uri: &str, id: Option<String>) -> Self {
+    pub fn image_ref_discovered(uri: &str, id: Option<String>) -> Self {
         let id = id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         Self::ImageRefDiscovered {
             id,
@@ -102,13 +102,38 @@ impl ProvenanceEvent {
     }
 
     /// constructor to generate a new image reference event, granting a UUID unless one is provided.
-    pub fn sbom_ref(uri: &str, id: Option<String>) -> Self {
+    pub fn sbom_ref_discovered(uri: &str, id: Option<String>) -> Self {
         let id = id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         Self::SbomDiscovered {
             artifact_id: id,
             uri: uri.to_string(),
         }
     }
+
+    /// constructor to generate a new image resolved event, granting a UUID unless one is provided.
+    pub fn image_ref_resolved(
+        uri: String,
+        id: Option<String>,
+        digest: String,
+        media_type: String,
+    ) -> Self {
+        let id = id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        Self::ImageRefResolved {
+            id,
+            uri: uri.to_string(),
+            digest,
+            media_type,
+        }
+    }
+
+    //constructor to generate a new image reference event, granting a UUID unless one is provided.
+    // pub fn sbom_ref_resolved(uri: &str, id: Option<String>) -> Self {
+    //     let id = id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    //     Self::SbomDiscovered {
+    //         artifact_id: id,
+    //         uri: uri.to_string(),
+    //     }
+    // }
 }
 
 #[derive(Debug)]

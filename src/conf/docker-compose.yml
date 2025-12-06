@@ -25,7 +25,7 @@
 services:
   neo4j:
     user: 7474:7474
-    image: neo4j/neo4j:5.26.2
+    image: registry1.dso.mil/ironbank/opensource/neo4j/neo4j:5.26.2
     restart: never
     environment:
       - NEO4J_AUTH=neo4j/somepassword
@@ -35,8 +35,8 @@ services:
       - "7474:7474"
       - "7687:7687"
     volumes:
-      - neo4j-no-ssl.conf:/var/lib/neo4j/conf
-      - ../neo4j_setup/imports:/var/lib/neo4j/import
+      # - ./neo4j-no-ssl.conf:/var/lib/neo4j/conf
+      - ./neo4j_setup/imports:/var/lib/neo4j/import
 
   jaeger:
     image: cr.jaegertracing.io/jaegertracing/jaeger:2.11.0
@@ -53,21 +53,104 @@ services:
   cassini:
     depends_on:
       - jaeger
-    image: cassini:latest
+    image: registry.sandbox.labz.s-box.org/sei/polar-mirror/cassini:0d2a5c44
     networks:
       - polar
     ports:
       - 8080:8080
     environment:
-      - CASSINI_BIND_ADDR=0.0.0.0:8080
+      - BROKER_ADDR=localhost:8080
       - TLS_CA_CERT=/etc/ssl/ca_certificate.pem
       - TLS_SERVER_CERT_CHAIN=/etc/ssl/server_cassini_certificate.pem
       - TLS_SERVER_KEY=/etc/ssl/server_cassini_key.pem
     volumes:
-      - ../certs/ca_certificates/ca_certificate.pem:/etc/ssl/ca_certificate.pem:ro
-      - ../certs/server/server_cassini_key.pem:/etc/ssl/server_cassini_key.pem:ro
-      - ../certs/server/server_cassini_certificate.pem:/etc/ssl/server_cassini_certificate.pem:ro
+      - ./certs/ca_certificates/ca_certificate.pem:/etc/ssl/ca_certificate.pem:ro
+      - ./certs/server/server_cassini_key.pem:/etc/ssl/server_cassini_key.pem:ro
+      - ./certs/server/server_cassini_certificate.pem:/etc/ssl/server_cassini_certificate.pem:ro
 
+  gitlab-observer:
+    depends_on:
+      - cassini
+    image: registry.sandbox.labz.s-box.org/sei/polar-mirror/polar-gitlab-observer:0d2a5c44
+    networks:
+      - polar
+    env_file: gitlab.env
+    environment:
+      - BROKER_ADDR=cassini:8080
+      - CASSINI_SERVER_NAME=cassini
+      - TLS_CA_CERT=/etc/ssl/ca_certificate.pem
+      - TLS_CLIENT_CERT=/etc/ssl/tls.crt
+      - TLS_CLIENT_KEY=/etc/ssl/tls.key
+      - PROXY_CA_CERT=/etc/ssl/proxy_ca.pem
+      - OBSERVER_BASE_INTERVAL=30
+    volumes:
+      - ./certs/ca_certificates/ca_certificate.pem:/etc/ssl/ca_certificate.pem:ro
+      - ./certs/client/client_cassini_key.pem:/etc/ssl/tls.key:ro
+      - ./certs/client/client_cassini_certificate.pem:/etc/ssl/tls.crt:ro
+      - ./certs/proxy_ca.pem:/etc/ssl/proxy_ca.pem:ro
+
+  gitlab-consumer:
+    depends_on:
+      - cassini
+    image: registry.sandbox.labz.s-box.org/sei/polar-mirror/polar-gitlab-consumer:0d2a5c44
+    networks:
+      - polar
+    environment:
+      - BROKER_ADDR=cassini:8080
+      - CASSINI_SERVER_NAME=cassini
+      - TLS_CA_CERT=/etc/ssl/ca_certificate.pem
+      - TLS_CLIENT_CERT=/etc/ssl/tls.crt
+      - TLS_CLIENT_KEY=/etc/ssl/tls.key
+      - GRAPH_DB=neo4j
+      - GRAPH_USER=neo4j
+      - GRAPH_PASSWORD=somepassword
+      - GRAPH_ENDPOINT=bolt://neo4j:7687
+    volumes:
+      - ./certs/ca_certificates/ca_certificate.pem:/etc/ssl/ca_certificate.pem:ro
+      - ./certs/client/client_cassini_key.pem:/etc/ssl/tls.key:ro
+      - ./certs/client/client_cassini_certificate.pem:/etc/ssl/tls.crt:ro
+
+  provenance-linker:
+    depends_on:
+      - cassini
+    image: registry.sandbox.labz.s-box.org/sei/polar-mirror/polar-linker-agent:0d2a5c44
+    networks:
+      - polar
+    environment:
+      - BROKER_ADDR=cassini:8080
+      - CASSINI_SERVER_NAME=cassini
+      - TLS_CA_CERT=/etc/ssl/ca_certificate.pem
+      - TLS_CLIENT_CERT=/etc/ssl/tls.crt
+      - TLS_CLIENT_KEY=/etc/ssl/tls.key
+      - GRAPH_DB=neo4j
+      - GRAPH_USER=neo4j
+      - GRAPH_PASSWORD=somepassword
+      - GRAPH_ENDPOINT=neo4j://neo4j:7474
+    volumes:
+      - ./certs/ca_certificates/ca_certificate.pem:/etc/ssl/ca_certificate.pem:ro
+      - ./certs/client/client_cassini_key.pem:/etc/ssl/tls.key:ro
+      - ./certs/client/client_cassini_certificate.pem:/etc/ssl/tls.crt:ro
+
+  provenance-resolver:
+    depends_on:
+      - cassini
+    image: registry.sandbox.labz.s-box.org/sei/polar-mirror/polar-resolver-agent:0d2a5c44
+    networks:
+      - polar
+    environment:
+      - BROKER_ADDR=cassini:8080
+      - CASSINI_SERVER_NAME=cassini
+      - TLS_CA_CERT=/etc/ssl/ca_certificate.pem
+      - TLS_CLIENT_CERT=/etc/ssl/tls.crt
+      - TLS_CLIENT_KEY=/etc/ssl/tls.key
+      - PROXY_CA_CERT=/etc/ssl/proxy_ca.pem
+      - DOCKER_CONFIG=/home/polar/.docker/
+    volumes:
+      - ./certs/ca_certificates/ca_certificate.pem:/etc/ssl/ca_certificate.pem:ro
+      - ./certs/client/client_cassini_key.pem:/etc/ssl/tls.key:ro
+      - ./certs/client/client_cassini_certificate.pem:/etc/ssl/tls.crt:ro
+      - ./certs/proxy_ca.pem:/etc/ssl/proxy_ca.pem:ro
+      - ./config.json:/home/polar/.docker/config.json
 networks:
   polar:
 

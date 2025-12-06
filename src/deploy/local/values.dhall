@@ -8,7 +8,7 @@ let Agents = ../types/agents.dhall
 let cassini
     : Cassini
     = { name = "cassini"
-      , image = "cassini:latest"
+      , image = "registry.sandbox.labz.s-box.org/sei/polar-mirror/cassini:0d2a5c44"
       , ports = { http = 3000, tcp = 8080 }
       , tls =
         { certificateRequestName = "cassini-certificate"
@@ -32,6 +32,22 @@ let clientTlsConfig
       , client_key_path = Constants.mtls.keyPath
       , client_ca_cert_path = Constants.mtls.caCertPath
       }
+
+      let linker
+          : Agents.ProvenanceLinker
+          = { name = Constants.ProvenanceLinkerName
+            , image = "registry.sandbox.labz.s-box.org/sei/polar-mirror/polar-linker-agent:0d2a5c44"
+            , graph = Constants.graphConfig
+            , tls = Constants.commonClientTls
+            }
+
+      let resolver
+          : Agents.ProvenanceResolver
+          = { name = Constants.ProvenanceLinkerName
+            , image = "registry.sandbox.labz.s-box.org/sei/polar-mirror/polar-resolver-agent:0d2a5c44"
+            , tls = Constants.commonClientTls
+            }
+
 
 let neo4jPorts = { http = 7474, bolt = 7687 }
 
@@ -68,4 +84,4 @@ let neo4jDNSName = "${Constants.neo4jServiceName}.${Constants.GraphNamespace}.sv
 
 let neo4jBoltAddr = "neo4j://${neo4jDNSName}:${Natural/show neo4j.ports.bolt}"
 
-in  { cassini, clientTlsConfig, neo4j , neo4jDNSName, neo4jBoltAddr }
+in  { cassini, linker, resolver, clientTlsConfig, neo4j , neo4jDNSName, neo4jBoltAddr }

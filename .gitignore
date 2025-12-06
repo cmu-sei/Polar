@@ -12,6 +12,7 @@ output/
 src/agents/*/result
 result*
 report.json
+config.json
 bin
 certs
 .vscode/settings.json
@@ -20,6 +21,7 @@ vscode-marketplace-nix.txt
 open-vsx-nix.txt
 observer.env
 consumer.env
+gitlab.env
 manifests
 chart/
 .direnv/

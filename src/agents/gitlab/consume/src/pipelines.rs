@@ -20,10 +20,10 @@
 
    DM24-0470
 */
-use cassini_client::TcpClientMessage;
 
 use crate::BROKER_CLIENT_NAME;
 use crate::{subscribe_to_topic, GitlabConsumerArgs, GitlabConsumerState};
+use cassini_client::TcpClientMessage;
 use common::types::GitlabData;
 use common::types::GitlabEnvelope;
 use common::PIPELINE_CONSUMER_TOPIC;
@@ -34,7 +34,7 @@ use neo4rs::Query;
 use polar::ProvenanceEvent;
 use polar::PROVENANCE_DISCOVERY_TOPIC;
 use polar::{QUERY_COMMIT_FAILED, TRANSACTION_FAILED_ERROR};
-use ractor::{async_trait, registry::where_is, rpc::cast, Actor, ActorProcessingErr, ActorRef};
+use ractor::{async_trait, rpc::cast, Actor, ActorProcessingErr, ActorRef};
 use tracing::{debug, error, info};
 
 fn dowwnload_path(base_url: &str, download_url: &str) -> String {
@@ -57,15 +57,16 @@ impl GitlabPipelineConsumer {
         artifacts
             .iter()
             .map(|artifact| {
-                // TODO: while we're at it, we shoud emit an event to the discovery topic that we found an artifact
+                // while we're at it, we shoud emit an event to the discovery topic that we found an artifact
                 // IFF that artifact is one we care about.
 
                 //handle whether the artifact can actually be resolved...if it can't then there's no download path, nothing we can do.
+                // TODO: It makes better sense to just do this work here, and pass it to the linker directly, and save ourselves the latency
                 if let Some(name) = &artifact.name {
                     if GitlabPipelineConsumer::artifact_should_emit(name) {
                         if let Some(download_path) = &artifact.download_path {
                             if let Some(client) = ractor::registry::where_is(BROKER_CLIENT_NAME.to_string()) {
-                                let event = ProvenanceEvent::sbom_ref(download_path, Some(artifact.id.to_string()));
+                                let event = ProvenanceEvent::sbom_ref_discovered(download_path, Some(artifact.id.to_string()));
 
                                 match rkyv::to_bytes::<rkyv::rancor::Error>(&event) {
                                     Ok(payload) => {

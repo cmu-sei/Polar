@@ -1,6 +1,7 @@
-use std::process::Output;
+use crate::BROKER_CLIENT_NAME;
+use std::sync::Arc;
 use std::time::Duration;
-use std::{collections::HashMap, sync::Arc};
+use tracing::error;
 
 use crate::{
     linker::{ProvenanceLinker, ProvenanceLinkerArgs},
@@ -9,10 +10,7 @@ use crate::{
 use cassini_client::{TCPClientConfig, TcpClientArgs};
 use neo4rs::Graph;
 use polar::{get_neo_config, QueueOutput, PROVENANCE_LINKER_TOPIC};
-use ractor::port::output;
-use ractor::{
-    async_trait, Actor, ActorProcessingErr, ActorRef, ActorStatus, OutputPort, SupervisionEvent,
-};
+use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef, OutputPort, SupervisionEvent};
 use tracing::{debug, info, warn};
 
 // === Messages ===
@@ -60,7 +58,7 @@ impl Actor for ProvenanceSupervisor {
         };
 
         let (broker_client, _) = Actor::spawn_linked(
-            Some("provenance.linker.tcp".to_string()),
+            Some(BROKER_CLIENT_NAME.to_string()),
             cassini_client::TcpClientActor,
             client_args,
             myself.clone().into(),
@@ -132,9 +130,13 @@ impl Actor for ProvenanceSupervisor {
         _state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match event {
-            SupervisionEvent::ActorFailed(name, _reason) => {
-                debug!("Actor {name:?} failed! {_reason:?}");
-                myself.stop(None);
+            SupervisionEvent::ActorFailed(name, err) => {
+                error!("Actor {name:?} failed! {err:?}");
+                myself.stop(Some(format!("{err:?}")));
+            }
+            SupervisionEvent::ActorTerminated(name, state, reason) => {
+                error!("Actor {name:?} failed! {reason:?}");
+                myself.stop(reason)
             }
             _ => {}
         }

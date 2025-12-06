@@ -1,6 +1,6 @@
 let kubernetes = ../../types/kubernetes.dhall
 let Constants = ../../types/constants.dhall
-let Functions = ../../types.functions.dhall
+let Functions = ../../types/functions.dhall
 
 let namespace = kubernetes.Namespace::{
       , apiVersion = "v1"
@@ -9,7 +9,8 @@ let namespace = kubernetes.Namespace::{
         , name = Some Constants.PolarNamespace
         }
       }
-
+-- TODO:
+-- This should probably be a constant
 let neo4jCredentialSecret = kubernetes.Secret::{
 apiVersion = "v1"
 , kind = "Secret"

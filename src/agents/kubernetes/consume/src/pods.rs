@@ -171,7 +171,7 @@ pub fn pods_to_cypher(pods: &[Pod]) -> Vec<String> {
                         // emit a message to the provenance discovery agent that we saw an image.
                         // For k8s, the canonical image name is the best we've got, so the resolver will have to take care of finding out where it really came from.
                         where_is(BROKER_CLIENT_NAME.to_string()).map(|client| {
-                            let event = ProvenanceEvent::image_ref(image, None);
+                            let event = ProvenanceEvent::image_ref_discovered(image, None);
 
                             match rkyv::to_bytes::<rancor::Error>(&event) {
                                 Ok(payload) => {

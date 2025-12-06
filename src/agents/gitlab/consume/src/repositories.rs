@@ -28,12 +28,14 @@ use common::REPOSITORY_CONSUMER_TOPIC;
 use gitlab_schema::{BigInt, DateTimeString};
 use neo4rs::Query;
 use polar::{
-    ProvenanceEvent, PROVENANCE_DISCOVERY_TOPIC, QUERY_COMMIT_FAILED, QUERY_RUN_FAILED,
+    ProvenanceEvent, PROVENANCE_LINKER_TOPIC, QUERY_COMMIT_FAILED, QUERY_RUN_FAILED,
     TRANSACTION_FAILED_ERROR,
 };
 use ractor::{async_trait, registry::where_is, rpc::cast, Actor, ActorProcessingErr, ActorRef};
 use tracing::error;
-use tracing::{debug, info};
+use tracing::{debug, info, trace};
+
+const UNKNOWN_FIELD: &str = "unknown";
 
 pub struct GitlabRepositoryConsumer;
 
@@ -137,32 +139,38 @@ impl Actor for GitlabRepositoryConsumer {
                         if let Err(_) = transaction.run(neo4rs::Query::new(cypher_query)).await {
                             myself.stop(Some(QUERY_RUN_FAILED.to_string()));
                         }
-
-                        if let Err(_) = transaction.commit().await {
-                            myself.stop(Some(QUERY_COMMIT_FAILED.to_string()));
-                        }
-
-                        info!("Committed transaction to database");
                     }
                     GitlabData::ContainerRepositoryTags((_project_path, tags)) => {
                         let tags_data = tags
                             .iter()
                             .map(|tag| {
+                                let digest =
+                                    tag.digest.clone().unwrap_or(UNKNOWN_FIELD.to_string());
+                                let media_type =
+                                    tag.media_type.clone().unwrap_or(UNKNOWN_FIELD.to_string());
                                 // So, I'm not the HUGEST fan of doing this operation here
                                 // My gut tells me this should happen AFTER the query is already complete and executed
                                 // But that would mean making neo4j suffer under multiple queries vs batch processing.
                                 // If we notice too much of a slowdown from this step, we can probably bite that bullet.
-                                let event = ProvenanceEvent::image_ref(&tag.location, None);
+                                let event = ProvenanceEvent::image_ref_resolved(
+                                    tag.location.clone(),
+                                    None,
+                                    digest.clone(),
+                                    media_type.clone(),
+                                );
 
-                                // emit message here informing the resolver (and eventually, the provenance linker) that
-                                // we discovered a container image tag
+                                // emit message here informing the linker that
+                                // we discovered a container image tag, it will try to eventually link it to any infrastructure using this image
+
                                 where_is(BROKER_CLIENT_NAME.to_string()).map(|client| {
                                     // serialize and send the event
-                                    info!("Forwarding provenance event to {PROVENANCE_DISCOVERY_TOPIC}");
+                                    trace!(
+                                        "Forwarding provenance event to {PROVENANCE_LINKER_TOPIC}"
+                                    );
                                     match rkyv::to_bytes::<rkyv::rancor::Error>(&event) {
                                         Ok(payload) => {
                                             let message = TcpClientMessage::Publish {
-                                                topic: PROVENANCE_DISCOVERY_TOPIC.to_string(),
+                                                topic: PROVENANCE_LINKER_TOPIC.to_string(),
                                                 payload: payload.into(),
                                             };
 
@@ -196,10 +204,7 @@ impl Actor for GitlabRepositoryConsumer {
                                         .created_at
                                         .clone()
                                         .unwrap_or(DateTimeString(String::default())),
-                                    digest = tag.digest.clone().unwrap_or(String::default()),
                                     location = tag.location,
-                                    media_type =
-                                        tag.media_type.clone().unwrap_or(String::default()),
                                     name = tag.name,
                                     path = tag.path,
                                     published_at = tag
@@ -218,35 +223,45 @@ impl Actor for GitlabRepositoryConsumer {
                         let cypher_query = format!(
                             r#"
                             UNWIND [{tags_data}] AS tag
-                            MERGE (t:ContainerImageTag {{ name: tag.name, path: tag.path }})
-                            SET
-                            t.created_at = tag.created_at,
-                            t.digest = tag.digest,
-                            t.location = tag.location,
-                            t.media_type = tag.media_type,
-                            t.published_at = tag.published_at,
-                            t.revision = tag.revision,
-                            t.short_revision = tag.short_revision,
-                            t.total_size = tag.total_size,
-                            t.repo_path = tag.repo_path
+                            MERGE (t:ContainerImageTag {{
+                              repo_path: tag.repo_path,
+                              name: tag.name
+                            }})
+                            ON CREATE SET
+                              t.created_at   = tag.created_at,
+                              t.digest       = tag.digest,
+                              t.location     = tag.location,
+                              t.media_type   = tag.media_type,
+                              t.published_at = tag.published_at,
+                              t.revision     = tag.revision,
+                              t.short_revision = tag.short_revision,
+                              t.total_size   = tag.total_size
+                            ON MATCH SET
+                              t.digest       = tag.digest,
+                              t.location     = tag.location,
+                              t.media_type   = tag.media_type,
+                              t.published_at = tag.published_at,
+                              t.revision     = tag.revision,
+                              t.short_revision = tag.short_revision,
+                              t.total_size   = tag.total_size
                             WITH t
 
+                            MERGE (r:ContainerRepository {{ path: t.repo_path }})
+                            MERGE (r)-[:CONTAINS_TAG]->(t)
+
+                            WITH t
                             // normalize into ImageReference
                             MERGE (ref:ContainerImageReference {{ normalized: t.location, digest: t.digest, created_at: t.created_at, total_size: t.total_size, media_type: t.media_type }})
-                            ON CREATE SET, ref.first_seen = timestamp()
+                            ON CREATE SET ref.first_seen = timestamp()
                             MERGE (t)-[:IDENTIFIES]->(ref)
-                            WITH t
-                            // optional: link back to repository
-                            MATCH (r:ContainerRepository {{ path: t.repo_path }})
-                            WITH r
-                            MERGE (ref)-[:CONTAINS_TAG]->(r)
+
                         "#
                         );
 
                         debug!(cypher_query);
 
                         if let Err(e) = transaction.run(Query::new(cypher_query)).await {
-                            error!("Failed to commit transaction to database: {}", e);
+                            error!("Failed to run transaction to database: {}", e);
                             return Err(ActorProcessingErr::from(e));
                         }
                     }
@@ -338,11 +353,6 @@ impl Actor for GitlabRepositoryConsumer {
                                 }
                             }
                         }
-                        if let Err(_) = transaction.commit().await {
-                            myself.stop(Some(QUERY_COMMIT_FAILED.to_string()));
-                        }
-
-                        info!("Committed transaction to database");
                     }
                     GitlabData::PackageFiles((package_id, files)) => {
                         let file_data = files
@@ -383,13 +393,12 @@ impl Actor for GitlabRepositoryConsumer {
                         if let Err(_e) = transaction.run(neo4rs::Query::new(cypher_query)).await {
                             myself.stop(Some(QUERY_RUN_FAILED.to_string()));
                         }
-
-                        if let Err(_e) = transaction.commit().await {
-                            myself.stop(Some(QUERY_COMMIT_FAILED.to_string()));
-                        }
-                        info!("Committed transaction to database")
                     }
                     _ => (),
+                }
+
+                if let Err(_e) = transaction.commit().await {
+                    myself.stop(Some(QUERY_COMMIT_FAILED.to_string()));
                 }
             }
             Err(e) => myself.stop(Some(format!("{TRANSACTION_FAILED_ERROR}. {e}"))),

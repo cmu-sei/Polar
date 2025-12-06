@@ -36,7 +36,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         (),
     )
     .await
-    .expect("Expected to start observer agent");
+    .expect("Expected to start consumer agent");
     let _ = handle.await;
 
     Ok(())

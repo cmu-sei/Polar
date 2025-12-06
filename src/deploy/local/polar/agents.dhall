@@ -11,20 +11,8 @@ let proxyCACert = None Text
 let deploymentName = Constants.ProvenanceDeploymentName
 
 let values = ../values.dhall
-let linker
-    : Agent.ProvenanceLinker
-    = { name = Constants.ProvenanceLinkerName
-      , image = "provenance-linker-agent:latest"
-      , graph = Constants.graphConfig
-      , tls = Constants.commonClientTls
-      }
-
-let resolver
-    : Agent.ProvenanceResolver
-    = { name = Constants.ProvenanceLinkerName
-      , image = "provenance-resolver-agent:latest"
-      , tls = Constants.commonClientTls
-      }
+let linker = values.linker
+let resolver = values.resolver
 
 let volumes =
       [ Constants.ClientTlsVolume ] # ProxyUtils.ProxyVolume proxyCACert
