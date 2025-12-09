@@ -35,7 +35,6 @@ let gitlabSecret =
       , type = Some "Opaque"
       }
 
-
 let proxyCACert = Some values.mtls.proxyCertificate
 
 let volumes =

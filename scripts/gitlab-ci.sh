@@ -1,27 +1,20 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Skopeo image upload utility
+function upload_image() {
+  local tag=$1
+  local archive_path=$2
+  local remote_ref=$3
+
+  echo "Uploading $tag image to $remote_ref"
+  skopeo copy "$archive_path" "$remote_ref"
+}
 # CI is set and true
 echo "Running CI job: ${CI_JOB_NAME:-"local-ci"}:${CI_JOB_ID:-"0"} on branch ${CI_COMMIT_BRANCH:-$CI_COMMIT_SHORT_SHA}"
 
-# git won't let nix operate if it doesn't think its safe.
-# TODO: We could elimiante this when we fully own the test runner's configuration.
-git config --global --add safe.directory "$(pwd)"
 
-mkdir -p output/sbom
-
-# TODO: move this to static-tools.sh
-# Run cyclonedx once at the root
-cargo cyclonedx --manifest-path src/agents/Cargo.toml -v -f json
-
-# Move all generated SBOMs into a centralized location
-
-find . -type f -name '*.cdx.json' | while read -r sbom; do
-  echo "moving $sbom -> to output/sbom"
-  mv "$sbom" "output/sbom/$(basename "$sbom")"
-done
-
-# # run static tools
+# # # run static tools
 # echo "Running static analysis tooling"
 # sh scripts/static-tools.sh --manifest-path src/agents/Cargo.toml
 
@@ -74,15 +67,6 @@ nix build --quiet .#polarPkgs.provenance.resolverImage -o resolver
 #   *) echo "Unexpected vulnix exit code: $VULNIX_EXIT" ;;
 # esac
 
-# Skopeo image upload utility
-function upload_image() {
-  local tag=$1
-  local archive_path=$2
-  local remote_ref=$3
-
-  echo "Uploading $tag image to $remote_ref"
-  skopeo copy "$archive_path" "$remote_ref"
-}
 
 # Log in and push to container registries if running in CI on the main branch
 
@@ -126,7 +110,7 @@ if [ "$CI_COMMIT_REF_NAME" = "main" ]; then
     echo "uploading deployment manifests"
     # use oras to turn them into an oci artifact and upload
     oras push \
-    $CI_REGISTRY/polar-manifests:$CI_COMMIT_SHORT_SHA \
+    $CI_REGISTRY_IMAGE/polar-manifests:$CI_COMMIT_SHORT_SHA \
      ./manifests/:application/vnd.kubernetes.manifests.layer.v1+tar
 
 

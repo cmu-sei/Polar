@@ -112,19 +112,17 @@ nix build .#polarPkgs.cassini.cassini .#polarPkgs.cassini.harnessProducer .#pola
 sh scripts/static-tools.sh --manifest-path src/agents/Cargo.toml
 ~~~
 
-<!--TODO: We should bring this capability back at some point-->-->
 ## run-ci
 > Runs the `gitlab-ci.sh` script to run the CI/CD job locally on your machine.
   NOTE: You will need to set all of the environment variables appropriately.'
-  See the [example.env](./example.env) for details
-
+  See our [example.env](./example.env) and [the Gitlab Documentation](https://docs.gitlab.com/ci/variables/predefined_variables/#predefined-variables) for details.
 
 ~~~sh
 podman run --rm \
 --name polar-dev \
 --env-file=ci.env  \
 --env CI_COMMIT_REF_NAME=$(git symbolic-ref --short HEAD) \
---env CI_COMMIT_SHORT_SHA=$(git rev-parse --short=8 HEAD) \ # gitlab, the CI we use, explicitly takes 8 chars
+--env CI_COMMIT_SHORT_SHA=$(git rev-parse --short=8 HEAD) \
 --env SSL_CERT_FILE="./src/conf/certs/proxy-ca.pem" \
 --user 0 \
 --userns=keep-id \

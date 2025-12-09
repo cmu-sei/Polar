@@ -43,8 +43,12 @@ build:
   script:
     # init env
     - start.sh
+      # git won't let nix operate if it doesn't think its safe.
+      # TODO: We could elimiante this when we fully own the test runner's configuration.
+    - git config --global --add safe.directory "$(pwd)"
     # TODO: remove this and add cargo-cyclonedx to the static-tools derviation
     - cargo install -q cargo-cyclonedx
+
     - chmod +x -R scripts
     - sh scripts/gitlab-ci.sh
   artifacts:
