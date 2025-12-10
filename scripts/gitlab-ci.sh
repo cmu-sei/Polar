@@ -100,11 +100,10 @@ if [ "$CI_COMMIT_REF_NAME" = "main" ]; then
     # Generate kubernetes manifests and push them to a hosted repository
     chmod +x ./scripts/render-manifests.sh
 
-    # Explicitly enable strict secrets mode - this will encrypt any secret manifests
     # --CAUTION --
     # DO NOT REMOVE THIS FLAG, IT MUST BE SET TO RUN THE `render-manifests` scripts
     #
-    SECRETS_MODE=strict
+    SECRETS_MODE=plaintext
     sh scripts/render-manifests.sh src/deploy/sandbox manifests
 
     echo "uploading deployment manifests"

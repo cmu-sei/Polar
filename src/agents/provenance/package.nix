@@ -32,7 +32,7 @@ let
     };
 
     resolverBin = craneLib.buildPackage (crateArgs // {
-        pname = "linker";
+        pname = "provenance-resolver";
         cargoExtraArgs= "--bin provenance-resolver --locked";
         src = workspaceFileset ./provenance;
     });
@@ -40,7 +40,10 @@ let
     resolverImage = pkgs.dockerTools.buildImage {
         name = "provenance-resolver-agent";
         tag = "latest";
-        copyToRoot = commonPaths ++ [resolverBin];
+        copyToRoot = commonPaths ++ [
+          resolverBin
+          pkgs.cacert # this one needs a default trust store, so we'll include one
+        ];
         uid = commonUser.uid;
         gid = commonUser.gid;
 

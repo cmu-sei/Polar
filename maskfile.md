@@ -38,6 +38,7 @@ Our team primarily uses `podman` as a container runtime. So feel free to `alias`
   podman load < gitlab-observer
   podman load < gitlab-consumer
   ~~~
+
 ### kube
   > builds the kube agents and their  images
   ~~~sh
@@ -76,14 +77,11 @@ podman compose -f src/conf/docker-compose.yml up -d
 nix build .#default -o polar
 ~~~
 
-
 ### cassini
 > Builds all of the polar agents and outputs their binaries
 ~~~sh
 nix build .#polarPkgs.cassini.cassini .#polarPkgs.cassini.harnessProducer .#polarPkgs.cassini.harnessSink
 ~~~
-
-
 
 ## get-tls
   > Runs the nix derivation to generate TLS certificates for testing.
@@ -102,33 +100,33 @@ nix build .#polarPkgs.cassini.cassini .#polarPkgs.cassini.harnessProducer .#pola
 ~~~sh
     export SECRETS_MODE=$mode
     echo SECRETS_MODE=$mode
-    sh scripts/render-manifests.sh "src/deploy/$environment" $output_dir
+    sh $MASKFILE_DIR/scripts/render-manifests.sh "$MASKFILE_DIR/src/deploy/$environment" $MASKFILE_DIR/$output_dir
 ~~~
 
 ## static-analysis
 > uses the `static-tools.sh` script to run various static analysis tools on the rust source code.
 
-~~~sh
-sh scripts/static-tools.sh --manifest-path src/agents/Cargo.toml
-~~~
+  ~~~sh
+  sh scripts/static-tools.sh --manifest-path src/agents/Cargo.toml
+  ~~~
 
 ## run-ci
 > Runs the `gitlab-ci.sh` script to run the CI/CD job locally on your machine.
   NOTE: You will need to set all of the environment variables appropriately.'
   See our [example.env](./example.env) and [the Gitlab Documentation](https://docs.gitlab.com/ci/variables/predefined_variables/#predefined-variables) for details.
 
-~~~sh
-podman run --rm \
---name polar-dev \
---env-file=ci.env  \
---env CI_COMMIT_REF_NAME=$(git symbolic-ref --short HEAD) \
---env CI_COMMIT_SHORT_SHA=$(git rev-parse --short=8 HEAD) \
---env SSL_CERT_FILE="./src/conf/certs/proxy-ca.pem" \
---user 0 \
---userns=keep-id \
--v $(pwd):/workspace:rw \
--p 2222:2223 \
-polar-dev:0.1.0 \
-bash -c "start.sh; chmod +x scripts/gitlab-ci.sh; chmod +x scripts/static-tools.sh ; scripts/gitlab-ci.sh"
+  ~~~sh
+  podman run --rm \
+  --name polar-dev \
+  --env-file=ci.env  \
+  --env CI_COMMIT_REF_NAME=$(git symbolic-ref --short HEAD) \
+  --env CI_COMMIT_SHORT_SHA=$(git rev-parse --short=8 HEAD) \
+  --env SSL_CERT_FILE="./src/conf/certs/proxy-ca.pem" \
+  --user 0 \
+  --userns=keep-id \
+  -v $(pwd):/workspace:rw \
+  -p 2222:2223 \
+  polar-dev:0.1.0 \
+  bash -c "start.sh; chmod +x scripts/gitlab-ci.sh; chmod +x scripts/static-tools.sh ; scripts/gitlab-ci.sh"
 
-~~~
+  ~~~

@@ -21,19 +21,15 @@
    DM24-0470
 */
 
-use crate::{subscribe_to_topic, GitlabConsumerArgs, GitlabConsumerState, BROKER_CLIENT_NAME};
-use cassini_client::TcpClientMessage;
+use crate::{subscribe_to_topic, GitlabConsumerArgs, GitlabConsumerState};
 use common::types::{GitlabData, GitlabEnvelope};
 use common::REPOSITORY_CONSUMER_TOPIC;
 use gitlab_schema::{BigInt, DateTimeString};
 use neo4rs::Query;
-use polar::{
-    ProvenanceEvent, PROVENANCE_LINKER_TOPIC, QUERY_COMMIT_FAILED, QUERY_RUN_FAILED,
-    TRANSACTION_FAILED_ERROR,
-};
-use ractor::{async_trait, registry::where_is, rpc::cast, Actor, ActorProcessingErr, ActorRef};
+use polar::{QUERY_COMMIT_FAILED, QUERY_RUN_FAILED, TRANSACTION_FAILED_ERROR};
+use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef};
 use tracing::error;
-use tracing::{debug, info, trace};
+use tracing::{debug, info};
 
 const UNKNOWN_FIELD: &str = "unknown";
 
@@ -148,39 +144,6 @@ impl Actor for GitlabRepositoryConsumer {
                                     tag.digest.clone().unwrap_or(UNKNOWN_FIELD.to_string());
                                 let media_type =
                                     tag.media_type.clone().unwrap_or(UNKNOWN_FIELD.to_string());
-                                // So, I'm not the HUGEST fan of doing this operation here
-                                // My gut tells me this should happen AFTER the query is already complete and executed
-                                // But that would mean making neo4j suffer under multiple queries vs batch processing.
-                                // If we notice too much of a slowdown from this step, we can probably bite that bullet.
-                                let event = ProvenanceEvent::image_ref_resolved(
-                                    tag.location.clone(),
-                                    None,
-                                    digest.clone(),
-                                    media_type.clone(),
-                                );
-
-                                // emit message here informing the linker that
-                                // we discovered a container image tag, it will try to eventually link it to any infrastructure using this image
-
-                                where_is(BROKER_CLIENT_NAME.to_string()).map(|client| {
-                                    // serialize and send the event
-                                    trace!(
-                                        "Forwarding provenance event to {PROVENANCE_LINKER_TOPIC}"
-                                    );
-                                    match rkyv::to_bytes::<rkyv::rancor::Error>(&event) {
-                                        Ok(payload) => {
-                                            let message = TcpClientMessage::Publish {
-                                                topic: PROVENANCE_LINKER_TOPIC.to_string(),
-                                                payload: payload.into(),
-                                            };
-
-                                            cast(&client, message).ok();
-                                        }
-                                        Err(e) => {
-                                            error!("Failed to serialize event: {}", e);
-                                        }
-                                    }
-                                });
 
                                 // ContainerRepository paths are always in the form of <namespace>/<project_name>/<image_name>
                                 // so we should be able to take advantage of this and strip the tag off

@@ -53,7 +53,7 @@ services:
   cassini:
     depends_on:
       - jaeger
-    image: registry.sandbox.labz.s-box.org/sei/polar-mirror/cassini:0d2a5c44
+    image: registry.sandbox.labz.s-box.org/sei/polar-mirror/cassini:386858fe
     networks:
       - polar
     ports:
@@ -71,7 +71,7 @@ services:
   gitlab-observer:
     depends_on:
       - cassini
-    image: registry.sandbox.labz.s-box.org/sei/polar-mirror/polar-gitlab-observer:0d2a5c44
+    image: registry.sandbox.labz.s-box.org/sei/polar-mirror/polar-gitlab-observer:386858fe
     networks:
       - polar
     env_file: gitlab.env
@@ -92,7 +92,7 @@ services:
   gitlab-consumer:
     depends_on:
       - cassini
-    image: registry.sandbox.labz.s-box.org/sei/polar-mirror/polar-gitlab-consumer:0d2a5c44
+    image: registry.sandbox.labz.s-box.org/sei/polar-mirror/polar-gitlab-consumer:386858fe
     networks:
       - polar
     environment:
@@ -113,7 +113,7 @@ services:
   provenance-linker:
     depends_on:
       - cassini
-    image: registry.sandbox.labz.s-box.org/sei/polar-mirror/polar-linker-agent:0d2a5c44
+    image: registry.sandbox.labz.s-box.org/sei/polar-mirror/polar-linker-agent:386858fe
     networks:
       - polar
     environment:
@@ -134,7 +134,7 @@ services:
   provenance-resolver:
     depends_on:
       - cassini
-    image: registry.sandbox.labz.s-box.org/sei/polar-mirror/polar-resolver-agent:0d2a5c44
+    image: registry.sandbox.labz.s-box.org/sei/polar-mirror/polar-resolver-agent:386858fe
     networks:
       - polar
     environment:

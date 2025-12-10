@@ -349,8 +349,6 @@ let kubeAgentDeployment =
             , type = Some "Opaque"
             }
 
-
-
 let proxyCACert = Some values.mtls.proxyCertificate
 
 let deploymentName = Constants.ProvenanceDeploymentName
@@ -383,7 +381,7 @@ let volumes = [
 
 let linkerEnv = Constants.commonClientEnv # Constants.graphClientEnvVars # [ values.graphEndpointEnvVar ]
 
-let resolverEnv = Constants.commonClientEnv # proxyUtils.ProxyEnv proxyCACert # [  kubernetes.EnvVar::{ name = "DOCKER_CONFIG", value = Some "/home/polar/.docker/config.json" } ]
+let resolverEnv = Constants.commonClientEnv # proxyUtils.ProxyEnv proxyCACert
 
 
 let linkerVolumeMounts =

@@ -1,14 +1,7 @@
 use cassini_client::{TCPClientConfig, TcpClientActor, TcpClientArgs, TcpClientMessage};
 use oci_client::{
     client::{Certificate, CertificateEncoding, ClientConfig},
-    manifest::{
-        OciImageManifest, OciManifest, IMAGE_CONFIG_MEDIA_TYPE, IMAGE_DOCKER_CONFIG_MEDIA_TYPE,
-        IMAGE_DOCKER_LAYER_GZIP_MEDIA_TYPE, IMAGE_DOCKER_LAYER_TAR_MEDIA_TYPE,
-        IMAGE_LAYER_GZIP_MEDIA_TYPE, IMAGE_LAYER_MEDIA_TYPE,
-        IMAGE_LAYER_NONDISTRIBUTABLE_GZIP_MEDIA_TYPE, IMAGE_LAYER_NONDISTRIBUTABLE_MEDIA_TYPE,
-        IMAGE_MANIFEST_LIST_MEDIA_TYPE, IMAGE_MANIFEST_MEDIA_TYPE, OCI_IMAGE_INDEX_MEDIA_TYPE,
-        OCI_IMAGE_MEDIA_TYPE, WASM_CONFIG_MEDIA_TYPE, WASM_LAYER_MEDIA_TYPE,
-    },
+    manifest::OciManifest,
     secrets::RegistryAuth,
     Client as OciClient, Reference, RegistryOperation,
 };
@@ -120,7 +113,6 @@ impl Actor for ResolverSupervisor {
                 )
                 .await?;
 
-                // subscribe the dispatcher
                 state.queue_output.subscribe(resolver, |(message, _topic)| {
                     // when we get messages off the queue, we need to deserialize it,
                     // then forward directly to the resolver.
@@ -158,15 +150,7 @@ impl Actor for ResolverSupervisor {
 // --- Resolver Agent ---
 pub struct ResolverAgent;
 
-// type RegistryCredentials = (String, String);
-
 impl ResolverAgent {
-    // fn get_registry_credentials() -> Result<RegistryCredentials, ActorProcessingErr> {
-    //     let username = env::var("REGISTRY_USERNAME")?;
-    //     let password = env::var("REGISTRY_PASSWORD")?;
-    //     Ok((username, password))
-    // }
-
     fn deserialize_payload(payload: Vec<u8>) -> Option<ProvenanceEvent> {
         if let Ok(event) = rkyv::from_bytes::<ProvenanceEvent, rkyv::rancor::Error>(&payload) {
             Some(event)
@@ -291,12 +275,10 @@ impl Actor for ResolverAgent {
         _myself: ActorRef<Self::Msg>,
         args: Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
-        info!("ResolverAgent started");
-
         let oci_client = match std::env::var("PROXY_CA_CERT") {
             Ok(cert_path) => {
                 let data = get_file_as_byte_vec(&cert_path)?;
-                info!("Configuring OCI client with proxy cert found at {cert_path}");
+                debug!("Configuring OCI client with proxy cert found at {cert_path}");
                 let cert = Certificate {
                     encoding: CertificateEncoding::Pem,
                     data,
@@ -342,7 +324,7 @@ impl Actor for ResolverAgent {
     ) -> Result<(), ActorProcessingErr> {
         match msg {
             ProvenanceEvent::ImageRefDiscovered { id, uri } => {
-                debug!("Received provenance event!");
+                trace!("Received image ref discovered event!");
                 let (manifest, digest) =
                     ResolverAgent::inspect_image(&uri, &state.oci_client).await?;
 
