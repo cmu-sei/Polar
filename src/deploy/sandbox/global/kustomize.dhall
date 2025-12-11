@@ -1,6 +1,6 @@
 let values = ../values.dhall
 
-let kustomize = { apiVersion = "kustomize.toolkit.fluxcd.io/v1beta2"
+let kustomize = { apiVersion = "kustomize.toolkit.fluxcd.io/v1"
 , kind = "Kustomization"
 , metadata = { name = "polar", namespace = values.namespace }
 , spec =
@@ -9,6 +9,7 @@ let kustomize = { apiVersion = "kustomize.toolkit.fluxcd.io/v1beta2"
   , path = "./manifests"
   , prune = True
   , sourceRef = { kind = "OCIRepository", name = values.deployRepository.name }
+  , targetNamespace = values.namespace
   }
 }
 

@@ -6,17 +6,13 @@ use oci_client::{
     Client as OciClient, Reference, RegistryOperation,
 };
 use polar::{
-    get_file_as_byte_vec, DispatcherMessage, ProvenanceEvent, QueueOutput, DISPATCH_ACTOR,
-    PROVENANCE_DISCOVERY_TOPIC, PROVENANCE_LINKER_TOPIC,
+    get_file_as_byte_vec, ProvenanceEvent, QueueOutput, PROVENANCE_DISCOVERY_TOPIC,
+    PROVENANCE_LINKER_TOPIC,
 };
-use provenance_common::{MessageDispatcher, RESOLVER_CLIENT_NAME, RESOLVER_SUPERVISOR_NAME};
-use ractor::{
-    async_trait, factory::queues::Queue, Actor, ActorProcessingErr, ActorRef, OutputPort,
-    SupervisionEvent,
-};
+use provenance_common::RESOLVER_SUPERVISOR_NAME;
+use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef, OutputPort, SupervisionEvent};
 use reqwest::Client as WebClient;
-use rkyv::Resolver;
-use std::{env, str::FromStr, sync::OnceLock};
+use std::str::FromStr;
 use tracing::{debug, error, info, trace, warn};
 
 pub const BROKER_CLIENT_NAME: &str = "polar.provenance.resolver.tcp";
@@ -83,8 +79,8 @@ impl Actor for ResolverSupervisor {
 
     async fn post_start(
         &self,
-        myself: ActorRef<Self::Msg>,
-        state: &mut Self::State,
+        _myself: ActorRef<Self::Msg>,
+        _state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         // Perform any post-start initialization tasks here
 
@@ -134,12 +130,13 @@ impl Actor for ResolverSupervisor {
         _state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match event {
-            SupervisionEvent::ActorFailed(name, _reason) => {
-                error!("Actor {name:?} failed! {_reason:?}");
-                myself.stop(None);
+            SupervisionEvent::ActorFailed(name, reason) => {
+                error!("Actor {name:?} failed! {reason:?}");
+                myself.stop(Some(reason.to_string()));
             }
-            SupervisionEvent::ActorTerminated(name, state, reason) => {
+            SupervisionEvent::ActorTerminated(name, _state, reason) => {
                 warn!("Actor {name:?} terminated! {reason:?}");
+                myself.stop(reason)
             }
             _ => {}
         }
@@ -160,7 +157,7 @@ impl ResolverAgent {
         }
     }
 
-    fn resolve_registry_auth(reference: &Reference) -> RegistryAuth {
+    fn resolve_registry_auth(reference: &Reference) -> Result<RegistryAuth, ActorProcessingErr> {
         use docker_credential::{self, CredentialRetrievalError, DockerCredential};
         let registry = reference.resolve_registry();
         debug!("Resolving OCI credentials for registry: {}", registry);
@@ -179,7 +176,7 @@ impl ResolverAgent {
                         "Resolved credentials from docker config for key {}",
                         candidate
                     );
-                    return RegistryAuth::Basic(u, p);
+                    return Ok(RegistryAuth::Basic(u, p));
                 }
                 Ok(DockerCredential::IdentityToken(_)) => {
                     // TODO: really? Should we error out here too?
@@ -191,18 +188,18 @@ impl ResolverAgent {
                 }
                 Err(CredentialRetrievalError::ConfigNotFound) => {
                     debug!("docker config not found — skipping remaining candidates and using anonymous authentication");
-                    return RegistryAuth::Anonymous;
+                    return Ok(RegistryAuth::Anonymous);
                 }
                 Err(CredentialRetrievalError::NoCredentialConfigured) => {
                     debug!(
                         "No credentials for key {} — using anonymous authentication",
                         candidate
                     );
-                    return RegistryAuth::Anonymous;
+                    return Ok(RegistryAuth::Anonymous);
                 }
                 Err(e) => {
                     error!("Error reading docker credentials for {}: {}", candidate, e);
-                    todo!("file was malformed or something, unrecoverable and should be handled.")
+                    return Err(ActorProcessingErr::from(e));
                 }
             }
         }
@@ -211,7 +208,7 @@ impl ResolverAgent {
             "No usable credentials — falling back to anonymous for {}",
             base
         );
-        RegistryAuth::Anonymous
+        Ok(RegistryAuth::Anonymous)
     }
 
     fn normalize_registry_host(s: &str) -> String {
@@ -244,13 +241,16 @@ impl ResolverAgent {
         // Parse the image reference, e.g., "ghcr.io/myorg/myimage:latest"
         let reference = oci_client::Reference::from_str(image_ref)?;
 
-        let auth = Self::resolve_registry_auth(&reference);
+        let auth = Self::resolve_registry_auth(&reference)?;
 
         client
             .auth(&reference, &auth, RegistryOperation::Pull)
             .await?;
 
-        Ok(client.pull_manifest(&reference, &auth).await?)
+        match client.pull_manifest(&reference, &auth).await {
+            Ok(response) => Ok(response),
+            Err(e) => Err(ActorProcessingErr::from(e)),
+        }
     }
 }
 
@@ -325,29 +325,34 @@ impl Actor for ResolverAgent {
         match msg {
             ProvenanceEvent::ImageRefDiscovered { id, uri } => {
                 trace!("Received image ref discovered event!");
-                let (manifest, digest) =
-                    ResolverAgent::inspect_image(&uri, &state.oci_client).await?;
 
-                debug!("Resolved image: \n {manifest:?}");
+                match ResolverAgent::inspect_image(&uri, &state.oci_client).await {
+                    Ok((manifest, digest)) => {
+                        info!("Resolved image: \n {manifest:?}");
 
-                let media_type = manifest.content_type().to_owned();
+                        let media_type = manifest.content_type().to_owned();
 
-                // forward image data to the linker
-                let message = ProvenanceEvent::ImageRefResolved {
-                    id,
-                    uri,
-                    digest,
-                    media_type,
-                };
+                        // forward image data to the linker
+                        let message = ProvenanceEvent::ImageRefResolved {
+                            id,
+                            uri,
+                            digest,
+                            media_type,
+                        };
 
-                let payload = rkyv::to_bytes::<rkyv::rancor::Error>(&message)?;
+                        let payload = rkyv::to_bytes::<rkyv::rancor::Error>(&message)?;
 
-                state.cassini_client.cast(TcpClientMessage::Publish {
-                    topic: PROVENANCE_LINKER_TOPIC.to_string(),
-                    payload: payload.into(),
-                })?;
+                        state.cassini_client.cast(TcpClientMessage::Publish {
+                            topic: PROVENANCE_LINKER_TOPIC.to_string(),
+                            payload: payload.into(),
+                        })?;
+                    }
+                    Err(e) => {
+                        warn!("Failed to resolve image: {uri}, {e}");
+                    }
+                }
             }
-            _ => todo!(),
+            _ => warn!("Received unexpected message! {msg:?}"),
         }
 
         Ok(())

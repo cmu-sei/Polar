@@ -99,6 +99,19 @@ let consumerEnv =
           }
         ]
 
+let graphSecret = kubernetes.Secret::{
+    apiVersion = "v1"
+    , kind = "Secret"
+    , metadata = kubernetes.ObjectMeta::{
+        name = Some "polar-graph-pw"
+        , namespace = Some values.namespace
+        }
+    -- , data : Optional (List { mapKey : Text, mapValue : Text })
+    -- , immutable = Some True
+    , stringData = Some [ { mapKey = values.graphSecret.key, mapValue = env:GRAPH_PASSWORD as Text } ]
+    , type = Some "Opaque"
+}
+
 let gitlabAgentPod =
       kubernetes.PodSpec::{
       , imagePullSecrets = Some values.sandboxRegistry.imagePullSecrets
@@ -449,6 +462,7 @@ let provenanceDeployment =
       }
 
 in  [ kubernetes.Resource.Deployment gitlabAgentDeployment
+    , kubernetes.Resource.Secret graphSecret
     , kubernetes.Resource.Secret gitlabSecret
     , kubernetes.Resource.ServiceAccount gitlabAgentServiceAccount
     , kubernetes.Resource.ClusterRole kubeAgentClusterRole

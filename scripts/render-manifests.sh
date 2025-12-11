@@ -1,25 +1,6 @@
 #!/bin/bash
 set -euo pipefail
 
-convert_and_encrypt() {
-    input_dhall="$1"
-    output_yaml="$2"
-
-    # Convert Dhall to YAML
-    if ! dhall-to-yaml --file "$input_dhall" > "$output_yaml"; then
-        echo "[ERROR] Failed to convert $input_dhall to YAML" >&2
-        rm -f "$output_yaml"
-        exit 1
-    fi
-
-    # Encrypt the YAML using SOPS with local .sops.yaml config
-    if ! sops -e --config .sops.yaml --verbose --in-place --output-type yaml "$output_yaml"; then
-        echo "[ERROR] Failed to encrypt $output_yaml with SOPS" >&2
-        rm -f "$output_yaml"
-        exit 1
-    fi
-}
-
 convert_dhall_to_yaml() {
     local dhall_dir="$1"
     local output_dir="$2"
@@ -42,33 +23,11 @@ convert_dhall_to_yaml() {
         # Create the necessary directories for the yaml file
         mkdir -p "$(dirname "$yaml_file")"
 
-        # If the file looks like a secret, encrypt it with SOPS before we write it
-        # Handle secrets based on SECRETS_MODE
-        if [[ "$dhall_file" =~ -secret\.dhall$ ]]; then
-            case "${SECRETS_MODE:-strict}" in
-                strict)
-                    echo "[INFO] Encrypting secret from $dhall_file"
-                    convert_and_encrypt "$dhall_file" "$yaml_file"
-                    ;;
-                plaintext)
-                    echo "[WARN] Writing plaintext secret for $dhall_file (SECRETS_MODE=plaintext)"
-                    if ! dhall-to-yaml --documents --file "$dhall_file" > "$yaml_file"; then
-                        echo "[ERROR] Failed to render plaintext secret $dhall_file" >&2
-                        exit 1
-                    fi
-                    ;;
-                *)
-                    echo "[ERROR] Invalid SECRETS_MODE value: $SECRETS_MODE" >&2
-                    exit 1
-                    ;;
-            esac
-        else
-            echo "[INFO] Converting: $dhall_file -> $yaml_file"
+        echo "[INFO] Converting: $dhall_file -> $yaml_file"
 
-            if ! dhall-to-yaml --documents --file "$dhall_file" > "$yaml_file"; then
-                echo "[ERROR] Error: Failed to convert $dhall_file" >&2
-                exit 1
-            fi
+        if ! dhall-to-yaml --documents --file "$dhall_file" > "$yaml_file"; then
+            echo "[ERROR] Error: Failed to convert $dhall_file" >&2
+            exit 1
         fi
 
     done
