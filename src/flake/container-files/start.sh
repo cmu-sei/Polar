@@ -54,7 +54,7 @@ create_user() {
     chmod u+w /home/$user
 
     # set environment variable explicitly
-    export $USER = $user
+    export $USER=$user
 }
 
 ##############################################################################

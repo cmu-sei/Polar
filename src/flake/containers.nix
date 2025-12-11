@@ -185,11 +185,96 @@ let
     # ---------------------------------------------------------------------
     # Dev container image
     # ---------------------------------------------------------------------
-    devContainer = pkgs.dockerTools.buildImage {
+    # devContainer = pkgs.dockerTools.buildImage {
+    #   name = "polar-dev";
+    #   tag  = "latest";
+    #   copyToRoot = [
+    #     baseInfo
+    #     polarHelpScript
+    #     startScript
+    #     devEnv
+    #     fishConfig
+    #     gitconfig
+    #     interactiveShellInitFile
+    #     license
+    #     nixConfig
+    #     shellInitFile
+    #     containerPolicyConfig
+    #     vendorFuncs
+    #   ];
+    #   config = {
+    #     WorkingDir = "/workspace";
+    #     Env = [
+    #       "CARGO_HTTP_CAINFO=/etc/ssl/certs/ca-bundle.crt"
+
+    #       # Fish plugins
+    #       "BOB_THE_FISH=${pkgs.fishPlugins.bobthefish}"
+    #       "FISH_BASS=${pkgs.fishPlugins.bass}"
+    #       "FISH_GRC=${pkgs.fishPlugins.grc}"
+
+    #       "CC=clang"
+    #       "CXX=clang++"
+    #       "CMAKE=/bin/cmake"
+    #       "CMAKE_MAKE_PROGRAM=/bin/make"
+    #       "COREUTILS=${pkgs.uutils-coreutils-noprefix}"
+
+    #       # tell clang-sys / bindgen where to find libclang
+    #       "LIBCLANG_PATH=${pkgs.llvmPackages_19.libclang.lib}/lib"
+
+    #       "LANG=en_US.UTF-8"
+    #       "TZ=UTC"
+    #       "MANPAGER=sh -c 'col -bx | bat --language man --style plain'"
+    #       "MANPATH=${pkgs.man-db}/share/man:$MANPATH"
+    #       "LOCALE_ARCHIVE=${pkgs.glibcLocalesUtf8}/lib/locale/locale-archive"
+
+    #       # stdenv.cc is clang-based now, so this is fine:
+    #       "LD_LIBRARY_PATH=${pkgs.lib.makeLibraryPath [ devEnv pkgs.stdenv.cc.cc.lib ]}"
+
+    #       #"LIBCLANG_PATH=${pkgs.libclang.lib}/lib/"
+
+    #       "RUSTFLAGS=-Clinker=clang-lld-wrapper"
+
+    #       "PATH=$PATH:/bin:/usr/bin:${devEnv}/bin:/root/.cargo/bin"
+
+    #       # Add openssl to pkg config to ensure that it loads for cargo build
+    #       "PKG_CONFIG_PATH=${pkgs.openssl.dev}/lib/pkgconfig"
+
+    #       "SHELL=/bin/fish"
+    #       "SSL_CERT_DIR=/etc/ssl/certs"
+
+    #       # Add certificates to allow for cargo to download files from the
+    #       # internet. May have to adjust this for FIPS.
+    #       "SSL_CERT_FILE=/etc/ssl/certs/ca-bundle.crt"
+
+    #       "USER=root"
+    #     ];
+    #     Volumes = {};
+    #     Cmd = [ "${startScript}/bin/start.sh" ];
+    #   };
+    #   extraCommands = ''
+    #     # Link the env binary (needed for the check requirements script)
+    #     mkdir -p usr/bin
+    #     ln -s ${pkgs.coreutils}/bin/env usr/bin/env
+
+    #     # Link the dynamic linker/loader (needed for Node)
+    #     mkdir -p lib64
+    #     ln -s ${pkgs.stdenv.cc.cc}/lib/ld-linux-x86-64.so.2 lib64/
+
+    #     mkdir -p var/tmp
+    #     mkdir -p tmp
+    #   '';
+    # };
+
+    # ---------------------------------------------------------------------
+    # Dev container image (layered)
+    # ---------------------------------------------------------------------
+    devContainer = pkgs.dockerTools.buildLayeredImage {
       name = "polar-dev";
       tag  = "latest";
-      copyToRoot = [
-        baseInfo
+
+      # Flatten baseInfo into the main list so we don't rely on implicit
+      # flattening magic.
+      contents = baseInfo ++ [
         polarHelpScript
         startScript
         devEnv
@@ -202,6 +287,7 @@ let
         containerPolicyConfig
         vendorFuncs
       ];
+
       config = {
         WorkingDir = "/workspace";
         Env = [
@@ -218,7 +304,6 @@ let
           "CMAKE_MAKE_PROGRAM=/bin/make"
           "COREUTILS=${pkgs.uutils-coreutils-noprefix}"
 
-          # tell clang-sys / bindgen where to find libclang
           "LIBCLANG_PATH=${pkgs.llvmPackages_19.libclang.lib}/lib"
 
           "LANG=en_US.UTF-8"
@@ -227,23 +312,16 @@ let
           "MANPATH=${pkgs.man-db}/share/man:$MANPATH"
           "LOCALE_ARCHIVE=${pkgs.glibcLocalesUtf8}/lib/locale/locale-archive"
 
-          # stdenv.cc is clang-based now, so this is fine:
           "LD_LIBRARY_PATH=${pkgs.lib.makeLibraryPath [ devEnv pkgs.stdenv.cc.cc.lib ]}"
-
-          #"LIBCLANG_PATH=${pkgs.libclang.lib}/lib/"
 
           "RUSTFLAGS=-Clinker=clang-lld-wrapper"
 
           "PATH=$PATH:/bin:/usr/bin:${devEnv}/bin:/root/.cargo/bin"
 
-          # Add openssl to pkg config to ensure that it loads for cargo build
           "PKG_CONFIG_PATH=${pkgs.openssl.dev}/lib/pkgconfig"
 
           "SHELL=/bin/fish"
           "SSL_CERT_DIR=/etc/ssl/certs"
-
-          # Add certificates to allow for cargo to download files from the
-          # internet. May have to adjust this for FIPS.
           "SSL_CERT_FILE=/etc/ssl/certs/ca-bundle.crt"
 
           "USER=root"
@@ -251,6 +329,8 @@ let
         Volumes = {};
         Cmd = [ "${startScript}/bin/start.sh" ];
       };
+
+      # Works the same way as with buildImage – it just becomes the top layer.
       extraCommands = ''
         # Link the env binary (needed for the check requirements script)
         mkdir -p usr/bin
@@ -263,6 +343,9 @@ let
         mkdir -p var/tmp
         mkdir -p tmp
       '';
+
+      # Optional: be greedy with shareable layers if you don't care about extending this image with Dockerfiles.
+      maxLayers = 128;
     };
 
 in {
