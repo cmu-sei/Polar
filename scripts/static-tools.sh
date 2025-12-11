@@ -2,24 +2,16 @@
 
 # Define directories
 
-MANIFEST_PATH="src/default-manifest"  # Set default path
+# Default to the Polar workspace; can override with --manifest-path.
+MANIFEST_PATH="src/agents/Cargo.toml"
 
-OUTPUT_DIR="./output" 
+OUTPUT_DIR="./output"
 
-datastore_path="$OUTPUT_DIR/noseyparker_datastore"
 skip_summary=false
 show_progress=true
 
-# Define output files
-cargo_deny_output="$OUTPUT_DIR/cargo_deny_output.json"
-cargo_clippy_output="$OUTPUT_DIR/cargo_clippy_output.txt"
-cargo_udeps_output="$OUTPUT_DIR/cargo_udeps_output.txt"
-cargo_semver_output="$OUTPUT_DIR/cargo_semver_output.txt"
-#cargo_unused_features_output="$OUTPUT_DIR/cargo_unused_features_output.txt"
-cargo_bloat_all_output="$OUTPUT_DIR/cargo_bloat_all.txt"
-noseyparker_output="$OUTPUT_DIR/noseyparker_output.txt"
-noseyparker_report="$OUTPUT_DIR/noseyparker_report.txt"
-summary_file="$OUTPUT_DIR/summary.txt"
+# NOTE: datastore_path and all output file paths are derived
+# after argument parsing, once OUTPUT_DIR is final.
 
 # Helper function to print messages in color
 print_color() {
@@ -45,7 +37,7 @@ show_progress() {
             spinstr=$temp${spinstr%"$temp"}
             sleep $delay
         done
-    
+
         wait "$pid"
         print_color 32 "\r[✔] $msg ($(($(date +%s) - start_time)) sec)"
     else
@@ -97,7 +89,7 @@ generate_summary() {
 
     # Cargo Semver Checks Summary
     echo "Cargo Semver Checks Summary:" >> "$summary_file"
-    echo "Parsed: $(grep -oP 'Parsed \[.*\]' "$cargo_semver_output" | tail -n 1)"  >> "$summary_file" 
+    echo "Parsed: $(grep -oP 'Parsed \[.*\]' "$cargo_semver_output" | tail -n 1)"  >> "$summary_file"
     echo "Checked: $(grep -oP 'Checked \[.*\] \d+ checks; \d+ passed, \d+ failed, \d+ unnecessary' "$cargo_semver_output")"  >> "$summary_file"
     echo "Summary: $(grep -oP 'Summary semver requires.*' "$cargo_semver_output")"  >> "$summary_file"
     echo "" >> "$summary_file"
@@ -133,7 +125,7 @@ while [ "$#" -gt 0 ]; do
             ;;
         --output-path)
             if [[ -n "$2" && "$2" != --* ]]; then
-                OUTPUT_PATH="$2"
+                OUTPUT_DIR="$2"
                 shift 2
             else
                 echo "Error: --output-path requires a value."
@@ -154,11 +146,26 @@ while [ "$#" -gt 0 ]; do
         *)
             echo "Unknown option: $1"
             display_help
-            ;;            
+            ;;
     esac
 done
 
+# Finalize output paths now that OUTPUT_DIR is known
+mkdir -p "$OUTPUT_DIR"
+mkdir -p "$OUTPUT_DIR/unused-reports"
 
+datastore_path="$OUTPUT_DIR/noseyparker_datastore"
+
+# Define output files
+cargo_deny_output="$OUTPUT_DIR/cargo_deny_output.json"
+cargo_clippy_output="$OUTPUT_DIR/cargo_clippy_output.txt"
+cargo_udeps_output="$OUTPUT_DIR/cargo_udeps_output.txt"
+cargo_semver_output="$OUTPUT_DIR/cargo_semver_output.txt"
+#cargo_unused_features_output="$OUTPUT_DIR/cargo_unused_features_output.txt"
+cargo_bloat_all_output="$OUTPUT_DIR/cargo_bloat_all.txt"
+noseyparker_output="$OUTPUT_DIR/noseyparker_output.txt"
+noseyparker_report="$OUTPUT_DIR/noseyparker_report.txt"
+summary_file="$OUTPUT_DIR/summary.txt"
 
 # Check tools before running
 required_tools=("cargo" "cargo-deny" "cargo-clippy" "cargo-udeps" "cargo-semver-checks")
@@ -172,15 +179,13 @@ done
 # Operations
 run_with_progress "cargo deny --manifest-path $MANIFEST_PATH --format json check --show-stats > $cargo_deny_output 2>&1" "Cargo Deny Check"
 # run_with_progress "cargo spellcheck check > $spellcheck_output 2>&1" "Cargo Spellcheck"
-run_with_progress "cargo clippy --manifest-path $MANIFEST_PATH> $cargo_clippy_output 2>&1" "Cargo Clippy"
+run_with_progress "cargo clippy --manifest-path $MANIFEST_PATH > $cargo_clippy_output 2>&1" "Cargo Clippy"
 run_with_progress "cargo udeps --manifest-path $MANIFEST_PATH > $cargo_udeps_output 2>&1" "Cargo Udeps"
 run_with_progress "cargo-semver-checks semver-checks --manifest-path $MANIFEST_PATH > $cargo_semver_output 2>&1" "Cargo Semver Checks"
 # cargo bloat is unmaintained, SEE: https://github.com/RazrFalcon/cargo-bloat/issues/107#issuecomment-2483438706
 # run_with_progress "analyze_bloat_for_all_binaries" "Cargo Bloat Analysis"
 
-
-# Create the output directory and get a start time for reports
-mkdir -p $OUTPUT_DIR/unused-reports
+# Get a start time for reports
 START_TIME=$(date +%s)
 
 # run_with_progress "unused-features analyze > $cargo_unused_features_output 2>&1" "Cargo Unused Features Check"
@@ -196,9 +201,12 @@ find /workspace/src/agents -name "report.json" -newermt "@$START_TIME" | while r
 done
 
 # Nosey Parker Operations
-noseyparker-cli datastore init --datastore $datastore_path/
+rm -rf "$datastore_path"
+noseyparker-cli datastore init --datastore "$datastore_path/"
 run_with_progress "noseyparker-cli scan --datastore $datastore_path/ . > $noseyparker_output 2>&1" "Running Nosey Parker Scan"
 noseyparker-cli report --datastore $datastore_path/ > $noseyparker_report 2>&1
+
+# leave datastore on disk; uncomment to clean after each run
 #rm -rf "$datastore_path"
 
 # Generate Summary Report
