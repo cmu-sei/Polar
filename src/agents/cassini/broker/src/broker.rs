@@ -5,6 +5,7 @@ use crate::{
     subscriber::SubscriberManager,
     topic::{TopicManager, TopicManagerArgs},
     LISTENER_MGR_NOT_FOUND_TXT, UNEXPECTED_MESSAGE_STR,
+    BrokerConfigError
 };
 use crate::{
     BrokerMessage, LISTENER_MANAGER_NAME, PUBLISH_REQ_FAILED_TXT, REGISTRATION_REQ_FAILED_TXT,
@@ -16,6 +17,8 @@ use ractor::{
 };
 use tracing::{debug, error, trace, trace_span, warn};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
+
+use std::env;
 // ============================== Broker Supervisor Actor Definition ============================== //
 
 pub struct Broker;
@@ -38,6 +41,31 @@ pub struct BrokerArgs {
     pub ca_cert_file: String,
 }
 
+impl BrokerArgs {
+
+    fn required_env(var: &str) -> Result<String, BrokerConfigError> {
+        env::var(var).map_err(|e| {
+            BrokerConfigError::EnvVar { var: var.to_string(), source: e }
+        })
+    }
+
+    pub fn new() -> Result<Self, BrokerConfigError> {
+        use std::env;
+
+        let server_cert_file = BrokerArgs::required_env("TLS_SERVER_CERT_CHAIN")?;
+        let private_key_file = BrokerArgs::required_env("TLS_SERVER_KEY")?;
+        let ca_cert_file = BrokerArgs::required_env("TLS_CA_CERT")?;
+        let bind_addr = env::var("CASSINI_BIND_ADDR").unwrap_or(String::from("0.0.0.0:8080"));
+
+       Ok(BrokerArgs {
+               bind_addr,
+               session_timeout: None,
+               server_cert_file,
+               private_key_file,
+               ca_cert_file,
+           })
+    }
+}
 #[async_trait]
 impl Actor for Broker {
     type Msg = BrokerMessage;

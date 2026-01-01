@@ -1,6 +1,6 @@
 use cassini_types::ClientMessage;
 use opentelemetry::Context;
-
+use std::{env, fmt};
 pub mod broker;
 pub mod listener;
 pub mod session;
@@ -32,6 +32,28 @@ pub const LISTENER_MGR_NOT_FOUND_TXT: &str = "Listener Manager not found!";
 pub const TIMEOUT_REASON: &str = "SESSION_TIMEDOUT";
 pub const DISCONNECTED_REASON: &str = "CLIENT_DISCONNECTED";
 pub const DISPATCH_NAME: &str = "DISPATCH";
+
+
+
+#[derive(Debug, Clone)]
+pub enum BrokerConfigError {
+    EnvVar {
+        var: String,
+        source: env::VarError,
+    },
+}
+
+impl  fmt::Display for BrokerConfigError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        use crate::BrokerConfigError::EnvVar;
+        match self {
+            EnvVar { var, source } => {
+                write!(f ,"{source}. Pleaes provide a value for {var}")
+            }
+        }
+    }
+}
+
 
 pub fn init_logging() {
     use opentelemetry::{global, KeyValue};
