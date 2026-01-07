@@ -197,38 +197,6 @@ impl Actor for ListenerManager {
                 );
 
                 if let Some(reason) = reason {
-                    // TODO: I think this code is dead,
-                    // when a registered listener disconnects, it should send a message to the session itself and leave the manager out of it.
-                    // If the listener wasn't registered, then it could send a disconnectrequest to the manager itself and it would stop the child actor in the handle() fn
-                    // if reason.as_str() == DISCONNECTED_REASON {
-                    //     // alert the session we have a timeout
-                    //     boxed_state.map(|mut boxed| {
-                    //         let state = boxed
-                    //             .take::<ListenerState>()
-                    //             .expect("Expected failed listener to have had a state");
-
-                    //         if let Some(id) = state.registration_id {
-                    //             // propagate to session agent
-                    //             match where_is(id.clone()) {
-                    //                 Some(session) => {
-                    //                     if let Err(e) =
-                    //                         session.send_message(BrokerMessage::DisconnectRequest {
-                    //                             client_id,
-                    //                             registration_id: Some(id.to_string()),
-                    //                             trace_Ctx: None,
-                    //                         })
-                    //                     {
-                    //                         warn!("{SESSION_NOT_FOUND_TXT}: {id}: {e}");
-                    //                     }
-                    //                 }
-                    //                 None => {
-                    //                     warn!("{SESSION_NOT_FOUND_TXT}: {id}");
-                    //                 }
-                    //             }
-                    //         }
-                    //     });
-                    // // If a listener stopped unexpectdly, say, due to a connection timeout, we need to respond properly.
-                    //
                     if reason == TIMEOUT_REASON {
                         // tell the session we're timing out
                         boxed_state.map(|mut boxed| {

@@ -50,6 +50,10 @@ let environment =
         , name = "CASSINI_BIND_ADDR"
         , value = Some "0.0.0.0:${Natural/show values.cassini.ports.tcp}"
         }
+      , kubernetes.EnvVar::{
+          , name = "JAEGER_OTLP_ENDPOINT"
+          , value = Some values.jaegerDNSName
+          }
       ]
 
 let volumes =

@@ -8,7 +8,7 @@ let Agents = ../types/agents.dhall
 let cassini
     : Cassini
     = { name = "cassini"
-      , image = "registry.sandbox.labz.s-box.org/sei/polar-mirror/cassini:0d2a5c44"
+      , image = "registry.sandbox.labz.s-box.org/sei/polar-mirror/cassini:058b2e2f"
       , ports = { http = 3000, tcp = 8080 }
       , tls =
         { certificateRequestName = "cassini-certificate"
@@ -84,4 +84,16 @@ let neo4jDNSName = "${Constants.neo4jServiceName}.${Constants.GraphNamespace}.sv
 
 let neo4jBoltAddr = "neo4j://${neo4jDNSName}:${Natural/show neo4j.ports.bolt}"
 
-in  { cassini, linker, resolver, clientTlsConfig, neo4j , neo4jDNSName, neo4jBoltAddr }
+let jaeger = {
+    name = "jaeger"
+    , image = "cr.jaegertracing.io/jaegertracing/jaeger:2.13.0"
+    , ports = { http = 16686, grpc = 14250, thrift = 6831 }
+    , service = { name = "jaeger-svc" }
+    --, volumes = { config = { name = "jaeger-config", path = "/var/lib/jaeger/config" } }
+    --, config = { name = "jaeger-config", path = "/var/lib/jaeger/config" }
+    --, env = [ kubernetes.EnvVar::{ name = "COLLECTOR_OTLP_ENABLED", value = Some "true" } ]
+}
+
+let jaegerDNSName = "http://${jaeger.service.name}.${Constants.PolarNamespace}.svc.cluster.local:${Natural/show jaeger.ports.http}/v1/traces"
+
+in  { cassini, linker, resolver, clientTlsConfig, neo4j , neo4jDNSName, neo4jBoltAddr, jaegerDNSName }

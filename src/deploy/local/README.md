@@ -13,38 +13,29 @@ The directory is structured around a few expectations:
 
 You need Minikube installed and a functioning local Docker environment. Start Minikube with enough resources to run whatever you're deploying:
 
-```
+```sh
 minikube start \
   --cpus=4 \
   --memory=8g \
   --driver=podman # or docker if you prefer
+
+# If you rely on container images built locally, point Minikube at the host podman installation:
+# Note that if you want to pull from any remote repos, you'll have to add Image pull secrets.
+
+eval $(minikube podman-env)
+
+# use kubectl to bootstrap the cluster
+# we use cert-manager to handle certificates so it should be installed first.
+# SEE: https://cert-manager.io/docs/installation/
+kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.19.2/cert-manager.yaml
+
 ```
 
-If you rely on container images built locally, point Minikube at the host Docker daemon:
-Note that if you want to pull from any remote repos, you'll have to add Image pull secrets.
-
-```
-eval $(minikube docker-env)
-```
 
 This prevents you from having to push images to a registry just to test them locally.
 
-## Rendering Dhall → YAML
+## Render
 
-Dhall expressions in this directory intentionally produce typed Kubernetes objects. You render each file using `dhall-to-yaml`:
-
-```
-dhall-to-yaml --file ./deployment.dhall > deployment.yaml
-```
-
-Or recursively:
-
-```
-find . -name '*.dhall' -maxdepth 1 \
-  -exec sh -c 'dhall-to-yaml --file "$1" > "${1%.dhall}.yaml"' _ {} \;
-```
-
-If your Dhall files import environment variables (e.g. secrets), make sure they are exported prior to rendering or the process will fail loudly.
 
 ## Applying the Manifests
 

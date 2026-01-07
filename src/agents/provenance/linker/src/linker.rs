@@ -77,7 +77,7 @@ impl ProvenanceLinker {
     async fn link_sboms(
         graph: &Graph,
         artifact_id: String,
-        artifact_type: ArtifactType,
+        _artifact_type: ArtifactType,
         related_names: Vec<NormalizedString>,
         version: NormalizedString,
     ) -> Result<(), ActorProcessingErr> {
@@ -137,8 +137,6 @@ impl Actor for ProvenanceLinker {
         myself: ActorRef<Self::Msg>,
         args: Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
-        tracing::info!("{myself:?} starting...");
-
         Ok(ProvenanceLinkerState {
             graph: args.graph,
             interval: args.interval,
@@ -148,15 +146,15 @@ impl Actor for ProvenanceLinker {
 
     async fn post_start(
         &self,
-        myself: ActorRef<Self::Msg>,
-        state: &mut Self::State,
+        _myself: ActorRef<Self::Msg>,
+        _state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         Ok(())
     }
 
     async fn handle(
         &self,
-        myself: ActorRef<Self::Msg>,
+        _myself: ActorRef<Self::Msg>,
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
