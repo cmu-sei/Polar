@@ -63,6 +63,7 @@ services:
       - TLS_CA_CERT=/etc/ssl/ca_certificate.pem
       - TLS_SERVER_CERT_CHAIN=/etc/ssl/server_cassini_certificate.pem
       - TLS_SERVER_KEY=/etc/ssl/server_cassini_key.pem
+      - RUST_LOG=debug
     volumes:
       - ./certs/ca_certificates/ca_certificate.pem:/etc/ssl/ca_certificate.pem:ro
       - ./certs/server/server_cassini_key.pem:/etc/ssl/server_cassini_key.pem:ro

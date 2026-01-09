@@ -328,7 +328,7 @@ impl Actor for ResolverAgent {
 
                 match ResolverAgent::inspect_image(&uri, &state.oci_client).await {
                     Ok((manifest, digest)) => {
-                        info!("Resolved image: \n {manifest:?}");
+                        debug!("Resolved image: \n {manifest:?}");
 
                         let media_type = manifest.content_type().to_owned();
 

@@ -44,6 +44,13 @@ let mtls =
       , serverKeyPath = "${tlsPath}/tls.key"
       , proxyCertificate = "proxy-ca-cert"
       }
+let jaeger = {
+    image = "${sandboxRegistry.url}/jaegertracing/jaeger:2.13.0"
+    , service = { name = "jaeger-svc", type = "ClusterIP" }
+    , ports = { http = 16686 , traces = 4318 }
+}
+let jaegerDNSName = "${jaeger.service.name}.${namespace}.svc.cluster.local"
+
 
 let cassiniPort = 8080
 
@@ -97,6 +104,10 @@ let cassini =
           , name = "CASSINI_BIND_ADDR"
           , value = Some "0.0.0.0:${Natural/show cassiniPort}"
           }
+        , kubernetes.EnvVar::{
+            , name = "JAEGER_OTLP_ENDPOINT"
+            , value = Some "${jaegerDNSName}:${Natural/show jaeger.ports.http}/v1/traces"
+            }
         ]
       , volumes =
         [ kubernetes.Volume::{
@@ -286,6 +297,8 @@ in  { namespace
     , sandboxRegistry
     , mtls
     , tlsPath
+    , jaeger
+    , jaegerDNSName
     , cassini
     , cassiniDNSName
     , cassiniAddr
