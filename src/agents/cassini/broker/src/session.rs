@@ -18,6 +18,8 @@ use uuid::Uuid;
 pub struct SessionManager;
 
 /// Our representation of a connected session, and how close it is to timing out
+/// TODO: Eventually, we might want to add metadata to the session struct to track additional information.
+/// Consider stuff like last_activity_time, last_message_received_time, etc.
 pub struct Session {
     agent_ref: ActorRef<BrokerMessage>,
 }
@@ -251,6 +253,33 @@ impl Actor for SessionManager {
                             }
                         }
                     });
+                }
+            }
+            BrokerMessage::SubscribeAcknowledgment {
+                registration_id,
+                topic,
+                trace_ctx,
+                ..
+            } => {
+                let span = trace_span!("session.handle_subscribe_ack", %registration_id);
+                trace_ctx.map(|ctx| span.set_parent(ctx));
+                let _ = span.enter();
+
+                if let Some(session) = state.sessions.get(&registration_id) {
+                    session
+                        .agent_ref
+                        .send_message(BrokerMessage::SubscribeAcknowledgment {
+                            registration_id,
+                            topic,
+                            trace_ctx: Some(span.context()),
+                            result: Ok(()),
+                        })
+                        .map_err(|error| {
+                            warn!("Failed to send subscribe acknowledgment: {error}");
+                        })
+                        .ok();
+                } else {
+                    warn!("Could not find session for registration ID: {registration_id}");
                 }
             }
             _ => {

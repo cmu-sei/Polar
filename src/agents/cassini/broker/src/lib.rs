@@ -1,5 +1,6 @@
 use cassini_types::ClientMessage;
 use opentelemetry::Context;
+use ractor::{ActorProcessingErr, ActorRef, RpcReplyPort};
 use std::{env, fmt};
 pub mod broker;
 pub mod listener;
@@ -33,27 +34,21 @@ pub const TIMEOUT_REASON: &str = "SESSION_TIMEDOUT";
 pub const DISCONNECTED_REASON: &str = "CLIENT_DISCONNECTED";
 pub const DISPATCH_NAME: &str = "DISPATCH";
 
-
-
 #[derive(Debug, Clone)]
 pub enum BrokerConfigError {
-    EnvVar {
-        var: String,
-        source: env::VarError,
-    },
+    EnvVar { var: String, source: env::VarError },
 }
 
-impl  fmt::Display for BrokerConfigError {
+impl fmt::Display for BrokerConfigError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         use crate::BrokerConfigError::EnvVar;
         match self {
             EnvVar { var, source } => {
-                write!(f ,"{source}. Pleaes provide a value for {var}")
+                write!(f, "{source}. Pleaes provide a value for {var}")
             }
         }
     }
 }
-
 
 pub fn init_logging() {
     use opentelemetry::{global, KeyValue};
@@ -113,7 +108,7 @@ pub fn init_logging() {
 /// Activities that flow from an actor will also be traced leveraging Contexts,
 /// These are optional because they aren't initialzied until the listener begins to handle the message
 /// Because of this, they will be often left out of the listener's handler at first
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum BrokerMessage {
     /// Registration request from the client.
     /// When a client connects over TCP, it cannot send messages until it receives a registrationID and a session has been created for it
@@ -170,9 +165,14 @@ pub enum BrokerMessage {
     },
     /// Sent to the subscriber manager to create a new subscriber actor to handle pushing messages to the client.
     /// If successful, the associated topic actor is notified, adding the id of the new actor to it's subscriber list
-    Subscribe {
+    CreateSubscriber {
         topic: String,
         registration_id: String,
+        trace_ctx: Option<Context>,
+        reply: RpcReplyPort<Result<ActorRef<BrokerMessage>, ActorProcessingErr>>,
+    },
+    AddSubscriber {
+        subscriber_ref: ActorRef<BrokerMessage>,
         trace_ctx: Option<Context>,
     },
     /// instructs the topic manager to create a new topic actor,

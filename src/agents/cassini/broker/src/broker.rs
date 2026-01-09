@@ -3,18 +3,16 @@ use crate::{
     session::{SessionManager, SessionManagerArgs},
     subscriber::SubscriberManager,
     topic::{TopicManager, TopicManagerArgs},
-     UNEXPECTED_MESSAGE_STR,
-    BrokerConfigError
+    BrokerConfigError, UNEXPECTED_MESSAGE_STR,
 };
 use crate::{
-    BrokerMessage, LISTENER_MANAGER_NAME,  REGISTRATION_REQ_FAILED_TXT,
-    SESSION_MANAGER_NAME, SESSION_NOT_FOUND_TXT, SUBSCRIBER_MANAGER_NAME,
-    SUBSCRIBER_MGR_NOT_FOUND_TXT, TOPIC_MANAGER_NAME,
+    BrokerMessage, LISTENER_MANAGER_NAME, SESSION_MANAGER_NAME, SESSION_NOT_FOUND_TXT,
+    SUBSCRIBER_MANAGER_NAME, SUBSCRIBER_MGR_NOT_FOUND_TXT, TOPIC_MANAGER_NAME,
 };
 use ractor::{
     async_trait, registry::where_is, Actor, ActorProcessingErr, ActorRef, SupervisionEvent,
 };
-use tracing::{info, debug, error, trace, trace_span, warn};
+use tracing::{debug, error, info, trace, trace_span, warn};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 use std::env;
@@ -46,10 +44,10 @@ pub struct BrokerArgs {
 }
 
 impl BrokerArgs {
-
     fn required_env(var: &str) -> Result<String, BrokerConfigError> {
-        env::var(var).map_err(|e| {
-            BrokerConfigError::EnvVar { var: var.to_string(), source: e }
+        env::var(var).map_err(|e| BrokerConfigError::EnvVar {
+            var: var.to_string(),
+            source: e,
         })
     }
 
@@ -61,13 +59,13 @@ impl BrokerArgs {
         let ca_cert_file = BrokerArgs::required_env("TLS_CA_CERT")?;
         let bind_addr = env::var("CASSINI_BIND_ADDR").unwrap_or(String::from("0.0.0.0:8080"));
 
-       Ok(BrokerArgs {
-               bind_addr,
-               session_timeout: None,
-               server_cert_file,
-               private_key_file,
-               ca_cert_file,
-           })
+        Ok(BrokerArgs {
+            bind_addr,
+            session_timeout: None,
+            server_cert_file,
+            private_key_file,
+            ca_cert_file,
+        })
     }
 }
 
@@ -108,9 +106,7 @@ impl Actor for Broker {
         let (session_mgr, _) = Actor::spawn_linked(
             Some(SESSION_MANAGER_NAME.to_owned()),
             SessionManager,
-            SessionManagerArgs {
-                session_timeout,
-            },
+            SessionManagerArgs { session_timeout },
             myself.clone().into(),
         )
         .await
@@ -124,8 +120,12 @@ impl Actor for Broker {
             SubscriberManager,
             (),
             myself.clone().into(),
-        ).await
-        .map_err(|e| { error!("failed to spawn SubscriberManager: {e:?}"); ActorProcessingErr::from(e) })?;
+        )
+        .await
+        .map_err(|e| {
+            error!("failed to spawn SubscriberManager: {e:?}");
+            ActorProcessingErr::from(e)
+        })?;
 
         let topic_mgr_args = TopicManagerArgs {
             topics: None,
@@ -137,8 +137,12 @@ impl Actor for Broker {
             TopicManager,
             topic_mgr_args,
             myself.clone().into(),
-        ).await
-        .map_err(|e| { error!("failed to spawn TopicManager: {e:?}"); ActorProcessingErr::from(e) })?;
+        )
+        .await
+        .map_err(|e| {
+            error!("failed to spawn TopicManager: {e:?}");
+            ActorProcessingErr::from(e)
+        })?;
 
         info!("Broker startup complete");
 
@@ -146,7 +150,7 @@ impl Actor for Broker {
             listener_mgr: Some(listener_mgr),
             session_mgr: Some(session_mgr),
             topic_mgr: Some(topic_mgr),
-            subscriber_mgr: Some(subscriber_mgr)
+            subscriber_mgr: Some(subscriber_mgr),
         })
     }
 
@@ -294,17 +298,20 @@ impl Actor for Broker {
                     error!("TopicManager ActorRef missing in broker state; cannot subscribe session {registration_id} to {topic}");
                 }
 
-                // Tell SubscriberManager to create/track the subscriber for this registration/topic.
-                if let Some(subscriber_mgr) = &state.subscriber_mgr {
-                    if let Err(e) = subscriber_mgr.send_message(BrokerMessage::Subscribe {
-                        registration_id: registration_id.clone(),
-                        topic: topic.clone(),
-                        trace_ctx: Some(span.context()),
-                    }) {
-                        error!("Failed to forward Subscribe to SubscriberManager: {e:?}");
+                // Forward acknowledgment to the SessionManager; let it route to the appropriate session.
+                if let Some(session_mgr) = &state.session_mgr {
+                    if let Err(e) =
+                        session_mgr.send_message(BrokerMessage::SubscribeAcknowledgment {
+                            registration_id: registration_id.clone(),
+                            topic: topic.clone(),
+                            result: Ok(()),
+                            trace_ctx: Some(span.context()),
+                        })
+                    {
+                        warn!("Failed to forward SubscribeAcknowledgment to SessionManager: {e:?}");
                     }
                 } else {
-                    error!("SubscriberManager ActorRef missing in broker state");
+                    warn!("SessionManager missing when trying to deliver SubscribeAcknowledgment for {registration_id}");
                 }
             }
 
@@ -313,7 +320,8 @@ impl Actor for Broker {
                 topic,
                 trace_ctx,
             } => {
-                let span = trace_span!("broker.handle_unsubscribe_request", %registration_id, %topic);
+                let span =
+                    trace_span!("broker.handle_unsubscribe_request", %registration_id, %topic);
                 trace_ctx.map(|ctx| span.set_parent(ctx));
                 let _g = span.enter();
 
@@ -345,32 +353,6 @@ impl Actor for Broker {
                     warn!("SubscriberManager missing while handling unsubscribe for {topic}");
                 }
             }
-
-            BrokerMessage::SubscribeAcknowledgment {
-                registration_id,
-                topic,
-                trace_ctx,
-                ..
-            } => {
-                // Forward acknowledgment to the SessionManager; let it route to the appropriate session.
-                if let Some(session_mgr) = &state.session_mgr {
-                    let span = trace_span!("broker.handle_subscribe_ack", %registration_id);
-                    trace_ctx.map(|ctx| span.set_parent(ctx));
-                    let _ = span.enter();
-
-                    if let Err(e) = session_mgr.send_message(BrokerMessage::SubscribeAcknowledgment {
-                        registration_id: registration_id.clone(),
-                        topic: topic.clone(),
-                        result: Ok(()),
-                        trace_ctx: Some(span.context()),
-                    }) {
-                        warn!("Failed to forward SubscribeAcknowledgment to SessionManager: {e:?}");
-                    }
-                } else {
-                    warn!("SessionManager missing when trying to deliver SubscribeAcknowledgment for {registration_id}");
-                }
-            }
-
             BrokerMessage::PublishRequest {
                 registration_id,
                 topic,
@@ -383,7 +365,9 @@ impl Actor for Broker {
                 }
                 let _enter = span.enter();
 
-                trace!("Broker received publish request from {registration_id} for topic \"{topic}\"");
+                trace!(
+                    "Broker received publish request from {registration_id} for topic \"{topic}\""
+                );
 
                 // Forward publish intent to TopicManager. TopicManager is responsible for ensuring the
                 // topic exists and routing the message into the topic actor (idempotently).
@@ -397,12 +381,14 @@ impl Actor for Broker {
                         warn!("Failed to forward PublishRequest to TopicManager: {e:?}");
                         // Let session manager know publish failed so it can respond to client.
                         if let Some(session_mgr) = &state.session_mgr {
-                            if let Err(e2) = session_mgr.send_message(BrokerMessage::PublishResponse {
-                                topic: topic.clone(),
-                                payload: payload.clone(),
-                                result: Err(format!("forward failed: {e:?}")),
-                                trace_ctx: Some(span.context()),
-                            }) {
+                            if let Err(e2) =
+                                session_mgr.send_message(BrokerMessage::PublishResponse {
+                                    topic: topic.clone(),
+                                    payload: payload.clone(),
+                                    result: Err(format!("forward failed: {e:?}")),
+                                    trace_ctx: Some(span.context()),
+                                })
+                            {
                                 warn!("Failed to notify SessionManager of publish failure: {e2:?}");
                             }
                         }
@@ -504,7 +490,9 @@ impl Actor for Broker {
                         error!("Failed to forward TimeoutMessage to SubscriberManager: {e:?}");
                     }
                 } else {
-                    error!("SubscriberManager missing while handling timeout for {registration_id:?}");
+                    error!(
+                        "SubscriberManager missing while handling timeout for {registration_id:?}"
+                    );
                 }
             }
 
@@ -516,5 +504,4 @@ impl Actor for Broker {
 
         Ok(())
     }
-
 }
