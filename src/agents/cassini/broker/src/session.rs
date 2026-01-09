@@ -18,6 +18,8 @@ use uuid::Uuid;
 pub struct SessionManager;
 
 /// Our representation of a connected session, and how close it is to timing out
+/// TODO: Eventually, we might want to add metadata to the session struct to track additional information.
+/// Consider stuff like last_activity_time, last_message_received_time, etc.
 pub struct Session {
     agent_ref: ActorRef<BrokerMessage>,
 }
@@ -142,32 +144,6 @@ impl Actor for SessionManager {
                             })
                             .ok();
                     }
-                    // TODO: REMOVE THIS CODE AFTER TESTING
-                    // Ractor is pretty good at starting actors, the only reason we could fail to start a session is if we have
-                    // some kind of UUID collision, which is unlikely since the broker would've just looked up the existing session anyway.
-                    // So I don't think this is a needed code path
-                    // else {
-                    //     let failure_span = tracing::trace_span!("session_manager.handle_registration_request", %client_id);
-                    //     failure_span.set_parent(span.context());
-                    //     let _g = failure_span.enter();
-
-                    //     trace!("initializing session.");
-
-                    //     let err_msg =
-                    //         format!("{REGISTRATION_REQ_FAILED_TXT} Couldn't start session agent!");
-                    //     warn!("{err_msg}");
-
-                    //     if let Err(e) =
-                    //         listener_ref.send_message(BrokerMessage::RegistrationResponse {
-                    //             client_id: client_id.clone(),
-                    //             result: Err(err_msg.clone()),
-                    //             trace_ctx: Some(failure_span.context()),
-                    //         })
-                    //     {
-                    //         // listener probably died, nothing we can do
-                    //         warn!("{err_msg}: {e}");
-                    //     }
-                    // }
                 } else {
                     // LOL they didn't stick around very long!
                     warn!("{REGISTRATION_REQ_FAILED_TXT} {CLIENT_NOT_FOUND_TXT}")
@@ -277,6 +253,33 @@ impl Actor for SessionManager {
                             }
                         }
                     });
+                }
+            }
+            BrokerMessage::SubscribeAcknowledgment {
+                registration_id,
+                topic,
+                trace_ctx,
+                ..
+            } => {
+                let span = trace_span!("session.handle_subscribe_ack", %registration_id);
+                trace_ctx.map(|ctx| span.set_parent(ctx));
+                let _ = span.enter();
+
+                if let Some(session) = state.sessions.get(&registration_id) {
+                    session
+                        .agent_ref
+                        .send_message(BrokerMessage::SubscribeAcknowledgment {
+                            registration_id,
+                            topic,
+                            trace_ctx: Some(span.context()),
+                            result: Ok(()),
+                        })
+                        .map_err(|error| {
+                            warn!("Failed to send subscribe acknowledgment: {error}");
+                        })
+                        .ok();
+                } else {
+                    warn!("Could not find session for registration ID: {registration_id}");
                 }
             }
             _ => {

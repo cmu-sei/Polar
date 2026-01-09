@@ -102,6 +102,8 @@ in
       pkgs.llvmPackages_19.lld
       glibc
       clangLldWrapper
+      # compression tools used for rocksdb
+      zlib bzip2 lz4 snappy zstd
 
       grc
 

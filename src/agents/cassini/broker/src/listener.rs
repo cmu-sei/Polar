@@ -68,11 +68,10 @@ impl Actor for ListenerManager {
         }
 
         tracing::debug!("ListenerManager: Gathering certificates for mTLS");
-        if let Ok(certs) = CertificateDer::pem_file_iter(args.server_cert_file){
-            certs.map(|cert| cert.unwrap())
-                        .collect();
-        }
-
+        let certs = CertificateDer::pem_file_iter(args.server_cert_file)
+            .unwrap()
+            .map(|cert| cert.unwrap())
+            .collect();
 
         let mut root_store = RootCertStore::empty();
         let root_cert = CertificateDer::from_pem_file(args.ca_cert_file.clone()).expect(&format!(

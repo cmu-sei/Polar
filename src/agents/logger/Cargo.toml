@@ -1,0 +1,13 @@
+[package]
+name = "logger"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "event-logger"
+path = "src/entrypoint.rs"
+
+[dependencies]
+ractor = { version = "0.15.10", features = ["async-trait"] }
+rocksdb = "0.24.0"
+tokio = { version = "1.49.0", features = ["full"] }

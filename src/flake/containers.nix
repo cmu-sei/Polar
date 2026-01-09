@@ -354,11 +354,18 @@ in {
   devShells.default = pkgs.mkShell {
     name = "polar-devshell";
     packages = packageSets.devPkgs ++ [ pkgs.pkg-config pkgs.openssl ];
+
     shellHook = ''
       export OPENSSL_DIR="${pkgs.openssl.dev}"
       export OPENSSL_LIB_DIR="${pkgs.openssl.out}/lib"
       export OPENSSL_INCLUDE_DIR="${pkgs.openssl.dev}/include"
       export PKG_CONFIG_PATH="${pkgs.openssl.dev}/lib/pkgconfig"
+      export CC=clang
+      export CXX=clang++
+      export CMAKE=/bin/cmake
+      export CMAKE_MAKE_PROGRAM=/bin/make
+      export LD_LIBRARY_PATH="${pkgs.lib.makeLibraryPath [ pkgs.glibc pkgs.llvmPackages_19.clang ]}"
+      export LIBCLANG_PATH="${pkgs.llvmPackages_19.libclang.lib}/lib"
     '';
   };
 

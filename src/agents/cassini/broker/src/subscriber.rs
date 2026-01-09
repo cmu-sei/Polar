@@ -118,10 +118,11 @@ impl Actor for SubscriberManager {
                     }
                 });
             }
-            BrokerMessage::Subscribe {
+            BrokerMessage::CreateSubscriber {
                 registration_id,
                 topic,
                 trace_ctx,
+                reply,
             } => {
                 let span =
                     trace_span!("subscriber_manager.handle_subscribe", %registration_id, %topic);
@@ -135,14 +136,22 @@ impl Actor for SubscriberManager {
 
                 // drop the span guard here. We're through
                 drop(_g);
-                Actor::spawn_linked(
+                match Actor::spawn_linked(
                     Some(subscriber_id.clone()),
                     SubscriberAgent,
                     (),
                     myself.clone().into(),
                 )
                 .await
-                .ok();
+                {
+                    Ok((subscriber, _)) => {
+                        let _ = reply.send(Ok(subscriber));
+                    }
+                    Err(e) => {
+                        let err_msg = format!("Failed to spawn subscriber actor. {e}");
+                        let _ = reply.send(Err(ActorProcessingErr::from(err_msg)));
+                    }
+                }
             }
 
             BrokerMessage::UnsubscribeRequest {

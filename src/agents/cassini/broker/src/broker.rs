@@ -1,21 +1,18 @@
 use crate::{
-    get_subscriber_name,
     listener::{ListenerManager, ListenerManagerArgs},
     session::{SessionManager, SessionManagerArgs},
     subscriber::SubscriberManager,
     topic::{TopicManager, TopicManagerArgs},
-    LISTENER_MGR_NOT_FOUND_TXT, UNEXPECTED_MESSAGE_STR,
-    BrokerConfigError
+    BrokerConfigError, UNEXPECTED_MESSAGE_STR,
 };
 use crate::{
-    BrokerMessage, LISTENER_MANAGER_NAME, PUBLISH_REQ_FAILED_TXT, REGISTRATION_REQ_FAILED_TXT,
-    SESSION_MANAGER_NAME, SESSION_NOT_FOUND_TXT, SUBSCRIBER_MANAGER_NAME,
-    SUBSCRIBER_MGR_NOT_FOUND_TXT, TOPIC_MANAGER_NAME,
+    BrokerMessage, LISTENER_MANAGER_NAME, SESSION_MANAGER_NAME, SESSION_NOT_FOUND_TXT,
+    SUBSCRIBER_MANAGER_NAME, SUBSCRIBER_MGR_NOT_FOUND_TXT, TOPIC_MANAGER_NAME,
 };
 use ractor::{
     async_trait, registry::where_is, Actor, ActorProcessingErr, ActorRef, SupervisionEvent,
 };
-use tracing::{debug, error, trace, trace_span, warn};
+use tracing::{debug, error, info, trace, trace_span, warn};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 use std::env;
@@ -24,7 +21,12 @@ use std::env;
 pub struct Broker;
 
 // State object containing references to worker actors
-pub struct BrokerState;
+pub struct BrokerState {
+    listener_mgr: Option<ActorRef<BrokerMessage>>,
+    session_mgr: Option<ActorRef<BrokerMessage>>,
+    topic_mgr: Option<ActorRef<BrokerMessage>>,
+    subscriber_mgr: Option<ActorRef<BrokerMessage>>,
+}
 
 /// Would-be configurations for the broker actor itself, as well its workers
 #[derive(Clone)]
@@ -42,10 +44,10 @@ pub struct BrokerArgs {
 }
 
 impl BrokerArgs {
-
     fn required_env(var: &str) -> Result<String, BrokerConfigError> {
-        env::var(var).map_err(|e| {
-            BrokerConfigError::EnvVar { var: var.to_string(), source: e }
+        env::var(var).map_err(|e| BrokerConfigError::EnvVar {
+            var: var.to_string(),
+            source: e,
         })
     }
 
@@ -57,15 +59,16 @@ impl BrokerArgs {
         let ca_cert_file = BrokerArgs::required_env("TLS_CA_CERT")?;
         let bind_addr = env::var("CASSINI_BIND_ADDR").unwrap_or(String::from("0.0.0.0:8080"));
 
-       Ok(BrokerArgs {
-               bind_addr,
-               session_timeout: None,
-               server_cert_file,
-               private_key_file,
-               ca_cert_file,
-           })
+        Ok(BrokerArgs {
+            bind_addr,
+            session_timeout: None,
+            server_cert_file,
+            private_key_file,
+            ca_cert_file,
+        })
     }
 }
+
 #[async_trait]
 impl Actor for Broker {
     type Msg = BrokerMessage;
@@ -77,7 +80,7 @@ impl Actor for Broker {
         myself: ActorRef<Self::Msg>,
         args: BrokerArgs,
     ) -> Result<Self::State, ActorProcessingErr> {
-        debug!("Broker: Starting {myself:?}");
+        debug!("Broker: starting {:?}", myself);
 
         let listener_manager_args = ListenerManagerArgs {
             bind_addr: args.bind_addr,
@@ -86,60 +89,69 @@ impl Actor for Broker {
             ca_cert_file: args.ca_cert_file,
         };
 
-        // The Broker is the Supervisor for all of the other Supervisors, including:
-
-        // Listeners Supervisor
-        Actor::spawn_linked(
+        let (listener_mgr, _) = Actor::spawn_linked(
             Some(LISTENER_MANAGER_NAME.to_owned()),
             ListenerManager,
             listener_manager_args,
             myself.clone().into(),
         )
         .await
-        .expect("The Broker cannot initialize without the ListenerManager. Panicking.");
+        .map_err(|e| {
+            error!("Broker startup failed: ListenerManager failed to start: {e:?}");
+            ActorProcessingErr::from(e)
+        })?;
 
-        // Set default timeout for sessions, or use args
-        let mut session_timeout: u64 = 90;
+        let session_timeout = args.session_timeout.unwrap_or(90);
 
-        if let Some(timeout) = args.session_timeout {
-            session_timeout = timeout;
-        }
-
-        // Sessions Supervisor
-        Actor::spawn_linked(
-            Some(SESSION_MANAGER_NAME.to_string()),
+        let (session_mgr, _) = Actor::spawn_linked(
+            Some(SESSION_MANAGER_NAME.to_owned()),
             SessionManager,
-            SessionManagerArgs {
-                session_timeout: session_timeout,
-            },
+            SessionManagerArgs { session_timeout },
             myself.clone().into(),
         )
         .await
-        .expect("The Broker cannot initialize without the SessionManager. Panicking.");
+        .map_err(|e| {
+            error!("Broker startup failed: SessionManager failed to start: {e:?}");
+            ActorProcessingErr::from(e)
+        })?;
 
-        let topic_mgr_args = TopicManagerArgs { topics: None };
-
-        // Topics Supervisor
-        Actor::spawn_linked(
-            Some(TOPIC_MANAGER_NAME.to_owned()),
-            TopicManager,
-            topic_mgr_args,
-            myself.clone().into(),
-        )
-        .await
-        .expect("The Broker cannot initialize without the TopicManager. Panicking.");
-
-        // Subscribers Supervisor
-        Actor::spawn_linked(
+        let (subscriber_mgr, _sub_handle) = Actor::spawn_linked(
             Some(SUBSCRIBER_MANAGER_NAME.to_string()),
             SubscriberManager,
             (),
             myself.clone().into(),
         )
         .await
-        .expect("The Broker cannot initialize without the SubscriberManager. Panicking.");
+        .map_err(|e| {
+            error!("failed to spawn SubscriberManager: {e:?}");
+            ActorProcessingErr::from(e)
+        })?;
 
-        Ok(BrokerState)
+        let topic_mgr_args = TopicManagerArgs {
+            topics: None,
+            subscriber_mgr: Some(subscriber_mgr.clone()),
+        };
+
+        let (topic_mgr, _topic_handle) = Actor::spawn_linked(
+            Some(TOPIC_MANAGER_NAME.to_owned()),
+            TopicManager,
+            topic_mgr_args,
+            myself.clone().into(),
+        )
+        .await
+        .map_err(|e| {
+            error!("failed to spawn TopicManager: {e:?}");
+            ActorProcessingErr::from(e)
+        })?;
+
+        info!("Broker startup complete");
+
+        Ok(BrokerState {
+            listener_mgr: Some(listener_mgr),
+            session_mgr: Some(session_mgr),
+            topic_mgr: Some(topic_mgr),
+            subscriber_mgr: Some(subscriber_mgr),
+        })
     }
 
     async fn handle_supervisor_evt(
@@ -218,7 +230,7 @@ impl Actor for Broker {
         &self,
         _myself: ActorRef<Self::Msg>,
         message: Self::Msg,
-        _: &mut Self::State,
+        state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
             BrokerMessage::RegistrationRequest {
@@ -226,7 +238,6 @@ impl Actor for Broker {
                 client_id,
                 trace_ctx,
             } => {
-                // Start a new span linked to the parent trace if available.
                 let span = trace_span!("broker.handle_registration_request", client_id = client_id);
                 if let Some(ctx) = trace_ctx.clone() {
                     span.set_parent(ctx.clone()).ok();
@@ -234,225 +245,113 @@ impl Actor for Broker {
 
                 trace!("Broker actor received registration request");
 
-                match registration_id {
-                    Some(id) => {
-                        // We were provided some session id, find it and forward the request.
-                        let session = where_is(id.clone()).expect("Expected to find session. {id}");
+                // Forward the registration request to the session manager.
+                // The SessionManager is responsible for locating/creating the session actor.
+                if let Some(session_mgr) = &state.session_mgr {
+                    if let Err(e) = session_mgr.send_message(BrokerMessage::RegistrationRequest {
+                        registration_id: registration_id.clone(),
+                        client_id: client_id.clone(),
+                        trace_ctx: Some(span.context()),
+                    }) {
+                        error!("Failed to forward RegistrationRequest to SessionManager: {e:?}");
+                    }
 
-                        if let Err(e) = session.send_message(BrokerMessage::RegistrationRequest {
-                            registration_id: Some(id.clone()),
+                    // Also notify subscriber manager so any queued messages can be flushed.
+                    if let Some(sub_mgr) = &state.subscriber_mgr {
+                        if let Err(e) = sub_mgr.send_message(BrokerMessage::RegistrationRequest {
+                            registration_id: registration_id.clone(),
                             client_id: client_id.clone(),
                             trace_ctx: Some(span.context()),
                         }) {
-                            let err_msg = format!(
-                                "{REGISTRATION_REQ_FAILED_TXT}: {SESSION_NOT_FOUND_TXT}: {e}"
-                            );
-                            if let Some(listener) = where_is(id.clone()) {
-                                listener
-                                    .send_message(BrokerMessage::RegistrationResponse {
-                                        client_id: client_id.clone(),
-                                        result: Err(err_msg),
-                                        trace_ctx: Some(span.context()),
-                                    })
-                                    .ok();
-                            }
+                            warn!("Failed to notify SubscriberManager about registration: {e:?}");
                         }
-
-                        // Alert subscriber manager so that any waiting messages get sent
-                        let sub_mgr = where_is(SUBSCRIBER_MANAGER_NAME.to_string())
-                            .expect("Expected to find subscriber manager.");
-
-                        sub_mgr
-                            .send_message(BrokerMessage::RegistrationRequest {
-                                registration_id: Some(id.clone()),
-                                client_id: client_id.clone(),
-                                trace_ctx: Some(span.context()),
-                            })
-                            .expect("Expected to send message");
+                    } else {
+                        error!("SubscriberManager ActorRef missing in broker state");
                     }
-                    None => {
-                        // start new session
-                        let manager = where_is(SESSION_MANAGER_NAME.to_string())
-                            .expect("Expected to find SESSION_MANAGER");
-                        manager
-                            .send_message(BrokerMessage::RegistrationRequest {
-                                registration_id: registration_id.clone(),
-                                client_id: client_id.clone(),
-                                trace_ctx: Some(span.context()),
-                            })
-                            .expect("Expected to send message to session manager.");
-                    }
+                } else {
+                    error!("SessionManager ActorRef missing in broker state; cannot process registration");
                 }
             }
+
             BrokerMessage::SubscribeRequest {
                 registration_id,
                 topic,
                 trace_ctx,
             } => {
-                //Look for existing subscriber actor.
-                let span =
-                    trace_span!("broker.handle_subscribe_requesat", %registration_id, %topic);
+                let span = trace_span!("broker.handle_subscribe_request", %registration_id, %topic);
                 trace_ctx.map(|ctx| span.set_parent(ctx));
                 let _g = span.enter();
 
                 trace!("Broker received subscribe request message");
 
-                match where_is(get_subscriber_name(&registration_id, &topic)) {
-                    Some(_) => {
-                        debug!(
-                            "Session {registration_id} already subscribed to topic. \"{topic}\""
-                        );
-                        //Send success message, session already subscribed
-                        match &where_is(registration_id.clone()) {
-                            //session's probably dead for one reason or another if we fail here,
-                            //log and move on
-                            Some(session) => session
-                                .send_message(BrokerMessage::SubscribeAcknowledgment {
-                                    registration_id: registration_id.clone(),
-                                    topic: topic.clone(),
-                                    result: Ok(()),
-                                    trace_ctx: Some(span.context()),
-                                })
-                                .unwrap_or_else(|e| {
-                                    warn!("Session {registration_id} not found! {e}!");
-                                }),
-                            None => warn!("Session {registration_id} not found!"),
-                        }
+                // Delegate subscription/creation logic to TopicManager + SubscriberManager.
+                // TopicManager should ensure topic exists (idempotent) and create or forward to topic actor.
+                if let Some(topic_mgr) = &state.topic_mgr {
+                    if let Err(e) = topic_mgr.send_message(BrokerMessage::SubscribeRequest {
+                        registration_id: registration_id.clone(),
+                        topic: topic.clone(),
+                        trace_ctx: Some(span.context()),
+                    }) {
+                        error!("Failed to forward SubscribeRequest to TopicManager: {e:?}");
                     }
-                    None => {
-                        match where_is(topic.clone()) {
-                            Some(actor) => {
-                                // topic exists, create subscriber.
-                                debug!("Subscribing session {registration_id} to topic.");
+                } else {
+                    error!("TopicManager ActorRef missing in broker state; cannot subscribe session {registration_id} to {topic}");
+                }
 
-                                where_is(SUBSCRIBER_MANAGER_NAME.to_string())
-                                    .map(|subscriber_manager| {
-                                        subscriber_manager
-                                            .send_message({
-                                                BrokerMessage::Subscribe {
-                                                    registration_id: registration_id.clone(),
-                                                    topic: topic.clone(),
-                                                    trace_ctx: Some(span.context()),
-                                                }
-                                            })
-                                            .ok()
-                                    })
-                                    .or_else(|| {
-                                        error!("Failed to contact subscriber manager.");
-                                        todo!("Handle gracefully and shutdown.");
-                                    });
-
-                                actor
-                                    .send_message({
-                                        BrokerMessage::Subscribe {
-                                            registration_id: registration_id.clone(),
-                                            topic: topic.clone(),
-                                            trace_ctx: Some(span.context()),
-                                        }
-                                    })
-                                    .ok();
-                            }
-                            None => {
-                                //no topic actor exists, tell manager to make one
-                                debug!("Topic \"{topic}\" doesn't exist. Creating new topic.");
-                                where_is(TOPIC_MANAGER_NAME.to_owned())
-                                    .map(|topic_mgr| {
-                                        // create the topic
-                                        topic_mgr
-                                            .send_message(BrokerMessage::AddTopic {
-                                                registration_id: Some(registration_id.clone()),
-                                                topic: topic.clone(),
-                                                trace_ctx: Some(span.context()),
-                                            })
-                                            .ok();
-                                    })
-                                    .or_else(|| {
-                                        error!("Failed to find topic manager.");
-                                        todo!("handle failure to find critical actor.");
-                                    });
-
-                                // create subscriber
-                                debug!("Subscribing session {registration_id} to topic.");
-
-                                where_is(SUBSCRIBER_MANAGER_NAME.to_string())
-                                    .map(|subscriber_manager| {
-                                        subscriber_manager
-                                            .send_message({
-                                                BrokerMessage::Subscribe {
-                                                    registration_id: registration_id.clone(),
-                                                    topic: topic.clone(),
-                                                    trace_ctx: Some(span.context()),
-                                                }
-                                            })
-                                            .ok();
-                                    })
-                                    .or_else(|| {
-                                        error!("Failed to contact subscriber manager.");
-                                        todo!("Handle gracefully and shutdown.");
-                                    });
-                            }
-                        }
+                // Forward acknowledgment to the SessionManager; let it route to the appropriate session.
+                if let Some(session_mgr) = &state.session_mgr {
+                    if let Err(e) =
+                        session_mgr.send_message(BrokerMessage::SubscribeAcknowledgment {
+                            registration_id: registration_id.clone(),
+                            topic: topic.clone(),
+                            result: Ok(()),
+                            trace_ctx: Some(span.context()),
+                        })
+                    {
+                        warn!("Failed to forward SubscribeAcknowledgment to SessionManager: {e:?}");
                     }
+                } else {
+                    warn!("SessionManager missing when trying to deliver SubscribeAcknowledgment for {registration_id}");
                 }
             }
+
             BrokerMessage::UnsubscribeRequest {
                 registration_id,
                 topic,
                 trace_ctx,
             } => {
                 let span =
-                    trace_span!("broker.handle_unsubscribe_request", %registration_id ,%topic);
+                    trace_span!("broker.handle_unsubscribe_request", %registration_id, %topic);
                 trace_ctx.map(|ctx| span.set_parent(ctx));
                 let _g = span.enter();
 
-                trace!("broker received unsubscribe request");
+                trace!("Broker received unsubscribe request");
 
-                //find topic actor, tell it to forget session
-                if let Some(topic_actor) = where_is(topic.clone()) {
-                    if let Err(_e) = topic_actor.send_message(BrokerMessage::UnsubscribeRequest {
+                // Ask TopicManager to remove the session from the topic (if exists).
+                if let Some(topic_mgr) = &state.topic_mgr {
+                    if let Err(e) = topic_mgr.send_message(BrokerMessage::UnsubscribeRequest {
                         registration_id: registration_id.clone(),
                         topic: topic.clone(),
                         trace_ctx: Some(span.context()),
                     }) {
-                        warn!("Failed to find topic to unsubscribe to")
+                        warn!("Failed to forward UnsubscribeRequest to TopicManager: {e:?}");
                     }
-                    // tell subscriber manager to cleanup subscribers
-                    let subscriber_mgr = where_is(SUBSCRIBER_MANAGER_NAME.to_string())
-                        .expect(SUBSCRIBER_MGR_NOT_FOUND_TXT);
-                    subscriber_mgr
-                        .send_message(BrokerMessage::UnsubscribeRequest {
-                            registration_id: registration_id.clone(),
-                            topic: topic.clone(),
-                            trace_ctx: Some(span.context()),
-                        })
-                        .expect("Error sending message to subscriber manager.");
+                } else {
+                    warn!("TopicManager missing while handling unsubscribe for {topic}");
                 }
-                // TODO: If no topic exists, we should send an unsubscribe ACK to let it succeed
-            }
-            BrokerMessage::SubscribeAcknowledgment {
-                registration_id,
-                topic,
-                trace_ctx,
-                ..
-            } => {
-                where_is(registration_id.clone()).map(|session_agent_ref| {
-                    let span = trace_span!("broker.handle_subscribe_request", %registration_id);
-                    trace_ctx.map(|ctx| span.set_parent(ctx));
-                    let _ = span.enter();
 
-                    trace!(
-                        "Broker Received SubscribeAcknolwedgement message for topic \"{topic}\""
-                    );
-
-                    session_agent_ref
-                        .send_message(BrokerMessage::SubscribeAcknowledgment {
-                            registration_id: registration_id.clone(),
-                            topic: topic.clone(),
-                            result: Ok(()),
-                            trace_ctx: Some(span.context()),
-                        })
-                        .ok();
-                });
+                // Tell SubscriberManager to clean up subscriber resources.
+                if let Some(subscriber_mgr) = &state.subscriber_mgr {
+                    if let Err(e) = subscriber_mgr.send_message(BrokerMessage::UnsubscribeRequest {
+                        registration_id: registration_id.clone(),
+                        topic: topic.clone(),
+                        trace_ctx: Some(span.context()),
+                    }) {
+                        warn!("Failed to forward UnsubscribeRequest to SubscriberManager: {e:?}");
+                    }
+                } else {
+                    warn!("SubscriberManager missing while handling unsubscribe for {topic}");
+                }
             }
             BrokerMessage::PublishRequest {
                 registration_id,
@@ -466,94 +365,78 @@ impl Actor for Broker {
                 }
                 let _enter = span.enter();
 
-                trace!("Broker actor received publish request for session {registration_id} for topic \"{topic}\"");
-                //publish to topic
-                match where_is(topic.clone()) {
-                    Some(actor) => {
-                        if let Err(e) = actor.send_message(BrokerMessage::PublishRequest {
-                            registration_id: registration_id.clone(),
-                            topic: topic.clone(),
-                            payload: payload.clone(),
-                            trace_ctx: Some(span.context()),
-                        }) {
-                            warn!("{PUBLISH_REQ_FAILED_TXT}: {e}");
-                            //send err to session
-                            if let Some(session) = where_is(registration_id.clone()) {
-                                if let Err(e) =
-                                    session.send_message(BrokerMessage::PublishResponse {
-                                        topic,
-                                        payload: payload.clone(),
-                                        result: Err(e.to_string()),
-                                        trace_ctx: Some(span.context()),
-                                    })
-                                {
-                                    warn!("{PUBLISH_REQ_FAILED_TXT} {e}");
-                                }
+                trace!(
+                    "Broker received publish request from {registration_id} for topic \"{topic}\""
+                );
+
+                // Forward publish intent to TopicManager. TopicManager is responsible for ensuring the
+                // topic exists and routing the message into the topic actor (idempotently).
+                if let Some(topic_mgr) = &state.topic_mgr {
+                    if let Err(e) = topic_mgr.send_message(BrokerMessage::PublishRequest {
+                        registration_id: registration_id.clone(),
+                        topic: topic.clone(),
+                        payload: payload.clone(),
+                        trace_ctx: Some(span.context()),
+                    }) {
+                        warn!("Failed to forward PublishRequest to TopicManager: {e:?}");
+                        // Let session manager know publish failed so it can respond to client.
+                        if let Some(session_mgr) = &state.session_mgr {
+                            if let Err(e2) =
+                                session_mgr.send_message(BrokerMessage::PublishResponse {
+                                    topic: topic.clone(),
+                                    payload: payload.clone(),
+                                    result: Err(format!("forward failed: {e:?}")),
+                                    trace_ctx: Some(span.context()),
+                                })
+                            {
+                                warn!("Failed to notify SessionManager of publish failure: {e2:?}");
                             }
                         }
                     }
-                    None => {
-                        // topic doesn't exist
-                        // create the topic
-                        debug!("Topic \"{topic}\" doesn't exist. Creating new topic.");
-                        where_is(TOPIC_MANAGER_NAME.to_owned())
-                            .map(|topic_mgr| {
-                                topic_mgr
-                                    .send_message(BrokerMessage::AddTopic {
-                                        registration_id: Some(registration_id.clone()),
-                                        topic: topic.clone(),
-                                        trace_ctx: Some(span.context()),
-                                    })
-                                    .ok();
-                            })
-                            .or_else(|| {
-                                error!("Failed to find topic manager.");
-                                todo!("handle failure to find critical actor.");
-                            });
-
-                        // push message to that topic
-                        //
-                        debug!("Publishing to topic \"{topic}\"");
-                        where_is(topic.clone()).map(|actor| {
-                            actor
-                                .send_message(BrokerMessage::PublishRequest {
-                                    registration_id: registration_id.clone(),
-                                    topic,
-                                    payload: payload.clone(),
-                                    trace_ctx: Some(span.context()),
-                                })
-                                .ok();
+                } else {
+                    error!("TopicManager missing; cannot publish to topic \"{topic}\"");
+                    if let Some(session_mgr) = &state.session_mgr {
+                        let _ = session_mgr.send_message(BrokerMessage::PublishResponse {
+                            topic: topic.clone(),
+                            payload: payload.clone(),
+                            result: Err("topic manager unavailable".to_string()),
+                            trace_ctx: Some(span.context()),
                         });
                     }
                 }
-            } // end publish req
+            }
+
             BrokerMessage::PublishResponse {
                 topic,
                 payload,
                 result,
                 trace_ctx,
             } => {
-                let span = trace_span!("broker.handle_publish_request");
+                let span = trace_span!("broker.handle_publish_response");
                 if let Some(ctx) = trace_ctx {
                     span.set_parent(ctx).ok();
                 }
                 let _enter = span.enter();
 
-                match where_is(SUBSCRIBER_MANAGER_NAME.to_owned()) {
-                    Some(actor) => actor
-                        .send_message(BrokerMessage::PublishResponse {
-                            topic,
-                            payload,
-                            result,
-                            trace_ctx: Some(span.context()),
-                        })
-                        .expect("Failed to forward notification to subscriber manager"),
-                    None => tracing::error!("Failed to lookup subscriber manager!"),
+                // Forward publish responses into the subscriber manager which handles fanout.
+                if let Some(sub_mgr) = &state.subscriber_mgr {
+                    if let Err(e) = sub_mgr.send_message(BrokerMessage::PublishResponse {
+                        topic,
+                        payload,
+                        result,
+                        trace_ctx: Some(span.context()),
+                    }) {
+                        error!("Failed to forward PublishResponse to SubscriberManager: {e:?}");
+                    }
+                } else {
+                    error!("SubscriberManager missing; cannot forward PublishResponse");
                 }
             }
+
             BrokerMessage::ErrorMessage { error, .. } => {
                 warn!("Error Received: {error}");
             }
+
             BrokerMessage::DisconnectRequest {
                 client_id,
                 registration_id,
@@ -565,49 +448,60 @@ impl Actor for Broker {
                 }
                 let _enter = span.enter();
 
-                //start cleanup
                 debug!("Cleaning up session {registration_id:?}");
-                let subscriber_mgr = where_is(SUBSCRIBER_MANAGER_NAME.to_string())
-                    .expect(SUBSCRIBER_MGR_NOT_FOUND_TXT);
-                subscriber_mgr
-                    .send_message(BrokerMessage::DisconnectRequest {
+
+                if let Some(subscriber_mgr) = &state.subscriber_mgr {
+                    if let Err(e) = subscriber_mgr.send_message(BrokerMessage::DisconnectRequest {
                         client_id: client_id.clone(),
                         registration_id: registration_id.clone(),
                         trace_ctx: Some(span.context()),
-                    })
-                    .expect("Expected to forward message");
+                    }) {
+                        error!("Failed to forward DisconnectRequest to SubscriberManager: {e:?}");
+                    }
+                } else {
+                    error!("SubscriberManager missing while processing disconnect for {client_id}");
+                }
 
-                // Tell listener manager to kill listener, it's not coming back
-                let listener_mgr =
-                    where_is(LISTENER_MANAGER_NAME.to_string()).expect(LISTENER_MGR_NOT_FOUND_TXT);
-
-                listener_mgr
-                    .send_message(BrokerMessage::DisconnectRequest {
+                if let Some(listener_mgr) = &state.listener_mgr {
+                    if let Err(e) = listener_mgr.send_message(BrokerMessage::DisconnectRequest {
                         client_id: client_id.clone(),
                         registration_id,
                         trace_ctx: Some(span.context()),
-                    })
-                    .expect("Expected to forward message");
+                    }) {
+                        error!("Failed to forward DisconnectRequest to ListenerManager: {e:?}");
+                    }
+                } else {
+                    error!("ListenerManager missing while processing disconnect for {client_id}");
+                }
             }
+
             BrokerMessage::TimeoutMessage {
                 client_id,
                 registration_id,
                 error,
             } => {
-                //cleanup subscribers
-
-                let manager = where_is(SUBSCRIBER_MANAGER_NAME.to_string())
-                    .expect(SUBSCRIBER_MGR_NOT_FOUND_TXT);
-                manager
-                    .send_message(BrokerMessage::TimeoutMessage {
+                // Route timeout cleanup to subscriber manager which owns subscriber lifecycle.
+                if let Some(sub_mgr) = &state.subscriber_mgr {
+                    if let Err(e) = sub_mgr.send_message(BrokerMessage::TimeoutMessage {
                         client_id: client_id.clone(),
                         registration_id: registration_id.clone(),
                         error: error.clone(),
-                    })
-                    .expect("Expected to forward message");
+                    }) {
+                        error!("Failed to forward TimeoutMessage to SubscriberManager: {e:?}");
+                    }
+                } else {
+                    error!(
+                        "SubscriberManager missing while handling timeout for {registration_id:?}"
+                    );
+                }
             }
-            _ => warn!(UNEXPECTED_MESSAGE_STR),
+
+            other => {
+                warn!(UNEXPECTED_MESSAGE_STR);
+                debug!("Dropped broker message: {:?}", other);
+            }
         }
+
         Ok(())
     }
 }

@@ -1,8 +1,10 @@
 use crate::UNEXPECTED_MESSAGE_STR;
 use crate::{get_subscriber_name, BrokerMessage, PUBLISH_REQ_FAILED_TXT};
 use ractor::registry::where_is;
+use ractor::rpc::CallResult;
 use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef, OutputPort};
 use std::collections::{HashMap, VecDeque};
+use std::time::Duration;
 use tracing::{debug, error, info, trace, trace_span, warn};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
@@ -15,12 +17,126 @@ pub const TOPIC_ADD_FAILED_TXT: &str = "Failed to add topic \"{topic}!\"";
 pub struct TopicManager;
 
 pub struct TopicManagerState {
-    /// TODO: Not entirely sure this is needed since we can lookup actors by name any time, but acessing this may be faster?
-    topics: HashMap<String, ActorRef<BrokerMessage>>, // Map of topic name to Topic addresses
+    pub topics: HashMap<String, ActorRef<BrokerMessage>>,
+    pub subscriber_mgr: Option<ActorRef<BrokerMessage>>,
 }
 
 pub struct TopicManagerArgs {
     pub topics: Option<Vec<String>>,
+    // A reference to the SubscriberManager actor (injected at broker bootstrap).
+    pub subscriber_mgr: Option<ActorRef<BrokerMessage>>, // or the concrete SubscriberMsg type
+}
+
+impl TopicManager {
+    /// Ensure that a topic exists; if not, create it.
+    /// Returns the topic actor ref.
+    async fn ensure_topic(
+        &self,
+        topic: String,
+        myself: ActorRef<BrokerMessage>,
+        state: &mut TopicManagerState,
+    ) -> Result<ActorRef<BrokerMessage>, ActorProcessingErr> {
+        match state.topics.entry(topic.clone()) {
+            std::collections::hash_map::Entry::Occupied(entry) => {
+                // Return the existing actor
+                Ok(entry.get().clone())
+            }
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                // Create and store a new actor
+                match Actor::spawn_linked(
+                    Some(topic.clone()),
+                    TopicAgent,
+                    (),
+                    myself.clone().into(),
+                )
+                .await
+                {
+                    Ok((actor_ref, _handle)) => {
+                        entry.insert(actor_ref.clone());
+                        Ok(actor_ref)
+                    }
+                    Err(e) => {
+                        error!(
+                            "TopicManager failed to start topic actor for \"{}\": {e:?}",
+                            topic
+                        );
+                        Err(ActorProcessingErr::from(e))
+                    }
+                }
+            }
+        }
+    }
+    /// Ensure topic exists (idempotent) and ask the SubscriberManager to create/attach
+    /// a subscriber for `registration_id`.
+    async fn ensure_topic_and_subscribe(
+        &self,
+        registration_id: String,
+        topic: String,
+        trace_ctx: Option<opentelemetry::Context>, // adjust type to your trace ctx
+        myself: ActorRef<BrokerMessage>,
+        state: &mut TopicManagerState,
+    ) -> Result<ActorRef<BrokerMessage>, ActorProcessingErr> {
+        let topic_actor = self
+            .ensure_topic(topic.clone(), myself.clone(), state)
+            .await?;
+
+        // Ask SubscriberManager to create the subscriber (delegation)
+        if let Some(sub_mgr) = &state.subscriber_mgr {
+            if let Ok(call_result) = sub_mgr
+                .call(
+                    |reply| BrokerMessage::CreateSubscriber {
+                        registration_id: registration_id.clone(),
+                        topic: topic.clone(),
+                        trace_ctx,
+                        reply,
+                    },
+                    Some(Duration::from_millis(200)),
+                )
+                .await
+            {
+                match call_result {
+                    CallResult::Success(result) => {
+                        match result {
+                            Ok(subscriber_ref) => {
+                                // Handle successful subscription
+                                topic_actor
+                                    .cast(BrokerMessage::AddSubscriber {
+                                        subscriber_ref,
+                                        trace_ctx: None,
+                                    })
+                                    .ok();
+                            }
+                            Err(err) => {
+                                // Handle subscription error
+                                todo!("handle subscription error");
+                            }
+                        }
+                    }
+                    CallResult::SenderError => {
+                        // Handle call failure
+                        error!(
+                            "TopicManager: failed to subscribe {} -> {}",
+                            registration_id, topic
+                        );
+                    }
+                    CallResult::Timeout => {
+                        // Handle call timeout
+                        todo!("Handle call timeout");
+                    }
+                }
+            }
+        } else {
+            error!(
+                "TopicManager: subscriber_mgr missing while subscribing {} -> {}",
+                registration_id, topic
+            );
+            return Err(ActorProcessingErr::from(
+                "SubscriberManager not configured for TopicManager",
+            ));
+        }
+
+        Ok(topic_actor)
+    }
 }
 
 #[async_trait]
@@ -58,6 +174,7 @@ impl Actor for TopicManager {
         debug!("Starting {myself:?}");
         let mut state = TopicManagerState {
             topics: HashMap::new(),
+            subscriber_mgr: args.subscriber_mgr,
         };
 
         if let Some(topics) = args.topics {
@@ -69,7 +186,7 @@ impl Actor for TopicManager {
                 match Actor::spawn_linked(
                     Some(topic.clone()),
                     TopicAgent,
-                    TopicAgentArgs { subscribers: None },
+                    (),
                     myself.clone().into(),
                 )
                 .await
@@ -114,46 +231,38 @@ impl Actor for TopicManager {
                 }
                 let _enter = span.enter();
 
-                trace!("Topic manager received publish request for \"{topic}\"");
-
-                //forward request to topic agent
-                if let Some(topic_actor) = state.topics.get(&topic.clone()) {
-                    topic_actor
-                        .send_message(BrokerMessage::PublishRequest {
+                // Always go through ensure_topic
+                match self
+                    .ensure_topic(topic.clone(), myself.clone(), state)
+                    .await
+                {
+                    Ok(topic_actor) => {
+                        // Forward the publish to the topic actor
+                        if let Err(e) = topic_actor.send_message(BrokerMessage::PublishRequest {
                             registration_id,
-                            topic,
+                            topic: topic.clone(),
                             payload,
                             trace_ctx: Some(span.context()),
-                        })
-                        .expect("Failed for forward publish request")
-                } else {
-                    info!("Creating topic: \"{topic}\".");
-
-                    drop(_enter);
-
-                    match Actor::spawn_linked(
-                        Some(topic.clone()),
-                        TopicAgent,
-                        TopicAgentArgs { subscribers: None },
-                        myself.clone().into(),
-                    )
-                    .await
-                    {
-                        Ok((actor, _)) => {
-                            state.topics.insert(topic.clone(), actor.clone());
+                        }) {
+                            error!(
+                                "TopicManager failed to forward publish to topic actor {:?}: {e:?}",
+                                topic
+                            );
                         }
-                        Err(e) => {
-                            tracing::error!("Failed to start actor for topic: {topic}");
-                            //TOOD: send error message here
-                            match myself.try_get_supervisor() {
-                                Some(broker) => broker
-                                    .send_message(BrokerMessage::ErrorMessage {
-                                        client_id: registration_id.clone(),
-                                        error: e.to_string(),
-                                    })
-                                    .unwrap(),
-                                None => todo!(),
-                            }
+                    }
+                    Err(e) => {
+                        // If we can’t create/ensure topic, send an error upstream
+                        trace!(
+                            "TopicManager failed to ensure topic \"{}\"; sending error to broker: {e:?}",
+                            topic
+                        );
+                        if let Some(supervisor) = myself.try_get_supervisor() {
+                            supervisor
+                                .send_message(BrokerMessage::ErrorMessage {
+                                    client_id: registration_id.clone(),
+                                    error: format!("Failed to ensure topic {topic}: {e:?}"),
+                                })
+                                .ok();
                         }
                     }
                 }
@@ -185,47 +294,22 @@ impl Actor for TopicManager {
                     None => todo!(),
                 }
             }
-            BrokerMessage::AddTopic {
+            BrokerMessage::SubscribeRequest {
                 registration_id,
                 topic,
                 trace_ctx,
             } => {
-                let span = trace_span!("topic_manager.handle_publish_request");
-                if let Some(ctx) = trace_ctx {
-                    span.set_parent(ctx).ok();
-                }
-                let _enter = span.enter();
-
-                trace!("topic manager received add topic command for topic \"{topic}\"");
-
-                // Just create a new topic agent
-
-                if let Some(registration_id) = registration_id {
-                    let mut subscribers = Vec::new();
-                    subscribers.push(get_subscriber_name(&registration_id, &topic));
-                    drop(_enter);
-
-                    Actor::spawn_linked(
-                        Some(topic.clone()),
-                        TopicAgent,
-                        TopicAgentArgs {
-                            subscribers: Some(subscribers),
-                        },
-                        myself.clone().into(),
+                if let Err(e) = self
+                    .ensure_topic_and_subscribe(
+                        registration_id.clone(),
+                        topic.clone(),
+                        trace_ctx.clone(),
+                        myself.clone(),
+                        state,
                     )
                     .await
-                    .ok();
-                } else {
-                    // Just create a new topic agent
-                    drop(_enter);
-                    Actor::spawn_linked(
-                        Some(topic.clone()),
-                        TopicAgent,
-                        TopicAgentArgs { subscribers: None },
-                        myself.clone().into(),
-                    )
-                    .await
-                    .ok();
+                {
+                    error!("ensure_topic_and_subscribe failed: {e:?}");
                 }
             }
             _ => warn!(UNEXPECTED_MESSAGE_STR),
@@ -240,12 +324,8 @@ impl Actor for TopicManager {
 struct TopicAgent;
 
 struct TopicAgentState {
-    subscribers: Vec<String>,
+    subscribers: Vec<ActorRef<BrokerMessage>>,
     queue: VecDeque<Vec<u8>>,
-}
-
-pub struct TopicAgentArgs {
-    pub subscribers: Option<Vec<String>>,
 }
 
 #[async_trait]
@@ -257,15 +337,15 @@ impl Actor for TopicAgent {
     type State = TopicAgentState;
 
     #[doc = " Initialization arguments"]
-    type Arguments = TopicAgentArgs;
+    type Arguments = ();
 
     async fn pre_start(
         &self,
         _: ActorRef<Self::Msg>,
-        args: TopicAgentArgs,
+        args: (),
     ) -> Result<Self::State, ActorProcessingErr> {
         Ok(TopicAgentState {
-            subscribers: args.subscribers.unwrap_or_default(),
+            subscribers: Vec::new(),
             queue: VecDeque::new(),
         })
     }
@@ -299,32 +379,17 @@ impl Actor for TopicAgent {
 
                 trace!("Topic agent received publish request for \"{topic}\"");
 
-                //send ACK to session that made the request
-                match where_is(registration_id.clone()) {
-                    Some(session) => {
-                        if let Err(e) = session.send_message(BrokerMessage::PublishRequestAck {
-                            topic: topic.clone(),
-                            trace_ctx: Some(span.context()),
-                        }) {
-                            warn!("Failed to send publish Ack to session! {e}")
-                        }
-                    }
-                    None => warn!("Failed to lookup session {registration_id}"),
-                }
-
                 //alert subscribers
                 if !state.subscribers.is_empty() {
                     for subscriber in &state.subscribers {
-                        where_is(subscriber.to_string()).map(|actor| {
-                            if let Err(e) = actor.send_message(BrokerMessage::PublishResponse {
-                                topic: topic.clone(),
-                                payload: payload.clone(),
-                                result: Ok(()),
-                                trace_ctx: Some(span.context()),
-                            }) {
-                                warn!("{PUBLISH_REQ_FAILED_TXT}: {e}")
-                            }
-                        });
+                        if let Err(e) = subscriber.send_message(BrokerMessage::PublishResponse {
+                            topic: topic.clone(),
+                            payload: payload.clone(),
+                            result: Ok(()),
+                            trace_ctx: Some(span.context()),
+                        }) {
+                            warn!("{PUBLISH_REQ_FAILED_TXT}: {e}")
+                        }
                     }
                 } else {
                     //queue message
@@ -338,60 +403,44 @@ impl Actor for TopicAgent {
                         )
                     );
                 }
+
+                //send ACK to session that made the request
+                match where_is(registration_id.clone()) {
+                    Some(session) => {
+                        if let Err(e) = session.send_message(BrokerMessage::PublishRequestAck {
+                            topic: topic.clone(),
+                            trace_ctx: Some(span.context()),
+                        }) {
+                            warn!("Failed to send publish Ack to session! {e}")
+                        }
+                    }
+                    None => warn!("Failed to lookup session {registration_id}"),
+                }
             }
-            BrokerMessage::Subscribe {
-                registration_id,
-                topic,
+            BrokerMessage::AddSubscriber {
+                subscriber_ref,
                 trace_ctx,
             } => {
-                let span = trace_span!("topic.handle_subscribe_request", %registration_id);
+                let span = trace_span!("topic.add_subscriber");
                 trace_ctx.map(|ctx| span.set_parent(ctx));
                 let _ = span.enter();
 
-                trace!("Topic agent \"{topic}\" received subscribe directive");
+                trace!("Received subscribe session directive");
 
-                debug!("Subscribing session to topic \"{topic}\"");
+                state.subscribers.push(subscriber_ref.clone());
 
-                let sub_id = get_subscriber_name(&registration_id, &topic);
-
-                debug!("Adding {sub_id} to subscriber list");
-
-                state.subscribers.push(sub_id.clone());
-                //send any waiting messages
-                where_is(sub_id.clone()).map(|subscriber| {
-                    // TODO: I don't think this is wise in hindsight, we don't want to dump the queue upon getting every new subscriber.
-
-                    while let Some(msg) = &state.queue.pop_front() {
-                        // if this were to fail, user probably unsubscribed while we were dequeuing
-                        // It should be ok to ignore this case.
-
-                        subscriber
-                            .send_message(BrokerMessage::PublishResponse {
-                                topic: topic.clone(),
-                                payload: msg.to_vec(),
-                                result: Ok(()),
-                                trace_ctx: Some(span.context()),
-                            })
-                            .ok();
-                    }
-                });
-
-                //TODO: I don't know what it is about this code that isn't working well. We want to use outputports, but the messages
-                // simply aren't going through.
-                // where_is(get_subscriber_name(&registration_id, &topic)).map(|subscriber| {
-                //     state
-                //         .topic_output
-                //         .subscribe(subscriber.into(), move |payload| {
-                //             Some(BrokerMessage::PublishResponse {
-                //                 topic: topic.clone(),
-                //                 payload,
-                //                 result: Ok(()),
-                //                 // we'll start a new "deque_message" flow at the subscriber.
-                //                 // The span doesn't live long enough to be accessed here anyway, so we can say we're done subscribing.
-                //                 trace_ctx: Some(span.context()),
-                //             })
-                //         })
-                // });
+                while let Some(msg) = &state.queue.pop_front() {
+                    // if this were to fail, user probably unsubscribed while we were dequeuing
+                    // It should be ok to ignore this case.
+                    subscriber_ref
+                        .send_message(BrokerMessage::PublishResponse {
+                            topic: myself.get_name().unwrap(),
+                            payload: msg.to_vec(),
+                            result: Ok(()),
+                            trace_ctx: Some(span.context()),
+                        })
+                        .ok();
+                }
             }
             BrokerMessage::UnsubscribeRequest {
                 registration_id,
