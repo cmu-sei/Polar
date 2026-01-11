@@ -1,7 +1,11 @@
+use std::sync::Arc;
+use std::{process::Stdio, time::Duration};
 use harness_common::{ArchivedHarnessControllerMessage, HarnessControllerMessage, TestPlan};
 use ractor::{
-    async_trait, concurrency::JoinHandle, Actor, ActorProcessingErr, ActorRef, SupervisionEvent,
+    async_trait, concurrency::JoinHandle, Actor, ActorProcessingErr, OutputPort,ActorRef, SupervisionEvent,
 };
+
+use cassini_client::{TCPClientConfig, TcpClientActor, TcpClientArgs};
 use rkyv::{
     deserialize,
     rancor::{self, Error, Source},
@@ -11,8 +15,7 @@ use rustls::{
     server::WebPkiClientVerifier,
     RootCertStore, ServerConfig,
 };
-use std::sync::Arc;
-use std::{process::Stdio, time::Duration};
+
 use tokio::process::Command;
 use tokio::{
     io::{split, AsyncReadExt, AsyncWriteExt, BufWriter, ReadHalf, WriteHalf},
@@ -28,6 +31,48 @@ pub const SINK_CLIENT_SESSION: &str = "cassini.harness.session";
 // ============================== Sink Service ============================== //
 
 pub struct HarnessController;
+
+impl HarnessController {
+
+    // --- Orchestration helper ---
+
+    /// Spawn a TcpClientActor
+    pub async fn start_client(
+        myself: ActorRef<HarnessControllerMessage>,
+        client_name: &str,
+    ) -> Result<(), ActorProcessingErr> {
+        // Create the output ports the client expects
+        let events_output: Arc<OutputPort<String>> = Arc::new(OutputPort::default());
+        let queue_output: Arc<OutputPort<(Vec<u8>, String)>> = Arc::new(OutputPort::default());
+
+        //subscribe to events.
+        events_output.subscribe(myself.clone(), |_registration_id: String| {
+            info!("Successfully registered with Cassini.");
+            Some(HarnessControllerMessage::Initialize)
+        });
+
+        let config = TCPClientConfig::new()?;
+        // Prepare TcpClientArgs and spawn the client actor
+        let tcp_args = TcpClientArgs {
+            config,
+            registration_id: None,
+            events_output: events_output.clone(),
+            queue_output: queue_output.clone(),
+        };
+
+        match Actor::spawn_linked(
+            Some(format!("{client_name}-tcp-client")),
+            TcpClientActor,
+            tcp_args,
+            myself.clone().into()
+        )
+        .await
+        {
+            Ok((_client_ref, _)) => Ok(()),
+            Err(e) => Err(ActorProcessingErr::from(e))
+        }
+    }
+}
 
 pub struct HarnessControllerState {
     bind_addr: String,
@@ -189,57 +234,18 @@ impl Actor for HarnessController {
         let broker = crate::spawn_broker(myself.clone(), state.broker_path.clone()).await;
         state.broker = Some(broker.clone());
 
-        // Sleep to wait for for the broker to wake up
-        // TODO: Replace with a handshake to cassini, and when it responds as healthy, we continue the test
-        std::thread::sleep(Duration::from_secs(5));
+        // Check readiness of the broker. Here's where we should open a connection and await registration to complete.
+        match HarnessController::start_client(myself.clone(), "harness.controller.tcp").await {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                error!("Failed to register with the message broker. {e}");
+                if let Some(handle) = &state.server_handle {
+                    handle.abort();
 
-        // binaries are currently named aptly.
-        // harness-sink
-        // harness-producer
-        // I guess there's not much sense in writing two fns.
-        // TODO: add a handshake, and when it responds as healthy, we continue the test
-        let cloned_self = myself.clone();
-        let cloned_path = state.producer_path.clone();
-
-        let producer = tokio::spawn(async move {
-            tracing::info!("Spawning producer service at {cloned_path}");
-            let mut child = Command::new(cloned_path)
-                .stdout(Stdio::inherit())
-                .stderr(Stdio::inherit())
-                .spawn()
-                .expect("failed to spawn harness");
-
-            let status = child.wait().await.expect("harness {binary} crashed");
-            tracing::warn!(?status, "Harness producer exited");
-
-            let _ = cloned_self.cast(HarnessControllerMessage::Error {
-                reason: "harness {binary} crashed".to_string(),
-            });
-        })
-        .abort_handle();
-
-        let cloned_self = myself.clone();
-        let cloned_path = state.sink_path.clone();
-
-        // TODO: add a handshake, and when it responds as healthy, we continue the test
-        let sink = tokio::spawn(async move {
-            tracing::info!("Spawning producer service at {cloned_path}");
-            let mut child = Command::new(cloned_path)
-                .stdout(Stdio::inherit())
-                .stderr(Stdio::inherit())
-                .spawn()
-                .expect("failed to spawn harness");
-
-            let status = child.wait().await.expect("harness {binary} crashed");
-            tracing::warn!(?status, "Harness sink exited");
-
-            let _ = cloned_self.cast(HarnessControllerMessage::Error {
-                reason: "harness {binary} crashed".to_string(),
-            });
-        })
-        .abort_handle();
-
-        Ok(())
+                }
+                Err(e)
+            }
+        }
     }
 
     async fn post_stop(
@@ -305,6 +311,53 @@ impl Actor for HarnessController {
         debug!("{myself:?} Received a message");
 
         match message {
+            HarnessControllerMessage::Initialize => {
+                info!("Initializng test agents");
+                // binaries are currently named aptly.
+                // harness-sink
+                // harness-producer
+                // I guess there's not much sense in writing two fns.
+                // TODO: add a handshake, and when it responds as healthy, we continue the test
+                let cloned_self = myself.clone();
+                let cloned_path = state.producer_path.clone();
+
+                let producer = tokio::spawn(async move {
+                    tracing::info!("Spawning producer service at {cloned_path}");
+                    let mut child = Command::new(cloned_path)
+                        .stdout(Stdio::inherit())
+                        .stderr(Stdio::inherit())
+                        .spawn()
+                        .expect("failed to spawn harness");
+
+                    let status = child.wait().await.expect("harness {binary} crashed");
+                    tracing::warn!(?status, "Harness producer exited");
+
+                    let _ = cloned_self.cast(HarnessControllerMessage::Error {
+                        reason: "harness {binary} crashed".to_string(),
+                    });
+                })
+                .abort_handle();
+
+                let cloned_self = myself.clone();
+                let cloned_path = state.sink_path.clone();
+
+                // TODO: add a handshake, and when it responds as healthy, we continue the test
+                let sink = tokio::spawn(async move {
+                    tracing::info!("Spawning producer service at {cloned_path}");
+                    let mut child = Command::new(cloned_path)
+                        .stdout(Stdio::inherit())
+                        .stderr(Stdio::inherit())
+                        .spawn()
+                        .expect("failed to spawn harness");
+
+                    let status = child.wait().await.expect("harness {binary} crashed");
+                    tracing::warn!(?status, "Harness sink exited");
+
+                    let _ = cloned_self.cast(HarnessControllerMessage::Error {
+                        reason: "harness {binary} crashed".to_string(),
+                    });
+                });
+            }
             HarnessControllerMessage::ShutdownAck => myself.stop(Some("TEST_COMPLETE".to_string())),
             _ => (),
         }

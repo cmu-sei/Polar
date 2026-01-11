@@ -31,6 +31,8 @@ pub struct ProducerConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Archive)]
 pub enum HarnessControllerMessage {
+    //
+    Initialize,
     /// Message sent to clients to give them a token to id themselves by, mostly for convenience
     ClientRegistered(String),
     TestPlanRequest {

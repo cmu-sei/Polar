@@ -110,6 +110,135 @@ pub struct TcpClientArgs {
 pub struct TcpClientActor;
 
 impl TcpClientActor {
+
+    async fn connect_with_backoff(
+        addr: String,
+        server_name: String,
+        client_config: &Arc<ClientConfig>
+    ) -> Result<TlsStream<TcpStream>, ActorProcessingErr> {
+
+        let connector = TlsConnector::from(Arc::clone(client_config));
+        let mut backoff = std::time::Duration::from_millis(100);
+        let max_backoff = std::time::Duration::from_secs(2);
+        let max_attempts = 8;
+
+        // OWNED ServerName with 'static lifetime
+        let server_name = ServerName::try_from(server_name)
+            .map_err(|_| ActorProcessingErr::from("Invalid DNS name"))?;
+
+        for attempt in 1..=max_attempts {
+            match TcpStream::connect(addr.clone()).await {
+                Ok(tcp) => {
+                    match connector.connect(server_name.clone(), tcp).await {
+                        Ok(tls) => return Ok(tls),
+                        Err(e) => {
+                            debug!(attempt, error = %e, "TLS handshake failed, retrying");
+                        }
+                    }
+                }
+                Err(e) => {
+                    debug!(attempt, error = %e, "TCP connect failed, retrying");
+                }
+            }
+
+            tokio::time::sleep(backoff).await;
+            backoff = (backoff * 2).min(max_backoff);
+        }
+
+        Err(ActorProcessingErr::from(
+            "Failed to connect to broker after retries",
+        ))
+    }
+
+    fn spawn_reader(
+        &self,
+        myself: ActorRef<TcpClientMessage>,
+        state: &mut TcpClientState,
+    ) -> Result<(), ActorProcessingErr> {
+        let reader = tokio::io::BufReader::new(
+            state.reader.take().expect("Reader already taken"),
+        );
+
+        let queue_out = state.queue_output.clone();
+
+        let abort = tokio::spawn(async move {
+            let mut buf_reader = tokio::io::BufReader::new(reader);
+
+            while let Ok(incoming_msg_length) = buf_reader.read_u32().await {
+                if incoming_msg_length > 0 {
+                    let mut buffer = vec![0; incoming_msg_length as usize];
+                    if let Ok(_) = buf_reader.read_exact(&mut buffer).await {
+                        let archived =
+                            rkyv::access::<ArchivedClientMessage, Error>(
+                                &buffer[..],
+                            )
+                            .unwrap();
+                        // And you can always deserialize back to the original type
+
+                        if let Ok(message) =
+                            deserialize::<ClientMessage, Error>(archived)
+                        {
+                            match message {
+                                ClientMessage::RegistrationResponse {
+                                    result
+                                } => {
+                                    match result {
+                                        Ok(registration_id) => {
+                                            //emit registration event for consumers
+                                            myself.send_message(TcpClientMessage::RegistrationResponse(registration_id)).expect("Could not forward message to {myself:?");
+                                        }
+                                        Err(e) => {
+                                            info!("Failed to register session with the server. {e}");
+                                            //TODO: We practically never fail to register unless there's some sort of connection error.
+                                            // Should this change, how do we want to react?
+                                        }
+                                    }
+                                }
+                                ClientMessage::PublishResponse {
+                                    topic,
+                                    payload,
+                                    result,
+                                } => {
+                                    //new message on topic
+                                    if result.is_ok() {
+                                        queue_out.send((payload, topic));
+                                    } else {
+                                        warn!("Failed to publish message to topic: {topic}");
+                                    }
+                                }
+                                ClientMessage::SubscribeAcknowledgment {
+                                    topic,
+                                    result,
+                                } => {
+                                    if result.is_ok() {
+                                        info!("Successfully subscribed to topic: {topic}");
+                                    } else {
+                                        warn!("Failed to subscribe to topic: {topic}, {result:?}");
+                                    }
+                                }
+
+                                ClientMessage::UnsubscribeAcknowledgment {
+                                    topic,
+                                    result,
+                                } => {
+                                    if result.is_ok() {
+                                        info!("Successfully unsubscribed from topic: {topic}");
+                                    } else {
+                                        warn!("Failed to unsubscribe from topic: {topic}");
+                                    }
+                                }
+                                _ => (),
+                            }
+                        }
+                    }
+                }
+            }
+        })
+        .abort_handle();
+
+        state.abort_handle = Some(abort);
+        Ok(())
+    }
     /// Send a payload to the broker over the write.
     pub async fn send_message(
         message: ClientMessage,
@@ -246,6 +375,7 @@ impl Actor for TcpClientActor {
         Ok(state)
     }
 
+
     async fn post_start(
         &self,
         myself: ActorRef<Self::Msg>,
@@ -253,126 +383,22 @@ impl Actor for TcpClientActor {
     ) -> Result<(), ActorProcessingErr> {
         let addr = state.bind_addr.clone();
         info!("Connecting to {addr}");
-        let connector = TlsConnector::from(Arc::clone(&state.client_config));
 
-        match TcpStream::connect(&addr).await {
-            Ok(tcp_stream) => {
-                let domain =
-                    ServerName::try_from(state.server_name.clone()).expect("invalid DNS name");
+        let tls_stream = TcpClientActor::connect_with_backoff(addr,state.server_name.clone(), &state.client_config).await?;
+        let (reader, write_half) = split(tls_stream);
+        let writer = tokio::io::BufWriter::new(write_half);
 
-                match connector.connect(domain, tcp_stream).await {
-                    Ok(tls_stream) => {
-                        let (reader, write_half) = split(tls_stream);
+        state.reader = Some(reader);
+        state.writer = Some(Arc::new(Mutex::new(writer)));
 
-                        let writer = tokio::io::BufWriter::new(write_half);
+        info!("Successfully connected to Cassini. Listening for messages.");
 
-                        state.reader = Some(reader);
-                        state.writer = Some(Arc::new(Mutex::new(writer)));
+        self.spawn_reader(myself.clone(), state)?;
 
-                        info!("{myself:?} Listening... ");
-                        let reader = tokio::io::BufReader::new(
-                            state.reader.take().expect("Reader already taken!"),
-                        );
-
-                        let cloned_self = myself.clone();
-                        let cloned_queue_out = state.queue_output.clone();
-
-                        //start listening
-                        let abort_handle = tokio::spawn(async move {
-                            let mut buf_reader = tokio::io::BufReader::new(reader);
-
-                            while let Ok(incoming_msg_length) = buf_reader.read_u32().await {
-                                if incoming_msg_length > 0 {
-                                    let mut buffer = vec![0; incoming_msg_length as usize];
-                                    if let Ok(_) = buf_reader.read_exact(&mut buffer).await {
-                                        let archived =
-                                            rkyv::access::<ArchivedClientMessage, Error>(
-                                                &buffer[..],
-                                            )
-                                            .unwrap();
-                                        // And you can always deserialize back to the original type
-
-                                        if let Ok(message) =
-                                            deserialize::<ClientMessage, Error>(archived)
-                                        {
-                                            match message {
-                                                ClientMessage::RegistrationResponse {
-                                                    result
-                                                } => {
-                                                    match result {
-                                                        Ok(registration_id) => {
-                                                            //emit registration event for consumers
-                                                            cloned_self.send_message(TcpClientMessage::RegistrationResponse(registration_id)).expect("Could not forward message to {myself:?");
-                                                        }
-                                                        Err(e) => {
-                                                            info!("Failed to register session with the server. {e}");
-                                                            //TODO: We practically never fail to register unless there's some sort of connection error.
-                                                            // Should this change, how do we want to react?
-                                                        }
-                                                    }
-                                                }
-                                                ClientMessage::PublishResponse {
-                                                    topic,
-                                                    payload,
-                                                    result,
-                                                } => {
-                                                    //new message on topic
-                                                    if result.is_ok() {
-                                                        cloned_queue_out.send((payload, topic));
-                                                    } else {
-                                                        warn!("Failed to publish message to topic: {topic}");
-                                                    }
-                                                }
-                                                ClientMessage::SubscribeAcknowledgment {
-                                                    topic,
-                                                    result,
-                                                } => {
-                                                    if result.is_ok() {
-                                                        info!("Successfully subscribed to topic: {topic}");
-                                                    } else {
-                                                        warn!("Failed to subscribe to topic: {topic}, {result:?}");
-                                                    }
-                                                }
-
-                                                ClientMessage::UnsubscribeAcknowledgment {
-                                                    topic,
-                                                    result,
-                                                } => {
-                                                    if result.is_ok() {
-                                                        info!("Successfully unsubscribed from topic: {topic}");
-                                                    } else {
-                                                        warn!("Failed to unsubscribe from topic: {topic}");
-                                                    }
-                                                }
-                                                _ => (),
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }).abort_handle();
-
-                        state.abort_handle = Some(abort_handle);
-                    }
-                    Err(e) => {
-                        error!("Failed to establish mTLS connection! {e}");
-                        myself.stop(Some("Failed to establish mTLS connection! {e}".to_string()));
-                    }
-                }
-            }
-            Err(e) => {
-                let err = format!("Failed to connect to server: {e}");
-                error!("{err}");
-                // TODO: Maybe this should be an enum/constant we can match instead?
-                return Err(ActorProcessingErr::from(err));
-            }
-        };
-
-        //Send registration request
-        if let Err(e) = myself.send_message(TcpClientMessage::Register) {
-            error!("{e}");
-            return Err(ActorProcessingErr::from(e));
-        }
+        // Kick off registration *after* connection is guaranteed
+        myself
+            .send_message(TcpClientMessage::Register)
+            .map_err(ActorProcessingErr::from)?;
 
         Ok(())
     }

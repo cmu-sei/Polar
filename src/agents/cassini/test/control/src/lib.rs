@@ -1,8 +1,8 @@
 use clap::Parser;
 use harness_common::{HarnessControllerMessage, TestPlan};
-use ractor::ActorRef;
 use std::process::Stdio;
 use tokio::{process::Command, task::AbortHandle};
+use ractor::ActorRef;
 pub mod service;
 
 #[derive(Parser, Debug)]
@@ -58,14 +58,12 @@ pub fn read_test_config(path: &str) -> TestPlan {
 }
 
 /// Helper to run an instance of the broker in another thread.
-/// TODO: ensure that the environment is sound?
 pub async fn spawn_broker(
     control: ActorRef<HarnessControllerMessage>,
     broker_path: String,
 ) -> AbortHandle {
     return tokio::spawn(async move {
         tracing::info!("Spawning broker...");
-        // TODO: change path to be either an ENV var or a CLI rargument
         let mut child = Command::new(broker_path)
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit())
