@@ -102,7 +102,6 @@ impl Actor for ObserverSupervisor {
                 config: client_config,
                 registration_id: None,
                 events_output,
-                queue_output,
             },
             myself.clone().into(),
         )

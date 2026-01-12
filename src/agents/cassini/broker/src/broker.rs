@@ -1,17 +1,14 @@
 use crate::{
+    control::{ControlManager, ControlManagerState},
     listener::{ListenerManager, ListenerManagerArgs},
     session::{SessionManager, SessionManagerArgs},
     subscriber::SubscriberManager,
     topic::{TopicManager, TopicManagerArgs},
-    BrokerConfigError, UNEXPECTED_MESSAGE_STR,
+    BrokerConfigError, LISTENER_MANAGER_NAME, SESSION_MANAGER_NAME, SUBSCRIBER_MANAGER_NAME,
+    TOPIC_MANAGER_NAME, UNEXPECTED_MESSAGE_STR,
 };
-use crate::{
-    BrokerMessage, LISTENER_MANAGER_NAME, SESSION_MANAGER_NAME, SESSION_NOT_FOUND_TXT,
-    SUBSCRIBER_MANAGER_NAME, SUBSCRIBER_MGR_NOT_FOUND_TXT, TOPIC_MANAGER_NAME,
-};
-use ractor::{
-    async_trait, registry::where_is, Actor, ActorProcessingErr, ActorRef, SupervisionEvent,
-};
+use cassini_types::BrokerMessage;
+use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef, SupervisionEvent};
 use tracing::{debug, error, info, trace, trace_span, warn};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
@@ -26,6 +23,7 @@ pub struct BrokerState {
     session_mgr: Option<ActorRef<BrokerMessage>>,
     topic_mgr: Option<ActorRef<BrokerMessage>>,
     subscriber_mgr: Option<ActorRef<BrokerMessage>>,
+    control_mgr: Option<ActorRef<BrokerMessage>>,
 }
 
 /// Would-be configurations for the broker actor itself, as well its workers
@@ -144,6 +142,25 @@ impl Actor for Broker {
             ActorProcessingErr::from(e)
         })?;
 
+        let control_mgr_args = ControlManagerState {
+            topic_mgr: topic_mgr.clone(),
+            subscriber_mgr: subscriber_mgr.clone(),
+            listener_mgr: listener_mgr.clone(),
+            session_mgr: session_mgr.clone(),
+        };
+
+        let (control_mgr, _) = Actor::spawn_linked(
+            Some("CONTROL_MANAGER".to_owned()),
+            ControlManager,
+            control_mgr_args,
+            myself.clone().into(),
+        )
+        .await
+        .map_err(|e| {
+            error!("failed to spawn ControlManager: {e:?}");
+            ActorProcessingErr::from(e)
+        })?;
+
         info!("Broker startup complete");
 
         Ok(BrokerState {
@@ -151,6 +168,7 @@ impl Actor for Broker {
             session_mgr: Some(session_mgr),
             topic_mgr: Some(topic_mgr),
             subscriber_mgr: Some(subscriber_mgr),
+            control_mgr: Some(control_mgr),
         })
     }
 
@@ -495,7 +513,29 @@ impl Actor for Broker {
                     );
                 }
             }
-
+            BrokerMessage::ControlRequest {
+                registration_id,
+                op,
+                reply_to,
+                trace_ctx,
+            } => {
+                let span = trace_span!("broker.handle_control_request", %registration_id);
+                if let Some(ctx) = trace_ctx {
+                    span.set_parent(ctx).ok();
+                }
+                let _enter = span.enter();
+                trace!("Handling control request");
+                if let Some(control_mgr) = &state.control_mgr {
+                    control_mgr
+                        .send_message(BrokerMessage::ControlRequest {
+                            registration_id,
+                            op,
+                            reply_to,
+                            trace_ctx: Some(span.context()),
+                        })
+                        .ok();
+                }
+            }
             other => {
                 warn!(UNEXPECTED_MESSAGE_STR);
                 debug!("Dropped broker message: {:?}", other);

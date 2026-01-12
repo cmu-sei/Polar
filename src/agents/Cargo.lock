@@ -724,7 +724,10 @@ dependencies = [
 name = "cassini-types"
 version = "0.1.0"
 dependencies = [
+ "opentelemetry",
+ "ractor",
  "rkyv 0.8.12",
+ "tracing",
 ]
 
 [[package]]
@@ -1971,6 +1974,7 @@ name = "harness-controller"
 version = "0.1.0"
 dependencies = [
  "cassini-client",
+ "cassini-types",
  "clap",
  "harness-common",
  "polar",

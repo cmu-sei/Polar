@@ -5,4 +5,7 @@ edition.workspace = true
 license = "MIT"
 
 [dependencies]
+ractor = { version="0.15.8" }
+tracing = "0.1.41"
 rkyv = { workspace = true }
+opentelemetry = "0.31.0"

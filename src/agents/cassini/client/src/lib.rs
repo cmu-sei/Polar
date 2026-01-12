@@ -1,4 +1,4 @@
-use cassini_types::{ArchivedClientMessage, ClientMessage};
+use cassini_types::{ArchivedClientMessage, ClientMessage, ControlOp};
 use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef, OutputPort, RpcReplyPort};
 use rkyv::deserialize;
 use rkyv::rancor::Error;
@@ -83,6 +83,16 @@ pub enum TcpClientMessage {
     UnsubscribeRequest(String),
     ///Disconnect, sending a session id to end, if any
     Disconnect,
+    ListSessions,
+    ListTopics,
+    GetSession,
+}
+/// Events emitted by the client.
+#[derive(Clone, Debug)]
+pub enum ClientEvent {
+    Registered { registration_id: String },
+    MessagePublished { topic: String, payload: Vec<u8> },
+    TransportError { reason: String },
 }
 
 /// Actor state for the TCP client
@@ -93,30 +103,27 @@ pub struct TcpClientState {
     reader: Option<ReadHalf<TlsStream<TcpStream>>>, // Use Option to allow taking ownership
     registration: RegistrationState,
     client_config: Arc<ClientConfig>,
-    events_output: Arc<OutputPort<String>>,
+
     /// Output port where message payloads and the topic it came from is piped to a dispatcher
-    queue_output: Arc<OutputPort<(Vec<u8>, String)>>,
+    events_output: Arc<OutputPort<ClientEvent>>,
     abort_handle: Option<AbortHandle>, // abort handle switch for the stream read loop
 }
 
 pub struct TcpClientArgs {
     pub config: TCPClientConfig,
     pub registration_id: Option<String>,
-    pub events_output: Arc<OutputPort<String>>,
-    pub queue_output: Arc<OutputPort<(Vec<u8>, String)>>,
+    pub events_output: Arc<OutputPort<ClientEvent>>,
 }
 
 /// TCP client actor
 pub struct TcpClientActor;
 
 impl TcpClientActor {
-
     async fn connect_with_backoff(
         addr: String,
         server_name: String,
-        client_config: &Arc<ClientConfig>
+        client_config: &Arc<ClientConfig>,
     ) -> Result<TlsStream<TcpStream>, ActorProcessingErr> {
-
         let connector = TlsConnector::from(Arc::clone(client_config));
         let mut backoff = std::time::Duration::from_millis(100);
         let max_backoff = std::time::Duration::from_secs(2);
@@ -128,14 +135,12 @@ impl TcpClientActor {
 
         for attempt in 1..=max_attempts {
             match TcpStream::connect(addr.clone()).await {
-                Ok(tcp) => {
-                    match connector.connect(server_name.clone(), tcp).await {
-                        Ok(tls) => return Ok(tls),
-                        Err(e) => {
-                            debug!(attempt, error = %e, "TLS handshake failed, retrying");
-                        }
+                Ok(tcp) => match connector.connect(server_name.clone(), tcp).await {
+                    Ok(tls) => return Ok(tls),
+                    Err(e) => {
+                        debug!(attempt, error = %e, "TLS handshake failed, retrying");
                     }
-                }
+                },
                 Err(e) => {
                     debug!(attempt, error = %e, "TCP connect failed, retrying");
                 }
@@ -155,11 +160,9 @@ impl TcpClientActor {
         myself: ActorRef<TcpClientMessage>,
         state: &mut TcpClientState,
     ) -> Result<(), ActorProcessingErr> {
-        let reader = tokio::io::BufReader::new(
-            state.reader.take().expect("Reader already taken"),
-        );
+        let reader = tokio::io::BufReader::new(state.reader.take().expect("Reader already taken"));
 
-        let queue_out = state.queue_output.clone();
+        let queue_out = state.events_output.clone();
 
         let abort = tokio::spawn(async move {
             let mut buf_reader = tokio::io::BufReader::new(reader);
@@ -168,27 +171,29 @@ impl TcpClientActor {
                 if incoming_msg_length > 0 {
                     let mut buffer = vec![0; incoming_msg_length as usize];
                     if let Ok(_) = buf_reader.read_exact(&mut buffer).await {
+                        // TODO: In hindisght, I fail to understand the need for this step, from_bytes works just fine, so let's use that
                         let archived =
-                            rkyv::access::<ArchivedClientMessage, Error>(
-                                &buffer[..],
-                            )
-                            .unwrap();
+                            rkyv::access::<ArchivedClientMessage, Error>(&buffer[..]).unwrap();
                         // And you can always deserialize back to the original type
 
-                        if let Ok(message) =
-                            deserialize::<ClientMessage, Error>(archived)
-                        {
+                        if let Ok(message) = deserialize::<ClientMessage, Error>(archived) {
                             match message {
-                                ClientMessage::RegistrationResponse {
-                                    result
-                                } => {
+                                ClientMessage::RegistrationResponse { result } => {
                                     match result {
                                         Ok(registration_id) => {
                                             //emit registration event for consumers
-                                            myself.send_message(TcpClientMessage::RegistrationResponse(registration_id)).expect("Could not forward message to {myself:?");
+                                            myself
+                                                .send_message(
+                                                    TcpClientMessage::RegistrationResponse(
+                                                        registration_id,
+                                                    ),
+                                                )
+                                                .expect("Could not forward message to {myself:?");
                                         }
                                         Err(e) => {
-                                            info!("Failed to register session with the server. {e}");
+                                            info!(
+                                                "Failed to register session with the server. {e}"
+                                            );
                                             //TODO: We practically never fail to register unless there's some sort of connection error.
                                             // Should this change, how do we want to react?
                                         }
@@ -201,15 +206,13 @@ impl TcpClientActor {
                                 } => {
                                     //new message on topic
                                     if result.is_ok() {
-                                        queue_out.send((payload, topic));
+                                        queue_out
+                                            .send(ClientEvent::MessagePublished { topic, payload });
                                     } else {
                                         warn!("Failed to publish message to topic: {topic}");
                                     }
                                 }
-                                ClientMessage::SubscribeAcknowledgment {
-                                    topic,
-                                    result,
-                                } => {
+                                ClientMessage::SubscribeAcknowledgment { topic, result } => {
                                     if result.is_ok() {
                                         info!("Successfully subscribed to topic: {topic}");
                                     } else {
@@ -217,10 +220,7 @@ impl TcpClientActor {
                                     }
                                 }
 
-                                ClientMessage::UnsubscribeAcknowledgment {
-                                    topic,
-                                    result,
-                                } => {
+                                ClientMessage::UnsubscribeAcknowledgment { topic, result } => {
                                     if result.is_ok() {
                                         info!("Successfully unsubscribed from topic: {topic}");
                                     } else {
@@ -368,13 +368,11 @@ impl Actor for TcpClientActor {
             registration,
             client_config: Arc::new(client_config),
             events_output: args.events_output,
-            queue_output: args.queue_output,
             abort_handle: None,
         };
 
         Ok(state)
     }
-
 
     async fn post_start(
         &self,
@@ -384,7 +382,12 @@ impl Actor for TcpClientActor {
         let addr = state.bind_addr.clone();
         info!("Connecting to {addr}");
 
-        let tls_stream = TcpClientActor::connect_with_backoff(addr,state.server_name.clone(), &state.client_config).await?;
+        let tls_stream = TcpClientActor::connect_with_backoff(
+            addr,
+            state.server_name.clone(),
+            &state.client_config,
+        )
+        .await?;
         let (reader, write_half) = split(tls_stream);
         let writer = tokio::io::BufWriter::new(write_half);
 
@@ -455,7 +458,9 @@ impl Actor for TcpClientActor {
                     registration_id: registration_id.clone(),
                 };
                 // emit event
-                state.events_output.send(registration_id);
+                state
+                    .events_output
+                    .send(ClientEvent::Registered { registration_id });
             }
 
             // ignore all other messages while unregistered.
@@ -507,6 +512,26 @@ impl Actor for TcpClientActor {
                     }
                     TcpClientMessage::ErrorMessage(error) => {
                         warn!("Received error from broker: {error}");
+                    }
+                    TcpClientMessage::ListSessions => {
+                        let envelope = ClientMessage::ControlRequest {
+                            registration_id: registration_id.to_owned(),
+                            op: ControlOp::ListSessions,
+                        };
+
+                        if let Err(e) = TcpClientActor::send_message(envelope, state).await {
+                            myself.stop(Some(format!("Unexpected error sending message. {e}")))
+                        }
+                    }
+                    TcpClientMessage::ListTopics => {
+                        let envelope = ClientMessage::ControlRequest {
+                            registration_id: registration_id.to_owned(),
+                            op: ControlOp::ListTopics,
+                        };
+
+                        if let Err(e) = TcpClientActor::send_message(envelope, state).await {
+                            myself.stop(Some(format!("Unexpected error sending message. {e}")))
+                        }
                     }
                     // other variats handled elsewhere
                     _ => (),

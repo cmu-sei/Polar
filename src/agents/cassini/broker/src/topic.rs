@@ -1,9 +1,10 @@
+use crate::PUBLISH_REQ_FAILED_TXT;
 use crate::UNEXPECTED_MESSAGE_STR;
-use crate::{get_subscriber_name, BrokerMessage, PUBLISH_REQ_FAILED_TXT};
+use cassini_types::BrokerMessage;
 use ractor::registry::where_is;
 use ractor::rpc::CallResult;
 use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef, OutputPort};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::Duration;
 use tracing::{debug, error, info, trace, trace_span, warn};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
@@ -311,6 +312,27 @@ impl Actor for TopicManager {
                 {
                     error!("ensure_topic_and_subscribe failed: {e:?}");
                 }
+            }
+            BrokerMessage::GetTopics {
+                registration_id,
+                reply_to,
+                trace_ctx,
+            } => {
+                let span = trace_span!("topic_manager.handle_get_topics", %registration_id);
+                if let Some(ctx) = trace_ctx {
+                    span.set_parent(ctx).ok();
+                }
+                let _enter = span.enter();
+
+                trace!("Topic Manager retrieving topics.");
+
+                let topics: HashSet<String> =
+                    state.topics.keys().map(|topic| topic.to_owned()).collect();
+
+                reply_to
+                    .send(topics)
+                    .map_err(|_| warn!("Failed to send topics."))
+                    .ok();
             }
             _ => warn!(UNEXPECTED_MESSAGE_STR),
         }
