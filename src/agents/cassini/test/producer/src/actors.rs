@@ -3,8 +3,7 @@ use cassini_client::{TCPClientConfig, TcpClientActor, TcpClientArgs, TcpClientMe
 use fake::Fake;
 use harness_common::{
     client::{HarnessClient, HarnessClientArgs, HarnessClientConfig, HarnessClientMessage},
-    compute_checksum, ConnectionState, Envelope, HarnessControllerMessage, MessagePattern,
-    ProducerConfig, TestPlan,
+    compute_checksum, Envelope, MessagePattern, ProducerConfig,
 };
 use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef, OutputPort, SupervisionEvent};
 use serde::Serialize;

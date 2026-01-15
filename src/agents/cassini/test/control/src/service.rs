@@ -1,8 +1,4 @@
-use crate::{
-    Action, ActiveGate, Observation, ObservedBrokerState, SessionExpectation, Step, TestPlan,
-    TopicExpectation,
-};
-use cassini_types::{ControlOp, SessionMap};
+use crate::{Phase, TestPlan};
 
 use ractor::{
     async_trait,
@@ -78,269 +74,6 @@ impl HarnessController {
             .map_err(ActorProcessingErr::from)
     }
 
-    /// Process the next step (non-blocking). Called whenever we need to advance.
-    /// It will:
-    ///  - if out of steps: emit ShutdownAck
-    ///  - if Step::Do: run action (may spawn process or send control request)
-    ///  - if Step::Wait: set active gate and attempt immediate evaluation
-    async fn process_next_step(
-        &self,
-        myself: ActorRef<HarnessControllerMessage>,
-        state: &mut HarnessControllerState,
-    ) -> Result<(), ActorProcessingErr> {
-        if state.current_step_index >= state.test_plan.steps.len() {
-            // plan complete
-            myself.cast(HarnessControllerMessage::ShutdownAck).ok();
-            return Ok(());
-        }
-
-        match &state.test_plan.steps[state.current_step_index] {
-            Step::Do(action) => {
-                // perform action; if action is immediate, consider it completed (or wait for explicit signal)
-                self.handle_do_action(action.clone(), myself.clone(), state)
-                    .await?;
-                // By default, treat Do as immediately completed and advance. If some Do requires waiting,
-                // you'd install a gate or expect some observation to validate it.
-                self.advance_step(myself, state)?;
-            }
-
-            Step::Wait(gate) => {
-                // Install an active gate with deadline and evaluate immediately
-                let deadline = Instant::now() + Duration::from_secs(gate.timeout_seconds as u64);
-                state.active_gate = Some(ActiveGate {
-                    deadline,
-                    expectations: gate.expect.clone(),
-                });
-
-                // Immediately evaluate (in case observed state already satisfies)
-                if self.check_current_gate(state) {
-                    // satisfied right away
-                    self.advance_step(myself, state)?;
-                } else {
-                    // else we'll wait for observations to come in and re-evaluate
-                    tracing::info!("Waiting on gate: {:?}", gate.description);
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Advance to next step (increment index and schedule processing of next step).
-    fn advance_step(
-        &self,
-        myself: ActorRef<HarnessControllerMessage>,
-        state: &mut HarnessControllerState,
-    ) -> Result<(), ActorProcessingErr> {
-        state.current_step_index += 1;
-        state.active_gate = None;
-        // enqueue processing of the next step
-        myself
-            .cast(HarnessControllerMessage::AdvanceTest)
-            .map_err(ActorProcessingErr::from)
-    }
-
-    /// Evaluate the current active gate (if any) against the observed state.
-    /// Returns true if satisfied.
-    fn check_current_gate(&self, state: &HarnessControllerState) -> bool {
-        let idx = state.current_step_index;
-        let step = match state.test_plan.steps.get(idx) {
-            Some(Step::Wait(g)) => g,
-            _ => return false, // not a wait step
-        };
-
-        let expect = &step.expect;
-
-        // Sessions
-        if let Some(s) = &expect.sessions {
-            match s {
-                SessionExpectation::CountAtLeast(n) => {
-                    if state.observed_state.sessions.len() < (*n as usize) {
-                        return false;
-                    }
-                }
-                SessionExpectation::ContainsIds(ids) => {
-                    for id in ids {
-                        if !state.observed_state.sessions.contains_key(id) {
-                            return false;
-                        }
-                    }
-                }
-            }
-        }
-
-        // Topics
-        // if let Some(t) = &expect.topics {
-        //     match t {
-        //         TopicExpectation::Exists(list) => {
-        //             for topic in list {
-        //                 if !state.observed_state.topics.contains(topic) {
-        //                     return false;
-        //                 }
-        //             }
-        //         }
-        //         TopicExpectation::CountAtLeast(n) => {
-        //             if state.observed_state.topics.len() < (*n as usize) {
-        //                 return false;
-        //             }
-        //         }
-        //     }
-        // }
-
-        // Subscriptions
-        // if let Some(sub) = &expect.subscriptions {
-        //     let count = state
-        //         .observed_state
-        //         .subscriptions
-        //         .get(&sub.topic)
-        //         .cloned()
-        //         .unwrap_or(0);
-        //     if count < sub.countAtLeast as usize {
-        //         return false;
-        //     }
-        // }
-
-        true
-    }
-
-    /// Handle Step::Do actions. This function should send control requests or spawn processes.
-    async fn handle_do_action(
-        &self,
-        action: Action,
-        _myself: ActorRef<HarnessControllerMessage>,
-        state: &mut HarnessControllerState,
-    ) -> Result<(), ActorProcessingErr> {
-        match action {
-            Action::StartProducer(spec) => {
-                // Spawn the producer as earlier via tokio::spawn and set state.producer handle.
-                // This is your existing code; keep process management in harness.
-                let path = state.producer_path.clone();
-                let client = spec.client_id.clone();
-                // Example: spawn process with args derived from spec.producer
-                let _handle = tokio::spawn(async move {
-                    let mut child = Command::new(path)
-                        .arg("--producer-config")
-                        // write spec as temp file or pass via env, omitted here
-                        .spawn()
-                        .expect("failed to spawn producer");
-                    let status = child.wait().await.expect("producer crashed");
-                    tracing::warn!(?status, "Producer exited");
-                })
-                .abort_handle();
-                state.producer = Some(_handle);
-            }
-
-            Action::Subscribe(s) => {
-                // Send a subscribe control via the client actor
-                if let Some(client_ref) = state.client_ref.as_ref() {
-                    // The TcpClientMessage::Subscribe variant exists in your client; use send_message
-                    client_ref
-                        .send_message(TcpClientMessage::Subscribe(s.topic))
-                        .map_err(ActorProcessingErr::from)?;
-                } else {
-                    return Err(ActorProcessingErr::from("No client_ref available"));
-                }
-            }
-
-            Action::Unsubscribe(u) => {
-                if let Some(client_ref) = state.client_ref.as_ref() {
-                    client_ref
-                        .send_message(TcpClientMessage::UnsubscribeRequest(u.topic))
-                        .map_err(ActorProcessingErr::from)?;
-                } else {
-                    return Err(ActorProcessingErr::from("No client_ref available"));
-                }
-            }
-
-            Action::Disconnect(d) => {
-                if let Some(client_ref) = state.client_ref.as_ref() {
-                    client_ref
-                        .send_message(TcpClientMessage::Disconnect)
-                        .map_err(ActorProcessingErr::from)?;
-                } else {
-                    return Err(ActorProcessingErr::from("No client_ref available"));
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    fn derive_observation(result: ControlResult) -> Option<Observation> {
-        match result {
-            ControlResult::SessionList(sessions) => Some(Observation::Sessions(sessions)),
-
-            ControlResult::TopicList(topics) => {
-                Some(Observation::Topics(topics.into_iter().collect()))
-            }
-
-            _ => None,
-        }
-    }
-    /// Try to parse a raw message blob (the first item from queue_output) and, if it
-    /// is a ControlResponse, convert it into an Observation that the controller can use.
-    ///
-    /// Returns Ok(Some(obs)) when a meaningful observation was produced,
-    /// Ok(None) when the message isn't relevant, and Err(_) when deserialization failed.
-    pub fn parse_control_response(buffer: &[u8]) -> Result<Option<Observation>, ControlError> {
-        // Use rkyv to deserialize the wire bytes (ClientMessage)
-        match rkyv::from_bytes::<ClientMessage, rancor::Error>(buffer) {
-            Ok(client_msg) => {
-                match client_msg {
-                    ClientMessage::ControlResponse {
-                        registration_id: _id,
-                        result,
-                    } => {
-                        // Convert ControlResult -> Observation where reasonable
-                        match result {
-                            Ok(control_res) => {
-                                // Map concrete control results to observations.
-                                // Adjust these arms to match your ControlResult shape.
-                                match control_res {
-                                    // If you have a SessionInfo variant that contains SessionDetails type
-                                    ControlResult::SessionInfo(session_details) => {
-                                        return Ok(Some(Observation::Session(session_details)));
-                                    }
-
-                                    // If the control returned a list of sessions
-                                    ControlResult::SessionList(list) => {
-                                        return Ok(Some(Observation::Sessions(list)));
-                                    }
-
-                                    // If the control returned a list of topic names
-                                    ControlResult::TopicList(vec_topics) => {
-                                        let set: HashSet<String> = vec_topics.into_iter().collect();
-                                        return Ok(Some(Observation::Topics(set)));
-                                    }
-
-                                    // Other kinds we don't treat as observations (Pong, BrokerStats, etc.)
-                                    _ => return Ok(None),
-                                }
-                            }
-                            Err(control_err) => {
-                                // Control returned an error; log and optionally surface as observation
-                                tracing::warn!("Control op returned error: {:?}", control_err);
-                                // If you want to convert some errors into observations, do that here.
-                                return Ok(None);
-                            }
-                        }
-                    }
-
-                    // Not a control response — ignore
-                    _ => Ok(None),
-                }
-            }
-            Err(e) => {
-                // Deserialisation failed — return an error so the subscriber can log it
-                tracing::error!("Failed to deserialize client message: {:?}", e);
-                Err(ControlError::InternalError(format!(
-                    "Failed to deserialize control response: {:?}",
-                    e
-                )))
-            }
-        }
-    }
-
     /// --- Orchestration helper ---
     pub async fn start_client(
         myself: ActorRef<HarnessControllerMessage>,
@@ -377,15 +110,14 @@ impl HarnessController {
 }
 
 pub struct HarnessControllerState {
-    pub current_step_index: usize,
+    pub current_phase_index: usize,
     started: bool,
     client_ref: Option<ActorRef<TcpClientMessage>>,
     bind_addr: String,
     server_config: ServerConfig,
     registration_id: Option<String>,
-    pub active_gate: Option<ActiveGate>,
+    pub current_phase: Option<Phase>,
     pub test_plan: TestPlan,
-    pub observed_state: ObservedBrokerState,
     server_handle: Option<AbortHandle>,
     broker: Option<AbortHandle>,
     producer: Option<AbortHandle>,
@@ -516,9 +248,8 @@ impl Actor for HarnessController {
         let state = HarnessControllerState {
             client_ref: None,
             started: false,
-            current_step_index: 0,
-            observed_state: ObservedBrokerState::default(),
-            active_gate: None,
+            current_phase_index: 0,
+            current_phase: None,
             registration_id: None,
             bind_addr: args.bind_addr,
             server_config,
@@ -636,44 +367,12 @@ impl Actor for HarnessController {
                         // This will queue StartTest and then the actor will process the first step.
                         myself.cast(HarnessControllerMessage::StartTest).ok();
                     }
-
-                    ClientEvent::MessagePublished {
-                        topic: _topic,
-                        payload,
-                    } => {
-                        // parse and convert to Observation
-                        match HarnessController::parse_control_response(&payload) {
-                            Ok(Some(obs)) => {
-                                state.observed_state.apply(obs);
-                                // After applying an observation, re-evaluate any active gate
-                                if let Some(active) = &state.active_gate {
-                                    // check deadline
-                                    if Instant::now() > active.deadline {
-                                        return Err(ActorProcessingErr::from("Gate timed out"));
-                                    }
-                                }
-
-                                // If the active gate is satisfied, advance
-                                if self.check_current_gate(state) {
-                                    self.advance_step(myself, state)?;
-                                }
-                            }
-                            Ok(None) => {
-                                // ignore irrelevant messages
-                            }
-                            Err(e) => {
-                                return Err(ActorProcessingErr::from(
-                                    "Failed parsing control response.".to_string(),
-                                ));
-                            }
-                        }
-                    }
-
                     ClientEvent::TransportError { reason } => {
                         error!("Client transport error: {}", reason);
                         // if transport fails, consider failing the test
                         return Err(ActorProcessingErr::from("Transport error"));
                     }
+                    _ => (),
                 }
             }
 
@@ -683,7 +382,7 @@ impl Actor for HarnessController {
                 } else {
                     state.started = true;
                     // ensure index starts at 0
-                    state.current_step_index = 0;
+                    state.current_phase_index = 0;
                     // start processing
                     // schedule async evaluation of next step
                     let _ = myself.cast(HarnessControllerMessage::AdvanceTest);
@@ -691,8 +390,8 @@ impl Actor for HarnessController {
             }
 
             HarnessControllerMessage::AdvanceTest => {
-                // process next step
-                self.process_next_step(myself.clone(), state).await?;
+                // TODO: process next step
+                todo!("implement phase orchestration");
             }
 
             HarnessControllerMessage::ShutdownAck => {

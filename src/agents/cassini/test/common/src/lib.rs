@@ -25,13 +25,22 @@ pub enum PayloadSpec {
 #[derive(Clone, Debug, Serialize, Deserialize, Archive, serde::Serialize, serde::Deserialize)]
 pub struct ProducerConfig {
     pub topic: String,
-    pub msg_size: u64,
-    pub message_count: u64,
-    pub duration_seconds: u64,
+    pub message_size: u64,
+    pub duration: u64,
     pub pattern: MessagePattern,
-    pub payload: PayloadSpec,
 }
 
+/// Expectations are evaluated locally by sinks.
+/// The controller only aggregates failures.
+#[derive(Debug, Clone, Serialize, Deserialize, Archive, serde::Serialize, serde::Deserialize)]
+pub enum Expectation {
+    /// At least N messages observed within a window.
+    AtLeast { messages: u64, within_seconds: u64 },
+    /// No duplicate message identifiers observed.
+    NoDuplicates,
+    /// Payloads must deserialize and match expected schema.
+    NoCorruption,
+}
 ///A general message envelope that gets exchanged between the sink and producer.
 /// Dhall already has strong typing, so testers can describe structured values with guaranteed shape.
 /// We can import their Dhall config in Rust and convert it to JSON.

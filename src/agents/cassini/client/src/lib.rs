@@ -15,7 +15,7 @@ use tokio::sync::Mutex;
 use tokio::task::AbortHandle;
 use tokio_rustls::client::TlsStream;
 use tokio_rustls::TlsConnector;
-use tracing::{debug, error, info, info_span, warn};
+use tracing::{debug, error, info, info_span, trace, warn};
 
 pub const UNEXPECTED_DISCONNECT: &str = "UNEXPECTED_DISCONNECT";
 pub const REGISTRATION_EXPECTED: &str =
@@ -170,64 +170,87 @@ impl TcpClientActor {
             while let Ok(incoming_msg_length) = buf_reader.read_u32().await {
                 if incoming_msg_length > 0 {
                     let mut buffer = vec![0; incoming_msg_length as usize];
+
+                    trace!("Reading {incoming_msg_length} byte(s).");
                     if let Ok(_) = buf_reader.read_exact(&mut buffer).await {
-                        // TODO: In hindisght, I fail to understand the need for this step, from_bytes works just fine, so let's use that
-                        let archived =
-                            rkyv::access::<ArchivedClientMessage, Error>(&buffer[..]).unwrap();
+                        trace!(
+                            len = incoming_msg_length,
+                            first_16 = ?&buffer[..buffer.len().min(16)],
+                            "Received frame"
+                        );
+
+                        // let archived =
+                        //     match rkyv::access::<ArchivedClientMessage, Error>(&buffer[..]) {
+                        //         Ok(a) => a,
+                        //         Err(e) => {
+                        //         }
+                        //     };
                         // And you can always deserialize back to the original type
+                        // get owned buffer
+                        //
 
-                        if let Ok(message) = deserialize::<ClientMessage, Error>(archived) {
-                            match message {
-                                ClientMessage::RegistrationResponse { result } => {
-                                    match result {
-                                        Ok(registration_id) => {
-                                            //emit registration event for consumers
-                                            myself
-                                                .send_message(
-                                                    TcpClientMessage::RegistrationResponse(
-                                                        registration_id,
-                                                    ),
-                                                )
-                                                .expect("Could not forward message to {myself:?");
+                        match rkyv::from_bytes::<ClientMessage, Error>(&buffer) {
+                            Ok(message) => {
+                                match message {
+                                    ClientMessage::RegistrationResponse { result } => {
+                                        match result {
+                                            Ok(registration_id) => {
+                                                //emit registration event for consumers
+                                                myself
+                                                    .send_message(
+                                                        TcpClientMessage::RegistrationResponse(
+                                                            registration_id,
+                                                        ),
+                                                    )
+                                                    .expect("Could not forward message to {myself:?");
+                                            }
+                                            Err(e) => {
+                                                info!(
+                                                    "Failed to register session with the server. {e}"
+                                                );
+                                                //TODO: We practically never fail to register unless there's some sort of connection error.
+                                                // Should this change, how do we want to react?
+                                            }
                                         }
-                                        Err(e) => {
-                                            info!(
-                                                "Failed to register session with the server. {e}"
-                                            );
-                                            //TODO: We practically never fail to register unless there's some sort of connection error.
-                                            // Should this change, how do we want to react?
+                                    }
+                                    ClientMessage::PublishResponse {
+                                        topic,
+                                        payload,
+                                        result,
+                                    } => {
+                                        //new message on topic
+                                        if result.is_ok() {
+                                            queue_out
+                                                .send(ClientEvent::MessagePublished { topic, payload });
+                                        } else {
+                                            warn!("Failed to publish message to topic: {topic}");
                                         }
                                     }
-                                }
-                                ClientMessage::PublishResponse {
-                                    topic,
-                                    payload,
-                                    result,
-                                } => {
-                                    //new message on topic
-                                    if result.is_ok() {
-                                        queue_out
-                                            .send(ClientEvent::MessagePublished { topic, payload });
-                                    } else {
-                                        warn!("Failed to publish message to topic: {topic}");
+                                    ClientMessage::SubscribeAcknowledgment { topic, result } => {
+                                        if result.is_ok() {
+                                            info!("Successfully subscribed to topic: {topic}");
+                                        } else {
+                                            warn!("Failed to subscribe to topic: {topic}, {result:?}");
+                                        }
                                     }
-                                }
-                                ClientMessage::SubscribeAcknowledgment { topic, result } => {
-                                    if result.is_ok() {
-                                        info!("Successfully subscribed to topic: {topic}");
-                                    } else {
-                                        warn!("Failed to subscribe to topic: {topic}, {result:?}");
-                                    }
-                                }
 
-                                ClientMessage::UnsubscribeAcknowledgment { topic, result } => {
-                                    if result.is_ok() {
-                                        info!("Successfully unsubscribed from topic: {topic}");
-                                    } else {
-                                        warn!("Failed to unsubscribe from topic: {topic}");
+                                    ClientMessage::UnsubscribeAcknowledgment { topic, result } => {
+                                        if result.is_ok() {
+                                            info!("Successfully unsubscribed from topic: {topic}");
+                                        } else {
+                                            warn!("Failed to unsubscribe from topic: {topic}");
+                                        }
                                     }
+                                    _ => (),
                                 }
-                                _ => (),
+                            }
+                            Err(e) => {
+                                error!(
+                                    len = buffer.len(),
+                                    first_8 = ?&buffer[..buffer.len().min(8)],
+                                    "{e} Received raw frame"
+                                );
+                                continue;
                             }
                         }
                     }

@@ -331,13 +331,19 @@ impl Listener {
                 let mut buffer = Vec::new();
 
                 //get message length as header
-                let len = bytes.len().to_be_bytes();
+                // CAUTION: Always use u32s here to ensure we properly read a u32 on the other side.
+                let len = (bytes.len() as u32).to_be_bytes();
                 buffer.extend_from_slice(&len);
 
                 //add message to buffer
                 buffer.extend_from_slice(&bytes);
 
-                trace!("writing {} byte(s) to client.", buffer.len());
+                trace!(
+                    ty = %std::any::type_name::<ClientMessage>(),
+                    len = bytes.len(),
+                    first_8 = ?&bytes[..bytes.len().min(8)],
+                    "Sending frame"
+                );
 
                 tokio::spawn(async move {
                     let mut writer = writer.lock().await;

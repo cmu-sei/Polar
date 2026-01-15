@@ -40,7 +40,6 @@ pub enum BrokerMessage {
         reply_to: RpcReplyPort<SessionMap>,
         trace_ctx: Option<Context>,
     },
-    /// TODO: Do we care to keep this around?
     /// A heartbeat tick messgae sent by sessions to track uptime
     HeartbeatTick,
     /// Registration response to the client after attempting registration
@@ -48,7 +47,6 @@ pub enum BrokerMessage {
     /// Err shoudl contain an error message
     RegistrationResponse {
         client_id: String,
-
         result: Result<String, String>,
         trace_ctx: Option<Context>,
     },
@@ -251,7 +249,7 @@ pub enum ControlOp {
 #[derive(Debug, Clone, Serialize, Archive, Deserialize)]
 pub enum ControlResult {
     SessionInfo(SessionDetails),
-    SessionList(HashMap<String, SessionDetails>),
+    SessionList(SessionMap),
     SubscriberList(Vec<String>),
     TopicList(HashSet<String>),
     // BrokerStats(BrokerStats),

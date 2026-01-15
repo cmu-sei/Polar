@@ -128,9 +128,6 @@ impl Actor for SessionManager {
                         success_span.set_parent(span.context()).ok();
                         let _g = success_span.enter();
 
-                        trace!("initializing session.");
-                        // trace!("Session manager successfully started new session actor.");
-
                         state.sessions.insert(
                             new_id.clone(),
                             Session {
@@ -196,7 +193,7 @@ impl Actor for SessionManager {
                     );
                 }
 
-                if let Err(e) = reply_to.send(sessions) {
+                if let Err(_e) = reply_to.send(sessions) {
                     warn!("Failed to send session data to controller.");
                 }
             }
@@ -778,8 +775,8 @@ impl Actor for SessionAgent {
             BrokerMessage::ControlRequest {
                 registration_id,
                 op,
-                reply_to,
                 trace_ctx,
+                ..
             } => {
                 let span = trace_span!("session.handle_control_request", %registration_id);
                 trace_ctx.map(|ctx| span.set_parent(ctx));

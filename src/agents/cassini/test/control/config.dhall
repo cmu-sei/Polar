@@ -1,93 +1,52 @@
-let SessionExpectation = < CountAtLeast : Natural | ContainsIds : List Text >
+{-
+  TestPlan.dhall
 
-let TopicExpectation = < Exists : List Text | CountAtLeast : Natural >
+  A load- and integration-testing oriented harness configuration.
+  The harness executes phases sequentially.
+  Each phase starts from a clean slate unless explicitly configured otherwise.
+-}
 
-let SubscriptionExpectation = { topic : Text, countAtLeast : Natural }
-
-let Expectations =
-      { sessions : Optional SessionExpectation
-      , topics : Optional TopicExpectation
-      , subscriptions : Optional SubscriptionExpectation
-      }
-
-let Gate =
-      { description : Optional Text
-      , timeoutSeconds : Natural
-      , expect : Expectations
-      }
 
 let Pattern =
       < Drip : { idle_time_seconds : Natural }
       | Burst : { burst_size : Natural, idle_time_seconds : Natural }
       >
 
-let PayloadSpec =
-      < Fixed : Text
-      | Random : { seed : Natural }
-      | FromFile : { path : Text }
-      | Template : { template : Text }
-      >
-
 let Producer =
       { topic : Text
-      , msgSize : Natural
-      , messageCount : Natural
-      , durationSeconds : Natural
+      , message_size : Natural
+      , duration : Natural
       , pattern : Pattern
-      , payload : PayloadSpec
       }
 
-let StartProducer = { clientId : Text, producer : Producer }
-
-let Subscribe = { clientId : Text, topic : Text }
-
-let Unsubscribe = { clientId : Text, topic : Text }
-
-let Disconnect = { clientId : Text }
-
-let Action =
-      < StartProducer : StartProducer
-      | Subscribe : Subscribe
-      | Unsubscribe : Unsubscribe
-      | Disconnect : Disconnect
+let Expectation =
+      < AtLeast : { messages : Natural, within_seconds : Natural }
+      | NoStarvation : { max_idle_seconds : Natural }
+      | OrderingPreserved : { key : Text }
       >
 
-let Step = < Wait : Gate | Do : Action >
-
-let TestPlan =
+let Phase =
       { name : Text
-      , description : Optional Text
-      , timeoutSeconds : Natural
-      , steps : List Step
+      , producers : List Producer
+      , expectations : List Expectation
       }
 
-let steadyProducer
-    : Producer
-    = { topic = "steady"
-      , msgSize = 4096
-      , messageCount = 0
-      , durationSeconds = 60
-      , pattern = Pattern.Drip { idle_time_seconds = 1 }
-      , payload = PayloadSpec.Random { seed = 42 }
-      }
+let TestPlan = { name : Text, phases : List Phase }
 
-let expectController
-    : Expectations
-    = { sessions = Some (SessionExpectation.CountAtLeast 1)
-      , topics = None TopicExpectation
-      , subscriptions = None SubscriptionExpectation
-      }
-
-let steps =
-      [ Step.Wait
-          { description = Some "Wait for producer and sink to register"
-          , timeoutSeconds = 15
-          , expect = expectController
-          }
+let producers =
+      [ { topic = "steady"
+        , message_size = 4096
+        , duration = 60
+        , pattern = Pattern.Drip { idle_time_seconds = 1 }
+        }
       ]
+
+let expectations = [ Expectation.AtLeast { messages = 1, within_seconds = 30 } ]
+
+let phases = [ { name = "load test", producers, expectations } ]
 
 let plan
     : TestPlan
-    = { name = "plan", description = Some "Desc", timeoutSeconds = 60, steps }
+    = { name = "Polar test plan", phases }
 
 in  plan
