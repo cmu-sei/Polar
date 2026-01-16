@@ -4,7 +4,7 @@
     ''
         server.jvm.additional=-Dunsupported.dbms.udc.source=docker
 
-        server.memory.heap.initial_size=2g
+        server.memory.heap.initial_size=4g
         server.memory.heap.max_size=6g
         # server.memory.pagecache.size=512M
 
