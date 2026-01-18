@@ -1,4 +1,5 @@
 use cassini_client::{TCPClientConfig, TcpClientActor, TcpClientArgs, TcpClientMessage};
+use cassini_types::ClientEvent;
 use oci_client::{
     client::{Certificate, CertificateEncoding, ClientConfig},
     manifest::OciManifest,
@@ -6,11 +7,14 @@ use oci_client::{
     Client as OciClient, Reference, RegistryOperation,
 };
 use polar::{
-    get_file_as_byte_vec, ProvenanceEvent, QueueOutput, PROVENANCE_DISCOVERY_TOPIC,
-    PROVENANCE_LINKER_TOPIC,
+    get_file_as_byte_vec, ProvenanceEvent, Supervisor, SupervisorMessage,
+    PROVENANCE_DISCOVERY_TOPIC, PROVENANCE_LINKER_TOPIC,
 };
-use provenance_common::RESOLVER_SUPERVISOR_NAME;
-use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef, OutputPort, SupervisionEvent};
+use provenance_common::{RESOLVER_CLIENT_NAME, RESOLVER_SUPERVISOR_NAME};
+use ractor::{
+    async_trait, registry::where_is, Actor, ActorProcessingErr, ActorRef, OutputPort,
+    SupervisionEvent,
+};
 use reqwest::Client as WebClient;
 use std::str::FromStr;
 use tracing::{debug, error, info, trace, warn};
@@ -23,17 +27,29 @@ pub struct ResolverSupervisor;
 #[derive(Clone)]
 pub struct ResolverSupervisorState {
     cassini_client: ActorRef<TcpClientMessage>,
-    queue_output: QueueOutput,
 }
-
-#[derive(Debug, Clone)]
-pub enum ResolverSupervisorMsg {
-    Initialize,
+impl Supervisor for ResolverSupervisor {
+    fn deserialize_and_dispatch(_topic: String, payload: Vec<u8>) {
+        match rkyv::from_bytes::<ProvenanceEvent, rkyv::rancor::Error>(&payload) {
+            Ok(event) => {
+                //lookup and forward
+                if let Some(resolver) = where_is(PROVENANCE_DISCOVERY_TOPIC.to_string()) {
+                    resolver
+                        .send_message(event)
+                        .map_err(|e| error!("Failed to forward provenance event! {e}"))
+                        .ok();
+                }
+            }
+            Err(e) => {
+                error!("Failed to deserialize provenance event! {e}");
+            }
+        }
+    }
 }
 
 #[async_trait]
 impl Actor for ResolverSupervisor {
-    type Msg = ResolverSupervisorMsg;
+    type Msg = SupervisorMessage;
     type State = ResolverSupervisorState;
     type Arguments = ();
 
@@ -45,13 +61,10 @@ impl Actor for ResolverSupervisor {
         debug!("{myself:?} starting");
 
         let events_output = std::sync::Arc::new(OutputPort::default());
-        let queue_output = std::sync::Arc::new(OutputPort::default());
 
         //subscribe to registration event
-        events_output.subscribe(myself.clone(), |_registration_id| {
-            //TODO: feel free to store the registration id in state in case the connection dies
-            // so we can reconnect and resume session
-            Some(ResolverSupervisorMsg::Initialize)
+        events_output.subscribe(myself.clone(), |event| {
+            Some(SupervisorMessage::ClientEvent { event })
         });
 
         let config = TCPClientConfig::new()?;
@@ -63,16 +76,12 @@ impl Actor for ResolverSupervisor {
                 config,
                 registration_id: None,
                 events_output,
-                queue_output: queue_output.clone(),
             },
             myself.clone().into(),
         )
         .await?;
 
-        let state = ResolverSupervisorState {
-            cassini_client,
-            queue_output,
-        };
+        let state = ResolverSupervisorState { cassini_client };
 
         Ok(state)
     }
@@ -82,8 +91,6 @@ impl Actor for ResolverSupervisor {
         _myself: ActorRef<Self::Msg>,
         _state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        // Perform any post-start initialization tasks here
-
         Ok(())
     }
 
@@ -93,32 +100,23 @@ impl Actor for ResolverSupervisor {
         msg: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        info!("Handling message: {:?}", msg);
-
         match msg {
-            ResolverSupervisorMsg::Initialize => {
-                let args = ResolverAgentArgs {
-                    cassini_client: state.cassini_client.clone(),
-                };
+            SupervisorMessage::ClientEvent { event } => match event {
+                ClientEvent::Registered { .. } => {
+                    let args = ResolverAgentArgs {
+                        cassini_client: state.cassini_client.clone(),
+                    };
 
-                let (resolver, _) = Actor::spawn_linked(
-                    Some(PROVENANCE_DISCOVERY_TOPIC.to_string()),
-                    ResolverAgent,
-                    args,
-                    myself.clone().into(),
-                )
-                .await?;
-
-                state.queue_output.subscribe(resolver, |(message, _topic)| {
-                    // when we get messages off the queue, we need to deserialize it,
-                    // then forward directly to the resolver.
-                    // if it's NOT a provenance event, it probably isn't for us
-                    // In the future, it might be some new configuration, we'll have to handle this alter.
-                    // For now, though pass in an empty topic, as the dispatcher will discard it.
-                    ResolverAgent::deserialize_payload(message)
-                });
-            }
-            _ => {}
+                    let (_resolver, _) = Actor::spawn_linked(
+                        Some(PROVENANCE_DISCOVERY_TOPIC.to_string()),
+                        ResolverAgent,
+                        args,
+                        myself.clone().into(),
+                    )
+                    .await?;
+                }
+                _ => {}
+            },
         }
         Ok(())
     }
@@ -148,15 +146,6 @@ impl Actor for ResolverSupervisor {
 pub struct ResolverAgent;
 
 impl ResolverAgent {
-    fn deserialize_payload(payload: Vec<u8>) -> Option<ProvenanceEvent> {
-        if let Ok(event) = rkyv::from_bytes::<ProvenanceEvent, rkyv::rancor::Error>(&payload) {
-            Some(event)
-        } else {
-            warn!("Failed to deserialize message into provenance event.");
-            None
-        }
-    }
-
     fn resolve_registry_auth(reference: &Reference) -> Result<RegistryAuth, ActorProcessingErr> {
         use docker_credential::{self, CredentialRetrievalError, DockerCredential};
         let registry = reference.resolve_registry();

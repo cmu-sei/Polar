@@ -9,6 +9,7 @@ license = "MIT"
 tracing = "0.1.41"
 tracing-glog = "0.4.1"
 tracing-subscriber = { version ="0.3.20", features=["std", "env-filter"]}
+cassini-types = { path = "../cassini/types" }
 serde = {version = "1", features = ["derive"]}
 # rkyv = { workspace = true }
 ractor = { version = "0.15.8", features = ["async-trait"] }

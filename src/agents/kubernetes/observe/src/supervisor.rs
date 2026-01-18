@@ -1,7 +1,9 @@
 use cassini_client::{TCPClientConfig, TcpClientActor, TcpClientArgs};
+use cassini_types::ClientEvent;
 use k8s_openapi::api::core::v1::Namespace;
 use kube::Config;
 use kube::{api::ListParams, Api, Client};
+use polar::SupervisorMessage;
 use ractor::OutputPort;
 use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef, SupervisionEvent};
 use tracing::{debug, error, info, warn};
@@ -18,12 +20,6 @@ pub struct ClusterObserverSupervisorState {
     kube_client: kube::Client,
 }
 
-pub enum SupervisorMessage {
-    /// Notification message telling the supervisor the client's been registered with the broker.
-    /// This triggers the observer to finish startup and cancels the timeou
-    ClientRegistered(String),
-}
-
 impl ClusterObserverSupervisor {
     pub async fn init(
         kube_config: Config,
@@ -38,10 +34,9 @@ impl ClusterObserverSupervisor {
                 let client_config = TCPClientConfig::new()?;
 
                 let events_output = std::sync::Arc::new(OutputPort::default());
-                let queue_output = std::sync::Arc::new(OutputPort::default());
 
-                events_output.subscribe(myself.clone(), |message| {
-                    Some(SupervisorMessage::ClientRegistered(message))
+                events_output.subscribe(myself.clone(), |event| {
+                    Some(SupervisorMessage::ClientEvent { event })
                 });
 
                 match Actor::spawn_linked(
@@ -51,7 +46,6 @@ impl ClusterObserverSupervisor {
                         config: client_config,
                         registration_id: None,
                         events_output,
-                        queue_output,
                     },
                     myself.into(),
                 )
@@ -158,34 +152,40 @@ impl Actor for ClusterObserverSupervisor {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
-            SupervisorMessage::ClientRegistered(registration_id) => {
-                match ClusterObserverSupervisor::discover_namespaces(state.kube_client.clone())
-                    .await
-                {
-                    Ok(namespaces) => {
-                        //start actors
-                        for ns in namespaces {
-                            let args = PodObserverArgs {
-                                registration_id: registration_id.clone(),
-                                kube_client: state.kube_client.clone(),
-                                namespace: ns.clone(),
-                            };
+            SupervisorMessage::ClientEvent { event } => match event {
+                ClientEvent::Registered { registration_id } => {
+                    match ClusterObserverSupervisor::discover_namespaces(state.kube_client.clone())
+                        .await
+                    {
+                        Ok(namespaces) => {
+                            //start actors
+                            for ns in namespaces {
+                                let args = PodObserverArgs {
+                                    registration_id: registration_id.clone(),
+                                    kube_client: state.kube_client.clone(),
+                                    namespace: ns.clone(),
+                                };
 
-                            if let Err(e) = Actor::spawn_linked(
-                                Some(format!("{KUBERNETES_OBSERVER}.{ns}")),
-                                PodObserver,
-                                args,
-                                myself.get_cell().clone(),
-                            )
-                            .await
-                            {
-                                error!("{e}")
+                                if let Err(e) = Actor::spawn_linked(
+                                    Some(format!("{KUBERNETES_OBSERVER}.{ns}")),
+                                    PodObserver,
+                                    args,
+                                    myself.get_cell().clone(),
+                                )
+                                .await
+                                {
+                                    error!("{e}")
+                                }
                             }
                         }
+                        Err(e) => return Err(ActorProcessingErr::from(e)),
                     }
-                    Err(e) => return Err(ActorProcessingErr::from(e)),
                 }
-            }
+                ClientEvent::MessagePublished { .. } => {
+                    todo!("Handle incoming messages")
+                }
+                ClientEvent::TransportError { .. } => todo!("Handle client transport errors"),
+            },
         }
         Ok(())
     }

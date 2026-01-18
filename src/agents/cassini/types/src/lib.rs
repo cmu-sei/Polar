@@ -270,6 +270,13 @@ pub struct SessionSummary {
     pub registration_id: String,
 }
 
+/// Events emitted by the client.
+#[derive(Clone, Debug)]
+pub enum ClientEvent {
+    Registered { registration_id: String },
+    MessagePublished { topic: String, payload: Vec<u8> },
+    TransportError { reason: String },
+}
 /// External Messages for client comms
 /// These messages are serialized/deserialized to/from JSON
 #[derive(Serialize, Deserialize, Archive, Debug, Clone)]

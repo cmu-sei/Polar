@@ -1,6 +1,8 @@
 use crate::BROKER_CLIENT_NAME;
 use cassini_client::TCPClientConfig;
 use cassini_client::*;
+use cassini_types::ClientEvent;
+use polar::SupervisorMessage;
 use ractor::async_trait;
 use ractor::registry::where_is;
 use ractor::Actor;
@@ -26,13 +28,9 @@ pub struct ObserverSupervisorArgs {
     pub openapi_endpoint: String,
 }
 
-pub enum ObserverSupervisorMessage {
-    ClientRegistered,
-}
-
 #[async_trait]
 impl Actor for ObserverSupervisor {
-    type Msg = ObserverSupervisorMessage;
+    type Msg = SupervisorMessage;
     type State = ObserverSupervisorState;
     type Arguments = ObserverSupervisorArgs;
 
@@ -49,11 +47,10 @@ impl Actor for ObserverSupervisor {
 
         // define an output port for the actor to subscribe to
         let events_output = std::sync::Arc::new(OutputPort::default());
-        let queue_output = std::sync::Arc::new(OutputPort::default());
 
         // subscribe self to this port
-        events_output.subscribe(myself.clone(), |_| {
-            Some(ObserverSupervisorMessage::ClientRegistered)
+        events_output.subscribe(myself.clone(), |event| {
+            Some(SupervisorMessage::ClientEvent { event })
         });
 
         let config = TCPClientConfig::new()?;
@@ -65,7 +62,6 @@ impl Actor for ObserverSupervisor {
                 config,
                 registration_id: None,
                 events_output,
-                queue_output,
             },
             myself.clone().into(),
         )
@@ -92,24 +88,31 @@ impl Actor for ObserverSupervisor {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
-            ObserverSupervisorMessage::ClientRegistered => {
-                let args = ApiObserverArgs {
-                    openapi_endpoint: state.openapi_endpoint.clone(),
-                };
+            SupervisorMessage::ClientEvent { event } => {
+                match event {
+                    ClientEvent::Registered { .. } => {
+                        let args = ApiObserverArgs {
+                            openapi_endpoint: state.openapi_endpoint.clone(),
+                        };
 
-                // finish init
-                if let Err(e) = Actor::spawn_linked(
-                    Some("polar.web.observer".to_string()),
-                    ApiObserver,
-                    args,
-                    myself.get_cell(),
-                )
-                .await
-                {
-                    return Err(ActorProcessingErr::from(e));
+                        // finish init
+                        if let Err(e) = Actor::spawn_linked(
+                            Some("polar.web.observer".to_string()),
+                            ApiObserver,
+                            args,
+                            myself.get_cell(),
+                        )
+                        .await
+                        {
+                            return Err(ActorProcessingErr::from(e));
+                        }
+                    }
+                    ClientEvent::TransportError { .. } => todo!("handle transport errors"),
+                    ClientEvent::MessagePublished { .. } => todo!(),
                 }
             }
         }
+
         Ok(())
     }
 

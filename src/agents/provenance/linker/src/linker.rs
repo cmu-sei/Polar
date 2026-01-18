@@ -1,51 +1,20 @@
-use cassini_client::TcpClientMessage;
 use cyclonedx_bom::prelude::*;
 use neo4rs::Graph;
 use neo4rs::Query;
-use polar::get_neo_config;
-use polar::ProvenanceEvent;
 use ractor::async_trait;
 use ractor::concurrency::Duration;
-use ractor::concurrency::Interval;
-use ractor::registry::where_is;
 use ractor::Actor;
 use ractor::ActorProcessingErr;
 use ractor::ActorRef;
-use reqwest::Client;
-use rkyv::rancor;
 use tokio::task::AbortHandle;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 use crate::ArtifactType;
-use crate::BROKER_CLIENT_NAME;
 
 /// An actor responsible for connecting distinct knowledge graph domains.
 /// Potential planes include build, runtime, and artifact, where semantic continuity isn't always possible.
 pub struct ProvenanceLinker;
 
-impl ProvenanceLinker {
-    pub fn handle_message(payload: Vec<u8>) -> Option<LinkerCommand> {
-        if let Ok(event) = rkyv::from_bytes::<ProvenanceEvent, rancor::Error>(&payload) {
-            match event {
-                ProvenanceEvent::ImageRefResolved {
-                    id,
-                    uri,
-                    digest,
-                    media_type,
-                } => Some(LinkerCommand::LinkContainerImages {
-                    id,
-                    uri,
-                    digest,
-                    media_type,
-                }),
-                _ => todo!(),
-            }
-        } else {
-            warn!("Failed to deserialize message into provenance event.");
-            None
-        }
-    }
-}
 pub enum LinkerCommand {
     LinkContainerImages {
         id: String,

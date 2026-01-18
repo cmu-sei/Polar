@@ -1,6 +1,5 @@
-use cassini_types::{ArchivedClientMessage, ClientMessage, ControlOp};
+use cassini_types::{ClientEvent, ClientMessage, ControlOp};
 use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef, OutputPort, RpcReplyPort};
-use rkyv::deserialize;
 use rkyv::rancor::Error;
 use rustls::client::WebPkiServerVerifier;
 use rustls::pki_types::pem::PemObject;
@@ -87,13 +86,6 @@ pub enum TcpClientMessage {
     ListTopics,
     GetSession,
 }
-/// Events emitted by the client.
-#[derive(Clone, Debug)]
-pub enum ClientEvent {
-    Registered { registration_id: String },
-    MessagePublished { topic: String, payload: Vec<u8> },
-    TransportError { reason: String },
-}
 
 /// Actor state for the TCP client
 pub struct TcpClientState {
@@ -178,16 +170,6 @@ impl TcpClientActor {
                             first_16 = ?&buffer[..buffer.len().min(16)],
                             "Received frame"
                         );
-
-                        // let archived =
-                        //     match rkyv::access::<ArchivedClientMessage, Error>(&buffer[..]) {
-                        //         Ok(a) => a,
-                        //         Err(e) => {
-                        //         }
-                        //     };
-                        // And you can always deserialize back to the original type
-                        // get owned buffer
-                        //
 
                         match rkyv::from_bytes::<ClientMessage, Error>(&buffer) {
                             Ok(message) => {

@@ -1,5 +1,17 @@
+use crate::groups::JiraGroupObserver;
+use crate::issues::JiraIssueObserver;
+use crate::projects::JiraProjectObserver;
+use crate::users::JiraUserObserver;
+use crate::JiraObserverArgs;
+use crate::BROKER_CLIENT_NAME;
+use crate::JIRA_GROUP_OBSERVER;
+use crate::JIRA_ISSUE_OBSERVER;
+use crate::JIRA_PROJECT_OBSERVER;
+use crate::JIRA_USER_OBSERVER;
 use cassini_client::{TCPClientConfig, TcpClientActor, TcpClientArgs};
+use cassini_types::ClientEvent;
 use jira_common::get_file_as_byte_vec;
+use polar::SupervisorMessage;
 use ractor::async_trait;
 use ractor::Actor;
 use ractor::ActorProcessingErr;
@@ -11,17 +23,6 @@ use reqwest::Client;
 use reqwest::ClientBuilder;
 use tracing::error;
 use tracing::{debug, info, warn};
-
-use crate::groups::JiraGroupObserver;
-use crate::issues::JiraIssueObserver;
-use crate::projects::JiraProjectObserver;
-use crate::users::JiraUserObserver;
-use crate::JiraObserverArgs;
-use crate::BROKER_CLIENT_NAME;
-use crate::JIRA_GROUP_OBSERVER;
-use crate::JIRA_ISSUE_OBSERVER;
-use crate::JIRA_PROJECT_OBSERVER;
-use crate::JIRA_USER_OBSERVER;
 pub struct ObserverSupervisor;
 
 pub struct ObserverSupervisorState {
@@ -66,12 +67,6 @@ impl ObserverSupervisor {
     }
 }
 
-pub enum SupervisorMessage {
-    /// Notification message telling the supervisor the client's been registered with the broker.
-    /// This triggers the observer to finish startup and cancels the timeout
-    ClientRegistered(String),
-}
-
 #[async_trait]
 impl Actor for ObserverSupervisor {
     type Msg = SupervisorMessage;
@@ -89,11 +84,9 @@ impl Actor for ObserverSupervisor {
         let events_output = std::sync::Arc::new(OutputPort::default());
 
         // TODO: Subscribe a dispatcher when we need to use these messages
-        let queue_output = std::sync::Arc::new(OutputPort::default());
-
         // subscribe self to this port
-        events_output.subscribe(myself.clone(), |message| {
-            Some(SupervisorMessage::ClientRegistered(message))
+        events_output.subscribe(myself.clone(), |event| {
+            Some(SupervisorMessage::ClientEvent { event })
         });
 
         let config = TCPClientConfig::new()?;
@@ -105,7 +98,6 @@ impl Actor for ObserverSupervisor {
                 config,
                 registration_id: None,
                 events_output,
-                queue_output,
             },
             myself.clone().into(),
         )
@@ -133,58 +125,66 @@ impl Actor for ObserverSupervisor {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
-            SupervisorMessage::ClientRegistered(registration_id) => {
-                // set up args for observer actors
-                let args = JiraObserverArgs {
-                    jira_url: state.jira_url.clone(),
-                    token: state.jira_token.clone(),
-                    registration_id: registration_id.clone(),
-                    web_client: ObserverSupervisor::get_client(state.proxy_ca_cert_file.clone()),
-                    base_interval: state.base_interval,
-                    max_backoff: state.max_backoff_secs,
-                };
-                if let Err(e) = Actor::spawn_linked(
-                    Some(JIRA_PROJECT_OBSERVER.to_string()),
-                    JiraProjectObserver,
-                    args.clone(),
-                    myself.clone().into(),
-                )
-                .await
-                {
-                    warn!("failed to start project observer {e}")
-                }
+            SupervisorMessage::ClientEvent { event } => match event {
+                ClientEvent::Registered { registration_id } => {
+                    // set up args for observer actors
+                    let args = JiraObserverArgs {
+                        jira_url: state.jira_url.clone(),
+                        token: state.jira_token.clone(),
+                        registration_id: registration_id.clone(),
+                        web_client: ObserverSupervisor::get_client(
+                            state.proxy_ca_cert_file.clone(),
+                        ),
+                        base_interval: state.base_interval,
+                        max_backoff: state.max_backoff_secs,
+                    };
+                    if let Err(e) = Actor::spawn_linked(
+                        Some(JIRA_PROJECT_OBSERVER.to_string()),
+                        JiraProjectObserver,
+                        args.clone(),
+                        myself.clone().into(),
+                    )
+                    .await
+                    {
+                        warn!("failed to start project observer {e}")
+                    }
 
-                if let Err(e) = Actor::spawn_linked(
-                    Some(JIRA_GROUP_OBSERVER.to_string()),
-                    JiraGroupObserver,
-                    args.clone(),
-                    myself.clone().into(),
-                )
-                .await
-                {
-                    warn!("failed to start group observer {e}")
+                    if let Err(e) = Actor::spawn_linked(
+                        Some(JIRA_GROUP_OBSERVER.to_string()),
+                        JiraGroupObserver,
+                        args.clone(),
+                        myself.clone().into(),
+                    )
+                    .await
+                    {
+                        warn!("failed to start group observer {e}")
+                    }
+                    if let Err(e) = Actor::spawn_linked(
+                        Some(JIRA_USER_OBSERVER.to_string()),
+                        JiraUserObserver,
+                        args.clone(),
+                        myself.clone().into(),
+                    )
+                    .await
+                    {
+                        warn!("failed to start user observer {e}")
+                    }
+                    if let Err(e) = Actor::spawn_linked(
+                        Some(JIRA_ISSUE_OBSERVER.to_string()),
+                        JiraIssueObserver,
+                        args.clone(),
+                        myself.clone().into(),
+                    )
+                    .await
+                    {
+                        warn!("failed to start issue observer {e}")
+                    }
                 }
-                if let Err(e) = Actor::spawn_linked(
-                    Some(JIRA_USER_OBSERVER.to_string()),
-                    JiraUserObserver,
-                    args.clone(),
-                    myself.clone().into(),
-                )
-                .await
-                {
-                    warn!("failed to start user observer {e}")
+                ClientEvent::MessagePublished { topic, payload } => {
+                    todo!()
                 }
-                if let Err(e) = Actor::spawn_linked(
-                    Some(JIRA_ISSUE_OBSERVER.to_string()),
-                    JiraIssueObserver,
-                    args.clone(),
-                    myself.clone().into(),
-                )
-                .await
-                {
-                    warn!("failed to start issue observer {e}")
-                }
-            }
+                ClientEvent::TransportError { reason } => todo!(),
+            },
         }
         Ok(())
     }

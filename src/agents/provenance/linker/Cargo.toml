@@ -18,3 +18,4 @@ cyclonedx-bom = "0.8.0"
 anyhow = "1.0.100"
 provenance-common = { path = "../provenance-common/" }
 cassini-client = { path = "../../cassini/client" }
+cassini-types = { path = "../../cassini/types" }
