@@ -16,8 +16,6 @@ use tokio_rustls::TlsConnector;
 use tokio_rustls::client::TlsStream;
 use tracing::{debug, error, info, warn};
 
-use crate::{ArchivedHarnessControllerMessage, HarnessControllerMessage};
-
 pub const UNEXPECTED_DISCONNECT: &str = "UNEXPECTED_DISCONNECT";
 
 ///

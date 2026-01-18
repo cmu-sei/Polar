@@ -1,8 +1,6 @@
-use cassini_types::ClientMessage;
-use opentelemetry::Context;
-use ractor::{ActorProcessingErr, ActorRef, RpcReplyPort};
 use std::{env, fmt};
 pub mod broker;
+pub mod control;
 pub mod listener;
 pub mod session;
 pub mod subscriber;
@@ -15,7 +13,7 @@ pub const LISTENER_MANAGER_NAME: &str = "LISTENER_MANAGER";
 pub const SESSION_MANAGER_NAME: &str = "SESSION_MANAGER";
 pub const TOPIC_MANAGER_NAME: &str = "TOPIC_MANAGER";
 pub const SUBSCRIBER_MANAGER_NAME: &str = "SUBSCRIBER_MANAGER";
-
+pub const CONTROL_MANAGER_NAME: &str = "CONTROL_MANAGER";
 pub const ACTOR_STARTUP_MSG: &str = "Started {myself:?}";
 pub const UNEXPECTED_MESSAGE_STR: &str = "Received unexpected message!";
 pub const SESSION_NOT_NAMED: &str = "Expected session to have been named.";
@@ -103,194 +101,6 @@ pub fn init_logging() {
         .with(tracing_subscriber::fmt::layer())
         .with(tracing_opentelemetry::layer().with_tracer(tracer))
         .init();
-}
-/// Internal messagetypes for the Broker.
-/// Activities that flow from an actor will also be traced leveraging Contexts,
-/// These are optional because they aren't initialzied until the listener begins to handle the message
-/// Because of this, they will be often left out of the listener's handler at first
-#[derive(Debug)]
-pub enum BrokerMessage {
-    /// Registration request from the client.
-    /// When a client connects over TCP, it cannot send messages until it receives a registrationID and a session has been created for it
-    /// In the event of a disconnect, a client should be able to either resume their session by providing that registration ID, or
-    /// have a new one assigned to it by sending an empty registration request
-    RegistrationRequest {
-        //Id for a new, potentially unauthenticated/unauthorized client client
-        registration_id: Option<String>,
-        client_id: String,
-        trace_ctx: Option<Context>,
-    },
-    /// Helper variant to start a session and re/initialize it with a new client connection + tracing context
-    InitSession {
-        client_id: String,
-        trace_ctx: Option<Context>,
-    },
-    /// TODO: Do we care to keep this around?
-    /// A heartbeat tick messgae sent by sessions to track uptime
-    HeartbeatTick,
-    /// Registration response to the client after attempting registration
-    /// Ok result contains new registration id,
-    /// Err shoudl contain an error message
-    RegistrationResponse {
-        client_id: String,
-
-        result: Result<String, String>,
-        trace_ctx: Option<Context>,
-    },
-    /// Publish request from the client.
-    PublishRequest {
-        registration_id: String,
-        topic: String,
-        payload: Vec<u8>,
-        trace_ctx: Option<Context>,
-    },
-    /// Publish response to the client.
-    PublishResponse {
-        topic: String,
-        payload: Vec<u8>,
-        result: Result<(), String>,
-        trace_ctx: Option<Context>,
-    },
-    /// Message sent to the client to let them know they successfully published a message
-    PublishRequestAck {
-        topic: String,
-        trace_ctx: Option<Context>,
-    },
-    PublishResponseAck,
-    /// Subscribe request from the client.
-    SubscribeRequest {
-        registration_id: String,
-        topic: String,
-        trace_ctx: Option<Context>,
-    },
-    /// Sent to the subscriber manager to create a new subscriber actor to handle pushing messages to the client.
-    /// If successful, the associated topic actor is notified, adding the id of the new actor to it's subscriber list
-    CreateSubscriber {
-        topic: String,
-        registration_id: String,
-        trace_ctx: Option<Context>,
-        reply: RpcReplyPort<Result<ActorRef<BrokerMessage>, ActorProcessingErr>>,
-    },
-    AddSubscriber {
-        subscriber_ref: ActorRef<BrokerMessage>,
-        trace_ctx: Option<Context>,
-    },
-    /// instructs the topic manager to create a new topic actor,
-    /// optionally at the behest of a session client during the processing of a SubscribeRequest
-    /// which would also prompt the creation of a subscriber agent for that topic.
-    AddTopic {
-        registration_id: Option<String>,
-        topic: String,
-        trace_ctx: Option<Context>,
-    },
-    /// Sent to session actors to forward messages to their clients.
-    /// Messages that fail to be delivered for some reason are kept in their queues.
-    PushMessage {
-        // reply: RpcReplyPort<Result<(), String>>,
-        payload: Vec<u8>,
-        topic: String,
-        trace_ctx: Option<Context>,
-    },
-    /// Sent back to subscription actors if sessions fail to forward messages to the client for requeueing
-    PushMessageFailed {
-        payload: Vec<u8>,
-    },
-    /// Subscribe acknowledgment to the client.
-    SubscribeAcknowledgment {
-        registration_id: String,
-        topic: String,
-        result: Result<(), String>, // Ok for success, Err with error message
-        trace_ctx: Option<Context>,
-    },
-    /// Unsubscribe request from the client.
-    UnsubscribeRequest {
-        registration_id: String,
-        topic: String,
-        trace_ctx: Option<Context>,
-    },
-    /// Unsubscribe acknowledgment to the client.
-    UnsubscribeAcknowledgment {
-        registration_id: String,
-        topic: String,
-        result: Result<(), String>, // Ok for success, Err with error message
-    },
-    /// Disconnect request from the client.
-    DisconnectRequest {
-        client_id: String,
-        registration_id: Option<String>,
-        trace_ctx: Option<Context>,
-    },
-    /// Error message to the client.
-    ErrorMessage {
-        client_id: String,
-        error: String,
-    },
-    /// Ping message to the client to check connectivity.
-    PingMessage {
-        registration_id: String,
-        client_id: String,
-    },
-    /// Pong message received from the client in response to a ping.
-    PongMessage {
-        registration_id: String,
-    },
-    TimeoutMessage {
-        client_id: String,
-        ///name of the session agent that died
-        registration_id: String,
-        error: Option<String>,
-        // trace_ctx: Option<Context>,
-    },
-}
-
-impl BrokerMessage {
-    pub fn from_client_message(msg: ClientMessage, client_id: String) -> Self {
-        match msg {
-            ClientMessage::RegistrationRequest { registration_id } => {
-                BrokerMessage::RegistrationRequest {
-                    registration_id,
-                    client_id,
-                    trace_ctx: None,
-                }
-            }
-            ClientMessage::PublishRequest {
-                topic,
-                payload,
-                registration_id,
-            } => BrokerMessage::PublishRequest {
-                registration_id,
-                topic,
-                payload,
-                trace_ctx: None,
-            },
-            ClientMessage::SubscribeRequest {
-                topic,
-                registration_id,
-            } => BrokerMessage::SubscribeRequest {
-                registration_id,
-                topic,
-                trace_ctx: None,
-            },
-            ClientMessage::UnsubscribeRequest {
-                registration_id,
-                topic,
-            } => BrokerMessage::UnsubscribeRequest {
-                registration_id,
-                topic,
-                trace_ctx: None,
-            },
-
-            ClientMessage::DisconnectRequest(registration_id) => BrokerMessage::DisconnectRequest {
-                client_id,
-                registration_id,
-                trace_ctx: None,
-            },
-            // Handle unexpected messages
-            _ => {
-                todo!("Handle a conversion case between broker messages and client messages")
-            }
-        }
-    }
 }
 
 ///Consider a different naming convention for the subscribers, right now they're named directly after the session they represent and the topic they subscribe to

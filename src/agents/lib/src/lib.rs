@@ -1,10 +1,10 @@
+use cassini_types::ClientEvent;
 use ractor::OutputPort;
 use reqwest::{Certificate, Client, ClientBuilder};
 use serde::{Deserialize, Serialize};
+use std::io::Read;
 use std::sync::Arc;
-use std::{io::Read, thread::JoinHandle};
 use tracing::{debug, info};
-
 /// wrapper definition for a ractor outputport where a raw message payload and a topic can be piped to a necessary dispatcher
 pub type QueueOutput = Arc<OutputPort<(Vec<u8>, String)>>;
 
@@ -19,6 +19,16 @@ pub const QUERY_COMMIT_FAILED: &str = "Error committing transaction to graph";
 pub const QUERY_RUN_FAILED: &str = "Error running query on the graph.";
 pub const UNEXPECTED_MESSAGE_STR: &str = "Received unexpected message!";
 
+pub trait Supervisor {
+    /// Helper function to dispatch messages off of message queues to the associated actors within an agent supervision tree.
+    /// Payload : a series of raw bytes containing an expected data structure/enum for the agent.
+    /// Topci: a string value containing the name of a live actor under the supervisor's supervision tree.
+    fn deserialize_and_dispatch(topic: String, payload: Vec<u8>);
+}
+
+pub enum SupervisorMessage {
+    ClientEvent { event: ClientEvent },
+}
 /// Helper function to parse a file at a given path and return the raw bytes as a vector
 pub fn get_file_as_byte_vec(filename: &String) -> Result<Vec<u8>, std::io::Error> {
     let mut f = std::fs::File::open(&filename)?;

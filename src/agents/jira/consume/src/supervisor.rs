@@ -1,8 +1,16 @@
 use std::time::Duration;
 
+use crate::get_neo_config;
+use crate::groups::JiraGroupConsumer;
+use crate::issues::JiraIssueConsumer;
+use crate::projects::JiraProjectConsumer;
+use crate::users::JiraUserConsumer;
+use crate::JiraConsumerArgs;
+use crate::BROKER_CLIENT_NAME;
 use cassini_backoff::{Backoff, ExponentialBackoff};
 use cassini_client::TCPClientConfig;
 use cassini_client::{TcpClientActor, TcpClientArgs, TcpClientMessage};
+use cassini_types::ClientEvent;
 use jira_common::dispatch::MessageDispatcher;
 use jira_common::types::JiraData;
 use jira_common::JIRA_GROUPS_CONSUMER_TOPIC;
@@ -11,6 +19,7 @@ use jira_common::JIRA_PROJECTS_CONSUMER_TOPIC;
 use jira_common::JIRA_USERS_CONSUMER_TOPIC;
 use polar::DispatcherMessage;
 use polar::DISPATCH_ACTOR;
+use polar::{Supervisor, SupervisorMessage};
 use ractor::async_trait;
 use ractor::registry::where_is;
 use ractor::rpc::call;
@@ -26,30 +35,30 @@ use tracing::error;
 use tracing::info;
 use tracing::warn;
 
-use crate::get_neo_config;
-use crate::groups::JiraGroupConsumer;
-use crate::issues::JiraIssueConsumer;
-use crate::projects::JiraProjectConsumer;
-use crate::users::JiraUserConsumer;
-use crate::JiraConsumerArgs;
-use crate::BROKER_CLIENT_NAME;
-
 pub struct ConsumerSupervisor;
 
 pub struct ConsumerSupervisorState {
     graph_config: neo4rs::Config,
 }
-
-pub enum ConsumerSupervisorMessage {
-    /// TCP client successfully registered with the broker
-    ClientRegistered(String),
+impl Supervisor for ConsumerSupervisor {
+    fn deserialize_and_dispatch(topic: String, payload: Vec<u8>) {
+        match rkyv::from_bytes::<JiraData, rkyv::rancor::Error>(&payload) {
+            Ok(message) => {
+                if let Some(consumer) = where_is(topic.clone()) {
+                    if let Err(e) = consumer.send_message(message) {
+                        tracing::warn!("Error forwarding message. {e}");
+                    }
+                }
+            }
+            Err(err) => warn!("Failed to deserialize message: {:?}", err),
+        }
+    }
 }
-
 impl ConsumerSupervisor {
     /// Helper to try restarting an actor at least 10 times using an exponential backoff strategy.
     async fn restart_actor(
         actor_name: String,
-        supervisor: ActorRef<ConsumerSupervisorMessage>,
+        supervisor: ActorRef<SupervisorMessage>,
         graph_config: neo4rs::Config,
     ) -> Result<ActorRef<JiraData>, String> {
         // Set up an exponential backoff policy
@@ -127,7 +136,7 @@ impl ConsumerSupervisor {
 }
 #[async_trait]
 impl Actor for ConsumerSupervisor {
-    type Msg = ConsumerSupervisorMessage;
+    type Msg = SupervisorMessage;
     type State = ConsumerSupervisorState;
     type Arguments = ();
 
@@ -139,23 +148,9 @@ impl Actor for ConsumerSupervisor {
         debug!("{myself:?} starting");
 
         let events_output = std::sync::Arc::new(OutputPort::default());
-        let queue_output = std::sync::Arc::new(ractor::OutputPort::default());
 
-        // start dispatcher
-        let (dispatcher, _) = Actor::spawn_linked(
-            Some(DISPATCH_ACTOR.to_string()),
-            MessageDispatcher,
-            (),
-            myself.clone().into(),
-        )
-        .await?;
-        //subscribe
-        queue_output.subscribe(dispatcher, |(message, topic)| {
-            Some(DispatcherMessage::Dispatch { message, topic })
-        });
-
-        events_output.subscribe(myself.clone(), |message| {
-            Some(ConsumerSupervisorMessage::ClientRegistered(message))
+        events_output.subscribe(myself.clone(), |event| {
+            Some(SupervisorMessage::ClientEvent { event })
         });
 
         let client_config = TCPClientConfig::new()?;
@@ -167,7 +162,6 @@ impl Actor for ConsumerSupervisor {
                 config: client_config,
                 registration_id: None,
                 events_output,
-                queue_output,
             },
             myself.clone().into(),
         )
@@ -187,58 +181,64 @@ impl Actor for ConsumerSupervisor {
         _: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
-            ConsumerSupervisorMessage::ClientRegistered(registration_id) => {
-                let args = JiraConsumerArgs {
-                    registration_id,
-                    graph_config: get_neo_config(),
-                };
+            SupervisorMessage::ClientEvent { event } => match event {
+                ClientEvent::Registered { registration_id } => {
+                    let args = JiraConsumerArgs {
+                        registration_id,
+                        graph_config: get_neo_config(),
+                    };
 
-                if let Err(e) = Actor::spawn_linked(
-                    Some(JIRA_PROJECTS_CONSUMER_TOPIC.to_string()),
-                    JiraProjectConsumer,
-                    args.clone(),
-                    myself.clone().into(),
-                )
-                .await
-                {
-                    error!("failed to start projects consumer. {e}");
-                    myself.stop(None);
-                }
-                if let Err(e) = Actor::spawn_linked(
-                    Some(JIRA_GROUPS_CONSUMER_TOPIC.to_string()),
-                    JiraGroupConsumer,
-                    args.clone(),
-                    myself.clone().into(),
-                )
-                .await
-                {
-                    error!("failed to start groups consumer. {e}");
-                    myself.stop(None);
-                }
-                if let Err(e) = Actor::spawn_linked(
-                    Some(JIRA_USERS_CONSUMER_TOPIC.to_string()),
-                    JiraUserConsumer,
-                    args.clone(),
-                    myself.clone().into(),
-                )
-                .await
-                {
-                    error!("failed to start users consumer. {e}");
-                    myself.stop(None);
-                }
+                    if let Err(e) = Actor::spawn_linked(
+                        Some(JIRA_PROJECTS_CONSUMER_TOPIC.to_string()),
+                        JiraProjectConsumer,
+                        args.clone(),
+                        myself.clone().into(),
+                    )
+                    .await
+                    {
+                        error!("failed to start projects consumer. {e}");
+                        myself.stop(None);
+                    }
+                    if let Err(e) = Actor::spawn_linked(
+                        Some(JIRA_GROUPS_CONSUMER_TOPIC.to_string()),
+                        JiraGroupConsumer,
+                        args.clone(),
+                        myself.clone().into(),
+                    )
+                    .await
+                    {
+                        error!("failed to start groups consumer. {e}");
+                        myself.stop(None);
+                    }
+                    if let Err(e) = Actor::spawn_linked(
+                        Some(JIRA_USERS_CONSUMER_TOPIC.to_string()),
+                        JiraUserConsumer,
+                        args.clone(),
+                        myself.clone().into(),
+                    )
+                    .await
+                    {
+                        error!("failed to start users consumer. {e}");
+                        myself.stop(None);
+                    }
 
-                if let Err(e) = Actor::spawn_linked(
-                    Some(JIRA_ISSUES_CONSUMER_TOPIC.to_string()),
-                    JiraIssueConsumer,
-                    args.clone(),
-                    myself.clone().into(),
-                )
-                .await
-                {
-                    error!("failed to start issues consumer. {e}");
-                    myself.stop(None);
+                    if let Err(e) = Actor::spawn_linked(
+                        Some(JIRA_ISSUES_CONSUMER_TOPIC.to_string()),
+                        JiraIssueConsumer,
+                        args.clone(),
+                        myself.clone().into(),
+                    )
+                    .await
+                    {
+                        error!("failed to start issues consumer. {e}");
+                        myself.stop(None);
+                    }
                 }
-            }
+                ClientEvent::MessagePublished { topic, payload } => {
+                    ConsumerSupervisor::deserialize_and_dispatch(topic, payload);
+                }
+                ClientEvent::TransportError { reason } => todo!(),
+            },
         }
         Ok(())
     }

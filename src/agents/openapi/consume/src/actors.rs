@@ -1,7 +1,12 @@
+use crate::BROKER_CLIENT_NAME;
+use crate::WEB_CONSUMER_NAME;
 use cassini_client::TCPClientConfig;
 use cassini_client::*;
+use cassini_types::ClientEvent;
 use neo4rs::Graph;
 use neo4rs::Query;
+use polar::Supervisor;
+use polar::SupervisorMessage;
 use ractor::async_trait;
 use ractor::Actor;
 use ractor::ActorProcessingErr;
@@ -14,25 +19,35 @@ use tracing::warn;
 use utoipa::openapi::Deprecated;
 use utoipa::openapi::OpenApi;
 use web_agent_common::AppData;
-use web_agent_common::MessageDispatcher;
-
-use crate::subscribe_to_topic;
-use crate::BROKER_CLIENT_NAME;
 
 /// The supervisor for our consumer actors
 pub struct ConsumerSupervisor;
 
-pub struct ConsumerSupervisorState;
-
-pub enum ConsumerSupervisorMessage {
-    ClientRegistered(String),
+pub struct ConsumerSupervisorState {
+    cassini_client: ActorRef<TcpClientMessage>,
+    consumer_agent: Option<ActorRef<AppData>>,
 }
 
 pub struct ConsumerSupervisorArgs;
 
+impl Supervisor for ConsumerSupervisor {
+    fn deserialize_and_dispatch(topic: String, payload: Vec<u8>) {
+        match rkyv::from_bytes::<AppData, rkyv::rancor::Error>(&payload) {
+            Ok(message) => {
+                if let Some(consumer) = ractor::registry::where_is(topic.clone()) {
+                    if let Err(e) = consumer.send_message(message) {
+                        tracing::warn!("Error forwarding message. {e}");
+                    }
+                }
+            }
+            Err(err) => warn!("Failed to deserialize message: {:?}", err),
+        }
+    }
+}
+
 #[async_trait]
 impl Actor for ConsumerSupervisor {
-    type Msg = ConsumerSupervisorMessage;
+    type Msg = SupervisorMessage;
     type State = ConsumerSupervisorState;
     type Arguments = ConsumerSupervisorArgs;
 
@@ -43,68 +58,74 @@ impl Actor for ConsumerSupervisor {
     ) -> Result<Self::State, ActorProcessingErr> {
         debug!("{myself:?} starting");
 
-        // start dispatcher
-        let _ = Actor::spawn_linked(
-            Some("DISPATCH".to_string()),
-            MessageDispatcher,
-            (),
-            myself.clone().into(),
-        )
-        .await
-        .expect("Expected to start dispatcher");
-
         // define an output port for the actor to subscribe to
         let events_output = std::sync::Arc::new(OutputPort::default());
-        let queue_output = std::sync::Arc::new(OutputPort::default());
 
         // subscribe self to this port
-        events_output.subscribe(myself.clone(), |message| {
-            Some(ConsumerSupervisorMessage::ClientRegistered(message))
+        events_output.subscribe(myself.clone(), |event| {
+            Some(SupervisorMessage::ClientEvent { event })
         });
 
         let config = TCPClientConfig::new()?;
 
-        if let Err(e) = Actor::spawn_linked(
+        match Actor::spawn_linked(
             Some(BROKER_CLIENT_NAME.to_string()),
             TcpClientActor,
             TcpClientArgs {
                 config,
                 registration_id: None,
-                events_output: events_output.clone(),
-                queue_output: queue_output.clone(),
+                events_output,
             },
             myself.clone().into(),
         )
         .await
         {
-            return Err(ActorProcessingErr::from(e));
+            Ok((client, _)) => Ok(ConsumerSupervisorState {
+                cassini_client: client,
+                consumer_agent: None,
+            }),
+            Err(e) => Err(ActorProcessingErr::from(e)),
         }
-
-        Ok(ConsumerSupervisorState)
     }
 
     async fn handle(
         &self,
         myself: ActorRef<Self::Msg>,
         message: Self::Msg,
-        _: &mut Self::State,
+        state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
-            ConsumerSupervisorMessage::ClientRegistered(registration_id) => {
-                let args = ApiConsumerArgs { registration_id };
-
-                if let Err(e) = Actor::spawn_linked(
-                    Some("polar.web.consumer".to_string()),
-                    ApiConsumer,
-                    args,
-                    myself.get_cell(),
-                )
-                .await
-                {
-                    return Err(ActorProcessingErr::from(e));
+            SupervisorMessage::ClientEvent { event } => match event {
+                ClientEvent::Registered { .. } => {
+                    match Actor::spawn_linked(
+                        Some(WEB_CONSUMER_NAME.to_string()),
+                        ApiConsumer,
+                        (),
+                        myself.get_cell(),
+                    )
+                    .await
+                    {
+                        Ok((agent, _)) => {
+                            state.consumer_agent = Some(agent);
+                            state
+                                .cassini_client
+                                .send_message(TcpClientMessage::Subscribe(
+                                    WEB_CONSUMER_NAME.to_string(),
+                                ))
+                                .map_err(|e| {
+                                    tracing::error!(
+                                        "Failed to forward subscribe request to client. {e}"
+                                    )
+                                })
+                                .ok();
+                        }
+                        Err(e) => return Err(ActorProcessingErr::from(e)),
+                    }
                 }
-            }
+                _ => todo!(),
+            },
         }
+
         Ok(())
     }
 
@@ -145,11 +166,7 @@ impl Actor for ConsumerSupervisor {
 
 pub struct ApiConsumer;
 
-pub struct ApiConsumerArgs {
-    pub registration_id: String,
-}
 pub struct ApiConsumerState {
-    pub registration_id: String,
     pub graph: Graph,
 }
 
@@ -157,20 +174,20 @@ pub struct ApiConsumerState {
 impl Actor for ApiConsumer {
     type Msg = AppData;
     type State = ApiConsumerState;
-    type Arguments = ApiConsumerArgs;
+    type Arguments = ();
 
     async fn pre_start(
         &self,
-        myself: ActorRef<Self::Msg>,
-        args: ApiConsumerArgs,
+        _myself: ActorRef<Self::Msg>,
+        _args: Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
-        debug!("{myself:?} starting");
-        //subscribe to topic
-        Ok(
-            subscribe_to_topic(args.registration_id, "polar.web.consumer".to_string())
-                .await
-                .unwrap(),
-        )
+        let config = polar::get_neo_config()?;
+
+        //load neo config and connect to graph db
+        match neo4rs::Graph::connect(config) {
+            Ok(graph) => Ok(ApiConsumerState { graph }),
+            Err(e) => Err(e.into()),
+        }
     }
 
     async fn handle(

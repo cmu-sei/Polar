@@ -1,8 +1,10 @@
 use cassini_client::*;
-use kube_common::MessageDispatcher;
-use polar::DispatcherMessage;
-use polar::{get_neo_config, DISPATCH_ACTOR};
+use cassini_types::ClientEvent;
+use kube_common::{KubeMessage, RawKubeEvent};
+use polar::get_neo_config;
+use polar::{Supervisor, SupervisorMessage};
 use ractor::async_trait;
+use ractor::registry::where_is;
 use ractor::Actor;
 use ractor::ActorProcessingErr;
 use ractor::ActorRef;
@@ -16,22 +18,84 @@ use crate::pods::PodConsumer;
 // use crate::pods::PodConsumer;
 use crate::KubeConsumerArgs;
 use crate::BROKER_CLIENT_NAME;
-
+use kube_common::{
+    get_consumer_name, BATCH_PROCESS_ACTION, RESOURCE_APPLIED_ACTION, RESOURCE_DELETED_ACTION,
+    RESYNC_ACTIUON,
+};
 pub struct ClusterConsumerSupervisor;
 
 pub struct ClusterConsumerSupervisorState {
     graph_config: neo4rs::Config,
 }
 
-pub enum SupervisorMessage {
-    ClientRegistered(String),
+impl Supervisor for ClusterConsumerSupervisor {
+    fn deserialize_and_dispatch(_topic: String, payload: Vec<u8>) {
+        // 1) Parse the raw message into your RawKubeEvent
+        let raw_event: RawKubeEvent = match serde_json::from_slice(&payload) {
+            Ok(ev) => ev,
+            Err(err) => {
+                error!("Failed to deserialize RawKubeEvent: {}", err);
+                return;
+            }
+        };
+
+        let kind = raw_event.kind; // e.g. "Pod"
+        let action = raw_event.action; // e.g. "Applied" or "BatchProcess"
+        let payload = raw_event.object; // serde_json::Value
+
+        // 2) Build the consumer’s name from cluster + kind
+        let consumer_name = get_consumer_name("cluster", &kind);
+
+        // 3) Look up the actor in Ractor’s registry
+        match where_is(consumer_name.clone()) {
+            Some(consumer_ref) => {
+                // 4) Build a typed KubeMessage based on action
+                let kube_msg = match action.as_str() {
+                    BATCH_PROCESS_ACTION => KubeMessage::ResourceBatch {
+                        kind: kind.clone(),
+                        resources: payload,
+                    },
+                    RESOURCE_APPLIED_ACTION => KubeMessage::ResourceApplied {
+                        kind: kind.clone(),
+                        resource: payload,
+                    },
+                    RESOURCE_DELETED_ACTION => KubeMessage::ResourceDeleted {
+                        kind: kind.clone(),
+                        resource: payload,
+                    },
+                    RESYNC_ACTIUON => KubeMessage::ResyncStarted {
+                        kind: kind.clone(),
+                        resource: payload,
+                    },
+                    other => {
+                        warn!(
+                            "Unhandled K8s action \"{}\" for kind \"{}\", dropping",
+                            other, kind
+                        );
+                        return;
+                    }
+                };
+
+                // 5) Send message, logging any failure
+                if let Err(err) = consumer_ref.send_message(kube_msg) {
+                    error!(
+                        "Failed to send KubeMessage to {}: {}",
+                        consumer_ref.get_name().unwrap_or_default(),
+                        err
+                    );
+                }
+            }
+
+            None => {
+                // No consumer registered for this kind
+                warn!(
+                    "No consumer found for topic \"{}\" (kind=\"{}\")",
+                    consumer_name, kind
+                );
+            }
+        }
+    }
 }
-
-// pub struct ClusterConsumerSupervisorArgs {
-//     pub client_config: cassini_client::TCPClientConfig,
-//     pub graph_config: neo4rs::Config,
-// }
-
 #[async_trait]
 impl Actor for ClusterConsumerSupervisor {
     type Msg = SupervisorMessage;
@@ -47,27 +111,9 @@ impl Actor for ClusterConsumerSupervisor {
 
         let graph_config = get_neo_config()?;
         let events_output = std::sync::Arc::new(ractor::OutputPort::default());
-        let queue_output = std::sync::Arc::new(ractor::OutputPort::default());
 
-        let (dispatcher, _) = Actor::spawn_linked(
-            Some(DISPATCH_ACTOR.to_string()),
-            MessageDispatcher,
-            (),
-            myself.clone().into(),
-        )
-        .await?;
-
-        //subscribe dispatcher
-        //
-        queue_output.subscribe(dispatcher, |(payload, topic)| {
-            Some(DispatcherMessage::Dispatch {
-                message: payload,
-                topic,
-            })
-        });
-
-        events_output.subscribe(myself.clone(), |message| {
-            Some(SupervisorMessage::ClientRegistered(message))
+        events_output.subscribe(myself.clone(), |event| {
+            Some(SupervisorMessage::ClientEvent { event })
         });
 
         let client_config = TCPClientConfig::new()?;
@@ -79,7 +125,6 @@ impl Actor for ClusterConsumerSupervisor {
                 config: client_config,
                 registration_id: None,
                 events_output,
-                queue_output: queue_output.clone(),
             },
             myself.clone().into(),
         )
@@ -97,24 +142,32 @@ impl Actor for ClusterConsumerSupervisor {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
-            SupervisorMessage::ClientRegistered(registration_id) => {
-                //start actors
-                let args = KubeConsumerArgs {
-                    registration_id,
-                    graph_config: state.graph_config.clone(),
-                };
+            SupervisorMessage::ClientEvent { event } => {
+                match event {
+                    ClientEvent::Registered { registration_id } => {
+                        //start actors
+                        let args = KubeConsumerArgs {
+                            registration_id,
+                            graph_config: state.graph_config.clone(),
+                        };
 
-                // TODO: The anticipated naming convention for these will be kubernetes.clustername.rrole.resource - but cluster name isn't really known ahead of time at the moment.
-                // For now, we'll test using either minikube or kind, so for now we can simply use kubernetes.cluster.default.pods
-                if let Err(e) = Actor::spawn_linked(
-                    Some(kube_common::get_consumer_name("cluster", "Pod")),
-                    PodConsumer,
-                    args,
-                    myself.get_cell().clone(),
-                )
-                .await
-                {
-                    error!("{e}");
+                        // TODO: The anticipated naming convention for these will be kubernetes.clustername.rrole.resource - but cluster name isn't really known ahead of time at the moment.
+                        // For now, we'll test using either minikube or kind, so for now we can simply use kubernetes.cluster.default.pods
+                        if let Err(e) = Actor::spawn_linked(
+                            Some(kube_common::get_consumer_name("cluster", "Pod")),
+                            PodConsumer,
+                            args,
+                            myself.get_cell().clone(),
+                        )
+                        .await
+                        {
+                            error!("{e}");
+                        }
+                    }
+                    ClientEvent::MessagePublished { topic, payload } => {
+                        ClusterConsumerSupervisor::deserialize_and_dispatch(topic, payload)
+                    }
+                    ClientEvent::TransportError { reason } => todo!(),
                 }
             }
         }

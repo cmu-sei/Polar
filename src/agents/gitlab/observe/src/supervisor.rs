@@ -1,18 +1,3 @@
-use cassini_client::*;
-use common::get_file_as_byte_vec;
-use ractor::async_trait;
-use ractor::Actor;
-use ractor::ActorProcessingErr;
-use ractor::ActorRef;
-use ractor::OutputPort;
-use ractor::SupervisionEvent;
-use reqwest::Certificate;
-use reqwest::Client;
-use reqwest::ClientBuilder;
-use std::env;
-use tracing::error;
-use tracing::{debug, info, warn};
-
 use crate::derive_instance_id;
 use crate::groups::GitlabGroupObserver;
 use crate::meta::MetaObserver;
@@ -32,6 +17,19 @@ use crate::GITLAB_REPOSITORY_OBSERVER;
 use crate::GITLAB_RUNNER_OBSERVER;
 use crate::GITLAB_USERS_OBSERVER;
 use crate::META_OBSERVER;
+use cassini_client::*;
+use cassini_types::ClientEvent;
+use polar::{Supervisor, SupervisorMessage};
+use ractor::async_trait;
+use ractor::Actor;
+use ractor::ActorProcessingErr;
+use ractor::ActorRef;
+use ractor::OutputPort;
+use ractor::SupervisionEvent;
+use std::env;
+use tracing::debug;
+use tracing::error;
+
 pub struct ObserverSupervisor;
 
 pub struct ObserverSupervisorState {
@@ -41,20 +39,6 @@ pub struct ObserverSupervisorState {
     pub base_interval: u64,
     pub max_backoff_secs: u64,
     pub proxy_ca_cert_file: Option<String>,
-}
-
-// pub struct ObserverSupervisorArgs {
-//     pub gitlab_endpoint: String,
-//     pub gitlab_token: Option<String>,
-//     pub proxy_ca_cert_file: Option<String>,
-//     pub base_interval: u64,
-//     pub max_backoff_secs: u64,
-// }
-
-pub enum SupervisorMessage {
-    /// Notification message telling the supervisor the client's been registered with the broker.
-    /// This triggers the observer to finish startup and cancels the timeout
-    ClientRegistered(String),
 }
 
 #[async_trait]
@@ -84,15 +68,14 @@ impl Actor for ObserverSupervisor {
 
         // define an output port for the actor to subscribe to
         let events_output = std::sync::Arc::new(OutputPort::default());
-        let queue_output = std::sync::Arc::new(ractor::OutputPort::default());
         // subscribe self to this port
-        events_output.subscribe(myself.clone(), |message| {
-            Some(SupervisorMessage::ClientRegistered(message))
+        events_output.subscribe(myself.clone(), |event| {
+            Some(SupervisorMessage::ClientEvent { event })
         });
 
         // TODO: we don't make the observer respond to any configuration outputs or messages from the queue YET,
         // When we do, start a dispatcher, subscribe it to the queue_output, and go from there.
-        //\
+        //
         let client_config = TCPClientConfig::new()?;
 
         let (_client, _) = Actor::spawn_linked(
@@ -102,7 +85,6 @@ impl Actor for ObserverSupervisor {
                 config: client_config,
                 registration_id: None,
                 events_output,
-                queue_output,
             },
             myself.clone().into(),
         )
@@ -124,83 +106,96 @@ impl Actor for ObserverSupervisor {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
-            SupervisorMessage::ClientRegistered(registration_id) => {
-                // set up args for observer actors
-                let args = GitlabObserverArgs {
-                    gitlab_endpoint: state.gitlab_endpoint.clone(),
-                    instance_uid: derive_instance_id(&state.gitlab_endpoint),
-                    token: state.gitlab_token.clone(),
-                    registration_id: registration_id.clone(),
-                    web_client: polar::get_web_client(),
-                    base_interval: state.base_interval,
-                    max_backoff: state.max_backoff_secs,
-                };
+            SupervisorMessage::ClientEvent { event } => {
+                match event {
+                    ClientEvent::Registered { registration_id } => {
+                        // set up args for observer actors
+                        let args = GitlabObserverArgs {
+                            gitlab_endpoint: state.gitlab_endpoint.clone(),
+                            instance_uid: derive_instance_id(&state.gitlab_endpoint),
+                            token: state.gitlab_token.clone(),
+                            registration_id: registration_id.clone(),
+                            web_client: polar::get_web_client(),
+                            base_interval: state.base_interval,
+                            max_backoff: state.max_backoff_secs,
+                        };
 
-                //TODO: Should other observers wait until the meta observer is online and observing?
-                // TODO: decide which observers to start based off of some configuration
-                Actor::spawn_linked(
-                    Some(META_OBSERVER.to_string()),
-                    MetaObserver,
-                    args.clone(),
-                    myself.clone().into(),
-                )
-                .await?;
+                        //TODO: Should other observers wait until the meta observer is online and observing?
+                        //TODO: decide which observers to start based off of some configuration
+                        Actor::spawn_linked(
+                            Some(META_OBSERVER.to_string()),
+                            MetaObserver,
+                            args.clone(),
+                            myself.clone().into(),
+                        )
+                        .await?;
 
-                Actor::spawn_linked(
-                    Some(GITLAB_USERS_OBSERVER.to_string()),
-                    GitlabUserObserver,
-                    args.clone(),
-                    myself.clone().into(),
-                )
-                .await?;
+                        Actor::spawn_linked(
+                            Some(GITLAB_USERS_OBSERVER.to_string()),
+                            GitlabUserObserver,
+                            args.clone(),
+                            myself.clone().into(),
+                        )
+                        .await?;
 
-                Actor::spawn_linked(
-                    Some(GITLAB_PROJECT_OBSERVER.to_string()),
-                    GitlabProjectObserver,
-                    args.clone(),
-                    myself.clone().into(),
-                )
-                .await?;
+                        Actor::spawn_linked(
+                            Some(GITLAB_PROJECT_OBSERVER.to_string()),
+                            GitlabProjectObserver,
+                            args.clone(),
+                            myself.clone().into(),
+                        )
+                        .await?;
 
-                Actor::spawn_linked(
-                    Some(GITLAB_PIPELINE_OBSERVER.to_string()),
-                    GitlabPipelineObserver,
-                    args.clone(),
-                    myself.clone().into(),
-                )
-                .await?;
+                        Actor::spawn_linked(
+                            Some(GITLAB_PIPELINE_OBSERVER.to_string()),
+                            GitlabPipelineObserver,
+                            args.clone(),
+                            myself.clone().into(),
+                        )
+                        .await?;
 
-                Actor::spawn_linked(
-                    Some(GITLAB_JOBS_OBSERVER.to_string()),
-                    GitlabJobObserver,
-                    args.clone(),
-                    myself.clone().into(),
-                )
-                .await?;
+                        Actor::spawn_linked(
+                            Some(GITLAB_JOBS_OBSERVER.to_string()),
+                            GitlabJobObserver,
+                            args.clone(),
+                            myself.clone().into(),
+                        )
+                        .await?;
 
-                Actor::spawn_linked(
-                    Some(GITLAB_GROUPS_OBSERVER.to_string()),
-                    GitlabGroupObserver,
-                    args.clone(),
-                    myself.clone().into(),
-                )
-                .await?;
+                        Actor::spawn_linked(
+                            Some(GITLAB_GROUPS_OBSERVER.to_string()),
+                            GitlabGroupObserver,
+                            args.clone(),
+                            myself.clone().into(),
+                        )
+                        .await?;
 
-                Actor::spawn_linked(
-                    Some(GITLAB_RUNNER_OBSERVER.to_string()),
-                    GitlabRunnerObserver,
-                    args.clone(),
-                    myself.clone().into(),
-                )
-                .await?;
+                        Actor::spawn_linked(
+                            Some(GITLAB_RUNNER_OBSERVER.to_string()),
+                            GitlabRunnerObserver,
+                            args.clone(),
+                            myself.clone().into(),
+                        )
+                        .await?;
 
-                Actor::spawn_linked(
-                    Some(GITLAB_REPOSITORY_OBSERVER.to_string()),
-                    GitlabRepositoryObserver,
-                    args.clone(),
-                    myself.clone().into(),
-                )
-                .await?;
+                        Actor::spawn_linked(
+                            Some(GITLAB_REPOSITORY_OBSERVER.to_string()),
+                            GitlabRepositoryObserver,
+                            args.clone(),
+                            myself.clone().into(),
+                        )
+                        .await?;
+                    }
+                    ClientEvent::MessagePublished { topic, payload } => {
+                        todo!("Deserialize and dispatch message from the queue");
+                        // TODO: We haven't yet figured out what kind of messages observer supervisors will receive yet, but when we do
+                        // this is what we'll call
+                        // ObserverSupervisor::deserialize_and_dispatch(topic, payload)
+                    }
+                    ClientEvent::TransportError { reason } => {
+                        todo!("Handle client transport error")
+                    }
+                }
             }
         }
         Ok(())

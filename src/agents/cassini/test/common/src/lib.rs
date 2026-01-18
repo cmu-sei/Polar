@@ -1,54 +1,46 @@
 use rkyv::{Archive, Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-pub mod client;
+// pub mod client;
 
-pub enum ConnectionState {
-    NotContacted,
-    Registered { client_id: String },
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, Archive, serde::Serialize, serde::Deserialize)]
-pub struct TestPlan {
-    pub producers: Vec<ProducerConfig>,
-    // pub payload: serde_json::Value,
-}
 /// Messaging pattern that mimics user behavior over the network.
 #[derive(Clone, Debug, Serialize, Deserialize, Archive, serde::Serialize, serde::Deserialize)]
 pub enum MessagePattern {
-    Burst { idle_time: usize, burst_size: u32 },
-    Drip { idle_time: usize },
+    Drip {
+        idle_time_seconds: u64,
+    },
+    Burst {
+        burst_size: u64,
+        idle_time_seconds: u64,
+    },
+}
+#[derive(Clone, Debug, Serialize, Deserialize, Archive, serde::Serialize, serde::Deserialize)]
+pub enum PayloadSpec {
+    Fixed(String),
+    Random { seed: u64 },
+    FromFile { path: String },
+    Template { template: String },
 }
 // Config for the supervisor
 #[derive(Clone, Debug, Serialize, Deserialize, Archive, serde::Serialize, serde::Deserialize)]
 pub struct ProducerConfig {
     pub topic: String,
-    #[serde(alias = "msgSize")]
-    pub msg_size: usize,
+    pub message_size: u64,
     pub duration: u64,
     pub pattern: MessagePattern,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Archive)]
-pub enum HarnessControllerMessage {
-    //
-    Initialize,
-    /// Message sent to clients to give them a token to id themselves by, mostly for convenience
-    ClientRegistered(String),
-    TestPlanRequest {
-        client_id: String,
-    },
-    TestPlan {
-        plan: TestPlan,
-    },
-    Error {
-        reason: String,
-    },
-    /// sent when a serivce receives a shutdown, allowing the harness to finish and do cleanup tasks
-    ShutdownAck,
-    Shutdown, // stop a service
+/// Expectations are evaluated locally by sinks.
+/// The controller only aggregates failures.
+#[derive(Debug, Clone, Serialize, Deserialize, Archive, serde::Serialize, serde::Deserialize)]
+pub enum Expectation {
+    /// At least N messages observed within a window.
+    AtLeast { messages: u64, within_seconds: u64 },
+    /// No duplicate message identifiers observed.
+    NoDuplicates,
+    /// Payloads must deserialize and match expected schema.
+    NoCorruption,
 }
-
 ///A general message envelope that gets exchanged between the sink and producer.
 /// Dhall already has strong typing, so testers can describe structured values with guaranteed shape.
 /// We can import their Dhall config in Rust and convert it to JSON.

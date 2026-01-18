@@ -2,12 +2,14 @@ use clap::Parser;
 use harness_controller::service::*;
 use harness_controller::{read_test_config, Arguments};
 use ractor::Actor;
-use std::env;
+use std::{env, string};
 use tracing::info;
+
 #[tokio::main]
 async fn main() {
     harness_controller::init_logging();
 
+    // dump_client_message_layout();
     let args = Arguments::parse();
     let test_plan = read_test_config(&args.config);
 

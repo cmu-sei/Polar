@@ -1,11 +1,11 @@
 use crate::UNEXPECTED_MESSAGE_STR;
 use crate::{
-    BrokerMessage, BROKER_NAME, BROKER_NOT_FOUND_TXT, LISTENER_MGR_NOT_FOUND_TXT,
-    PUBLISH_REQ_FAILED_TXT, REGISTRATION_REQ_FAILED_TXT, SESSION_MISSING_REASON_STR,
-    SESSION_NOT_FOUND_TXT, SUBSCRIBE_REQUEST_FAILED_TXT, TIMEOUT_REASON,
+    BROKER_NAME, BROKER_NOT_FOUND_TXT, LISTENER_MGR_NOT_FOUND_TXT, PUBLISH_REQ_FAILED_TXT,
+    REGISTRATION_REQ_FAILED_TXT, SESSION_MISSING_REASON_STR, SESSION_NOT_FOUND_TXT,
+    SUBSCRIBE_REQUEST_FAILED_TXT, TIMEOUT_REASON,
 };
 use async_trait::async_trait;
-use cassini_types::{ArchivedClientMessage, ClientMessage};
+use cassini_types::{ArchivedClientMessage, BrokerMessage, ClientMessage};
 use opentelemetry::Context;
 use ractor::{registry::where_is, Actor, ActorProcessingErr, ActorRef, SupervisionEvent};
 use rkyv::{
@@ -331,13 +331,19 @@ impl Listener {
                 let mut buffer = Vec::new();
 
                 //get message length as header
-                let len = bytes.len().to_be_bytes();
+                // CAUTION: Always use u32s here to ensure we properly read a u32 on the other side.
+                let len = (bytes.len() as u32).to_be_bytes();
                 buffer.extend_from_slice(&len);
 
                 //add message to buffer
                 buffer.extend_from_slice(&bytes);
 
-                trace!("writing {} byte(s) to client.", buffer.len());
+                trace!(
+                    ty = %std::any::type_name::<ClientMessage>(),
+                    len = bytes.len(),
+                    first_8 = ?&bytes[..bytes.len().min(8)],
+                    "Sending frame"
+                );
 
                 tokio::spawn(async move {
                     let mut writer = writer.lock().await;
@@ -1108,6 +1114,66 @@ impl Actor for Listener {
                 }
             }
 
+            BrokerMessage::ControlRequest {
+                registration_id,
+                op,
+                ..
+            } => {
+                let span = trace_span!("listener.handle_control_request", %registration_id);
+                // explicitly break context so we get a new trace for each new request
+                span.set_parent(Context::new()).ok();
+                let _g = span.enter();
+
+                trace!("listener received control request");
+
+                //validate registration ids
+                let id = state
+                    .registration_id
+                    .clone()
+                    .take_if(|client_session_id| registration_id == *client_session_id).unwrap_or_else(||
+                        todo!("Here's where we'd respond, chances are the client sent a registration_id that didn't match ours")
+                    );
+
+                //fwd
+                if let Some(session) = where_is(id.clone()) {
+                    if let Err(e) = session.send_message(BrokerMessage::ControlRequest {
+                        registration_id: id,
+                        op,
+                        reply_to: None,
+                        trace_ctx: Some(span.context()),
+                    }) {
+                        todo!("error")
+                    }
+                }
+            }
+            BrokerMessage::ControlResponse {
+                registration_id,
+                result,
+                trace_ctx,
+            } => {
+                let span = trace_span!("listener.handle_subscribe_request", %registration_id);
+                trace_ctx.map(|ctx| span.set_parent(ctx));
+                let _g = span.enter();
+
+                trace!("Received ControlResponse");
+                let msg = ClientMessage::ControlResponse {
+                    registration_id: registration_id.clone(),
+                    result,
+                };
+
+                let _ = Listener::write(state.client_id.clone(), msg, Arc::clone(&state.writer))
+                    .await
+                    .map_err(|e| {
+                        error!("Failed to write message {e}");
+                        if let Err(e) = myself.send_message(BrokerMessage::TimeoutMessage {
+                            client_id: state.client_id.clone(),
+                            registration_id: registration_id.clone(),
+                            error: Some(e.to_string()),
+                        }) {
+                            myself.stop(Some(e.to_string()));
+                        }
+                    });
+            }
             _ => {
                 warn!(UNEXPECTED_MESSAGE_STR)
             }

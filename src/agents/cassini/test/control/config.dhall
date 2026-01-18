@@ -1,50 +1,52 @@
--- TestPlan.dhall
+{-
+  TestPlan.dhall
 
--- Pattern for message emission
--- When configured to drip messages, they'll be sent at a constant rate denoted by idle_time between messages,
--- When configured to send in bursts, the burst_size denotes the amount of messages sent between idle_times
+  A load- and integration-testing oriented harness configuration.
+  The harness executes phases sequentially.
+  Each phase starts from a clean slate unless explicitly configured otherwise.
+-}
+
+
 let Pattern =
-      < Drip: { idle_time: Natural }
-      | Burst :
-          { burst_size : Natural
-          , idle_time  : Natural
-          }
+      < Drip : { idle_time_seconds : Natural }
+      | Burst : { burst_size : Natural, idle_time_seconds : Natural }
       >
 
--- A single producer configuration
 let Producer =
-      { topic     : Text
-      , msgSize   : Natural
-      , duration  : Natural
-      , pattern   : Pattern
+      { topic : Text
+      , message_size : Natural
+      , duration : Natural
+      , pattern : Pattern
       }
 
--- A test plan is just a list of producers
--- TODO: We've discussed potentially splitting the producer and sink components again to enable them to communicate over the wire
--- This is probably where some of those configurations would be best suited.
-let TestPlan = {
-    producers : List Producer
-}
+let Expectation =
+      < AtLeast : { messages : Natural, within_seconds : Natural }
+      | NoStarvation : { max_idle_seconds : Natural }
+      | OrderingPreserved : { key : Text }
+      >
 
+let Phase =
+      { name : Text
+      , producers : List Producer
+      , expectations : List Expectation
+      }
 
-let steadyProducer: Producer = {
-   topic = "steady"
-,  msgSize = 4096
-,  duration = 60
-,  pattern = Pattern.Drip { idle_time = 1 }
-}
+let TestPlan = { name : Text, phases : List Phase }
 
---let burstProducer: Producer = {
---   topic = "burst"
---,  msgSize = 4096
---,  duration = 10
---,  pattern = Pattern.Burst { burst_size = 10, idle_time = 5 }
---
---}
+let producers =
+      [ { topic = "steady"
+        , message_size = 4096
+        , duration = 60
+        , pattern = Pattern.Drip { idle_time_seconds = 1 }
+        }
+      ]
 
+let expectations = [ Expectation.AtLeast { messages = 1, within_seconds = 30 } ]
 
-let plan: TestPlan = {
-    producers = [ steadyProducer ]
-}
+let phases = [ { name = "load test", producers, expectations } ]
 
-in plan
+let plan
+    : TestPlan
+    = { name = "Polar test plan", phases }
+
+in  plan

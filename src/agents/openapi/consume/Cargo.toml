@@ -20,6 +20,7 @@ utoipa = "5.4.0"
 neo4rs = { workspace = true }
 url = "2.5.7"
 polar = { path = "../../lib" }
+rkyv = { workspace = true }
 # Fix a vulnerability in a transitive dependency.
 ring = { version = "=0.17.14" }
 rustls = { version = "0.23", default-features = false, features = [

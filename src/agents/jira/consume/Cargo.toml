@@ -51,6 +51,7 @@ url = "2.5.7"
 tracing = "0.1.41"
 ractor = { version = "0.15.8", features = ["async-trait"] }
 
+rkyv = { workspace = true, features = ["std", "alloc"] }
 [[bin]]
 name = "jira-consumer"
 path = "src/entrypoint.rs"
