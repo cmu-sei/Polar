@@ -3,7 +3,7 @@ use crate::UNEXPECTED_MESSAGE_STR;
 use cassini_types::BrokerMessage;
 use ractor::registry::where_is;
 use ractor::rpc::CallResult;
-use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef, OutputPort};
+use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::Duration;
 use tracing::{debug, error, info, trace, trace_span, warn};
@@ -107,7 +107,7 @@ impl TopicManager {
                                     })
                                     .ok();
                             }
-                            Err(err) => {
+                            Err(_err) => {
                                 // Handle subscription error
                                 todo!("handle subscription error");
                             }
@@ -364,7 +364,7 @@ impl Actor for TopicAgent {
     async fn pre_start(
         &self,
         _: ActorRef<Self::Msg>,
-        args: (),
+        _args: (),
     ) -> Result<Self::State, ActorProcessingErr> {
         Ok(TopicAgentState {
             subscribers: Vec::new(),
@@ -375,7 +375,7 @@ impl Actor for TopicAgent {
     async fn post_start(
         &self,
         myself: ActorRef<Self::Msg>,
-        state: &mut Self::State,
+        _state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         debug!("{myself:?} Started",);
         Ok(())

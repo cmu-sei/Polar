@@ -198,6 +198,7 @@ impl Actor for SessionManager {
                 }
             }
             BrokerMessage::DisconnectRequest {
+                reason,
                 client_id,
                 registration_id,
                 trace_ctx,
@@ -218,6 +219,7 @@ impl Actor for SessionManager {
                     match myself.try_get_supervisor() {
                         Some(broker) => broker
                             .send_message(BrokerMessage::DisconnectRequest {
+                                reason,
                                 client_id,
                                 registration_id: Some(registration_id),
                                 trace_ctx: Some(span.context()),
@@ -735,6 +737,7 @@ impl Actor for SessionAgent {
                 }
             }
             BrokerMessage::DisconnectRequest {
+                reason,
                 client_id,
                 registration_id,
                 trace_ctx,
@@ -747,13 +750,14 @@ impl Actor for SessionAgent {
                 trace!("session received disconnect request.");
                 info!("client {client_id} disconnected");
                 match myself.try_get_supervisor() {
-                    Some(manager) => manager
-                        .send_message(BrokerMessage::DisconnectRequest {
+                    Some(manager) => {
+                        let _ = manager.send_message(BrokerMessage::DisconnectRequest {
+                            reason,
                             client_id,
                             registration_id,
                             trace_ctx: Some(span.context()),
-                        })
-                        .expect("Expected to forward to manager"),
+                        });
+                    }
                     None => tracing::error!("Couldn't find supervisor."),
                 }
             }
@@ -762,13 +766,13 @@ impl Actor for SessionAgent {
                 registration_id,
                 error,
             } => match myself.try_get_supervisor() {
-                Some(manager) => manager
-                    .send_message(BrokerMessage::TimeoutMessage {
+                Some(manager) => {
+                    let _ = manager.send_message(BrokerMessage::TimeoutMessage {
                         client_id,
                         registration_id,
                         error,
-                    })
-                    .expect("Expected to forward to manager"),
+                    });
+                }
                 None => error!("Couldn't find supervisor."),
             },
 

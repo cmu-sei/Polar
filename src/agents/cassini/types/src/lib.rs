@@ -15,6 +15,15 @@ pub struct SessionDetails {
     // last_activity: u64,
 }
 
+/// Helper to distinguish why a listener's connection may have died.
+///
+#[derive(Debug, Clone)]
+pub enum DisconnectReason {
+    RemoteClosed,
+    //TODO: It's possible we may eventually want to detect rougue clients, this would let us be explicit.
+    // PolicyViolation(PolicyViolation),
+    TransportError(String),
+}
 /// Internal messagetypes for the Broker.
 /// Activities that flow from an actor will also be traced leveraging Contexts,
 /// These are optional because they aren't initialzied until the listener begins to handle the message
@@ -134,6 +143,7 @@ pub enum BrokerMessage {
     },
     /// Disconnect request from the client.
     DisconnectRequest {
+        reason: DisconnectReason,
         client_id: String,
         registration_id: Option<String>,
         trace_ctx: Option<Context>,
@@ -206,6 +216,8 @@ impl BrokerMessage {
                 client_id,
                 registration_id,
                 trace_ctx: None,
+                // if we got one of these messages off the client, we can safely say it was intentional
+                reason: DisconnectReason::RemoteClosed,
             },
             ClientMessage::ControlRequest {
                 registration_id,

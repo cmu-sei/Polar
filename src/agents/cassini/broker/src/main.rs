@@ -15,11 +15,13 @@ async fn main() {
     match BrokerArgs::new() {
         Ok(args) => {
             // Start Supervisor
-            let (_broker, handle) = Actor::spawn(Some(BROKER_NAME.to_string()), Broker, args)
-                .await
-                .expect("Failed to start Broker");
-
-            handle.await.expect("Something went wrong");
+            if let Ok((_broker, handle)) =
+                Actor::spawn(Some(BROKER_NAME.to_string()), Broker, args).await
+            {
+                handle.await.ok();
+            } else {
+                std::process::exit(1);
+            }
         }
         Err(e) => {
             error!("Failed to load arguments. {e}");

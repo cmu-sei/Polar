@@ -1,11 +1,10 @@
 use crate::UNEXPECTED_MESSAGE_STR;
 use crate::{
-    BROKER_NAME, BROKER_NOT_FOUND_TXT, LISTENER_MGR_NOT_FOUND_TXT, PUBLISH_REQ_FAILED_TXT,
-    REGISTRATION_REQ_FAILED_TXT, SESSION_MISSING_REASON_STR, SESSION_NOT_FOUND_TXT,
-    SUBSCRIBE_REQUEST_FAILED_TXT, TIMEOUT_REASON,
+    BROKER_NAME, BROKER_NOT_FOUND_TXT, PUBLISH_REQ_FAILED_TXT, REGISTRATION_REQ_FAILED_TXT,
+    SESSION_MISSING_REASON_STR, SESSION_NOT_FOUND_TXT, SUBSCRIBE_REQUEST_FAILED_TXT,
 };
 use async_trait::async_trait;
-use cassini_types::{ArchivedClientMessage, BrokerMessage, ClientMessage};
+use cassini_types::{ArchivedClientMessage, BrokerMessage, ClientMessage, DisconnectReason};
 use opentelemetry::Context;
 use ractor::{registry::where_is, Actor, ActorProcessingErr, ActorRef, SupervisionEvent};
 use rkyv::{
@@ -27,6 +26,7 @@ use tokio::{
 use tokio_rustls::{server::TlsStream, TlsAcceptor};
 use tracing::{debug, debug_span, error, info, info_span, instrument, trace, trace_span, warn};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
+
 // ============================== Listener Manager ============================== //
 /// The actual listener/server process. When clients connect to the server, their stream is split and
 /// given to a worker processes to use to interact with and handle that connection with the client.
@@ -184,52 +184,7 @@ impl Actor for ListenerManager {
                     actor_cell.get_id()
                 );
             }
-            SupervisionEvent::ActorTerminated(actor_cell, boxed_state, reason) => {
-                let client_id = actor_cell
-                    .get_name()
-                    .expect("Expected client listener to have been named");
-
-                debug!(
-                    "Client listener: {0}:{1:?} stopped. {reason:?}",
-                    client_id,
-                    actor_cell.get_id()
-                );
-
-                if let Some(reason) = reason {
-                    if reason == TIMEOUT_REASON {
-                        // tell the session we're timing out
-                        boxed_state.map(|mut boxed| {
-                            let state = boxed
-                                .take::<ListenerState>()
-                                .expect("Expected failed listener to have had a state");
-
-                            if let Some(registration_id) = state.registration_id {
-                                if let Some(session) = where_is(registration_id.clone()) {
-                                    warn!("{client_id:?} disconnected unexpectedly!");
-
-                                    if let Err(e) =
-                                        session.send_message(BrokerMessage::TimeoutMessage {
-                                            client_id,
-                                            registration_id: registration_id.clone(),
-                                            error: Some(TIMEOUT_REASON.to_string()),
-                                        })
-                                    {
-                                        warn!("{SESSION_NOT_FOUND_TXT}: {registration_id}: {e}");
-                                    }
-                                }
-                            }
-                        });
-                    }
-                }
-            }
-            SupervisionEvent::ActorFailed(actor_cell, _) => {
-                warn!(
-                    "Worker agent: {0:?}:{1:?} failed!",
-                    actor_cell.get_name(),
-                    actor_cell.get_id()
-                );
-            }
-            SupervisionEvent::ProcessGroupChanged(_) => (),
+            _ => (),
         }
 
         Ok(())
@@ -268,24 +223,58 @@ impl Actor for ListenerManager {
                     .expect("Failed to forward message to client: {client_id}");
             }
             BrokerMessage::DisconnectRequest {
+                reason,
                 client_id,
+                registration_id,
                 trace_ctx,
-                ..
             } => {
                 let span = trace_span!("listener_manager.handle_disconnect_request");
                 trace_ctx.map(|ctx| span.set_parent(ctx));
                 let _g = span.enter();
 
-                trace!("listener manager received disconnect request");
+                trace!("listener manager handling client disconnect");
                 match where_is(client_id.clone()) {
-                    Some(listener) => listener.stop(Some("{DISCONNECTED_REASON}".to_string())),
+                    Some(listener) => {
+                        //if we're registered, propagate to session agent
+                        if let Some(id) = registration_id {
+                            match where_is(id.clone()) {
+                                Some(session) => {
+                                    // depending on why the connection ended,
+                                    // send a disconnect request or a timeout message to trigger session cleanup logic.
+                                    match reason {
+                                        DisconnectReason::RemoteClosed => {
+                                            info!("Client {client_id} disconencted.");
+                                            let _ = session.send_message(
+                                                BrokerMessage::DisconnectRequest {
+                                                    reason,
+                                                    client_id: client_id.clone(),
+                                                    registration_id: Some(id.clone()),
+                                                    trace_ctx: Some(span.context()),
+                                                },
+                                            );
+                                        }
+                                        DisconnectReason::TransportError(error) => {
+                                            warn!("Client {client_id} disconnected unexpectedly! Notifying session.");
+                                            let _ = session.send_message(
+                                                BrokerMessage::TimeoutMessage {
+                                                    client_id: client_id.clone(),
+                                                    registration_id: id,
+                                                    error: Some(error),
+                                                },
+                                            );
+                                        }
+                                    }
+                                }
+                                None => {
+                                    warn!("{SESSION_NOT_FOUND_TXT}: {id}");
+                                }
+                            }
+                        }
+                        listener.stop(None);
+                    }
                     None => warn!("Couldn't find listener {client_id}"),
                 }
             }
-            BrokerMessage::TimeoutMessage { client_id, .. } => match where_is(client_id.clone()) {
-                Some(listener) => listener.stop(Some(TIMEOUT_REASON.to_string())),
-                None => warn!("Couldn't find listener {client_id}"),
-            },
             _ => (),
         }
         Ok(())
@@ -385,16 +374,14 @@ impl Actor for Listener {
 
     async fn post_stop(
         &self,
-        myself: ActorRef<Self::Msg>,
+        _myself: ActorRef<Self::Msg>,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         // stop listening
-
         state.task_handle.as_ref().map(|handle| {
             handle.abort();
         });
 
-        info!("Client {} disconnected.", myself.get_name().unwrap());
         Ok(())
     }
 
@@ -414,7 +401,6 @@ impl Actor for Listener {
         let id = state.client_id.clone();
 
         let reader = state.reader.take().expect("Reader already taken!");
-
         //start listening
         let handle = tokio::spawn(async move {
             let mut buf_reader = tokio::io::BufReader::new(reader);
@@ -450,8 +436,16 @@ impl Actor for Listener {
                 }
             }
 
-            // TODO: on disconnect, die with honor or allow other events to capture it?
-            // myself.stop(Some(TIMEOUT_REASON.to_string()));
+            // if our read loop ends before we expect it to, we can effectively say something bad happened.
+            // This represents the start of the session timeout flow.
+            // We can't access state here, but we can enter the listener's DisconnectRequest handling flow,
+            // There, we can populate the session_id and tracing context, if any
+            let _ = myself.send_message(BrokerMessage::DisconnectRequest {
+                reason: DisconnectReason::TransportError("Connection interrupted!".to_string()),
+                client_id: id,
+                registration_id: None,
+                trace_ctx: None,
+            });
         });
 
         // add join handle to state, we'll need to cancel it if a client disconnects
@@ -1065,52 +1059,32 @@ impl Actor for Listener {
                     });
             }
             BrokerMessage::DisconnectRequest {
-                client_id,
-                registration_id,
-                ..
+                reason, client_id, ..
             } => {
                 let span = trace_span!("listener.handle_disconnect_request", %client_id);
                 span.set_parent(Context::new()).ok();
                 let _g = span.enter();
 
-                trace!("Listener received disconnect request message from client.");
+                trace!("Listener received disconnect request message.");
 
-                if let Some(id) = registration_id {
-                    //if we're registered, propagate to session agent
-                    match where_is(id.clone()) {
-                        Some(session) => {
-                            if let Err(e) = session.send_message(BrokerMessage::DisconnectRequest {
-                                client_id,
-                                registration_id: Some(id.to_string()),
-                                trace_ctx: Some(span.context()),
-                            }) {
-                                warn!("{SESSION_NOT_FOUND_TXT}: {id}: {e}");
-                                myself.stop(Some("{DISCONNECTED_REASON}".to_string()));
-                            }
-                        }
-                        None => {
-                            warn!("{SESSION_NOT_FOUND_TXT}: {id}");
-                            myself.stop(Some("{DISCONNECTED_REASON}".to_string()));
-                        }
-                    }
+                // send a message that we're disconnecting, let the manager handle it
+                /*
+                 * TODO: we have to manully populate the registration_id and overwrite the one handed to us by the client
+                 * I think this represents a potential abuse case, but session tokens aren't exactly used for auth purposes.
+                 * It's likely that attestation will eventually solve this issue.
+                 */
+                if let Some(manager) = myself.try_get_supervisor() {
+                    manager
+                        .send_message(BrokerMessage::DisconnectRequest {
+                            reason,
+                            client_id,
+                            registration_id: state.registration_id.clone(),
+                            trace_ctx: Some(span.context()),
+                        })
+                        .ok();
                 } else {
-                    // Otherwise, tell supervisor this listener is done
-                    match myself.try_get_supervisor() {
-                        Some(broker) => {
-                            if let Err(e) = broker.send_message(BrokerMessage::DisconnectRequest {
-                                client_id,
-                                registration_id: None,
-                                trace_ctx: Some(span.context()),
-                            }) {
-                                error!("{LISTENER_MGR_NOT_FOUND_TXT}: {e}");
-                                myself.stop(Some("{DISCONNECTED_REASON}".to_string()));
-                            }
-                        }
-                        None => {
-                            error!("{LISTENER_MGR_NOT_FOUND_TXT}, ending connection");
-                            myself.stop(Some("{DISCONNECTED_REASON}".to_string()));
-                        }
-                    }
+                    error!("Failed to locate listener manager.");
+                    myself.kill();
                 }
             }
 
@@ -1136,14 +1110,12 @@ impl Actor for Listener {
 
                 //fwd
                 if let Some(session) = where_is(id.clone()) {
-                    if let Err(e) = session.send_message(BrokerMessage::ControlRequest {
+                    let _ = session.send_message(BrokerMessage::ControlRequest {
                         registration_id: id,
                         op,
                         reply_to: None,
                         trace_ctx: Some(span.context()),
-                    }) {
-                        todo!("error")
-                    }
+                    });
                 }
             }
             BrokerMessage::ControlResponse {

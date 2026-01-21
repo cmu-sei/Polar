@@ -9,14 +9,8 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::{process::Stdio, time::Duration};
 
-use cassini_client::{
-    ClientEvent, TCPClientConfig, TcpClientActor, TcpClientArgs, TcpClientMessage,
-};
-use cassini_types::{ClientMessage, ControlError, ControlResult, SessionDetails};
-use rkyv::{
-    deserialize,
-    rancor::{self, Error, Source},
-};
+use cassini_client::{TCPClientConfig, TcpClientActor, TcpClientArgs, TcpClientMessage};
+use cassini_types::{ClientEvent, ClientMessage, ControlError, ControlResult, SessionDetails};
 use rustls::{
     pki_types::{pem::PemObject, CertificateDer, PrivateKeyDer},
     server::WebPkiClientVerifier,

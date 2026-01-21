@@ -1,6 +1,6 @@
 use cassini_types::{BrokerMessage, ControlError, ControlOp, ControlResult};
 use ractor::{concurrency::Duration, rpc::CallResult, Actor, ActorProcessingErr, ActorRef};
-use tracing::{debug, info, trace, trace_span, warn};
+use tracing::{debug, trace_span, warn};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 use crate::UNEXPECTED_MESSAGE_STR;
@@ -101,7 +101,7 @@ impl Actor for ControlManager {
                                     trace_ctx: Some(span.context()),
                                 },
                             },
-                            Err(e) => todo!(),
+                            Err(_e) => todo!(),
                         }
                     }
                     // ControlOp::GetSessionInfo { registration_id } => {
@@ -158,7 +158,7 @@ impl Actor for ControlManager {
                                     trace_ctx: Some(span.context()),
                                 },
                             },
-                            Err(e) => todo!(),
+                            Err(_e) => todo!(),
                         }
                     }
                     // ControlOp::ListSubscribers { topic } => {

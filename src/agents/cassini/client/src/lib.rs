@@ -20,7 +20,8 @@ pub const UNEXPECTED_DISCONNECT: &str = "UNEXPECTED_DISCONNECT";
 pub const REGISTRATION_EXPECTED: &str =
     "Expected client to be registered to conduct this operation.";
 
-///
+pub const CLIENT_DISCONNECTED: &str = "CLIENT_DISCONNECTED";
+
 /// A basse configuration for a TCP Client actor
 pub struct TCPClientConfig {
     pub broker_endpoint: String,
@@ -32,11 +33,7 @@ pub struct TCPClientConfig {
 
 pub enum RegistrationState {
     Unregistered,
-    /// Eventually, we might want to a stronger type definition for the registration token
-    /// perhaps one day we'll treat it as a true secret and add some protections?
-    Registered {
-        registration_id: String,
-    },
+    Registered { registration_id: String },
 }
 
 impl TCPClientConfig {
@@ -159,83 +156,95 @@ impl TcpClientActor {
         let abort = tokio::spawn(async move {
             let mut buf_reader = tokio::io::BufReader::new(reader);
 
-            while let Ok(incoming_msg_length) = buf_reader.read_u32().await {
-                if incoming_msg_length > 0 {
-                    let mut buffer = vec![0; incoming_msg_length as usize];
+            loop {
+                match buf_reader.read_u32().await {
+                    Ok(incoming_msg_length) => {
+                        if incoming_msg_length > 0 {
+                            let mut buffer = vec![0; incoming_msg_length as usize];
 
-                    trace!("Reading {incoming_msg_length} byte(s).");
-                    if let Ok(_) = buf_reader.read_exact(&mut buffer).await {
-                        trace!(
-                            len = incoming_msg_length,
-                            first_16 = ?&buffer[..buffer.len().min(16)],
-                            "Received frame"
-                        );
-
-                        match rkyv::from_bytes::<ClientMessage, Error>(&buffer) {
-                            Ok(message) => {
-                                match message {
-                                    ClientMessage::RegistrationResponse { result } => {
-                                        match result {
-                                            Ok(registration_id) => {
-                                                //emit registration event for consumers
-                                                myself
-                                                    .send_message(
-                                                        TcpClientMessage::RegistrationResponse(
-                                                            registration_id,
-                                                        ),
-                                                    )
-                                                    .expect("Could not forward message to {myself:?");
-                                            }
-                                            Err(e) => {
-                                                info!(
-                                                    "Failed to register session with the server. {e}"
-                                                );
-                                                //TODO: We practically never fail to register unless there's some sort of connection error.
-                                                // Should this change, how do we want to react?
-                                            }
-                                        }
-                                    }
-                                    ClientMessage::PublishResponse {
-                                        topic,
-                                        payload,
-                                        result,
-                                    } => {
-                                        //new message on topic
-                                        if result.is_ok() {
-                                            queue_out
-                                                .send(ClientEvent::MessagePublished { topic, payload });
-                                        } else {
-                                            warn!("Failed to publish message to topic: {topic}");
-                                        }
-                                    }
-                                    ClientMessage::SubscribeAcknowledgment { topic, result } => {
-                                        if result.is_ok() {
-                                            info!("Successfully subscribed to topic: {topic}");
-                                        } else {
-                                            warn!("Failed to subscribe to topic: {topic}, {result:?}");
-                                        }
-                                    }
-
-                                    ClientMessage::UnsubscribeAcknowledgment { topic, result } => {
-                                        if result.is_ok() {
-                                            info!("Successfully unsubscribed from topic: {topic}");
-                                        } else {
-                                            warn!("Failed to unsubscribe from topic: {topic}");
-                                        }
-                                    }
-                                    _ => (),
-                                }
-                            }
-                            Err(e) => {
-                                error!(
-                                    len = buffer.len(),
-                                    first_8 = ?&buffer[..buffer.len().min(8)],
-                                    "{e} Received raw frame"
+                            trace!("Reading {incoming_msg_length} byte(s).");
+                            if let Ok(_) = buf_reader.read_exact(&mut buffer).await {
+                                trace!(
+                                    len = incoming_msg_length,
+                                    first_16 = ?&buffer[..buffer.len().min(16)],
+                                    "Received frame"
                                 );
-                                continue;
+
+                                match rkyv::from_bytes::<ClientMessage, Error>(&buffer) {
+                                    Ok(message) => {
+                                        match message {
+                                            ClientMessage::RegistrationResponse { result } => {
+                                                match result {
+                                                    Ok(registration_id) => {
+                                                        //emit registration event for consumers
+                                                        myself
+                                                            .send_message(
+                                                                TcpClientMessage::RegistrationResponse(
+                                                                    registration_id,
+                                                                ),
+                                                            )
+                                                            .expect("Could not forward message to {myself:?");
+                                                    }
+                                                    Err(e) => {
+                                                        warn!(
+                                                            "Failed to register session with the server. {e}"
+                                                        );
+                                                        //TODO: We practically never fail to register unless there's some sort of connection error.
+                                                        // Should this change, how do we want to react?
+                                                    }
+                                                }
+                                            }
+                                            ClientMessage::PublishResponse {
+                                                topic,
+                                                payload,
+                                                result,
+                                            } => {
+                                                //new message on topic
+                                                if result.is_ok() {
+                                                    queue_out
+                                                        .send(ClientEvent::MessagePublished { topic, payload });
+                                                } else {
+                                                    warn!("Failed to publish message to topic: {topic}");
+                                                }
+                                            }
+                                            ClientMessage::SubscribeAcknowledgment { topic, result } => {
+                                                if result.is_ok() {
+                                                    info!("Successfully subscribed to topic: {topic}");
+                                                } else {
+                                                    warn!("Failed to subscribe to topic: {topic}, {result:?}");
+                                                }
+                                            }
+
+                                            ClientMessage::UnsubscribeAcknowledgment { topic, result } => {
+                                                if result.is_ok() {
+                                                    info!("Successfully unsubscribed from topic: {topic}");
+                                                } else {
+                                                    warn!("Failed to unsubscribe from topic: {topic}");
+                                                }
+                                            }
+                                            _ => (),
+                                        }
+                                    }
+                                    Err(e) => {
+                                        error!(
+                                            len = buffer.len(),
+                                            first_8 = ?&buffer[..buffer.len().min(8)],
+                                            "{e} Received raw frame"
+                                        );
+                                        continue;
+                                    }
+                                }
                             }
                         }
                     }
+                    Err(e) => {
+                        info!("TCP reader terminating: {e}");
+                        queue_out.send(ClientEvent::TransportError {
+                            reason: format!("{UNEXPECTED_DISCONNECT} {e}")
+                        });
+                        break;
+                    }
+
                 }
             }
         })
@@ -248,7 +257,7 @@ impl TcpClientActor {
     pub async fn send_message(
         message: ClientMessage,
         state: &mut TcpClientState,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), ActorProcessingErr> {
         match rkyv::to_bytes::<Error>(&message) {
             Ok(bytes) => {
                 //create new buffer
@@ -262,25 +271,32 @@ impl TcpClientActor {
                 buffer.extend_from_slice(&bytes);
 
                 //write message
-                let unwrapped_writer = state.writer.clone().unwrap();
-                let mut writer = unwrapped_writer.lock().await;
-                if let Err(e) = writer.write_all(&buffer).await {
-                    error!("Failed to flush stream {e}");
-                    return Err(Box::new(e));
+                if let Some(arc_writer) = state.writer.as_ref() {
+                    let mut writer = arc_writer.lock().await;
+                    writer.write_all(&buffer).await?;
+                    writer.flush().await?;
+                    Ok(())
+                } else {
+                    let reason = "No writer assigned to client!".to_string();
+                    return Err(ActorProcessingErr::from(reason));
                 }
-
-                if let Err(e) = writer.flush().await {
-                    error!("Failed to flush stream {e}");
-                    return Err(Box::new(e));
-                }
-
-                Ok(())
             }
             Err(e) => {
                 warn!("Failed to serialize message. {e}");
-                Err(Box::new(e))
+                Err(ActorProcessingErr::from(e))
             }
         }
+    }
+
+    pub fn emit_transport_err_and_stop(
+        myself: ActorRef<TcpClientMessage>,
+        state: &mut TcpClientState,
+        reason: String,
+    ) {
+        state.events_output.send(ClientEvent::TransportError {
+            reason: reason.clone(),
+        });
+        myself.stop(Some(reason));
     }
 }
 
@@ -388,7 +404,7 @@ impl Actor for TcpClientActor {
         info!("Connecting to {addr}");
 
         let tls_stream = TcpClientActor::connect_with_backoff(
-            addr,
+            addr.clone(),
             state.server_name.clone(),
             &state.client_config,
         )
@@ -399,7 +415,7 @@ impl Actor for TcpClientActor {
         state.reader = Some(reader);
         state.writer = Some(Arc::new(Mutex::new(writer)));
 
-        info!("Successfully connected to Cassini. Listening for messages.");
+        info!("Successfully connected to {addr}. Listening for messages.");
 
         self.spawn_reader(myself.clone(), state)?;
 
@@ -433,7 +449,7 @@ impl Actor for TcpClientActor {
                     registration_id: None,
                 };
                 if let Err(e) = TcpClientActor::send_message(envelope, state).await {
-                    myself.stop(Some(format!("Unexpected error sending message. {e}")))
+                    TcpClientActor::emit_transport_err_and_stop(myself, state, e.to_string())
                 }
             }
             // We might've initialized with a registration id,
@@ -443,7 +459,7 @@ impl Actor for TcpClientActor {
                     registration_id: Some(registration_id.to_owned()),
                 };
                 if let Err(e) = TcpClientActor::send_message(envelope, state).await {
-                    myself.stop(Some(format!("Unexpected error sending message. {e}")))
+                    TcpClientActor::emit_transport_err_and_stop(myself, state, e.to_string())
                 }
             }
             (
@@ -482,7 +498,11 @@ impl Actor for TcpClientActor {
                             registration_id: registration_id.to_owned(),
                         };
                         if let Err(e) = TcpClientActor::send_message(envelope, state).await {
-                            myself.stop(Some(format!("Unexpected error sending message. {e}")))
+                            TcpClientActor::emit_transport_err_and_stop(
+                                myself,
+                                state,
+                                e.to_string(),
+                            );
                         }
                     }
                     TcpClientMessage::Subscribe(topic) => {
@@ -491,7 +511,11 @@ impl Actor for TcpClientActor {
                             topic,
                         };
                         if let Err(e) = TcpClientActor::send_message(envelope, state).await {
-                            myself.stop(Some(format!("Unexpected error sending message. {e}")))
+                            TcpClientActor::emit_transport_err_and_stop(
+                                myself,
+                                state,
+                                e.to_string(),
+                            );
                         }
                     }
                     TcpClientMessage::Disconnect => {
@@ -499,12 +523,16 @@ impl Actor for TcpClientActor {
                         let envelope =
                             ClientMessage::DisconnectRequest(Some(registration_id.to_owned()));
                         if let Err(e) = TcpClientActor::send_message(envelope, state).await {
-                            myself.stop(Some(format!("Unexpected error sending message. {e}")))
+                            TcpClientActor::emit_transport_err_and_stop(
+                                myself.clone(),
+                                state,
+                                e.to_string(),
+                            );
                         }
                         // if we're disconnecting explicitly, we're  good to just stop here.
                         state.abort_handle.as_ref().map(|handle| handle.abort());
 
-                        myself.stop(None);
+                        myself.stop(Some(CLIENT_DISCONNECTED.to_string()));
                     }
                     TcpClientMessage::UnsubscribeRequest(topic) => {
                         let envelope = ClientMessage::UnsubscribeRequest {
@@ -512,7 +540,11 @@ impl Actor for TcpClientActor {
                             topic,
                         };
                         if let Err(e) = TcpClientActor::send_message(envelope, state).await {
-                            myself.stop(Some(format!("Unexpected error sending message. {e}")))
+                            TcpClientActor::emit_transport_err_and_stop(
+                                myself.clone(),
+                                state,
+                                e.to_string(),
+                            );
                         }
                     }
                     TcpClientMessage::ErrorMessage(error) => {
@@ -525,7 +557,11 @@ impl Actor for TcpClientActor {
                         };
 
                         if let Err(e) = TcpClientActor::send_message(envelope, state).await {
-                            myself.stop(Some(format!("Unexpected error sending message. {e}")))
+                            TcpClientActor::emit_transport_err_and_stop(
+                                myself.clone(),
+                                state,
+                                e.to_string(),
+                            );
                         }
                     }
                     TcpClientMessage::ListTopics => {
@@ -535,10 +571,14 @@ impl Actor for TcpClientActor {
                         };
 
                         if let Err(e) = TcpClientActor::send_message(envelope, state).await {
-                            myself.stop(Some(format!("Unexpected error sending message. {e}")))
+                            TcpClientActor::emit_transport_err_and_stop(
+                                myself.clone(),
+                                state,
+                                e.to_string(),
+                            );
                         }
                     }
-                    // other variats handled elsewhere
+                    // other variants handled elsewhere
                     _ => (),
                 }
             }

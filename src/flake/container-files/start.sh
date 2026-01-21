@@ -55,6 +55,7 @@ create_user() {
 
     # set environment variable explicitly
     export $USER=$user
+
 }
 
 ##############################################################################
@@ -73,6 +74,13 @@ else
     DEV_UID=0
     DEV_GID=0
 fi
+
+# Ensure a container-owned cargo target dir (avoid writing into host bind-mount).
+CARGO_TARGET_DIR="/var/cache/cargo-target"
+mkdir -p "$CARGO_TARGET_DIR"
+chown "$DEV_UID:$DEV_GID" "$CARGO_TARGET_DIR"
+chmod 0755 "$CARGO_TARGET_DIR"
+export CARGO_TARGET_DIR
 
 ##############################################################################
 # 3. build users

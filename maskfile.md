@@ -25,7 +25,7 @@ Our team primarily uses `podman` as a container runtime. So feel free to `alias`
   echo "building cassini image..."
   nix build .#polarPkgs.cassini.cassiniImage -o cassini
   echo "loading image..."
-  podman load < result
+  podman load < cassini 
   ~~~
 
 ### gitlab
@@ -50,7 +50,7 @@ Our team primarily uses `podman` as a container runtime. So feel free to `alias`
   podman load < kube-consumer
   ~~~
 
-## start-dev
+## start-dev (public_key)
   > Enters the Polar Dev container.
 
   This command mounts your project directory into the
@@ -58,8 +58,19 @@ Our team primarily uses `podman` as a container runtime. So feel free to `alias`
   project files within the container.
 
 
-  ~~~sh
-  podman run --rm --name polar-dev --user 0 --userns=keep-id -it -v $(pwd):/workspace:rw -p 2222:2223 polar-dev:0.1.0
+  ~~~sh 
+    podman run --it \
+    --user 0 --userns=keep-id \
+    -v ./:/workspace:rw \
+    -p 2222:2223 \
+    -e CREATE_USER="$USER" \
+    -e CREATE_UID="$(id -u)" \
+    -e CREATE_GID="$(id -g)" \
+    -e DROPBEAR_ENABLE=1 \
+    -e DROPBEAR_PORT=2223 \
+    -e AUTHORIZED_KEYS_B64="$(base64 -w0 $public_key)" \
+    polar-dev:latest
+    
   ~~~
 
 ## start-compose
@@ -98,7 +109,6 @@ nix build .#polarPkgs.cassini.cassini .#polarPkgs.cassini.harnessProducer .#pola
   See [the deployment docs](src/deploy/README.md) for details.
 
 ~~~sh
-    export SECRETS_MODE=plaintext
     sh $MASKFILE_DIR/scripts/render-manifests.sh "$MASKFILE_DIR/src/deploy/$environment" $MASKFILE_DIR/$output_dir
 ~~~
 

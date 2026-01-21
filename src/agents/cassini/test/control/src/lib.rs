@@ -1,4 +1,3 @@
-use cassini_types::{SessionDetails, SessionMap};
 use clap::Parser;
 use harness_common::{Expectation, MessagePattern, ProducerConfig};
 use ractor::ActorRef;

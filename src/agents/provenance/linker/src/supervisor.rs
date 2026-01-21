@@ -17,7 +17,7 @@ use ractor::{
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::error;
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 
 // === Supervisor state ===
 pub struct ProvenanceSupervisorState {

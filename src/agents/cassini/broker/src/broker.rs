@@ -456,6 +456,7 @@ impl Actor for Broker {
             }
 
             BrokerMessage::DisconnectRequest {
+                reason,
                 client_id,
                 registration_id,
                 trace_ctx,
@@ -470,6 +471,7 @@ impl Actor for Broker {
 
                 if let Some(subscriber_mgr) = &state.subscriber_mgr {
                     if let Err(e) = subscriber_mgr.send_message(BrokerMessage::DisconnectRequest {
+                        reason: reason.clone(),
                         client_id: client_id.clone(),
                         registration_id: registration_id.clone(),
                         trace_ctx: Some(span.context()),
@@ -482,6 +484,7 @@ impl Actor for Broker {
 
                 if let Some(listener_mgr) = &state.listener_mgr {
                     if let Err(e) = listener_mgr.send_message(BrokerMessage::DisconnectRequest {
+                        reason,
                         client_id: client_id.clone(),
                         registration_id,
                         trace_ctx: Some(span.context()),

@@ -10,7 +10,7 @@ use polar::{
     get_file_as_byte_vec, ProvenanceEvent, Supervisor, SupervisorMessage,
     PROVENANCE_DISCOVERY_TOPIC, PROVENANCE_LINKER_TOPIC,
 };
-use provenance_common::{RESOLVER_CLIENT_NAME, RESOLVER_SUPERVISOR_NAME};
+use provenance_common::RESOLVER_SUPERVISOR_NAME;
 use ractor::{
     async_trait, registry::where_is, Actor, ActorProcessingErr, ActorRef, OutputPort,
     SupervisionEvent,
