@@ -70,11 +70,21 @@ pub struct ControlClientConfig {
 impl ControlClientConfig {
     /// Read filepaths from the environment and return. If we can't read these, we can't start
     pub fn new() -> Result<Self, ActorProcessingErr> {
-        let client_certificate_path = env::var("TLS_CLIENT_CERT")?;
-        let client_key_path = env::var("TLS_CLIENT_KEY")?;
-        let ca_certificate_path = env::var("TLS_CA_CERT")?;
-        let controller_addr = env::var("CONTROLLER_ADDR")?;
-        let server_name = env::var("HARNESS_SERVER_NAME")?;
+        let client_certificate_path = env::var("TLS_CLIENT_CERT")
+            .map_err(|_| error!("TLS_CLIENT_CERT not set"))
+            .unwrap();
+        let client_key_path = env::var("TLS_CLIENT_KEY")
+            .map_err(|_| error!("TLS_CLIENT_KEY not set"))
+            .unwrap();
+        let ca_certificate_path = env::var("TLS_CA_CERT")
+            .map_err(|_| error!("TLS_CA_CERT not set"))
+            .unwrap();
+        let controller_addr = env::var("CONTROLLER_ADDR")
+            .map_err(|_| error!("CONTROLLER_ADDR not set"))
+            .unwrap();
+        let server_name = env::var("HARNESS_SERVER_NAME")
+            .map_err(|_| error!("HARNESS_SERVER_NAME not set"))
+            .unwrap();
 
         Ok(ControlClientConfig {
             controller_addr,
@@ -191,9 +201,9 @@ impl ControlClient {
                                 match rkyv::from_bytes::<ControllerCommand, rkyv::rancor::Error>(
                                     &buffer,
                                 ) {
-                                    Ok(message) => {
-                                        //TODO: We'll probably pipe these upwards to the supervisor.
-                                        todo!("handle control commands");
+                                    Ok(command) => {
+                                        // pipe up to supervisor
+                                        queue_out.send(ClientEvent::CommandReceived { command });
                                     }
                                     Err(e) => {
                                         error!(

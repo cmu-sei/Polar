@@ -18,7 +18,6 @@ pub struct SinkService;
 
 pub struct SinkServiceState {
     harness_client: ActorRef<ControlClientMsg>,
-    timeout_token: CancellationToken,
 }
 
 #[async_trait]
@@ -57,13 +56,9 @@ impl Actor for SinkService {
             },
             myself.clone().into(),
         )
-        .await
-        .expect("Expected to start tcp client");
+        .await?;
 
-        Ok(SinkServiceState {
-            harness_client,
-            timeout_token: CancellationToken::new(),
-        })
+        Ok(SinkServiceState { harness_client })
     }
 
     async fn post_start(
@@ -105,11 +100,6 @@ impl Actor for SinkService {
                     actor_cell.get_name(),
                     actor_cell.get_id()
                 );
-                // TODO: When this happens, send a message to the producer client
-                // should we
-                // Kill the whole test
-                // kill the corresponding producer? if so how?
-                // do nothing?
             }
             SupervisionEvent::ProcessGroupChanged(_) => (),
         }
@@ -177,7 +167,7 @@ async fn main() {
         (),
     )
     .await
-    .expect("Expected to start sink server");
+    .expect("Expected to start sink supervisor");
 
     handle.await.unwrap();
 }
