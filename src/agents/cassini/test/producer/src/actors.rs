@@ -2,8 +2,7 @@
 use cassini_client::{TCPClientConfig, TcpClientActor, TcpClientArgs, TcpClientMessage};
 use fake::Fake;
 use harness_common::{
-    client::{HarnessClient, HarnessClientArgs, HarnessClientConfig, HarnessClientMessage},
-    compute_checksum, Envelope, MessagePattern, ProducerConfig,
+    Envelope, MessagePattern, ProducerConfig, client::{ControlClientArgs, ControlClientConfig, HarnessClient, HarnessClientArgs, HarnessClientConfig, HarnessClientMessage}, compute_checksum
 };
 use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef, OutputPort, SupervisionEvent};
 use serde::Serialize;
@@ -32,7 +31,7 @@ pub struct RootActor;
 pub struct RootActorState {
     harness_client: ActorRef<HarnessClientMessage>,
     producers: u32,
-    registration: harness_common::ConnectionState,
+    registration: harness_common::,
     timeout_token: CancellationToken,
 }
 
@@ -42,7 +41,7 @@ pub struct RootActorArguments {
 
 #[async_trait]
 impl Actor for RootActor {
-    type Msg = HarnessControllerMessage;
+    type Msg = ControllerCommand;
     type State = RootActorState;
     type Arguments = RootActorArguments;
 
@@ -53,6 +52,13 @@ impl Actor for RootActor {
     ) -> Result<Self::State, ActorProcessingErr> {
         tracing::info!("RootActor: Started {myself:?}");
 
+        let events_output = OutputPort::default();
+
+        events_output.subscribe(myself.clone(), |event| Some());
+        let args = ControlClientArgs {
+            config: ControlClientConfig::new(),
+
+        }
         let (harness_client, _) = Actor::spawn_linked(
             Some("cassini.harness.producer.client".to_string()),
             HarnessClient,

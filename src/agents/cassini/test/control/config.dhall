@@ -25,28 +25,32 @@ let Expectation =
       | OrderingPreserved : { key : Text }
       >
 
-let Phase =
+let Test =
       { name : Text
-      , producers : List Producer
-      , expectations : List Expectation
+      , producer : Producer
+      --, expectations : List Expectation
       }
 
-let TestPlan = { name : Text, phases : List Phase }
+let TestPlan = { name : Text, tests : List Test }
 
-let producers =
-      [ { topic = "steady"
+--TODO: Rather than provide a list of producer configuration, which really act as
+--multiple actors. We should have just one producer configuration that should contain the same params
+--This will simplify the producer agent, as now it will not have to supervise multiple "producer" actors
+--that all used the same client.
+let producer =
+       { topic = "steady"
         , message_size = 4096
         , duration = 60
         , pattern = Pattern.Drip { idle_time_seconds = 1 }
         }
-      ]
 
-let expectations = [ Expectation.AtLeast { messages = 1, within_seconds = 30 } ]
 
-let phases = [ { name = "load test", producers, expectations } ]
+--let expectations = [ Expectation.AtLeast { messages = 1, within_seconds = 30 } ]
+
+let tests = [ { name = "load test", producer } ]
 
 let plan
     : TestPlan
-    = { name = "Polar test plan", phases }
+    = { name = "Polar test plan", tests }
 
 in  plan

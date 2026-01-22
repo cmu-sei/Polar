@@ -1,22 +1,22 @@
-use crate::{Phase, TestPlan};
+use crate::{Test, TestPlan};
 
+use cassini_client::{TCPClientConfig, TcpClientActor, TcpClientArgs, TcpClientMessage};
+use cassini_types::{ClientEvent, ClientMessage, ControlError, ControlResult, SessionDetails};
+use harness_common::{AgentRole, ControllerCommand};
 use ractor::{
     async_trait,
     concurrency::{Instant, JoinHandle},
     Actor, ActorProcessingErr, ActorRef, OutputPort, SupervisionEvent,
 };
-use std::collections::HashSet;
-use std::sync::Arc;
-use std::{process::Stdio, time::Duration};
-
-use cassini_client::{TCPClientConfig, TcpClientActor, TcpClientArgs, TcpClientMessage};
-use cassini_types::{ClientEvent, ClientMessage, ControlError, ControlResult, SessionDetails};
+use rkyv::rancor::Error;
+use rkyv::rancor::Source;
 use rustls::{
     pki_types::{pem::PemObject, CertificateDer, PrivateKeyDer},
     server::WebPkiClientVerifier,
     RootCertStore, ServerConfig,
 };
-
+use std::{f64::consts::E, sync::Arc};
+use std::{process::Stdio, time::Duration};
 use tokio::process::Command;
 use tokio::{
     io::{split, AsyncReadExt, AsyncWriteExt, BufWriter, ReadHalf, WriteHalf},
@@ -28,25 +28,35 @@ use tokio_rustls::{server::TlsStream, TlsAcceptor};
 use tracing::{debug, error, info, warn};
 pub const SINK_CLIENT_SESSION: &str = "cassini.harness.session";
 
-#[derive(Debug, Clone)]
+struct TestState {
+    producer: Option<ActorRef<ClientSessionMessage>>,
+    producer_complete: bool,
+
+    sink: Option<ActorRef<ClientSessionMessage>>,
+    sink_complete: bool,
+    // TODO: metrics
+}
+
+#[derive(Clone)]
 pub enum HarnessControllerMessage {
-    Initialize,
-    ClientEvent(ClientEvent),
+    ClientConnected {
+        client_id: String,
+        // peer_addr: String,
+    },
+    TestEvent(TestEvent),
+    CassiniEvent(ClientEvent),
     StartTest,
     AdvanceTest,
-    StepCompleted,
-    ShutdownAck,
-    Error { reason: String },
 }
 
 pub struct HarnessController;
 
 impl HarnessController {
     /// Helper to run an instance of the broker in another thread.
-    pub async fn spawn_broker(broker_path: String) -> AbortHandle {
+    pub async fn spawn_process(binary_path: String) -> AbortHandle {
         return tokio::spawn(async move {
-            tracing::info!("Spawning broker...");
-            let mut child = Command::new(broker_path)
+            tracing::info!("Spawning binary at {binary_path}...");
+            let mut child = Command::new(binary_path)
                 .stdout(Stdio::inherit())
                 .stderr(Stdio::inherit())
                 .spawn()
@@ -56,6 +66,7 @@ impl HarnessController {
         })
         .abort_handle();
     }
+
     /// Called once registration is observed; kicks off the plan execution
     fn start_test(
         &self,
@@ -78,7 +89,7 @@ impl HarnessController {
 
         // Subscribe to events (registration strings, etc.)
         events_output.subscribe(myself.clone(), |event| {
-            Some(HarnessControllerMessage::ClientEvent(event))
+            Some(HarnessControllerMessage::CassiniEvent(event))
         });
 
         let config = TCPClientConfig::new()?;
@@ -104,14 +115,15 @@ impl HarnessController {
 }
 
 pub struct HarnessControllerState {
-    pub current_phase_index: usize,
+    pub current_test_index: usize,
     started: bool,
     client_ref: Option<ActorRef<TcpClientMessage>>,
     bind_addr: String,
     server_config: ServerConfig,
     registration_id: Option<String>,
-    pub current_phase: Option<Phase>,
+    pub current_test: Option<Test>,
     pub test_plan: TestPlan,
+    test_state: Option<TestState>,
     server_handle: Option<AbortHandle>,
     broker: Option<AbortHandle>,
     producer: Option<AbortHandle>,
@@ -193,57 +205,61 @@ impl Actor for HarnessController {
 
         let plan = args.test_plan.clone();
         let cloned_self = myself.clone();
-        // TODO: unfreeze when we're ready to add clients
-        // let server_handle = tokio::spawn(async move {
-        //     while let Ok((stream, peer_addr)) = server.accept().await {
-        //         match acceptor.accept(stream).await {
-        //             Ok(stream) => {
-        //                 let client_id = uuid::Uuid::new_v4().to_string();
+        let server_handle = tokio::spawn(async move {
+            while let Ok((stream, peer_addr)) = server.accept().await {
+                match acceptor.accept(stream).await {
+                    Ok(stream) => {
+                        let client_id = uuid::Uuid::new_v4().to_string();
 
-        //                 let (reader, writer) = split(stream);
+                        let (reader, writer) = split(stream);
 
-        //                 let writer = tokio::io::BufWriter::new(writer);
+                        let writer = tokio::io::BufWriter::new(writer);
 
-        //                 debug!("New connection from {peer_addr}");
+                        debug!("New connection from {peer_addr}");
 
-        //                 let listener_args = ClientSessionArguments {
-        //                     writer: Arc::new(Mutex::new(writer)),
-        //                     reader: Some(reader),
-        //                     // client_id: client_id.clone(),
-        //                 };
+                        let output_port = OutputPort::default();
 
-        //                 //start listener actor to handle connection
-        //                 let (client, _) = Actor::spawn_linked(
-        //                     Some(client_id),
-        //                     ClientSession,
-        //                     listener_args,
-        //                     cloned_self.clone().into(),
-        //                 )
-        //                 .await
-        //                 .expect("Failed to start listener for new connection");
+                        // handle events such as transport errors in actor
+                        output_port.subscribe(myself.clone(), |event| {
+                            Some(HarnessControllerMessage::TestEvent(event))
+                        });
 
-        //                 // send test plan
-        //                 client
-        //                     .cast(ClientSessionMessage::Send(
-        //                         HarnessControllerMessage::TestPlan { plan: plan.clone() },
-        //                     ))
-        //                     .ok();
-        //             }
-        //             Err(e) => {
-        //                 //We probably got pinged or something, ignore but log the attempt.
-        //                 tracing::warn!("TLS handshake failed from {}: {}", peer_addr, e);
-        //             }
-        //         }
-        //     }
-        // })
-        // .abort_handle();
+                        let listener_args = ClientSessionArguments {
+                            writer: Arc::new(Mutex::new(writer)),
+                            reader: Some(reader),
+                            client_id: client_id.clone(),
+                            output_port,
+                        };
+
+                        //start listener actor to handle connection
+                        let (_client, _) = Actor::spawn_linked(
+                            Some(client_id.clone()),
+                            ClientSession,
+                            listener_args,
+                            cloned_self.clone().into(),
+                        )
+                        .await
+                        .expect("Failed to start listener for new connection");
+
+                        myself
+                            .cast(HarnessControllerMessage::ClientConnected { client_id })
+                            .ok();
+                    }
+                    Err(e) => {
+                        //We probably got pinged or something, ignore but log the attempt.
+                        tracing::warn!("TLS handshake failed from {}: {}", peer_addr, e);
+                    }
+                }
+            }
+        })
+        .abort_handle();
 
         //set up state object
         let state = HarnessControllerState {
             client_ref: None,
             started: false,
-            current_phase_index: 0,
-            current_phase: None,
+            current_test_index: 0,
+            current_test: None,
             registration_id: None,
             bind_addr: args.bind_addr,
             server_config,
@@ -252,6 +268,7 @@ impl Actor for HarnessController {
             broker: None,
             producer: None,
             sink: None,
+            test_state: None,
             sink_path: args.sink_path,
             broker_path: args.broker_path,
             producer_path: args.producer_path,
@@ -268,7 +285,7 @@ impl Actor for HarnessController {
         debug!("{myself:?} started.");
 
         tracing::info!("Starting cassini server...");
-        let broker = HarnessController::spawn_broker(state.broker_path.clone()).await;
+        let broker = HarnessController::spawn_process(state.broker_path.clone()).await;
         state.broker = Some(broker.clone());
 
         // Check readiness of the broker. Here's where we should open a connection and await registration to complete.
@@ -350,7 +367,7 @@ impl Actor for HarnessController {
         debug!("{myself:?} Received a message");
 
         match message {
-            HarnessControllerMessage::ClientEvent(event) => {
+            HarnessControllerMessage::CassiniEvent(event) => {
                 match event {
                     ClientEvent::Registered { registration_id } => {
                         info!("Controller registered: {}", registration_id);
@@ -369,30 +386,135 @@ impl Actor for HarnessController {
                     _ => (),
                 }
             }
+            HarnessControllerMessage::TestEvent(event) => match event {
+                TestEvent::CommandReceived { reply_to, command } => match command {
+                    ControllerCommand::Hello { role } => match role {
+                        AgentRole::Producer => {
+                            debug!("Received hello from producer");
 
+                            if let Some(test) = state.test_plan.tests.get(state.current_test_index)
+                            {
+                                state
+                                    .test_state
+                                    .as_mut()
+                                    .map(|state| state.producer = Some(reply_to.clone()));
+
+                                let topic = test.producer.topic.clone();
+                                let reply = ControllerCommand::ProducerConfig {
+                                    producer: test.producer.clone(),
+                                };
+
+                                reply_to.cast(ClientSessionMessage::Send(reply)).ok();
+                            } else {
+                                error!("No test found for current index!");
+                                return Err(ActorProcessingErr::from(
+                                    "No test configured.".to_string(),
+                                ));
+                            }
+                        }
+                        AgentRole::Sink => {
+                            debug!("Received hello from sink");
+                            if let Some(test) = state.test_plan.tests.get(state.current_test_index)
+                            {
+                                state
+                                    .test_state
+                                    .as_mut()
+                                    .map(|state| state.sink = Some(reply_to.clone()));
+
+                                let topic = test.producer.topic.clone();
+                                let reply = ControllerCommand::SinkTopic { topic };
+
+                                reply_to.cast(ClientSessionMessage::Send(reply)).ok();
+                            } else {
+                                error!("No test found for current index!");
+                                return Err(ActorProcessingErr::from(
+                                    "No test configured.".to_string(),
+                                ));
+                            }
+                        }
+                    },
+                    ControllerCommand::TestComplete { role, .. } => {
+                        if let Some(test_state) = state.test_state.as_mut() {
+                            match role {
+                                AgentRole::Producer => {
+                                    debug!("Producer agent completed task");
+
+                                    test_state.producer_complete = true;
+                                }
+                                AgentRole::Sink => {
+                                    debug!("Sink agent completed task");
+                                    test_state.sink_complete = true;
+                                }
+                            }
+                            // if test is finished, advance to next phase
+                            // otherwise wait for the other to finish.
+                            if test_state.producer_complete == true
+                                && test_state.sink_complete == true
+                            {
+                                debug!("Test {} completed!", state.current_test_index);
+                                myself.cast(HarnessControllerMessage::AdvanceTest).ok();
+                            } else {
+                                debug!("Waiting for other agent to complete");
+                            }
+                        }
+                    }
+                    _ => (),
+                },
+                TestEvent::TransportError { client_id, reason } => {
+                    error!("client {client_id} encountered an error {reason} stopping test");
+                    return Err(ActorProcessingErr::from(reason));
+                }
+            },
             HarnessControllerMessage::StartTest => {
-                if state.started {
-                    // idempotent
-                } else {
+                if !state.started {
                     state.started = true;
+
+                    // start sink
+                    let sink = HarnessController::spawn_process(state.sink_path.clone()).await;
+
+                    // start producer
+                    let producer =
+                        HarnessController::spawn_process(state.producer_path.clone()).await;
+
+                    // init test state, will be updated when agents handshake
+                    state.test_state = Some(TestState {
+                        producer: None,
+                        sink: None,
+                        producer_complete: false,
+                        sink_complete: false,
+                    });
                     // ensure index starts at 0
-                    state.current_phase_index = 0;
+                    // state.current_test_index = 0;
                     // start processing
                     // schedule async evaluation of next step
-                    let _ = myself.cast(HarnessControllerMessage::AdvanceTest);
+                    // let _ = myself.cast(HarnessControllerMessage::AdvanceTest);
+                } else {
+                    error!("Received start directive during active test. Stopping.");
+                    myself.stop(Some("Duplicate start directive".to_string()));
                 }
             }
 
             HarnessControllerMessage::AdvanceTest => {
+                // start sink
+
+                // start producer
+
                 // TODO: process next step
                 todo!("implement phase orchestration");
-            }
+                // we need to do a few things within each phase
+                // start sinks with their topics
+                // start producers
+                // wait until producers announce completion
+                // wait until sinks announce completion of validation checks
+                // advance to next phase
+                // Reuse the broker instance between phases or restart
+                // How do we wait for handshakes from producers?
+                //
 
-            HarnessControllerMessage::ShutdownAck => {
-                // finish test
-                myself.stop(Some("TEST_COMPLETE".to_string()));
+                //
+                state.current_test_index += 1;
+                let _ = myself.cast(HarnessControllerMessage::AdvanceTest);
             }
-
             _ => (),
         }
 
@@ -400,170 +522,193 @@ impl Actor for HarnessController {
     }
 }
 
-// struct ClientSession;
+struct ClientSession;
 
-// enum ClientSessionMessage {
-//     Send(HarnessControllerMessage),
-// }
+/// events that can occur related to the client session
+#[derive(Clone)]
+enum TestEvent {
+    CommandReceived {
+        reply_to: ActorRef<ClientSessionMessage>,
+        command: ControllerCommand,
+    },
+    TransportError {
+        client_id: String,
+        reason: String,
+    },
+}
 
-// struct ClientSessionState {
-//     writer: Arc<Mutex<BufWriter<WriteHalf<TlsStream<TcpStream>>>>>,
-//     reader: Option<ReadHalf<TlsStream<TcpStream>>>,
-//     task_handle: Option<JoinHandle<()>>,
-//     // output_port: Arc<OutputPort<SinkCommand>>,
-// }
+enum ClientSessionMessage {
+    Send(ControllerCommand),
+}
 
-// struct ClientSessionArguments {
-//     writer: Arc<Mutex<BufWriter<WriteHalf<TlsStream<TcpStream>>>>>,
-//     reader: Option<ReadHalf<TlsStream<TcpStream>>>,
-//     // output_port: Arc<OutputPort<SinkCommand>>,
-// }
+struct ClientSessionState {
+    writer: Arc<Mutex<BufWriter<WriteHalf<TlsStream<TcpStream>>>>>,
+    reader: Option<ReadHalf<TlsStream<TcpStream>>>,
+    task_handle: Option<JoinHandle<()>>,
+    client_id: String,
+    output_port: Arc<OutputPort<TestEvent>>,
+}
 
-// impl ClientSession {
-//     /// Helper fn to write messages to client
-//     ///
-//     /// writing binary data over the wire requires us to be specific about what we expect on the other side. So we note the length of the message
-//     /// we intend to send and write the amount to the *front* of the buffer to be read first, then write the actual message data to the buffer to be deserialized.
-//     ///
-//     async fn write(
-//         message: HarnessControllerMessage,
-//         writer: Arc<Mutex<BufWriter<WriteHalf<TlsStream<TcpStream>>>>>,
-//     ) -> Result<(), Error> {
-//         match rkyv::to_bytes::<Error>(&message) {
-//             Ok(bytes) => {
-//                 //create new buffer
-//                 let mut buffer = Vec::new();
+struct ClientSessionArguments {
+    writer: Arc<Mutex<BufWriter<WriteHalf<TlsStream<TcpStream>>>>>,
+    reader: Option<ReadHalf<TlsStream<TcpStream>>>,
+    client_id: String,
+    output_port: OutputPort<TestEvent>,
+}
 
-//                 //get message length as header
-//                 let len = bytes.len().to_be_bytes();
-//                 buffer.extend_from_slice(&len);
+impl ClientSession {
+    /// Helper fn to write messages to client
+    ///
+    /// writing binary data over the wire requires us to be specific about what we expect on the other side. So we note the length of the message
+    /// we intend to send and write the amount to the *front* of the buffer to be read first, then write the actual message data to the buffer to be deserialized.
+    ///
+    async fn write(
+        message: ControllerCommand,
+        writer: Arc<Mutex<BufWriter<WriteHalf<TlsStream<TcpStream>>>>>,
+    ) -> Result<(), Error> {
+        match rkyv::to_bytes::<Error>(&message) {
+            Ok(bytes) => {
+                //create new buffer
+                let mut buffer = Vec::new();
 
-//                 //add message to buffer
-//                 buffer.extend_from_slice(&bytes);
+                //get message length as header
+                let len = bytes.len().to_be_bytes();
+                buffer.extend_from_slice(&len);
 
-//                 tokio::spawn(async move {
-//                     let mut writer = writer.lock().await;
-//                     if let Err(e) = writer.write_all(&buffer).await {
-//                         warn!("Failed to send message to client {e}");
-//                         return Err(rancor::Error::new(e));
-//                     }
-//                     Ok(if let Err(e) = writer.flush().await {
-//                         return Err(rancor::Error::new(e));
-//                     })
-//                 })
-//                 .await
-//                 .expect("Expected write thread to finish")
-//             }
-//             Err(e) => Err(e),
-//         }
-//     }
-// }
+                //add message to buffer
+                buffer.extend_from_slice(&bytes);
 
-// #[async_trait]
-// impl Actor for ClientSession {
-//     type Msg = ClientSessionMessage;
-//     type State = ClientSessionState;
-//     type Arguments = ClientSessionArguments;
+                tokio::spawn(async move {
+                    let mut writer = writer.lock().await;
+                    if let Err(e) = writer.write_all(&buffer).await {
+                        warn!("Failed to send message to client {e}");
+                        return Err(Error::new(e));
+                    }
+                    Ok(if let Err(e) = writer.flush().await {
+                        return Err(Error::new(e));
+                    })
+                })
+                .await
+                .expect("Expected write thread to finish")
+            }
+            Err(e) => Err(e),
+        }
+    }
+}
 
-//     async fn pre_start(
-//         &self,
-//         _: ActorRef<Self::Msg>,
-//         args: ClientSessionArguments,
-//     ) -> Result<Self::State, ActorProcessingErr> {
-//         Ok(ClientSessionState {
-//             writer: args.writer,
-//             reader: args.reader,
-//             task_handle: None,
-//             // output_port: args.output_port,
-//         })
-//     }
+#[async_trait]
+impl Actor for ClientSession {
+    type Msg = ClientSessionMessage;
+    type State = ClientSessionState;
+    type Arguments = ClientSessionArguments;
 
-//     async fn post_stop(
-//         &self,
-//         _myself: ActorRef<Self::Msg>,
-//         state: &mut Self::State,
-//     ) -> Result<(), ActorProcessingErr> {
-//         // stop listening
-//         //
-//         state.task_handle.as_ref().map(|handle| {
-//             handle.abort();
-//         });
-//         Ok(())
-//     }
+    async fn pre_start(
+        &self,
+        _: ActorRef<Self::Msg>,
+        args: ClientSessionArguments,
+    ) -> Result<Self::State, ActorProcessingErr> {
+        Ok(ClientSessionState {
+            writer: args.writer,
+            reader: args.reader,
+            task_handle: None,
+            client_id: args.client_id,
+            output_port: Arc::new(args.output_port),
+        })
+    }
 
-//     async fn post_start(
-//         &self,
-//         myself: ActorRef<Self::Msg>,
-//         state: &mut Self::State,
-//     ) -> Result<(), ActorProcessingErr> {
-//         let reader = state.reader.take().expect("Reader already taken!");
-//         let cloned_self = myself.clone();
+    async fn post_stop(
+        &self,
+        _myself: ActorRef<Self::Msg>,
+        state: &mut Self::State,
+    ) -> Result<(), ActorProcessingErr> {
+        // stop listening
+        //
+        state.task_handle.as_ref().map(|handle| {
+            handle.abort();
+        });
+        Ok(())
+    }
 
-//         //start listening
-//         debug!("client listening...");
-//         let handle = tokio::spawn(async move {
-//             let mut buf_reader = tokio::io::BufReader::new(reader);
-//             // parse incoming message length, this tells us what size of a message to expect.
-//             while let Ok(incoming_msg_length) = buf_reader.read_u64().await {
-//                 if incoming_msg_length > 0 {
-//                     // create a buffer of exact size, and read data in.
-//                     let mut buffer = vec![0u8; incoming_msg_length as usize];
-//                     if let Ok(_) = buf_reader.read_exact(&mut buffer).await {
-//                         // use unsafe API for maximum performance
-//                         match rkyv::access::<ArchivedHarnessControllerMessage, Error>(&buffer[..]) {
-//                             Ok(archived) => {
-//                                 // deserialize back to the original type
-//                                 if let Ok(deserialized) =
-//                                     deserialize::<HarnessControllerMessage, Error>(archived)
-//                                 {
-//                                     cloned_self.try_get_supervisor().map(|service| {
-//                                         service
-//                                             .send_message(deserialized)
-//                                             .expect("Expected to forward command upwards");
-//                                     });
-//                                 }
-//                             }
-//                             Err(e) => {
-//                                 warn!("Failed to parse message: {e}");
-//                             }
-//                         }
-//                     }
-//                 }
-//             }
-//         });
+    async fn post_start(
+        &self,
+        myself: ActorRef<Self::Msg>,
+        state: &mut Self::State,
+    ) -> Result<(), ActorProcessingErr> {
+        let reader = state.reader.take().expect("Reader already taken!");
+        let cloned_self = myself.clone();
+        let output_port = state.output_port.clone();
+        let client_id = state.client_id.clone();
+        //start listening
+        debug!("client listening...");
+        let handle = tokio::spawn(async move {
+            let mut buf_reader = tokio::io::BufReader::new(reader);
+            // parse incoming message length, this tells us what size of a message to expect.
+            while let Ok(incoming_msg_length) = buf_reader.read_u64().await {
+                if incoming_msg_length > 0 {
+                    // create a buffer of exact size, and read data in.
+                    let mut buffer = vec![0u8; incoming_msg_length as usize];
+                    if let Ok(_) = buf_reader.read_exact(&mut buffer).await {
+                        // use unsafe API for maximum performance
+                        match rkyv::access::<
+                            harness_common::ArchivedControllerCommand,
+                            rkyv::rancor::Error,
+                        >(&buffer[..])
+                        {
+                            Ok(archived) => {
+                                // deserialize back to the original type
+                                if let Ok(command) = rkyv::deserialize::<
+                                    ControllerCommand,
+                                    rkyv::rancor::Error,
+                                >(archived)
+                                {
+                                    let message = HarnessControllerMessage::TestEvent(
+                                        TestEvent::CommandReceived {
+                                            reply_to: myself.clone(),
+                                            command,
+                                        },
+                                    );
 
-//         // add join handle to state, we'll need to cancel it if a client disconnects
-//         state.task_handle = Some(handle);
+                                    cloned_self.try_get_supervisor().map(|service| {
+                                        service
+                                            .send_message(message)
+                                            .expect("Expected to forward command upwards");
+                                    });
+                                }
+                            }
+                            Err(e) => {
+                                warn!("Failed to parse message: {e}");
+                            }
+                        }
+                    }
+                }
+            }
 
-//         // // send client service its client_id
-//         // let client_id = myself
-//         //     .get_name()
-//         //     .expect("Expected client session to be named");
+            // TODO: emit an event alerting the server the connection was interrupted.
+            output_port.send(TestEvent::TransportError {
+                client_id,
+                reason: "connection interrupted".to_string(),
+            });
+        });
 
-//         // debug!("issuing client id.");
-//         // ClientSession::write(
-//         //     HarnessControllerMessage::ClientRegistered(client_id),
-//         //     state.writer.clone(),
-//         // )
-//         // .await
-//         // .ok();
+        // add join handle to state, we'll need to cancel it if a client disconnects
+        state.task_handle = Some(handle);
 
-//         Ok(())
-//     }
+        Ok(())
+    }
 
-//     async fn handle(
-//         &self,
-//         _: ActorRef<Self::Msg>,
-//         message: Self::Msg,
-//         state: &mut Self::State,
-//     ) -> Result<(), ActorProcessingErr> {
-//         match message {
-//             ClientSessionMessage::Send(message) => {
-//                 ClientSession::write(message, Arc::clone(&state.writer))
-//                     .await
-//                     .expect("expected to write message to client.");
-//             }
-//         }
-//         Ok(())
-//     }
-// }
+    async fn handle(
+        &self,
+        _: ActorRef<Self::Msg>,
+        message: Self::Msg,
+        state: &mut Self::State,
+    ) -> Result<(), ActorProcessingErr> {
+        match message {
+            ClientSessionMessage::Send(message) => {
+                ClientSession::write(message, Arc::clone(&state.writer))
+                    .await
+                    .expect("expected to write message to client.");
+            }
+        }
+        Ok(())
+    }
+}

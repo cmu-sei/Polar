@@ -1,6 +1,8 @@
 use cassini_client::*;
 
-use harness_common::{Envelope, validate_checksum};
+use cassini_types::ClientEvent;
+use harness_common::{Envelope, SupervisorMessage, validate_checksum};
+use polar::Supervisor;
 use ractor::{
     Actor, ActorProcessingErr, ActorRef, OutputPort, async_trait,
     concurrency::{Duration, Instant},
@@ -48,6 +50,11 @@ pub struct SinkState {
 pub enum SinkAgentMsg {
     Start,
     Receive(Vec<u8>),
+    /// TODO: Figure out how to propogate errors, Basically any error we hit is a test failure
+    /// including failing to validate messages, file errors, connection drops, etc.
+    Error {
+        reason: String,
+    },
 }
 
 impl SinkAgent {
@@ -95,6 +102,14 @@ impl SinkAgent {
     }
 }
 
+// impl Supervisor for SinkAgent {
+//     fn deserialize_and_dispatch(topic: String, payload: Vec<u8>) {
+//         match rkyv::from_bytes::<SinkAgentMsg, rkyv::rancor::Error>(&payload) {
+//             Ok(message) => todo!(),
+//             Err(e) => todo!(),
+//         }
+//     }
+// }
 #[async_trait]
 impl Actor for SinkAgent {
     type Msg = SinkAgentMsg;
@@ -110,14 +125,15 @@ impl Actor for SinkAgent {
 
         // define an output port for the actor to subscribe to
         let events_output = std::sync::Arc::new(OutputPort::default());
-        let queue_output = std::sync::Arc::new(OutputPort::default());
 
         // subscribe self to this port
-        events_output.subscribe(myself.clone(), |_| Some(SinkAgentMsg::Start));
-
-        // subscribe to the messaging queue, when acting as a sink, messages will be deserialized and analyzed
-        queue_output.subscribe(myself.clone(), |(message, _topic)| {
-            Some(SinkAgentMsg::Receive(message))
+        events_output.subscribe(myself.clone(), |event| match event {
+            ClientEvent::Registered { .. } => Some(SinkAgentMsg::Start),
+            ClientEvent::MessagePublished { payload, .. } => Some(SinkAgentMsg::Receive(payload)),
+            ClientEvent::TransportError { reason } => {
+                error!("Lost connection to the message broker! {reason}");
+                Some(SinkAgentMsg::Error { reason })
+            }
         });
 
         let tcp_cfg = TCPClientConfig::new()?;
@@ -129,7 +145,6 @@ impl Actor for SinkAgent {
                 config: tcp_cfg,
                 registration_id: None,
                 events_output,
-                queue_output,
             },
             myself.clone().into(),
         )
@@ -161,14 +176,14 @@ impl Actor for SinkAgent {
 
     async fn handle(
         &self,
-        _myself: ActorRef<Self::Msg>,
+        myself: ActorRef<Self::Msg>,
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
             SinkAgentMsg::Start => {
                 let msg = TcpClientMessage::Subscribe(state.cfg.topic.clone());
-                state.tcp_client.send_message(msg).unwrap();
+                state.tcp_client.send_message(msg)?;
             }
             SinkAgentMsg::Receive(payload) => {
                 state.metrics.received += 1;
@@ -220,6 +235,15 @@ impl Actor for SinkAgent {
                 }
 
                 state.last_seen.replace(now);
+            }
+            SinkAgentMsg::Error { reason } => {
+                error!("Sink agent error: {reason}");
+                let supervisor = myself
+                    .try_get_supervisor()
+                    .expect("Expected to find a supervisor");
+                supervisor
+                    .send_message(SupervisorMessage::AgentError { reason })
+                    .expect("Expected to message supervisor");
             }
         }
         Ok(())

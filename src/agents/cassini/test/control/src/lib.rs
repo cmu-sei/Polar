@@ -1,20 +1,22 @@
 use clap::Parser;
 use harness_common::{Expectation, MessagePattern, ProducerConfig};
-use ractor::ActorRef;
+use ractor::{registry::ActorRegistryErr, ActorRef};
 use rkyv::{Archive, Deserialize, Serialize};
 use std::collections::HashSet;
 use std::process::Stdio;
 use tokio::{process::Command, task::AbortHandle, time::Instant};
 pub mod service;
 
+pub enum ConnectionState {
+    Connected,
+    NotContacted,
+}
 /// A single phase of the test.
 /// Phases are time-bounded, not event-gated.
 #[derive(Debug, Clone, Serialize, Deserialize, Archive, serde::Serialize, serde::Deserialize)]
-pub struct Phase {
+pub struct Test {
     pub name: String,
-    pub producers: Vec<ProducerConfig>,
-    /// Expectations evaluated by sinks during this phase.
-    pub expectations: Vec<Expectation>,
+    pub producer: ProducerConfig,
 }
 
 /// Entire test plan executed by the harness controller.
@@ -22,7 +24,7 @@ pub struct Phase {
 #[derive(Debug, Clone, Serialize, Deserialize, Archive, serde::Serialize, serde::Deserialize)]
 pub struct TestPlan {
     pub name: String,
-    pub phases: Vec<Phase>,
+    pub tests: Vec<Test>,
 }
 
 #[derive(Parser, Debug)]

@@ -1,13 +1,12 @@
 use harness_common::{
-    HarnessControllerMessage,
-    client::{HarnessClient, HarnessClientArgs, HarnessClientConfig, HarnessClientMessage},
+    AgentRole, ControllerCommand, SupervisorMessage,
+    client::{
+        ClientEvent as HarnessClientEvent, ControlClient, ControlClientArgs, ControlClientConfig,
+        ControlClientMsg,
+    },
 };
-use harness_sink::sink::*;
-use ractor::{Actor, ActorProcessingErr, ActorRef, SupervisionEvent, async_trait};
-
+use ractor::{Actor, ActorProcessingErr, ActorRef, OutputPort, SupervisionEvent, async_trait};
 use tokio_util::sync::CancellationToken;
-
-use tokio_rustls::{TlsAcceptor, server::TlsStream};
 
 use tracing::{debug, error, info, warn};
 
@@ -18,33 +17,43 @@ pub const SINK_CLIENT_SESSION: &str = "cassini.harness.sink.session";
 pub struct SinkService;
 
 pub struct SinkServiceState {
-    harness_client: ActorRef<HarnessClientMessage>,
+    harness_client: ActorRef<ControlClientMsg>,
     timeout_token: CancellationToken,
-}
-
-pub struct SinkServiceArgs {
-    tcp_client_config: HarnessClientConfig,
 }
 
 #[async_trait]
 impl Actor for SinkService {
-    type Msg = HarnessControllerMessage;
+    type Msg = SupervisorMessage;
     type State = SinkServiceState;
-    type Arguments = SinkServiceArgs;
+    type Arguments = ();
 
     async fn pre_start(
         &self,
         myself: ActorRef<Self::Msg>,
-        args: SinkServiceArgs,
+        args: Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
         info!("Starting {myself:?}");
         tracing::info!("RootActor: Started {myself:?}");
 
+        let output_port = OutputPort::default();
+
+        output_port.subscribe(myself.clone(), |event| match event {
+            HarnessClientEvent::CommandReceived { command } => {
+                Some(SupervisorMessage::CommandReceived { command })
+            }
+            HarnessClientEvent::Connected => Some(SupervisorMessage::ControllerConnected),
+            HarnessClientEvent::TransportError { reason } => {
+                tracing::error!("Disconnected from harness: {reason}");
+                Some(SupervisorMessage::TransportError { reason })
+            }
+        });
+
         let (harness_client, _) = Actor::spawn_linked(
             Some("cassini.harness.producer.client".to_string()),
-            HarnessClient,
-            HarnessClientArgs {
-                config: args.tcp_client_config,
+            ControlClient,
+            ControlClientArgs {
+                config: ControlClientConfig::new()?,
+                events_output: std::sync::Arc::new(output_port),
             },
             myself.clone().into(),
         )
@@ -62,25 +71,6 @@ impl Actor for SinkService {
         myself: ActorRef<Self::Msg>,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        // TODO: Make configurable?
-        let timeout = 60;
-        let token = state.timeout_token.clone();
-        let _ = tokio::spawn(async move {
-            info!("Waiting {timeout} secs for contact from controller.");
-            tokio::select! {
-                // Use cloned token to listen to cancellation requests
-                _ = token.cancelled() => {
-                    info!("Cancelling timeout.")
-                }
-                // wait
-                _ = tokio::time::sleep(std::time::Duration::from_secs(timeout)) => {
-                    error!("Failed to receive contact from controller. Shutting down.");
-                    myself.stop(Some("TEST_TIMED_OUT".to_string()));
-
-                }
-            }
-        });
-
         Ok(())
     }
 
@@ -134,50 +124,43 @@ impl Actor for SinkService {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
-            HarnessControllerMessage::TestPlan { plan } => {
-                // abort timeout
-                state.timeout_token.cancel();
-
-                info!(
-                    "Received test plan from client. {}",
-                    serde_json::to_string_pretty(&plan).unwrap()
-                );
-                info!("Starting subscribes.");
-                // start a sink for each producer, if we already have a sink subscriber for that topic, skip
-
-                for config in plan.producers {
-                    let args = SinkConfig {
-                        topic: config.topic.clone(),
+            SupervisorMessage::ControllerConnected => {
+                // say hello
+                debug!("Controller connected, saying hello.");
+                state
+                    .harness_client
+                    .send_message(ControlClientMsg::SendCommand(ControllerCommand::Hello {
+                        role: AgentRole::Sink,
+                    }))?;
+            }
+            SupervisorMessage::CommandReceived { command } => match command {
+                ControllerCommand::SinkTopic { topic } => {
+                    debug!("Received topic {topic}, starting sink actor");
+                    let args = harness_sink::sink::SinkConfig {
+                        topic: topic.clone(),
                     };
 
                     let _ = Actor::spawn_linked(
-                        Some(format!("cassini.harness.sink.{}", config.topic)),
-                        SinkAgent,
+                        Some(format!("cassini.harness.sink.{}", topic)),
+                        harness_sink::sink::SinkAgent,
                         args,
                         myself.clone().into(),
                     )
-                    .await
-                    .map_err(|_e| ());
+                    .await?;
                 }
+                _ => {
+                    warn!("Received unknown command");
+                }
+            },
+            SupervisorMessage::TransportError { reason } => {
+                error!("Lost connection to controller: {}", reason);
+                myself.stop(Some(reason));
             }
-            HarnessControllerMessage::Shutdown => {
-                info!("Shutdown command received. Shutting down.");
-
-                // write back to the producer that we're stopping
-                state
-                    .harness_client
-                    .cast(HarnessClientMessage::Send(
-                        HarnessControllerMessage::ShutdownAck,
-                    ))
-                    .ok();
-
-                myself.stop_children_and_wait(None, None).await;
-
-                myself.stop(None);
+            SupervisorMessage::AgentError { reason } => {
+                error!("Agent encountered an error: {reason}");
+                myself.stop(Some(reason));
             }
-            _ => (),
         }
-
         Ok(())
     }
 }
@@ -188,14 +171,10 @@ async fn main() {
 
     info!("Sink agent starting up.");
 
-    let client_config = HarnessClientConfig::new();
-
     let (_, handle) = Actor::spawn(
         Some("cassini.harness.sink.supervisor".to_string()),
         SinkService,
-        SinkServiceArgs {
-            tcp_client_config: client_config,
-        },
+        (),
     )
     .await
     .expect("Expected to start sink server");

@@ -10,9 +10,9 @@ serde_json = "1"
 rkyv = { workspace = true }
 sha2 = "0.10.9"
 hex = "0.4.3"
-
 ractor = { version = "0.15.8", features = ["async-trait"] }
 tokio = { version = "1.47.1", features = ["full"] }
 tracing = "0.1.41"
 rustls = { version = "0.23", features = ["aws-lc-rs"] }
 tokio-rustls = "0.26.4"
+anyhow = "1.0.100"

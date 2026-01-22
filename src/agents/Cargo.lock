@@ -1959,6 +1959,7 @@ dependencies = [
 name = "harness-common"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "hex",
  "ractor",
  "rkyv 0.8.12",
@@ -2021,6 +2022,7 @@ name = "harness-sink"
 version = "0.1.0"
 dependencies = [
  "cassini-client",
+ "cassini-types",
  "harness-common",
  "polar",
  "ractor",

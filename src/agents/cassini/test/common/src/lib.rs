@@ -1,7 +1,33 @@
 use rkyv::{Archive, Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-// pub mod client;
+use crate::client::ClientEvent;
+
+pub mod client;
+
+pub enum SupervisorMessage {
+    ControllerConnected,
+    CommandReceived { command: ControllerCommand },
+    TransportError { reason: String },
+    AgentError { reason: String },
+}
+pub enum ConnectionState {
+    Connected,
+    NotContacted,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, Archive, serde::Serialize, serde::Deserialize)]
+pub enum AgentRole {
+    Producer,
+    Sink,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Archive, serde::Serialize, serde::Deserialize)]
+pub enum ControllerCommand {
+    Hello { role: AgentRole },
+    ProducerConfig { producer: ProducerConfig },
+    SinkTopic { topic: String },
+    TestComplete { client_id: String, role: AgentRole },
+}
 
 /// Messaging pattern that mimics user behavior over the network.
 #[derive(Clone, Debug, Serialize, Deserialize, Archive, serde::Serialize, serde::Deserialize)]
@@ -63,3 +89,11 @@ pub fn validate_checksum(payload: &[u8], expected: &str) -> bool {
     let actual = compute_checksum(payload);
     actual == expected
 }
+
+// #[tracing::instrument]
+// pub fn handle_control_client_event(
+//     myself: ractor::ActorRef<SupervisorMessage>,
+//     event: ClientEvent,
+// ) -> Option<SupervisorMessage> {
+
+// }
