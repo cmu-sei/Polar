@@ -366,6 +366,97 @@ in {
       export CMAKE_MAKE_PROGRAM=/bin/make
       export LD_LIBRARY_PATH="${pkgs.lib.makeLibraryPath [ pkgs.glibc pkgs.llvmPackages_19.clang ]}"
       export LIBCLANG_PATH="${pkgs.llvmPackages_19.libclang.lib}/lib"
+
+      # -------------------------------------------------------------------
+      # Polar TLS auto-setup (direnv/nix develop)
+      # -------------------------------------------------------------------
+      set -euo pipefail
+
+      PROJECT_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd -P)"
+      CERTS_LINK="$PROJECT_ROOT/result-tlsCerts"
+
+      need_certs() {
+        [ ! -e "$CERTS_LINK/ca_certificates/ca_certificate.pem" ] || \
+        [ ! -e "$CERTS_LINK/server/server_cassini_certificate.pem" ] || \
+        [ ! -e "$CERTS_LINK/server/server_cassini_key.pem" ] || \
+        [ ! -e "$CERTS_LINK/client/client_cassini_certificate.pem" ] || \
+        [ ! -e "$CERTS_LINK/client/client_cassini_key.pem" ]
+      }
+
+      if need_certs; then
+        echo "[polar] TLS certs missing -> building .#tlsCerts"
+        nix build -L .#tlsCerts -o "$CERTS_LINK"
+      fi
+
+      CA_CERT="$CERTS_LINK/ca_certificates/ca_certificate.pem"
+      SERVER_CERT="$CERTS_LINK/server/server_cassini_certificate.pem"
+      SERVER_KEY="$CERTS_LINK/server/server_cassini_key.pem"
+      CLIENT_CERT="$CERTS_LINK/client/client_cassini_certificate.pem"
+      CLIENT_KEY="$CERTS_LINK/client/client_cassini_key.pem"
+
+      SSL_DIR="$PROJECT_ROOT/var/ssl"
+      mkdir -p "$SSL_DIR"
+
+      SERVER_CHAIN="$SSL_DIR/server_cert_chain.pem"
+      cat "$SERVER_CERT" "$CA_CERT" > "$SERVER_CHAIN"
+
+      # Cassini / Polar mTLS vars (app-specific; safe)
+      : "''${TLS_CA_CERT:=$CA_CERT}"
+      : "''${TLS_SERVER_CERT_CHAIN:=$SERVER_CHAIN}"
+      : "''${TLS_SERVER_KEY:=$SERVER_KEY}"
+      : "''${TLS_CLIENT_CERT:=$CLIENT_CERT}"
+      : "''${TLS_CLIENT_KEY:=$CLIENT_KEY}"
+      export TLS_CA_CERT TLS_SERVER_CERT_CHAIN TLS_SERVER_KEY TLS_CLIENT_CERT TLS_CLIENT_KEY
+
+      : "''${BIND_ADDR:=127.0.0.1:8080}"
+      : "''${CASSINI_BIND_ADDR:=$BIND_ADDR}"
+      : "''${BROKER_ADDR:=$BIND_ADDR}"
+      export BIND_ADDR CASSINI_BIND_ADDR BROKER_ADDR
+
+      : "''${CONTROLLER_BIND_ADDR:=127.0.0.1:3030}"
+      : "''${CONTROLLER_ADDR:=$CONTROLLER_BIND_ADDR}"
+      export CONTROLLER_BIND_ADDR CONTROLLER_ADDR
+
+      : "''${CASSINI_SERVER_NAME:=localhost}"
+      : "''${CONTROLLER_SERVER_NAME:=localhost}"
+      : "''${HARNESS_SERVER_NAME:=localhost}"
+      export CASSINI_SERVER_NAME CONTROLLER_SERVER_NAME HARNESS_SERVER_NAME
+
+      # -------------------------------------------------------------------
+      # IMPORTANT: do NOT override SSL_CERT_FILE with the dev CA.
+      # Keep system CA bundle for GitHub/Cargo/etc.
+      # -------------------------------------------------------------------
+      # Prefer what Nix/direnv already provides, else fall back to pkgs.cacert.
+      : "''${SSL_CERT_FILE:=''${NIX_SSL_CERT_FILE:-''${SYSTEM_CERTIFICATE_PATH:-${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt}}}"
+      export SSL_CERT_FILE
+
+      # Make Cargo + git happy even if they ignore SSL_CERT_FILE in some paths
+      export CARGO_HTTP_CAINFO="$SSL_CERT_FILE"
+      export GIT_SSL_CAINFO="$SSL_CERT_FILE"
+
+      # If cargo is using libgit2 and your environment/proxy/ssl gets weird,
+      # force git CLI fetching (matches the error suggestion you saw).
+      export CARGO_NET_GIT_FETCH_WITH_CLI=true
+
+      pick_dns_name() {
+        ${pkgs.openssl}/bin/openssl x509 -in "$SERVER_CERT" -noout -text 2>/dev/null \
+          | sed -n 's/.*DNS:\([^,]*\).*/\1/p' \
+          | head -n 1
+      }
+      DNS_NAME="$(pick_dns_name || true)"
+      if [ -n "$DNS_NAME" ]; then
+        echo "[polar] server cert SAN DNS (debug): $DNS_NAME"
+      fi
+
+      echo "[polar] TLS env configured:"
+      echo "  TLS_CA_CERT=$TLS_CA_CERT"
+      echo "  TLS_SERVER_CERT_CHAIN=$TLS_SERVER_CERT_CHAIN"
+      echo "  TLS_SERVER_KEY=$TLS_SERVER_KEY"
+      echo "  TLS_CLIENT_CERT=$TLS_CLIENT_CERT"
+      echo "  TLS_CLIENT_KEY=$TLS_CLIENT_KEY"
+      echo "  CASSINI_SERVER_NAME=$CASSINI_SERVER_NAME"
+      echo "  BROKER_ADDR=$BROKER_ADDR"
+      echo "  CONTROLLER_ADDR=$CONTROLLER_ADDR"
     '';
   };
 
