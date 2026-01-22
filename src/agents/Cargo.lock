@@ -2001,6 +2001,7 @@ name = "harness-producer"
 version = "0.1.0"
 dependencies = [
  "cassini-client",
+ "cassini-types",
  "fake",
  "harness-common",
  "polar",

@@ -203,7 +203,6 @@ impl Actor for HarnessController {
 
         info!("HarnessController: Server running on {}", args.bind_addr);
 
-        let plan = args.test_plan.clone();
         let cloned_self = myself.clone();
         let server_handle = tokio::spawn(async move {
             while let Ok((stream, peer_addr)) = server.accept().await {
@@ -264,7 +263,7 @@ impl Actor for HarnessController {
             bind_addr: args.bind_addr,
             server_config,
             test_plan: args.test_plan,
-            server_handle: None, // TODO: Add back the server handle
+            server_handle: Some(server_handle),
             broker: None,
             producer: None,
             sink: None,
@@ -310,8 +309,9 @@ impl Actor for HarnessController {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         //shutdown processes
+        state.producer.as_ref().map(|handle| handle.abort());
+        state.sink.as_ref().map(|handle| handle.abort());
         state.server_handle.as_ref().map(|handle| handle.abort());
-
         state.broker.as_ref().map(|handle| handle.abort());
 
         debug!("{myself:?} stopped");

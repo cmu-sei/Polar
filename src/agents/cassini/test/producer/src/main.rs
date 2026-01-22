@@ -1,4 +1,3 @@
-use harness_common::client::HarnessClientConfig;
 use harness_producer::actors::*;
 use ractor::Actor;
 use tracing::info;
@@ -9,14 +8,10 @@ async fn main() {
 
     info!("Producer Agent Starting up.");
 
-    let client_config = HarnessClientConfig::new();
-
     let (_, handle) = Actor::spawn(
         Some("cassini.harness.producer.supervisor".to_string()),
         RootActor,
-        RootActorArguments {
-            tcp_client_config: client_config,
-        },
+        (),
     )
     .await
     .expect("Expected harness supervisor to start.");

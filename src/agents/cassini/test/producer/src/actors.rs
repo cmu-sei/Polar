@@ -1,15 +1,21 @@
 // use cassini_client::*;
 use cassini_client::{TCPClientConfig, TcpClientActor, TcpClientArgs, TcpClientMessage};
+use cassini_types::ClientEvent as CassiniEvent;
 use fake::Fake;
 use harness_common::{
-    Envelope, MessagePattern, ProducerConfig, client::{ControlClientArgs, ControlClientConfig, HarnessClient, HarnessClientArgs, HarnessClientConfig, HarnessClientMessage}, compute_checksum
+    client::{
+        ClientEvent as HarnessClientEvent, ControlClient, ControlClientArgs, ControlClientConfig,
+        ControlClientMsg,
+    },
+    compute_checksum, ControllerCommand, Envelope, MessagePattern, ProducerConfig,
+    SupervisorMessage,
 };
 use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef, OutputPort, SupervisionEvent};
 use serde::Serialize;
 use serde_json::to_string_pretty;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::time;
-use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 const PRODUCER_FINISHED_SUCCESSFULLY: &str = "PRODUCER_FINISHED_SUCCESSFULLY";
 // const PRODUCER_ENCOUNTERED_ERROR: &str = "PRODUCER_ENCOUNTERED_ERROR";
@@ -29,52 +35,51 @@ pub struct Metrics {
 pub struct RootActor;
 
 pub struct RootActorState {
-    harness_client: ActorRef<HarnessClientMessage>,
-    producers: u32,
-    registration: harness_common::,
-    timeout_token: CancellationToken,
-}
-
-pub struct RootActorArguments {
-    pub tcp_client_config: HarnessClientConfig,
+    harness_client: ActorRef<ControlClientMsg>,
+    producer: Option<ActorRef<ProducerMessage>>,
 }
 
 #[async_trait]
 impl Actor for RootActor {
-    type Msg = ControllerCommand;
+    type Msg = SupervisorMessage;
     type State = RootActorState;
-    type Arguments = RootActorArguments;
+    type Arguments = ();
 
     async fn pre_start(
         &self,
         myself: ActorRef<Self::Msg>,
-        args: RootActorArguments,
+        _args: (),
     ) -> Result<Self::State, ActorProcessingErr> {
         tracing::info!("RootActor: Started {myself:?}");
 
-        let events_output = OutputPort::default();
+        let events_output = Arc::new(OutputPort::default());
 
-        events_output.subscribe(myself.clone(), |event| Some());
-        let args = ControlClientArgs {
-            config: ControlClientConfig::new(),
+        // subscribe self to this port
+        events_output.subscribe(myself.clone(), |event| match event {
+            HarnessClientEvent::CommandReceived { command } => {
+                Some(SupervisorMessage::CommandReceived { command })
+            }
+            HarnessClientEvent::Connected => Some(SupervisorMessage::ControllerConnected),
+            HarnessClientEvent::TransportError { reason } => {
+                tracing::error!("Disconnected from harness: {reason}");
+                Some(SupervisorMessage::TransportError { reason })
+            }
+        });
 
-        }
         let (harness_client, _) = Actor::spawn_linked(
             Some("cassini.harness.producer.client".to_string()),
-            HarnessClient,
-            HarnessClientArgs {
-                config: args.tcp_client_config,
+            ControlClient,
+            ControlClientArgs {
+                config: ControlClientConfig::new()?,
+                events_output,
             },
             myself.clone().into(),
         )
-        .await
-        .expect("Expected to start tcp client");
+        .await?;
 
         Ok(RootActorState {
             harness_client,
-            producers: 0u32,
-            registration: ConnectionState::NotContacted,
-            timeout_token: CancellationToken::new(),
+            producer: None,
         })
     }
 
@@ -83,24 +88,6 @@ impl Actor for RootActor {
         myself: ActorRef<Self::Msg>,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        // TODO: Make configurable?
-        let timeout = 60;
-        let token = state.timeout_token.clone();
-        let _ = tokio::spawn(async move {
-            info!("Waiting {timeout} secs for contact from controller.");
-            tokio::select! {
-                // Use cloned token to listen to cancellation requests
-                _ = token.cancelled() => {
-                    info!("Cancelling timeout.")
-                }
-                // wait
-                _ = tokio::time::sleep(std::time::Duration::from_secs(timeout)) => {
-                    error!("Failed to receive contact from controller. Shutting down.");
-                    myself.stop(Some("TEST_TIMED_OUT".to_string()));
-
-                }
-            }
-        });
         Ok(())
     }
 
@@ -111,54 +98,47 @@ impl Actor for RootActor {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
-            HarnessControllerMessage::ClientRegistered(id) => {
-                info!("Received client id \"{id}\"");
-                state.registration = harness_common::ConnectionState::Registered { client_id: id };
+            SupervisorMessage::ControllerConnected => {
+                debug!("Connected to controller successfully");
+                // say hello
+                state.harness_client.cast(ControlClientMsg::SendCommand(
+                    ControllerCommand::Hello {
+                        role: harness_common::AgentRole::Producer,
+                    },
+                ))?;
             }
-            HarnessControllerMessage::TestPlan { plan } => {
-                state.timeout_token.cancel();
+            SupervisorMessage::CommandReceived { command } => match command {
+                ControllerCommand::ProducerConfig { producer } => {
+                    debug!(
+                        "Received producer configuration: {}",
+                        serde_json::to_string_pretty(&producer).unwrap()
+                    );
 
-                debug!(
-                    "{myself:?} Received test plan:\n{plan}",
-                    plan = serde_json::to_string_pretty(&plan).unwrap()
-                );
-                // Gotta keep track of producers somehow...
-                // so we create a list of them here, and insert
-                // the refs according to the index, starting at 0.
-
-                for config in &plan.producers {
-                    let (_, _) = Actor::spawn_linked(
-                        Some(format!("cassini.harness.producer.{}", state.producers)),
+                    let (producer, _) = Actor::spawn_linked(
+                        Some(format!(
+                            "cassini.harness.producer.{}",
+                            producer.topic.clone()
+                        )),
                         ProducerAgent,
-                        config.to_owned(),
+                        producer,
                         myself.clone().into(),
                     )
-                    .await
-                    .expect("Expected to start producer agent");
+                    .await?;
 
-                    state.producers += 1;
+                    state.producer = Some(producer);
                 }
+                _ => warn!("Received unexpected command."),
+            },
+            SupervisorMessage::TransportError { reason } => {
+                error!("Lost connection to the controller: {}", reason);
+                myself.stop(Some(reason))
             }
-            HarnessControllerMessage::Shutdown => {
-                info!("Received shutdown command. Stopping...");
-
-                state
-                    .harness_client
-                    .cast(HarnessClientMessage::Send(
-                        HarnessControllerMessage::ShutdownAck,
-                    ))
-                    .ok();
-
-                myself.stop_children(None);
-                myself.stop(None);
+            SupervisorMessage::AgentError { reason } => {
+                error!("Producer encountered an error! {} Stopping.", reason);
+                myself.stop(Some(reason))
             }
-            _ => (),
         }
 
-        // match (state.registration, message) {
-        //     (ConnectionState::NotContacted, _) => error!("Can't do anything without a client ID"),
-
-        // }
         Ok(())
     }
 
@@ -175,21 +155,6 @@ impl Actor for RootActor {
             }
             SupervisionEvent::ActorTerminated(dead_actor, _, reason) => {
                 tracing::info!("{dead_actor:?} stopped {reason:?}");
-                // TODO: if we ran into an error, handle it.
-                // if they're all done, we can tell the sink to start cleaning up and shutdown.
-                //
-                if state.producers == 0 {
-                    //send a message to the sink telling it to shutdown, we'll stop when we hear about it
-                    info!("Producers concluded. Shutting down");
-
-                    myself.stop_children(None);
-                    myself.stop(None);
-
-                    // state
-                    //     .harness_client
-                    //     .send_message(SinkClientMessage::Send(HarnessContro))
-                    //     .expect("Expected to send command to sink.");
-                }
             }
             other => {
                 tracing::info!("RootActor: received supervisor event '{other}'");
@@ -209,6 +174,8 @@ pub struct ProducerState {
 
 pub enum ProducerMessage {
     Start, // trigger tests
+    CassiniEvent(CassiniEvent),
+    AgentError { reason: String },
 }
 
 #[async_trait]
@@ -223,36 +190,40 @@ impl Actor for ProducerAgent {
         args: Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
         debug!("{myself:?} starting");
+        // Create the output ports the client expects
+        let events_output: std::sync::Arc<OutputPort<CassiniEvent>> =
+            std::sync::Arc::new(OutputPort::default());
 
-        // define an output port for the actor to subscribe to
-        let events_output = std::sync::Arc::new(OutputPort::default());
-        let queue_output = std::sync::Arc::new(OutputPort::default());
+        // Subscribe to events (registration strings, etc.)
+        events_output.subscribe(myself.clone(), |event| match event {
+            CassiniEvent::Registered { .. } => Some(ProducerMessage::Start),
+            CassiniEvent::MessagePublished { payload, .. } => None,
+            CassiniEvent::TransportError { reason } => {
+                error!("Lost connection to the message broker! {reason}");
+                Some(ProducerMessage::AgentError { reason })
+            }
+        });
 
-        // subscribe self to this port
-        // message doesn't matter, we just need to wait until the cassini client
-        // registers to trigger the tests.
-        events_output.subscribe(myself.clone(), |_| Some(ProducerMessage::Start));
+        let config = TCPClientConfig::new()?;
+        // Prepare TcpClientArgs and spawn the client actor
+        let tcp_args = TcpClientArgs {
+            config,
+            registration_id: None,
+            events_output: events_output.clone(),
+        };
 
-        let tcp_cfg = TCPClientConfig::new()?;
-
-        let (client, _) = Actor::spawn_linked(
-            Some(format!("{}.tcp.client", myself.get_name().unwrap())),
+        let (tcp_client, _) = TcpClientActor::spawn_linked(
+            Some(format!("producer.{}.cassini.tcp", args.topic)),
             TcpClientActor,
-            TcpClientArgs {
-                config: tcp_cfg,
-                registration_id: None,
-                events_output,
-                queue_output,
-            },
+            tcp_args,
             myself.clone().into(),
         )
-        .await
-        .expect("expected client to start");
+        .await?;
 
         let state = ProducerState {
             cfg: args,
             metrics: Metrics::default(),
-            tcp_client: client,
+            tcp_client,
         };
 
         Ok(state)
@@ -276,12 +247,12 @@ impl Actor for ProducerAgent {
         info!("Running test.");
         // here, we take on different actions depending on behavior pattern
         match state.cfg.pattern {
-            MessagePattern::Drip { idle_time } => {
-                let interval = Duration::from_secs_f64(1.0 / idle_time as f64);
+            MessagePattern::Drip { idle_time_seconds } => {
+                let interval = Duration::from_secs_f64(1.0 / idle_time_seconds as f64);
                 let duration = Duration::from_secs(state.cfg.duration);
                 let topic = state.cfg.topic.clone();
 
-                let size = state.cfg.msg_size.clone();
+                let size = state.cfg.message_size.clone() as usize;
                 let tcp_client = state.tcp_client.clone();
 
                 let mut ticker = time::interval(interval);
@@ -299,7 +270,6 @@ impl Actor for ProducerAgent {
                     // create a payload of the desired message size using fake
 
                     let faked = (0..=size).fake::<String>();
-
                     let checksum = compute_checksum(faked.as_bytes());
 
                     let envelope = Envelope {
@@ -334,14 +304,14 @@ impl Actor for ProducerAgent {
                     .unwrap();
             }
             MessagePattern::Burst {
-                idle_time,
+                idle_time_seconds,
                 burst_size,
             } => {
-                let interval = Duration::from_secs_f64(1.0 / idle_time as f64);
+                let interval = Duration::from_secs_f64(1.0 / idle_time_seconds as f64);
                 let duration = Duration::from_secs(state.cfg.duration);
                 let topic = state.cfg.topic.clone();
 
-                let size = state.cfg.msg_size.clone();
+                let size = state.cfg.message_size.clone() as usize;
                 let tcp_client = state.tcp_client.clone();
 
                 info!("Starting test...");
