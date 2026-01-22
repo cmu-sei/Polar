@@ -315,22 +315,6 @@ impl Actor for Broker {
                 } else {
                     error!("TopicManager ActorRef missing in broker state; cannot subscribe session {registration_id} to {topic}");
                 }
-
-                // Forward acknowledgment to the SessionManager; let it route to the appropriate session.
-                if let Some(session_mgr) = &state.session_mgr {
-                    if let Err(e) =
-                        session_mgr.send_message(BrokerMessage::SubscribeAcknowledgment {
-                            registration_id: registration_id.clone(),
-                            topic: topic.clone(),
-                            result: Ok(()),
-                            trace_ctx: Some(span.context()),
-                        })
-                    {
-                        warn!("Failed to forward SubscribeAcknowledgment to SessionManager: {e:?}");
-                    }
-                } else {
-                    warn!("SessionManager missing when trying to deliver SubscribeAcknowledgment for {registration_id}");
-                }
             }
 
             BrokerMessage::UnsubscribeRequest {

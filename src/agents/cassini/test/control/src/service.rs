@@ -6,7 +6,7 @@ use harness_common::{AgentRole, ControllerCommand};
 use ractor::{
     async_trait,
     concurrency::{Instant, JoinHandle},
-    Actor, ActorProcessingErr, ActorRef, OutputPort, SupervisionEvent,
+    message, Actor, ActorProcessingErr, ActorRef, OutputPort, SupervisionEvent,
 };
 use rkyv::rancor::Error;
 use rkyv::rancor::Source;
@@ -41,7 +41,7 @@ struct TestState {
 pub enum HarnessControllerMessage {
     ClientConnected {
         client_id: String,
-        // peer_addr: String,
+        client: ActorRef<ClientSessionMessage>, // peer_addr: String,
     },
     TestEvent(TestEvent),
     CassiniEvent(ClientEvent),
@@ -110,6 +110,60 @@ impl HarnessController {
         {
             Ok((client_ref, _)) => Ok(client_ref),
             Err(e) => Err(ActorProcessingErr::from(e)),
+        }
+    }
+
+    pub fn issue_producer_configuration(
+        state: &mut HarnessControllerState,
+    ) -> Result<(), ActorProcessingErr> {
+        if let Some(test) = state.test_plan.tests.get(state.current_test_index) {
+            match state.test_state.as_ref() {
+                Some(test_state) => {
+                    let command = ControllerCommand::ProducerConfig {
+                        producer: test.producer.clone(),
+                    };
+
+                    if let Some(session) = test_state.producer.as_ref() {
+                        debug!("Issuing new producer configuration");
+                        Ok(session.cast(ClientSessionMessage::Send(command))?)
+                    } else {
+                        return Err(ActorProcessingErr::from("No producer session found"));
+                    }
+                }
+                None => return Err(ActorProcessingErr::from("No test state found.".to_string())),
+            }
+        } else {
+            error!("No test found for current index!");
+            return Err(ActorProcessingErr::from("No test configured.".to_string()));
+        }
+    }
+
+    pub fn issue_sink_configuration(
+        state: &mut HarnessControllerState,
+    ) -> Result<(), ActorProcessingErr> {
+        if let Some(test) = state.test_plan.tests.get(state.current_test_index) {
+            match state.test_state.as_ref() {
+                Some(test_state) => {
+                    if let Some(sink_session) = test_state.sink.as_ref() {
+                        debug!("issuing new sink configuration");
+
+                        let topic = test.producer.topic.clone();
+                        let reply = ControllerCommand::SinkTopic { topic };
+
+                        Ok(sink_session.cast(ClientSessionMessage::Send(reply))?)
+                    } else {
+                        error!("No sink session found");
+                        Err(ActorProcessingErr::from("No sink session found"))
+                    }
+                }
+                None => {
+                    error!("No test state found");
+                    Err(ActorProcessingErr::from("No test state found"))
+                }
+            }
+        } else {
+            error!("No test found for current index!");
+            Err(ActorProcessingErr::from("No test configured.".to_string()))
         }
     }
 }
@@ -231,7 +285,7 @@ impl Actor for HarnessController {
                         };
 
                         //start listener actor to handle connection
-                        let (_client, _) = Actor::spawn_linked(
+                        let (client, _) = Actor::spawn_linked(
                             Some(client_id.clone()),
                             ClientSession,
                             listener_args,
@@ -241,7 +295,7 @@ impl Actor for HarnessController {
                         .expect("Failed to start listener for new connection");
 
                         myself
-                            .cast(HarnessControllerMessage::ClientConnected { client_id })
+                            .cast(HarnessControllerMessage::ClientConnected { client_id, client })
                             .ok();
                     }
                     Err(e) => {
@@ -399,7 +453,6 @@ impl Actor for HarnessController {
                                     .as_mut()
                                     .map(|state| state.producer = Some(reply_to.clone()));
 
-                                let topic = test.producer.topic.clone();
                                 let reply = ControllerCommand::ProducerConfig {
                                     producer: test.producer.clone(),
                                 };
@@ -470,11 +523,12 @@ impl Actor for HarnessController {
                     state.started = true;
 
                     // start sink
-                    let sink = HarnessController::spawn_process(state.sink_path.clone()).await;
+                    state.sink =
+                        Some(HarnessController::spawn_process(state.sink_path.clone()).await);
 
                     // start producer
-                    let producer =
-                        HarnessController::spawn_process(state.producer_path.clone()).await;
+                    state.producer =
+                        Some(HarnessController::spawn_process(state.producer_path.clone()).await);
 
                     // init test state, will be updated when agents handshake
                     state.test_state = Some(TestState {
@@ -495,12 +549,39 @@ impl Actor for HarnessController {
             }
 
             HarnessControllerMessage::AdvanceTest => {
-                // start sink
+                //check that we can actually move forward
 
-                // start producer
+                state.current_test_index += 1;
 
-                // TODO: process next step
-                todo!("implement phase orchestration");
+                match state.test_plan.tests.get(state.current_test_index) {
+                    Some(_test) => {
+                        debug!("Advancing to next test {}", state.current_test_index);
+
+                        // reset test state
+
+                        if let Some(test_state) = state.test_state.as_mut() {
+                            test_state.producer_complete = false;
+                            test_state.sink_complete = false;
+                        } else {
+                            error!("No test state found");
+                            myself.stop(Some("No test state found".to_string()));
+                        }
+
+                        Self::issue_sink_configuration(state)?;
+                        Self::issue_producer_configuration(state)?;
+                    }
+                    None => {
+                        // we're done
+                        info!("Test completed");
+                        myself.stop(None);
+                    }
+                }
+                // finally
+                // turns out, with our current configuration, we can actually reuse the live agents.
+                // So what we'll want to do is, incrememnt the phase ndex, and send out new configurations. By the time we get here
+                // the agent's should have already stopped their children and disconnected from cassini,
+                //  and be left in a waiting state until they're told to shutdown.
+
                 // we need to do a few things within each phase
                 // start sinks with their topics
                 // start producers
@@ -512,10 +593,10 @@ impl Actor for HarnessController {
                 //
 
                 //
-                state.current_test_index += 1;
-                let _ = myself.cast(HarnessControllerMessage::AdvanceTest);
             }
-            _ => (),
+            HarnessControllerMessage::ClientConnected { client_id, client } => {
+                debug!("Client connected: {}", client_id);
+            }
         }
 
         Ok(())
@@ -537,7 +618,7 @@ enum TestEvent {
     },
 }
 
-enum ClientSessionMessage {
+pub enum ClientSessionMessage {
     Send(ControllerCommand),
 }
 

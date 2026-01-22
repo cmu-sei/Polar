@@ -102,14 +102,6 @@ impl SinkAgent {
     }
 }
 
-// impl Supervisor for SinkAgent {
-//     fn deserialize_and_dispatch(topic: String, payload: Vec<u8>) {
-//         match rkyv::from_bytes::<SinkAgentMsg, rkyv::rancor::Error>(&payload) {
-//             Ok(message) => todo!(),
-//             Err(e) => todo!(),
-//         }
-//     }
-// }
 #[async_trait]
 impl Actor for SinkAgent {
     type Msg = SinkAgentMsg;
@@ -128,7 +120,10 @@ impl Actor for SinkAgent {
 
         // subscribe self to this port
         events_output.subscribe(myself.clone(), |event| match event {
-            ClientEvent::Registered { .. } => Some(SinkAgentMsg::Start),
+            ClientEvent::Registered { .. } => {
+                debug!("Successfully registered with the message broker");
+                Some(SinkAgentMsg::Start)
+            }
             ClientEvent::MessagePublished { payload, .. } => Some(SinkAgentMsg::Receive(payload)),
             ClientEvent::TransportError { reason } => {
                 error!("Lost connection to the message broker! {reason}");
@@ -161,12 +156,13 @@ impl Actor for SinkAgent {
 
     async fn post_stop(
         &self,
-        _myself: ActorRef<Self::Msg>,
+        myself: ActorRef<Self::Msg>,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         info!("Test run stopped. Validating checksums...");
         SinkAgent::validate_checksums(format!("{}-output.json", state.cfg.topic).as_str())
             .expect("Expected to validate checksums");
+        // TODO: instead of panicking should it fail, emit a message to the controller
         info!(
             "{}",
             to_string_pretty(&state.metrics).expect("expected to serialize to json")
@@ -182,6 +178,7 @@ impl Actor for SinkAgent {
     ) -> Result<(), ActorProcessingErr> {
         match message {
             SinkAgentMsg::Start => {
+                debug!("Subscribing to topic {}", state.cfg.topic);
                 let msg = TcpClientMessage::Subscribe(state.cfg.topic.clone());
                 state.tcp_client.send_message(msg)?;
             }

@@ -8,6 +8,7 @@ use ractor::{
     async_trait, registry::where_is, Actor, ActorProcessingErr, ActorRef, SupervisionEvent,
 };
 use std::collections::{HashMap, HashSet};
+use std::thread::sleep;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, trace, trace_span, warn};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
@@ -693,7 +694,7 @@ impl Actor for SessionAgent {
 
                 trace!("Session received a subscribe acknowledgement message");
 
-                // fwd a copy to the supervisor
+                // fwd a copy to the supervisor so it can update its database
                 match myself.try_get_supervisor() {
                     Some(manager) => {
                         manager

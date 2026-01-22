@@ -24,7 +24,6 @@ const PRODUCER_FINISHED_SUCCESSFULLY: &str = "PRODUCER_FINISHED_SUCCESSFULLY";
 #[derive(Debug, Default, Serialize, Clone)]
 pub struct Metrics {
     pub sent: usize,
-    pub received: usize,
     pub errors: usize,
     pub start_ms: u128,
     pub elapsed_ms: u128,
@@ -151,10 +150,19 @@ impl Actor for RootActor {
         match message {
             SupervisionEvent::ActorFailed(dead_actor, panic_msg) => {
                 tracing::error!("{dead_actor:?} failed {panic_msg}");
-                myself.stop(None);
+                myself.stop(Some(panic_msg.to_string()));
             }
             SupervisionEvent::ActorTerminated(dead_actor, _, reason) => {
                 tracing::info!("{dead_actor:?} stopped {reason:?}");
+                // this is the happy case, child producer stopped for good reason, let's tell the controller we're done.
+                state
+                    .harness_client
+                    .send_message(ControlClientMsg::SendCommand(
+                        ControllerCommand::TestComplete {
+                            client_id: String::default(),
+                            role: harness_common::AgentRole::Producer,
+                        },
+                    ))?;
             }
             other => {
                 tracing::info!("RootActor: received supervisor event '{other}'");
@@ -315,6 +323,8 @@ impl Actor for ProducerAgent {
                 let tcp_client = state.tcp_client.clone();
 
                 info!("Starting test...");
+                state.metrics.start_ms = crate::get_timestamp_in_milliseconds()?;
+
                 let mut ticker = time::interval(interval);
                 let mut seqno = 0;
                 let end = Instant::now() + duration;
@@ -351,6 +361,9 @@ impl Actor for ProducerAgent {
                         state.metrics.sent += 1;
                     }
                 }
+                state.metrics.elapsed_ms =
+                    (crate::get_timestamp_in_milliseconds()? - state.metrics.start_ms);
+
                 // when done, print metrics and exit
                 info!(
                     "{}",

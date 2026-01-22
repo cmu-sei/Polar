@@ -27,6 +27,8 @@ pub enum ControllerCommand {
     ProducerConfig { producer: ProducerConfig },
     SinkTopic { topic: String },
     TestComplete { client_id: String, role: AgentRole },
+    Shutdown,
+    ShutDownComplete { role: AgentRole },
 }
 
 /// Messaging pattern that mimics user behavior over the network.
@@ -89,11 +91,3 @@ pub fn validate_checksum(payload: &[u8], expected: &str) -> bool {
     let actual = compute_checksum(payload);
     actual == expected
 }
-
-// #[tracing::instrument]
-// pub fn handle_control_client_event(
-//     myself: ractor::ActorRef<SupervisorMessage>,
-//     event: ClientEvent,
-// ) -> Option<SupervisorMessage> {
-
-// }
