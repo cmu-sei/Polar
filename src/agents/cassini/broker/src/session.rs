@@ -8,7 +8,6 @@ use ractor::{
     async_trait, registry::where_is, Actor, ActorProcessingErr, ActorRef, SupervisionEvent,
 };
 use std::collections::{HashMap, HashSet};
-use std::thread::sleep;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, trace, trace_span, warn};
 use tracing_opentelemetry::OpenTelemetrySpanExt;

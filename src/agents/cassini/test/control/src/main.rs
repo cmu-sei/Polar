@@ -2,7 +2,7 @@ use clap::Parser;
 use harness_controller::service::*;
 use harness_controller::{read_test_config, Arguments};
 use ractor::Actor;
-use std::{env, string};
+use std::env;
 use tracing::info;
 
 #[tokio::main]

@@ -84,8 +84,8 @@ impl Actor for RootActor {
 
     async fn post_start(
         &self,
-        myself: ActorRef<Self::Msg>,
-        state: &mut Self::State,
+        _myself: ActorRef<Self::Msg>,
+        _state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         Ok(())
     }
@@ -126,6 +126,12 @@ impl Actor for RootActor {
 
                     state.producer = Some(producer);
                 }
+                ControllerCommand::Shutdown => {
+                    debug!(
+                        "Received shutdown command. stopping sink client and commencing validation."
+                    );
+                    myself.stop(Some("SHUTDOWN".to_string()));
+                }
                 _ => warn!("Received unexpected command."),
             },
             SupervisorMessage::TransportError { reason } => {
@@ -149,8 +155,20 @@ impl Actor for RootActor {
     ) -> Result<(), ActorProcessingErr> {
         match message {
             SupervisionEvent::ActorFailed(dead_actor, panic_msg) => {
-                tracing::error!("{dead_actor:?} failed {panic_msg}");
-                myself.stop(Some(panic_msg.to_string()));
+                let error = format!(
+                    "Worker agent: {0:?}:{1:?} failed! {panic_msg}",
+                    dead_actor.get_name(),
+                    dead_actor.get_id()
+                );
+                error!("{error}");
+                state
+                    .harness_client
+                    .send_message(ControlClientMsg::SendCommand(
+                        ControllerCommand::TestError {
+                            error: error.clone(),
+                        },
+                    ))?;
+                myself.stop(Some(error));
             }
             SupervisionEvent::ActorTerminated(dead_actor, _, reason) => {
                 tracing::info!("{dead_actor:?} stopped {reason:?}");
@@ -205,7 +223,7 @@ impl Actor for ProducerAgent {
         // Subscribe to events (registration strings, etc.)
         events_output.subscribe(myself.clone(), |event| match event {
             CassiniEvent::Registered { .. } => Some(ProducerMessage::Start),
-            CassiniEvent::MessagePublished { payload, .. } => None,
+            CassiniEvent::MessagePublished { .. } => None,
             CassiniEvent::TransportError { reason } => {
                 error!("Lost connection to the message broker! {reason}");
                 Some(ProducerMessage::AgentError { reason })
@@ -249,7 +267,7 @@ impl Actor for ProducerAgent {
     async fn handle(
         &self,
         myself: ActorRef<Self::Msg>,
-        msg: Self::Msg,
+        _msg: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         info!("Running test.");
@@ -265,6 +283,7 @@ impl Actor for ProducerAgent {
 
                 let mut ticker = time::interval(interval);
                 let end = Instant::now() + duration;
+                state.metrics.start_ms = crate::get_timestamp_in_milliseconds()?;
 
                 let mut seqno = 0;
 
@@ -300,6 +319,9 @@ impl Actor for ProducerAgent {
                     }
                     state.metrics.sent += 1;
                 }
+
+                state.metrics.elapsed_ms =
+                    (crate::get_timestamp_in_milliseconds()? - state.metrics.start_ms);
 
                 // when done, print metrics and exit
                 info!(

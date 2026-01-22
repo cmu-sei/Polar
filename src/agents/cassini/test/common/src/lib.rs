@@ -1,8 +1,6 @@
 use rkyv::{Archive, Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::client::ClientEvent;
-
 pub mod client;
 
 pub enum SupervisorMessage {
@@ -23,12 +21,28 @@ pub enum AgentRole {
 
 #[derive(Clone, Debug, Serialize, Deserialize, Archive, serde::Serialize, serde::Deserialize)]
 pub enum ControllerCommand {
-    Hello { role: AgentRole },
-    ProducerConfig { producer: ProducerConfig },
-    SinkTopic { topic: String },
-    TestComplete { client_id: String, role: AgentRole },
+    Hello {
+        role: AgentRole,
+    },
+    ProducerConfig {
+        producer: ProducerConfig,
+    },
+    SinkTopic {
+        topic: String,
+    },
+    TestComplete {
+        client_id: String,
+        role: AgentRole,
+    },
     Shutdown,
-    ShutDownComplete { role: AgentRole },
+    /// a message to the sink to tell it that it can go about cleanup and validation
+    ProducerFinished,
+    ShutDownComplete {
+        role: AgentRole,
+    },
+    TestError {
+        error: String,
+    },
 }
 
 /// Messaging pattern that mimics user behavior over the network.

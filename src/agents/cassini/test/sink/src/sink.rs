@@ -10,7 +10,7 @@ use ractor::{
 use rkyv::rancor;
 use serde_json::to_string_pretty;
 
-use std::path::{Display, Path};
+use std::path::Path;
 use tokio::{fs::OpenOptions, io::AsyncWriteExt};
 
 use tracing::{debug, error, info};
@@ -156,18 +156,23 @@ impl Actor for SinkAgent {
 
     async fn post_stop(
         &self,
-        myself: ActorRef<Self::Msg>,
+        _myself: ActorRef<Self::Msg>,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         info!("Test run stopped. Validating checksums...");
-        SinkAgent::validate_checksums(format!("{}-output.json", state.cfg.topic).as_str())
-            .expect("Expected to validate checksums");
-        // TODO: instead of panicking should it fail, emit a message to the controller
-        info!(
-            "{}",
-            to_string_pretty(&state.metrics).expect("expected to serialize to json")
-        );
-        Ok(())
+        match SinkAgent::validate_checksums(format!("{}-output.json", state.cfg.topic).as_str()) {
+            Ok(_) => {
+                info!(
+                    "{}",
+                    to_string_pretty(&state.metrics).expect("expected to serialize to json")
+                );
+                Ok(())
+            }
+            Err(err) => {
+                let error = format!("Failed to validate checksums: {}", err);
+                Err(error.into())
+            }
+        }
     }
 
     async fn handle(

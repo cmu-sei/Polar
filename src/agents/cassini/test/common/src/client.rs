@@ -1,4 +1,4 @@
-use ractor::{Actor, ActorProcessingErr, ActorRef, OutputPort, RpcReplyPort, async_trait};
+use ractor::{Actor, ActorProcessingErr, ActorRef, OutputPort, async_trait};
 use rkyv::rancor::Error;
 use rustls::ClientConfig;
 use rustls::client::WebPkiServerVerifier;
@@ -13,9 +13,8 @@ use tokio::sync::Mutex;
 use tokio::task::AbortHandle;
 use tokio_rustls::TlsConnector;
 use tokio_rustls::client::TlsStream;
-use tracing::{debug, error, info, info_span, trace, warn};
+use tracing::{debug, error, info, trace, warn};
 
-use crate::AgentRole;
 use crate::ControllerCommand;
 
 pub const UNEXPECTED_DISCONNECT: &str = "UNEXPECTED_DISCONNECT";
@@ -174,7 +173,7 @@ impl ControlClient {
 
     fn spawn_reader(
         &self,
-        myself: ActorRef<ControlClientMsg>,
+        _myself: ActorRef<ControlClientMsg>,
         state: &mut ControlClientState,
     ) -> Result<(), ActorProcessingErr> {
         let reader = tokio::io::BufReader::new(state.reader.take().expect("Reader already taken"));

@@ -40,8 +40,8 @@ let TestPlan = { name : Text, tests : List Test }
 let producer =
        { topic = "steady"
         , message_size = 4096
-        , duration = 60
-        , pattern = Pattern.Drip { idle_time_seconds = 400 }
+        , duration = 3
+        , pattern = Pattern.Drip { idle_time_seconds = 1 }
         }
 
 

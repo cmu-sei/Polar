@@ -1,12 +1,11 @@
 use crate::{Test, TestPlan};
 
 use cassini_client::{TCPClientConfig, TcpClientActor, TcpClientArgs, TcpClientMessage};
-use cassini_types::{ClientEvent, ClientMessage, ControlError, ControlResult, SessionDetails};
+use cassini_types::ClientEvent;
 use harness_common::{AgentRole, ControllerCommand};
 use ractor::{
-    async_trait,
-    concurrency::{Instant, JoinHandle},
-    message, Actor, ActorProcessingErr, ActorRef, OutputPort, SupervisionEvent,
+    async_trait, concurrency::JoinHandle, Actor, ActorProcessingErr, ActorRef, OutputPort,
+    SupervisionEvent,
 };
 use rkyv::rancor::Error;
 use rkyv::rancor::Source;
@@ -15,7 +14,7 @@ use rustls::{
     server::WebPkiClientVerifier,
     RootCertStore, ServerConfig,
 };
-use std::{f64::consts::E, sync::Arc};
+use std::sync::Arc;
 use std::{process::Stdio, time::Duration};
 use tokio::process::Command;
 use tokio::{
@@ -491,8 +490,15 @@ impl Actor for HarnessController {
                             match role {
                                 AgentRole::Producer => {
                                     debug!("Producer agent completed task");
-
                                     test_state.producer_complete = true;
+                                    // tell the sink to shutdown
+                                    if let Some(sink_session) = test_state.sink.as_ref() {
+                                        sink_session.send_message(ClientSessionMessage::Send(
+                                            ControllerCommand::ProducerFinished,
+                                        ))?;
+                                    } else {
+                                        todo!("if there's no sink, what do we do?")
+                                    }
                                 }
                                 AgentRole::Sink => {
                                     debug!("Sink agent completed task");
@@ -509,9 +515,16 @@ impl Actor for HarnessController {
                             } else {
                                 debug!("Waiting for other agent to complete");
                             }
+                        } else {
+                            error!("No test state found");
+                            myself.stop(Some("No test state found".to_string()))
                         }
                     }
-                    _ => (),
+                    ControllerCommand::TestError { error } => {
+                        error!("Test failed! {error}");
+                        myself.stop(Some(error));
+                    }
+                    _ => warn!("Unexpected command! {command:?}"),
                 },
                 TestEvent::TransportError { client_id, reason } => {
                     error!("client {client_id} encountered an error {reason} stopping test");
@@ -573,7 +586,34 @@ impl Actor for HarnessController {
                     None => {
                         // we're done
                         info!("Test completed");
-                        myself.stop(None);
+
+                        state
+                            .client_ref
+                            .as_ref()
+                            .map(|client| client.send_message(TcpClientMessage::Disconnect));
+
+                        state.test_state.as_ref().map(|test_state| {
+                            test_state.producer.as_ref().map(|session| {
+                                session.send_message(ClientSessionMessage::Send(
+                                    ControllerCommand::Shutdown,
+                                ))
+                            });
+                        });
+
+                        state.test_state.as_ref().map(|test_state| {
+                            test_state.sink.as_ref().map(|session| {
+                                session.send_message(ClientSessionMessage::Send(
+                                    ControllerCommand::Shutdown,
+                                ))
+                            });
+                        });
+
+                        myself
+                            .stop_and_wait(
+                                Some("test complete".to_string()),
+                                Some(Duration::from_millis(500)),
+                            )
+                            .await?;
                     }
                 }
                 // finally
@@ -594,7 +634,7 @@ impl Actor for HarnessController {
 
                 //
             }
-            HarnessControllerMessage::ClientConnected { client_id, client } => {
+            HarnessControllerMessage::ClientConnected { client_id, .. } => {
                 debug!("Client connected: {}", client_id);
             }
         }
@@ -607,7 +647,7 @@ struct ClientSession;
 
 /// events that can occur related to the client session
 #[derive(Clone)]
-enum TestEvent {
+pub enum TestEvent {
     CommandReceived {
         reply_to: ActorRef<ClientSessionMessage>,
         command: ControllerCommand,

@@ -5,8 +5,8 @@ use harness_common::{
         ControlClientMsg,
     },
 };
+use harness_sink::sink::SinkAgentMsg;
 use ractor::{Actor, ActorProcessingErr, ActorRef, OutputPort, SupervisionEvent, async_trait};
-use tokio_util::sync::CancellationToken;
 
 use tracing::{debug, error, info, warn};
 
@@ -18,6 +18,7 @@ pub struct SinkService;
 
 pub struct SinkServiceState {
     harness_client: ActorRef<ControlClientMsg>,
+    sink: Option<ActorRef<SinkAgentMsg>>,
 }
 
 #[async_trait]
@@ -29,7 +30,7 @@ impl Actor for SinkService {
     async fn pre_start(
         &self,
         myself: ActorRef<Self::Msg>,
-        args: Self::Arguments,
+        _args: Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
         info!("Starting {myself:?}");
         tracing::info!("RootActor: Started {myself:?}");
@@ -58,22 +59,25 @@ impl Actor for SinkService {
         )
         .await?;
 
-        Ok(SinkServiceState { harness_client })
+        Ok(SinkServiceState {
+            harness_client,
+            sink: None,
+        })
     }
 
     async fn post_start(
         &self,
-        myself: ActorRef<Self::Msg>,
-        state: &mut Self::State,
+        _myself: ActorRef<Self::Msg>,
+        _state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         Ok(())
     }
 
     async fn handle_supervisor_evt(
         &self,
-        _: ActorRef<Self::Msg>,
+        myself: ActorRef<Self::Msg>,
         msg: SupervisionEvent,
-        _: &mut Self::State,
+        state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match msg {
             SupervisionEvent::ActorStarted(actor_cell) => {
@@ -93,13 +97,30 @@ impl Actor for SinkService {
                     client_id,
                     actor_cell.get_id()
                 );
+                state
+                    .harness_client
+                    .send_message(ControlClientMsg::SendCommand(
+                        ControllerCommand::TestComplete {
+                            client_id: String::default(),
+                            role: AgentRole::Sink,
+                        },
+                    ))?;
             }
             SupervisionEvent::ActorFailed(actor_cell, _) => {
-                error!(
+                let error = format!(
                     "Worker agent: {0:?}:{1:?} failed!",
                     actor_cell.get_name(),
                     actor_cell.get_id()
                 );
+                error!("{error}");
+                state
+                    .harness_client
+                    .send_message(ControlClientMsg::SendCommand(
+                        ControllerCommand::TestError {
+                            error: error.clone(),
+                        },
+                    ))?;
+                myself.stop(Some(error))
             }
             SupervisionEvent::ProcessGroupChanged(_) => (),
         }
@@ -130,16 +151,34 @@ impl Actor for SinkService {
                         topic: topic.clone(),
                     };
 
-                    let _ = Actor::spawn_linked(
+                    let (sink, _) = Actor::spawn_linked(
                         Some(format!("cassini.harness.sink.{}", topic)),
                         harness_sink::sink::SinkAgent,
                         args,
                         myself.clone().into(),
                     )
                     .await?;
+
+                    state.sink = Some(sink);
+                }
+                ControllerCommand::ProducerFinished => {
+                    debug!(
+                        "Received message producer is finished. stopping sink client and commencing validation."
+                    );
+                    if let Some(sink) = state.sink.take() {
+                        sink.stop(Some("PRODUCER_FINISHED".to_string()))
+                    } else {
+                        return Err("No sink found".into());
+                    }
+                }
+                ControllerCommand::Shutdown => {
+                    debug!(
+                        "Received shutdown command. stopping sink client and commencing validation."
+                    );
+                    myself.stop(Some("SHUTDOWN".to_string()));
                 }
                 _ => {
-                    warn!("Received unknown command");
+                    warn!("Received unknown command {command:?}");
                 }
             },
             SupervisorMessage::TransportError { reason } => {
