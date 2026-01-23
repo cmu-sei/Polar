@@ -2,7 +2,6 @@ use cassini_client::*;
 
 use cassini_types::ClientEvent;
 use harness_common::{Envelope, SupervisorMessage, validate_checksum};
-use polar::Supervisor;
 use ractor::{
     Actor, ActorProcessingErr, ActorRef, OutputPort, async_trait,
     concurrency::{Duration, Instant},

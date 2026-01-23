@@ -19,7 +19,7 @@ use crate::GITLAB_USERS_OBSERVER;
 use crate::META_OBSERVER;
 use cassini_client::*;
 use cassini_types::ClientEvent;
-use polar::{Supervisor, SupervisorMessage};
+use polar::SupervisorMessage;
 use ractor::async_trait;
 use ractor::Actor;
 use ractor::ActorProcessingErr;
@@ -115,7 +115,7 @@ impl Actor for ObserverSupervisor {
                             instance_uid: derive_instance_id(&state.gitlab_endpoint),
                             token: state.gitlab_token.clone(),
                             registration_id: registration_id.clone(),
-                            web_client: polar::get_web_client(),
+                            web_client: polar::get_web_client()?,
                             base_interval: state.base_interval,
                             max_backoff: state.max_backoff_secs,
                         };

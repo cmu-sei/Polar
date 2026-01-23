@@ -9,15 +9,14 @@ use neo4rs::Graph;
 use polar::{
     get_neo_config, ProvenanceEvent, Supervisor, SupervisorMessage, PROVENANCE_LINKER_TOPIC,
 };
-use provenance_common::PROVENANCE_LINKER_NAME;
 use ractor::{
     async_trait, registry::where_is, Actor, ActorProcessingErr, ActorRef, OutputPort,
     SupervisionEvent,
 };
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::error;
 use tracing::{debug, warn};
+use tracing::{error, instrument, trace};
 
 // === Supervisor state ===
 pub struct ProvenanceSupervisorState {
@@ -31,21 +30,22 @@ pub struct ProvenanceSupervisorState {
 pub struct ProvenanceSupervisor;
 
 impl Supervisor for ProvenanceSupervisor {
+    #[instrument(name = "ProvenanceSupervisor::deserialize_and_dispatch")]
     fn deserialize_and_dispatch(_topic: String, payload: Vec<u8>) {
+        debug!("Received message on topic {_topic}");
         match rkyv::from_bytes::<ProvenanceEvent, rkyv::rancor::Error>(&payload) {
             Ok(event) => {
                 match event {
                     ProvenanceEvent::ImageRefResolved {
-                        id,
                         uri,
                         digest,
                         media_type,
                     } => {
                         //lookup linker and forward
-                        if let Some(linker) = where_is(PROVENANCE_LINKER_NAME.to_string()) {
+                        trace!("looking up actor {PROVENANCE_LINKER_TOPIC} and forwarding");
+                        if let Some(linker) = where_is(PROVENANCE_LINKER_TOPIC.to_string()) {
                             linker
                                 .send_message(LinkerCommand::LinkContainerImages {
-                                    id,
                                     uri,
                                     digest,
                                     media_type,
@@ -79,6 +79,7 @@ impl Actor for ProvenanceSupervisor {
         let events_output = Arc::new(OutputPort::default());
 
         events_output.subscribe(myself.clone(), |event| {
+            debug!("Received event: {event:?}");
             Some(SupervisorMessage::ClientEvent { event })
         });
         let client_config = TCPClientConfig::new()?;
@@ -109,10 +110,9 @@ impl Actor for ProvenanceSupervisor {
     async fn post_start(
         &self,
         myself: ActorRef<Self::Msg>,
-        state: &mut Self::State,
+        _state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         debug!("{myself:?} started.");
-
         Ok(())
     }
 
@@ -127,6 +127,7 @@ impl Actor for ProvenanceSupervisor {
                 ClientEvent::Registered { .. } => {
                     // subscribe to topic
                     //
+                    debug!("Subscribing to topic {}", PROVENANCE_LINKER_TOPIC);
                     state
                         .broker_client
                         .cast(cassini_client::TcpClientMessage::Subscribe(
@@ -135,7 +136,6 @@ impl Actor for ProvenanceSupervisor {
 
                     let linker_args = ProvenanceLinkerArgs {
                         graph: state.graph.clone(),
-                        interval: Duration::from_secs(30),
                     };
 
                     let (_linker, _) = Actor::spawn_linked(
@@ -146,7 +146,13 @@ impl Actor for ProvenanceSupervisor {
                     )
                     .await?;
                 }
-                _ => todo!(),
+                ClientEvent::MessagePublished { topic, payload } => {
+                    Self::deserialize_and_dispatch(topic, payload)
+                }
+                ClientEvent::TransportError { reason } => {
+                    error!("Transport error: {reason}");
+                    myself.stop(Some(reason))
+                }
             },
         }
         Ok(())
@@ -166,6 +172,9 @@ impl Actor for ProvenanceSupervisor {
             SupervisionEvent::ActorTerminated(name, state, reason) => {
                 error!("Actor {name:?} failed! {reason:?}");
                 myself.stop(reason)
+            }
+            SupervisionEvent::ActorStarted(actor) => {
+                debug!("Actor {actor:?} started!");
             }
             _ => {}
         }

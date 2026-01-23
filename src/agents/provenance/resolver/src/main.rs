@@ -17,7 +17,7 @@ use ractor::{
 };
 use reqwest::Client as WebClient;
 use std::str::FromStr;
-use tracing::{debug, error, info, trace, warn};
+use tracing::{debug, debug_span, error, info, instrument, trace, warn};
 
 pub const BROKER_CLIENT_NAME: &str = "polar.provenance.resolver.tcp";
 
@@ -29,11 +29,13 @@ pub struct ResolverSupervisorState {
     cassini_client: ActorRef<TcpClientMessage>,
 }
 impl Supervisor for ResolverSupervisor {
-    fn deserialize_and_dispatch(_topic: String, payload: Vec<u8>) {
+    #[instrument(level = "trace", skip(payload))]
+    fn deserialize_and_dispatch(topic: String, payload: Vec<u8>) {
         match rkyv::from_bytes::<ProvenanceEvent, rkyv::rancor::Error>(&payload) {
             Ok(event) => {
                 //lookup and forward
-                if let Some(resolver) = where_is(PROVENANCE_DISCOVERY_TOPIC.to_string()) {
+                trace!("Looking up actor {topic} and forwarding payload");
+                if let Some(resolver) = where_is(topic.to_string()) {
                     resolver
                         .send_message(event)
                         .map_err(|e| error!("Failed to forward provenance event! {e}"))
@@ -115,7 +117,13 @@ impl Actor for ResolverSupervisor {
                     )
                     .await?;
                 }
-                _ => {}
+                ClientEvent::MessagePublished { topic, payload } => {
+                    Self::deserialize_and_dispatch(topic, payload)
+                }
+                ClientEvent::TransportError { reason } => {
+                    error!("Transport error: {reason}");
+                    myself.stop(Some(reason))
+                }
             },
         }
         Ok(())
@@ -222,6 +230,7 @@ impl ResolverAgent {
         ]
     }
 
+    #[instrument(level = "debug", name = "resolver.inspect_image", skip(client))]
     async fn inspect_image(
         image_ref: &str,
         client: &OciClient,
@@ -231,7 +240,6 @@ impl ResolverAgent {
         let reference = oci_client::Reference::from_str(image_ref)?;
 
         let auth = Self::resolve_registry_auth(&reference)?;
-
         client
             .auth(&reference, &auth, RegistryOperation::Pull)
             .await?;
@@ -284,7 +292,7 @@ impl Actor for ResolverAgent {
 
         let state = ResolverAgentState {
             cassini_client: args.cassini_client,
-            web_client: polar::get_web_client(),
+            web_client: polar::get_web_client()?,
             oci_client,
         };
         Ok(state)
@@ -292,15 +300,14 @@ impl Actor for ResolverAgent {
 
     async fn post_start(
         &self,
-        myself: ActorRef<Self::Msg>,
+        _myself: ActorRef<Self::Msg>,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         //subscribe to topic on the broker
         //
+        info!("Subscribing to topic {PROVENANCE_DISCOVERY_TOPIC}");
         state.cassini_client.cast(TcpClientMessage::Subscribe(
-            myself
-                .get_name()
-                .expect("Expected actor to have been named."),
+            PROVENANCE_DISCOVERY_TOPIC.to_string(),
         ))?;
         Ok(())
     }
@@ -312,10 +319,10 @@ impl Actor for ResolverAgent {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match msg {
-            ProvenanceEvent::ImageRefDiscovered { id, uri } => {
+            ProvenanceEvent::ImageRefDiscovered { uri } => {
                 trace!("Received image ref discovered event!");
 
-                match ResolverAgent::inspect_image(&uri, &state.oci_client).await {
+                match Self::inspect_image(&uri, &state.oci_client).await {
                     Ok((manifest, digest)) => {
                         debug!("Resolved image: \n {manifest:?}");
 
@@ -323,7 +330,6 @@ impl Actor for ResolverAgent {
 
                         // forward image data to the linker
                         let message = ProvenanceEvent::ImageRefResolved {
-                            id,
                             uri,
                             digest,
                             media_type,
@@ -331,13 +337,14 @@ impl Actor for ResolverAgent {
 
                         let payload = rkyv::to_bytes::<rkyv::rancor::Error>(&message)?;
 
+                        debug!("Publishing event to topic: {PROVENANCE_LINKER_TOPIC}");
                         state.cassini_client.cast(TcpClientMessage::Publish {
                             topic: PROVENANCE_LINKER_TOPIC.to_string(),
                             payload: payload.into(),
                         })?;
                     }
                     Err(e) => {
-                        warn!("Failed to resolve image: {uri}, {e}");
+                        error!("Failed to resolve image: {uri}, {e}");
                     }
                 }
             }

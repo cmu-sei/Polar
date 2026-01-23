@@ -184,7 +184,10 @@ impl Actor for ClusterObserverSupervisor {
                 ClientEvent::MessagePublished { .. } => {
                     todo!("Handle incoming messages")
                 }
-                ClientEvent::TransportError { .. } => todo!("Handle client transport errors"),
+                ClientEvent::TransportError { reason } => {
+                    error!("Transport error occurred! {reason}");
+                    myself.stop(Some(reason))
+                }
             },
         }
         Ok(())

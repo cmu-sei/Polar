@@ -29,227 +29,231 @@ use polar::{ProvenanceEvent, PROVENANCE_DISCOVERY_TOPIC, QUERY_COMMIT_FAILED, QU
 use ractor::{async_trait, registry::where_is, rpc::cast, Actor, ActorProcessingErr, ActorRef};
 use rkyv::rancor;
 use serde_json::from_value;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, instrument};
 use uuid::Uuid;
 
 use crate::{KubeConsumerArgs, KubeConsumerState, BROKER_CLIENT_NAME};
 
 use std::collections::HashSet;
 
-pub fn pods_to_cypher(pods: &[Pod]) -> Vec<String> {
-    let mut statements = Vec::new();
-    let mut seen_volumes = HashSet::new();
-    let mut seen_configmaps = HashSet::new();
-    let mut seen_secrets = HashSet::new();
-    let mut seen_pvcs = HashSet::new();
-    let mut seen_images = HashSet::new();
+pub struct PodConsumer;
 
-    for pod in pods {
-        //add unique id to podsmut
-        let uid = pod.metadata.uid.clone().unwrap_or_default();
+impl PodConsumer {
+    #[instrument(
+        level = "debug",
+        name = "PodConsumer::pods_to_cypher",
+        skip(state, pods)
+    )]
+    pub fn pods_to_cypher(
+        state: &mut KubeConsumerState,
+        pods: &[Pod],
+    ) -> Result<Vec<String>, ActorProcessingErr> {
+        let mut statements = Vec::new();
+        let mut seen_volumes = HashSet::new();
+        let mut seen_configmaps = HashSet::new();
+        let mut seen_secrets = HashSet::new();
+        let mut seen_pvcs = HashSet::new();
+        let mut seen_images = HashSet::new();
 
-        let pod_name = pod.metadata.name.clone().unwrap_or_default();
-        let namespace = pod
-            .metadata
-            .namespace
-            .clone()
-            .unwrap_or_else(|| "default".to_string());
-        let sa_name = pod
-            .spec
-            .as_ref()
-            .and_then(|s| s.service_account_name.clone())
-            .unwrap_or_default();
+        for pod in pods {
+            //add unique id to podsmut
+            let uid = pod.metadata.uid.clone().unwrap_or_default();
 
-        // Pod node
-        statements.push(format!(
-            "MERGE (p:Pod {{uid: '{uid}', name: '{pod_name}', namespace: '{namespace}' }}) \
-             SET p.serviceAccountName = '{sa_name}'"
-        ));
+            let pod_name = pod.metadata.name.clone().unwrap_or_default();
+            let namespace = pod
+                .metadata
+                .namespace
+                .clone()
+                .unwrap_or_else(|| "default".to_string());
+            let sa_name = pod
+                .spec
+                .as_ref()
+                .and_then(|s| s.service_account_name.clone())
+                .unwrap_or_default();
 
-        if let Some(spec) = &pod.spec {
-            // Volumes
-            if let Some(volumes) = &spec.volumes {
-                for volume in volumes {
-                    let vol_key = format!("{}::{}", namespace, volume.name);
-                    if seen_volumes.insert(vol_key.clone()) {
-                        statements.push(format!(
-                            "MERGE (v:Volume {{ name: '{}', namespace: '{}' }})",
-                            volume.name, namespace
-                        ));
-                    }
+            // Pod node
+            statements.push(format!(
+                "MERGE (p:Pod {{uid: '{uid}', name: '{pod_name}', namespace: '{namespace}' }}) \
+                 SET p.serviceAccountName = '{sa_name}'"
+            ));
 
-                    statements.push(format!(
-                        "MATCH (p:Pod {{ name: '{}', namespace: '{}' }}), \
-                               (v:Volume {{ name: '{}', namespace: '{}' }}) \
-                         MERGE (p)-[:USES_VOLUME]->(v)",
-                        pod_name, namespace, volume.name, namespace
-                    ));
-
-                    // Volume -> ConfigMap
-                    if let Some(cm) = &volume.config_map {
-                        if seen_configmaps.insert(format!("{}::{}", namespace, cm.name)) {
+            if let Some(spec) = &pod.spec {
+                // Volumes
+                if let Some(volumes) = &spec.volumes {
+                    for volume in volumes {
+                        let vol_key = format!("{}::{}", namespace, volume.name);
+                        if seen_volumes.insert(vol_key.clone()) {
                             statements.push(format!(
-                                "MERGE (cm:ConfigMap {{ name: '{}', namespace: '{}' }})",
-                                cm.name, namespace
+                                "MERGE (v:Volume {{ name: '{}', namespace: '{}' }})",
+                                volume.name, namespace
                             ));
                         }
-                        statements.push(format!(
-                            "MATCH (v:Volume {{ name: '{}', namespace: '{}' }}), \
-                                   (cm:ConfigMap {{ name: '{}', namespace: '{}' }}) \
-                             MERGE (v)-[:BACKED_BY]->(cm)",
-                            volume.name, namespace, cm.name, namespace
-                        ));
-                    }
 
-                    // Volume -> Secret
-                    if let Some(secret) = &volume.secret {
-                        if let Some(secret_name) = &secret.secret_name {
-                            if seen_secrets.insert(format!("{}::{}", namespace, secret_name)) {
+                        statements.push(format!(
+                            "MATCH (p:Pod {{ name: '{}', namespace: '{}' }}), \
+                                   (v:Volume {{ name: '{}', namespace: '{}' }}) \
+                             MERGE (p)-[:USES_VOLUME]->(v)",
+                            pod_name, namespace, volume.name, namespace
+                        ));
+
+                        // Volume -> ConfigMap
+                        if let Some(cm) = &volume.config_map {
+                            if seen_configmaps.insert(format!("{}::{}", namespace, cm.name)) {
                                 statements.push(format!(
-                                    "MERGE (s:Secret {{ name: '{}', namespace: '{}' }})",
-                                    secret_name, namespace
+                                    "MERGE (cm:ConfigMap {{ name: '{}', namespace: '{}' }})",
+                                    cm.name, namespace
                                 ));
                             }
                             statements.push(format!(
                                 "MATCH (v:Volume {{ name: '{}', namespace: '{}' }}), \
-                                       (s:Secret {{ name: '{}', namespace: '{}' }}) \
-                                 MERGE (v)-[:BACKED_BY]->(s)",
-                                volume.name, namespace, secret_name, namespace
+                                       (cm:ConfigMap {{ name: '{}', namespace: '{}' }}) \
+                                 MERGE (v)-[:BACKED_BY]->(cm)",
+                                volume.name, namespace, cm.name, namespace
                             ));
                         }
-                    }
 
-                    // Volume -> PVC
-                    if let Some(pvc) = &volume.persistent_volume_claim {
-                        if seen_pvcs.insert(format!("{}::{}", namespace, pvc.claim_name)) {
-                            statements.push(format!(
-                                "MERGE (pvc:PersistentVolumeClaim {{ name: '{}', namespace: '{}' }})",
-                                pvc.claim_name, namespace
-                            ));
-                        }
-                        statements.push(format!(
-                            "MATCH (v:Volume {{ name: '{}', namespace: '{}' }}), \
-                                   (pvc:PersistentVolumeClaim {{ name: '{}', namespace: '{}' }}) \
-                             MERGE (v)-[:BACKED_BY]->(pvc)",
-                            volume.name, namespace, pvc.claim_name, namespace
-                        ));
-                    }
-                }
-            }
-
-            // Containers and InitContainers
-            let containers = spec
-                .containers
-                .iter()
-                .chain(spec.init_containers.iter().flatten());
-
-            for container in containers {
-                if let Some(image) = &container.image {
-                    if seen_images.insert(image.clone()) {
-                        statements.push(format!(
-                            "
-                            // Ensure a PodContainer node for this pod+container
-                            MERGE (p:Pod {{ name: '{pod_name}', namespace: '{namespace}' }})
-                            MERGE (c:PodContainer {{ name: '{container_name}', namespace: '{namespace}', pod_name: '{pod_name}' }})
-                            SET c.image = '{image}'
-
-                            // Create canonical image reference
-                            MERGE (ref:ContainerImageReference {{ normalized: '{image}' }})
-                            ON CREATE SET ref.discovered_by = 'k8s_consumer', ref.first_seen = timestamp()
-
-                            // Link container to image reference
-                            MERGE (c)-[:USES_REFERENCE]->(ref)
-
-                            // Link pod to container
-                            MERGE (p)-[:HAS_CONTAINER]->(c)
-
-                                ",
-                                container_name = container.name.as_str(),
-                                image = image.as_str()
-                        ));
-
-                        // emit a message to the provenance discovery agent that we saw an image.
-                        // For k8s, the canonical image name is the best we've got, so the resolver will have to take care of finding out where it really came from.
-                        where_is(BROKER_CLIENT_NAME.to_string()).map(|client| {
-                            let event = ProvenanceEvent::image_ref_discovered(image, None);
-
-                            match rkyv::to_bytes::<rancor::Error>(&event) {
-                                Ok(payload) => {
-                                    let message = TcpClientMessage::Publish {
-                                        topic: PROVENANCE_DISCOVERY_TOPIC.to_string(),
-                                        payload: payload.into(),
-                                    };
-
-                                    cast(&client, message)
-                                        .map_err(|e| {
-                                            error!("Failed to forward message to broker. {e}")
-                                            // if we fail to talk to the client, we might be ok dropping the message and retrying after the supervisor restarts.
-                                        })
-                                        .ok();
-                                }
-                                Err(e) => {
-                                    error!("Failed to serialize event. {e}");
-                                    // If we fail to serialize, should we retry? Drop the message? Or stop?
-                                    todo!("Handle failure to serialize event.");
-                                }
-                            }
-                        });
-                    }
-                    statements.push(format!(
-                        "MATCH (p:Pod {{ name: '{}', namespace: '{}' }}), \
-                               (c:PodContainer {{ image: '{}' }}) \
-                         MERGE (p)-[:HAS_CONTAINER]->(c)",
-                        pod_name, namespace, image
-                    ));
-                }
-
-                if let Some(envs) = &container.env {
-                    for env in envs {
-                        if let Some(value_from) = &env.value_from {
-                            if let Some(cm_ref) = &value_from.config_map_key_ref {
-                                if seen_configmaps.insert(format!("{}::{}", namespace, cm_ref.name))
-                                {
-                                    statements.push(format!(
-                                        "MERGE (cm:ConfigMap {{ name: '{}', namespace: '{}' }})",
-                                        cm_ref.name, namespace
-                                    ));
-                                }
-                                //link configmap to container
-                                statements.push(format!(
-                                    "MATCH (p:Pod {{ name: '{}', namespace: '{}' }}), \
-                                           (cm:ConfigMap {{ name: '{}', namespace: '{}' }}) \
-                                     MERGE (p)-[:USES_CONFIGMAP]->(cm)",
-                                    pod_name, namespace, cm_ref.name, namespace
-                                ));
-                            }
-
-                            if let Some(secret_ref) = &value_from.secret_key_ref {
-                                if seen_secrets
-                                    .insert(format!("{}::{}", namespace, secret_ref.name))
-                                {
+                        // Volume -> Secret
+                        if let Some(secret) = &volume.secret {
+                            if let Some(secret_name) = &secret.secret_name {
+                                if seen_secrets.insert(format!("{}::{}", namespace, secret_name)) {
                                     statements.push(format!(
                                         "MERGE (s:Secret {{ name: '{}', namespace: '{}' }})",
-                                        secret_ref.name, namespace
+                                        secret_name, namespace
                                     ));
                                 }
                                 statements.push(format!(
-                                    "MATCH (p:Pod {{ name: '{}', namespace: '{}' }}), \
+                                    "MATCH (v:Volume {{ name: '{}', namespace: '{}' }}), \
                                            (s:Secret {{ name: '{}', namespace: '{}' }}) \
-                                     MERGE (p)-[:USES_SECRET]->(s)",
-                                    pod_name, namespace, secret_ref.name, namespace
+                                     MERGE (v)-[:BACKED_BY]->(s)",
+                                    volume.name, namespace, secret_name, namespace
                                 ));
+                            }
+                        }
+
+                        // Volume -> PVC
+                        if let Some(pvc) = &volume.persistent_volume_claim {
+                            if seen_pvcs.insert(format!("{}::{}", namespace, pvc.claim_name)) {
+                                statements.push(format!(
+                                    "MERGE (pvc:PersistentVolumeClaim {{ name: '{}', namespace: '{}' }})",
+                                    pvc.claim_name, namespace
+                                ));
+                            }
+                            statements.push(format!(
+                                "MATCH (v:Volume {{ name: '{}', namespace: '{}' }}), \
+                                       (pvc:PersistentVolumeClaim {{ name: '{}', namespace: '{}' }}) \
+                                 MERGE (v)-[:BACKED_BY]->(pvc)",
+                                volume.name, namespace, pvc.claim_name, namespace
+                            ));
+                        }
+                    }
+                }
+
+                // Containers and InitContainers
+                let containers = spec
+                    .containers
+                    .iter()
+                    .chain(spec.init_containers.iter().flatten());
+
+                for container in containers {
+                    if let Some(image) = &container.image {
+                        if seen_images.insert(image.clone()) {
+                            statements.push(format!(
+                                "
+                                // Ensure a PodContainer node for this pod+container
+                                MERGE (p:Pod {{ name: '{pod_name}', namespace: '{namespace}' }})
+                                MERGE (c:PodContainer {{ name: '{container_name}', namespace: '{namespace}', pod_name: '{pod_name}' }})
+                                SET c.image = '{image}'
+
+
+                                MERGE (ref:ContainerImageReference {{
+                                  normalized: '{image}'
+                                }})
+                                ON CREATE SET
+                                  ref.discovered_by = 'k8s_consumer',
+                                  ref.first_seen = timestamp()
+                                ON MATCH SET
+                                  ref.last_seen = timestamp()
+
+                                MERGE (c)-[:USES_REFERENCE]->(ref)
+                                MERGE (p)-[:HAS_CONTAINER]->(c)
+
+                                    ",
+                                    container_name = container.name.as_str(),
+                                    image = image.as_str()
+                            ));
+
+                            // emit a message to the provenance discovery agent that we saw an image.
+                            // For k8s, the canonical image name is the best we've got, so the resolver will have to take care of finding out where it really came from.
+                            // WHEN IT DOES - The resolver should populate the event with a unique ID, provided the image is a new one
+                            // TODO: Is it worth making this configurable? unlikely
+                            let event = ProvenanceEvent::ImageRefDiscovered {
+                                uri: image.to_string(),
+                            };
+                            let payload = rkyv::to_bytes::<rancor::Error>(&event)?;
+
+                            let message = TcpClientMessage::Publish {
+                                topic: PROVENANCE_DISCOVERY_TOPIC.to_string(),
+                                payload: payload.into(),
+                            };
+
+                            debug!("emitting provenance event for image {image}");
+                            state.broker_client.send_message(message)?;
+                        }
+                        statements.push(format!(
+                            "MATCH (p:Pod {{ name: '{}', namespace: '{}' }}), \
+                                   (c:PodContainer {{ image: '{}' }}) \
+                             MERGE (p)-[:HAS_CONTAINER]->(c)",
+                            pod_name, namespace, image
+                        ));
+                    }
+
+                    if let Some(envs) = &container.env {
+                        for env in envs {
+                            if let Some(value_from) = &env.value_from {
+                                if let Some(cm_ref) = &value_from.config_map_key_ref {
+                                    if seen_configmaps
+                                        .insert(format!("{}::{}", namespace, cm_ref.name))
+                                    {
+                                        statements.push(format!(
+                                            "MERGE (cm:ConfigMap {{ name: '{}', namespace: '{}' }})",
+                                            cm_ref.name, namespace
+                                        ));
+                                    }
+                                    //link configmap to container
+                                    statements.push(format!(
+                                        "MATCH (p:Pod {{ name: '{}', namespace: '{}' }}), \
+                                               (cm:ConfigMap {{ name: '{}', namespace: '{}' }}) \
+                                         MERGE (p)-[:USES_CONFIGMAP]->(cm)",
+                                        pod_name, namespace, cm_ref.name, namespace
+                                    ));
+                                }
+
+                                if let Some(secret_ref) = &value_from.secret_key_ref {
+                                    if seen_secrets
+                                        .insert(format!("{}::{}", namespace, secret_ref.name))
+                                    {
+                                        statements.push(format!(
+                                            "MERGE (s:Secret {{ name: '{}', namespace: '{}' }})",
+                                            secret_ref.name, namespace
+                                        ));
+                                    }
+                                    statements.push(format!(
+                                        "MATCH (p:Pod {{ name: '{}', namespace: '{}' }}), \
+                                               (s:Secret {{ name: '{}', namespace: '{}' }}) \
+                                         MERGE (p)-[:USES_SECRET]->(s)",
+                                        pod_name, namespace, secret_ref.name, namespace
+                                    ));
+                                }
                             }
                         }
                     }
                 }
             }
         }
+
+        Ok(statements)
     }
-
-    statements
 }
-
-pub struct PodConsumer;
 
 // pub enum Message {
 //     MessageK
@@ -267,14 +271,13 @@ impl Actor for PodConsumer {
     ) -> Result<Self::State, ActorProcessingErr> {
         debug!("{myself:?} starting, connecting to broker");
 
-        let client =
-            where_is(BROKER_CLIENT_NAME.to_string()).expect("Expected to find TCP client.");
-
-        client.send_message(TcpClientMessage::Subscribe(myself.get_name().unwrap()))?;
+        args.broker_client
+            .send_message(TcpClientMessage::Subscribe(myself.get_name().unwrap()))?;
 
         //load neo config and connect to graph db
         match neo4rs::Graph::connect(args.graph_config) {
             Ok(graph) => Ok(KubeConsumerState {
+                broker_client: args.broker_client,
                 registration_id: args.registration_id,
                 graph,
             }),
@@ -308,7 +311,7 @@ impl Actor for PodConsumer {
                             Ok(pods) => {
                                 debug!("Received {} pod(s)", pods.len());
 
-                                let queries = pods_to_cypher(&pods);
+                                let queries = Self::pods_to_cypher(state, &pods)?;
 
                                 for query in queries {
                                     debug!("{query:?}");
@@ -329,7 +332,7 @@ impl Actor for PodConsumer {
                     KubeMessage::ResourceApplied { resource, .. } => {
                         match from_value::<Pod>(resource) {
                             Ok(pod) => {
-                                let queries = pods_to_cypher(&vec![pod]);
+                                let queries = Self::pods_to_cypher(state, &vec![pod])?;
 
                                 for query in queries {
                                     debug!("{query:?}");

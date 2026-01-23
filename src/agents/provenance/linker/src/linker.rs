@@ -2,11 +2,9 @@ use cyclonedx_bom::prelude::*;
 use neo4rs::Graph;
 use neo4rs::Query;
 use ractor::async_trait;
-use ractor::concurrency::Duration;
 use ractor::Actor;
 use ractor::ActorProcessingErr;
 use ractor::ActorRef;
-use tokio::task::AbortHandle;
 use tracing::{debug, info, warn};
 
 use crate::ArtifactType;
@@ -17,7 +15,6 @@ pub struct ProvenanceLinker;
 
 pub enum LinkerCommand {
     LinkContainerImages {
-        id: String,
         uri: String,
         digest: String,
         media_type: String,
@@ -33,13 +30,10 @@ pub enum LinkerCommand {
 
 pub struct ProvenanceLinkerState {
     graph: Graph,
-    interval: Duration,
-    abort_handle: Option<AbortHandle>,
 }
 
 pub struct ProvenanceLinkerArgs {
     pub graph: Graph,
-    pub interval: Duration,
 }
 
 impl ProvenanceLinker {
@@ -106,11 +100,8 @@ impl Actor for ProvenanceLinker {
         myself: ActorRef<Self::Msg>,
         args: Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
-        Ok(ProvenanceLinkerState {
-            graph: args.graph,
-            interval: args.interval,
-            abort_handle: None,
-        })
+        debug!("{myself:?} starting!");
+        Ok(ProvenanceLinkerState { graph: args.graph })
     }
 
     async fn post_start(
@@ -147,22 +138,27 @@ impl Actor for ProvenanceLinker {
             }
             //TODO: Add another handler for linking package files in gtlab to container images deployed in k8s and their sboms
             LinkerCommand::LinkContainerImages {
-                id,
                 uri,
                 digest,
                 media_type,
             } => {
                 tracing::trace!("Recevied a LinkContainerImages directive");
                 // Invariant: “Every observed container image in the system has a canonical reference node.”
-                debug!("Updating reference to container: {uri} with id: {id}");
+                info!("Updating reference to container: {uri} with digest: {digest}");
                 let query = format!(
                     r#"
-                    MERGE (ref:ContainerImageReference {{id: '{id}', normalized: '{uri}', digest: '{digest}', media_type: '{media_type}', last_updated: timestamp()}})
+                    MERGE (ref:ContainerImageReference {{
+                      normalized: '{uri}'
+                    }})
+                    SET
+                      ref.digest = '{digest}',
+                      ref.media_type = '{media_type}',
+                      ref.last_resolved = timestamp()
+
                     WITH ref
                     MATCH (tag:ContainerImageTag)
-                        WHERE tag.location = ref.normalized
-                    WITH tag
-                    MERGE (ref)<-[:IDENTIFIES]-(tag)
+                    WHERE tag.location = ref.normalized
+                    MERGE (tag)-[:IDENTIFIES]->(ref)
                     "#
                 );
                 tracing::debug!(query);

@@ -1,5 +1,5 @@
 use cassini_types::ClientEvent;
-use ractor::OutputPort;
+use ractor::{ActorProcessingErr, OutputPort};
 use reqwest::{Certificate, Client, ClientBuilder};
 use serde::{Deserialize, Serialize};
 use std::io::Read;
@@ -54,20 +54,16 @@ pub enum ProvenanceEvent {
     /// Emitted when a new container image reference is discovered
     /// (e.g., observed in a GitLab pipeline, Kubernetes Pod, or registry listing).
     ///
-    /// `id`: Deterministic identifier for the image reference.
-    ///        Typically a UUIDv5 derived from the normalized image URI.
     /// `uri`: The canonical image reference string (e.g. `"ghcr.io/org/app:1.2.3"`).
-    ImageRefDiscovered { id: String, uri: String },
+    ImageRefDiscovered { uri: String },
 
     /// Emitted when a previously discovered image reference has been
     /// resolved (validated via Skopeo or registry metadata) and now includes
     /// content-addressable digest information.
     ///
-    /// `id`: Same deterministic identifier used in `ImageRefDiscovered`.
     /// `digest`: Verified content digest (e.g. `"sha256:abc123..."`).
     /// `media_type`: MIME type of the image manifest (e.g. `"application/vnd.oci.image.manifest.v1+json"`).
     ImageRefResolved {
-        id: String,
         uri: String,
         digest: String,
         media_type: String,
@@ -103,15 +99,6 @@ pub enum ProvenanceEvent {
 
 impl ProvenanceEvent {
     /// constructor to generate a new image reference event, granting a UUID unless one is provided.
-    pub fn image_ref_discovered(uri: &str, id: Option<String>) -> Self {
-        let id = id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-        Self::ImageRefDiscovered {
-            id,
-            uri: uri.to_string(),
-        }
-    }
-
-    /// constructor to generate a new image reference event, granting a UUID unless one is provided.
     pub fn sbom_ref_discovered(uri: &str, id: Option<String>) -> Self {
         let id = id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         Self::SbomDiscovered {
@@ -127,9 +114,7 @@ impl ProvenanceEvent {
         digest: String,
         media_type: String,
     ) -> Self {
-        let id = id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         Self::ImageRefResolved {
-            id,
             uri: uri.to_string(),
             digest,
             media_type,
@@ -175,30 +160,27 @@ pub fn init_logging() {
 }
 /// Helper function to get a web client with optional proxy CA certificate
 /// Attempts to find a path to the proxy CA certificate provided by the environment variable PROXY_CA_CERT
-pub fn get_web_client() -> Client {
-    info!("Attempting to find PROXY_CA_CERT");
-    match std::env::var("PROXY_CA_CERT") {
+pub fn get_web_client() -> Result<Client, ActorProcessingErr> {
+    debug!("Attempting to find PROXY_CA_CERT");
+    Ok(match std::env::var("PROXY_CA_CERT") {
         Ok(path) => {
             let cert_data = get_file_as_byte_vec(&path)
                 .expect("Expected to find a proxy CA certificate at {path}");
             let root_cert =
                 Certificate::from_pem(&cert_data).expect("Expected {path} to be in PEM format.");
 
-            info!("Found PROXY_CA_CERT at: {path}, Configuring web client...");
+            debug!("Found PROXY_CA_CERT at: {path}, Configuring web client...");
 
             ClientBuilder::new()
                 .add_root_certificate(root_cert)
                 .use_rustls_tls()
-                .build()
-                .expect("Expected to build web client with proxy CA certificate")
+                .build()?
         }
         Err(e) => {
             debug!("Failed to find PROXY_CA_CERT. {e} Configuring web client without proxy CA certificate...");
-            ClientBuilder::new()
-                .build()
-                .expect("Expected to build web client.")
+            ClientBuilder::new().build()?
         }
-    }
+    })
 }
 /// Standard helper fn to get a neo4rs configuration based on environment variables
 /// All of the following variables are required fields unless otherwise specified.
