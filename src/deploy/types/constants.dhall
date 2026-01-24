@@ -152,8 +152,9 @@ let neo4jServiceName = "polar-db-svc"
 
 let neo4jDNSName = "${neo4jServiceName}.${GraphNamespace}.svc.cluster.local"
 
-let ProvenanceDeploymentName = "polar-provenance"
 
+let RegistryResolverName = "oci-registry-resolver"
+let ArtifactLinkerName = "artifact-linker"
 let ProvenanceLinkerName = "provenance-linker"
 
 let ProvenanceResolverName = "provenance-resolver"
@@ -217,7 +218,8 @@ let graphClientEnvVars = [      kubernetes.EnvVar::{
     , cassiniAddr
     , cassiniDNSName
     , commonClientEnv
-    , ProvenanceDeploymentName
+    , RegistryResolverName
+    , ArtifactLinkerName
     , ProvenanceLinkerName
     , ProvenanceResolverName
     , OciRegistrySecret

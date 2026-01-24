@@ -83,7 +83,7 @@ let
 
     # Create passwd/group/shadow files
     etc = pkgs.runCommand "polar-etc" {
-      buildInputs = [ pkgs.shadow ];
+      buildInputs = [  ];
     } ''
       mkdir -p $out/etc $out/home/${commonUser.name}
 
@@ -97,11 +97,10 @@ let
       bash # Basic bash to run bare essential code
       glibcLocalesUtf8
       uutils-coreutils-noprefix # Essential GNU utilities (ls, cat, etc.)
-      busybox
       etc
     ];
     cassini = import (workspaceRoot + /cassini/package.nix) {
-      inherit pkgs commonPaths craneLib  workspaceFileset cargoArtifacts commonUser;
+      inherit pkgs commonPaths craneLib  workspaceFileset commonUser;
       crateArgs = individualCrateArgs;
     };
 

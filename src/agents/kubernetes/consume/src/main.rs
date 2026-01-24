@@ -28,7 +28,7 @@ use std::error::Error;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    init_logging();
+    init_logging("kubernetes.cluster.consumer.supervisor".to_string());
 
     let (_, handle) = Actor::spawn(
         Some("kubernetes.cluster.supervisor".to_string()),

@@ -37,6 +37,12 @@ let
         src = workspaceFileset ./provenance;
     });
 
+    resolverConfig = pkgs.writeTextFile {
+      name          = "resolver.dhall";
+      destination   = "/resolver.dhall";
+      text          = builtins.readFile ./resolver/resolver.dhall;
+    };
+
     resolverImage = pkgs.dockerTools.buildImage {
         name = "provenance-resolver-agent";
         tag = "latest";

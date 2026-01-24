@@ -2220,19 +2220,21 @@ checksum = "6dbf3de79e51f3d586ab4cb9d5c3e2c14aa28ed23d180cf89b4df0454a69cc87"
 
 [[package]]
 name = "hyper"
-version = "1.6.0"
+version = "1.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cc2b571658e38e0c01b1fdca3bbbe93c00d3d71693ff2770043f8c29bc7d6f80"
+checksum = "2ab2d4f250c3d7b1c9fcdff1cece94ea4e2dfbec68614f7b87cb205f24ca9d11"
 dependencies = [
+ "atomic-waker",
  "bytes",
  "futures-channel",
- "futures-util",
+ "futures-core",
  "h2",
  "http",
  "http-body",
  "httparse",
  "itoa",
  "pin-project-lite",
+ "pin-utils",
  "smallvec",
  "tokio",
  "want",
@@ -3011,10 +3013,14 @@ checksum = "34080505efa8e45a4b816c349525ebe327ceaa8559756f0356cba97ef3bf7432"
 name = "logger"
 version = "0.1.0"
 dependencies = [
+ "cassini-client",
+ "cassini-types",
  "polar",
  "ractor",
+ "rkyv 0.8.12",
  "rocksdb",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -3863,12 +3869,16 @@ version = "0.1.0"
 dependencies = [
  "cassini-types",
  "neo4rs",
+ "opentelemetry",
+ "opentelemetry-otlp",
+ "opentelemetry_sdk",
  "ractor",
  "reqwest",
  "rkyv 0.8.12",
  "serde",
  "tracing",
  "tracing-glog",
+ "tracing-opentelemetry",
  "tracing-subscriber",
  "uuid",
 ]
@@ -4082,6 +4092,8 @@ dependencies = [
  "ractor",
  "reqwest",
  "rkyv 0.8.12",
+ "serde",
+ "serde_dhall",
  "tokio",
  "tracing",
 ]

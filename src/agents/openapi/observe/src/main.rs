@@ -4,7 +4,7 @@ use std::{env, error::Error};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    polar::init_logging();
+    polar::init_logging("polar.openapi.supervisor".to_string());
 
     let args = ObserverSupervisorArgs {
         openapi_endpoint: env::var("OPENAPI_ENDPOINT").unwrap(),

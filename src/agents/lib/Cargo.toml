@@ -9,6 +9,10 @@ license = "MIT"
 tracing = "0.1.41"
 tracing-glog = "0.4.1"
 tracing-subscriber = { version ="0.3.20", features=["std", "env-filter"]}
+opentelemetry = "0.31.0"
+tracing-opentelemetry = "0.32.0"
+opentelemetry_sdk = "0.31.0"
+opentelemetry-otlp = "0.31.0"
 cassini-types = { path = "../cassini/types" }
 serde = {version = "1", features = ["derive"]}
 # rkyv = { workspace = true }

@@ -136,28 +136,70 @@ pub enum DispatcherMessage {
     Dispatch { message: Vec<u8>, topic: String }, // Serialize()
 }
 
-pub fn init_logging() {
-    use std::io::stderr;
-    use std::io::IsTerminal;
-    use tracing_glog::Glog;
-    use tracing_glog::GlogFields;
+pub fn init_logging(service_name: String) {
+    use opentelemetry::{global, KeyValue};
+    use opentelemetry_otlp::Protocol;
+    use opentelemetry_otlp::WithExportConfig;
+    use opentelemetry_sdk::Resource;
     use tracing_subscriber::filter::EnvFilter;
-    use tracing_subscriber::layer::SubscriberExt;
-    use tracing_subscriber::Registry;
+    use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-    let fmt = tracing_subscriber::fmt::Layer::default()
-        .with_ansi(stderr().is_terminal())
-        .with_writer(std::io::stderr)
-        .event_format(Glog::default().with_timer(tracing_glog::LocalTime::default()))
-        .fmt_fields(GlogFields::default().compact());
+    // Determine whether to enable Jaeger/OTLP tracing
+    let enable_jaeger = std::env::var("ENABLE_JAEGER_TRACING")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
 
+    // Always set up a basic log filter
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 
-    let subscriber = Registry::default().with(filter).with(fmt);
-    tracing::subscriber::set_global_default(subscriber).expect("to set global subscriber");
+    // let mut subscriber = tracing_subscriber::registry()
+    //     .with(filter)
+    //     .with(tracing_subscriber::fmt::layer());
 
-    // TODO: connect to jaeger?
+    if enable_jaeger {
+        let jaeger_otlp_endpoint = match std::env::var("JAEGER_OTLP_ENDPOINT") {
+            Ok(endpoint) => endpoint,
+            Err(_) => "http://localhost:4318/v1/traces".to_string(),
+        };
+        if !jaeger_otlp_endpoint.is_empty() {
+            match opentelemetry_otlp::SpanExporter::builder()
+                .with_http()
+                .with_protocol(Protocol::HttpBinary)
+                .with_endpoint(jaeger_otlp_endpoint)
+                .build()
+            {
+                Ok(otlp_exporter) => {
+                    let tracer_provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
+                        .with_batch_exporter(otlp_exporter)
+                        .with_resource(
+                            Resource::builder_empty()
+                                .with_attributes([KeyValue::new(
+                                    "service.name",
+                                    service_name.clone(),
+                                )])
+                                .build(),
+                        )
+                        .build();
+                    global::set_tracer_provider(tracer_provider);
+
+                    let tracer = global::tracer("{service_name}.tracing");
+
+                    tracing_subscriber::registry()
+                        .with(filter.clone())
+                        .with(tracing_subscriber::fmt::layer())
+                        .with(tracing_opentelemetry::layer().with_tracer(tracer))
+                        .init();
+                }
+                Err(e) => {
+                    eprintln!("Failed to initialize Jaeger OTLP exporter: {e}");
+                }
+            }
+        }
+    }
+
+    tracing_subscriber::registry().with(filter).init();
 }
+
 /// Helper function to get a web client with optional proxy CA certificate
 /// Attempts to find a path to the proxy CA certificate provided by the environment variable PROXY_CA_CERT
 pub fn get_web_client() -> Result<Client, ActorProcessingErr> {

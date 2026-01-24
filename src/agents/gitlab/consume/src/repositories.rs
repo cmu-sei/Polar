@@ -113,6 +113,10 @@ impl Actor for GitlabRepositoryConsumer {
                         let cypher_query = format!(
                             r#"
                             UNWIND [{repos_data}] AS repo
+                            // OCI Registry
+                            MATCH (reg:OCIRegistry) WHERE reg.host = repo.location
+                            WITH reg
+
                             MERGE (r:ContainerRepository {{ id: repo.id }})
                             SET
                             r.created_at = datetime(repo.created_at),
@@ -127,6 +131,10 @@ impl Actor for GitlabRepositoryConsumer {
                             WITH r
                             MATCH (p:GitlabProject {{ full_path: "{full_path}" }})
                             MERGE (r)-[:BELONGS_TO]-(p)
+                            with r
+                            //link Repository (OCI repo, registry-scoped)
+                            MERGE (r:ContainerRepository {{ path: repo.path }})
+                            MERGE (reg)-[:HOSTS_REPOSITORY]->(r)
                         "#
                         );
 
@@ -187,7 +195,6 @@ impl Actor for GitlabRepositoryConsumer {
                             r#"
                             UNWIND [{tags_data}] AS tag
                             MERGE (t:ContainerImageTag {{
-                              repo_path: tag.repo_path,
                               name: tag.name
                             }})
                             ON CREATE SET
