@@ -114,9 +114,10 @@ impl Actor for ResolverSupervisor {
 
     async fn post_start(
         &self,
-        _myself: ActorRef<Self::Msg>,
+        myself: ActorRef<Self::Msg>,
         _state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
+        debug!("{myself:?} started.");
         Ok(())
     }
 
@@ -200,22 +201,9 @@ impl ResolverAgent {
             .collect()
     }
 
-    /// Pure function: given a catalog response, returns all image URIs
-    fn discover_image_uris(
-        registry_host: &str,
-        catalog: &[String],
-        tags_map: &std::collections::HashMap<String, Vec<String>>,
-    ) -> Vec<String> {
-        catalog
-            .iter()
-            .flat_map(|repo| {
-                Self::discover_images_from_tags(registry_host, repo, tags_map.get(repo).cloned())
-            })
-            .collect()
-    }
-
     #[instrument(name = "resolver.scrape_registry", level = "debug")]
     async fn scrape_registry(
+        myself: ActorRef<ProvenanceEvent>,
         tcp_client: ActorRef<TcpClientMessage>,
         web_client: &WebClient,
         registry: &RegistryConfig,
@@ -262,29 +250,27 @@ impl ResolverAgent {
             let uris = Self::discover_images_from_tags(&base, repo, tags.tags);
 
             for uri in uris {
-                debug!("Discovered image via startup scrape: {}", uri);
-
-                let msg = ProvenanceEvent::ImageRefDiscovered { uri };
-                let payload = rkyv::to_bytes::<rkyv::rancor::Error>(&msg)?;
-
-                tcp_client.cast(TcpClientMessage::Publish {
-                    topic: PROVENANCE_DISCOVERY_TOPIC.to_string(),
-                    payload: payload.into(),
-                })?;
+                myself.cast(ProvenanceEvent::ImageRefDiscovered { uri })?;
             }
         }
 
         Ok(())
     }
 
-    #[instrument(name = "resolver.startup_scrape", level = "debug", skip(state))]
-    async fn startup_scrape(state: &mut ResolverAgentState) -> Result<(), ActorProcessingErr> {
+    async fn startup_scrape(
+        myself: ActorRef<ProvenanceEvent>,
+        state: &mut ResolverAgentState,
+    ) -> Result<(), ActorProcessingErr> {
         info!("Starting resolver startup scrape");
 
         for registry in &state.config.registries {
-            if let Err(e) =
-                Self::scrape_registry(state.cassini_client.clone(), &state.web_client, registry)
-                    .await
+            if let Err(e) = Self::scrape_registry(
+                myself.clone(),
+                state.cassini_client.clone(),
+                &state.web_client,
+                registry,
+            )
+            .await
             {
                 warn!(
                     registry = %registry.name,
@@ -296,7 +282,6 @@ impl ResolverAgent {
 
         Ok(())
     }
-
     fn registry_allowed(config: &ResolverConfig, reference: &Reference) -> bool {
         let registry = Self::normalize_registry_host(reference.resolve_registry());
 
@@ -458,7 +443,7 @@ impl Actor for ResolverAgent {
 
     async fn post_start(
         &self,
-        _myself: ActorRef<Self::Msg>,
+        myself: ActorRef<Self::Msg>,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         info!("Subscribing to topic {PROVENANCE_DISCOVERY_TOPIC}");
@@ -467,7 +452,7 @@ impl Actor for ResolverAgent {
         ))?;
 
         // fire-and-forget startup scrape
-        if let Err(e) = Self::startup_scrape(state).await {
+        if let Err(e) = Self::startup_scrape(myself.clone(), state).await {
             warn!("Startup scrape failed: {}", e);
         }
 
