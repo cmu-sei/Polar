@@ -89,3 +89,13 @@ There are instructions in the `basic` directory in that repo for how to do so, b
    `
       1. `mkdir $PROJECT_ROOT/conf/gitlab_compose/ssl`
       2. `cp results/* $PROJECT_ROOT/conf/certs`
+
+## Running Unit and Integration Tests
+
+In order to run unit and integration tests, you can use the following commands:
+
+**NOTE: Some integration tests leverage testcontainers, so a container runtime such as Docker or Podman must be present and configured on the host.**
+**If using Podman, consider setting the `DOCKER_HOST` environment variable to point to the Podman socket.**
+```sh
+cargo test --package polar -- --nocapture
+```

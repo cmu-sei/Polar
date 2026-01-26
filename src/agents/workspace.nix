@@ -70,7 +70,7 @@ let
     # build workspace derivation to be given as a default package
     workspacePackages = craneLib.buildPackage (individualCrateArgs // {
       pname = "polar";
-      cargoExtraArgs = "--workspace --locked";
+      cargoExtraArgs = "--workspace --locked --exclude logger --exclude policy-config --exclude config-ops";
       src = workspaceFileset ./.;
     });
 

@@ -20,57 +20,6 @@ pub struct ProvenanceLinkerArgs {
     pub compiler: ActorRef<GraphControllerMsg>,
 }
 
-impl ProvenanceLinker {
-    async fn link_sboms(
-        graph: &Graph,
-        artifact_id: String,
-        _artifact_type: ArtifactType,
-        related_names: Vec<NormalizedString>,
-        version: NormalizedString,
-    ) -> Result<(), ActorProcessingErr> {
-        info!("Linking SBOM artifact {}", artifact_id);
-
-        // Example: link SBOM components to GitlabPackages or ContainerImageTags
-        // (depending on what exists in your ontology)
-        for name in related_names {
-            let cypher = format!(
-                r#"
-                MATCH (a:Artifact {{ id: '{id}' }})
-                MERGE (s:SoftwareComponent {{ name: '{name}' }})
-                MERGE (a)-[:DESCRIBES_COMPONENT]->(s)
-                WITH s
-                OPTIONAL MATCH (pkg:GitlabPackage {{ name: s.name }})
-                MERGE (s)-[:IDENTIFIES_PACKAGE]->(pkg)
-                "#,
-                id = artifact_id,
-                name = name
-            );
-
-            debug!(%cypher, "Linking SBOM component");
-            if let Err(e) = graph.run(Query::new(cypher)).await {
-                warn!("Failed to link component {}: {:?}", name, e);
-            }
-        }
-
-        // Optionally, if version info is present, link to container tags or package versions
-        if &version.to_string() != "None" {
-            let cypher = format!(
-                r#"
-                MATCH (a:Artifact {{ id: '{id}' }})
-                MATCH (pkg:GitlabPackage {{ version: '{ver}' }})
-                MERGE (a)-[:DESCRIBES_VERSION]->(pkg)
-            "#,
-                id = artifact_id,
-                ver = version
-            );
-
-            debug!(%cypher, "Linking SBOM to versioned package");
-            let _ = graph.run(Query::new(cypher)).await;
-        }
-
-        Ok(())
-    }
-}
 pub enum LinkerCommand {
     LinkContainerImages {
         uri: String,
