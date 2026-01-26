@@ -14,7 +14,6 @@ use ractor::{
     SupervisionEvent,
 };
 use std::sync::Arc;
-use std::time::Duration;
 use tracing::{debug, warn};
 use tracing::{error, instrument, trace};
 
@@ -134,9 +133,16 @@ impl Actor for ProvenanceSupervisor {
                             PROVENANCE_LINKER_TOPIC.to_string(),
                         ))?;
 
-                    let linker_args = ProvenanceLinkerArgs {
-                        graph: state.graph.clone(),
-                    };
+                    let graph = neo4rs::Graph::connect(get_neo_config()?)?;
+                    let (compiler, _) = Actor::spawn_linked(
+                        Some("linker.graph.controller".to_string()),
+                        polar::graph::GraphController,
+                        graph,
+                        myself.clone().into(),
+                    )
+                    .await?;
+
+                    let linker_args = ProvenanceLinkerArgs { compiler };
 
                     let (_linker, _) = Actor::spawn_linked(
                         Some(PROVENANCE_LIKER_NAME.to_string()),

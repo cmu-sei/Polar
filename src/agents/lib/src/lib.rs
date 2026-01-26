@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 use std::io::Read;
 use std::sync::Arc;
 use tracing::{debug, info};
+
+pub mod graph;
 /// wrapper definition for a ractor outputport where a raw message payload and a topic can be piped to a necessary dispatcher
 pub type QueueOutput = Arc<OutputPort<(Vec<u8>, String)>>;
 
@@ -12,8 +14,6 @@ pub type QueueOutput = Arc<OutputPort<(Vec<u8>, String)>>;
 /// Including container images and software bill of materials.
 pub const PROVENANCE_DISCOVERY_TOPIC: &str = "polar.provenance.resolver";
 pub const PROVENANCE_LINKER_TOPIC: &str = "polar.provenance.linker";
-
-pub const DISPATCH_ACTOR: &str = "DISPATCH";
 pub const TRANSACTION_FAILED_ERROR: &str = "Expected to start a transaction with the graph";
 pub const QUERY_COMMIT_FAILED: &str = "Error committing transaction to graph";
 pub const QUERY_RUN_FAILED: &str = "Error running query on the graph.";
@@ -29,6 +29,7 @@ pub trait Supervisor {
 pub enum SupervisorMessage {
     ClientEvent { event: ClientEvent },
 }
+
 /// Helper function to parse a file at a given path and return the raw bytes as a vector
 pub fn get_file_as_byte_vec(filename: &String) -> Result<Vec<u8>, std::io::Error> {
     let mut f = std::fs::File::open(&filename)?;
@@ -97,40 +98,6 @@ pub enum ProvenanceEvent {
     },
 }
 
-impl ProvenanceEvent {
-    /// constructor to generate a new image reference event, granting a UUID unless one is provided.
-    pub fn sbom_ref_discovered(uri: &str, id: Option<String>) -> Self {
-        let id = id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-        Self::SbomDiscovered {
-            artifact_id: id,
-            uri: uri.to_string(),
-        }
-    }
-
-    /// constructor to generate a new image resolved event, granting a UUID unless one is provided.
-    pub fn image_ref_resolved(
-        uri: String,
-        id: Option<String>,
-        digest: String,
-        media_type: String,
-    ) -> Self {
-        Self::ImageRefResolved {
-            uri: uri.to_string(),
-            digest,
-            media_type,
-        }
-    }
-
-    //constructor to generate a new image reference event, granting a UUID unless one is provided.
-    // pub fn sbom_ref_resolved(uri: &str, id: Option<String>) -> Self {
-    //     let id = id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-    //     Self::SbomDiscovered {
-    //         artifact_id: id,
-    //         uri: uri.to_string(),
-    //     }
-    // }
-}
-
 #[derive(Debug)]
 pub enum DispatcherMessage {
     Dispatch { message: Vec<u8>, topic: String }, // Serialize()
@@ -144,60 +111,58 @@ pub fn init_logging(service_name: String) {
     use tracing_subscriber::filter::EnvFilter;
     use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-    // Determine whether to enable Jaeger/OTLP tracing
+    eprintln!("INIT_LOGGING called");
+
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+
     let enable_jaeger = std::env::var("ENABLE_JAEGER_TRACING")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
 
-    // Always set up a basic log filter
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-
-    // let mut subscriber = tracing_subscriber::registry()
-    //     .with(filter)
-    //     .with(tracing_subscriber::fmt::layer());
-
     if enable_jaeger {
-        let jaeger_otlp_endpoint = match std::env::var("JAEGER_OTLP_ENDPOINT") {
-            Ok(endpoint) => endpoint,
-            Err(_) => "http://localhost:4318/v1/traces".to_string(),
-        };
-        if !jaeger_otlp_endpoint.is_empty() {
-            match opentelemetry_otlp::SpanExporter::builder()
+        let endpoint = std::env::var("JAEGER_OTLP_ENDPOINT")
+            .unwrap_or_else(|_| "http://localhost:4318/v1/traces".to_string());
+
+        if !endpoint.is_empty() {
+            if let Ok(exporter) = opentelemetry_otlp::SpanExporter::builder()
                 .with_http()
                 .with_protocol(Protocol::HttpBinary)
-                .with_endpoint(jaeger_otlp_endpoint)
+                .with_endpoint(endpoint)
                 .build()
             {
-                Ok(otlp_exporter) => {
-                    let tracer_provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
-                        .with_batch_exporter(otlp_exporter)
-                        .with_resource(
-                            Resource::builder_empty()
-                                .with_attributes([KeyValue::new(
-                                    "service.name",
-                                    service_name.clone(),
-                                )])
-                                .build(),
-                        )
-                        .build();
-                    global::set_tracer_provider(tracer_provider);
+                let tracer_provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
+                    .with_batch_exporter(exporter)
+                    .with_resource(
+                        Resource::builder_empty()
+                            .with_attributes([KeyValue::new("service.name", service_name.clone())])
+                            .build(),
+                    )
+                    .build();
 
-                    let tracer = global::tracer("{service_name}.tracing");
+                global::set_tracer_provider(tracer_provider);
+                let tracer = global::tracer(format!("{service_name}.tracing"));
 
-                    tracing_subscriber::registry()
-                        .with(filter.clone())
-                        .with(tracing_subscriber::fmt::layer())
-                        .with(tracing_opentelemetry::layer().with_tracer(tracer))
-                        .init();
-                }
-                Err(e) => {
-                    eprintln!("Failed to initialize Jaeger OTLP exporter: {e}");
+                if tracing_subscriber::registry()
+                    .with(filter)
+                    .with(tracing_subscriber::fmt::layer())
+                    .with(tracing_opentelemetry::layer().with_tracer(tracer))
+                    .try_init()
+                    .is_err()
+                {
+                    eprintln!("Logging registry already initialized");
                 }
             }
         }
+    } else {
+        if tracing_subscriber::registry()
+            .with(filter)
+            .with(tracing_subscriber::fmt::layer())
+            .try_init()
+            .is_err()
+        {
+            eprintln!("Logging registry already initialized");
+        }
     }
-
-    tracing_subscriber::registry().with(filter).init();
 }
 
 /// Helper function to get a web client with optional proxy CA certificate

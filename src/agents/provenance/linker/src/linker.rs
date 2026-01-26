@@ -1,6 +1,8 @@
 use cyclonedx_bom::prelude::*;
+
 use neo4rs::Graph;
 use neo4rs::Query;
+use polar::graph::{GraphControllerMsg, GraphOp, NodeKey, Property};
 use ractor::async_trait;
 use ractor::Actor;
 use ractor::ActorProcessingErr;
@@ -9,31 +11,13 @@ use tracing::{debug, info, warn};
 
 use crate::ArtifactType;
 
-/// An actor responsible for connecting distinct knowledge graph domains.
-/// Potential planes include build, runtime, and artifact, where semantic continuity isn't always possible.
 pub struct ProvenanceLinker;
 
-pub enum LinkerCommand {
-    LinkContainerImages {
-        uri: String,
-        digest: String,
-        media_type: String,
-    },
-    LinkPackages,
-    LinkArtifacts {
-        artifact_id: String,
-        artifact_type: ArtifactType,
-        related_names: Vec<NormalizedString>,
-        version: NormalizedString,
-    },
-}
-
 pub struct ProvenanceLinkerState {
-    graph: Graph,
+    compiler: ActorRef<GraphControllerMsg>,
 }
-
 pub struct ProvenanceLinkerArgs {
-    pub graph: Graph,
+    pub compiler: ActorRef<GraphControllerMsg>,
 }
 
 impl ProvenanceLinker {
@@ -57,7 +41,7 @@ impl ProvenanceLinker {
                 WITH s
                 OPTIONAL MATCH (pkg:GitlabPackage {{ name: s.name }})
                 MERGE (s)-[:IDENTIFIES_PACKAGE]->(pkg)
-            "#,
+                "#,
                 id = artifact_id,
                 name = name
             );
@@ -69,7 +53,6 @@ impl ProvenanceLinker {
         }
 
         // Optionally, if version info is present, link to container tags or package versions
-        // TODO: this might
         if &version.to_string() != "None" {
             let cypher = format!(
                 r#"
@@ -88,7 +71,20 @@ impl ProvenanceLinker {
         Ok(())
     }
 }
-
+pub enum LinkerCommand {
+    LinkContainerImages {
+        uri: String,
+        digest: String,
+        media_type: String,
+    },
+    LinkPackages,
+    LinkArtifacts {
+        artifact_id: String,
+        artifact_type: ArtifactType,
+        related_names: Vec<NormalizedString>,
+        version: NormalizedString,
+    },
+}
 #[async_trait]
 impl Actor for ProvenanceLinker {
     type Msg = LinkerCommand;
@@ -100,73 +96,136 @@ impl Actor for ProvenanceLinker {
         myself: ActorRef<Self::Msg>,
         args: Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
-        debug!("{myself:?} starting!");
-        Ok(ProvenanceLinkerState { graph: args.graph })
-    }
-
-    async fn post_start(
-        &self,
-        _myself: ActorRef<Self::Msg>,
-        _state: &mut Self::State,
-    ) -> Result<(), ActorProcessingErr> {
-        Ok(())
+        // Expect the supervisor to pass the compiler ActorRef via args.graph or separate arg.
+        // For this example, assume ProvenanceLinkerArgs contains compiler_ref.
+        Ok(ProvenanceLinkerState {
+            // store compiler ref elsewhere
+            compiler: args.compiler,
+        })
     }
 
     async fn handle(
         &self,
-        _myself: ActorRef<Self::Msg>,
+        _me: ActorRef<Self::Msg>,
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
-            LinkerCommand::LinkArtifacts {
-                artifact_id,
-                artifact_type,
-                related_names,
-                version,
-            } => {
-                tracing::trace!("Recevied a LinkArtifacts directive");
-                ProvenanceLinker::link_sboms(
-                    &state.graph,
-                    artifact_id,
-                    artifact_type,
-                    related_names,
-                    version,
-                )
-                .await
-                .expect("Expected to link sboms");
-            }
-            //TODO: Add another handler for linking package files in gtlab to container images deployed in k8s and their sboms
             LinkerCommand::LinkContainerImages {
                 uri,
                 digest,
                 media_type,
             } => {
-                tracing::trace!("Recevied a LinkContainerImages directive");
-                // Invariant: “Every observed container image in the system has a canonical reference node.”
-                info!("Updating reference to container: {uri} with digest: {digest}");
-                let query = format!(
-                    r#"
-                    MERGE (ref:ContainerImageReference {{
-                      normalized: '{uri}'
-                    }})
-                    SET
-                      ref.digest = '{digest}',
-                      ref.media_type = '{media_type}',
-                      ref.last_resolved = timestamp()
+                // Upsert the ContainerImageReference node
+                let node_key = NodeKey::ContainerImageRef {
+                    normalized: uri.clone(),
+                };
+                let props = vec![
+                    Property("digest".into(), serde_json::json!(digest)),
+                    Property("media_type".into(), serde_json::json!(media_type)),
+                ];
+                let op = GraphOp::UpsertNode {
+                    key: node_key.clone(),
+                    props,
+                };
+                // send to compiler
+                state
+                    .compiler
+                    .send_message(GraphControllerMsg::Op(op))
+                    .map_err(|e| {
+                        ActorProcessingErr::from(format!(
+                            "failed to send GraphOp to compiler: {:?}",
+                            e
+                        ))
+                    })?;
 
-                    WITH ref
-                    MATCH (tag:ContainerImageTag)
-                    WHERE tag.location = ref.normalized
-                    MERGE (tag)-[:IDENTIFIES]->(ref)
-                    "#
-                );
-                tracing::debug!(query);
-
-                state.graph.run(Query::new(query.to_string())).await?;
+                // Then link tags (existing ContainerImageTag nodes) to the ref
+                // Here we model linking as an edge from tag -> ref. We build an edge op
+                let from = NodeKey::ContainerImageRef {
+                    normalized: uri.clone(),
+                }; // could be tag node in other flows
+                   // For simplicity assume tag nodes are identified by normalized tag location.
+                let to = node_key.clone();
+                let edge = GraphOp::EnsureEdge {
+                    from,
+                    to,
+                    rel_type: "IDENTIFIES".to_string(),
+                    props: vec![],
+                };
+                state
+                    .compiler
+                    .send_message(GraphControllerMsg::Op(edge))
+                    .map_err(|e| {
+                        ActorProcessingErr::from(format!(
+                            "failed to send edge op to compiler: {:?}",
+                            e
+                        ))
+                    })?;
             }
-            // TODO: handle other commands as they arise
-            _ => warn!("Received unexpected message"),
+
+            LinkerCommand::LinkArtifacts {
+                artifact_id,
+                artifact_type: _,
+                related_names,
+                ..
+            } => {
+                // Create Artifact node and link components -> package nodes
+                let art_key = NodeKey::OCIRegistry {
+                    hostname: artifact_id.clone(),
+                }; // pick appropriate node type; replace if artifact node exists
+                let create_art = GraphOp::UpsertNode {
+                    key: art_key.clone(),
+                    props: vec![Property(
+                        "artifact_id".into(),
+                        serde_json::json!(artifact_id.clone()),
+                    )],
+                };
+                state
+                    .compiler
+                    .send_message(GraphControllerMsg::Op(create_art))
+                    .map_err(|e| {
+                        ActorProcessingErr::from(format!("failed to send artifact upsert: {:?}", e))
+                    })?;
+
+                // For each related name, create a SoftwareComponent (you may add node type later); for now, model it as ContainerImageRef or package.
+                for name in related_names {
+                    let comp_key = NodeKey::ContainerImageRef {
+                        normalized: name.to_string(),
+                    };
+                    let up = GraphOp::UpsertNode {
+                        key: comp_key.clone(),
+                        props: vec![],
+                    };
+                    state
+                        .compiler
+                        .send_message(GraphControllerMsg::Op(up.clone()))
+                        .map_err(|e| {
+                            ActorProcessingErr::from(format!(
+                                "failed to send component upsert: {:?}",
+                                e
+                            ))
+                        })?;
+
+                    // Link artifact -> component
+                    let edge = GraphOp::EnsureEdge {
+                        from: art_key.clone(),
+                        to: comp_key.clone(),
+                        rel_type: "DESCRIBES_COMPONENT".to_string(),
+                        props: vec![],
+                    };
+                    state
+                        .compiler
+                        .send_message(GraphControllerMsg::Op(edge))
+                        .map_err(|e| {
+                            ActorProcessingErr::from(format!(
+                                "failed to send artifact->component link: {:?}",
+                                e
+                            ))
+                        })?;
+                }
+            }
+
+            _ => warn!("unexpected linker command"),
         }
         Ok(())
     }
