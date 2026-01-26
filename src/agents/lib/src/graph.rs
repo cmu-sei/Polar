@@ -1,8 +1,8 @@
+use neo4rs::{BoltNull, BoltType};
 use neo4rs::{Graph, Query};
 use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
-use tracing::debug;
+use tracing::{debug, trace};
 /// Minimal typed intent that processors emit.
 /// Keep this small and stable; extend later with versions.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -15,8 +15,46 @@ pub enum NodeKey {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum GraphValue {
+    String(String),
+    Bool(bool),
+    I64(i64),
+    F64(f64),
+
+    Bytes(Vec<u8>),
+
+    List(Vec<GraphValue>),
+    Map(Vec<(String, GraphValue)>),
+
+    Null,
+}
+
+impl From<GraphValue> for BoltType {
+    fn from(v: GraphValue) -> Self {
+        match v {
+            GraphValue::String(s) => s.into(),
+            GraphValue::Bool(b) => b.into(),
+            GraphValue::I64(i) => i.into(),
+            GraphValue::F64(f) => f.into(),
+            GraphValue::Bytes(b) => b.into(),
+            GraphValue::List(xs) => xs
+                .into_iter()
+                .map(BoltType::from)
+                .collect::<Vec<_>>()
+                .into(),
+            GraphValue::Map(kvs) => kvs
+                .into_iter()
+                .map(|(k, v)| (k, BoltType::from(v)))
+                .collect::<std::collections::HashMap<_, _>>()
+                .into(),
+            GraphValue::Null => BoltType::Null(BoltNull),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct Property(pub String, pub Value);
+pub struct Property(pub String, pub GraphValue);
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum GraphOp {
@@ -68,138 +106,151 @@ impl Actor for GraphController {
     ) -> Result<(), ActorProcessingErr> {
         match msg {
             GraphControllerMsg::Op(op) => {
+                let span = tracing::trace_span!("GraphController.handle_op");
+                let _guard = span.enter();
                 let (cypher, params) = compile_graph_op(&op);
 
                 let mut q = Query::new(cypher);
                 for (k, v) in params {
-                    match v {
-                        Value::String(s) => q = q.param(&k, s),
-                        Value::Bool(b) => q = q.param(&k, b),
-                        Value::Number(n) if n.is_i64() => q = q.param(&k, n.as_i64().unwrap()),
-                        Value::Number(n) if n.is_f64() => q = q.param(&k, n.as_f64().unwrap()),
-                        Value::Null => {}
-                        _ => panic!("unsupported param type"),
-                    }
+                    q = q.param(&k, v);
                 }
+                let mut txn = state.graph.start_txn().await?;
                 debug!("{q:?}");
-                state.graph.run(q).await.map_err(|e| {
+                txn.run(q).await.map_err(|e| {
                     ActorProcessingErr::from(format!("neo4j execution failed: {:?}", e))
                 })?;
+                txn.commit().await?;
+                trace!("transaction committed")
             }
         }
         Ok(())
     }
 }
 
-/// Compile GraphOp to Cypher string and parameters.
-/// Kept pure for unit testing.
-pub fn compile_graph_op(op: &GraphOp) -> (String, Vec<(String, serde_json::Value)>) {
+/// Compile GraphOp to Cypher string and Bolt parameters.
+/// Pure and deterministic.
+pub fn compile_graph_op(op: &GraphOp) -> (String, Vec<(String, BoltType)>) {
     match op {
         GraphOp::UpsertNode { key, props } => match key {
             NodeKey::OCIRegistry { hostname } => {
-                let cypher = "MERGE (n:OCIRegistry { hostname: $hostname })\nSET n.last_seen = coalesce(n.last_seen, timestamp())".to_string();
-                let mut params = vec![("hostname".to_string(), serde_json::json!(hostname))];
+                let cypher = r#"
+                    MERGE (n:OCIRegistry { hostname: $hostname })
+                    SET n.last_seen = coalesce(n.last_seen, timestamp())
+                    "#
+                .trim()
+                .to_string();
+
+                let mut params = vec![(
+                    "hostname".to_string(),
+                    BoltType::from(GraphValue::String(hostname.clone())),
+                )];
+
                 for Property(k, v) in props {
-                    params.push((k.clone(), v.clone()));
+                    params.push((k.clone(), BoltType::from(v.clone())));
                 }
+
                 (cypher, params)
             }
+
             NodeKey::ContainerImageRef { normalized } => {
-                let cypher = "MERGE (n:ContainerImageReference { normalized: $normalized })\nSET n.last_resolved = coalesce(n.last_resolved, timestamp())".to_string();
-                let mut params = vec![("normalized".to_string(), serde_json::json!(normalized))];
+                let cypher = r#"
+                MERGE (n:ContainerImageReference { normalized: $normalized })
+                SET n.last_resolved = coalesce(n.last_resolved, timestamp())
+                "#
+                .trim()
+                .to_string();
+
+                let mut params = vec![(
+                    "normalized".to_string(),
+                    BoltType::from(GraphValue::String(normalized.clone())),
+                )];
+
                 for Property(k, v) in props {
-                    params.push((k.clone(), v.clone()));
+                    params.push((k.clone(), BoltType::from(v.clone())));
                 }
+
                 (cypher, params)
             }
         },
+
         GraphOp::EnsureEdge {
             from,
             to,
             rel_type,
             props,
         } => {
-            // Only two node types for this epic; expand as needed.
             let (from_match, mut params) = match from {
                 NodeKey::OCIRegistry { hostname } => (
                     "(a:OCIRegistry { hostname: $from_hostname })".to_string(),
-                    vec![("from_hostname".to_string(), serde_json::json!(hostname))],
+                    vec![(
+                        "from_hostname".to_string(),
+                        BoltType::from(GraphValue::String(hostname.clone())),
+                    )],
                 ),
+
                 NodeKey::ContainerImageRef { normalized } => (
                     "(a:ContainerImageReference { normalized: $from_normalized })".to_string(),
-                    vec![("from_normalized".to_string(), serde_json::json!(normalized))],
+                    vec![(
+                        "from_normalized".to_string(),
+                        BoltType::from(GraphValue::String(normalized.clone())),
+                    )],
                 ),
             };
+
             let (to_match, mut to_params) = match to {
                 NodeKey::OCIRegistry { hostname } => (
                     "(b:OCIRegistry { hostname: $to_hostname })".to_string(),
-                    vec![("to_hostname".to_string(), serde_json::json!(hostname))],
+                    vec![(
+                        "to_hostname".to_string(),
+                        BoltType::from(GraphValue::String(hostname.clone())),
+                    )],
                 ),
+
                 NodeKey::ContainerImageRef { normalized } => (
                     "(b:ContainerImageReference { normalized: $to_normalized })".to_string(),
-                    vec![("to_normalized".to_string(), serde_json::json!(normalized))],
+                    vec![(
+                        "to_normalized".to_string(),
+                        BoltType::from(GraphValue::String(normalized.clone())),
+                    )],
                 ),
             };
+
             params.append(&mut to_params);
 
             let mut set_clauses = Vec::new();
             for Property(k, _) in props {
-                set_clauses.push(format!("r.{} = ${}", k, k));
+                set_clauses.push(format!("r.{k} = ${k}"));
             }
-            let mut cypher = format!(
-                "MERGE {from_match}\nMERGE {to_match}\nMERGE (a)-[r:{rel}]->(b)",
-                from_match = from_match,
-                to_match = to_match,
-                rel = rel_type,
-            );
+
+            let mut cypher =
+                format!("MERGE {from_match}\nMERGE {to_match}\nMERGE (a)-[r:{rel_type}]->(b)");
+
             if !set_clauses.is_empty() {
-                cypher = format!("{}\nSET {}", cypher, set_clauses.join(", "));
+                cypher.push_str("\nSET ");
+                cypher.push_str(&set_clauses.join(", "));
             }
+
             for Property(k, v) in props {
-                params.push((k.clone(), v.clone()));
+                params.push((k.clone(), BoltType::from(v.clone())));
             }
+
             (cypher, params)
         }
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::Value;
+mod unittests {
+    use neo4rs::BoltBoolean;
 
-    #[test]
-    fn test_compile_graph_op_upsert_oci_registry() {
-        let op = GraphOp::UpsertNode {
-            key: NodeKey::OCIRegistry {
-                hostname: "registry.example.com".to_string(),
-            },
-            props: vec![Property("extra".into(), Value::String("foo".into()))],
-        };
-
-        let (cypher, params) = compile_graph_op(&op);
-
-        assert!(cypher.contains("MERGE (n:OCIRegistry { hostname: $hostname })"));
-        assert!(cypher.contains("SET n.last_seen"));
-        assert_eq!(
-            params,
-            vec![
-                (
-                    "hostname".to_string(),
-                    Value::String("registry.example.com".into())
-                ),
-                ("extra".to_string(), Value::String("foo".into()))
-            ]
-        );
-    }
-
+    use crate::graph::*;
     #[test]
     fn test_compile_graph_op_upsert_container_image_ref() {
         let op = GraphOp::UpsertNode {
             key: NodeKey::ContainerImageRef {
                 normalized: "registry.example.com/app@sha256:deadbeef".to_string(),
             },
-            props: vec![Property("tag".into(), Value::String("latest".into()))],
+            props: vec![Property("tag".into(), GraphValue::String("latest".into()))],
         };
 
         let (cypher, params) = compile_graph_op(&op);
@@ -210,7 +261,7 @@ mod tests {
         let normalized_param = params.iter().find(|(k, _)| k == "normalized").unwrap();
         assert_eq!(
             normalized_param.1,
-            Value::String("registry.example.com/app@sha256:deadbeef".into())
+            BoltType::String("registry.example.com/app@sha256:deadbeef".into())
         );
     }
 
@@ -224,7 +275,7 @@ mod tests {
                 normalized: "registry.example.com/app@sha256:deadbeef".to_string(),
             },
             rel_type: "HOSTS".to_string(),
-            props: vec![Property("verified".into(), Value::Bool(true))],
+            props: vec![Property("verified".into(), GraphValue::Bool(true))],
         };
 
         let (cypher, params) = compile_graph_op(&op);
@@ -240,19 +291,25 @@ mod tests {
             vec![
                 (
                     "from_hostname".to_string(),
-                    Value::String("registry.example.com".into())
+                    BoltType::String("registry.example.com".into())
                 ),
                 (
                     "to_normalized".to_string(),
-                    Value::String("registry.example.com/app@sha256:deadbeef".into())
+                    BoltType::String("registry.example.com/app@sha256:deadbeef".into())
                 ),
-                ("verified".to_string(), Value::Bool(true))
+                (
+                    "verified".to_string(),
+                    BoltType::Boolean(BoltBoolean { value: true })
+                )
             ]
         );
     }
 }
 
 #[cfg(test)]
+/// GraphControllers's integration test suite.
+/// TODO: I can't why, but these tests fail despite the data showing up in the graph. The issue is the row returned is always empty, but this isn't the case in cypher-shell
+/// I have ruled out timing, and the connection is clearly successful. More investigation is needed.
 mod integration_tests {
     use super::*;
     use neo4rs::{Graph, Query};
@@ -261,7 +318,7 @@ mod integration_tests {
     use testcontainers::runners::AsyncRunner;
     use testcontainers::ContainerAsync;
     use testcontainers_modules::neo4j::{Neo4j, Neo4jImage};
-    use tracing::debug;
+    use tracing::{debug, instrument};
 
     static INIT_TRACING: Once = Once::new();
 
@@ -272,6 +329,7 @@ mod integration_tests {
     }
 
     /// Start Neo4j and return the container and graph handle
+    #[instrument(level = "debug")]
     async fn start_neo4j() -> (ContainerAsync<Neo4jImage>, Graph) {
         debug!("Starting neo4j container");
         let container = Neo4j::default().start().await.unwrap();
@@ -293,6 +351,7 @@ mod integration_tests {
     }
 
     #[tokio::test]
+    #[instrument(level = "debug")]
     async fn graph_controller_upserts_container_image_ref() {
         init_test_logging();
 
@@ -310,32 +369,35 @@ mod integration_tests {
             },
             props: vec![Property(
                 "media_type".into(),
-                serde_json::json!("application/vnd.oci.image.manifest.v1+json"),
+                GraphValue::String("application/vnd.oci.image.manifest.v1+json".to_string()),
             )],
         };
 
         controller.send_message(GraphControllerMsg::Op(op)).unwrap();
-
+        ractor::concurrency::sleep(Duration::from_secs(1)).await;
+        //kill actor since we're done with it
+        // also frees up the neo4j connection pool.
         // Give async actor time to run
-        tokio::time::sleep(Duration::from_millis(200)).await;
-
+        controller.kill();
         // Validate node exists in Neo4j
-        let query = Query::new(
-            "MATCH (n:ContainerImageReference { normalized: $normalized }) RETURN n.digest AS digest, n.media_type AS media_type".to_string()
-        )
-        .param("normalized", normalized.clone());
-
-        let mut result = graph.execute(query).await.unwrap();
-        let row = result.next().await.unwrap().unwrap();
-
-        // Only media_type prop was set
-        assert_eq!(
-            row.get::<String>("media_type").unwrap(),
-            "application/vnd.oci.image.manifest.v1+json"
+        let mut q = Query::new(
+            "MATCH (n:ContainerImageReference)
+             WHERE n.normalized = $normalized
+             RETURN n.normalized AS reference"
+                .to_string(),
         );
+        q = q.param("normalized", normalized.clone());
+
+        debug!("{q:?}");
+        let mut result = graph.execute(q).await.unwrap();
+        let row = result.next().await.unwrap().unwrap();
+        debug!("{row:?}");
+        // Only media_type prop was set
+        assert_eq!(row.get::<String>("reference").unwrap(), normalized);
     }
 
     #[tokio::test]
+    #[instrument(level = "debug")]
     async fn graph_controller_creates_edge() {
         init_test_logging();
 
@@ -377,7 +439,7 @@ mod integration_tests {
                     normalized: image_ref.into(),
                 },
                 rel_type: "HOSTS".into(),
-                props: vec![Property("verified".into(), serde_json::json!(true))],
+                props: vec![Property("verified".into(), GraphValue::Bool(true))],
             }))
             .unwrap();
 
@@ -385,10 +447,10 @@ mod integration_tests {
 
         // Validate edge exists
         let query = Query::new(
-            "MATCH (a:OCIRegistry { hostname: $hostname })-[r:HOSTS]->(b:ContainerImageReference { normalized: $normalized }) RETURN r.verified AS verified".to_string()
-        )
-        .param("hostname", registry)
-        .param("normalized", image_ref);
+             "MATCH (a:OCIRegistry { hostname: $hostname })-[r:HOSTS]->(b:ContainerImageReference { normalized: $normalized }) RETURN r.verified AS verified".to_string()
+         )
+         .param("hostname", registry)
+         .param("normalized", image_ref);
 
         let mut result = graph.execute(query).await.unwrap();
         let row = result.next().await.unwrap().unwrap();

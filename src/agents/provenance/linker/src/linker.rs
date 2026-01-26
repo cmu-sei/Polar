@@ -121,8 +121,11 @@ impl Actor for ProvenanceLinker {
                     normalized: uri.clone(),
                 };
                 let props = vec![
-                    Property("digest".into(), serde_json::json!(digest)),
-                    Property("media_type".into(), serde_json::json!(media_type)),
+                    Property("digest".into(), polar::graph::GraphValue::String(digest)),
+                    Property(
+                        "media_type".into(),
+                        polar::graph::GraphValue::String(media_type),
+                    ),
                 ];
                 let op = GraphOp::UpsertNode {
                     key: node_key.clone(),
@@ -177,7 +180,7 @@ impl Actor for ProvenanceLinker {
                     key: art_key.clone(),
                     props: vec![Property(
                         "artifact_id".into(),
-                        serde_json::json!(artifact_id.clone()),
+                        polar::graph::GraphValue::String(artifact_id),
                     )],
                 };
                 state

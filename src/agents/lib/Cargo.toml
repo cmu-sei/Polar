@@ -20,8 +20,6 @@ neo4rs = { workspace = true }
 rkyv = { workspace = true }
 uuid = "1.18.1"
 reqwest = { workspace = true, features = ["json", "rustls-tls"] }
-serde_json = "1.0.149"
-
 tokio = { version = "1.49.0", features = ["full"] }
 testcontainers = "0.26.3"
 testcontainers-modules = { version = "0.14.0", features = ["neo4j"]}

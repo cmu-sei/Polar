@@ -4179,7 +4179,6 @@ dependencies = [
  "reqwest",
  "rkyv 0.8.12",
  "serde",
- "serde_json",
  "testcontainers",
  "testcontainers-modules",
  "tokio",
