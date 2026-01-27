@@ -1,4 +1,4 @@
-pub mod logger;
+// pub mod logger;
 
 pub struct EventLoggingSupervisor;
 

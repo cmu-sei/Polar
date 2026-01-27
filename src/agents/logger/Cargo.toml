@@ -9,7 +9,7 @@ path = "src/entrypoint.rs"
 
 [dependencies]
 ractor = { version = "0.15.10", features = ["async-trait"] }
-rocksdb = "0.24.0"
+# rocksdb = "0.24.0"
 tokio = { version = "1.49.0", features = ["full"] }
 polar = {path = "../lib"}
 cassini-client = { workspace = true }
