@@ -1,7 +1,5 @@
 use cyclonedx_bom::prelude::*;
 
-use neo4rs::Graph;
-use neo4rs::Query;
 use polar::graph::{GraphControllerMsg, GraphOp, NodeKey, Property};
 use ractor::async_trait;
 use ractor::Actor;
@@ -42,7 +40,7 @@ impl Actor for ProvenanceLinker {
 
     async fn pre_start(
         &self,
-        myself: ActorRef<Self::Msg>,
+        _myself: ActorRef<Self::Msg>,
         args: Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
         // Expect the supervisor to pass the compiler ActorRef via args.graph or separate arg.

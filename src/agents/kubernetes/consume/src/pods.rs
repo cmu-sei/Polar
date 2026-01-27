@@ -26,13 +26,12 @@ use k8s_openapi::api::core::v1::Pod;
 use kube_common::KubeMessage;
 use neo4rs::Query;
 use polar::{ProvenanceEvent, PROVENANCE_DISCOVERY_TOPIC, QUERY_COMMIT_FAILED, QUERY_RUN_FAILED};
-use ractor::{async_trait, registry::where_is, rpc::cast, Actor, ActorProcessingErr, ActorRef};
+use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef};
 use rkyv::rancor;
 use serde_json::from_value;
-use tracing::{debug, error, info, instrument};
-use uuid::Uuid;
+use tracing::{debug, error, info, instrument, trace};
 
-use crate::{KubeConsumerArgs, KubeConsumerState, BROKER_CLIENT_NAME};
+use crate::{KubeConsumerArgs, KubeConsumerState};
 
 use std::collections::HashSet;
 
@@ -183,9 +182,8 @@ impl PodConsumer {
                             ));
 
                             // emit a message to the provenance discovery agent that we saw an image.
-                            // For k8s, the canonical image name is the best we've got, so the resolver will have to take care of finding out where it really came from.
-                            // WHEN IT DOES - The resolver should populate the event with a unique ID, provided the image is a new one
-                            // TODO: Is it worth making this configurable? unlikely
+                            // For k8s, the canonical image name is the best we've got,
+                            // so the resolver will have to take care of finding out where it really came from.
                             let event = ProvenanceEvent::ImageRefDiscovered {
                                 uri: image.to_string(),
                             };
@@ -195,8 +193,8 @@ impl PodConsumer {
                                 topic: PROVENANCE_DISCOVERY_TOPIC.to_string(),
                                 payload: payload.into(),
                             };
+                            trace!("emitting provenance event for image {image}");
 
-                            debug!("emitting provenance event for image {image}");
                             state.broker_client.send_message(message)?;
                         }
                         statements.push(format!(

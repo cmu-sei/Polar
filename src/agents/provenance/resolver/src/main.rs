@@ -389,10 +389,11 @@ impl ResolverAgent {
         debug!("attempting to resolve image: {image_ref}");
         // Parse the image reference, e.g., "ghcr.io/myorg/myimage:latest"
         let reference = Reference::from_str(&image_ref)?;
-        if !Self::registry_allowed(&state.config, &reference) {
-            debug!("Skipping image from unconfigured registry: {}", image_ref);
-            return Ok(None);
-        }
+        // TODO: Consider adding a "strict" mode to allow reading from unconfigured registriesq?
+        // if !Self::registry_allowed(&state.config, &reference) {
+        //     debug!("Skipping image from unconfigured registry: {}", image_ref);
+        //     return Ok(None);
+        // }
 
         let auth = Self::resolve_registry_auth(&reference)?;
         state
@@ -582,92 +583,4 @@ mod tests {
             ResolverAgent::discover_images_from_tags("registry.example.com", "foo/bar", None);
         assert!(uris.is_empty());
     }
-
-    // TODO: See how we can enable these small tests using wiremock.
-    // #[tokio::test]
-    // async fn scrape_registry_ignores_unsupported_catalog() {
-    //     let mock_server = MockServer::start().await;
-
-    //     // Mock GET /v2/_catalog → 404
-    //     Mock::given(method("GET"))
-    //         .and(path("/v2/_catalog"))
-    //         .respond_with(ResponseTemplate::new(404))
-    //         .mount(&mock_server)
-    //         .await;
-
-    //     let tcp_client = MockTcpClient::new();
-    //     let registry = RegistryConfig {
-    //         name: "test".to_string(),
-    //         url: mock_server.uri(),
-    //         client_cert_path: None,
-    //     };
-
-    //     // Should not panic, and not publish any events
-    //     ResolverAgent::scrape_registry(
-    //         tcp_client.clone() as ActorRef<TcpClientMessage>,
-    //         &WebClient::new(),
-    //         &registry,
-    //     )
-    //     .await
-    //     .unwrap();
-
-    //     let published = tcp_client.published.lock().unwrap();
-    //     assert!(published.is_empty(), "No publish events should be sent");
-    // }
-
-    // #[tokio::test]
-    // async fn scrape_repository_handles_null_tags() {
-    //     let mock_server = MockServer::start().await;
-
-    //     // Mock GET /v2/foo/tags/list → { "tags": null }
-    //     Mock::given(method("GET"))
-    //         .and(path("/v2/foo/tags/list"))
-    //         .respond_with(
-    //             ResponseTemplate::new(200).set_body_json(serde_json::json!({"tags": null})),
-    //         )
-    //         .mount(&mock_server)
-    //         .await;
-
-    //     let tcp_client = MockTcpClient::new();
-    //     ResolverAgent::scrape_repository(
-    //         tcp_client.clone() as ActorRef<TcpClientMessage>,
-    //         &WebClient::new(),
-    //         &mock_server.uri(),
-    //         "foo",
-    //     )
-    //     .await
-    //     .unwrap();
-
-    //     let published = tcp_client.published.lock().unwrap();
-    //     assert!(
-    //         published.is_empty(),
-    //         "No ImageRefDiscovered events should be published when tags are null"
-    //     );
-    // }
-
-    // #[tokio::test]
-    // async fn inspect_image_skips_unconfigured_registry() {
-    //     // config allows only registry.example.com
-    //     let config = ResolverConfig {
-    //         registries: vec![RegistryConfig {
-    //             name: "allowed".to_string(),
-    //             url: "registry.example.com".to_string(),
-    //             client_cert_path: None,
-    //         }],
-    //     };
-
-    //     let state = &mut ResolverAgentState {
-    //         cassini_client: MockTcpClient::new() as ActorRef<TcpClientMessage>,
-    //         web_client: WebClient::new(),
-    //         oci_client: OciClient::default(),
-    //         config,
-    //     };
-
-    //     // image_ref points to an unconfigured registry
-    //     let result = ResolverAgent::inspect_image(state, "other.registry.com/foo/bar:latest")
-    //         .await
-    //         .unwrap();
-
-    //     assert!(result.is_none(), "Should skip unconfigured registry");
-    // }
 }

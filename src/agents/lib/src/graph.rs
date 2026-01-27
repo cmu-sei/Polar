@@ -10,8 +10,32 @@ pub enum NodeKey {
     OCIRegistry {
         hostname: String,
     },
+    /// A human-facing ref (tag or digest), not identity.
     ContainerImageRef {
-        normalized: String, /* e.g. registry/repo:tag or @sha */
+        normalized: String,
+    },
+    /// Canonical OCI artifact (manifest / index)
+    OCIArtifact {
+        digest: String, // sha256:...
+    },
+    /// Content-addressed filesystem layer
+    OCILayer {
+        digest: String, // sha256:...
+    },
+    /// OCI config object
+    OCIConfig {
+        digest: String, // sha256:...
+        os: String,
+        arch: String,
+        created: String,
+        entrypoint: String,
+        cmd: String,
+    },
+    /// Observed / asserted software component
+    ComponentClaim {
+        claim_type: String, // "rpm", "deb", "pip", "file", ...
+        name: String,
+        version: String,
     },
 }
 
@@ -82,6 +106,118 @@ pub struct GraphControllerState {
 
 pub struct GraphController;
 
+impl GraphController {
+    fn node_match_and_params(key: &NodeKey, prefix: &str) -> (String, Vec<(String, BoltType)>) {
+        match key {
+            NodeKey::OCIRegistry { hostname } => (
+                format!("(:OCIRegistry {{ hostname: ${prefix}_hostname }})"),
+                vec![(format!("{prefix}_hostname"), hostname.clone().into())],
+            ),
+
+            NodeKey::ContainerImageRef { normalized } => (
+                format!("(:ContainerImageReference {{ normalized: ${prefix}_normalized }})"),
+                vec![(format!("{prefix}_normalized"), normalized.clone().into())],
+            ),
+
+            NodeKey::OCIArtifact { digest } => (
+                format!("(:OCIArtifact {{ digest: ${prefix}_digest }})"),
+                vec![(format!("{prefix}_digest"), digest.clone().into())],
+            ),
+
+
+            NodeKey::OCILayer { digest } => (
+                format!("(:OCILayer {{ digest: ${prefix}_digest }})"),
+                vec![(format!("{prefix}_digest"), digest.clone().into())],
+            ),
+
+            // TODO: Add other types to the cypher
+            NodeKey::OCIConfig { digest, ..} => (
+                format!("(:OCIConfig {{ digest: ${prefix}_digest }})"),
+                vec![(format!("{prefix}_digest"), digest.clone().into())],
+            ),
+
+            NodeKey::ComponentClaim {
+                claim_type,
+                name,
+                version,
+            } => (
+                format!(
+                    "(:ComponentClaim {{ type: ${prefix}_type, name: ${prefix}_name, version: ${prefix}_version }})"
+                ),
+                vec![
+                    (format!("{prefix}_type"), claim_type.clone().into()),
+                    (format!("{prefix}_name"), name.clone().into()),
+                    (format!("{prefix}_version"), version.clone().into()),
+                ],
+            ),
+        }
+    }
+
+    /// Compile GraphOp to Cypher string and Bolt parameters.
+    /// Pure and deterministic.
+    pub fn compile_graph_op(op: &GraphOp) -> (String, Vec<(String, BoltType)>) {
+        match op {
+            GraphOp::UpsertNode { key, props } => {
+                let (node_pattern, mut params) = Self::node_match_and_params(key, "n");
+
+                let mut cypher = format!(
+                    "MERGE (n {})",
+                    node_pattern.trim_start_matches('(').trim_end_matches(')')
+                );
+
+                if !props.is_empty() {
+                    let sets = props
+                        .iter()
+                        .map(|Property(k, _)| format!("n.{k} = ${k}"))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+
+                    cypher.push_str(&format!("\nSET {sets}"));
+                }
+
+                for Property(k, v) in props {
+                    params.push((k.clone(), v.clone().into()));
+                }
+
+                (cypher, params)
+            }
+
+            GraphOp::EnsureEdge {
+                from,
+                to,
+                rel_type,
+                props,
+            } => {
+                let (from_pat, mut params) = Self::node_match_and_params(from, "from");
+                let (to_pat, mut to_params) = Self::node_match_and_params(to, "to");
+                params.append(&mut to_params);
+
+                let mut cypher = format!(
+                    "MERGE (a {})\nMERGE (b {})\nMERGE (a)-[r:{}]->(b)",
+                    from_pat.trim_start_matches('(').trim_end_matches(')'),
+                    to_pat.trim_start_matches('(').trim_end_matches(')'),
+                    rel_type
+                );
+
+                if !props.is_empty() {
+                    let sets = props
+                        .iter()
+                        .map(|Property(k, _)| format!("r.{k} = ${k}"))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+
+                    cypher.push_str(&format!("\nSET {sets}"));
+                }
+
+                for Property(k, v) in props {
+                    params.push((k.clone(), v.clone().into()));
+                }
+
+                (cypher, params)
+            }
+        }
+    }
+}
 #[async_trait]
 impl Actor for GraphController {
     type Msg = GraphControllerMsg;
@@ -108,7 +244,7 @@ impl Actor for GraphController {
             GraphControllerMsg::Op(op) => {
                 let span = tracing::trace_span!("GraphController.handle_op");
                 let _guard = span.enter();
-                let (cypher, params) = compile_graph_op(&op);
+                let (cypher, params) = Self::compile_graph_op(&op);
 
                 let mut q = Query::new(cypher);
                 for (k, v) in params {
@@ -127,118 +263,6 @@ impl Actor for GraphController {
     }
 }
 
-/// Compile GraphOp to Cypher string and Bolt parameters.
-/// Pure and deterministic.
-pub fn compile_graph_op(op: &GraphOp) -> (String, Vec<(String, BoltType)>) {
-    match op {
-        GraphOp::UpsertNode { key, props } => match key {
-            NodeKey::OCIRegistry { hostname } => {
-                let cypher = r#"
-                    MERGE (n:OCIRegistry { hostname: $hostname })
-                    SET n.last_seen = coalesce(n.last_seen, timestamp())
-                    "#
-                .trim()
-                .to_string();
-
-                let mut params = vec![(
-                    "hostname".to_string(),
-                    BoltType::from(GraphValue::String(hostname.clone())),
-                )];
-
-                for Property(k, v) in props {
-                    params.push((k.clone(), BoltType::from(v.clone())));
-                }
-
-                (cypher, params)
-            }
-
-            NodeKey::ContainerImageRef { normalized } => {
-                let cypher = r#"
-                MERGE (n:ContainerImageReference { normalized: $normalized })
-                SET n.last_resolved = coalesce(n.last_resolved, timestamp())
-                "#
-                .trim()
-                .to_string();
-
-                let mut params = vec![(
-                    "normalized".to_string(),
-                    BoltType::from(GraphValue::String(normalized.clone())),
-                )];
-
-                for Property(k, v) in props {
-                    params.push((k.clone(), BoltType::from(v.clone())));
-                }
-
-                (cypher, params)
-            }
-        },
-
-        GraphOp::EnsureEdge {
-            from,
-            to,
-            rel_type,
-            props,
-        } => {
-            let (from_match, mut params) = match from {
-                NodeKey::OCIRegistry { hostname } => (
-                    "(a:OCIRegistry { hostname: $from_hostname })".to_string(),
-                    vec![(
-                        "from_hostname".to_string(),
-                        BoltType::from(GraphValue::String(hostname.clone())),
-                    )],
-                ),
-
-                NodeKey::ContainerImageRef { normalized } => (
-                    "(a:ContainerImageReference { normalized: $from_normalized })".to_string(),
-                    vec![(
-                        "from_normalized".to_string(),
-                        BoltType::from(GraphValue::String(normalized.clone())),
-                    )],
-                ),
-            };
-
-            let (to_match, mut to_params) = match to {
-                NodeKey::OCIRegistry { hostname } => (
-                    "(b:OCIRegistry { hostname: $to_hostname })".to_string(),
-                    vec![(
-                        "to_hostname".to_string(),
-                        BoltType::from(GraphValue::String(hostname.clone())),
-                    )],
-                ),
-
-                NodeKey::ContainerImageRef { normalized } => (
-                    "(b:ContainerImageReference { normalized: $to_normalized })".to_string(),
-                    vec![(
-                        "to_normalized".to_string(),
-                        BoltType::from(GraphValue::String(normalized.clone())),
-                    )],
-                ),
-            };
-
-            params.append(&mut to_params);
-
-            let mut set_clauses = Vec::new();
-            for Property(k, _) in props {
-                set_clauses.push(format!("r.{k} = ${k}"));
-            }
-
-            let mut cypher =
-                format!("MERGE {from_match}\nMERGE {to_match}\nMERGE (a)-[r:{rel_type}]->(b)");
-
-            if !set_clauses.is_empty() {
-                cypher.push_str("\nSET ");
-                cypher.push_str(&set_clauses.join(", "));
-            }
-
-            for Property(k, v) in props {
-                params.push((k.clone(), BoltType::from(v.clone())));
-            }
-
-            (cypher, params)
-        }
-    }
-}
-
 #[cfg(test)]
 mod unittests {
     use neo4rs::BoltBoolean;
@@ -253,7 +277,9 @@ mod unittests {
             props: vec![Property("tag".into(), GraphValue::String("latest".into()))],
         };
 
-        let (cypher, params) = compile_graph_op(&op);
+        let (cypher, params) = GraphController::compile_graph_op(&op);
+        println!("{cypher}");
+        println!("{params:?}");
 
         assert!(cypher.contains("MERGE (n:ContainerImageReference { normalized: $normalized })"));
         assert!(cypher.contains("SET n.last_resolved"));
@@ -278,7 +304,10 @@ mod unittests {
             props: vec![Property("verified".into(), GraphValue::Bool(true))],
         };
 
-        let (cypher, params) = compile_graph_op(&op);
+        let (cypher, params) = GraphController::compile_graph_op(&op);
+
+        println!("{cypher}");
+        println!("{params:?}");
 
         assert!(cypher.contains("MERGE (a:OCIRegistry { hostname: $from_hostname })"));
         assert!(cypher.contains("MERGE (b:ContainerImageReference { normalized: $to_normalized })"));

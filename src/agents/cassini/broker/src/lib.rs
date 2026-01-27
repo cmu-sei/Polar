@@ -55,59 +55,57 @@ pub fn init_logging() {
     use tracing_subscriber::filter::EnvFilter;
     use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-    // Determine whether to enable Jaeger/OTLP tracing
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+
     let enable_jaeger = std::env::var("ENABLE_JAEGER_TRACING")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
 
-    // Always set up a basic log filter
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-
-    // let mut subscriber = tracing_subscriber::registry()
-    //     .with(filter)
-    //     .with(tracing_subscriber::fmt::layer());
-
     if enable_jaeger {
-        let jaeger_otlp_endpoint = match std::env::var("JAEGER_OTLP_ENDPOINT") {
-            Ok(endpoint) => endpoint,
-            Err(_) => "http://localhost:4318/v1/traces".to_string(),
-        };
-        if !jaeger_otlp_endpoint.is_empty() {
-            match opentelemetry_otlp::SpanExporter::builder()
+        let endpoint = std::env::var("JAEGER_OTLP_ENDPOINT")
+            .unwrap_or_else(|_| "http://localhost:4318/v1/traces".to_string());
+
+        if !endpoint.is_empty() {
+            if let Ok(exporter) = opentelemetry_otlp::SpanExporter::builder()
                 .with_http()
                 .with_protocol(Protocol::HttpBinary)
-                .with_endpoint(jaeger_otlp_endpoint)
+                .with_endpoint(endpoint)
                 .build()
             {
-                Ok(otlp_exporter) => {
-                    let tracer_provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
-                        .with_batch_exporter(otlp_exporter)
-                        .with_resource(
-                            Resource::builder_empty()
-                                .with_attributes([KeyValue::new("service.name", "cassini-server")])
-                                .build(),
-                        )
-                        .build();
-                    global::set_tracer_provider(tracer_provider);
+                let tracer_provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
+                    .with_batch_exporter(exporter)
+                    .with_resource(
+                        Resource::builder_empty()
+                            .with_attributes([KeyValue::new("service.name", "cassini-server")])
+                            .build(),
+                    )
+                    .build();
 
-                    let tracer = global::tracer("cassini.tracing");
+                global::set_tracer_provider(tracer_provider);
+                let tracer = global::tracer(format!("cassini-tracing"));
 
-                    tracing_subscriber::registry()
-                        .with(filter.clone())
-                        .with(tracing_subscriber::fmt::layer())
-                        .with(tracing_opentelemetry::layer().with_tracer(tracer))
-                        .init();
-                }
-                Err(e) => {
-                    eprintln!("Failed to initialize Jaeger OTLP exporter: {e}");
+                if tracing_subscriber::registry()
+                    .with(filter)
+                    .with(tracing_subscriber::fmt::layer())
+                    .with(tracing_opentelemetry::layer().with_tracer(tracer))
+                    .try_init()
+                    .is_err()
+                {
+                    eprintln!("Logging registry already initialized");
                 }
             }
         }
+    } else {
+        if tracing_subscriber::registry()
+            .with(filter)
+            .with(tracing_subscriber::fmt::layer())
+            .try_init()
+            .is_err()
+        {
+            eprintln!("Logging registry already initialized");
+        }
     }
-
-    tracing_subscriber::registry().with(filter).init();
 }
-
 ///Consider a different naming convention for the subscribers, right now they're named directly after the session they represent and the topic they subscribe to
 /// IF we wanted to support topics subscribing to topics e.g overloading the type of subscriber topics can have, we will want to reconsider this approach.
 pub fn get_subscriber_name(registration_id: &str, topic: &str) -> String {

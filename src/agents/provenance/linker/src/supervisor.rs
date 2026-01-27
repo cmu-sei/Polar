@@ -29,9 +29,9 @@ pub struct ProvenanceSupervisorState {
 pub struct ProvenanceSupervisor;
 
 impl Supervisor for ProvenanceSupervisor {
-    #[instrument(name = "ProvenanceSupervisor::deserialize_and_dispatch")]
-    fn deserialize_and_dispatch(_topic: String, payload: Vec<u8>) {
-        debug!("Received message on topic {_topic}");
+    #[instrument(name = "ProvenanceSupervisor::deserialize_and_dispatch" skip(payload))]
+    fn deserialize_and_dispatch(topic: String, payload: Vec<u8>) {
+        debug!("Received message on topic {topic}");
         match rkyv::from_bytes::<ProvenanceEvent, rkyv::rancor::Error>(&payload) {
             Ok(event) => {
                 match event {
