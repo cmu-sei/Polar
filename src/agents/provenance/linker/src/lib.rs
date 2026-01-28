@@ -1,9 +1,10 @@
 use std::fmt::Debug;
 
-use neo4rs::{BoltType, Graph, Query};
-use polar::graph::Property;
+use neo4rs::{BoltType, Config, Graph, Query};
+use polar::graph::{GraphController, Property};
 use polar::graph::{GraphControllerMsg, GraphControllerState, GraphNodeKey, GraphOp};
-use ractor::{Actor, ActorProcessingErr, ActorRef};
+use ractor::{Actor, ActorProcessingErr, ActorRef, SpawnErr};
+use tokio::task::JoinHandle;
 use tracing::{debug, trace, warn};
 
 use serde::{Deserialize, Serialize};
@@ -111,38 +112,19 @@ impl GraphNodeKey for ArtifactNodeKey {
     }
 }
 
-pub struct GraphController;
+/// A concrete instance of a GraphController for the artifact linker.
 
-impl GraphController {
-    async fn handle_op(
-        state: &mut GraphControllerState,
-        op: &GraphOp<ArtifactNodeKey>,
-    ) -> Result<(), ActorProcessingErr> {
-        let span = tracing::trace_span!("GraphController.handle_op");
-        let _guard = span.enter();
-        let (cypher, params) = Self::compile_graph_op(&op);
+pub struct LinkerGraphController;
 
-        let mut q = Query::new(cypher);
-        for (k, v) in params {
-            q = q.param(&k, v);
-        }
-        let mut txn = state.graph.start_txn().await?;
-        debug!("{q:?}");
-        txn.run(q)
-            .await
-            .map_err(|e| ActorProcessingErr::from(format!("neo4j execution failed: {:?}", e)))?;
-        txn.commit().await?;
-        trace!("transaction committed");
-        Ok(())
-    }
+/// This implementation is responsible for compiling graph operations into Cypher queries and executing them against a Neo4j database.
+impl GraphController for LinkerGraphController {
     /// Compile GraphOp to Cypher string and Bolt parameters.
     /// Pure and deterministic.
-    /// TODO: Move into the trait for the graph controller
-    fn compile_graph_op<K>(op: &GraphOp<K>) -> (String, Vec<(String, BoltType)>)
+    fn compile_graph_op<K>(op: &GraphOp<K>) -> Query
     where
         K: GraphNodeKey + Debug,
     {
-        match op {
+        let (cypher, params) = match op {
             GraphOp::UpsertNode { key, props } => {
                 trace!("Received UpsertNode directive. {key:?}, {props:?}");
                 let (node_pattern, mut params) = key.cypher_match("n");
@@ -203,12 +185,43 @@ impl GraphController {
 
                 (cypher, params)
             }
+        };
+
+        let mut q = Query::new(cypher);
+        for (k, v) in params {
+            q = q.param(&k, v);
         }
+
+        q
+    }
+}
+
+impl LinkerGraphController {
+    /// Here we provide an async helper, just to make the Actor implemntation as lean as possible. Asnc traits aren't well supported yet, so until then this is the best we've got
+    async fn handle_op<ArtifactNodeKey>(
+        graph: &Graph,
+        op: &GraphOp<ArtifactNodeKey>,
+    ) -> Result<(), ActorProcessingErr>
+    where
+        ArtifactNodeKey: GraphNodeKey + Debug,
+    {
+        let span = tracing::trace_span!("GraphController.handle_op");
+        let _guard = span.enter();
+        let q = Self::compile_graph_op(&op);
+
+        let mut txn = graph.start_txn().await?;
+        debug!("{q:?}");
+        txn.run(q)
+            .await
+            .map_err(|e| ActorProcessingErr::from(format!("neo4j execution failed: {:?}", e)))?;
+        txn.commit().await?;
+        trace!("transaction committed");
+        Ok(())
     }
 }
 
 #[ractor::async_trait]
-impl Actor for GraphController {
+impl Actor for LinkerGraphController {
     type Msg = GraphControllerMsg<ArtifactNodeKey>;
     type State = GraphControllerState;
     type Arguments = Graph;
@@ -229,7 +242,7 @@ impl Actor for GraphController {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match msg {
-            GraphControllerMsg::Op(op) => Self::handle_op(state, &op).await?,
+            GraphControllerMsg::Op(op) => Self::handle_op(&state.graph, &op).await?,
         }
         Ok(())
     }

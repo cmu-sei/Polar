@@ -1,6 +1,7 @@
+use ractor::{concurrency::JoinHandle, Actor, ActorCell, ActorProcessingErr, ActorRef, SpawnErr};
 use std::fmt::Debug;
 
-use neo4rs::{BoltNull, BoltType, Graph};
+use neo4rs::{BoltNull, BoltType, Config, Graph, Query};
 use serde::{Deserialize, Serialize};
 
 pub trait GraphNodeKey {
@@ -80,4 +81,13 @@ where
     K: GraphNodeKey + Debug,
 {
     Op(GraphOp<K>),
+}
+
+/// A Controller actor intended to centralize interactions with the graph database.
+pub trait GraphController {
+    /// A function intended to compile graph operations into Cypher queries and execute them against a Neo4j database.
+    /// Implementing it for a given nodekey assures that the graph controller can handle the specific node identities.
+    fn compile_graph_op<K>(op: &GraphOp<K>) -> Query
+    where
+        K: GraphNodeKey + Debug;
 }
