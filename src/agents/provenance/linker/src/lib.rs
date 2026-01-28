@@ -1,10 +1,9 @@
 use std::fmt::Debug;
 
-use neo4rs::{BoltType, Config, Graph, Query};
-use polar::graph::{GraphController, Property};
+use neo4rs::{BoltType, Graph};
+use polar::graph::compile_graph_op;
 use polar::graph::{GraphControllerMsg, GraphControllerState, GraphNodeKey, GraphOp};
-use ractor::{Actor, ActorProcessingErr, ActorRef, SpawnErr};
-use tokio::task::JoinHandle;
+use ractor::{Actor, ActorProcessingErr, ActorRef};
 use tracing::{debug, trace, warn};
 
 use serde::{Deserialize, Serialize};
@@ -23,6 +22,8 @@ pub enum ArtifactType {
 /// CAUTION: Keep this small and stable; extend later with versions.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum ArtifactNodeKey {
+    /// Our understanding of what an "artifact" in the general sense is.
+    Artifact,
     PodContainer {
         pod_uid: String,
         container_name: String,
@@ -62,13 +63,14 @@ pub enum ArtifactNodeKey {
 impl GraphNodeKey for ArtifactNodeKey {
     fn cypher_match(&self, prefix: &str) -> (String, Vec<(String, BoltType)>) {
         match self {
+            Self::Artifact => (
+                format!("(:Artifact)"), vec![]),
             Self::OCIRegistry { hostname } => (
                 format!("(:OCIRegistry {{ hostname: ${prefix}_hostname }})"),
                 vec![(format!("{prefix}_hostname"), hostname.clone().into())],
             ),
-
             Self::ContainerImageRef { normalized } => (
-                format!("(:ContainerImageReference {{ normalized: ${prefix}_normalized }})"),
+                format!("(:ContainerImage {{ normalized: ${prefix}_normalized }})"),
                 vec![(format!("{prefix}_normalized"), normalized.clone().into())],
             ),
 
@@ -116,88 +118,8 @@ impl GraphNodeKey for ArtifactNodeKey {
 
 pub struct LinkerGraphController;
 
-/// This implementation is responsible for compiling graph operations into Cypher queries and executing them against a Neo4j database.
-impl GraphController for LinkerGraphController {
-    /// Compile GraphOp to Cypher string and Bolt parameters.
-    /// Pure and deterministic.
-    fn compile_graph_op<K>(op: &GraphOp<K>) -> Query
-    where
-        K: GraphNodeKey + Debug,
-    {
-        let (cypher, params) = match op {
-            GraphOp::UpsertNode { key, props } => {
-                trace!("Received UpsertNode directive. {key:?}, {props:?}");
-                let (node_pattern, mut params) = key.cypher_match("n");
-
-                let mut cypher = format!(
-                    "MERGE (n {})",
-                    node_pattern.trim_start_matches('(').trim_end_matches(')')
-                );
-
-                if !props.is_empty() {
-                    let sets = props
-                        .iter()
-                        .map(|Property(k, _)| format!("n.{k} = ${k}"))
-                        .collect::<Vec<_>>()
-                        .join(", ");
-
-                    cypher.push_str(&format!("\nSET {sets}"));
-                }
-
-                for Property(k, v) in props {
-                    params.push((k.clone(), v.clone().into()));
-                }
-
-                (cypher, params)
-            }
-
-            GraphOp::EnsureEdge {
-                from,
-                to,
-                rel_type,
-                props,
-            } => {
-                trace!("Received EnsureEdge directive {to:?} {rel_type} {props:?}");
-                let (from_pat, mut params) = from.cypher_match("from");
-                let (to_pat, mut to_params) = to.cypher_match("to");
-                params.append(&mut to_params);
-
-                let mut cypher = format!(
-                    "MERGE (a {})\nMERGE (b {})\nMERGE (a)-[r:{}]->(b)",
-                    from_pat.trim_start_matches('(').trim_end_matches(')'),
-                    to_pat.trim_start_matches('(').trim_end_matches(')'),
-                    rel_type
-                );
-
-                if !props.is_empty() {
-                    let sets = props
-                        .iter()
-                        .map(|Property(k, _)| format!("r.{k} = ${k}"))
-                        .collect::<Vec<_>>()
-                        .join(", ");
-
-                    cypher.push_str(&format!("\nSET {sets}"));
-                }
-
-                for Property(k, v) in props {
-                    params.push((k.clone(), v.clone().into()));
-                }
-
-                (cypher, params)
-            }
-        };
-
-        let mut q = Query::new(cypher);
-        for (k, v) in params {
-            q = q.param(&k, v);
-        }
-
-        q
-    }
-}
-
 impl LinkerGraphController {
-    /// Here we provide an async helper, just to make the Actor implemntation as lean as possible. Asnc traits aren't well supported yet, so until then this is the best we've got
+    /// Here we provide an async helper, just to make the Actor implementation as lean as possible. Async traits aren't well supported yet, so until then this is the best we've got
     async fn handle_op<ArtifactNodeKey>(
         graph: &Graph,
         op: &GraphOp<ArtifactNodeKey>,
@@ -207,7 +129,7 @@ impl LinkerGraphController {
     {
         let span = tracing::trace_span!("GraphController.handle_op");
         let _guard = span.enter();
-        let q = Self::compile_graph_op(&op);
+        let q = compile_graph_op(&op);
 
         let mut txn = graph.start_txn().await?;
         debug!("{q:?}");

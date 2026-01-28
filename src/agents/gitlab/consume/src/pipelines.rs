@@ -302,7 +302,7 @@ impl Actor for GitlabPipelineConsumer {
 
                             WITH p, pipeline_data.artifacts AS artifacts
                             UNWIND artifacts AS artifact
-                            MERGE (a:Artifact {{ id: artifact.artifact_id }})
+                            MERGE (a:GitlabPipelineArtifact {{ id: artifact.artifact_id }})
                             SET a.size = artifact.size,
                                 a.name = artifact.name,
                                 a.download_path = artifact.download_path,

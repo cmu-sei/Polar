@@ -1,4 +1,4 @@
-use polar::graph::GraphValue;
+use polar::graph::{self, GraphValue};
 use polar::graph::{GraphControllerMsg, GraphOp, Property};
 use polar::ProvenanceEvent;
 use ractor::async_trait;
@@ -118,7 +118,21 @@ impl Actor for ProvenanceLinker {
                     "failed to upsert OCIRegistry",
                 )?;
 
-                Self::ensure_edge(state, artifact_key, registry_key, "HOSTED_BY")?;
+                // ensure edges between the "Artifat" type node, the OCIartifact itself, and the registry
+                Self::ensure_edge(
+                    state,
+                    ArtifactNodeKey::Artifact,
+                    artifact_key.clone(),
+                    graph::rel::IS,
+                )?;
+                Self::ensure_edge(
+                    state,
+                    registry_key.clone(),
+                    ArtifactNodeKey::Artifact,
+                    graph::rel::CONTAINS,
+                )?;
+
+                Self::ensure_edge(state, artifact_key, registry_key, graph::rel::HOSTED_BY)?;
             }
 
             ProvenanceEvent::ImageRefResolved {
@@ -153,7 +167,19 @@ impl Actor for ProvenanceLinker {
                     "failed to upsert OCIArtifact from ImageRefResolved",
                 )?;
 
-                Self::ensure_edge(state, ref_key, artifact_key, "POINTS_TO")?;
+                // ensure edges between the "Artifat" type node, the OCIartifact itself, and the registry
+                Self::ensure_edge(
+                    state,
+                    ArtifactNodeKey::Artifact,
+                    artifact_key.clone(),
+                    graph::rel::IS,
+                )?;
+                Self::ensure_edge(
+                    state,
+                    ref_key.clone(),
+                    artifact_key.clone(),
+                    graph::rel::INSTANCE_OF,
+                )?;
             }
             ProvenanceEvent::OCIRegistryDiscovered { hostname } => {
                 trace!("OCI registry discovered: {hostname}");
