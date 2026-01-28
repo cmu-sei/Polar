@@ -95,7 +95,7 @@ impl Actor for ClusterObserverSupervisor {
     async fn pre_start(
         &self,
         myself: ActorRef<Self::Msg>,
-        args: (),
+        _: (),
     ) -> Result<Self::State, ActorProcessingErr> {
         // Read Kubernetes credentials and other data from the environment
         info!("{myself:?} starting");

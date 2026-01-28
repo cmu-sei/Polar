@@ -123,7 +123,7 @@ impl Actor for ProvenanceSupervisor {
                     let graph = neo4rs::Graph::connect(get_neo_config()?)?;
                     let (compiler, _) = Actor::spawn_linked(
                         Some("linker.graph.controller".to_string()),
-                        polar::graph::GraphController,
+                        crate::GraphController,
                         graph,
                         myself.clone().into(),
                     )

@@ -1,25 +1,27 @@
 use polar::graph::GraphValue;
-use polar::graph::{GraphControllerMsg, GraphOp, NodeKey, Property};
+use polar::graph::{GraphControllerMsg, GraphOp, Property};
 use polar::ProvenanceEvent;
 use ractor::async_trait;
 use ractor::Actor;
 use ractor::ActorProcessingErr;
 use ractor::ActorRef;
-use tracing::{debug, info, trace, warn};
+use tracing::{debug, trace, warn};
+
+use crate::ArtifactNodeKey;
 
 pub struct ProvenanceLinker;
 
 pub struct ProvenanceLinkerState {
-    compiler: ActorRef<GraphControllerMsg>,
+    compiler: ActorRef<GraphControllerMsg<ArtifactNodeKey>>,
 }
 pub struct ProvenanceLinkerArgs {
-    pub compiler: ActorRef<GraphControllerMsg>,
+    pub compiler: ActorRef<GraphControllerMsg<ArtifactNodeKey>>,
 }
 
 impl ProvenanceLinker {
     fn send_op(
         state: &mut ProvenanceLinkerState,
-        op: GraphOp,
+        op: GraphOp<ArtifactNodeKey>,
         err_ctx: &'static str,
     ) -> Result<(), ActorProcessingErr> {
         state
@@ -30,7 +32,7 @@ impl ProvenanceLinker {
 
     fn upsert_node(
         state: &mut ProvenanceLinkerState,
-        key: NodeKey,
+        key: ArtifactNodeKey,
         props: Vec<Property>,
         err_ctx: &'static str,
     ) -> Result<(), ActorProcessingErr> {
@@ -39,8 +41,8 @@ impl ProvenanceLinker {
 
     fn ensure_edge(
         state: &mut ProvenanceLinkerState,
-        from: NodeKey,
-        to: NodeKey,
+        from: ArtifactNodeKey,
+        to: ArtifactNodeKey,
         rel_type: &'static str,
     ) -> Result<(), ActorProcessingErr> {
         Self::send_op(
@@ -90,7 +92,7 @@ impl Actor for ProvenanceLinker {
             } => {
                 trace!("OCIArtifact resolved: {uri}");
 
-                let artifact_key = NodeKey::OCIArtifact {
+                let artifact_key = ArtifactNodeKey::OCIArtifact {
                     digest: digest.clone(),
                 };
 
@@ -105,7 +107,7 @@ impl Actor for ProvenanceLinker {
                     "failed to upsert OCIArtifact",
                 )?;
 
-                let registry_key = NodeKey::OCIRegistry {
+                let registry_key = ArtifactNodeKey::OCIRegistry {
                     hostname: registry.clone(),
                 };
 
@@ -126,7 +128,7 @@ impl Actor for ProvenanceLinker {
             } => {
                 trace!("ImageRef resolved: {uri}");
 
-                let ref_key = NodeKey::ContainerImageRef {
+                let ref_key = ArtifactNodeKey::ContainerImageRef {
                     normalized: uri.clone(),
                 };
 
@@ -137,7 +139,7 @@ impl Actor for ProvenanceLinker {
                     "failed to upsert ContainerImageReference",
                 )?;
 
-                let artifact_key = NodeKey::OCIArtifact {
+                let artifact_key = ArtifactNodeKey::OCIArtifact {
                     digest: digest.clone(),
                 };
 
@@ -158,7 +160,7 @@ impl Actor for ProvenanceLinker {
 
                 Self::upsert_node(
                     state,
-                    NodeKey::OCIRegistry {
+                    ArtifactNodeKey::OCIRegistry {
                         hostname: hostname.clone(),
                     },
                     vec![Property("hostname".into(), GraphValue::String(hostname))],
@@ -177,7 +179,7 @@ impl Actor for ProvenanceLinker {
                     image_ref
                 );
                 // 1. Upsert PodContainer (idempotent, no inference)
-                let pod_container_key = NodeKey::PodContainer {
+                let pod_container_key = ArtifactNodeKey::PodContainer {
                     pod_uid: pod_uid.clone(),
                     container_name: container_name.clone(),
                 };
@@ -197,7 +199,7 @@ impl Actor for ProvenanceLinker {
                 )?;
 
                 // 2. Upsert ContainerImageReference (string-only claim)
-                let image_ref_key = NodeKey::ContainerImageRef {
+                let image_ref_key = ArtifactNodeKey::ContainerImageRef {
                     normalized: image_ref.clone(),
                 };
 
@@ -230,68 +232,6 @@ impl Actor for ProvenanceLinker {
                         ))
                     })?;
             }
-
-            // ProvenanceEvent::LinkArtifacts {
-            //     artifact_id,
-            //     artifact_type: _,
-            //     related_names,
-            //     ..
-            // } => {
-            //     // Create Artifact node and link components -> package nodes
-            //     let art_key = NodeKey::OCIRegistry {
-            //         hostname: artifact_id.clone(),
-            //     }; // pick appropriate node type; replace if artifact node exists
-            //     let create_art = GraphOp::UpsertNode {
-            //         key: art_key.clone(),
-            //         props: vec![Property(
-            //             "artifact_id".into(),
-            //             polar::graph::GraphValue::String(artifact_id),
-            //         )],
-            //     };
-            //     state
-            //         .compiler
-            //         .send_message(GraphControllerMsg::Op(create_art))
-            //         .map_err(|e| {
-            //             ActorProcessingErr::from(format!("failed to send artifact upsert: {:?}", e))
-            //         })?;
-
-            //     // For each related name, create a SoftwareComponent (you may add node type later); for now, model it as ContainerImageRef or package.
-            //     for name in related_names {
-            //         let comp_key = NodeKey::ContainerImageRef {
-            //             normalized: name.to_string(),
-            //         };
-            //         let up = GraphOp::UpsertNode {
-            //             key: comp_key.clone(),
-            //             props: vec![],
-            //         };
-            //         state
-            //             .compiler
-            //             .send_message(GraphControllerMsg::Op(up.clone()))
-            //             .map_err(|e| {
-            //                 ActorProcessingErr::from(format!(
-            //                     "failed to send component upsert: {:?}",
-            //                     e
-            //                 ))
-            //             })?;
-
-            //         // Link artifact -> component
-            //         let edge = GraphOp::EnsureEdge {
-            //             from: art_key.clone(),
-            //             to: comp_key.clone(),
-            //             rel_type: "DESCRIBES_COMPONENT".to_string(),
-            //             props: vec![],
-            //         };
-            //         state
-            //             .compiler
-            //             .send_message(GraphControllerMsg::Op(edge))
-            //             .map_err(|e| {
-            //                 ActorProcessingErr::from(format!(
-            //                     "failed to send artifact->component link: {:?}",
-            //                     e
-            //                 ))
-            //             })?;
-            //     }
-            // }
             _ => warn!("unexpected linker command"),
         }
         Ok(())

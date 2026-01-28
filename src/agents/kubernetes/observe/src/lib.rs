@@ -1,20 +1,7 @@
 pub mod pods;
 pub mod supervisor;
 
-use cassini_client::TcpClientMessage;
-use ractor::registry::where_is;
-use tracing::warn;
-
 pub const TCP_CLIENT_NAME: &str = "kubernetes.cluster_name.supervisor_name.client";
-
-/// Helper struct to map container images to registries + meta
-/// TODO: unfcomment if we need this later
-// struct ContainerImageRef {
-//     registry: String,
-//     project_path: String,
-//     tag: Option<String>,
-//     digest: Option<String>,
-// }
 
 pub struct KubernetesObserver;
 
