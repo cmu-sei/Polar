@@ -34,21 +34,3 @@ pub enum KubernetesObserverMessage {
 pub struct KubernetesObserverArgs {
     pub namespace: String,
 }
-/// Helper function to send a message to the cassini client actor
-pub fn send_to_client(_registration_id: String, topic: String, payload: Vec<u8>) {
-    let envelope = TcpClientMessage::Publish {
-        topic,
-        payload,
-    };
-
-    // send data for batch processing
-
-    match where_is(TCP_CLIENT_NAME.to_owned()) {
-        Some(client) => {
-            if let Err(e) = client.send_message(envelope) {
-                warn!("Failed to send message to client {e}");
-            }
-        }
-        None => todo!("If no client present, drop the message?"),
-    }
-}

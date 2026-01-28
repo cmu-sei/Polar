@@ -1,6 +1,6 @@
 use crate::BROKER_CLIENT_NAME;
 use crate::{
-    linker::{LinkerCommand, ProvenanceLinker, ProvenanceLinkerArgs},
+    linker::{ProvenanceLinker, ProvenanceLinkerArgs},
     PROVENANCE_LIKER_NAME,
 };
 use cassini_client::{TCPClientConfig, TcpClientArgs};
@@ -34,26 +34,13 @@ impl Supervisor for ProvenanceSupervisor {
         debug!("Received message on topic {topic}");
         match rkyv::from_bytes::<ProvenanceEvent, rkyv::rancor::Error>(&payload) {
             Ok(event) => {
-                match event {
-                    ProvenanceEvent::ImageRefResolved {
-                        uri,
-                        digest,
-                        media_type,
-                    } => {
-                        //lookup linker and forward
-                        trace!("looking up actor {PROVENANCE_LINKER_TOPIC} and forwarding");
-                        if let Some(linker) = where_is(PROVENANCE_LINKER_TOPIC.to_string()) {
-                            linker
-                                .send_message(LinkerCommand::LinkContainerImages {
-                                    uri,
-                                    digest,
-                                    media_type,
-                                })
-                                .map_err(|e| error!("Failed to forward command to linker! {e}"))
-                                .ok();
-                        }
-                    }
-                    _ => todo!(),
+                //lookup linker and forward
+                trace!("looking up actor {PROVENANCE_LINKER_TOPIC} and forwarding");
+                if let Some(linker) = where_is(PROVENANCE_LINKER_TOPIC.to_string()) {
+                    linker
+                        .send_message(event)
+                        .map_err(|e| error!("Failed to forward event to linker! {e}"))
+                        .ok();
                 }
             }
             Err(e) => warn!("Failed to parse provenance event. {e}"),

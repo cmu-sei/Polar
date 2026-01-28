@@ -155,54 +155,31 @@ impl PodConsumer {
 
                 for container in containers {
                     if let Some(image) = &container.image {
+                        let pod_uid = pod.metadata.uid.clone().unwrap(); // TODO: I know this is unwise, but we need a hard identifier for pods.
                         if seen_images.insert(image.clone()) {
                             statements.push(format!(
                                 "
                                 // Ensure a PodContainer node for this pod+container
-                                MERGE (p:Pod {{ name: '{pod_name}', namespace: '{namespace}' }})
-                                MERGE (c:PodContainer {{ name: '{container_name}', namespace: '{namespace}', pod_name: '{pod_name}' }})
-                                SET c.image = '{image}'
+                                MERGE (p:Pod {{ pod_uid: '{pod_uid}'}})
+                                SET
+                                p.name = '{pod_name}',
+                                p.namespace = '{namespace}'
 
-
-                                MERGE (ref:ContainerImageReference {{
-                                  normalized: '{image}'
+                                MERGE (c:PodContainer {{
+                                    pod_uid: '{pod_uid}',
+                                    container_name: '{container_name}'
                                 }})
-                                ON CREATE SET
-                                  ref.discovered_by = 'k8s_consumer',
-                                  ref.first_seen = timestamp()
-                                ON MATCH SET
-                                  ref.last_seen = timestamp()
+                                SET
+                                    c.namespace = '{namespace}',
+                                    c.pod_name  = '{pod_name}',
+                                    c.image     = '{image}'
 
-                                MERGE (c)-[:USES_REFERENCE]->(ref)
                                 MERGE (p)-[:HAS_CONTAINER]->(c)
-
                                     ",
-                                    container_name = container.name.as_str(),
-                                    image = image.as_str()
+                                container_name = container.name.as_str(),
+                                image = image.as_str(),
                             ));
-
-                            // emit a message to the provenance discovery agent that we saw an image.
-                            // For k8s, the canonical image name is the best we've got,
-                            // so the resolver will have to take care of finding out where it really came from.
-                            let event = ProvenanceEvent::ImageRefDiscovered {
-                                uri: image.to_string(),
-                            };
-                            let payload = rkyv::to_bytes::<rancor::Error>(&event)?;
-
-                            let message = TcpClientMessage::Publish {
-                                topic: PROVENANCE_DISCOVERY_TOPIC.to_string(),
-                                payload: payload.into(),
-                            };
-                            trace!("emitting provenance event for image {image}");
-
-                            state.broker_client.send_message(message)?;
                         }
-                        statements.push(format!(
-                            "MATCH (p:Pod {{ name: '{}', namespace: '{}' }}), \
-                                   (c:PodContainer {{ image: '{}' }}) \
-                             MERGE (p)-[:HAS_CONTAINER]->(c)",
-                            pod_name, namespace, image
-                        ));
                     }
 
                     if let Some(envs) = &container.env {

@@ -1,4 +1,4 @@
-use cassini_client::{TCPClientConfig, TcpClientActor, TcpClientArgs};
+use cassini_client::{TCPClientConfig, TcpClientActor, TcpClientArgs, TcpClientMessage};
 use cassini_types::ClientEvent;
 use k8s_openapi::api::core::v1::Namespace;
 use kube::Config;
@@ -18,12 +18,12 @@ pub struct ClusterObserverSupervisor;
 
 pub struct ClusterObserverSupervisorState {
     kube_client: kube::Client,
+    tcp_client: ActorRef<TcpClientMessage>,
 }
 
 impl ClusterObserverSupervisor {
     pub async fn init(
         kube_config: Config,
-        args: (),
         myself: ActorRef<SupervisorMessage>,
     ) -> Result<ClusterObserverSupervisorState, ActorProcessingErr> {
         // try to create a client and auth with the kube api
@@ -51,7 +51,10 @@ impl ClusterObserverSupervisor {
                 )
                 .await
                 {
-                    Ok(_) => Ok(ClusterObserverSupervisorState { kube_client }),
+                    Ok((tcp_client, _)) => Ok(ClusterObserverSupervisorState {
+                        kube_client,
+                        tcp_client,
+                    }),
                     Err(e) => Err(ActorProcessingErr::from(e)),
                 }
             }
@@ -100,13 +103,13 @@ impl Actor for ClusterObserverSupervisor {
         // detect deployed environment, otherwise, try to infer configuration from the environment
         if let Ok(kube_config) = kube::Config::incluster() {
             info!("Attempting to infer kube configuration from pod environment...");
-            match ClusterObserverSupervisor::init(kube_config, args, myself).await {
+            match ClusterObserverSupervisor::init(kube_config, myself).await {
                 Ok(state) => Ok(state),
                 Err(e) => Err(ActorProcessingErr::from(e)),
             }
         } else if let Ok(kube_config) = kube::Config::infer().await {
             info!("Attempting to infer kube configuration from local environment...");
-            match ClusterObserverSupervisor::init(kube_config, args, myself).await {
+            match ClusterObserverSupervisor::init(kube_config, myself).await {
                 Ok(state) => Ok(state),
                 Err(e) => Err(ActorProcessingErr::from(e)),
             }
@@ -153,7 +156,7 @@ impl Actor for ClusterObserverSupervisor {
     ) -> Result<(), ActorProcessingErr> {
         match message {
             SupervisorMessage::ClientEvent { event } => match event {
-                ClientEvent::Registered { registration_id } => {
+                ClientEvent::Registered { .. } => {
                     match ClusterObserverSupervisor::discover_namespaces(state.kube_client.clone())
                         .await
                     {
@@ -161,7 +164,7 @@ impl Actor for ClusterObserverSupervisor {
                             //start actors
                             for ns in namespaces {
                                 let args = PodObserverArgs {
-                                    registration_id: registration_id.clone(),
+                                    tcp_client: state.tcp_client.clone(),
                                     kube_client: state.kube_client.clone(),
                                     namespace: ns.clone(),
                                 };

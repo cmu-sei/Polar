@@ -29,7 +29,7 @@ pub mod runners;
 pub mod supervisor;
 pub mod users;
 
-use cassini_client::TcpClientMessage;
+use cassini_client::{TcpClientActor, TcpClientMessage};
 use common::types::{GitlabData, WithInstance};
 use cynic::{GraphQlError, Operation};
 use gitlab_queries::groups::*;
@@ -90,6 +90,8 @@ pub struct GitlabObserverState {
     base_interval: Duration,
     /// thread handle containing the observer loop
     task_handle: Option<AbortHandle>,
+
+    tcp_client: ActorRef<TcpClientMessage>,
 }
 
 impl GitlabObserverState {
@@ -102,6 +104,7 @@ impl GitlabObserverState {
         base_interval: Duration,
         max_backoff: Duration,
         instance_uid: String,
+        tcp_client: ActorRef<TcpClientMessage>,
     ) -> Self {
         //init rng to calculate backoff jitter
         let mut rng = rand::rng();
@@ -121,6 +124,7 @@ impl GitlabObserverState {
             failed_attempts: 0,
             rng: small,
             task_handle: None,
+            tcp_client,
         }
     }
 
@@ -153,6 +157,7 @@ pub struct GitlabObserverArgs {
     pub max_backoff: u64,
     pub base_interval: u64,
     pub instance_uid: String,
+    pub tcp_client: ActorRef<TcpClientMessage>,
 }
 
 /// Helper to init observer_state from args to cut down on repeating the same block for every obvserver
@@ -165,6 +170,7 @@ pub fn init_observer_state(args: GitlabObserverArgs) -> GitlabObserverState {
         Duration::from_secs(args.base_interval),
         Duration::from_secs(args.max_backoff),
         args.instance_uid,
+        args.tcp_client,
     );
 }
 /// Messages that observers send themselves to prompt the retrieval of resources
@@ -214,12 +220,10 @@ pub fn send_to_broker(
 
         let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&envelope).unwrap();
 
-
         if let Err(e) = client.send_message(TcpClientMessage::Publish {
-                    topic: topic.to_string(),
-                    payload: bytes.to_vec(),
-                }
-                ) {
+            topic: topic.to_string(),
+            payload: bytes.to_vec(),
+        }) {
             return Err(ActorProcessingErr::from(format!(
                 "Failed to message TCP client {e}"
             )));

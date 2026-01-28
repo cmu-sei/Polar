@@ -1,13 +1,11 @@
-use cyclonedx_bom::prelude::*;
-
+use polar::graph::GraphValue;
 use polar::graph::{GraphControllerMsg, GraphOp, NodeKey, Property};
+use polar::ProvenanceEvent;
 use ractor::async_trait;
 use ractor::Actor;
 use ractor::ActorProcessingErr;
 use ractor::ActorRef;
-use tracing::{debug, info, warn};
-
-use crate::ArtifactType;
+use tracing::{debug, info, trace, warn};
 
 pub struct ProvenanceLinker;
 
@@ -18,23 +16,49 @@ pub struct ProvenanceLinkerArgs {
     pub compiler: ActorRef<GraphControllerMsg>,
 }
 
-pub enum LinkerCommand {
-    LinkContainerImages {
-        uri: String,
-        digest: String,
-        media_type: String,
-    },
-    LinkPackages,
-    LinkArtifacts {
-        artifact_id: String,
-        artifact_type: ArtifactType,
-        related_names: Vec<NormalizedString>,
-        version: NormalizedString,
-    },
+impl ProvenanceLinker {
+    fn send_op(
+        state: &mut ProvenanceLinkerState,
+        op: GraphOp,
+        err_ctx: &'static str,
+    ) -> Result<(), ActorProcessingErr> {
+        state
+            .compiler
+            .send_message(GraphControllerMsg::Op(op))
+            .map_err(|e| ActorProcessingErr::from(format!("{err_ctx}: {:?}", e)))
+    }
+
+    fn upsert_node(
+        state: &mut ProvenanceLinkerState,
+        key: NodeKey,
+        props: Vec<Property>,
+        err_ctx: &'static str,
+    ) -> Result<(), ActorProcessingErr> {
+        Self::send_op(state, GraphOp::UpsertNode { key, props }, err_ctx)
+    }
+
+    fn ensure_edge(
+        state: &mut ProvenanceLinkerState,
+        from: NodeKey,
+        to: NodeKey,
+        rel_type: &'static str,
+    ) -> Result<(), ActorProcessingErr> {
+        Self::send_op(
+            state,
+            GraphOp::EnsureEdge {
+                from,
+                to,
+                rel_type: rel_type.to_string(),
+                props: vec![],
+            },
+            "failed to ensure edge",
+        )
+    }
 }
+
 #[async_trait]
 impl Actor for ProvenanceLinker {
-    type Msg = LinkerCommand;
+    type Msg = ProvenanceEvent;
     type State = ProvenanceLinkerState;
     type Arguments = ProvenanceLinkerArgs;
 
@@ -58,123 +82,216 @@ impl Actor for ProvenanceLinker {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
-            LinkerCommand::LinkContainerImages {
+            ProvenanceEvent::OCIArtifactResolved {
+                uri,
+                digest,
+                media_type,
+                registry,
+            } => {
+                trace!("OCIArtifact resolved: {uri}");
+
+                let artifact_key = NodeKey::OCIArtifact {
+                    digest: digest.clone(),
+                };
+
+                Self::upsert_node(
+                    state,
+                    artifact_key.clone(),
+                    vec![
+                        Property("digest".into(), GraphValue::String(digest)),
+                        Property("uri".into(), GraphValue::String(uri)),
+                        Property("media_type".into(), GraphValue::String(media_type)),
+                    ],
+                    "failed to upsert OCIArtifact",
+                )?;
+
+                let registry_key = NodeKey::OCIRegistry {
+                    hostname: registry.clone(),
+                };
+
+                Self::upsert_node(
+                    state,
+                    registry_key.clone(),
+                    vec![Property("hostname".into(), GraphValue::String(registry))],
+                    "failed to upsert OCIRegistry",
+                )?;
+
+                Self::ensure_edge(state, artifact_key, registry_key, "HOSTED_BY")?;
+            }
+
+            ProvenanceEvent::ImageRefResolved {
                 uri,
                 digest,
                 media_type,
             } => {
-                // Upsert the ContainerImageReference node
-                let node_key = NodeKey::ContainerImageRef {
+                trace!("ImageRef resolved: {uri}");
+
+                let ref_key = NodeKey::ContainerImageRef {
                     normalized: uri.clone(),
+                };
+
+                Self::upsert_node(
+                    state,
+                    ref_key.clone(),
+                    vec![Property("normalized".into(), GraphValue::String(uri))],
+                    "failed to upsert ContainerImageReference",
+                )?;
+
+                let artifact_key = NodeKey::OCIArtifact {
+                    digest: digest.clone(),
+                };
+
+                Self::upsert_node(
+                    state,
+                    artifact_key.clone(),
+                    vec![
+                        Property("digest".into(), GraphValue::String(digest)),
+                        Property("media_type".into(), GraphValue::String(media_type)),
+                    ],
+                    "failed to upsert OCIArtifact from ImageRefResolved",
+                )?;
+
+                Self::ensure_edge(state, ref_key, artifact_key, "POINTS_TO")?;
+            }
+            ProvenanceEvent::OCIRegistryDiscovered { hostname } => {
+                trace!("OCI registry discovered: {hostname}");
+
+                Self::upsert_node(
+                    state,
+                    NodeKey::OCIRegistry {
+                        hostname: hostname.clone(),
+                    },
+                    vec![Property("hostname".into(), GraphValue::String(hostname))],
+                    "failed to upsert OCIRegistry",
+                )?;
+            }
+            ProvenanceEvent::PodContainerUsesImage {
+                pod_uid,
+                container_name,
+                image_ref,
+            } => {
+                trace!(
+                    "PodContainer {} / {} observed image ref {}",
+                    pod_uid,
+                    container_name,
+                    image_ref
+                );
+                // 1. Upsert PodContainer (idempotent, no inference)
+                let pod_container_key = NodeKey::PodContainer {
+                    pod_uid: pod_uid.clone(),
+                    container_name: container_name.clone(),
                 };
                 let props = vec![
-                    Property("digest".into(), polar::graph::GraphValue::String(digest)),
+                    Property("pod_uid".into(), polar::graph::GraphValue::String(pod_uid)),
                     Property(
-                        "media_type".into(),
-                        polar::graph::GraphValue::String(media_type),
+                        "name".into(),
+                        polar::graph::GraphValue::String(container_name),
                     ),
                 ];
-                let op = GraphOp::UpsertNode {
-                    key: node_key.clone(),
-                    props,
-                };
-                // send to compiler
-                state
-                    .compiler
-                    .send_message(GraphControllerMsg::Op(op))
-                    .map_err(|e| {
-                        ActorProcessingErr::from(format!(
-                            "failed to send GraphOp to compiler: {:?}",
-                            e
-                        ))
-                    })?;
 
-                // Then link tags (existing ContainerImageTag nodes) to the ref
-                // Here we model linking as an edge from tag -> ref. We build an edge op
-                let from = NodeKey::ContainerImageRef {
-                    normalized: uri.clone(),
-                }; // could be tag node in other flows
-                   // For simplicity assume tag nodes are identified by normalized tag location.
-                let to = node_key.clone();
-                let edge = GraphOp::EnsureEdge {
-                    from,
-                    to,
-                    rel_type: "IDENTIFIES".to_string(),
+                Self::upsert_node(
+                    state,
+                    pod_container_key.clone(),
+                    props,
+                    "Failed to upsert PodContainer",
+                )?;
+
+                // 2. Upsert ContainerImageReference (string-only claim)
+                let image_ref_key = NodeKey::ContainerImageRef {
+                    normalized: image_ref.clone(),
+                };
+
+                let props = vec![Property(
+                    "normalized".into(),
+                    polar::graph::GraphValue::String(image_ref),
+                )];
+                Self::upsert_node(
+                    state,
+                    image_ref_key.clone(),
+                    props,
+                    "Failed to upsert ContainerImageReference",
+                )?;
+
+                // 3. Create PodContainer -> ImageRef edge
+                let edge_op = GraphOp::EnsureEdge {
+                    from: pod_container_key,
+                    to: image_ref_key.clone(),
+                    rel_type: "USES_IMAGE".to_string(),
                     props: vec![],
                 };
+
                 state
                     .compiler
-                    .send_message(GraphControllerMsg::Op(edge))
+                    .send_message(GraphControllerMsg::Op(edge_op))
                     .map_err(|e| {
                         ActorProcessingErr::from(format!(
-                            "failed to send edge op to compiler: {:?}",
+                            "failed to create USES_IMAGE edge: {:?}",
                             e
                         ))
                     })?;
             }
 
-            LinkerCommand::LinkArtifacts {
-                artifact_id,
-                artifact_type: _,
-                related_names,
-                ..
-            } => {
-                // Create Artifact node and link components -> package nodes
-                let art_key = NodeKey::OCIRegistry {
-                    hostname: artifact_id.clone(),
-                }; // pick appropriate node type; replace if artifact node exists
-                let create_art = GraphOp::UpsertNode {
-                    key: art_key.clone(),
-                    props: vec![Property(
-                        "artifact_id".into(),
-                        polar::graph::GraphValue::String(artifact_id),
-                    )],
-                };
-                state
-                    .compiler
-                    .send_message(GraphControllerMsg::Op(create_art))
-                    .map_err(|e| {
-                        ActorProcessingErr::from(format!("failed to send artifact upsert: {:?}", e))
-                    })?;
+            // ProvenanceEvent::LinkArtifacts {
+            //     artifact_id,
+            //     artifact_type: _,
+            //     related_names,
+            //     ..
+            // } => {
+            //     // Create Artifact node and link components -> package nodes
+            //     let art_key = NodeKey::OCIRegistry {
+            //         hostname: artifact_id.clone(),
+            //     }; // pick appropriate node type; replace if artifact node exists
+            //     let create_art = GraphOp::UpsertNode {
+            //         key: art_key.clone(),
+            //         props: vec![Property(
+            //             "artifact_id".into(),
+            //             polar::graph::GraphValue::String(artifact_id),
+            //         )],
+            //     };
+            //     state
+            //         .compiler
+            //         .send_message(GraphControllerMsg::Op(create_art))
+            //         .map_err(|e| {
+            //             ActorProcessingErr::from(format!("failed to send artifact upsert: {:?}", e))
+            //         })?;
 
-                // For each related name, create a SoftwareComponent (you may add node type later); for now, model it as ContainerImageRef or package.
-                for name in related_names {
-                    let comp_key = NodeKey::ContainerImageRef {
-                        normalized: name.to_string(),
-                    };
-                    let up = GraphOp::UpsertNode {
-                        key: comp_key.clone(),
-                        props: vec![],
-                    };
-                    state
-                        .compiler
-                        .send_message(GraphControllerMsg::Op(up.clone()))
-                        .map_err(|e| {
-                            ActorProcessingErr::from(format!(
-                                "failed to send component upsert: {:?}",
-                                e
-                            ))
-                        })?;
+            //     // For each related name, create a SoftwareComponent (you may add node type later); for now, model it as ContainerImageRef or package.
+            //     for name in related_names {
+            //         let comp_key = NodeKey::ContainerImageRef {
+            //             normalized: name.to_string(),
+            //         };
+            //         let up = GraphOp::UpsertNode {
+            //             key: comp_key.clone(),
+            //             props: vec![],
+            //         };
+            //         state
+            //             .compiler
+            //             .send_message(GraphControllerMsg::Op(up.clone()))
+            //             .map_err(|e| {
+            //                 ActorProcessingErr::from(format!(
+            //                     "failed to send component upsert: {:?}",
+            //                     e
+            //                 ))
+            //             })?;
 
-                    // Link artifact -> component
-                    let edge = GraphOp::EnsureEdge {
-                        from: art_key.clone(),
-                        to: comp_key.clone(),
-                        rel_type: "DESCRIBES_COMPONENT".to_string(),
-                        props: vec![],
-                    };
-                    state
-                        .compiler
-                        .send_message(GraphControllerMsg::Op(edge))
-                        .map_err(|e| {
-                            ActorProcessingErr::from(format!(
-                                "failed to send artifact->component link: {:?}",
-                                e
-                            ))
-                        })?;
-                }
-            }
-
+            //         // Link artifact -> component
+            //         let edge = GraphOp::EnsureEdge {
+            //             from: art_key.clone(),
+            //             to: comp_key.clone(),
+            //             rel_type: "DESCRIBES_COMPONENT".to_string(),
+            //             props: vec![],
+            //         };
+            //         state
+            //             .compiler
+            //             .send_message(GraphControllerMsg::Op(edge))
+            //             .map_err(|e| {
+            //                 ActorProcessingErr::from(format!(
+            //                     "failed to send artifact->component link: {:?}",
+            //                     e
+            //                 ))
+            //             })?;
+            //     }
+            // }
             _ => warn!("unexpected linker command"),
         }
         Ok(())

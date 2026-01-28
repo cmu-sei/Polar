@@ -219,12 +219,6 @@ impl Actor for GitlabRepositoryConsumer {
                             MERGE (r:ContainerRepository {{ path: t.repo_path }})
                             MERGE (r)-[:CONTAINS_TAG]->(t)
 
-                            WITH t
-                            // normalize into ImageReference
-                            MERGE (ref:ContainerImageReference {{ normalized: t.location, digest: t.digest, created_at: t.created_at, total_size: t.total_size, media_type: t.media_type }})
-                            ON CREATE SET ref.first_seen = timestamp()
-                            MERGE (t)-[:IDENTIFIES]->(ref)
-
                         "#
                         );
 

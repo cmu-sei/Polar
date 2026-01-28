@@ -1,12 +1,17 @@
 use neo4rs::{BoltNull, BoltType};
 use neo4rs::{Graph, Query};
+use opentelemetry::KeyValue;
 use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, trace};
 /// Minimal typed intent that processors emit.
-/// Keep this small and stable; extend later with versions.
+/// CAUTION: Keep this small and stable; extend later with versions.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum NodeKey {
+    PodContainer {
+        pod_uid: String,
+        container_name: String,
+    },
     OCIRegistry {
         hostname: String,
     },
@@ -119,11 +124,16 @@ impl GraphController {
                 vec![(format!("{prefix}_normalized"), normalized.clone().into())],
             ),
 
-            NodeKey::OCIArtifact { digest } => (
+            NodeKey::OCIArtifact { digest, .. } => (
                 format!("(:OCIArtifact {{ digest: ${prefix}_digest }})"),
                 vec![(format!("{prefix}_digest"), digest.clone().into())],
             ),
-
+            NodeKey::PodContainer { pod_uid, container_name } => (
+                format!("(:PodContainer {{ container_name: ${prefix}_container_name, pod_uid: ${prefix}_pod_uid }})"),
+            vec![
+                (format!("{prefix}_container_name"), container_name.clone().into()),
+                (format!("{prefix}_pod_uid"), pod_uid.clone().into()),
+            ]),
 
             NodeKey::OCILayer { digest } => (
                 format!("(:OCILayer {{ digest: ${prefix}_digest }})"),
@@ -158,6 +168,7 @@ impl GraphController {
     pub fn compile_graph_op(op: &GraphOp) -> (String, Vec<(String, BoltType)>) {
         match op {
             GraphOp::UpsertNode { key, props } => {
+                trace!("Received UpsertNode directive. {key:?}, {props:?}");
                 let (node_pattern, mut params) = Self::node_match_and_params(key, "n");
 
                 let mut cypher = format!(
@@ -188,6 +199,7 @@ impl GraphController {
                 rel_type,
                 props,
             } => {
+                trace!("Received EnsureEdge directive {to:?} {rel_type} {props:?}");
                 let (from_pat, mut params) = Self::node_match_and_params(from, "from");
                 let (to_pat, mut to_params) = Self::node_match_and_params(to, "to");
                 params.append(&mut to_params);

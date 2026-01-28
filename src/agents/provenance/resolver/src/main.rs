@@ -181,6 +181,15 @@ impl Actor for ResolverSupervisor {
 pub struct ResolverAgent;
 
 impl ResolverAgent {
+    fn registry_from_image_ref(uri: &str) -> Option<String> {
+        let first = uri.split('/').next()?;
+        if first.contains('.') || first.contains(':') {
+            Some(first.to_string())
+        } else {
+            None
+        }
+    }
+
     fn normalize_registry_host(s: &str) -> String {
         s.trim()
             .trim_end_matches('/')
@@ -201,7 +210,7 @@ impl ResolverAgent {
             .collect()
     }
 
-    #[instrument(name = "resolver.scrape_registry", level = "debug")]
+    #[instrument(name = "resolver.scrape_registry", level = "trace")]
     async fn scrape_registry(
         myself: ActorRef<ProvenanceEvent>,
         tcp_client: ActorRef<TcpClientMessage>,
@@ -209,8 +218,19 @@ impl ResolverAgent {
         registry: &RegistryConfig,
     ) -> Result<(), ActorProcessingErr> {
         let base = Self::normalize_registry_host(&registry.url);
-        let catalog_url = format!("https://{}/v2/_catalog", base);
 
+        // Emit registry discovery backed by successful network reachability
+        let event = ProvenanceEvent::OCIRegistryDiscovered {
+            hostname: base.clone(),
+        };
+
+        let payload = rkyv::to_bytes::<rkyv::rancor::Error>(&event)?;
+        tcp_client.cast(TcpClientMessage::Publish {
+            topic: PROVENANCE_LINKER_TOPIC.to_string(),
+            payload: payload.into(),
+        })?;
+
+        let catalog_url = format!("https://{}/v2/_catalog", base);
         debug!("Scraping registry catalog: {}", catalog_url);
 
         let resp = web_client.get(&catalog_url).send().await?;
@@ -227,9 +247,9 @@ impl ResolverAgent {
         struct Catalog {
             repositories: Vec<String>,
         }
+
         let catalog: Catalog = resp.json().await?;
 
-        // Fetch tags for each repo and push events
         for repo in &catalog.repositories {
             let tags_url = format!("https://{}/v2/{}/tags/list", base, repo);
             let resp = web_client.get(&tags_url).send().await?;
@@ -246,6 +266,7 @@ impl ResolverAgent {
             struct Tags {
                 tags: Option<Vec<String>>,
             }
+
             let tags: Tags = resp.json().await?;
             let uris = Self::discover_images_from_tags(&base, repo, tags.tags);
 
@@ -257,6 +278,7 @@ impl ResolverAgent {
         Ok(())
     }
 
+    #[instrument(skip_all, name = "ArtifactResolver.startup_scrape", level = "trace")]
     async fn startup_scrape(
         myself: ActorRef<ProvenanceEvent>,
         state: &mut ResolverAgentState,
@@ -282,6 +304,7 @@ impl ResolverAgent {
 
         Ok(())
     }
+    /// Check if the registry is allowed based on the configuration.
     fn registry_allowed(config: &ResolverConfig, reference: &Reference) -> bool {
         let registry = Self::normalize_registry_host(reference.resolve_registry());
 
@@ -313,6 +336,7 @@ impl ResolverAgent {
             }))
         }
     }
+
     fn resolve_registry_auth(reference: &Reference) -> Result<RegistryAuth, ActorProcessingErr> {
         use docker_credential::{self, CredentialRetrievalError, DockerCredential};
         let registry = reference.resolve_registry();
@@ -406,6 +430,46 @@ impl ResolverAgent {
             Err(e) => Err(ActorProcessingErr::from(e)),
         }
     }
+
+    fn forward_event(
+        state: &mut ResolverAgentState,
+        event: ProvenanceEvent,
+    ) -> Result<(), ActorProcessingErr> {
+        trace!("Forwarding event to {PROVENANCE_LINKER_TOPIC}: {:?}", event);
+        let payload = rkyv::to_bytes::<rkyv::rancor::Error>(&event)?;
+
+        Ok(state.cassini_client.cast(TcpClientMessage::Publish {
+            topic: PROVENANCE_LINKER_TOPIC.to_string(),
+            payload: payload.into(),
+        })?)
+    }
+
+    fn emit_oci_resolved_event(
+        state: &mut ResolverAgentState,
+        uri: String,
+        manifest: OciManifest,
+        digest: String,
+    ) -> Result<(), ActorProcessingErr> {
+        if let Some(hostname) = Self::registry_from_image_ref(&uri) {
+            let event = ProvenanceEvent::OCIRegistryDiscovered {
+                hostname: hostname.clone(),
+            };
+            Self::forward_event(state, event)?;
+
+            // emit OCIArtifactResolved event
+            let event = ProvenanceEvent::OCIArtifactResolved {
+                uri: uri.clone(),
+                digest: digest.clone(),
+                media_type: manifest.content_type().to_owned(),
+                registry: hostname.clone(),
+            };
+            Ok(Self::forward_event(state, event)?)
+        } else {
+            // tODO: I'm very interested to see how we'd fail here, considering that by the time we call this fn, we've already resolved it over the web.
+            warn!("Could not extract registry hostname from image ref: {uri}");
+            Ok(())
+        }
+    }
 }
 
 pub struct ResolverAgentArgs {
@@ -467,34 +531,47 @@ impl Actor for ResolverAgent {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match msg {
-            ProvenanceEvent::ImageRefDiscovered { uri } => {
-                trace!("Received image ref discovered event!");
-
+            ProvenanceEvent::OCIArtifactDiscovered { uri } => {
                 match Self::inspect_image(state, &uri).await {
                     Ok(Some((manifest, digest))) => {
                         debug!("Resolved image: \n {manifest:?}");
 
-                        let media_type = manifest.content_type().to_owned();
+                        Self::emit_oci_resolved_event(state, uri, manifest, digest)?
+                    }
 
-                        // forward image data to the linker
-                        let message = ProvenanceEvent::ImageRefResolved {
+                    Ok(None) => {}
+
+                    Err(e) => {
+                        error!("Failed to resolve image: {uri}, {e}");
+                    }
+                }
+            }
+            ProvenanceEvent::ImageRefDiscovered { uri } => {
+                trace!("Received image ref discovered event");
+                match Self::inspect_image(state, &uri).await {
+                    Ok(Some((manifest, digest))) => {
+                        debug!("Resolved image: \n {manifest:?}");
+
+                        Self::emit_oci_resolved_event(
+                            state,
+                            uri.clone(),
+                            manifest.clone(),
+                            digest.clone(),
+                        )?;
+
+                        // Emit ImageRefResolved event (unchanged semantics)
+                        let media_type = manifest.content_type().to_owned();
+                        let event = ProvenanceEvent::ImageRefResolved {
                             uri,
                             digest,
                             media_type,
                         };
-
-                        let payload = rkyv::to_bytes::<rkyv::rancor::Error>(&message)?;
-
-                        debug!("Publishing event to topic: {PROVENANCE_LINKER_TOPIC}");
-                        state.cassini_client.cast(TcpClientMessage::Publish {
-                            topic: PROVENANCE_LINKER_TOPIC.to_string(),
-                            payload: payload.into(),
-                        })?;
+                        Self::forward_event(state, event)?;
                     }
+                    Ok(None) => {}
                     Err(e) => {
                         error!("Failed to resolve image: {uri}, {e}");
                     }
-                    _ => {}
                 }
             }
             _ => warn!("Received unexpected message! {msg:?}"),

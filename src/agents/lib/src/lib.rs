@@ -52,10 +52,40 @@ pub fn get_file_as_byte_vec(filename: &String) -> Result<Vec<u8>, std::io::Error
 /// - Internal Neo4j IDs (`id(node)`) MUST NOT be emitted in events — they are ephemeral.
 #[derive(Debug, rkyv::Serialize, rkyv::Deserialize, rkyv::Archive)]
 pub enum ProvenanceEvent {
+    /// Emitted when a new OCI registry is discovered
+    /// (e.g., observed in a Gitlab, Gitea, Artifactory or registry listing).
+    ///
+    /// `hostname`: The hostname of the registry (e.g. `"ghcr.io"`).
+    OCIRegistryDiscovered { hostname: String },
+    /// Emitted when a new OCI artifact is discovered.
+    /// observed likely by an agent closest to a registry itself. Either through REST or OCI compatible clients.
+    ///
+    /// `uri`: The canonical reference string (e.g. `"ghcr.io/org/app:1.2.3"`).
+    ///
+    OCIArtifactDiscovered { uri: String },
+    /// Emitted when a new OCI artifact is resolved.
+    ///
+    ///
+    /// `uri`: The canonical reference string (e.g. `"ghcr.io/org/app:1.2.3"`).
+    ///
+    OCIArtifactResolved {
+        uri: String,
+        digest: String,
+        media_type: String,
+        registry: String,
+    },
+
     /// Emitted when a new container image reference is discovered
     /// (e.g., observed in a GitLab pipeline, Kubernetes Pod, or registry listing).
     ///
     /// `uri`: The canonical image reference string (e.g. `"ghcr.io/org/app:1.2.3"`).
+
+    /// What this means:
+    /// “A resolver successfully dereferenced this URI at some point in time and observed an OCI artifact with these properties.”
+    /// “The URI is this artifact
+    /// “The artifact is an image”
+    /// “This is the canonical truth forever”
+    /// It means: there exists evidence linking a claim to an artifact. To that end, it does not represent artifact itself in our database
     ImageRefDiscovered { uri: String },
 
     /// Emitted when a previously discovered image reference has been
@@ -68,6 +98,17 @@ pub enum ProvenanceEvent {
         uri: String,
         digest: String,
         media_type: String,
+    },
+
+    /// Emitted when a pod container is seen using an image.
+    ///
+    /// `pod_uid`: Unique identifier of the pod.
+    /// `container_name`: Name of the container.
+    /// `image_ref`: Reference to the image used by the container.
+    PodContainerUsesImage {
+        pod_uid: String,
+        container_name: String,
+        image_ref: String,
     },
 
     /// Emitted when an SBOM artifact (CycloneDX, SPDX, etc.) has been
