@@ -4372,7 +4372,7 @@ dependencies = [
  "reqwest",
  "rkyv 0.8.12",
  "serde",
- "serde_dhall",
+ "serde_json",
  "tokio",
  "tracing",
 ]

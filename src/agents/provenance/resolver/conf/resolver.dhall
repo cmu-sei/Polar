@@ -8,4 +8,13 @@ let Registry =
 let ResolverConfig =
       { registries : List Registry }
 
-in {Registry, ResolverConfig}
+let config : ResolverConfig =
+    { registries =
+        [ { name = "sandbox-acr"
+        , url = "sanbboxaksacr.azurecr.us"
+            , clientCertPath = None Text
+            }
+        ]
+    }
+
+in config

@@ -1,0 +1,8 @@
+{
+  "registries": [
+    {
+      "name": "sandbox-acr",
+      "url": "sanbboxaksacr.azurecr.us"
+    }
+  ]
+}

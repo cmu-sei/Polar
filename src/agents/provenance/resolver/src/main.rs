@@ -17,16 +17,16 @@ use ractor::{
 };
 use reqwest::Client as WebClient;
 use std::str::FromStr;
-use tracing::{debug, error, info, instrument, trace, warn};
+use tracing::{debug, error, field::debug, info, instrument, trace, warn};
 pub const BROKER_CLIENT_NAME: &str = "polar.provenance.resolver.tcp";
 use serde::Deserialize;
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, serde::Serialize, Deserialize, Clone)]
 pub struct ResolverConfig {
     pub registries: Vec<RegistryConfig>,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, serde::Serialize, Deserialize, Clone)]
 pub struct RegistryConfig {
     pub name: String,
     pub url: String,
@@ -64,12 +64,25 @@ impl Supervisor for ResolverSupervisor {
 
 impl ResolverSupervisor {
     fn load_resolver_config() -> Result<ResolverConfig, ActorProcessingErr> {
+        debug!("Attemnpting to load configuration");
         let path =
-            std::env::var("POLAR_RESOLVER_CONFIG").unwrap_or_else(|_| "resolver.dhall".to_string());
+            std::env::var("POLAR_RESOLVER_CONFIG").unwrap_or_else(|_| "resolver.json".to_string());
 
-        let config: ResolverConfig = serde_dhall::from_file(&path).parse()?;
+        let bytes = get_file_as_byte_vec(&path)?;
 
-        Ok(config)
+        match serde_json::from_slice::<ResolverConfig>(&bytes) {
+            Ok(config) => {
+                debug!(
+                    "Loaded configuration from {path}: {:?} {}",
+                    config,
+                    serde_json::to_string_pretty(&config).unwrap_or_default()
+                );
+                Ok(config)
+            }
+            Err(e) => Err(ActorProcessingErr::from(format!(
+                "Failed to load resolver configuration! {e}"
+            ))),
+        }
     }
 }
 
@@ -149,6 +162,8 @@ impl Actor for ResolverSupervisor {
                 }
                 ClientEvent::TransportError { reason } => {
                     error!("Transport error: {reason}");
+                    // TODO: Handle transport errors appropriately
+                    // Ideally we
                     myself.stop(Some(reason))
                 }
             },
@@ -316,10 +331,11 @@ impl ResolverAgent {
 
     fn build_oci_client(config: &ResolverConfig) -> Result<OciClient, ActorProcessingErr> {
         let mut certs = Vec::new();
-
+        debug!("Attempting to load certificates");
         for registry in &config.registries {
             if let Some(cert_path) = &registry.client_cert_path {
                 let data = get_file_as_byte_vec(cert_path)?;
+                trace!("found certificate for {} at {cert_path}", registry.url);
                 certs.push(Certificate {
                     encoding: CertificateEncoding::Pem,
                     data,
@@ -328,8 +344,13 @@ impl ResolverAgent {
         }
 
         if certs.is_empty() {
+            debug!("Initializing OCI client without certificates");
             Ok(OciClient::default())
         } else {
+            debug!(
+                "Initializing OCI client with {} extra root certificates",
+                certs.len()
+            );
             Ok(OciClient::new(ClientConfig {
                 extra_root_certificates: certs,
                 ..ClientConfig::default()
@@ -594,6 +615,7 @@ async fn main() {
     .expect("Expected to start supervisor");
 
     handle.await.expect("Expected to finish supervisor");
+    tokio::signal::ctrl_c().await.unwrap();
 }
 
 mod tests {
