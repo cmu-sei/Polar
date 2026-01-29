@@ -38,9 +38,9 @@ let
     });
 
     resolverConfig = pkgs.writeTextFile {
-      name          = "resolver.dhall";
-      destination   = "/resolver.dhall";
-      text          = builtins.readFile ./resolver/resolver.dhall;
+      name          = "resolver.json";
+      destination   = "/resolver.json";
+      text          = builtins.readFile ./resolver/resolver.json;
     };
 
     resolverImage = pkgs.dockerTools.buildImage {
