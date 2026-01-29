@@ -445,7 +445,6 @@ let spec =
             kubernetes.Container::{
             , name = Constants.ProvenanceResolverName
             , image = Some resolver.image
-            , imagePullPolicy = Some "Never"
             , securityContext = Some Constants.DropAllCapSecurityContext
             , env = Some resolverEnv
             , volumeMounts = Some resolverVolumeMounts
@@ -460,7 +459,6 @@ let spec =
             [ kubernetes.Container::{
             , name = Constants.ProvenanceLinkerName
             , image = Some linker.image
-            , imagePullPolicy = Some "Never"
             , securityContext = Some Constants.DropAllCapSecurityContext
             , env = Some linkerEnv
             , volumeMounts = Some linkerVolumeMounts

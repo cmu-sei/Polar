@@ -49,6 +49,7 @@ let
         copyToRoot = commonPaths ++ [
           resolverBin
           pkgs.cacert # this one needs a default trust store, so we'll include one
+          resolverConfig
         ];
         uid = commonUser.uid;
         gid = commonUser.gid;
