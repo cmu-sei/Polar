@@ -29,9 +29,11 @@ use std::env;
 use std::error::Error;
 use tracing::error;
 
+const JIRA_OBSERVER_SUPERVISOR: &str = "jira.supervisor.observer";
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    init_logging();
+    init_logging(JIRA_OBSERVER_SUPERVISOR.to_string());
 
     let jira_url = env::var("JIRA_URL").expect("Expected to find a value for JIRA_URL. Please provide a valid url to a jira server, ex 'http://hostname/jira'.");
     let jira_token = env::var("JIRA_TOKEN").expect("Expected to find a value for JIRA_TOKEN.");
@@ -51,7 +53,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     };
 
     match Actor::spawn(
-        Some("jira.supervisor.observer".to_string()),
+        Some(JIRA_OBSERVER_SUPERVISOR.to_string()),
         supervisor::ObserverSupervisor,
         args,
     )

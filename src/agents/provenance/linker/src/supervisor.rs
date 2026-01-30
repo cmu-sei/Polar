@@ -1,6 +1,6 @@
 use crate::BROKER_CLIENT_NAME;
 use crate::{
-    linker::{LinkerCommand, ProvenanceLinker, ProvenanceLinkerArgs},
+    linker::{ProvenanceLinker, ProvenanceLinkerArgs},
     PROVENANCE_LIKER_NAME,
 };
 use cassini_client::{TCPClientConfig, TcpClientArgs};
@@ -9,15 +9,13 @@ use neo4rs::Graph;
 use polar::{
     get_neo_config, ProvenanceEvent, Supervisor, SupervisorMessage, PROVENANCE_LINKER_TOPIC,
 };
-use provenance_common::PROVENANCE_LINKER_NAME;
 use ractor::{
     async_trait, registry::where_is, Actor, ActorProcessingErr, ActorRef, OutputPort,
     SupervisionEvent,
 };
 use std::sync::Arc;
-use std::time::Duration;
-use tracing::error;
 use tracing::{debug, warn};
+use tracing::{error, instrument, trace};
 
 // === Supervisor state ===
 pub struct ProvenanceSupervisorState {
@@ -31,30 +29,18 @@ pub struct ProvenanceSupervisorState {
 pub struct ProvenanceSupervisor;
 
 impl Supervisor for ProvenanceSupervisor {
-    fn deserialize_and_dispatch(_topic: String, payload: Vec<u8>) {
+    #[instrument(name = "ProvenanceSupervisor::deserialize_and_dispatch" skip(payload))]
+    fn deserialize_and_dispatch(topic: String, payload: Vec<u8>) {
+        debug!("Received message on topic {topic}");
         match rkyv::from_bytes::<ProvenanceEvent, rkyv::rancor::Error>(&payload) {
             Ok(event) => {
-                match event {
-                    ProvenanceEvent::ImageRefResolved {
-                        id,
-                        uri,
-                        digest,
-                        media_type,
-                    } => {
-                        //lookup linker and forward
-                        if let Some(linker) = where_is(PROVENANCE_LINKER_NAME.to_string()) {
-                            linker
-                                .send_message(LinkerCommand::LinkContainerImages {
-                                    id,
-                                    uri,
-                                    digest,
-                                    media_type,
-                                })
-                                .map_err(|e| error!("Failed to forward command to linker! {e}"))
-                                .ok();
-                        }
-                    }
-                    _ => todo!(),
+                //lookup linker and forward
+                trace!("looking up actor {PROVENANCE_LINKER_TOPIC} and forwarding");
+                if let Some(linker) = where_is(PROVENANCE_LINKER_TOPIC.to_string()) {
+                    linker
+                        .send_message(event)
+                        .map_err(|e| error!("Failed to forward event to linker! {e}"))
+                        .ok();
                 }
             }
             Err(e) => warn!("Failed to parse provenance event. {e}"),
@@ -79,6 +65,7 @@ impl Actor for ProvenanceSupervisor {
         let events_output = Arc::new(OutputPort::default());
 
         events_output.subscribe(myself.clone(), |event| {
+            debug!("Received event: {event:?}");
             Some(SupervisorMessage::ClientEvent { event })
         });
         let client_config = TCPClientConfig::new()?;
@@ -109,10 +96,9 @@ impl Actor for ProvenanceSupervisor {
     async fn post_start(
         &self,
         myself: ActorRef<Self::Msg>,
-        state: &mut Self::State,
+        _state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         debug!("{myself:?} started.");
-
         Ok(())
     }
 
@@ -127,16 +113,24 @@ impl Actor for ProvenanceSupervisor {
                 ClientEvent::Registered { .. } => {
                     // subscribe to topic
                     //
+                    debug!("Subscribing to topic {}", PROVENANCE_LINKER_TOPIC);
                     state
                         .broker_client
                         .cast(cassini_client::TcpClientMessage::Subscribe(
                             PROVENANCE_LINKER_TOPIC.to_string(),
                         ))?;
 
-                    let linker_args = ProvenanceLinkerArgs {
-                        graph: state.graph.clone(),
-                        interval: Duration::from_secs(30),
-                    };
+                    let graph = neo4rs::Graph::connect(get_neo_config()?)?;
+
+                    let (compiler, _) = Actor::spawn_linked(
+                        Some("linker.graph.controller".to_string()),
+                        crate::LinkerGraphController,
+                        graph,
+                        myself.clone().into(),
+                    )
+                    .await?;
+
+                    let linker_args = ProvenanceLinkerArgs { compiler };
 
                     let (_linker, _) = Actor::spawn_linked(
                         Some(PROVENANCE_LIKER_NAME.to_string()),
@@ -146,7 +140,13 @@ impl Actor for ProvenanceSupervisor {
                     )
                     .await?;
                 }
-                _ => todo!(),
+                ClientEvent::MessagePublished { topic, payload } => {
+                    Self::deserialize_and_dispatch(topic, payload)
+                }
+                ClientEvent::TransportError { reason } => {
+                    error!("Transport error: {reason}");
+                    myself.stop(Some(reason))
+                }
             },
         }
         Ok(())
@@ -166,6 +166,9 @@ impl Actor for ProvenanceSupervisor {
             SupervisionEvent::ActorTerminated(name, state, reason) => {
                 error!("Actor {name:?} failed! {reason:?}");
                 myself.stop(reason)
+            }
+            SupervisionEvent::ActorStarted(actor) => {
+                debug!("Actor {actor:?} started!");
             }
             _ => {}
         }

@@ -21,17 +21,19 @@ This Software includes and/or makes use of Third-Party Software each subject to 
 DM24-0470
 */
 
-use jira_consumer::{get_neo_config, supervisor};
+use jira_consumer::supervisor;
 use polar::init_logging;
 use ractor::Actor;
 use std::error::Error;
 
+const JIRA_CONSUMER_SUPERVISOR: &str = "jira.supervisor.consumer";
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    init_logging();
+    init_logging(JIRA_CONSUMER_SUPERVISOR.to_string());
 
     let (_, handle) = Actor::spawn(
-        Some("jira.supervisor.consumer".to_string()),
+        Some(JIRA_CONSUMER_SUPERVISOR.to_string()),
         supervisor::ConsumerSupervisor,
         (),
     )

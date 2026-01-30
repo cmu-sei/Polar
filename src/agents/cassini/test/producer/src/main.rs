@@ -4,7 +4,7 @@ use tracing::info;
 
 #[tokio::main]
 async fn main() {
-    polar::init_logging();
+    polar::init_logging("cassini.harness.producer.supervisor".to_string());
 
     info!("Producer Agent Starting up.");
 

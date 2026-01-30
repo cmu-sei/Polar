@@ -267,6 +267,8 @@ impl Actor for GitlabJobObserver {
 
                                                                                     read_jobs.extend(jobs.into_iter().map(|option| {
                                                                                         let job = option.unwrap();
+
+                                                                                        // TODO: We need to emit provenance events about any artifacts here
                                                                                         job
                                                                                     }));
 

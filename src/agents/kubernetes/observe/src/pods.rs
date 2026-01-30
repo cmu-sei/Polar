@@ -1,4 +1,4 @@
-use crate::{send_to_client, KubernetesObserverMessage, TCP_CLIENT_NAME};
+use crate::KubernetesObserverMessage;
 use cassini_client::TcpClientMessage;
 use futures::{StreamExt, TryStreamExt};
 use k8s_openapi::api::core::v1::Pod;
@@ -10,15 +10,17 @@ use kube::{
 };
 use kube_common::{get_consumer_name, KUBERNETES_CONSUMER, RESOURCE_DELETED_ACTION};
 use kube_common::{RawKubeEvent, BATCH_PROCESS_ACTION, RESOURCE_APPLIED_ACTION};
-use ractor::{async_trait, registry::where_is, Actor, ActorProcessingErr, ActorRef};
+use polar::{ProvenanceEvent, PROVENANCE_DISCOVERY_TOPIC, PROVENANCE_LINKER_TOPIC};
+use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef};
+use rkyv::{rancor, to_bytes};
 use serde_json::to_vec;
 use tokio::task::AbortHandle;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, instrument, trace, warn};
 
 pub struct PodObserver;
 
 pub struct PodObserverState {
-    pub registration_id: String,
+    pub tcp_client: ActorRef<TcpClientMessage>,
     pub namespace: String,
     pub kube_client: kube::Client,
     pub watcher: Option<AbortHandle>,
@@ -31,7 +33,7 @@ pub enum PodObserverMessage {
 }
 
 pub struct PodObserverArgs {
-    pub registration_id: String,
+    pub tcp_client: ActorRef<TcpClientMessage>,
     pub kube_client: Client,
     pub namespace: String,
 }
@@ -39,12 +41,17 @@ pub struct PodObserverArgs {
 impl PodObserver {
     /// Helper function to watch for events concerning pods.
     /// Runs inside of a thread we can cancel should problems arise.
+    #[instrument(
+        level = "trace",
+        name = "PodObserver.watch_pods",
+        skip(tcp_client, kube_client, namespace)
+    )]
     async fn watch_pods(
-        registration_id: String,
-        client: Client,
+        tcp_client: ActorRef<TcpClientMessage>,
+        kube_client: Client,
         namespace: String,
-    ) -> Result<(), watcher::Error> {
-        let api: Api<Pod> = Api::namespaced(client.clone(), &namespace);
+    ) -> Result<(), ActorProcessingErr> {
+        let api: Api<Pod> = Api::namespaced(kube_client.clone(), &namespace);
         let mut watcher = watcher(api, watcher::Config::default()).boxed();
         while let Some(event) = watcher.try_next().await? {
             match event {
@@ -58,12 +65,26 @@ impl PodObserver {
                             object: serialized,
                         };
 
+                        // look inside, see what containers the pod is using
+                        if let Some(spec) = pod.spec {
+                            for container in spec.containers {
+                                // emit provenance events
+                                let event = ProvenanceEvent::ImageRefDiscovered {
+                                    uri: container.name.clone(),
+                                };
+                                let payload = to_bytes::<rancor::Error>(&event)?;
+                                tcp_client.cast(TcpClientMessage::Publish {
+                                    topic: PROVENANCE_DISCOVERY_TOPIC.to_string(),
+                                    payload: payload.into(),
+                                })?;
+                            }
+                        }
+
                         if let Ok(payload) = to_vec(&message) {
-                            send_to_client(
-                                registration_id.clone(),
-                                KUBERNETES_CONSUMER.to_string(),
+                            tcp_client.cast(TcpClientMessage::Publish {
+                                topic: KUBERNETES_CONSUMER.to_string(),
                                 payload,
-                            )
+                            })?;
                         }
                     }
                 }
@@ -78,14 +99,11 @@ impl PodObserver {
                                 kind: String::from("Pod"),
                             };
 
-                            match to_vec(&message) {
-                                Ok(payload) => send_to_client(
-                                    registration_id.clone(),
-                                    get_consumer_name("cluster", "Pod"),
-                                    payload,
-                                ),
-                                Err(e) => error!("{e}"),
-                            }
+                            let payload = to_vec(&message)?;
+                            tcp_client.cast(TcpClientMessage::Publish {
+                                topic: KUBERNETES_CONSUMER.to_string(),
+                                payload,
+                            })?;
                         }
                         Err(e) => warn!("{e}"),
                     }
@@ -171,7 +189,7 @@ impl Actor for PodObserver {
         args: PodObserverArgs,
     ) -> Result<Self::State, ActorProcessingErr> {
         let state = PodObserverState {
-            registration_id: args.registration_id,
+            tcp_client: args.tcp_client,
             namespace: args.namespace,
             kube_client: args.kube_client,
             watcher: None,
@@ -194,12 +212,13 @@ impl Actor for PodObserver {
         info!("trying to watch {} namespace.", state.namespace);
 
         //spawn a new thread to watch for pods
-        let client = state.kube_client.clone();
-        let id = state.registration_id.clone();
+        let tcp_client = state.tcp_client.clone();
+        let kube_client = state.kube_client.clone();
         let ns = state.namespace.clone();
 
-        let handle = tokio::spawn(async move { PodObserver::watch_pods(id, client, ns).await })
-            .abort_handle();
+        let handle =
+            tokio::spawn(async move { PodObserver::watch_pods(tcp_client, kube_client, ns).await })
+                .abort_handle();
 
         state.watcher = Some(handle);
 
@@ -223,7 +242,7 @@ impl Actor for PodObserver {
 
     async fn handle(
         &self,
-        myself: ActorRef<Self::Msg>,
+        _myself: ActorRef<Self::Msg>,
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
@@ -235,6 +254,40 @@ impl Actor for PodObserver {
                 match api.list(&ListParams::default()).await {
                     Ok(pod_list) => {
                         let topic = get_consumer_name("cluster", "Pod");
+
+                        // iterate and emit provenance events
+                        for pod in &pod_list.items {
+                            if let Some(spec) = &pod.spec {
+                                for container in &spec.containers {
+                                    if let Some(image) = &container.image {
+                                        let event = ProvenanceEvent::ImageRefDiscovered {
+                                            uri: image.clone(),
+                                        };
+                                        trace!("Emitting event: {:?}", event);
+                                        let payload = to_bytes::<rancor::Error>(&event)?;
+                                        state.tcp_client.cast(TcpClientMessage::Publish {
+                                            topic: PROVENANCE_DISCOVERY_TOPIC.to_string(),
+                                            payload: payload.into(),
+                                        })?;
+
+                                        if let Some(uid) = pod.metadata.uid.clone() {
+                                            trace!("Emitting event: {:?}", event);
+                                            let event = ProvenanceEvent::PodContainerUsesImage {
+                                                pod_uid: uid,
+                                                container_name: container.name.clone(),
+                                                image_ref: image.clone(),
+                                            };
+                                            trace!("Emitting event: {:?}", event);
+                                            let payload = to_bytes::<rancor::Error>(&event)?;
+                                            state.tcp_client.cast(TcpClientMessage::Publish {
+                                                topic: PROVENANCE_LINKER_TOPIC.to_string(),
+                                                payload: payload.into(),
+                                            })?;
+                                        }
+                                    }
+                                }
+                            }
+                        }
 
                         match serde_json::to_value(pod_list.items) {
                             Ok(serialized) => {
@@ -249,18 +302,7 @@ impl Actor for PodObserver {
                                 let envelope = TcpClientMessage::Publish { topic, payload };
 
                                 // send data for batch processing
-
-                                match where_is(TCP_CLIENT_NAME.to_owned()) {
-                                    Some(client) => {
-                                        if let Err(e) = client.send_message(envelope) {
-                                            warn!("Failed to send message to client {e}");
-                                        }
-                                    }
-                                    None => {
-                                        error!("No cassini client found, stopping");
-                                        myself.stop(None);
-                                    }
-                                }
+                                state.tcp_client.cast(envelope)?;
                             }
                             Err(_e) => todo!(),
                         }

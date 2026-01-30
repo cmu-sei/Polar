@@ -18,7 +18,6 @@ use jira_common::JIRA_ISSUES_CONSUMER_TOPIC;
 use jira_common::JIRA_PROJECTS_CONSUMER_TOPIC;
 use jira_common::JIRA_USERS_CONSUMER_TOPIC;
 use polar::DispatcherMessage;
-use polar::DISPATCH_ACTOR;
 use polar::{Supervisor, SupervisorMessage};
 use ractor::async_trait;
 use ractor::registry::where_is;

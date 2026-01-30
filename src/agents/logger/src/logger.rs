@@ -61,7 +61,6 @@ pub struct DecodedEvent<'a> {
 /// --- Your rkyv log payload type(s) (example) ---
 /// In practice you’ll have schema_id/schema_ver -> validator mapping.
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Debug)]
-#[archive(check_bytes)]
 pub struct LogRecordV1 {
     pub level: u8,
     pub msg: String,
@@ -83,12 +82,13 @@ fn decode_batch(frame: &[u8]) -> Result<DecodedBatch<'_>, String> {
 /// Validate archived rkyv bytes before touching them.
 /// This is the “no footguns” step.
 fn validate_archived(schema_id: u32, schema_ver: u32, payload: &[u8]) -> Result<(), String> {
-    match (schema_id, schema_ver) {
-        (1, 1) => rkyv::check_archived_root::<LogRecordV1>(payload)
-            .map(|_| ())
-            .map_err(|e| format!("rkyv validation failed: {e}")),
-        _ => Err(format!("unknown schema {schema_id} v{schema_ver}")),
-    }
+    todo!()
+    // match (schema_id, schema_ver) {
+    //     (1, 1) => rkyv::check_archived_root::<LogRecordV1>(payload)
+    //         .map(|_| ())
+    //         .map_err(|e| format!("rkyv validation failed: {e}")),
+    //     _ => Err(format!("unknown schema {schema_id} v{schema_ver}")),
+    // }
 }
 
 /// RocksDB keying: stream_id(16) || seq_be_u64(8)
@@ -107,11 +107,12 @@ fn encode_next_seq(next: u64) -> [u8; 8] {
 /// Load stream head or default 0.
 /// Skeleton: you can cache these in state later for throughput.
 fn load_next_seq(db: &DB, stream_id: &[u8; 16]) -> u64 {
-    db.get(stream_id)
-        .ok()
-        .flatten()
-        .and_then(|v| (v.len() == 8).then(|| u64::from_be_bytes(v.as_slice().try_into().ok()?)))
-        .unwrap_or(0)
+    todo!()
+    // db.get(stream_id)
+    //     .ok()
+    //     .flatten()
+    //     .and_then(|v| (v.len() == 8).then(|| u64::from_be_bytes(v.as_slice().try_into().ok()?)))
+    //     .unwrap_or(0)
 }
 
 /// Subscribe helper (mirrors Polar consumer pattern: find TCP client, send Subscribe). :contentReference[oaicite:9]{index=9}

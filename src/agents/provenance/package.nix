@@ -37,12 +37,19 @@ let
         src = workspaceFileset ./provenance;
     });
 
+    resolverConfig = pkgs.writeTextFile {
+      name          = "resolver.json";
+      destination   = "/resolver.json";
+      text          = builtins.readFile ./resolver/resolver.json;
+    };
+
     resolverImage = pkgs.dockerTools.buildImage {
         name = "provenance-resolver-agent";
         tag = "latest";
         copyToRoot = commonPaths ++ [
           resolverBin
           pkgs.cacert # this one needs a default trust store, so we'll include one
+          resolverConfig
         ];
         uid = commonUser.uid;
         gid = commonUser.gid;

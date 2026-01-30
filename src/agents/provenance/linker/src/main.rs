@@ -4,7 +4,7 @@ use ractor::Actor;
 
 #[tokio::main]
 async fn main() {
-    polar::init_logging();
+    polar::init_logging(LINKER_SUPERVISOR_NAME.to_string());
     let (_, handle) = Actor::spawn(
         Some(LINKER_SUPERVISOR_NAME.to_string()),
         ProvenanceSupervisor,

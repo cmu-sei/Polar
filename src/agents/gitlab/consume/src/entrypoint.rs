@@ -26,12 +26,13 @@ use polar::init_logging;
 use ractor::Actor;
 use std::error::Error;
 
+pub const GITLAB_CONSUMER_SUPERVISOR: &str = "gitlab.supervisor.consumer";
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    init_logging();
+    init_logging(GITLAB_CONSUMER_SUPERVISOR.to_string());
 
     let (_, handle) = Actor::spawn(
-        Some("gitlab.supervisor.consumer".to_string()),
+        Some(GITLAB_CONSUMER_SUPERVISOR.to_string()),
         ConsumerSupervisor,
         (),
     )

@@ -66,7 +66,7 @@ impl GitlabPipelineConsumer {
                     if GitlabPipelineConsumer::artifact_should_emit(name) {
                         if let Some(download_path) = &artifact.download_path {
                             if let Some(client) = ractor::registry::where_is(BROKER_CLIENT_NAME.to_string()) {
-                                let event = ProvenanceEvent::sbom_ref_discovered(download_path, Some(artifact.id.to_string()));
+                                let event = ProvenanceEvent::SbomDiscovered { artifact_id: artifact.id.to_string(), uri: download_path.clone() };
 
                                 match rkyv::to_bytes::<rkyv::rancor::Error>(&event) {
                                     Ok(payload) => {
@@ -302,7 +302,7 @@ impl Actor for GitlabPipelineConsumer {
 
                             WITH p, pipeline_data.artifacts AS artifacts
                             UNWIND artifacts AS artifact
-                            MERGE (a:Artifact {{ id: artifact.artifact_id }})
+                            MERGE (a:GitlabPipelineArtifact {{ id: artifact.artifact_id }})
                             SET a.size = artifact.size,
                                 a.name = artifact.name,
                                 a.download_path = artifact.download_path,

@@ -27,12 +27,14 @@ use ractor::Actor;
 use std::error::Error;
 use tracing::error;
 
+const GITLAB_OBSERVER_SUPERVISOR: &str = "gitlab.supervisor.observer";
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    init_logging();
+    init_logging(GITLAB_OBSERVER_SUPERVISOR.to_string());
 
     match Actor::spawn(
-        Some("gitlab.supervisor.observer".to_string()),
+        Some(GITLAB_OBSERVER_SUPERVISOR.to_string()),
         supervisor::ObserverSupervisor,
         (),
     )

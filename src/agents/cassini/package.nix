@@ -5,7 +5,6 @@
   craneLib,
   crateArgs,
   workspaceFileset,
-  cargoArtifacts,
   commonUser,
 }:
 
@@ -13,7 +12,6 @@
 let
 
     cassini = craneLib.buildPackage (crateArgs // {
-    inherit cargoArtifacts;
     cargoExtraArgs = "--bin cassini-server --locked";
     src = workspaceFileset ./broker;
     # Disable tests for now, We'll run them later with env vars and TlsCerts
@@ -22,7 +20,6 @@ let
 
     # build the client
     client = craneLib.buildPackage (crateArgs // {
-    inherit cargoArtifacts;
     cargoExtraArgs = "--lib cassini-client --locked";
     src = workspaceFileset ./client;
     # Disable tests for now, We'll run them later with env vars and TlsCerts
@@ -31,7 +28,6 @@ let
 
     # build the test harness services
     harnessProducer = craneLib.buildPackage (crateArgs // {
-    inherit cargoArtifacts;
     cargoExtraArgs = "--bin harness-producer --locked";
     src = workspaceFileset ./test/producer;
     # Disable tests for now, We'll run them later with env vars and TlsCerts
@@ -39,7 +35,6 @@ let
     });
 
     harnessSink = craneLib.buildPackage (crateArgs // {
-    inherit cargoArtifacts;
     cargoExtraArgs = "--bin harness-sink --locked";
     src = workspaceFileset ./test/sink;
     # Disable tests for now, We'll run them later with env vars and TlsCerts
@@ -48,9 +43,7 @@ let
 
     cassiniEnv = pkgs.buildEnv {
         name = "cassini-env";
-        paths =  [
-            pkgs.bashInteractiveFHS
-            pkgs.busybox
+        paths = commonPaths ++ [
             cassini
         ];
 

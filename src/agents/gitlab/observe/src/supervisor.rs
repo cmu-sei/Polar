@@ -19,7 +19,7 @@ use crate::GITLAB_USERS_OBSERVER;
 use crate::META_OBSERVER;
 use cassini_client::*;
 use cassini_types::ClientEvent;
-use polar::{Supervisor, SupervisorMessage};
+use polar::SupervisorMessage;
 use ractor::async_trait;
 use ractor::Actor;
 use ractor::ActorProcessingErr;
@@ -33,6 +33,7 @@ use tracing::error;
 pub struct ObserverSupervisor;
 
 pub struct ObserverSupervisorState {
+    pub tcp_client: ActorRef<TcpClientMessage>,
     pub gitlab_endpoint: String,
     pub gitlab_token: Option<String>,
     /// base interval that observers will use to query
@@ -55,7 +56,6 @@ impl Actor for ObserverSupervisor {
         debug!("{myself:?} starting");
 
         let gitlab_endpoint = url::Url::parse(env::var("GITLAB_ENDPOINT")?.as_str())?;
-
         let gitlab_token = env::var("GITLAB_TOKEN")?;
 
         // Helpful for looking at services behind a proxy
@@ -78,7 +78,7 @@ impl Actor for ObserverSupervisor {
         //
         let client_config = TCPClientConfig::new()?;
 
-        let (_client, _) = Actor::spawn_linked(
+        let (tcp_client, _) = Actor::spawn_linked(
             Some(BROKER_CLIENT_NAME.to_string()),
             TcpClientActor,
             TcpClientArgs {
@@ -91,6 +91,7 @@ impl Actor for ObserverSupervisor {
         .await?;
 
         Ok(ObserverSupervisorState {
+            tcp_client,
             gitlab_endpoint: gitlab_endpoint.to_string(),
             gitlab_token: Some(gitlab_token),
             base_interval,
@@ -115,9 +116,10 @@ impl Actor for ObserverSupervisor {
                             instance_uid: derive_instance_id(&state.gitlab_endpoint),
                             token: state.gitlab_token.clone(),
                             registration_id: registration_id.clone(),
-                            web_client: polar::get_web_client(),
+                            web_client: polar::get_web_client()?,
                             base_interval: state.base_interval,
                             max_backoff: state.max_backoff_secs,
+                            tcp_client: state.tcp_client.clone(),
                         };
 
                         //TODO: Should other observers wait until the meta observer is online and observing?
@@ -186,13 +188,13 @@ impl Actor for ObserverSupervisor {
                         )
                         .await?;
                     }
-                    ClientEvent::MessagePublished { topic, payload } => {
+                    ClientEvent::MessagePublished { .. } => {
                         todo!("Deserialize and dispatch message from the queue");
                         // TODO: We haven't yet figured out what kind of messages observer supervisors will receive yet, but when we do
                         // this is what we'll call
                         // ObserverSupervisor::deserialize_and_dispatch(topic, payload)
                     }
-                    ClientEvent::TransportError { reason } => {
+                    ClientEvent::TransportError { .. } => {
                         todo!("Handle client transport error")
                     }
                 }

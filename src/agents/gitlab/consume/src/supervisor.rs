@@ -322,7 +322,7 @@ impl Actor for ConsumerSupervisor {
                 ClientEvent::MessagePublished { topic, payload } => {
                     ConsumerSupervisor::deserialize_and_dispatch(topic, payload);
                 }
-                ClientEvent::TransportError { reason } => todo!("Handle transport error"),
+                ClientEvent::TransportError { ..} => todo!("Handle transport error"),
             },
         }
         Ok(())

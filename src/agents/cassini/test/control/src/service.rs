@@ -61,22 +61,12 @@ impl HarnessController {
                 .spawn()
                 .expect("failed to spawn broker");
 
-            let status = child.wait().await.expect("broker crashed");
+            let _status = child.wait().await.expect("broker crashed");
         })
         .abort_handle();
     }
 
     /// Called once registration is observed; kicks off the plan execution
-    fn start_test(
-        &self,
-        myself: &ActorRef<HarnessControllerMessage>,
-    ) -> Result<(), ActorProcessingErr> {
-        // Mark that we've started and tell the actor to process the first step.
-        // We avoid blocking here — we just push a message to the actor's mailbox.
-        myself
-            .cast(HarnessControllerMessage::StartTest)
-            .map_err(ActorProcessingErr::from)
-    }
 
     /// --- Orchestration helper ---
     pub async fn start_client(
@@ -171,8 +161,6 @@ pub struct HarnessControllerState {
     pub current_test_index: usize,
     started: bool,
     client_ref: Option<ActorRef<TcpClientMessage>>,
-    bind_addr: String,
-    server_config: ServerConfig,
     registration_id: Option<String>,
     pub current_test: Option<Test>,
     pub test_plan: TestPlan,
@@ -313,8 +301,6 @@ impl Actor for HarnessController {
             current_test_index: 0,
             current_test: None,
             registration_id: None,
-            bind_addr: args.bind_addr,
-            server_config,
             test_plan: args.test_plan,
             server_handle: Some(server_handle),
             broker: None,

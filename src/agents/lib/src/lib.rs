@@ -1,10 +1,12 @@
 use cassini_types::ClientEvent;
-use ractor::OutputPort;
+use ractor::{ActorProcessingErr, OutputPort};
 use reqwest::{Certificate, Client, ClientBuilder};
 use serde::{Deserialize, Serialize};
 use std::io::Read;
 use std::sync::Arc;
 use tracing::{debug, info};
+
+pub mod graph;
 /// wrapper definition for a ractor outputport where a raw message payload and a topic can be piped to a necessary dispatcher
 pub type QueueOutput = Arc<OutputPort<(Vec<u8>, String)>>;
 
@@ -12,8 +14,6 @@ pub type QueueOutput = Arc<OutputPort<(Vec<u8>, String)>>;
 /// Including container images and software bill of materials.
 pub const PROVENANCE_DISCOVERY_TOPIC: &str = "polar.provenance.resolver";
 pub const PROVENANCE_LINKER_TOPIC: &str = "polar.provenance.linker";
-
-pub const DISPATCH_ACTOR: &str = "DISPATCH";
 pub const TRANSACTION_FAILED_ERROR: &str = "Expected to start a transaction with the graph";
 pub const QUERY_COMMIT_FAILED: &str = "Error committing transaction to graph";
 pub const QUERY_RUN_FAILED: &str = "Error running query on the graph.";
@@ -29,6 +29,7 @@ pub trait Supervisor {
 pub enum SupervisorMessage {
     ClientEvent { event: ClientEvent },
 }
+
 /// Helper function to parse a file at a given path and return the raw bytes as a vector
 pub fn get_file_as_byte_vec(filename: &String) -> Result<Vec<u8>, std::io::Error> {
     let mut f = std::fs::File::open(&filename)?;
@@ -51,26 +52,63 @@ pub fn get_file_as_byte_vec(filename: &String) -> Result<Vec<u8>, std::io::Error
 /// - Internal Neo4j IDs (`id(node)`) MUST NOT be emitted in events — they are ephemeral.
 #[derive(Debug, rkyv::Serialize, rkyv::Deserialize, rkyv::Archive)]
 pub enum ProvenanceEvent {
+    /// Emitted when a new OCI registry is discovered
+    /// (e.g., observed in a Gitlab, Gitea, Artifactory or registry listing).
+    ///
+    /// `hostname`: The hostname of the registry (e.g. `"ghcr.io"`).
+    OCIRegistryDiscovered { hostname: String },
+    /// Emitted when a new OCI artifact is discovered.
+    /// observed likely by an agent closest to a registry itself. Either through REST or OCI compatible clients.
+    ///
+    /// `uri`: The canonical reference string (e.g. `"ghcr.io/org/app:1.2.3"`).
+    ///
+    OCIArtifactDiscovered { uri: String },
+    /// Emitted when a new OCI artifact is resolved.
+    ///
+    ///
+    /// `uri`: The canonical reference string (e.g. `"ghcr.io/org/app:1.2.3"`).
+    ///
+    OCIArtifactResolved {
+        uri: String,
+        digest: String,
+        media_type: String,
+        registry: String,
+    },
+
     /// Emitted when a new container image reference is discovered
     /// (e.g., observed in a GitLab pipeline, Kubernetes Pod, or registry listing).
     ///
-    /// `id`: Deterministic identifier for the image reference.
-    ///        Typically a UUIDv5 derived from the normalized image URI.
     /// `uri`: The canonical image reference string (e.g. `"ghcr.io/org/app:1.2.3"`).
-    ImageRefDiscovered { id: String, uri: String },
+
+    /// What this means:
+    /// “A resolver successfully dereferenced this URI at some point in time and observed an OCI artifact with these properties.”
+    /// “The URI is this artifact
+    /// “The artifact is an image”
+    /// “This is the canonical truth forever”
+    /// It means: there exists evidence linking a claim to an artifact. To that end, it does not represent artifact itself in our database
+    ImageRefDiscovered { uri: String },
 
     /// Emitted when a previously discovered image reference has been
     /// resolved (validated via Skopeo or registry metadata) and now includes
     /// content-addressable digest information.
     ///
-    /// `id`: Same deterministic identifier used in `ImageRefDiscovered`.
     /// `digest`: Verified content digest (e.g. `"sha256:abc123..."`).
     /// `media_type`: MIME type of the image manifest (e.g. `"application/vnd.oci.image.manifest.v1+json"`).
     ImageRefResolved {
-        id: String,
         uri: String,
         digest: String,
         media_type: String,
+    },
+
+    /// Emitted when a pod container is seen using an image.
+    ///
+    /// `pod_uid`: Unique identifier of the pod.
+    /// `container_name`: Name of the container.
+    /// `image_ref`: Reference to the image used by the container.
+    PodContainerUsesImage {
+        pod_uid: String,
+        container_name: String,
+        image_ref: String,
     },
 
     /// Emitted when an SBOM artifact (CycloneDX, SPDX, etc.) has been
@@ -101,104 +139,96 @@ pub enum ProvenanceEvent {
     },
 }
 
-impl ProvenanceEvent {
-    /// constructor to generate a new image reference event, granting a UUID unless one is provided.
-    pub fn image_ref_discovered(uri: &str, id: Option<String>) -> Self {
-        let id = id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-        Self::ImageRefDiscovered {
-            id,
-            uri: uri.to_string(),
-        }
-    }
-
-    /// constructor to generate a new image reference event, granting a UUID unless one is provided.
-    pub fn sbom_ref_discovered(uri: &str, id: Option<String>) -> Self {
-        let id = id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-        Self::SbomDiscovered {
-            artifact_id: id,
-            uri: uri.to_string(),
-        }
-    }
-
-    /// constructor to generate a new image resolved event, granting a UUID unless one is provided.
-    pub fn image_ref_resolved(
-        uri: String,
-        id: Option<String>,
-        digest: String,
-        media_type: String,
-    ) -> Self {
-        let id = id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-        Self::ImageRefResolved {
-            id,
-            uri: uri.to_string(),
-            digest,
-            media_type,
-        }
-    }
-
-    //constructor to generate a new image reference event, granting a UUID unless one is provided.
-    // pub fn sbom_ref_resolved(uri: &str, id: Option<String>) -> Self {
-    //     let id = id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-    //     Self::SbomDiscovered {
-    //         artifact_id: id,
-    //         uri: uri.to_string(),
-    //     }
-    // }
-}
-
 #[derive(Debug)]
 pub enum DispatcherMessage {
     Dispatch { message: Vec<u8>, topic: String }, // Serialize()
 }
 
-pub fn init_logging() {
-    use std::io::stderr;
-    use std::io::IsTerminal;
-    use tracing_glog::Glog;
-    use tracing_glog::GlogFields;
+pub fn init_logging(service_name: String) {
+    use opentelemetry::{global, KeyValue};
+    use opentelemetry_otlp::Protocol;
+    use opentelemetry_otlp::WithExportConfig;
+    use opentelemetry_sdk::Resource;
     use tracing_subscriber::filter::EnvFilter;
-    use tracing_subscriber::layer::SubscriberExt;
-    use tracing_subscriber::Registry;
+    use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-    let fmt = tracing_subscriber::fmt::Layer::default()
-        .with_ansi(stderr().is_terminal())
-        .with_writer(std::io::stderr)
-        .event_format(Glog::default().with_timer(tracing_glog::LocalTime::default()))
-        .fmt_fields(GlogFields::default().compact());
+    eprintln!("INIT_LOGGING called");
 
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 
-    let subscriber = Registry::default().with(filter).with(fmt);
-    tracing::subscriber::set_global_default(subscriber).expect("to set global subscriber");
+    let enable_jaeger = std::env::var("ENABLE_JAEGER_TRACING")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
 
-    // TODO: connect to jaeger?
+    if enable_jaeger {
+        let endpoint = std::env::var("JAEGER_OTLP_ENDPOINT")
+            .unwrap_or_else(|_| "http://localhost:4318/v1/traces".to_string());
+
+        if !endpoint.is_empty() {
+            if let Ok(exporter) = opentelemetry_otlp::SpanExporter::builder()
+                .with_http()
+                .with_protocol(Protocol::HttpBinary)
+                .with_endpoint(endpoint)
+                .build()
+            {
+                let tracer_provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
+                    .with_batch_exporter(exporter)
+                    .with_resource(
+                        Resource::builder_empty()
+                            .with_attributes([KeyValue::new("service.name", service_name.clone())])
+                            .build(),
+                    )
+                    .build();
+
+                global::set_tracer_provider(tracer_provider);
+                let tracer = global::tracer(format!("{service_name}.tracing"));
+
+                if tracing_subscriber::registry()
+                    .with(filter)
+                    .with(tracing_subscriber::fmt::layer())
+                    .with(tracing_opentelemetry::layer().with_tracer(tracer))
+                    .try_init()
+                    .is_err()
+                {
+                    eprintln!("Logging registry already initialized");
+                }
+            }
+        }
+    } else {
+        if tracing_subscriber::registry()
+            .with(filter)
+            .with(tracing_subscriber::fmt::layer())
+            .try_init()
+            .is_err()
+        {
+            eprintln!("Logging registry already initialized");
+        }
+    }
 }
+
 /// Helper function to get a web client with optional proxy CA certificate
 /// Attempts to find a path to the proxy CA certificate provided by the environment variable PROXY_CA_CERT
-pub fn get_web_client() -> Client {
-    info!("Attempting to find PROXY_CA_CERT");
-    match std::env::var("PROXY_CA_CERT") {
+pub fn get_web_client() -> Result<Client, ActorProcessingErr> {
+    debug!("Attempting to find PROXY_CA_CERT");
+    Ok(match std::env::var("PROXY_CA_CERT") {
         Ok(path) => {
             let cert_data = get_file_as_byte_vec(&path)
                 .expect("Expected to find a proxy CA certificate at {path}");
             let root_cert =
                 Certificate::from_pem(&cert_data).expect("Expected {path} to be in PEM format.");
 
-            info!("Found PROXY_CA_CERT at: {path}, Configuring web client...");
+            debug!("Found PROXY_CA_CERT at: {path}, Configuring web client...");
 
             ClientBuilder::new()
                 .add_root_certificate(root_cert)
                 .use_rustls_tls()
-                .build()
-                .expect("Expected to build web client with proxy CA certificate")
+                .build()?
         }
         Err(e) => {
             debug!("Failed to find PROXY_CA_CERT. {e} Configuring web client without proxy CA certificate...");
-            ClientBuilder::new()
-                .build()
-                .expect("Expected to build web client.")
+            ClientBuilder::new().build()?
         }
-    }
+    })
 }
 /// Standard helper fn to get a neo4rs configuration based on environment variables
 /// All of the following variables are required fields unless otherwise specified.

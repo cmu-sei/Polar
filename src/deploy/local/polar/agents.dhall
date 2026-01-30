@@ -8,8 +8,6 @@ let ProxyUtils = ../../types/proxy-utils.dhall
 
 let proxyCACert = None Text
 
-let deploymentName = Constants.ProvenanceDeploymentName
-
 let values = ../values.dhall
 let linker = values.linker
 let resolver = values.resolver
@@ -77,18 +75,11 @@ let resolverVolumeMounts =
         ]
       # ProxyUtils.ProxyMount proxyCACert
 
-let spec =
+let resolverSpec =
       kubernetes.PodSpec::{
       , containers =
-        [ kubernetes.Container::{
-          , name = Constants.ProvenanceLinkerName
-          , image = Some linker.image
-          , imagePullPolicy = Some "Never"
-          , securityContext = Some Constants.DropAllCapSecurityContext
-          , env = Some linkerEnv
-          , volumeMounts = Some linkerVolumeMounts
-          }
-        , kubernetes.Container::{
+        [
+         kubernetes.Container::{
           , name = Constants.ProvenanceResolverName
           , image = Some resolver.image
           , imagePullPolicy = Some "Never"
@@ -100,23 +91,63 @@ let spec =
       , volumes = Some volumes
       }
 
-in  kubernetes.Deployment::{
+let linkerSpec =
+      kubernetes.PodSpec::{
+      , containers =
+        [ kubernetes.Container::{
+          , name = Constants.ProvenanceLinkerName
+          , image = Some linker.image
+          , imagePullPolicy = Some "Never"
+          , securityContext = Some Constants.DropAllCapSecurityContext
+          , env = Some linkerEnv
+          , volumeMounts = Some linkerVolumeMounts
+          }
+        ]
+      , volumes = Some volumes
+      }
+
+let resolverDeployment =  kubernetes.Deployment::{
     , metadata = kubernetes.ObjectMeta::{
-      , name = Some deploymentName
+      , name = Some Constants.RegistryResolverName
       , namespace = Some Constants.PolarNamespace
       , annotations = Some [ Constants.RejectSidecarAnnotation ]
       }
     , spec = Some kubernetes.DeploymentSpec::{
       , selector = kubernetes.LabelSelector::{
-        , matchLabels = Some (toMap { name = deploymentName })
+        , matchLabels = Some (toMap { name = Constants.RegistryResolverName })
         }
       , replicas = Some 1
       , template = kubernetes.PodTemplateSpec::{
         , metadata = Some kubernetes.ObjectMeta::{
-          , name = Some deploymentName
-          , labels = Some [ { mapKey = "name", mapValue = deploymentName } ]
+          , name = Some Constants.RegistryResolverName
+          , labels = Some [ { mapKey = "name", mapValue = Constants.RegistryResolverName } ]
           }
-        , spec = Some kubernetes.PodSpec::spec
+        , spec = Some kubernetes.PodSpec::resolverSpec
         }
       }
     }
+
+let linkerDeployment =  kubernetes.Deployment::{
+    , metadata = kubernetes.ObjectMeta::{
+      , name = Some Constants.ArtifactLinkerName
+      , namespace = Some Constants.PolarNamespace
+      , annotations = Some [ Constants.RejectSidecarAnnotation ]
+      }
+    , spec = Some kubernetes.DeploymentSpec::{
+      , selector = kubernetes.LabelSelector::{
+        , matchLabels = Some (toMap { name = Constants.ArtifactLinkerName})
+        }
+      , replicas = Some 1
+      , template = kubernetes.PodTemplateSpec::{
+        , metadata = Some kubernetes.ObjectMeta::{
+          , name = Some Constants.ArtifactLinkerName
+          , labels = Some [ { mapKey = "name", mapValue = Constants.ArtifactLinkerName } ]
+          }
+        , spec = Some kubernetes.PodSpec::linkerSpec
+        }
+      }
+    }
+
+in
+[ kubernetes.Resource.Deployment linkerDeployment, kubernetes.Resource.Deployment resolverDeployment
+]

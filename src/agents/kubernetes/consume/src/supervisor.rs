@@ -26,6 +26,7 @@ pub struct ClusterConsumerSupervisor;
 
 pub struct ClusterConsumerSupervisorState {
     graph_config: neo4rs::Config,
+    broker_client: ActorRef<TcpClientMessage>,
 }
 
 impl Supervisor for ClusterConsumerSupervisor {
@@ -118,7 +119,7 @@ impl Actor for ClusterConsumerSupervisor {
 
         let client_config = TCPClientConfig::new()?;
 
-        let (_client, _) = Actor::spawn_linked(
+        let (broker_client, _) = Actor::spawn_linked(
             Some(BROKER_CLIENT_NAME.to_string()),
             TcpClientActor,
             TcpClientArgs {
@@ -130,7 +131,10 @@ impl Actor for ClusterConsumerSupervisor {
         )
         .await?;
 
-        let state = ClusterConsumerSupervisorState { graph_config };
+        let state = ClusterConsumerSupervisorState {
+            graph_config,
+            broker_client,
+        };
 
         Ok(state)
     }
@@ -147,6 +151,7 @@ impl Actor for ClusterConsumerSupervisor {
                     ClientEvent::Registered { registration_id } => {
                         //start actors
                         let args = KubeConsumerArgs {
+                            broker_client: state.broker_client.clone(),
                             registration_id,
                             graph_config: state.graph_config.clone(),
                         };
@@ -167,7 +172,10 @@ impl Actor for ClusterConsumerSupervisor {
                     ClientEvent::MessagePublished { topic, payload } => {
                         ClusterConsumerSupervisor::deserialize_and_dispatch(topic, payload)
                     }
-                    ClientEvent::TransportError { reason } => todo!(),
+                    ClientEvent::TransportError { reason } => {
+                        error!("Transport error occurred! {reason}");
+                        myself.stop(Some(reason))
+                    }
                 }
             }
         }

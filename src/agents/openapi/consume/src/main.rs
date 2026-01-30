@@ -26,10 +26,10 @@ use web_consumer::actors::{ConsumerSupervisor, ConsumerSupervisorArgs};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    polar::init_logging();
+    polar::init_logging("polar.openapi.observer.supervisor".to_string());
 
     let (_, handle) = Actor::spawn(
-        Some("polar.web.supervisor".to_string()),
+        Some("polar.openapi.observer.supervisor".to_string()),
         ConsumerSupervisor,
         ConsumerSupervisorArgs,
     )

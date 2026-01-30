@@ -1,176 +1,264 @@
-use cyclonedx_bom::prelude::*;
-use neo4rs::Graph;
-use neo4rs::Query;
+use polar::graph::{self, GraphValue};
+use polar::graph::{GraphControllerMsg, GraphOp, Property};
+use polar::ProvenanceEvent;
 use ractor::async_trait;
-use ractor::concurrency::Duration;
 use ractor::Actor;
 use ractor::ActorProcessingErr;
 use ractor::ActorRef;
-use tokio::task::AbortHandle;
-use tracing::{debug, info, warn};
+use tracing::{debug, trace, warn};
 
-use crate::ArtifactType;
+use crate::ArtifactNodeKey;
 
-/// An actor responsible for connecting distinct knowledge graph domains.
-/// Potential planes include build, runtime, and artifact, where semantic continuity isn't always possible.
 pub struct ProvenanceLinker;
 
-pub enum LinkerCommand {
-    LinkContainerImages {
-        id: String,
-        uri: String,
-        digest: String,
-        media_type: String,
-    },
-    LinkPackages,
-    LinkArtifacts {
-        artifact_id: String,
-        artifact_type: ArtifactType,
-        related_names: Vec<NormalizedString>,
-        version: NormalizedString,
-    },
-}
-
 pub struct ProvenanceLinkerState {
-    graph: Graph,
-    interval: Duration,
-    abort_handle: Option<AbortHandle>,
+    compiler: ActorRef<GraphControllerMsg<ArtifactNodeKey>>,
 }
-
 pub struct ProvenanceLinkerArgs {
-    pub graph: Graph,
-    pub interval: Duration,
+    pub compiler: ActorRef<GraphControllerMsg<ArtifactNodeKey>>,
 }
 
 impl ProvenanceLinker {
-    async fn link_sboms(
-        graph: &Graph,
-        artifact_id: String,
-        _artifact_type: ArtifactType,
-        related_names: Vec<NormalizedString>,
-        version: NormalizedString,
+    fn send_op(
+        state: &mut ProvenanceLinkerState,
+        op: GraphOp<ArtifactNodeKey>,
+        err_ctx: &'static str,
     ) -> Result<(), ActorProcessingErr> {
-        info!("Linking SBOM artifact {}", artifact_id);
+        state
+            .compiler
+            .send_message(GraphControllerMsg::Op(op))
+            .map_err(|e| ActorProcessingErr::from(format!("{err_ctx}: {:?}", e)))
+    }
 
-        // Example: link SBOM components to GitlabPackages or ContainerImageTags
-        // (depending on what exists in your ontology)
-        for name in related_names {
-            let cypher = format!(
-                r#"
-                MATCH (a:Artifact {{ id: '{id}' }})
-                MERGE (s:SoftwareComponent {{ name: '{name}' }})
-                MERGE (a)-[:DESCRIBES_COMPONENT]->(s)
-                WITH s
-                OPTIONAL MATCH (pkg:GitlabPackage {{ name: s.name }})
-                MERGE (s)-[:IDENTIFIES_PACKAGE]->(pkg)
-            "#,
-                id = artifact_id,
-                name = name
-            );
+    fn upsert_node(
+        state: &mut ProvenanceLinkerState,
+        key: ArtifactNodeKey,
+        props: Vec<Property>,
+        err_ctx: &'static str,
+    ) -> Result<(), ActorProcessingErr> {
+        Self::send_op(state, GraphOp::UpsertNode { key, props }, err_ctx)
+    }
 
-            debug!(%cypher, "Linking SBOM component");
-            if let Err(e) = graph.run(Query::new(cypher)).await {
-                warn!("Failed to link component {}: {:?}", name, e);
-            }
-        }
-
-        // Optionally, if version info is present, link to container tags or package versions
-        // TODO: this might
-        if &version.to_string() != "None" {
-            let cypher = format!(
-                r#"
-                MATCH (a:Artifact {{ id: '{id}' }})
-                MATCH (pkg:GitlabPackage {{ version: '{ver}' }})
-                MERGE (a)-[:DESCRIBES_VERSION]->(pkg)
-            "#,
-                id = artifact_id,
-                ver = version
-            );
-
-            debug!(%cypher, "Linking SBOM to versioned package");
-            let _ = graph.run(Query::new(cypher)).await;
-        }
-
-        Ok(())
+    fn ensure_edge(
+        state: &mut ProvenanceLinkerState,
+        from: ArtifactNodeKey,
+        to: ArtifactNodeKey,
+        rel_type: &'static str,
+    ) -> Result<(), ActorProcessingErr> {
+        Self::send_op(
+            state,
+            GraphOp::EnsureEdge {
+                from,
+                to,
+                rel_type: rel_type.to_string(),
+                props: vec![],
+            },
+            "failed to ensure edge",
+        )
     }
 }
 
 #[async_trait]
 impl Actor for ProvenanceLinker {
-    type Msg = LinkerCommand;
+    type Msg = ProvenanceEvent;
     type State = ProvenanceLinkerState;
     type Arguments = ProvenanceLinkerArgs;
 
     async fn pre_start(
         &self,
-        myself: ActorRef<Self::Msg>,
+        _myself: ActorRef<Self::Msg>,
         args: Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
+        // Expect the supervisor to pass the compiler ActorRef via args.graph or separate arg.
+        // For this example, assume ProvenanceLinkerArgs contains compiler_ref.
         Ok(ProvenanceLinkerState {
-            graph: args.graph,
-            interval: args.interval,
-            abort_handle: None,
+            // store compiler ref elsewhere
+            compiler: args.compiler,
         })
-    }
-
-    async fn post_start(
-        &self,
-        _myself: ActorRef<Self::Msg>,
-        _state: &mut Self::State,
-    ) -> Result<(), ActorProcessingErr> {
-        Ok(())
     }
 
     async fn handle(
         &self,
-        _myself: ActorRef<Self::Msg>,
+        _me: ActorRef<Self::Msg>,
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
-            LinkerCommand::LinkArtifacts {
-                artifact_id,
-                artifact_type,
-                related_names,
-                version,
+            ProvenanceEvent::OCIArtifactResolved {
+                uri,
+                digest,
+                media_type,
+                registry,
             } => {
-                tracing::trace!("Recevied a LinkArtifacts directive");
-                ProvenanceLinker::link_sboms(
-                    &state.graph,
-                    artifact_id,
-                    artifact_type,
-                    related_names,
-                    version,
-                )
-                .await
-                .expect("Expected to link sboms");
+                trace!("OCIArtifact resolved: {uri}");
+
+                let artifact_key = ArtifactNodeKey::OCIArtifact {
+                    digest: digest.clone(),
+                };
+
+                Self::upsert_node(
+                    state,
+                    artifact_key.clone(),
+                    vec![
+                        Property("digest".into(), GraphValue::String(digest)),
+                        Property("uri".into(), GraphValue::String(uri)),
+                        Property("media_type".into(), GraphValue::String(media_type)),
+                    ],
+                    "failed to upsert OCIArtifact",
+                )?;
+
+                let registry_key = ArtifactNodeKey::OCIRegistry {
+                    hostname: registry.clone(),
+                };
+
+                Self::upsert_node(
+                    state,
+                    registry_key.clone(),
+                    vec![Property("hostname".into(), GraphValue::String(registry))],
+                    "failed to upsert OCIRegistry",
+                )?;
+
+                // ensure edges between the "Artifat" type node, the OCIartifact itself, and the registry
+                Self::ensure_edge(
+                    state,
+                    ArtifactNodeKey::Artifact,
+                    artifact_key.clone(),
+                    graph::rel::IS,
+                )?;
+                Self::ensure_edge(
+                    state,
+                    registry_key.clone(),
+                    ArtifactNodeKey::Artifact,
+                    graph::rel::CONTAINS,
+                )?;
+
+                Self::ensure_edge(state, artifact_key, registry_key, graph::rel::HOSTED_BY)?;
             }
-            //TODO: Add another handler for linking package files in gtlab to container images deployed in k8s and their sboms
-            LinkerCommand::LinkContainerImages {
-                id,
+
+            ProvenanceEvent::ImageRefResolved {
                 uri,
                 digest,
                 media_type,
             } => {
-                tracing::trace!("Recevied a LinkContainerImages directive");
-                // Invariant: “Every observed container image in the system has a canonical reference node.”
-                debug!("Updating reference to container: {uri} with id: {id}");
-                let query = format!(
-                    r#"
-                    MERGE (ref:ContainerImageReference {{id: '{id}', normalized: '{uri}', digest: '{digest}', media_type: '{media_type}', last_updated: timestamp()}})
-                    WITH ref
-                    MATCH (tag:ContainerImageTag)
-                        WHERE tag.location = ref.normalized
-                    WITH tag
-                    MERGE (ref)<-[:IDENTIFIES]-(tag)
-                    "#
-                );
-                tracing::debug!(query);
+                trace!("ImageRef resolved: {uri}");
 
-                state.graph.run(Query::new(query.to_string())).await?;
+                let ref_key = ArtifactNodeKey::ContainerImageRef {
+                    normalized: uri.clone(),
+                };
+
+                Self::upsert_node(
+                    state,
+                    ref_key.clone(),
+                    vec![Property("normalized".into(), GraphValue::String(uri))],
+                    "failed to upsert ContainerImageReference",
+                )?;
+
+                let artifact_key = ArtifactNodeKey::OCIArtifact {
+                    digest: digest.clone(),
+                };
+
+                Self::upsert_node(
+                    state,
+                    artifact_key.clone(),
+                    vec![
+                        Property("digest".into(), GraphValue::String(digest)),
+                        Property("media_type".into(), GraphValue::String(media_type)),
+                    ],
+                    "failed to upsert OCIArtifact from ImageRefResolved",
+                )?;
+
+                // ensure edges between the "Artifat" type node, the OCIartifact itself, and the registry
+                Self::ensure_edge(
+                    state,
+                    ArtifactNodeKey::Artifact,
+                    artifact_key.clone(),
+                    graph::rel::IS,
+                )?;
+                Self::ensure_edge(
+                    state,
+                    ref_key.clone(),
+                    artifact_key.clone(),
+                    graph::rel::INSTANCE_OF,
+                )?;
             }
-            // TODO: handle other commands as they arise
-            _ => warn!("Received unexpected message"),
+            ProvenanceEvent::OCIRegistryDiscovered { hostname } => {
+                trace!("OCI registry discovered: {hostname}");
+
+                Self::upsert_node(
+                    state,
+                    ArtifactNodeKey::OCIRegistry {
+                        hostname: hostname.clone(),
+                    },
+                    vec![Property("hostname".into(), GraphValue::String(hostname))],
+                    "failed to upsert OCIRegistry",
+                )?;
+            }
+            ProvenanceEvent::PodContainerUsesImage {
+                pod_uid,
+                container_name,
+                image_ref,
+            } => {
+                trace!(
+                    "PodContainer {} / {} observed image ref {}",
+                    pod_uid,
+                    container_name,
+                    image_ref
+                );
+                // 1. Upsert PodContainer (idempotent, no inference)
+                let pod_container_key = ArtifactNodeKey::PodContainer {
+                    pod_uid: pod_uid.clone(),
+                    container_name: container_name.clone(),
+                };
+                let props = vec![
+                    Property("pod_uid".into(), polar::graph::GraphValue::String(pod_uid)),
+                    Property(
+                        "name".into(),
+                        polar::graph::GraphValue::String(container_name),
+                    ),
+                ];
+
+                Self::upsert_node(
+                    state,
+                    pod_container_key.clone(),
+                    props,
+                    "Failed to upsert PodContainer",
+                )?;
+
+                // 2. Upsert ContainerImageReference (string-only claim)
+                let image_ref_key = ArtifactNodeKey::ContainerImageRef {
+                    normalized: image_ref.clone(),
+                };
+
+                let props = vec![Property(
+                    "normalized".into(),
+                    polar::graph::GraphValue::String(image_ref),
+                )];
+                Self::upsert_node(
+                    state,
+                    image_ref_key.clone(),
+                    props,
+                    "Failed to upsert ContainerImageReference",
+                )?;
+
+                // 3. Create PodContainer -> ImageRef edge
+                let edge_op = GraphOp::EnsureEdge {
+                    from: pod_container_key,
+                    to: image_ref_key.clone(),
+                    rel_type: "USES_IMAGE".to_string(),
+                    props: vec![],
+                };
+
+                state
+                    .compiler
+                    .send_message(GraphControllerMsg::Op(edge_op))
+                    .map_err(|e| {
+                        ActorProcessingErr::from(format!(
+                            "failed to create USES_IMAGE edge: {:?}",
+                            e
+                        ))
+                    })?;
+            }
+            _ => warn!("unexpected linker command"),
         }
         Ok(())
     }
