@@ -14,7 +14,7 @@ use tokio::sync::Mutex;
 use tokio::task::AbortHandle;
 use tokio_rustls::client::TlsStream;
 use tokio_rustls::TlsConnector;
-use tracing::{debug, error, info, info_span, trace, warn};
+use tracing::{debug, debug_span, trace_span, warn_span, error, info, info_span, trace, warn, Instrument};
 
 pub const UNEXPECTED_DISCONNECT: &str = "UNEXPECTED_DISCONNECT";
 pub const REGISTRATION_EXPECTED: &str =
@@ -31,6 +31,7 @@ pub struct TCPClientConfig {
     pub client_key_path: String,
 }
 
+#[derive(Debug)]
 pub enum RegistrationState {
     Unregistered,
     Registered { registration_id: String },
@@ -56,6 +57,7 @@ impl TCPClientConfig {
 }
 
 /// Messages handled by the TCP client actor
+#[derive(Debug)]
 pub enum TcpClientMessage {
     // Send(ClientMessage),
     RegistrationResponse(String),
@@ -108,6 +110,7 @@ pub struct TcpClientArgs {
 pub struct TcpClientActor;
 
 impl TcpClientActor {
+    #[tracing::instrument(name="cassini.tcp_client.connect_with_backoff", skip(client_config))]
     async fn connect_with_backoff(
         addr: String,
         server_name: String,
@@ -123,6 +126,8 @@ impl TcpClientActor {
             .map_err(|_| ActorProcessingErr::from("Invalid DNS name"))?;
 
         for attempt in 1..=max_attempts {
+            let backoff_ms = backoff.as_millis();
+            warn!(attempt, backoff_ms, "connect failed; retrying");
             match TcpStream::connect(addr.clone()).await {
                 Ok(tcp) => match connector.connect(server_name.clone(), tcp).await {
                     Ok(tls) => return Ok(tls),
@@ -149,13 +154,21 @@ impl TcpClientActor {
         myself: ActorRef<TcpClientMessage>,
         state: &mut TcpClientState,
     ) -> Result<(), ActorProcessingErr> {
-        let reader = tokio::io::BufReader::new(state.reader.take().expect("Reader already taken"));
+        // Take ownership of the read half exactly once.
+        let reader = state.reader.take().expect("Reader already taken");
 
         let queue_out = state.events_output.clone();
+        let broker_addr = state.bind_addr.clone();
+        // If you have a stable ID, use it here; otherwise addr is still useful.
+        // (You can add registration_id later once known.)
+        let read_loop_span = info_span!(
+            "cassini.tcp_client.read_loop",
+            broker_addr = %broker_addr,
+        );
 
         let abort = tokio::spawn(async move {
-            let mut buf_reader = tokio::io::BufReader::new(reader);
 
+            let mut buf_reader = tokio::io::BufReader::new(reader);
             loop {
                 match buf_reader.read_u32().await {
                     Ok(incoming_msg_length) => {
@@ -164,6 +177,14 @@ impl TcpClientActor {
 
                             trace!("Reading {incoming_msg_length} byte(s).");
                             if let Ok(_) = buf_reader.read_exact(&mut buffer).await {
+                                // Now we *actually* have a frame. Scope the span to just decode+dispatch.
+                                let _fg = trace_span!(
+                                    "tcp_client.read_frame",
+                                    len = incoming_msg_length,
+                                    first_16 = ?&buffer[..buffer.len().min(16)],
+                                )
+                                .entered();
+
                                 trace!(
                                     len = incoming_msg_length,
                                     first_16 = ?&buffer[..buffer.len().min(16)],
@@ -238,7 +259,9 @@ impl TcpClientActor {
                         }
                     }
                     Err(e) => {
-                        info!("TCP reader terminating: {e}");
+                        // This is the main "lifetime end" signal for the read loop.
+                        // Use warn so it stands out in traces; it usually means disconnect.
+                        warn!(error = %e, "TCP reader terminating");
                         queue_out.send(ClientEvent::TransportError {
                             reason: format!("{UNEXPECTED_DISCONNECT} {e}")
                         });
@@ -247,7 +270,7 @@ impl TcpClientActor {
 
                 }
             }
-        })
+        }.instrument(read_loop_span))
         .abort_handle();
 
         state.abort_handle = Some(abort);
@@ -293,9 +316,11 @@ impl TcpClientActor {
         state: &mut TcpClientState,
         reason: String,
     ) {
+        let _g = warn_span!("tcp_client.transport_error", error = %reason).entered();
         state.events_output.send(ClientEvent::TransportError {
             reason: reason.clone(),
         });
+        drop(_g);
         myself.stop(Some(reason));
     }
 }
@@ -311,16 +336,26 @@ impl Actor for TcpClientActor {
         _: ActorRef<Self::Msg>,
         args: TcpClientArgs,
     ) -> Result<Self::State, ActorProcessingErr> {
-        let _span = info_span!("cassini.tcp-client.init").entered();
+        // Keep the "init" span short-lived and add the key identifiers as fields.
+        let init_span = info_span!(
+            "cassini.tcp_client.init",
+            broker_addr = %args.config.broker_endpoint,
+            server_name = %args.config.server_name,
+            has_registration_id = args.registration_id.is_some(),
+        );
+        let _g = init_span.enter();
         info!("Starting TCP Client");
 
         // --- 1. Initialize crypto provider once ---
+        let _g = debug_span!("tls.install_crypto_provider").entered();
         match rustls::crypto::aws_lc_rs::default_provider().install_default() {
             Ok(_) => warn!("Default crypto provider installed (this should only happen once)"),
             Err(_) => debug!("Crypto provider already configured"),
         }
+        drop(_g);
 
         // --- 2. Load CA certificate into root store ---
+        let _g = debug_span!("tls.load_ca_cert").entered();
         let mut root_cert_store = rustls::RootCertStore::empty();
         let ca_path = &args.config.ca_certificate_path;
 
@@ -335,15 +370,19 @@ impl Actor for TcpClientActor {
                 "Failed to add CA certificate to root store: {e}"
             ))
         })?;
+        drop(_g);
 
         // --- 3. Build WebPKI verifier ---
+        let _g = debug_span!("tls.build_verifier").entered();
         let verifier = WebPkiServerVerifier::builder(Arc::new(root_cert_store))
             .build()
             .map_err(|e| {
                 ActorProcessingErr::from(anyhow::anyhow!("Failed to build WebPKI verifier: {e}"))
             })?;
+        drop(_g);
 
         // --- 4. Load client cert and key ---
+        let _g = debug_span!("tls.load_client_cert_key").entered();
         let mut certs = Vec::new();
         let cert_path = &args.config.client_certificate_path;
         let key_path = &args.config.client_key_path;
@@ -361,8 +400,10 @@ impl Actor for TcpClientActor {
                 "Failed to read client private key from {key_path}: {e}"
             ))
         })?;
+        drop(_g);
 
         // --- 5. Build Rustls client config ---
+        let _g = debug_span!("tls.build_client_config").entered();
         let client_config = rustls::ClientConfig::builder()
             .with_webpki_verifier(verifier)
             .with_client_auth_cert(certs, private_key)
@@ -371,6 +412,7 @@ impl Actor for TcpClientActor {
                     "Failed to build Rustls client config: {e}"
                 ))
             })?;
+        drop(_g);
 
         // --- 6. Determine registration state ---
         let registration = match args.registration_id {
@@ -381,6 +423,7 @@ impl Actor for TcpClientActor {
         };
 
         // --- 7. Construct final state ---
+        // init_span ends when this function returns (no long-lived spawned tasks here)
         let state = TcpClientState {
             bind_addr: args.config.broker_endpoint,
             server_name: args.config.server_name,
@@ -401,6 +444,12 @@ impl Actor for TcpClientActor {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         let addr = state.bind_addr.clone();
+        let connect_span = info_span!(
+            "cassini.tcp_client.connect",
+            broker_addr = %addr,
+            server_name = %state.server_name,
+        );
+        let _g = connect_span.enter();
         info!("Connecting to {addr}");
 
         let tls_stream = TcpClientActor::connect_with_backoff(
@@ -409,6 +458,9 @@ impl Actor for TcpClientActor {
             &state.client_config,
         )
         .await?;
+
+        info!("TLS connection established");
+
         let (reader, write_half) = split(tls_stream);
         let writer = tokio::io::BufWriter::new(write_half);
 
@@ -417,9 +469,11 @@ impl Actor for TcpClientActor {
 
         info!("Successfully connected to {addr}. Listening for messages.");
 
+        // Spawn the long-running reader loop under its own span (spawn_reader should instrument the task).
         self.spawn_reader(myself.clone(), state)?;
 
         // Kick off registration *after* connection is guaranteed
+        info!("Requesting registration");
         myself
             .send_message(TcpClientMessage::Register)
             .map_err(ActorProcessingErr::from)?;
@@ -436,6 +490,11 @@ impl Actor for TcpClientActor {
         Ok(())
     }
 
+    #[tracing::instrument(
+        name = "cassini.tcp_client.handle",
+        skip(self, myself, state),
+        fields(registration = ?state.registration, msg = ?message),
+    )]
     async fn handle(
         &self,
         myself: ActorRef<Self::Msg>,

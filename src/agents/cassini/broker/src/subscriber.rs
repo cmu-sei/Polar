@@ -8,7 +8,7 @@ use ractor::{
     async_trait, registry::where_is, Actor, ActorProcessingErr, ActorRef, SupervisionEvent,
 };
 use std::collections::VecDeque;
-use tracing::{debug, error, info, trace, trace_span, warn};
+use tracing::{debug, error, info, trace, trace_span, warn, Instrument};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 pub const SUBSCRIBER_NOT_FOUND_TXT: &str = "Subscriber not found!";
@@ -29,16 +29,24 @@ impl SubscriberManager {
         myself: ActorRef<BrokerMessage>,
         reason: Option<String>,
     ) {
-        //cleanup all subscriptions for session
+        let mut stopped = 0usize;
+        // cleanup all subscriptions for session
         for subscriber in myself.get_children().into_iter().filter(|cell| {
-            let sub_name = cell.get_name().unwrap();
-            let sub_id = sub_name.split_once(":").unwrap().0;
-            registration_id.eq(sub_id)
+            let Some(sub_name) = cell.get_name() else {
+                return false;
+            };
+            let Some((sub_id, _topic)) = sub_name.split_once(':') else {
+                return false;
+            };
+            registration_id == sub_id
         }) {
             subscriber.stop(reason.clone());
+            stopped += 1;
         }
+        debug!(%registration_id, stopped, "Stopped subscriptions for registration");
     }
 }
+
 #[async_trait]
 impl Actor for SubscriberManager {
     type Msg = BrokerMessage; // Messages this actor handles
@@ -51,7 +59,6 @@ impl Actor for SubscriberManager {
         _: (),
     ) -> Result<Self::State, ActorProcessingErr> {
         tracing::debug!("{myself:?} starting");
-
         Ok(SubscriberManagerState)
     }
 
@@ -76,10 +83,13 @@ impl Actor for SubscriberManager {
                 client_id,
                 trace_ctx,
             } => {
-                let span =
-                    trace_span!("subscriber_manager.handle_client_reregistration", %client_id);
+                let span = trace_span!(
+                    "cassini.subscriber_manager.handle_registration_request",
+                    %client_id,
+                    has_registration_id = registration_id.is_some()
+                );
                 if let Some(ctx) = trace_ctx {
-                    span.set_parent(ctx.clone()).ok();
+                    let _ = span.set_parent(ctx);
                 }
                 let _g = span.enter();
 
@@ -87,61 +97,83 @@ impl Actor for SubscriberManager {
                     "Subscriber manager for received registration request for client {client_id}"
                 );
 
-                //find all subscribers for a given registration id
-                registration_id.map(|registration_id: String| {
+                // find all subscribers for a given registration id
+                if let Some(registration_id) = registration_id {
                     info!("Gathering Subscriptions for session {registration_id}");
-                    if let Some(_) = where_is(registration_id.clone()) {
+                    if where_is(registration_id.clone()).is_some() {
                         let cloned_session_id = registration_id.clone();
-                        for subscriber in myself.get_children()
-                        .into_iter()
-                        .filter(|cell|{
-                            let sub_name = cell.get_name().unwrap();
-                            let sub_id = sub_name.split_once(":").unwrap().0;
-                            cloned_session_id.eq(sub_id)
+
+                        for subscriber in myself
+                            .get_children()
+                            .into_iter()
+                            .filter(|cell| {
+                                let Some(sub_name) = cell.get_name() else {
+                                    return false;
+                                };
+                                let Some((sub_id, _topic)) = sub_name.split_once(':') else {
+                                    return false;
+                                };
+                                cloned_session_id == sub_id
+                            })
+                        {
+                            // notify so they dump unsent messages
+                            if let Err(e) = subscriber.send_message(BrokerMessage::RegistrationRequest {
+                                registration_id: Some(registration_id.clone()),
+                                client_id: client_id.clone(),
+                                trace_ctx: Some(span.context()),
                             }) {
-                            //notify so they dump unsent messages
-                            if let Err(e) = subscriber.send_message(BrokerMessage::RegistrationRequest { registration_id: Some(registration_id.clone()), client_id: client_id.clone(), trace_ctx: Some(span.context())}) {
-                                warn!("{REGISTRATION_REQ_FAILED_TXT}: {SUBSCRIBER_NOT_FOUND_TXT}: {e}")
+                                warn!(error = %e, "{REGISTRATION_REQ_FAILED_TXT}: {SUBSCRIBER_NOT_FOUND_TXT}");
                             }
                         }
                     } else {
-                        let err_msg = format!("{REGISTRATION_REQ_FAILED_TXT}: {SESSION_NOT_FOUND_TXT}");
+                        let err_msg =
+                            format!("{REGISTRATION_REQ_FAILED_TXT}: {SESSION_NOT_FOUND_TXT}");
                         warn!("{err_msg}");
 
                         if let Some(listener) = where_is(client_id.clone()) {
-                            listener.send_message(BrokerMessage::RegistrationResponse { client_id: client_id.clone(), result: Err(err_msg.clone()), trace_ctx: Some(span.context())})
-                            .map_err(|e| {
-                                warn!("{err_msg}: {e}");
-                            }).unwrap()
+                            if let Err(e) = listener.send_message(BrokerMessage::RegistrationResponse {
+                                client_id: client_id.clone(),
+                                result: Err(err_msg.clone()),
+                                trace_ctx: Some(span.context()),
+                            }) {
+                                warn!(error = %e, "{err_msg}");
+                            }
+                        } else {
+                            error!("{err_msg}: {CLIENT_NOT_FOUND_TXT}");
                         }
-                        else { error!("{err_msg}: {CLIENT_NOT_FOUND_TXT}"); }
                     }
-                });
+                } else {
+                    warn!("RegistrationRequest missing registration_id; nothing to rehydrate");
+                }
             }
+
             BrokerMessage::CreateSubscriber {
                 registration_id,
                 topic,
                 trace_ctx,
                 reply,
             } => {
-                let span =
-                    trace_span!("subscriber_manager.handle_subscribe", %registration_id, %topic);
-                trace_ctx.map(|ctx| span.set_parent(ctx));
-                let _g = span.enter();
+                let span = trace_span!(
+                    "cassini.subscriber_manager.create_subscriber",
+                    %registration_id,
+                    %topic
+                );
+                if let Some(ctx) = trace_ctx {
+                    let _ = span.set_parent(ctx);
+                }
 
-                trace!("Subscriber manager received subscribe command.");
+                trace!("Subscriber manager received subscribe command");
 
                 let subscriber_id = get_subscriber_name(&registration_id, &topic);
-                // start new subscriber actor for session
 
-                // drop the span guard here. We're through
-                drop(_g);
+                // Instrument the spawn future instead of holding an enter-guard across `.await`.
                 match Actor::spawn_linked(
                     Some(subscriber_id.clone()),
                     SubscriberAgent,
                     (),
                     myself.clone().into(),
                 )
+                .instrument(span.clone())
                 .await
                 {
                     Ok((subscriber, _)) => {
@@ -159,38 +191,52 @@ impl Actor for SubscriberManager {
                 topic,
                 trace_ctx,
             } => {
-                let span = trace_span!("subscriber_manager.handle_unsubscribe_request", %registration_id, %topic);
-                trace_ctx.map(|ctx| span.set_parent(ctx));
+                let span = trace_span!(
+                    "cassini.subscriber_manager.unsubscribe_request",
+                    %registration_id,
+                    %topic
+                );
+                if let Some(ctx) = trace_ctx {
+                    let _ = span.set_parent(ctx);
+                }
                 let _g = span.enter();
 
-                trace!("subscriber maanger received unsubscribe request.");
+                trace!("subscriber manager received unsubscribe request");
 
                 let subscriber_name = format!("{registration_id}:{topic}");
                 if let Some(subscriber) = where_is(subscriber_name.clone()) {
                     subscriber.stop(Some("UNSUBSCRIBED".to_string()));
-                    //send ack
-
-                    where_is(registration_id.clone()).map(|session| {
-                        session
-                            .send_message(BrokerMessage::UnsubscribeAcknowledgment {
-                                registration_id,
-                                topic,
-                                result: Ok(()),
-                            })
-                            .expect("expected to send ack to session");
-                    });
+                    // send ack
+                    if let Some(session) = where_is(registration_id.clone()) {
+                        if let Err(e) = session.send_message(BrokerMessage::UnsubscribeAcknowledgment {
+                            registration_id,
+                            topic,
+                            result: Ok(()),
+                        }) {
+                            warn!(error = %e, "Failed to send unsubscribe ack to session");
+                        }
+                    } else {
+                        warn!("Failed to lookup session {registration_id} for unsubscribe ack");
+                    }
                 } else {
                     warn!("Session agent {registration_id} not subscribed to topic {topic}");
                 }
             }
+
             BrokerMessage::DisconnectRequest {
                 client_id,
                 registration_id,
                 trace_ctx,
                 ..
             } => {
-                let span = trace_span!("subscriber_manager.handle_disconnect_request", %client_id );
-                trace_ctx.map(|ctx| span.set_parent(ctx));
+                let span = trace_span!(
+                    "cassini.subscriber_manager.disconnect_request",
+                    %client_id,
+                    has_registration_id = registration_id.is_some()
+                );
+                if let Some(ctx) = trace_ctx {
+                    let _ = span.set_parent(ctx);
+                }
                 let _g = span.enter();
 
                 if let Some(registration_id) = registration_id {
@@ -203,16 +249,16 @@ impl Actor for SubscriberManager {
                     warn!("Failed to process disconnect request! registration_id missing.")
                 }
             }
-            BrokerMessage::TimeoutMessage {
-                registration_id, ..
-            } => {
+
+            BrokerMessage::TimeoutMessage { registration_id, .. } => {
                 SubscriberManager::forget_subscriptions(
                     registration_id,
                     myself.clone(),
                     Some(TIMEOUT_REASON.to_string()),
                 );
             }
-            _ => warn!(UNEXPECTED_MESSAGE_STR, "{message:?}"),
+
+            other => warn!(?other, "{UNEXPECTED_MESSAGE_STR}"),
         }
         Ok(())
     }
@@ -264,10 +310,13 @@ impl Actor for SubscriberAgent {
         _: (),
     ) -> Result<Self::State, ActorProcessingErr> {
         tracing::debug!("{myself:?} starting");
-        //parse args. if any
-        let name = myself
-            .get_name()
-            .expect("{SUBSCRIBE_REQUEST_FAILED_TXT}: Expected subscriber to have name");
+        // parse args. if any
+        let name = myself.get_name().ok_or_else(|| {
+            ActorProcessingErr::from(format!(
+                "{SUBSCRIBE_REQUEST_FAILED_TXT}: Expected subscriber to have name"
+            ))
+        })?;
+
         if let Some((registration_id, topic)) = name.split_once(':') {
             Ok(SubscriberAgentState {
                 registration_id: registration_id.to_string(),
@@ -275,7 +324,9 @@ impl Actor for SubscriberAgent {
                 dead_letter_queue: VecDeque::new(),
             })
         } else {
-            panic!("{SUBSCRIBE_REQUEST_FAILED_TXT}: Bad name given");
+            Err(ActorProcessingErr::from(format!(
+                "{SUBSCRIBE_REQUEST_FAILED_TXT}: Bad name given: {name}"
+            )))
         }
     }
 
@@ -300,22 +351,26 @@ impl Actor for SubscriberAgent {
                 client_id,
                 trace_ctx,
             } => {
-                let span = trace_span!("subscriber.handle_registration_request", %client_id);
+                let span = trace_span!(
+                    "cassini.subscriber.handle_registration_request",
+                    %client_id,
+                    has_registration_id = registration_id.is_some()
+                );
                 if let Some(ctx) = trace_ctx {
-                    span.set_parent(ctx).ok();
+                    let _ = span.set_parent(ctx);
                 }
                 let _enter = span.enter();
 
                 trace!("Subscriber actor received registration request for client {client_id}");
 
-                //A client reconnected, push messages built up in DLQ to client
+                // A client reconnected, push messages built up in DLQ to client
                 if let Some(id) = registration_id {
                     match where_is(id.clone()) {
                         Some(session) => {
                             info!("Forwarding missed messages to session: {id}");
-                            while let Some(msg) = &state.dead_letter_queue.pop_front() {
+                            while let Some(msg) = state.dead_letter_queue.pop_front() {
                                 if let Err(e) = session.send_message(BrokerMessage::PushMessage {
-                                    payload: msg.to_owned(),
+                                    payload: msg,
                                     topic: state.topic.clone(),
                                     trace_ctx: Some(span.context()),
                                 }) {
@@ -330,15 +385,16 @@ impl Actor for SubscriberAgent {
                     }
                 }
             }
+
             BrokerMessage::PublishResponse {
                 topic,
                 payload,
                 trace_ctx,
                 ..
             } => {
-                let span = trace_span!("subscriber.dequeue_messages" ,%topic);
+                let span = trace_span!("cassini.subscriber.publish_response", %topic);
                 if let Some(ctx) = trace_ctx {
-                    span.set_parent(ctx).ok();
+                    let _ = span.set_parent(ctx);
                 }
                 let _enter = span.enter();
 
@@ -350,9 +406,8 @@ impl Actor for SubscriberAgent {
                 );
 
                 if let Some(session) = where_is(state.registration_id.clone()) {
-                    //  Forward the message, if we get an error message back from the session later.
-                    //  DLQ the message for later
-                    //  if we fail to send a message to a session, it's probably dead, either because of a timeout or disconnect, either way, message can drop
+                    // Forward the message; if we fail to send, session is likely dead (timeout/disconnect),
+                    // and message can drop (or be DLQ'd by session).
                     if let Err(e) = session.send_message(BrokerMessage::PushMessage {
                         payload,
                         topic,
@@ -366,9 +421,10 @@ impl Actor for SubscriberAgent {
                     myself.stop(None);
                 }
             }
+
             BrokerMessage::PushMessageFailed { payload } => {
-                //session couldn't talk to listener, add message to DLQ
-                state.dead_letter_queue.push_back(payload.clone());
+                // session couldn't talk to listener, add message to DLQ
+                state.dead_letter_queue.push_back(payload);
                 debug!(
                     "Subscriber {0} queue has {1} message(s) waiting",
                     myself
@@ -377,9 +433,9 @@ impl Actor for SubscriberAgent {
                     state.dead_letter_queue.len()
                 );
             }
+
             _ => {
-                warn!(UNEXPECTED_MESSAGE_STR);
-                warn!("{message:?}");
+                warn!(?message, "{UNEXPECTED_MESSAGE_STR}");
             }
         }
         Ok(())

@@ -1,6 +1,7 @@
 use cassini_types::{BrokerMessage, ControlError, ControlOp, ControlResult};
 use ractor::{concurrency::Duration, rpc::CallResult, Actor, ActorProcessingErr, ActorRef};
-use tracing::{debug, trace_span, warn};
+use std::time::Instant;
+use tracing::{debug, error, trace_span, warn};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 use crate::UNEXPECTED_MESSAGE_STR;
@@ -53,8 +54,16 @@ impl Actor for ControlManager {
                 trace_ctx,
                 reply_to,
             } => {
-                let span = trace_span!("ControlManager.handle_control_request", %registration_id);
-                trace_ctx.map(|ctx| span.set_parent(ctx).ok());
+                // Parent span for the whole control request; attach upstream ctx if present.
+                let span = trace_span!(
+                    "cassini.control_manager.handle",
+                    %registration_id,
+                    op = ?op
+                );
+                if let Some(ctx) = trace_ctx {
+                    let _ = span.set_parent(ctx);
+                }
+                let _g = span.enter();
 
                 let resp = match op {
                     ControlOp::Ping => {
@@ -66,8 +75,14 @@ impl Actor for ControlManager {
                         }
                     }
                     ControlOp::ListSessions => {
-                        let span = trace_span!("ControlManager Received ListSessionsDirective");
-                        let _ = span.enter();
+                        // Make this span a *child* of the request span (not a new root).
+                        let span = trace_span!(
+                            parent: &span,
+                            "cassini.control_manager.list_sessions",
+                            timeout_ms = 100u64
+                        );
+                        let _g = span.enter();
+                        let t0 = Instant::now();
 
                         match state
                             .session_mgr
@@ -81,27 +96,47 @@ impl Actor for ControlManager {
                             .await
                         {
                             Ok(result) => match result {
-                                CallResult::Success(sessions) => BrokerMessage::ControlResponse {
+                                CallResult::Success(sessions) => {
+                                    debug!(elapsed_ms = t0.elapsed().as_millis(), sessions = sessions.len(), "list_sessions ok");
+                                    BrokerMessage::ControlResponse {
+
                                     registration_id,
                                     result: Ok(ControlResult::SessionList(sessions)),
                                     trace_ctx: Some(span.context()),
-                                },
-                                CallResult::SenderError => BrokerMessage::ControlResponse {
+                                    }
+                                }
+                                CallResult::SenderError => {
+                                    warn!(elapsed_ms = t0.elapsed().as_millis(), "list_sessions sender_error");
+                                    BrokerMessage::ControlResponse {
                                     registration_id,
                                     result: Err(ControlError::InternalError(
                                         "Operation failed".to_string(),
                                     )),
                                     trace_ctx: Some(span.context()),
-                                },
-                                CallResult::Timeout => BrokerMessage::ControlResponse {
+                                    }
+                                }
+                                CallResult::Timeout => {
+                                    warn!(elapsed_ms = t0.elapsed().as_millis(), "list_sessions timeout");
+                                    BrokerMessage::ControlResponse {
                                     registration_id,
                                     result: Err(ControlError::InternalError(
                                         "Operation timed out.".to_string(),
                                     )),
                                     trace_ctx: Some(span.context()),
-                                },
+                                    }
+                                }
                             },
-                            Err(_e) => todo!(),
+                            Err(e) => {
+                                // ractor::rpc::CallError: actor stopped/mailbox closed/etc.
+                                error!(elapsed_ms = t0.elapsed().as_millis(), error = %e, "session_mgr call failed");
+                                BrokerMessage::ControlResponse {
+                                    registration_id,
+                                    result: Err(ControlError::InternalError(
+                                        "Session manager unavailable".to_string(),
+                                    )),
+                                    trace_ctx: Some(span.context()),
+                                }
+                            }
                         }
                     }
                     // ControlOp::GetSessionInfo { registration_id } => {
@@ -122,8 +157,13 @@ impl Actor for ControlManager {
                     //     }
                     // }
                     ControlOp::ListTopics => {
-                        let span = trace_span!("ControlManager Received ListTopics Directive");
-                        let _ = span.enter();
+                        let span = trace_span!(
+                            parent: &span,
+                            "cassini.control_manager.list_topics",
+                            timeout_ms = 100u64
+                        );
+                        let _g = span.enter();
+                        let t0 = Instant::now();
 
                         match state
                             .topic_mgr
@@ -138,27 +178,45 @@ impl Actor for ControlManager {
                             .await
                         {
                             Ok(result) => match result {
-                                CallResult::Success(topics) => BrokerMessage::ControlResponse {
+                                CallResult::Success(topics) => {
+                                    debug!(elapsed_ms = t0.elapsed().as_millis(), topics = topics.len(), "list_topics ok");
+                                    BrokerMessage::ControlResponse {
                                     registration_id,
                                     result: Ok(ControlResult::TopicList(topics)),
                                     trace_ctx: Some(span.context()),
-                                },
-                                CallResult::SenderError => BrokerMessage::ControlResponse {
+                                    }
+                                }
+                                CallResult::SenderError => {
+                                    warn!(elapsed_ms = t0.elapsed().as_millis(), "list_topics sender_error");
+                                    BrokerMessage::ControlResponse {
                                     registration_id,
                                     result: Err(ControlError::InternalError(
                                         "Operation failed".to_string(),
                                     )),
                                     trace_ctx: Some(span.context()),
-                                },
-                                CallResult::Timeout => BrokerMessage::ControlResponse {
+                                    }
+                                }
+                                CallResult::Timeout => {
+                                    warn!(elapsed_ms = t0.elapsed().as_millis(), "list_topics timeout");
+                                    BrokerMessage::ControlResponse {
                                     registration_id,
                                     result: Err(ControlError::InternalError(
                                         "Operation timed out.".to_string(),
                                     )),
                                     trace_ctx: Some(span.context()),
-                                },
+                                    }
+                                }
                             },
-                            Err(_e) => todo!(),
+                            Err(e) => {
+                                error!(elapsed_ms = t0.elapsed().as_millis(), error = %e, "topic_mgr call failed");
+                                BrokerMessage::ControlResponse {
+                                    registration_id,
+                                    result: Err(ControlError::InternalError(
+                                        "Topic manager unavailable".to_string(),
+                                    )),
+                                    trace_ctx: Some(span.context()),
+                                }
+                            }
                         }
                     }
                     // ControlOp::ListSubscribers { topic } => {
@@ -172,15 +230,21 @@ impl Actor for ControlManager {
                     _ => todo!("Handle other options"),
                 };
 
-                //fowrard response back to client
-                reply_to.map(|session| {
-                    session
-                        .cast(resp)
-                        .map_err(|_e| warn!("Failed to respond to session!"))
-                        .ok()
-                });
+                // forward response back to client
+                if let Some(session) = reply_to {
+                    if let Err(e) = session.cast(resp) {
+                        warn!(error = %e, "Failed to respond to session");
+                    } else {
+                        // Helpful breadcrumb when correlating "request -> response" without opening every span.
+                        debug!("ControlResponse forwarded to session");
+                    }
+                } else {
+                    warn!("ControlRequest missing reply_to; dropping response");
+                }
             }
-            _ => warn!("{UNEXPECTED_MESSAGE_STR}"),
+            other => {
+                warn!(?other, "{UNEXPECTED_MESSAGE_STR}");
+            }
         }
         Ok(())
     }

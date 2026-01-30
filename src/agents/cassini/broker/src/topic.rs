@@ -67,13 +67,14 @@ impl TopicManager {
             }
         }
     }
+
     /// Ensure topic exists (idempotent) and ask the SubscriberManager to create/attach
     /// a subscriber for `registration_id`.
     async fn ensure_topic_and_subscribe(
         &self,
         registration_id: String,
         topic: String,
-        trace_ctx: Option<opentelemetry::Context>, // adjust type to your trace ctx
+        trace_ctx: Option<opentelemetry::Context>,
         myself: ActorRef<BrokerMessage>,
         state: &mut TopicManagerState,
     ) -> Result<ActorRef<BrokerMessage>, ActorProcessingErr> {
@@ -83,47 +84,84 @@ impl TopicManager {
 
         // Ask SubscriberManager to create the subscriber (delegation)
         if let Some(sub_mgr) = &state.subscriber_mgr {
-            if let Ok(call_result) = sub_mgr
+            // BUGFIX: don't silently ignore call() failures (mailbox closed/actor dead/etc).
+            // Also: keep the trace context consistent through the whole subscribe flow.
+            let call_res = sub_mgr
                 .call(
                     |reply| BrokerMessage::CreateSubscriber {
                         registration_id: registration_id.clone(),
                         topic: topic.clone(),
-                        trace_ctx,
+                        trace_ctx: trace_ctx.clone(),
                         reply,
                     },
                     Some(Duration::from_millis(200)),
                 )
-                .await
-            {
-                match call_result {
-                    CallResult::Success(result) => {
-                        match result {
-                            Ok(subscriber_ref) => {
-                                // Handle successful subscription
-                                topic_actor
-                                    .cast(BrokerMessage::AddSubscriber {
-                                        subscriber_ref,
-                                        trace_ctx: None,
-                                    })
-                                    .ok();
-                            }
-                            Err(_err) => {
-                                // Handle subscription error
-                                todo!("handle subscription error");
+                .await;
+
+            match call_res {
+                Ok(call_result) => match call_result {
+                    CallResult::Success(result) => match result {
+                        Ok(subscriber_ref) => {
+                            // Attach subscriber to topic
+                            if let Err(e) = topic_actor.cast(BrokerMessage::AddSubscriber {
+                                subscriber_ref,
+                                // Preserve tracing into the add-subscriber/dequeue path.
+                                trace_ctx: trace_ctx.clone(),
+                            }) {
+                                warn!(
+                                    error = %e,
+                                    registration_id = %registration_id,
+                                    topic = %topic,
+                                    "failed to cast AddSubscriber to topic actor"
+                                );
                             }
                         }
-                    }
+                        Err(err) => {
+                            // Don't leave a TODO landmine in the hot path; report and fail.
+                            error!(
+                                error = ?err,
+                                registration_id = %registration_id,
+                                topic = %topic,
+                                "subscriber_mgr returned subscription error"
+                            );
+                            return Err(ActorProcessingErr::from(
+                                "SubscriberManager returned subscription error",
+                            ));
+                        }
+                    },
                     CallResult::SenderError => {
-                        // Handle call failure
                         error!(
-                            "TopicManager: failed to subscribe {} -> {}",
-                            registration_id, topic
+                            registration_id = %registration_id,
+                            topic = %topic,
+                            "SubscriberManager sender error while subscribing"
                         );
+                        return Err(ActorProcessingErr::from(
+                            "SubscriberManager sender error while subscribing",
+                        ));
                     }
                     CallResult::Timeout => {
-                        // Handle call timeout
-                        todo!("Handle call timeout");
+                        error!(
+                            registration_id = %registration_id,
+                            topic = %topic,
+                            timeout_ms = 200u64,
+                            "SubscriberManager call timed out while subscribing"
+                        );
+                        return Err(ActorProcessingErr::from(
+                            "SubscriberManager call timed out while subscribing",
+                        ));
                     }
+                },
+                Err(e) => {
+                    // ractor::rpc::CallError: actor stopped/mailbox closed/etc.
+                    error!(
+                        error = %e,
+                        registration_id = %registration_id,
+                        topic = %topic,
+                        "SubscriberManager call failed while subscribing"
+                    );
+                    return Err(ActorProcessingErr::from(
+                        "SubscriberManager call failed while subscribing",
+                    ));
                 }
             }
         } else {
@@ -142,36 +180,16 @@ impl TopicManager {
 
 #[async_trait]
 impl Actor for TopicManager {
-    #[doc = " The message type for this actor"]
     type Msg = BrokerMessage;
-
-    #[doc = " The type of state this actor manages internally"]
     type State = TopicManagerState;
-
-    #[doc = " Initialization arguments"]
     type Arguments = TopicManagerArgs;
 
-    #[doc = " Invoked when an actor is being started by the system."]
-    #[doc = ""]
-    #[doc = " Any initialization inherent to the actor\'s role should be"]
-    #[doc = " performed here hence why it returns the initial state."]
-    #[doc = ""]
-    #[doc = " Panics in `pre_start` do not invoke the"]
-    #[doc = " supervision strategy and the actor won\'t be started. [Actor]::`spawn`"]
-    #[doc = " will return an error to the caller"]
-    #[doc = ""]
-    #[doc = " * `myself` - A handle to the [ActorCell] representing this actor"]
-    #[doc = " * `args` - Arguments that are passed in the spawning of the actor which might"]
-    #[doc = " be necessary to construct the initial state"]
-    #[doc = ""]
-    #[doc = " Returns an initial [Actor::State] to bootstrap the actor"]
     async fn pre_start(
         &self,
         myself: ActorRef<Self::Msg>,
         args: TopicManagerArgs,
     ) -> Result<Self::State, ActorProcessingErr> {
-        //
-        // Try to reinit from a predermined list of topics
+        // Try to reinit from a predetermined list of topics
         debug!("Starting {myself:?}");
         let mut state = TopicManagerState {
             topics: HashMap::new(),
@@ -182,8 +200,6 @@ impl Actor for TopicManager {
             debug!("Spawning topic actors...");
 
             for topic in topics {
-                //start topic actors for that topic
-
                 match Actor::spawn_linked(
                     Some(topic.clone()),
                     TopicAgent,
@@ -209,7 +225,6 @@ impl Actor for TopicManager {
         _: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         debug!("{myself:?} Started");
-
         Ok(())
     }
 
@@ -226,11 +241,16 @@ impl Actor for TopicManager {
                 payload,
                 trace_ctx,
             } => {
-                let span = trace_span!("topic_manager.handle_publish_request");
+                let span = trace_span!(
+                    "cassini.topic_manager.publish_request",
+                    %registration_id,
+                    topic = %topic,
+                    payload_len = payload.len()
+                );
                 if let Some(ctx) = trace_ctx {
-                    span.set_parent(ctx).ok();
+                    let _ = span.set_parent(ctx);
                 }
-                let _enter = span.enter();
+                let _g = span.enter();
 
                 // Always go through ensure_topic
                 match self
@@ -245,18 +265,11 @@ impl Actor for TopicManager {
                             payload,
                             trace_ctx: Some(span.context()),
                         }) {
-                            error!(
-                                "TopicManager failed to forward publish to topic actor {:?}: {e:?}",
-                                topic
-                            );
+                            error!(error = %e, topic = %topic, "failed to forward publish to topic actor");
                         }
                     }
                     Err(e) => {
-                        // If we can’t create/ensure topic, send an error upstream
-                        trace!(
-                            "TopicManager failed to ensure topic \"{}\"; sending error to broker: {e:?}",
-                            topic
-                        );
+                        error!(error = %e, topic = %topic, "failed to ensure topic; notifying broker");
                         if let Some(supervisor) = myself.try_get_supervisor() {
                             supervisor
                                 .send_message(BrokerMessage::ErrorMessage {
@@ -268,21 +281,26 @@ impl Actor for TopicManager {
                     }
                 }
             }
+
             BrokerMessage::PublishResponse {
                 topic,
                 payload,
                 trace_ctx,
                 ..
             } => {
-                let span = trace_span!("topic_manager.handle_publish_request");
+                let span = trace_span!(
+                    "cassini.topic_manager.publish_response",
+                    topic = %topic,
+                    payload_len = payload.len()
+                );
                 if let Some(ctx) = trace_ctx {
-                    span.set_parent(ctx).ok();
+                    let _ = span.set_parent(ctx);
                 }
-                let _enter = span.enter();
+                let _g = span.enter();
 
                 trace!("Topic manager received publish response for \"{topic}\"");
 
-                //forward to broker
+                // forward to broker
                 match myself.try_get_supervisor() {
                     Some(broker) => broker
                         .send_message(BrokerMessage::PublishResponse {
@@ -295,11 +313,22 @@ impl Actor for TopicManager {
                     None => todo!(),
                 }
             }
+
             BrokerMessage::SubscribeRequest {
                 registration_id,
                 topic,
                 trace_ctx,
             } => {
+                let span = trace_span!(
+                    "cassini.topic_manager.subscribe_request",
+                    %registration_id,
+                    topic = %topic
+                );
+                if let Some(ctx) = trace_ctx.clone() {
+                    let _ = span.set_parent(ctx);
+                }
+                let _g = span.enter();
+
                 if let Err(e) = self
                     .ensure_topic_and_subscribe(
                         registration_id.clone(),
@@ -310,19 +339,20 @@ impl Actor for TopicManager {
                     )
                     .await
                 {
-                    error!("ensure_topic_and_subscribe failed: {e:?}");
+                    error!(error = %e, "ensure_topic_and_subscribe failed");
                 }
             }
+
             BrokerMessage::GetTopics {
                 registration_id,
                 reply_to,
                 trace_ctx,
             } => {
-                let span = trace_span!("topic_manager.handle_get_topics", %registration_id);
+                let span = trace_span!("cassini.topic_manager.get_topics", %registration_id);
                 if let Some(ctx) = trace_ctx {
-                    span.set_parent(ctx).ok();
+                    let _ = span.set_parent(ctx);
                 }
-                let _enter = span.enter();
+                let _g = span.enter();
 
                 trace!("Topic Manager retrieving topics.");
 
@@ -334,6 +364,7 @@ impl Actor for TopicManager {
                     .map_err(|_| warn!("Failed to send topics."))
                     .ok();
             }
+
             _ => warn!(UNEXPECTED_MESSAGE_STR),
         }
         Ok(())
@@ -352,13 +383,8 @@ struct TopicAgentState {
 
 #[async_trait]
 impl Actor for TopicAgent {
-    #[doc = " The message type for this actor"]
     type Msg = BrokerMessage;
-
-    #[doc = " The type of state this actor manages internally"]
     type State = TopicAgentState;
-
-    #[doc = " Initialization arguments"]
     type Arguments = ();
 
     async fn pre_start(
@@ -377,9 +403,10 @@ impl Actor for TopicAgent {
         myself: ActorRef<Self::Msg>,
         _state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        debug!("{myself:?} Started",);
+        debug!("{myself:?} Started");
         Ok(())
     }
+
     async fn handle(
         &self,
         myself: ActorRef<Self::Msg>,
@@ -391,17 +418,22 @@ impl Actor for TopicAgent {
                 registration_id,
                 topic,
                 payload,
-                ..
+                trace_ctx,
             } => {
-                let span = trace_span!("topic.dequeue_messages");
-                // explicitly break publishing context and start one to trace dequeue flow.
-                span.set_parent(opentelemetry::Context::new()).ok();
-
-                let _enter = span.enter();
+                let span = trace_span!(
+                    "cassini.topic_agent.publish",
+                    %registration_id,
+                    topic = %topic,
+                    payload_len = payload.len()
+                );
+                if let Some(ctx) = trace_ctx {
+                    let _ = span.set_parent(ctx);
+                }
+                let _g = span.enter();
 
                 trace!("Topic agent received publish request for \"{topic}\"");
 
-                //alert subscribers
+                // alert subscribers
                 if !state.subscribers.is_empty() {
                     for subscriber in &state.subscribers {
                         if let Err(e) = subscriber.send_message(BrokerMessage::PublishResponse {
@@ -414,7 +446,7 @@ impl Actor for TopicAgent {
                         }
                     }
                 } else {
-                    //queue message
+                    // queue message
                     state.queue.push_back(payload);
                     info!(
                         "{}",
@@ -426,7 +458,7 @@ impl Actor for TopicAgent {
                     );
                 }
 
-                //send ACK to session that made the request
+                // send ACK to session that made the request
                 match where_is(registration_id.clone()) {
                     Some(session) => {
                         if let Err(e) = session.send_message(BrokerMessage::PublishRequestAck {
@@ -439,43 +471,55 @@ impl Actor for TopicAgent {
                     None => warn!("Failed to lookup session {registration_id}"),
                 }
             }
+
             BrokerMessage::AddSubscriber {
                 subscriber_ref,
                 trace_ctx,
             } => {
-                let span = trace_span!("topic.add_subscriber");
-                trace_ctx.map(|ctx| span.set_parent(ctx));
-                let _ = span.enter();
+                let span = trace_span!("cassini.topic_agent.add_subscriber");
+                if let Some(ctx) = trace_ctx.clone() {
+                    let _ = span.set_parent(ctx);
+                }
+                let _g = span.enter();
 
                 trace!("Received subscribe session directive");
 
                 state.subscribers.push(subscriber_ref.clone());
 
-                while let Some(msg) = &state.queue.pop_front() {
+                // Drain queued messages now that someone is listening.
+                // NOTE: avoid taking a reference to a temporary; take ownership of the vec.
+                while let Some(msg) = state.queue.pop_front() {
                     // if this were to fail, user probably unsubscribed while we were dequeuing
                     // It should be ok to ignore this case.
                     subscriber_ref
                         .send_message(BrokerMessage::PublishResponse {
                             topic: myself.get_name().unwrap(),
-                            payload: msg.to_vec(),
+                            payload: msg,
                             result: Ok(()),
                             trace_ctx: Some(span.context()),
                         })
                         .ok();
                 }
             }
+
             BrokerMessage::UnsubscribeRequest {
                 registration_id,
                 topic,
                 trace_ctx,
             } => {
-                let span =
-                    trace_span!("topic.handle_unsubscribe_request", %registration_id, %topic);
-                trace_ctx.map(|ctx| span.set_parent(ctx));
+                let span = trace_span!(
+                    "cassini.topic_agent.unsubscribe_request",
+                    %registration_id,
+                    topic = %topic
+                );
+                if let Some(ctx) = trace_ctx {
+                    let _ = span.set_parent(ctx);
+                }
                 let _g = span.enter();
 
                 trace!("topic actor received unsubscribe request.");
             }
+
             _ => (),
         }
         Ok(())

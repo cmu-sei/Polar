@@ -13,6 +13,7 @@ use tracing::{debug, error, info, trace, trace_span, warn};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 use std::env;
+
 // ============================== Broker Supervisor Actor Definition ============================== //
 
 pub struct Broker;
@@ -50,12 +51,11 @@ impl BrokerArgs {
     }
 
     pub fn new() -> Result<Self, BrokerConfigError> {
-        use std::env;
-
         let server_cert_file = BrokerArgs::required_env("TLS_SERVER_CERT_CHAIN")?;
         let private_key_file = BrokerArgs::required_env("TLS_SERVER_KEY")?;
         let ca_cert_file = BrokerArgs::required_env("TLS_CA_CERT")?;
-        let bind_addr = env::var("CASSINI_BIND_ADDR").unwrap_or(String::from("0.0.0.0:8080"));
+        let bind_addr =
+            env::var("CASSINI_BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".to_string());
 
         Ok(BrokerArgs {
             bind_addr,
@@ -78,7 +78,11 @@ impl Actor for Broker {
         myself: ActorRef<Self::Msg>,
         args: BrokerArgs,
     ) -> Result<Self::State, ActorProcessingErr> {
-        debug!("Broker: starting {:?}", myself);
+        // Parent span for startup; don't try to "carry" this across spawned actors.
+        let span = trace_span!("cassini.broker.pre_start", bind_addr = %args.bind_addr);
+        let _g = span.enter();
+
+        debug!(actor = ?myself, "Broker starting");
 
         let listener_manager_args = ListenerManagerArgs {
             bind_addr: args.bind_addr,
@@ -95,7 +99,7 @@ impl Actor for Broker {
         )
         .await
         .map_err(|e| {
-            error!("Broker startup failed: ListenerManager failed to start: {e:?}");
+            error!(error = ?e, "Broker startup failed: ListenerManager failed to start");
             ActorProcessingErr::from(e)
         })?;
 
@@ -109,7 +113,7 @@ impl Actor for Broker {
         )
         .await
         .map_err(|e| {
-            error!("Broker startup failed: SessionManager failed to start: {e:?}");
+            error!(error = ?e, "Broker startup failed: SessionManager failed to start");
             ActorProcessingErr::from(e)
         })?;
 
@@ -121,7 +125,7 @@ impl Actor for Broker {
         )
         .await
         .map_err(|e| {
-            error!("failed to spawn SubscriberManager: {e:?}");
+            error!(error = ?e, "Broker startup failed: SubscriberManager failed to start");
             ActorProcessingErr::from(e)
         })?;
 
@@ -138,7 +142,7 @@ impl Actor for Broker {
         )
         .await
         .map_err(|e| {
-            error!("failed to spawn TopicManager: {e:?}");
+            error!(error = ?e, "Broker startup failed: TopicManager failed to start");
             ActorProcessingErr::from(e)
         })?;
 
@@ -157,7 +161,7 @@ impl Actor for Broker {
         )
         .await
         .map_err(|e| {
-            error!("failed to spawn ControlManager: {e:?}");
+            error!(error = ?e, "Broker startup failed: ControlManager failed to start");
             ActorProcessingErr::from(e)
         })?;
 
@@ -174,52 +178,42 @@ impl Actor for Broker {
 
     async fn handle_supervisor_evt(
         &self,
-        _myself: ActorRef<Self::Msg>,
+        myself: ActorRef<Self::Msg>,
         msg: SupervisionEvent,
         _: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
+        let span = trace_span!("cassini.broker.supervision_event");
+        let _g = span.enter();
+
         match msg {
             SupervisionEvent::ActorStarted(actor_cell) => {
                 debug!(
-                    "Worker agent: {0:?}:{1:?} started",
-                    actor_cell.get_name(),
-                    actor_cell.get_id()
-                )
+                    worker_name = ?actor_cell.get_name(),
+                    worker_id = ?actor_cell.get_id(),
+                    "Worker started"
+                );
             }
 
             SupervisionEvent::ActorTerminated(actor_cell, ..) => {
-                debug!(
-                    "Worker {0:?}:{1:?} terminated, restarting..",
-                    actor_cell.get_name(),
-                    actor_cell.get_id()
-                )
+                // Don't claim we restart if we don't.
+                warn!(
+                    worker_name = ?actor_cell.get_name(),
+                    worker_id = ?actor_cell.get_id(),
+                    "Worker terminated (no restart strategy implemented here)"
+                );
             }
 
             SupervisionEvent::ActorFailed(actor_cell, e) => {
-                warn!(
-                    "Worker agent: {0:?}:{1:?} failed! {e}",
-                    actor_cell.get_name(),
-                    actor_cell.get_id()
+                // Today: fatal. Tomorrow: restart policy per worker type.
+                error!(
+                    worker_name = ?actor_cell.get_name(),
+                    worker_id = ?actor_cell.get_id(),
+                    error = %e,
+                    "Worker failed; stopping broker"
                 );
-
-                // Determine type of actor that failed and restart
-
-                // NOTE: "Remote" actors can't have their types checked? But
-                // they do send serializable messages. If we can deserialize
-                // them to a datatype here, that may be another acceptable means
-                // of determining type.
-
-                // TODO: Figure out what panics/failures we can/can't recover
-                // from Missing certificate files and the inability to forward
-                // some messages count as bad states
-                _myself.stop(Some("ACTOR_FAILED".to_string()));
-
-                // Vaughn, this sounds like a whiteboarding session. These are
-                // top-level supervisors, so if they fail we definitely should
-                // _try_ to recover them, but each one may have a fairly hefty
-                // amount of stuff to recover. This may be akin to a full
-                // restart / re-init of the broker, if one of these fails.
+                myself.stop(Some("ACTOR_FAILED".to_string()));
             }
+
             SupervisionEvent::ProcessGroupChanged(_) => (),
         }
 
@@ -231,7 +225,7 @@ impl Actor for Broker {
         myself: ActorRef<Self::Msg>,
         _: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        debug!("Broker: Started {myself:?}");
+        debug!(actor = ?myself, "Broker started");
         Ok(())
     }
 
@@ -240,7 +234,7 @@ impl Actor for Broker {
         myself: ActorRef<Self::Msg>,
         _: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        debug!("Broker: Stopped {myself:?}");
+        debug!(actor = ?myself, "Broker stopped");
         Ok(())
     }
 
@@ -256,32 +250,34 @@ impl Actor for Broker {
                 client_id,
                 trace_ctx,
             } => {
-                let span = trace_span!("broker.handle_registration_request", client_id = client_id);
-                if let Some(ctx) = trace_ctx.clone() {
-                    span.set_parent(ctx.clone()).ok();
+                let span = trace_span!(
+                    "cassini.broker.registration_request",
+                    %client_id,
+                    registration_id = ?registration_id
+                );
+                if let Some(ctx) = trace_ctx {
+                    let _ = span.set_parent(ctx);
                 }
+                let _g = span.enter();
 
-                trace!("Broker actor received registration request");
+                trace!("Broker received registration request");
 
-                // Forward the registration request to the session manager.
-                // The SessionManager is responsible for locating/creating the session actor.
                 if let Some(session_mgr) = &state.session_mgr {
                     if let Err(e) = session_mgr.send_message(BrokerMessage::RegistrationRequest {
                         registration_id: registration_id.clone(),
                         client_id: client_id.clone(),
                         trace_ctx: Some(span.context()),
                     }) {
-                        error!("Failed to forward RegistrationRequest to SessionManager: {e:?}");
+                        error!(error = %e, "Failed to forward RegistrationRequest to SessionManager");
                     }
 
-                    // Also notify subscriber manager so any queued messages can be flushed.
                     if let Some(sub_mgr) = &state.subscriber_mgr {
                         if let Err(e) = sub_mgr.send_message(BrokerMessage::RegistrationRequest {
-                            registration_id: registration_id.clone(),
-                            client_id: client_id.clone(),
+                            registration_id,
+                            client_id,
                             trace_ctx: Some(span.context()),
                         }) {
-                            warn!("Failed to notify SubscriberManager about registration: {e:?}");
+                            warn!(error = %e, "Failed to notify SubscriberManager about registration");
                         }
                     } else {
                         error!("SubscriberManager ActorRef missing in broker state");
@@ -296,24 +292,24 @@ impl Actor for Broker {
                 topic,
                 trace_ctx,
             } => {
-                let span = trace_span!("broker.handle_subscribe_request", %registration_id, %topic);
-                trace_ctx.map(|ctx| span.set_parent(ctx));
+                let span = trace_span!("cassini.broker.subscribe_request", %registration_id, %topic);
+                if let Some(ctx) = trace_ctx {
+                    let _ = span.set_parent(ctx);
+                }
                 let _g = span.enter();
 
-                trace!("Broker received subscribe request message");
+                trace!("Broker received subscribe request");
 
-                // Delegate subscription/creation logic to TopicManager + SubscriberManager.
-                // TopicManager should ensure topic exists (idempotent) and create or forward to topic actor.
                 if let Some(topic_mgr) = &state.topic_mgr {
                     if let Err(e) = topic_mgr.send_message(BrokerMessage::SubscribeRequest {
-                        registration_id: registration_id.clone(),
-                        topic: topic.clone(),
+                        registration_id,
+                        topic,
                         trace_ctx: Some(span.context()),
                     }) {
-                        error!("Failed to forward SubscribeRequest to TopicManager: {e:?}");
+                        error!(error = %e, "Failed to forward SubscribeRequest to TopicManager");
                     }
                 } else {
-                    error!("TopicManager ActorRef missing in broker state; cannot subscribe session {registration_id} to {topic}");
+                    error!("TopicManager ActorRef missing in broker state; cannot subscribe");
                 }
             }
 
@@ -323,84 +319,98 @@ impl Actor for Broker {
                 trace_ctx,
             } => {
                 let span =
-                    trace_span!("broker.handle_unsubscribe_request", %registration_id, %topic);
-                trace_ctx.map(|ctx| span.set_parent(ctx));
+                    trace_span!("cassini.broker.unsubscribe_request", %registration_id, %topic);
+                if let Some(ctx) = trace_ctx {
+                    let _ = span.set_parent(ctx);
+                }
                 let _g = span.enter();
 
                 trace!("Broker received unsubscribe request");
 
-                // Ask TopicManager to remove the session from the topic (if exists).
                 if let Some(topic_mgr) = &state.topic_mgr {
                     if let Err(e) = topic_mgr.send_message(BrokerMessage::UnsubscribeRequest {
                         registration_id: registration_id.clone(),
                         topic: topic.clone(),
                         trace_ctx: Some(span.context()),
                     }) {
-                        warn!("Failed to forward UnsubscribeRequest to TopicManager: {e:?}");
+                        warn!(error = %e, "Failed to forward UnsubscribeRequest to TopicManager");
                     }
                 } else {
-                    warn!("TopicManager missing while handling unsubscribe for {topic}");
+                    warn!(%topic, "TopicManager missing while handling unsubscribe");
                 }
 
-                // Tell SubscriberManager to clean up subscriber resources.
                 if let Some(subscriber_mgr) = &state.subscriber_mgr {
                     if let Err(e) = subscriber_mgr.send_message(BrokerMessage::UnsubscribeRequest {
-                        registration_id: registration_id.clone(),
-                        topic: topic.clone(),
+                        registration_id,
+                        topic,
                         trace_ctx: Some(span.context()),
                     }) {
-                        warn!("Failed to forward UnsubscribeRequest to SubscriberManager: {e:?}");
+                        warn!(error = %e, "Failed to forward UnsubscribeRequest to SubscriberManager");
                     }
                 } else {
-                    warn!("SubscriberManager missing while handling unsubscribe for {topic}");
+                    warn!(%topic, "SubscriberManager missing while handling unsubscribe");
                 }
             }
+
             BrokerMessage::PublishRequest {
                 registration_id,
                 topic,
                 payload,
                 trace_ctx,
             } => {
-                let span = trace_span!("broker.handle_publish_request");
-                if let Some(ctx) = trace_ctx {
-                    span.set_parent(ctx).ok();
-                }
-                let _enter = span.enter();
-
-                trace!(
-                    "Broker received publish request from {registration_id} for topic \"{topic}\""
+                let payload_len = payload.len();
+                let span = trace_span!(
+                    "cassini.broker.publish_request",
+                    %registration_id,
+                    %topic,
+                    payload_bytes = payload_len
                 );
+                if let Some(ctx) = trace_ctx {
+                    let _ = span.set_parent(ctx);
+                }
+                let _g = span.enter();
 
-                // Forward publish intent to TopicManager. TopicManager is responsible for ensuring the
-                // topic exists and routing the message into the topic actor (idempotently).
+                trace!("Broker received publish request");
+
                 if let Some(topic_mgr) = &state.topic_mgr {
-                    if let Err(e) = topic_mgr.send_message(BrokerMessage::PublishRequest {
+                    // Low-hanging fruit: don't clone payload unless we have to.
+                    // Move it into the forward message; only clone in the failure path.
+                    let forward = topic_mgr.send_message(BrokerMessage::PublishRequest {
                         registration_id: registration_id.clone(),
                         topic: topic.clone(),
-                        payload: payload.clone(),
+                        payload,
                         trace_ctx: Some(span.context()),
-                    }) {
-                        warn!("Failed to forward PublishRequest to TopicManager: {e:?}");
-                        // Let session manager know publish failed so it can respond to client.
+                    });
+
+                    if let Err(e) = forward {
+                        warn!(error = %e, "Failed to forward PublishRequest to TopicManager");
+
+                        // If forwarding fails, we need a payload for the failure response.
+                        // We only have the length now; best we can do is return an error without echoing bytes.
                         if let Some(session_mgr) = &state.session_mgr {
                             if let Err(e2) =
                                 session_mgr.send_message(BrokerMessage::PublishResponse {
-                                    topic: topic.clone(),
-                                    payload: payload.clone(),
-                                    result: Err(format!("forward failed: {e:?}")),
+                                    topic,
+                                    payload: Vec::new(),
+                                    result: Err(format!("forward failed: {e}")),
                                     trace_ctx: Some(span.context()),
                                 })
                             {
-                                warn!("Failed to notify SessionManager of publish failure: {e2:?}");
+                                warn!(error = %e2, "Failed to notify SessionManager of publish failure");
                             }
+                        } else {
+                            error!(
+                                payload_bytes = payload_len,
+                                "SessionManager missing; publish failure can't be reported"
+                            );
                         }
                     }
                 } else {
-                    error!("TopicManager missing; cannot publish to topic \"{topic}\"");
+                    error!("TopicManager missing; cannot publish");
                     if let Some(session_mgr) = &state.session_mgr {
                         let _ = session_mgr.send_message(BrokerMessage::PublishResponse {
-                            topic: topic.clone(),
-                            payload: payload.clone(),
+                            topic,
+                            payload: Vec::new(),
                             result: Err("topic manager unavailable".to_string()),
                             trace_ctx: Some(span.context()),
                         });
@@ -414,13 +424,18 @@ impl Actor for Broker {
                 result,
                 trace_ctx,
             } => {
-                let span = trace_span!("broker.handle_publish_response");
+                let payload_len = payload.len();
+                let span = trace_span!(
+                    "cassini.broker.publish_response",
+                    %topic,
+                    ok = result.is_ok(),
+                    payload_bytes = payload_len
+                );
                 if let Some(ctx) = trace_ctx {
-                    span.set_parent(ctx).ok();
+                    let _ = span.set_parent(ctx);
                 }
-                let _enter = span.enter();
+                let _g = span.enter();
 
-                // Forward publish responses into the subscriber manager which handles fanout.
                 if let Some(sub_mgr) = &state.subscriber_mgr {
                     if let Err(e) = sub_mgr.send_message(BrokerMessage::PublishResponse {
                         topic,
@@ -428,7 +443,7 @@ impl Actor for Broker {
                         result,
                         trace_ctx: Some(span.context()),
                     }) {
-                        error!("Failed to forward PublishResponse to SubscriberManager: {e:?}");
+                        error!(error = %e, "Failed to forward PublishResponse to SubscriberManager");
                     }
                 } else {
                     error!("SubscriberManager missing; cannot forward PublishResponse");
@@ -436,7 +451,7 @@ impl Actor for Broker {
             }
 
             BrokerMessage::ErrorMessage { error, .. } => {
-                warn!("Error Received: {error}");
+                warn!(%error, "Broker received error message");
             }
 
             BrokerMessage::DisconnectRequest {
@@ -445,13 +460,18 @@ impl Actor for Broker {
                 registration_id,
                 trace_ctx,
             } => {
-                let span = trace_span!("broker.handle_disconnect_request", %client_id);
+                let span = trace_span!(
+                    "cassini.broker.disconnect_request",
+                    %client_id,
+                    registration_id = ?registration_id,
+                    reason = ?reason
+                );
                 if let Some(ctx) = trace_ctx {
-                    span.set_parent(ctx).ok();
+                    let _ = span.set_parent(ctx);
                 }
-                let _enter = span.enter();
+                let _g = span.enter();
 
-                debug!("Cleaning up session {registration_id:?}");
+                debug!("Broker cleaning up disconnect");
 
                 if let Some(subscriber_mgr) = &state.subscriber_mgr {
                     if let Err(e) = subscriber_mgr.send_message(BrokerMessage::DisconnectRequest {
@@ -460,23 +480,23 @@ impl Actor for Broker {
                         registration_id: registration_id.clone(),
                         trace_ctx: Some(span.context()),
                     }) {
-                        error!("Failed to forward DisconnectRequest to SubscriberManager: {e:?}");
+                        error!(error = %e, "Failed to forward DisconnectRequest to SubscriberManager");
                     }
                 } else {
-                    error!("SubscriberManager missing while processing disconnect for {client_id}");
+                    error!(%client_id, "SubscriberManager missing while processing disconnect");
                 }
 
                 if let Some(listener_mgr) = &state.listener_mgr {
                     if let Err(e) = listener_mgr.send_message(BrokerMessage::DisconnectRequest {
                         reason,
-                        client_id: client_id.clone(),
+                        client_id,
                         registration_id,
                         trace_ctx: Some(span.context()),
                     }) {
-                        error!("Failed to forward DisconnectRequest to ListenerManager: {e:?}");
+                        error!(error = %e, "Failed to forward DisconnectRequest to ListenerManager");
                     }
                 } else {
-                    error!("ListenerManager missing while processing disconnect for {client_id}");
+                    error!(%client_id, "ListenerManager missing while processing disconnect");
                 }
             }
 
@@ -485,47 +505,56 @@ impl Actor for Broker {
                 registration_id,
                 error,
             } => {
-                // Route timeout cleanup to subscriber manager which owns subscriber lifecycle.
+                // No trace_ctx in this message variant. Still give it a searchable span.
+                let span = trace_span!(
+                    "cassini.broker.timeout",
+                    client_id = %client_id,
+                    registration_id = %registration_id,
+                    error = ?error
+                );
+                let _g = span.enter();
+
                 if let Some(sub_mgr) = &state.subscriber_mgr {
                     if let Err(e) = sub_mgr.send_message(BrokerMessage::TimeoutMessage {
-                        client_id: client_id.clone(),
-                        registration_id: registration_id.clone(),
-                        error: error.clone(),
+                        client_id,
+                        registration_id,
+                        error,
                     }) {
-                        error!("Failed to forward TimeoutMessage to SubscriberManager: {e:?}");
+                        error!(error = %e, "Failed to forward TimeoutMessage to SubscriberManager");
                     }
                 } else {
-                    error!(
-                        "SubscriberManager missing while handling timeout for {registration_id:?}"
-                    );
+                    error!("SubscriberManager missing while handling timeout");
                 }
             }
+
             BrokerMessage::ControlRequest {
                 registration_id,
                 op,
                 reply_to,
                 trace_ctx,
             } => {
-                let span = trace_span!("broker.handle_control_request", %registration_id);
+                let span = trace_span!("cassini.broker.control_request", %registration_id, op = ?op);
                 if let Some(ctx) = trace_ctx {
-                    span.set_parent(ctx).ok();
+                    let _ = span.set_parent(ctx);
                 }
-                let _enter = span.enter();
-                trace!("Handling control request");
+                let _g = span.enter();
+
                 if let Some(control_mgr) = &state.control_mgr {
-                    control_mgr
-                        .send_message(BrokerMessage::ControlRequest {
-                            registration_id,
-                            op,
-                            reply_to,
-                            trace_ctx: Some(span.context()),
-                        })
-                        .ok();
+                    if let Err(e) = control_mgr.send_message(BrokerMessage::ControlRequest {
+                        registration_id,
+                        op,
+                        reply_to,
+                        trace_ctx: Some(span.context()),
+                    }) {
+                        warn!(error = %e, "Failed to forward ControlRequest to ControlManager");
+                    }
+                } else {
+                    error!("ControlManager missing; dropping control request");
                 }
             }
+
             other => {
-                warn!(UNEXPECTED_MESSAGE_STR);
-                debug!("Dropped broker message: {:?}", other);
+                warn!(?other, "{UNEXPECTED_MESSAGE_STR}");
             }
         }
 
