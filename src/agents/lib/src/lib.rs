@@ -230,6 +230,7 @@ pub fn get_web_client() -> Result<Client, ActorProcessingErr> {
         }
     })
 }
+
 /// Standard helper fn to get a neo4rs configuration based on environment variables
 /// All of the following variables are required fields unless otherwise specified.
 /// GRAPH_DB - name of the neo4j database

@@ -1,8 +1,8 @@
-use std::fmt::Debug;
-
 use neo4rs::{BoltNull, BoltType, Graph, Query};
+use ractor::ActorProcessingErr;
 use serde::{Deserialize, Serialize};
-use tracing::trace;
+use std::fmt::Debug;
+use tracing::{debug, instrument, trace};
 
 /// Graph relationship type constants.
 /// ------ IMPORTANT!!!!! ------
@@ -189,4 +189,126 @@ where
     }
 
     q
+}
+
+/// helper fn intedned for handling generic graph operations.
+/// Should be typed with some sort of Nodekey.
+#[instrument(level = "trace", skip(graph))]
+pub async fn handle_op<K>(graph: &Graph, op: &GraphOp<K>) -> Result<(), ActorProcessingErr>
+where
+    K: GraphNodeKey + Debug,
+{
+    let q = compile_graph_op(&op);
+
+    let mut txn = graph.start_txn().await?;
+    debug!("{}", q.query());
+    txn.run(q)
+        .await
+        .map_err(|e| ActorProcessingErr::from(format!("neo4j execution failed: {:?}", e)))?;
+    txn.commit().await?;
+    trace!("transaction committed");
+    Ok(())
+}
+
+mod tests {
+    use crate::{
+        graph::{handle_op, GraphNodeKey},
+        init_logging,
+    };
+
+    use super::GraphOp;
+    use neo4rs::{DetachedRowStream, Query};
+    use testcontainers::runners::AsyncRunner;
+    use testcontainers_modules::neo4j::Neo4j;
+
+    #[derive(Debug)]
+    enum TestNodeKey {
+        Node,
+    }
+
+    impl GraphNodeKey for TestNodeKey {
+        fn cypher_match(&self, _prefix: &str) -> (String, Vec<(String, neo4rs::BoltType)>) {
+            (format!("(:TestNode)"), vec![])
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_op_upserts_node() {
+        init_logging("polar.lib.testing".to_string());
+        let container = Neo4j::default().start().await.unwrap();
+
+        // prepare neo4rs client
+        let config = neo4rs::ConfigBuilder::new()
+            .uri(format!(
+                "bolt://{}:{}",
+                container.get_host().await.unwrap(),
+                container.image().bolt_port_ipv4().unwrap()
+            ))
+            .user(container.image().user().expect("default user is set"))
+            .password(
+                container
+                    .image()
+                    .password()
+                    .expect("default password is set"),
+            )
+            .build()
+            .unwrap();
+
+        // connect ot Neo4j
+        let graph = neo4rs::Graph::connect(config).unwrap();
+
+        // run a test query
+        let op = GraphOp::UpsertNode {
+            key: TestNodeKey::Node,
+            props: Vec::default(),
+        };
+
+        let result = handle_op(&graph, &op).await;
+        assert_eq!(result.is_ok(), true)
+    }
+
+    #[tokio::test]
+    async fn handle_op_creates_edge() {
+        init_logging("polar.handle_op_creates_edge".to_string());
+        let container = Neo4j::default().start().await.unwrap();
+
+        // prepare neo4rs client
+        let config = neo4rs::ConfigBuilder::new()
+            .uri(format!(
+                "bolt://{}:{}",
+                container.get_host().await.unwrap(),
+                container.image().bolt_port_ipv4().unwrap()
+            ))
+            .user(container.image().user().expect("default user is set"))
+            .password(
+                container
+                    .image()
+                    .password()
+                    .expect("default password is set"),
+            )
+            .build()
+            .unwrap();
+
+        // connect ot Neo4j
+        let graph = neo4rs::Graph::connect(config).unwrap();
+
+        // run a test query
+        let op = GraphOp::UpsertNode {
+            key: TestNodeKey::Node,
+            props: Vec::default(),
+        };
+
+        let result = handle_op(&graph, &op).await;
+        assert_eq!(result.is_ok(), true);
+
+        let op = GraphOp::EnsureEdge {
+            from: TestNodeKey::Node,
+            to: TestNodeKey::Node,
+            rel_type: "IS".into(),
+            props: vec![],
+        };
+
+        let result = handle_op(&graph, &op).await;
+        assert_eq!(result.is_ok(), true)
+    }
 }

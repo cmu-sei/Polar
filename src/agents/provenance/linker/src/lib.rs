@@ -1,7 +1,7 @@
 use std::fmt::Debug;
 
 use neo4rs::{BoltType, Graph};
-use polar::graph::compile_graph_op;
+use polar::graph::{compile_graph_op, handle_op};
 use polar::graph::{GraphControllerMsg, GraphControllerState, GraphNodeKey, GraphOp};
 use ractor::{Actor, ActorProcessingErr, ActorRef};
 use tracing::{debug, trace, warn};
@@ -118,30 +118,6 @@ impl GraphNodeKey for ArtifactNodeKey {
 
 pub struct LinkerGraphController;
 
-impl LinkerGraphController {
-    /// Here we provide an async helper, just to make the Actor implementation as lean as possible. Async traits aren't well supported yet, so until then this is the best we've got
-    async fn handle_op<ArtifactNodeKey>(
-        graph: &Graph,
-        op: &GraphOp<ArtifactNodeKey>,
-    ) -> Result<(), ActorProcessingErr>
-    where
-        ArtifactNodeKey: GraphNodeKey + Debug,
-    {
-        let span = tracing::trace_span!("GraphController.handle_op");
-        let _guard = span.enter();
-        let q = compile_graph_op(&op);
-
-        let mut txn = graph.start_txn().await?;
-        debug!("{q:?}");
-        txn.run(q)
-            .await
-            .map_err(|e| ActorProcessingErr::from(format!("neo4j execution failed: {:?}", e)))?;
-        txn.commit().await?;
-        trace!("transaction committed");
-        Ok(())
-    }
-}
-
 #[ractor::async_trait]
 impl Actor for LinkerGraphController {
     type Msg = GraphControllerMsg<ArtifactNodeKey>;
@@ -164,7 +140,7 @@ impl Actor for LinkerGraphController {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match msg {
-            GraphControllerMsg::Op(op) => Self::handle_op(&state.graph, &op).await?,
+            GraphControllerMsg::Op(op) => handle_op(&state.graph, &op).await?,
         }
         Ok(())
     }

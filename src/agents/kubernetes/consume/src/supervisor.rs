@@ -1,6 +1,7 @@
 use cassini_client::*;
 use cassini_types::ClientEvent;
 use kube_common::{KubeMessage, RawKubeEvent};
+use neo4rs::Graph;
 use polar::get_neo_config;
 use polar::{Supervisor, SupervisorMessage};
 use ractor::async_trait;
@@ -16,8 +17,8 @@ use tracing::warn;
 
 use crate::pods::PodConsumer;
 // use crate::pods::PodConsumer;
-use crate::KubeConsumerArgs;
 use crate::BROKER_CLIENT_NAME;
+use crate::{ClusterGraphController, KubeConsumerArgs};
 use kube_common::{
     get_consumer_name, BATCH_PROCESS_ACTION, RESOURCE_APPLIED_ACTION, RESOURCE_DELETED_ACTION,
     RESYNC_ACTIUON,
@@ -106,7 +107,7 @@ impl Actor for ClusterConsumerSupervisor {
     async fn pre_start(
         &self,
         myself: ActorRef<Self::Msg>,
-        args: (),
+        _args: (),
     ) -> Result<Self::State, ActorProcessingErr> {
         debug!("{myself:?} starting");
 
@@ -148,12 +149,22 @@ impl Actor for ClusterConsumerSupervisor {
         match message {
             SupervisorMessage::ClientEvent { event } => {
                 match event {
-                    ClientEvent::Registered { registration_id } => {
+                    ClientEvent::Registered { .. } => {
+                        // try to conect to the graph
+                        let graph = Graph::connect(state.graph_config.clone())?;
+
+                        let (graph_controller, _) = Actor::spawn_linked(
+                            Some("kubernetes.cluster.graph.controller".to_string()),
+                            ClusterGraphController,
+                            graph,
+                            myself.clone().into(),
+                        )
+                        .await?;
+
                         //start actors
                         let args = KubeConsumerArgs {
                             broker_client: state.broker_client.clone(),
-                            registration_id,
-                            graph_config: state.graph_config.clone(),
+                            graph_controller,
                         };
 
                         // TODO: The anticipated naming convention for these will be kubernetes.clustername.rrole.resource - but cluster name isn't really known ahead of time at the moment.
@@ -205,18 +216,6 @@ impl Actor for ClusterConsumerSupervisor {
                     actor_name,
                     actor_cell.get_id()
                 );
-
-                //    match ClusterConsumerSupervisor::restart_actor(actor_name.clone(), myself.clone(), state.graph_config.clone()).await {
-                //         Ok(actor) => {
-                //             info!("Restarted actor {0:?}:{1:?}",
-                //             actor_name,
-                //             actor.get_id())
-                //         }
-                //         Err(e) => {
-                //             error!("Failed to recover actor: {e}");
-                //             myself.stop(Some(e))
-                //         }
-                //    }
             }
             SupervisionEvent::ActorFailed(actor_cell, e) => {
                 // we no actors start w/o names
@@ -227,17 +226,6 @@ impl Actor for ClusterConsumerSupervisor {
                     actor_name,
                     actor_cell.get_id()
                 );
-                //     match ClusterConsumerSupervisor::restart_actor(actor_name.clone(), myself.clone(), state.graph_config.clone()).await {
-                //         Ok(actor) => {
-                //             info!("Restarted actor {0:?}:{1:?}",
-                //             actor_name,
-                //             actor.get_id())
-                //         }
-                //         Err(e) => {
-                //             error!("Failed to recover actor: {e}");
-                //             myself.stop(Some(e))
-                //         }
-                //    }
             }
 
             SupervisionEvent::ProcessGroupChanged(..) => todo!(),
