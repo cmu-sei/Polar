@@ -93,6 +93,7 @@ pub struct NormalizedComponent {
     pub name: String,
     pub version: String,
     pub purl: String,
+    pub component_type: String,
 }
 // TODO: We probably want a normalized definition of what an SBOM for our purproses here
 #[derive(
@@ -187,21 +188,16 @@ pub enum ProvenanceEvent {
         image_ref: String,
     },
 
-    /// Emitted when an SBOM artifact (CycloneDX, SPDX, etc.) has been
-    /// discovered in a build system or artifact store.
-    ///
-    /// `artifact_id`: Logical identifier of the artifact (e.g. a GitLab artifact ID or UUIDv5 of its path).
-    /// `uri`: Resolved download URI or location of the SBOM file.
-    SbomDiscovered { artifact_id: String, uri: String },
-
     /// Emitted when an SBOM has been parsed and its internal dependency graph
     /// extracted, ready to be linked to images or build outputs.
     ///
-    /// `component_id`: Logical identifier of the top-level software component (e.g. package name or UUIDv5).
-    /// `dependencies`: List of dependency identifiers discovered in the SBOM.
-    SbomParsed {
-        component_id: String,
-        dependencies: Vec<String>,
+    /// `uid`: Logical identifier of the artifact
+    /// `sbom`: the normalized sbom instance of the artifact
+    /// `name`: filename observed
+    SbomResolved {
+        uid: String,
+        sbom: NormalizedSbom,
+        name: String,
     },
 
     /// Emitted when a new build pipeline or job run has been discovered.

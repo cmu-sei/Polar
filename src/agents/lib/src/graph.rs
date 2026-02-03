@@ -33,6 +33,8 @@ pub mod rel {
 
     /// Volume -> Secret
     pub const BACKED_BY_SECRET: &str = "BACKED_BY";
+
+    pub const DESCRIBES: &str = "DESCRIBES";
 }
 
 pub trait GraphNodeKey {

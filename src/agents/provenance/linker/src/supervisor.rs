@@ -154,18 +154,19 @@ impl Actor for ProvenanceSupervisor {
 
     async fn handle_supervisor_evt(
         &self,
-        myself: ActorRef<Self::Msg>,
+        _myself: ActorRef<Self::Msg>,
         event: SupervisionEvent,
         _state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match event {
             SupervisionEvent::ActorFailed(name, err) => {
                 error!("Actor {name:?} failed! {err:?}");
-                myself.stop(Some(format!("{err:?}")));
+                // TODO: The only condition for crash or failure here should be if the DB goes down, in which case,
+                // we should consider how much we care about dropping messages.
+                todo!("Implement some restart logic for the linker");
             }
             SupervisionEvent::ActorTerminated(name, _state, reason) => {
-                error!("Actor {name:?} failed! {reason:?}");
-                myself.stop(reason)
+                warn!("Actor {name:?} stopped! {reason:?}");
             }
             SupervisionEvent::ActorStarted(actor) => {
                 debug!("Actor {actor:?} started!");

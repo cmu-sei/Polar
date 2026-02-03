@@ -3,7 +3,7 @@ use polar::{NormalizedComponent, NormalizedSbom, ProvenanceEvent, PROVENANCE_LIN
 use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef};
 use reqwest::Client as WebClient;
 use rkyv::rancor;
-use tracing::{debug, error, info, instrument, trace};
+use tracing::{debug, instrument, trace};
 
 pub struct ArtifactClassifier;
 
@@ -45,8 +45,9 @@ impl ArtifactClassifier {
 
                         NormalizedComponent {
                             name: c.name.to_string(),
-                            version: c.version.unwrap_or("unknwon".into()).to_string(),
+                            version: c.version.unwrap_or("unknown".into()).to_string(),
                             purl: purl.to_string(),
+                            component_type: c.component_type.to_string(),
                         }
                     })
                     .collect::<Vec<_>>();
