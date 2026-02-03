@@ -35,7 +35,7 @@ use polar::ProvenanceEvent;
 use polar::PROVENANCE_DISCOVERY_TOPIC;
 use polar::{QUERY_COMMIT_FAILED, TRANSACTION_FAILED_ERROR};
 use ractor::{async_trait, rpc::cast, Actor, ActorProcessingErr, ActorRef};
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, trace};
 
 fn dowwnload_path(base_url: &str, download_url: &str) -> String {
     format!("{base_url}{download_url}")
@@ -44,15 +44,6 @@ fn dowwnload_path(base_url: &str, download_url: &str) -> String {
 pub struct GitlabPipelineConsumer;
 
 impl GitlabPipelineConsumer {
-    /// Determine if an artifact should be emitted to the resolver
-    /// Here, we rely somewhat on convention, but we also check for specific file extensions.
-    fn artifact_should_emit(name: &str) -> bool {
-        name.ends_with(".cdx.json")
-            || name.ends_with(".sbom.json")
-            || name.ends_with("flake.lock")
-            || name.ends_with("cargo.lock")
-    }
-
     fn format_artifacts(base_url: &str, artifacts: &[CiJobArtifact]) -> String {
         artifacts
             .iter()
@@ -61,28 +52,22 @@ impl GitlabPipelineConsumer {
                 // IFF that artifact is one we care about.
 
                 //handle whether the artifact can actually be resolved...if it can't then there's no download path, nothing we can do.
-                // TODO: It makes better sense to just do this work here, and pass it to the linker directly, and save ourselves the latency
-                if let Some(name) = &artifact.name {
-                    if GitlabPipelineConsumer::artifact_should_emit(name) {
-                        if let Some(download_path) = &artifact.download_path {
-                            if let Some(client) = ractor::registry::where_is(BROKER_CLIENT_NAME.to_string()) {
-                                let event = ProvenanceEvent::SbomDiscovered { artifact_id: artifact.id.to_string(), uri: download_path.clone() };
 
-                                match rkyv::to_bytes::<rkyv::rancor::Error>(&event) {
-                                    Ok(payload) => {
-                                        let message = TcpClientMessage::Publish {
-                                            topic: PROVENANCE_DISCOVERY_TOPIC.to_string(),
-                                            payload: payload.into(),
-                                        };
-                                        cast(&client, message).ok();
-                                    }
-                                    Err(e) => {
-                                        error!("Failed to serialize event: {}", e);
-                                    }
-                                }
-                            }
-                        } else {
-                            debug!("Skipping artifact {} because it has no download path", artifact.id);
+                // TODO: Get rid of registry lookup for the client.
+                if let Some(download_path) = &artifact.download_path {
+                    if let Some(client) = ractor::registry::where_is(BROKER_CLIENT_NAME.to_string()) {
+
+                        let name = artifact.name.clone().unwrap_or(artifact.id.0.clone());
+                        let event = ProvenanceEvent::ArtifactDisocvered { name , url: download_path.to_owned() };
+
+                        if let Ok(payload) = rkyv::to_bytes::<rkyv::rancor::Error>(&event) {
+
+                            trace!("Emitting event {event:?} ");
+                            let message = TcpClientMessage::Publish {
+                                topic: PROVENANCE_DISCOVERY_TOPIC.to_string(),
+                                payload: payload.into(),
+                            };
+                            cast(&client, message).ok();
                         }
                     }
                 }

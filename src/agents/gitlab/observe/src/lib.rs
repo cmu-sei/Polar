@@ -29,7 +29,7 @@ pub mod runners;
 pub mod supervisor;
 pub mod users;
 
-use cassini_client::{TcpClientActor, TcpClientMessage};
+use cassini_client::{ TcpClientMessage};
 use common::types::{GitlabData, WithInstance};
 use cynic::{GraphQlError, Operation};
 use gitlab_queries::groups::*;

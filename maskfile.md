@@ -13,7 +13,11 @@ Our team primarily uses `podman` as a container runtime. So feel free to `alias`
   > Builds the Polar Dev image. A contaienrized Rust development environment in case you don't want to do local development.
   ~~~sh
   echo "Building the Polar development environment. This may take a moment."
-  nix build .#containers.devContainer --show-trace
+
+export def greet [] {
+    print "Current Weather"
+    print $env.WEATHER_INFO
+}  nix build .#containers.devContainer --show-trace
   echo "Loading the development image."
   podman load < result
   ~~~

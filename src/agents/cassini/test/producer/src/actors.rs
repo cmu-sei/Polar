@@ -321,7 +321,7 @@ impl Actor for ProducerAgent {
                 }
 
                 state.metrics.elapsed_ms =
-                    (crate::get_timestamp_in_milliseconds()? - state.metrics.start_ms);
+                    crate::get_timestamp_in_milliseconds()? - state.metrics.start_ms;
 
                 // when done, print metrics and exit
                 info!(

@@ -1,5 +1,6 @@
 use cassini_client::{TCPClientConfig, TcpClientActor, TcpClientArgs, TcpClientMessage};
 use cassini_types::ClientEvent;
+use classifier::*;
 use oci_client::{
     client::{Certificate, CertificateEncoding, ClientConfig},
     manifest::OciManifest,
@@ -7,17 +8,18 @@ use oci_client::{
     Client as OciClient, Reference, RegistryOperation,
 };
 use polar::{
-    get_file_as_byte_vec, ProvenanceEvent, Supervisor, SupervisorMessage,
+    get_file_as_byte_vec, get_web_client, ProvenanceEvent, Supervisor, SupervisorMessage,
     PROVENANCE_DISCOVERY_TOPIC, PROVENANCE_LINKER_TOPIC,
 };
 use provenance_common::RESOLVER_SUPERVISOR_NAME;
+use provenance_resolver::classifier;
 use ractor::{
     async_trait, registry::where_is, Actor, ActorProcessingErr, ActorRef, OutputPort,
     SupervisionEvent,
 };
 use reqwest::Client as WebClient;
 use std::str::FromStr;
-use tracing::{debug, error, field::debug, info, instrument, trace, warn};
+use tracing::{debug, error, info, instrument, trace, warn};
 pub const BROKER_CLIENT_NAME: &str = "polar.provenance.resolver.tcp";
 use serde::Deserialize;
 
@@ -143,12 +145,23 @@ impl Actor for ResolverSupervisor {
         match msg {
             SupervisorMessage::ClientEvent { event } => match event {
                 ClientEvent::Registered { .. } => {
+                    let (classifier, _) = Actor::spawn_linked(
+                        Some("polar.provenance.classifier".to_string()),
+                        ArtifactClassifier,
+                        ArtifactClassifierState {
+                            web_client: get_web_client()?,
+                            tcp_client: state.cassini_client.clone(),
+                        },
+                        myself.clone().into(),
+                    )
+                    .await?;
+
                     let config = Self::load_resolver_config()?;
                     let args = ResolverAgentArgs {
+                        classifier,
                         cassini_client: state.cassini_client.clone(),
                         config,
                     };
-
                     Actor::spawn_linked(
                         Some(PROVENANCE_DISCOVERY_TOPIC.to_string()),
                         ResolverAgent,
@@ -320,6 +333,10 @@ impl ResolverAgent {
         Ok(())
     }
     /// Check if the registry is allowed based on the configuration.
+    /// TODO: I think this is worth checking on if we consider the resolver untrusted.
+    /// It could be configured into a "strict" mode that only reads from configured registries.
+    ///  Or should this be the default behavior? Incentivizing operators
+    /// to know exactly which registries they should be talking to?
     fn registry_allowed(config: &ResolverConfig, reference: &Reference) -> bool {
         let registry = Self::normalize_registry_host(reference.resolve_registry());
 
@@ -495,11 +512,13 @@ impl ResolverAgent {
 
 pub struct ResolverAgentArgs {
     pub cassini_client: ActorRef<TcpClientMessage>,
+    pub classifier: ActorRef<ArtifactClassifierMsg>,
     pub config: ResolverConfig,
 }
 
 pub struct ResolverAgentState {
     pub cassini_client: ActorRef<TcpClientMessage>,
+    pub classifier: ActorRef<ArtifactClassifierMsg>,
     pub web_client: WebClient,
     pub oci_client: OciClient,
     pub config: ResolverConfig,
@@ -522,6 +541,7 @@ impl Actor for ResolverAgent {
             cassini_client: args.cassini_client,
             web_client: polar::get_web_client()?,
             oci_client,
+            classifier: args.classifier,
             config: args.config,
         };
         Ok(state)
@@ -595,6 +615,15 @@ impl Actor for ResolverAgent {
                     }
                 }
             }
+            ProvenanceEvent::ArtifactDisocvered { name, url } => {
+                trace!("Received ArtifactDiscovered directive");
+                // forward for classification
+                //
+                state.classifier.cast(ArtifactClassifierMsg::Classify {
+                    download_url: url,
+                    filename: name,
+                })?;
+            }
             _ => warn!("Received unexpected message! {msg:?}"),
         }
 
@@ -618,6 +647,7 @@ async fn main() {
     tokio::signal::ctrl_c().await.unwrap();
 }
 
+#[cfg(test)]
 mod tests {
     use crate::{Reference, RegistryConfig, ResolverAgent, ResolverConfig};
     use std::str::FromStr;

@@ -51,7 +51,7 @@ impl Actor for ObserverSupervisor {
     async fn pre_start(
         &self,
         myself: ActorRef<Self::Msg>,
-        args: (),
+        _args: (),
     ) -> Result<Self::State, ActorProcessingErr> {
         debug!("{myself:?} starting");
 

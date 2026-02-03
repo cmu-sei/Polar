@@ -2,6 +2,7 @@ use cassini_types::ClientEvent;
 use ractor::{ActorProcessingErr, OutputPort};
 use reqwest::{Certificate, Client, ClientBuilder};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::io::Read;
 use std::sync::Arc;
 use tracing::{debug, info};
@@ -42,6 +43,75 @@ pub fn get_file_as_byte_vec(filename: &String) -> Result<Vec<u8>, std::io::Error
     Ok(buffer)
 }
 
+/// Generate a content-addressed UID for an artifact based on its raw bytes.
+/// This is the *only* valid way artifacts should acquire identity.
+pub fn artifact_uid_from_bytes(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    let digest = hasher.finalize();
+
+    // Lowercase hex encoding, stable across languages and systems
+    hex::encode(digest)
+}
+
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Hash,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+    rkyv::Archive,
+)]
+pub enum SbomFormat {
+    CycloneDx,
+    Spdx,
+}
+
+impl SbomFormat {
+    pub fn as_str(&self) -> &str {
+        match self {
+            SbomFormat::CycloneDx => "CycloneDx",
+            SbomFormat::Spdx => "spdx",
+        }
+    }
+}
+
+#[derive(
+    Debug,
+    Clone,
+    serde::Serialize,
+    serde::Deserialize,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+    rkyv::Archive,
+)]
+pub struct NormalizedComponent {
+    pub name: String,
+    pub version: String,
+    pub purl: String,
+    pub component_type: String,
+}
+// TODO: We probably want a normalized definition of what an SBOM for our purproses here
+#[derive(
+    Debug,
+    Clone,
+    serde::Serialize,
+    serde::Deserialize,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+    rkyv::Archive,
+)]
+pub struct NormalizedSbom {
+    pub format: SbomFormat,
+    pub spec_version: String,
+    /// Strongly validated components
+    pub components: Vec<NormalizedComponent>,
+}
+
 /// Represents normalized provenance-related events emitted across agents.
 /// Each variant communicates new or updated knowledge about entities in the provenance graph.
 ///
@@ -52,6 +122,13 @@ pub fn get_file_as_byte_vec(filename: &String) -> Result<Vec<u8>, std::io::Error
 /// - Internal Neo4j IDs (`id(node)`) MUST NOT be emitted in events — they are ephemeral.
 #[derive(Debug, rkyv::Serialize, rkyv::Deserialize, rkyv::Archive)]
 pub enum ProvenanceEvent {
+    /// Emitted when more generic unclassified artifacts.
+    ArtifactDisocvered { name: String, url: String },
+    SBOMResolved {
+        uid: String,
+        name: String,
+        sbom: NormalizedSbom,
+    },
     /// Emitted when a new OCI registry is discovered
     /// (e.g., observed in a Gitlab, Gitea, Artifactory or registry listing).
     ///
@@ -111,21 +188,16 @@ pub enum ProvenanceEvent {
         image_ref: String,
     },
 
-    /// Emitted when an SBOM artifact (CycloneDX, SPDX, etc.) has been
-    /// discovered in a build system or artifact store.
-    ///
-    /// `artifact_id`: Logical identifier of the artifact (e.g. a GitLab artifact ID or UUIDv5 of its path).
-    /// `uri`: Resolved download URI or location of the SBOM file.
-    SbomDiscovered { artifact_id: String, uri: String },
-
     /// Emitted when an SBOM has been parsed and its internal dependency graph
     /// extracted, ready to be linked to images or build outputs.
     ///
-    /// `component_id`: Logical identifier of the top-level software component (e.g. package name or UUIDv5).
-    /// `dependencies`: List of dependency identifiers discovered in the SBOM.
-    SbomParsed {
-        component_id: String,
-        dependencies: Vec<String>,
+    /// `uid`: Logical identifier of the artifact
+    /// `sbom`: the normalized sbom instance of the artifact
+    /// `name`: filename observed
+    SbomResolved {
+        uid: String,
+        sbom: NormalizedSbom,
+        name: String,
     },
 
     /// Emitted when a new build pipeline or job run has been discovered.
@@ -230,6 +302,7 @@ pub fn get_web_client() -> Result<Client, ActorProcessingErr> {
         }
     })
 }
+
 /// Standard helper fn to get a neo4rs configuration based on environment variables
 /// All of the following variables are required fields unless otherwise specified.
 /// GRAPH_DB - name of the neo4j database
