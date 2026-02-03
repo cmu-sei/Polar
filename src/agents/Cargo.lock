@@ -4135,6 +4135,7 @@ name = "polar"
 version = "0.1.0"
 dependencies = [
  "cassini-types",
+ "hex",
  "neo4rs",
  "opentelemetry",
  "opentelemetry-otlp",
@@ -4143,6 +4144,7 @@ dependencies = [
  "reqwest",
  "rkyv 0.8.12",
  "serde",
+ "sha2",
  "testcontainers",
  "testcontainers-modules",
  "tokio",
@@ -4330,12 +4332,6 @@ dependencies = [
 [[package]]
 name = "provenance-common"
 version = "0.1.0"
-dependencies = [
- "polar",
- "ractor",
- "rkyv 0.8.12",
- "tracing",
-]
 
 [[package]]
 name = "provenance-linker"
@@ -4363,6 +4359,7 @@ version = "0.1.0"
 dependencies = [
  "cassini-client",
  "cassini-types",
+ "cyclonedx-bom",
  "docker_credential",
  "features",
  "oci-client",

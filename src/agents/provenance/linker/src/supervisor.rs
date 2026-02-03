@@ -163,7 +163,7 @@ impl Actor for ProvenanceSupervisor {
                 error!("Actor {name:?} failed! {err:?}");
                 myself.stop(Some(format!("{err:?}")));
             }
-            SupervisionEvent::ActorTerminated(name, state, reason) => {
+            SupervisionEvent::ActorTerminated(name, _state, reason) => {
                 error!("Actor {name:?} failed! {reason:?}");
                 myself.stop(reason)
             }

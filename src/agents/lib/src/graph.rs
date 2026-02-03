@@ -210,6 +210,7 @@ where
     Ok(())
 }
 
+#[cfg(test)]
 mod tests {
     use crate::{
         graph::{handle_op, GraphNodeKey},
@@ -217,7 +218,6 @@ mod tests {
     };
 
     use super::GraphOp;
-    use neo4rs::{DetachedRowStream, Query};
     use testcontainers::runners::AsyncRunner;
     use testcontainers_modules::neo4j::Neo4j;
 

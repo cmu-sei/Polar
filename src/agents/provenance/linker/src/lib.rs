@@ -1,10 +1,11 @@
 use std::fmt::Debug;
 
 use neo4rs::{BoltType, Graph};
-use polar::graph::{compile_graph_op, handle_op};
-use polar::graph::{GraphControllerMsg, GraphControllerState, GraphNodeKey, GraphOp};
+use polar::graph::handle_op;
+use polar::graph::{GraphControllerMsg, GraphControllerState, GraphNodeKey};
+use polar::NormalizedSbom;
 use ractor::{Actor, ActorProcessingErr, ActorRef};
-use tracing::{debug, trace, warn};
+use tracing::debug;
 
 use serde::{Deserialize, Serialize};
 pub mod linker;
@@ -20,9 +21,11 @@ pub enum ArtifactType {
 
 /// Minimal typed intent that processors emit.
 /// CAUTION: Keep this small and stable; extend later with versions.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ArtifactNodeKey {
     /// Our understanding of what an "artifact" in the general sense is.
+    /// This particular nodekey represents the datatype, not an instance of an artifact.
+    /// Other typed artifacts are related to it using an :IS
     Artifact,
     PodContainer {
         pod_uid: String,
@@ -52,8 +55,13 @@ pub enum ArtifactNodeKey {
         entrypoint: String,
         cmd: String,
     },
+    Sbom {
+        /// A Hash generated from the bytes of the sbom file.
+        uid: String,
+        sbom: NormalizedSbom,
+    },
     /// Observed / asserted software component
-    ComponentClaim {
+    Component {
         claim_type: String, // "rpm", "deb", "pip", "file", ...
         name: String,
         version: String,
@@ -89,14 +97,34 @@ impl GraphNodeKey for ArtifactNodeKey {
                 format!("(:OCILayer {{ digest: ${prefix}_digest }})"),
                 vec![(format!("{prefix}_digest"), digest.clone().into())],
             ),
-
-            // TODO: Add other types to the cypher
             Self::OCIConfig { digest, ..} => (
                 format!("(:OCIConfig {{ digest: ${prefix}_digest }})"),
                 vec![(format!("{prefix}_digest"), digest.clone().into())],
             ),
-
-            Self::ComponentClaim {
+            ArtifactNodeKey::Sbom {
+                uid,
+                sbom
+            } =>
+            (
+                    format!(
+                        "({prefix}:SBOM {{ artifact_uid: ${prefix}_artifact_uid, format: ${prefix}_format, spec_version: ${prefix}_spec_version }})"
+                    ),
+                    vec![
+                        (
+                            format!("{prefix}_artifact_uid"),
+                            BoltType::String(uid.clone().into()),
+                        ),
+                        (
+                            format!("{prefix}_format"),
+                            BoltType::String(format!("{}", sbom.format.as_str()).into()),
+                        ),
+                        (
+                            format!("{prefix}_spec_version"),
+                            BoltType::String(sbom.spec_version.clone().into()),
+                        ),
+                    ],
+                ),
+            Self::Component {
                 claim_type,
                 name,
                 version,

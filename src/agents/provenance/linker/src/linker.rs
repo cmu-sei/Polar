@@ -5,7 +5,7 @@ use ractor::async_trait;
 use ractor::Actor;
 use ractor::ActorProcessingErr;
 use ractor::ActorRef;
-use tracing::{debug, trace, warn};
+use tracing::{ trace, warn};
 
 use crate::ArtifactNodeKey;
 
