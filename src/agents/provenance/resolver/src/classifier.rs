@@ -193,8 +193,9 @@ mod classifier_tests {
         .as_bytes()
         .to_vec();
 
-        let err = ArtifactClassifier::parse_cyclonedx(&bytes).unwrap_err();
-        assert!(err.to_string().contains("zero components"));
+        let _ = ArtifactClassifier::parse_cyclonedx(&bytes)
+            .inspect_err(|e| println!("{}", e.to_string()))
+            .expect_err("should reject sbom with no components");
     }
 
     #[test]

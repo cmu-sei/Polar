@@ -19,7 +19,7 @@ pub const TRANSACTION_FAILED_ERROR: &str = "Expected to start a transaction with
 pub const QUERY_COMMIT_FAILED: &str = "Error committing transaction to graph";
 pub const QUERY_RUN_FAILED: &str = "Error running query on the graph.";
 pub const UNEXPECTED_MESSAGE_STR: &str = "Received unexpected message!";
-
+pub const GIT_REPOSITORIES_TOPIC: &str = "polar.git.repositories";
 pub trait Supervisor {
     /// Helper function to dispatch messages off of message queues to the associated actors within an agent supervision tree.
     /// Payload : a series of raw bytes containing an expected data structure/enum for the agent.
@@ -223,8 +223,6 @@ pub fn init_logging(service_name: String) {
     use opentelemetry_sdk::Resource;
     use tracing_subscriber::filter::EnvFilter;
     use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
-
-    eprintln!("INIT_LOGGING called");
 
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 

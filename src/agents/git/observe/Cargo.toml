@@ -1,0 +1,20 @@
+[package]
+name = "git"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+# --- Workspace & third-party ---
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1.41"
+ractor = { version = "0.15.8", features = ["async-trait"] }
+rkyv = { workspace = true }
+git2 = "0.20.4"
+git-agent-common = { path = "../common" }
+# --- Cassini ecosystem ---
+cassini-client = { path = "../../cassini/client" }
+cassini-types = { path = "../../cassini/types" }
+polar          = { path = "../../lib" }
+
+[dev-dependencies]
+tempfile = "3.24.0"
