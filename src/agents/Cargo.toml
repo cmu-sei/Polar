@@ -51,7 +51,7 @@ members = [
     "config-ops",
     "openapi/observe",
     "openapi/consume",
-    "openapi/common", "provenance/provenance-common", "logger", "git/observe",  "git/common", "git/scheduler",
+    "openapi/common", "provenance/provenance-common", "logger", "git/observe",  "git/common", "git/scheduler", "git/process",
 ]
 
 

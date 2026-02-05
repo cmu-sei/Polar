@@ -2004,6 +2004,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "git-repo-processor"
+version = "0.1.0"
+dependencies = [
+ "cassini-client",
+ "cassini-types",
+ "git-agent-common",
+ "neo4rs",
+ "polar",
+ "ractor",
+ "rkyv 0.8.12",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "git2"
 version = "0.20.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"

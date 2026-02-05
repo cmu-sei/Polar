@@ -33,13 +33,6 @@ pub fn send_event(
  * ============================
  */
 
-/// Messages the supervisor accepts.
-///
-/// The supervisor does *not* do git work.
-/// It routes, spawns, and enforces invariants.
-#[derive(Debug)]
-pub enum SupervisorMsg {}
-
 /// Git Observer (Supervisor + Per-Repo Workers)
 ///
 /// This module implements a supervisor/worker actor model where:
@@ -145,7 +138,7 @@ impl Actor for GitRepoSupervisor {
                     // Forward work to the worker.
                     worker.send_message(GitRepoWorkerMsg::Observe)?;
                 } else {
-                    // TODO: Before starting a worker, send a request to see if there's some schedule out there for this repo\
+                    //Before starting a worker, send a request to see if there's some schedule out there for this repo\
                     info!(
                         "No worker found for repo {}, requesting configuration",
                         repo_id.to_string()
@@ -257,6 +250,58 @@ pub struct GitRepoWorkerArgs {
     config: RepoObservationConfig,
     repo_path: PathBuf,
     tcp_client: ActorRef<TcpClientMessage>,
+}
+
+fn on_commit(
+    repo_id: RepoId,
+    ref_name: &str,
+    commit: &git2::Commit,
+    tcp_client: ActorRef<TcpClientMessage>,
+) -> Result<(), ActorProcessingErr> {
+    debug!("Found commit for ref_name {ref_name} in repo {repo_id:?}");
+
+    let observed_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis();
+
+    let event = GitRepositoryMessage::CommitDiscovered {
+        ref_name: ref_name.to_string(),
+        observed_at: observed_at.to_string(),
+        repo: repo_id,
+        oid: commit.id().to_string(),
+        // author: commit.author().name().unwrap_or_default().to_string(),
+        committer: commit.committer().to_string(),
+        time: commit.time().seconds(),
+        message: commit.message().unwrap_or_default().to_string(),
+        parents: commit.parent_ids().map(|id| id.to_string()).collect(),
+    };
+
+    send_event(tcp_client, event, GIT_REPOSITORIES_TOPIC.to_string())?;
+
+    Ok(())
+}
+
+fn emit_ref_update(
+    repo_id: RepoId,
+    ref_name: &str,
+    old: Option<Oid>,
+    new: Oid,
+    tcp_client: ActorRef<TcpClientMessage>,
+) -> Result<(), ActorProcessingErr> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis();
+    let event = GitRepositoryMessage::RefUpdated {
+        repo: repo_id,
+        ref_name: ref_name.to_string(),
+        old: old.map(|o| o.to_string()),
+        new: new.to_string(),
+        observed_at: now.to_string(),
+    };
+
+    send_event(tcp_client, event, GIT_REPOSITORIES_TOPIC.to_string())
 }
 
 impl GitRepoWorker {
@@ -386,56 +431,70 @@ impl GitRepoWorker {
     /// - schedule itself
     /// - persist checkpoints
     /// - spawn threads or actors
+    /// Observe a repository according to an explicit policy.
+    ///
+    /// Observation semantics:
+    /// - Commits are emitted in newest → oldest order (bounded)
+    /// - Ref updates are emitted exactly once per ref per cycle
+    /// - Ref updates are emitted *after* traversal completes
+    ///
+    /// This guarantees:
+    /// - No duplicate ref → commit edges
+    /// - Correct handling of force-pushes
+    /// - Stable graph anchoring
     pub fn observe_repository<F>(
         repo: &Repository,
         config: &RepoObservationConfig,
         last_seen: &mut HashMap<String, Oid>,
         mut on_commit: F,
+        mut on_ref_update: impl FnMut(&str, Option<Oid>, Oid),
     ) -> Result<(), git2::Error>
     where
         F: FnMut(&str, &git2::Commit),
     {
-        // Fetch first; observation is always against the freshest refs.
+        // Always fetch first; refs must represent current truth.
         Self::fetch_with_optional_depth(repo, &config.remotes, config.shallow_depth)?;
 
         for ref_name in &config.refs {
+            // Resolve ref tip *once* up front.
+            let reference = match repo.find_reference(ref_name) {
+                Ok(r) => r,
+                Err(_) => {
+                    // Ref does not exist locally; skip cleanly.
+                    trace!("Ref {ref_name} does not exist, skipping");
+                    continue;
+                }
+            };
+
+            let tip = match reference.target() {
+                Some(t) => t,
+                None => {
+                    trace!("Ref {ref_name} has no target, skipping");
+                    continue;
+                }
+            };
+
             let prev = last_seen.get(ref_name).copied();
 
+            // Walk commits reachable from the tip, bounded by last_seen.
             let newest =
                 Self::walk_commits_incremental(repo, ref_name, prev, config.max_depth, |commit| {
                     on_commit(ref_name, commit);
                 })?;
 
-            if let Some(oid) = newest {
-                last_seen.insert(ref_name.to_string(), oid);
-            }
+            // Emit ref update *once*, after traversal completes.
+            //
+            // IMPORTANT:
+            // - Uses resolved tip, not newest walked commit
+            // - Fires even if no new commits were discovered
+            on_ref_update(ref_name, prev, tip);
+
+            // Update checkpoint only after successful observation.
+            last_seen.insert(ref_name.to_string(), tip);
         }
 
         Ok(())
     }
-}
-
-fn on_commit(
-    repo_id: RepoId,
-    ref_name: &str,
-    commit: &git2::Commit,
-    tcp_client: ActorRef<TcpClientMessage>,
-) -> Result<(), ActorProcessingErr> {
-    debug!("Found commit for ref_name {ref_name} in repo {repo_id:?}");
-    let event = GitRepositoryMessage::Commit {
-        repo: repo_id,
-        oid: commit.id().to_string(),
-        author: commit.author().name().unwrap_or_default().to_string(),
-        time: commit.time().seconds(),
-        message: commit.message().unwrap_or_default().to_string(),
-        parents: commit.parent_ids().map(|id| id.to_string()).collect(),
-    };
-
-    debug!("Emitting event {:?}", event);
-    //TODO: actually emit event over the wire
-    // send_event(tcp_client, event, GIT_REPOSITORIES_TOPIC.to_string())?;
-
-    Ok(())
 }
 
 #[async_trait]
@@ -491,13 +550,25 @@ impl Actor for GitRepoWorker {
                     &state.config,
                     &mut state.last_seen,
                     |ref_name, commit| {
-                        message_send_failed = on_commit(
+                        on_commit(
                             state.repo_id.clone(),
                             ref_name,
                             commit,
                             state.tcp_client.clone(),
                         )
-                        .is_err();
+                        .map_err(|e| error!("commit emission failed: {e}"))
+                        .ok();
+                    },
+                    |ref_name, old, new| {
+                        emit_ref_update(
+                            state.repo_id.clone(),
+                            ref_name,
+                            old,
+                            new,
+                            state.tcp_client.clone(),
+                        )
+                        .map_err(|e| error!("ref update emission failed: {e}"))
+                        .ok();
                     },
                 )?;
 
@@ -633,12 +704,19 @@ mod unittests {
 
         let mut last_seen = HashMap::new();
         let mut seen = Vec::new();
+        let mut refs_seen = HashMap::new();
 
         let config = dummy_config(vec!["refs/heads/main".into(), "refs/heads/dev".into()]);
 
-        GitRepoWorker::observe_repository(&repo, &config, &mut last_seen, |r, c| {
-            seen.push((r.to_string(), c.id()))
-        })
+        GitRepoWorker::observe_repository(
+            &repo,
+            &config,
+            &mut last_seen,
+            |r, c| seen.push((r.to_string(), c.id())),
+            |ref_name, old, new| {
+                refs_seen.insert(ref_name.to_string(), (old, new));
+            },
+        )
         .unwrap();
 
         assert_eq!(last_seen["refs/heads/main"], *main_commits.last().unwrap());
@@ -668,7 +746,14 @@ mod unittests {
 
         let config = dummy_config(vec!["refs/heads/dev".into()]);
 
-        GitRepoWorker::observe_repository(&repo, &config, &mut last_seen, |_r, _c| {}).unwrap();
+        GitRepoWorker::observe_repository(
+            &repo,
+            &config,
+            &mut last_seen,
+            |_r, _c| {},
+            |_ref_name, _old, _new| {},
+        )
+        .unwrap();
 
         assert_eq!(last_seen["refs/heads/dev"], new_dev);
         assert_eq!(last_seen["refs/heads/main"], main_commits[0]);
@@ -682,7 +767,13 @@ mod unittests {
         let mut last_seen = HashMap::new();
         let config = dummy_config(vec!["refs/heads/main".into()]);
 
-        let result = GitRepoWorker::observe_repository(&repo, &config, &mut last_seen, |_r, _c| {});
+        let result = GitRepoWorker::observe_repository(
+            &repo,
+            &config,
+            &mut last_seen,
+            |_r, _c| {},
+            |_ref_name, _old, _new| {},
+        );
 
         assert!(result.is_err() || last_seen.is_empty());
     }

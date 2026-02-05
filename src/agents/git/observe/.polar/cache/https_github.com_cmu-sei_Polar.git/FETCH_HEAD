@@ -1,0 +1,5 @@
+4513eed54fe13c5244e30b4fdf0518aa24bc5ca8		branch 'main' of https://github.com/cmu-sei/Polar.git
+7b2ee96084ef3e0774e7fe0500ca02ee339cba88	not-for-merge	branch 'deploy-local-manifests' of https://github.com/cmu-sei/Polar.git
+dbdae3cf6db8b95fdf5f1d5a11859ae96d3d8c44	not-for-merge	branch 'kubernetes-graph-controller' of https://github.com/cmu-sei/Polar.git
+6a3f75c55cd5a9eda96be50719355fc6f602caf2	not-for-merge	branch 'log-events' of https://github.com/cmu-sei/Polar.git
+4b62d66a2c7e81003a70d3f1d52d4b0ba5ef69d1	not-for-merge	branch 'test-harness-refactor' of https://github.com/cmu-sei/Polar.git

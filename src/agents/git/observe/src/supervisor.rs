@@ -5,7 +5,7 @@ use crate::{
 use cassini_client::{TCPClientConfig, TcpClientActor, TcpClientArgs, TcpClientMessage};
 use cassini_types::ClientEvent;
 use git2::{Oid, Repository};
-use git_agent_common::GIT_REPO_CONFIG_RESPONSES;
+use git_agent_common::{GitRepositoryMessage, GIT_REPO_CONFIG_RESPONSES};
 use polar::{Supervisor, SupervisorMessage};
 use ractor::{
     async_trait, registry::where_is, Actor, ActorProcessingErr, ActorRef, OutputPort, RpcReplyPort,
@@ -32,11 +32,17 @@ impl RootSupervisor {
         state: &mut RootSupervisorState,
     ) -> Result<(), ActorProcessingErr> {
         trace!("Received message from topic {topic}");
-        let message = from_bytes::<RepoSupervisorMessage, rkyv::rancor::Error>(&payload)?;
+        let message = from_bytes::<GitRepositoryMessage, rkyv::rancor::Error>(&payload)?;
 
-        trace!("Forwarding message to repo supervisor");
         if let Some(repo_supervisor) = &state.repo_supervisor {
-            Ok(repo_supervisor.cast(message)?)
+            // quick check for expected message type, we only care about configuration events
+            let GitRepositoryMessage::ConfigurationResponse { config } = message else {
+                warn!("Received unexpected message type: {:?}", message);
+                return Ok(());
+            };
+            trace!("Forwarding message to repo supervisor");
+
+            Ok(repo_supervisor.cast(RepoSupervisorMessage::SpawnWorker { config })?)
         } else {
             return Err(ActorProcessingErr::from(
                 "missing repo supervisor".to_string(),
