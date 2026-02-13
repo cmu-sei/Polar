@@ -1,12 +1,13 @@
+use cassini_client::{TCPClientConfig, TcpClient, TcpClientActor, TcpClientArgs};
 use cassini_types::ClientEvent;
-use ractor::{ActorProcessingErr, OutputPort};
+use ractor::OutputPort;
+use ractor::{Actor, ActorProcessingErr, ActorRef};
 use reqwest::{Certificate, Client, ClientBuilder};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::io::Read;
 use std::sync::Arc;
 use tracing::{debug, info};
-
 pub mod graph;
 /// wrapper definition for a ractor outputport where a raw message payload and a topic can be piped to a necessary dispatcher
 pub type QueueOutput = Arc<OutputPort<(Vec<u8>, String)>>;
@@ -30,6 +31,36 @@ pub enum SupervisorMessage {
     ClientEvent { event: ClientEvent },
 }
 
+/// Helper to spawn a TCP client to connect to the message broker, Cassini.
+pub async fn spawn_tcp_client<M, F>(
+    service_name: &str,
+    supervisor: ActorRef<M>,
+    map_event: F,
+) -> Result<TcpClient, ActorProcessingErr>
+where
+    M: Send + 'static,
+    F: Fn(ClientEvent) -> Option<M> + Send + Sync + 'static,
+{
+    let events_output = std::sync::Arc::new(OutputPort::default());
+
+    events_output.subscribe(supervisor.clone(), map_event);
+
+    let config = TCPClientConfig::new()?;
+
+    let (tcp_client, _) = Actor::spawn_linked(
+        Some(format!("{service_name}.tcp")),
+        TcpClientActor,
+        TcpClientArgs {
+            config,
+            registration_id: None,
+            events_output,
+        },
+        supervisor.into(),
+    )
+    .await?;
+
+    Ok(tcp_client)
+}
 /// Helper function to parse a file at a given path and return the raw bytes as a vector
 pub fn get_file_as_byte_vec(filename: &String) -> Result<Vec<u8>, std::io::Error> {
     let mut f = std::fs::File::open(&filename)?;

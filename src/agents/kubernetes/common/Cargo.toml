@@ -8,7 +8,6 @@ license = "MIT"
 futures-lite = "2.6.1"
 url = "2.5.7"
 tracing = "0.1.41"
-amq-protocol-uri = { workspace = true }
 tcp-stream = { workspace = true }
 sysinfo = { workspace = true }
 serde = {version = "1", features = ["derive"]}

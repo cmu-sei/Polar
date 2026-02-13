@@ -1,8 +1,8 @@
 use crate::{
-    GitRepoSupervisor, GitRepoSupervisorArgs, RepoSupervisorMessage, REPO_SUPERVISOR_NAME,
-    SERVICE_NAME,
+    CredentialConfigError, GitRepoSupervisor, GitRepoSupervisorArgs, HostCredentialConfig,
+    RepoSupervisorMessage, StaticCredentialConfig, REPO_SUPERVISOR_NAME, SERVICE_NAME,
 };
-use cassini_client::{TCPClientConfig, TcpClientActor, TcpClientArgs, TcpClientMessage};
+use cassini_client::TcpClientMessage;
 use cassini_types::ClientEvent;
 use git_agent_common::{ConfigurationEvent, GIT_REPO_CONFIG_EVENTS};
 use polar::SupervisorMessage;
@@ -42,47 +42,57 @@ impl RootSupervisor {
         myself: ActorRef<SupervisorMessage>,
         state: &mut RootSupervisorState,
     ) -> Result<(), ActorProcessingErr> {
-        let cache_root = match std::env::var("POLAR_CACHE_ROOT") {
-            Ok(path) => {
-                debug!("Using cache root at {}", path);
-                PathBuf::from(path)
-            }
-            Err(_) => {
-                let default_dir = ".polar/cache";
+        // try to read config file
+        match StaticCredentialConfig::from_env("GIT_AGENT_CONFIG") {
+            Ok(credential_config) => {
+                let cache_root = match std::env::var("POLAR_CACHE_ROOT") {
+                    Ok(path) => {
+                        debug!("Using cache root at {}", path);
+                        PathBuf::from(path)
+                    }
+                    Err(_) => {
+                        let default_dir = ".polar/cache";
 
-                debug!(
-                    "Attempting to create default cache directory {}",
-                    default_dir
-                );
-                if let Ok(current_dir) = std::env::current_dir() {
-                    current_dir.join(default_dir)
-                } else {
-                    return Err(ActorProcessingErr::from("Failed to determine cache root"));
-                }
-            }
-        };
+                        debug!(
+                            "Attempting to create default cache directory {}",
+                            default_dir
+                        );
+                        if let Ok(current_dir) = std::env::current_dir() {
+                            current_dir.join(default_dir)
+                        } else {
+                            return Err(ActorProcessingErr::from("Failed to determine cache root"));
+                        }
+                    }
+                };
 
-        // start repo supervior
-        //
-        let (repo_supervisor, _) = Actor::spawn_linked(
-            Some(REPO_SUPERVISOR_NAME.to_string()),
-            GitRepoSupervisor,
-            GitRepoSupervisorArgs {
-                tcp_client: state.tcp_client.clone(),
-                cache_root: cache_root.clone(),
+                // start repo supervior
+                //
+                let (repo_supervisor, _) = Actor::spawn_linked(
+                    Some(REPO_SUPERVISOR_NAME.to_string()),
+                    GitRepoSupervisor,
+                    GitRepoSupervisorArgs {
+                        credential_config,
+                        tcp_client: state.tcp_client.clone(),
+                        cache_root: cache_root.clone(),
+                    },
+                    myself.into(),
+                )
+                .await?;
+
+                state.repo_supervisor = Some(repo_supervisor);
+
+                // subscribe to configuration messages
+                state.tcp_client.cast(TcpClientMessage::Subscribe(
+                    GIT_REPO_CONFIG_EVENTS.to_string(),
+                ))?;
+
+                Ok(())
+            }
+            Err(e) => match e {
+                CredentialConfigError::Io(e) => Err(e.into()),
+                CredentialConfigError::Parse(e) => Err(e.into()),
             },
-            myself.into(),
-        )
-        .await?;
-
-        state.repo_supervisor = Some(repo_supervisor);
-
-        // subscribe to configuration messages
-        state.tcp_client.cast(TcpClientMessage::Subscribe(
-            GIT_REPO_CONFIG_EVENTS.to_string(),
-        ))?;
-
-        Ok(())
+        }
     }
 }
 
@@ -100,26 +110,11 @@ impl Actor for RootSupervisor {
         // Read Kubernetes credentials and other data from the environment
         debug!("{myself:?} starting");
 
-        let events_output = std::sync::Arc::new(OutputPort::default());
-
-        //subscribe to registration event
-        events_output.subscribe(myself.clone(), |event| {
+        let tcp_client = polar::spawn_tcp_client(SERVICE_NAME, myself, |event| {
             Some(SupervisorMessage::ClientEvent { event })
-        });
-
-        let config = TCPClientConfig::new()?;
-
-        let (tcp_client, _) = Actor::spawn_linked(
-            Some(format!("{SERVICE_NAME}.supervisor.tcp")),
-            TcpClientActor,
-            TcpClientArgs {
-                config,
-                registration_id: None,
-                events_output,
-            },
-            myself.clone().into(),
-        )
+        })
         .await?;
+
         Ok(RootSupervisorState {
             tcp_client,
             repo_supervisor: None,
@@ -135,15 +130,15 @@ impl Actor for RootSupervisor {
         match msg {
             SupervisionEvent::ActorStarted(_) => (),
             SupervisionEvent::ActorTerminated(actor_cell, _, reason) => {
-                info!(
-                    "CLUSTER_SUPERVISOR: {0:?}:{1:?} terminated. {reason:?}",
+                debug!(
+                    "{0:?}:{1:?} terminated. {reason:?}",
                     actor_cell.get_name(),
                     actor_cell.get_id()
                 );
             }
             SupervisionEvent::ActorFailed(actor_cell, e) => {
-                warn!(
-                    "CLUSTER_SUPERVISOR: {0:?}:{1:?} failed! {e:?}",
+                error!(
+                    "{0:?}:{1:?} failed! {e:?}",
                     actor_cell.get_name(),
                     actor_cell.get_id()
                 );

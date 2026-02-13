@@ -1,17 +1,15 @@
-use cassini_client::{TCPClientConfig, TcpClientArgs};
+use cassini_client::TcpClient;
 use cassini_types::ClientEvent;
 use git_agent_common::{GitRepositoryMessage, RepoId, GIT_REPO_PROCESSING_TOPIC};
-use neo4rs::{BoltType, Graph};
+use neo4rs::BoltType;
+use polar::get_neo_config;
 use polar::graph::{
-    handle_op, rel, GraphController, GraphControllerMsg, GraphNodeKey, GraphOp, GraphValue,
-    Property,
+    rel, GraphController, GraphControllerMsg, GraphNodeKey, GraphOp, GraphValue, Property,
 };
-use polar::{get_neo_config, ProvenanceEvent};
 use polar::{impl_graph_controller, SupervisorMessage};
 use ractor::async_trait;
-use ractor::{Actor, ActorProcessingErr, ActorRef, OutputPort, SupervisionEvent};
+use ractor::{Actor, ActorProcessingErr, ActorRef, SupervisionEvent};
 use rkyv::rancor;
-use std::sync::Arc;
 use tracing::{debug, error, trace, warn};
 
 #[derive(Debug, Clone)]
@@ -69,7 +67,7 @@ impl GraphNodeKey for GitNodeKey {
 
 // === Supervisor state ===
 pub struct GitRepoProcessingManagerState {
-    pub tcp_client: ActorRef<cassini_client::TcpClientMessage>,
+    pub tcp_client: TcpClient,
     pub graph_controller: Option<ActorRef<GraphControllerMsg<GitNodeKey>>>,
 }
 
@@ -242,25 +240,10 @@ impl Actor for GitRepoProcessingManager {
         myself: ActorRef<Self::Msg>,
         _: (),
     ) -> Result<Self::State, ActorProcessingErr> {
-        let events_output = Arc::new(OutputPort::default());
-
-        events_output.subscribe(myself.clone(), |event| {
-            debug!("Received event: {event:?}");
-            Some(SupervisorMessage::ClientEvent { event })
-        });
-        let client_config = TCPClientConfig::new()?;
-        // start client
-        let client_args = TcpClientArgs {
-            config: client_config,
-            registration_id: None,
-            events_output: events_output.clone(),
-        };
-
-        let (tcp_client, _) = Actor::spawn_linked(
-            Some("polar.git.processor.tcp".to_string()),
-            cassini_client::TcpClientActor,
-            client_args,
-            myself.clone().into(),
+        let tcp_client = polar::spawn_tcp_client(
+            &format!("{GIT_REPO_PROCESSING_TOPIC}.tcp"),
+            myself.into(),
+            |ev| Some(SupervisorMessage::ClientEvent { event: ev }),
         )
         .await?;
 

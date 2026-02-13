@@ -9,12 +9,14 @@ tokio = { version = "1", features = ["full"] }
 tracing = "0.1.41"
 ractor = { version = "0.15.8", features = ["async-trait"] }
 rkyv = { workspace = true }
-git2 = {version = "0.20.3", features = ["https", "ssh"]}
+git2 = "=0.20.2"
 git-agent-common = { path = "../common" }
 # --- Cassini ecosystem ---
 cassini-client = { path = "../../cassini/client" }
 cassini-types = { path = "../../cassini/types" }
 polar          = { path = "../../lib" }
-
+serde = "1"
+serde_json = "1.0.149"
+url = "2.5.8"
 [dev-dependencies]
 tempfile = "3.24.0"

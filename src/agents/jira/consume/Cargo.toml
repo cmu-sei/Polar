@@ -30,7 +30,6 @@ license = "MIT"
 
 [dependencies]
 # Workspace crates
-lapin = { workspace = true }
 neo4rs = { workspace = true }
 cassini-backoff = { workspace = true }
 
