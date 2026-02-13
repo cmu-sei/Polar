@@ -1,13 +1,12 @@
 use cassini_client::{TCPClientConfig, TcpClientActor, TcpClientArgs, TcpClientMessage};
 use cassini_types::ClientEvent;
-use git_agent_common::{
-    GitRepositoryMessage, RepoObservationConfig, GIT_REPO_CONFIG_REQUESTS,
-    GIT_REPO_CONFIG_RESPONSES,
+use git_agent_common::{ConfigurationEvent, RepoId, RepoObservationConfig, GIT_REPO_CONFIG_EVENTS};
+use polar::{
+    GitRepositoryDiscoveredEvent, ProvenanceEvent, SupervisorMessage, GIT_REPO_DISCOGERY_TOPIC,
 };
-use polar::SupervisorMessage;
 use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef, OutputPort, SupervisionEvent};
 use rkyv::{from_bytes, rancor, to_bytes};
-use tracing::{debug, error, info, instrument, trace, warn};
+use tracing::{debug, error, event, info, instrument, trace, warn};
 
 pub const SERVICE_NAME: &str = "polar.git.scheduler";
 pub const TCP: &str = "tcp";
@@ -27,7 +26,7 @@ impl RootSupervisor {
         debug!("{myself:?} initializing");
         // subscribe to supervision events
         state.tcp_client.cast(TcpClientMessage::Subscribe(
-            GIT_REPO_CONFIG_REQUESTS.to_string(),
+            GIT_REPO_DISCOGERY_TOPIC.to_string(),
         ))?;
 
         Ok(())
@@ -39,35 +38,34 @@ impl RootSupervisor {
         state: &mut RootSupervisorState,
     ) -> Result<(), ActorProcessingErr> {
         trace!("Received message from topic {topic}");
-        let message = from_bytes::<GitRepositoryMessage, rancor::Error>(&payload)?;
+        let event = from_bytes::<GitRepositoryDiscoveredEvent, rancor::Error>(&payload)?;
 
-        match message {
-            GitRepositoryMessage::ConfigurationRequest { repo_url } => {
-                trace!("Received configuration request for repository {repo_url}");
-                // Handle configuration request
-                // Example: Fetch repository configuration and send response
-                // query neo4j and send response
-                // TODO: Implement fetching repository configuration from Neo4j, rem
-                let response = GitRepositoryMessage::ConfigurationResponse {
-                    config: RepoObservationConfig::new(
-                        repo_url,
-                        vec!["origin".to_string()],
-                        Some(100),
-                        vec!["refs/heads/main".to_string()],
-                    ),
-                };
-                let payload = to_bytes::<rancor::Error>(&response)?;
+        // Handle configuration request
+        // Example: Fetch repository configuration and send response
+        // query neo4j and send response
+        // TODO: Implement fetching repository configuration from Neo4j, rem
+        // TODO: Implement checking for an ssh or http url
+        let repo_url = event.http_url.unwrap();
+        let repo_id = RepoId::from_url(&repo_url);
 
-                // Send response to the client
-                let message = TcpClientMessage::Publish {
-                    topic: GIT_REPO_CONFIG_RESPONSES.to_string(),
-                    payload: payload.to_vec(),
-                };
+        let response = ConfigurationEvent {
+            config: RepoObservationConfig::new(
+                repo_id,
+                repo_url,
+                vec!["origin".to_string()],
+                Some(100),
+                vec!["refs/heads/main".to_string()],
+            ),
+        };
+        let payload = to_bytes::<rancor::Error>(&response)?;
 
-                state.tcp_client.cast(message)?;
-            }
-            _ => warn!("Received unknown message from TCP client {message:?}"),
-        }
+        // Send response to the client
+        let message = TcpClientMessage::Publish {
+            topic: GIT_REPO_CONFIG_EVENTS.to_string(),
+            payload: payload.to_vec(),
+        };
+
+        state.tcp_client.cast(message)?;
 
         Ok(())
     }

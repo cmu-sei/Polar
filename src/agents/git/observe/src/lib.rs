@@ -1,10 +1,8 @@
 use cassini_client::TcpClientMessage;
 use git2::{FetchOptions, Oid, RemoteCallbacks, Repository};
 use git_agent_common::{
-    GitRepositoryMessage, RepoId, RepoObservationConfig, GIT_REPO_CONFIG_REQUESTS,
+    GitRepositoryMessage, RepoId, RepoObservationConfig, GIT_REPO_PROCESSING_TOPIC,
 };
-use polar::GIT_REPOSITORIES_TOPIC;
-use ractor::concurrency::{self, Duration};
 use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef, SupervisionEvent};
 use rkyv::{rancor, to_bytes, Archive, Deserialize, Serialize};
 use std::collections::HashMap;
@@ -66,9 +64,6 @@ pub struct GitRepoSupervisorArgs {
 /// It routes, spawns, and enforces invariants.
 #[derive(Serialize, Deserialize, Archive, Debug)]
 pub enum RepoSupervisorMessage {
-    ObserveRepo {
-        repo_url: String,
-    },
     SpawnWorker {
         config: RepoObservationConfig,
     },
@@ -105,21 +100,6 @@ impl Actor for GitRepoSupervisor {
         })
     }
 
-    async fn post_start(
-        &self,
-        myself: ActorRef<Self::Msg>,
-        state: &mut Self::State,
-    ) -> Result<(), ActorProcessingErr> {
-        // TODO: REMOVE THIS AFTER TESTING
-        myself.send_after(concurrency::Duration::from_secs(3), || {
-            debug!("Observing repo");
-            RepoSupervisorMessage::ObserveRepo {
-                repo_url: "https://github.com/cmu-sei/Polar.git".to_string(),
-            }
-        });
-
-        Ok(())
-    }
     async fn handle(
         &self,
         myself: ActorRef<Self::Msg>,
@@ -127,39 +107,11 @@ impl Actor for GitRepoSupervisor {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match msg {
-            RepoSupervisorMessage::ObserveRepo { repo_url } => {
-                let repo_id = RepoId::from_url(&repo_url);
-
-                if let Some(worker) = state.workers.get(&repo_id) {
-                    trace!(
-                        "Forwarding observe request to worker for repo {}",
-                        repo_id.to_string()
-                    );
-                    // Forward work to the worker.
-                    worker.send_message(GitRepoWorkerMsg::Observe)?;
-                } else {
-                    //Before starting a worker, send a request to see if there's some schedule out there for this repo\
-                    info!(
-                        "No worker found for repo {}, requesting configuration",
-                        repo_id.to_string()
-                    );
-                    let request = GitRepositoryMessage::ConfigurationRequest {
-                        repo_url: repo_url.clone(),
-                    };
-
-                    send_event(
-                        state.tcp_client.clone(),
-                        request,
-                        GIT_REPO_CONFIG_REQUESTS.to_string(),
-                    )?;
-                }
-            }
             RepoSupervisorMessage::SpawnWorker { config } => {
                 trace!("Received SpawnWorker message");
-                let repo_id = RepoId::from_url(&config.repo_url);
+                let repo_id = config.repo_id.clone();
 
                 let args = GitRepoWorkerArgs {
-                    repo_id: repo_id.clone(),
                     config,
                     repo_path: state.cache_root.join(&repo_id.to_string()),
                     tcp_client: state.tcp_client.clone(),
@@ -177,14 +129,15 @@ impl Actor for GitRepoSupervisor {
 
                 state.workers.insert(repo_id, worker);
             }
-            RepoSupervisorMessage::StopWorker { repo_id } => {
-                trace!("Received stop message for repo {}", repo_id.to_string());
-                if let Some(worker) = state.workers.remove(&repo_id) {
-                    info!("Stopping worker for repo {}", repo_id.to_string());
-                    worker
-                        .stop_and_wait(None, Some(Duration::from_secs(300)))
-                        .await?;
-                }
+            RepoSupervisorMessage::StopWorker { .. } => {
+                todo!("Implement cleanup logic for the filesystem");
+                // trace!("Received stop message for repo {}", repo_id.to_string());
+                // if let Some(worker) = state.workers.remove(&repo_id) {
+                //     info!("Stopping worker for repo {}", repo_id.to_string());
+                //     worker
+                //         .stop_and_wait(None, Some(Duration::from_secs(300)))
+                //         .await?;
+                // }
             }
         }
         Ok(())
@@ -235,7 +188,6 @@ pub struct GitRepoWorker;
 ///
 /// No other actor is allowed to touch this repo path.
 pub struct GitRepoWorkerState {
-    repo_id: RepoId,
     config: RepoObservationConfig,
     tcp_client: ActorRef<TcpClientMessage>,
     repo: Repository,
@@ -246,7 +198,6 @@ pub struct GitRepoWorkerState {
 }
 
 pub struct GitRepoWorkerArgs {
-    repo_id: RepoId,
     config: RepoObservationConfig,
     repo_path: PathBuf,
     tcp_client: ActorRef<TcpClientMessage>,
@@ -277,7 +228,7 @@ fn on_commit(
         parents: commit.parent_ids().map(|id| id.to_string()).collect(),
     };
 
-    send_event(tcp_client, event, GIT_REPOSITORIES_TOPIC.to_string())?;
+    send_event(tcp_client, event, GIT_REPO_PROCESSING_TOPIC.to_string())?;
 
     Ok(())
 }
@@ -301,7 +252,7 @@ fn emit_ref_update(
         observed_at: now.to_string(),
     };
 
-    send_event(tcp_client, event, GIT_REPOSITORIES_TOPIC.to_string())
+    send_event(tcp_client, event, GIT_REPO_PROCESSING_TOPIC.to_string())
 }
 
 impl GitRepoWorker {
@@ -514,7 +465,6 @@ impl Actor for GitRepoWorker {
         // TODO: Load persisted last_seen checkpoints here.
 
         Ok(GitRepoWorkerState {
-            repo_id: args.repo_id,
             config: args.config,
             tcp_client: args.tcp_client,
             repo,
@@ -551,7 +501,7 @@ impl Actor for GitRepoWorker {
                     &mut state.last_seen,
                     |ref_name, commit| {
                         on_commit(
-                            state.repo_id.clone(),
+                            state.config.repo_id.clone(),
                             ref_name,
                             commit,
                             state.tcp_client.clone(),
@@ -561,7 +511,7 @@ impl Actor for GitRepoWorker {
                     },
                     |ref_name, old, new| {
                         emit_ref_update(
-                            state.repo_id.clone(),
+                            state.config.repo_id.clone(),
                             ref_name,
                             old,
                             new,
@@ -599,7 +549,8 @@ mod unittests {
     }
 
     fn dummy_config(refs: Vec<String>) -> RepoObservationConfig {
-        RepoObservationConfig::new("local".into(), Vec::new(), Some(100), refs)
+        let id = RepoId::from_url("local");
+        RepoObservationConfig::new(id, "local".into(), Vec::new(), Some(100), refs)
     }
 
     /// Create a bare repository for testing.

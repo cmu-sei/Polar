@@ -20,7 +20,7 @@
 
    DM24-0470
 */
-use crate::{subscribe_to_topic, GitlabConsumerArgs, GitlabConsumerState};
+use crate::{ GitlabConsumerState};
 use common::types::{GitlabData, GitlabEnvelope};
 use common::GROUPS_CONSUMER_TOPIC;
 use neo4rs::Query;

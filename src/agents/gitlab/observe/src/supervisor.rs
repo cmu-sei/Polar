@@ -148,45 +148,46 @@ impl Actor for ObserverSupervisor {
                         )
                         .await?;
 
-                        Actor::spawn_linked(
-                            Some(GITLAB_PIPELINE_OBSERVER.to_string()),
-                            GitlabPipelineObserver,
-                            args.clone(),
-                            myself.clone().into(),
-                        )
-                        .await?;
+                        //TODO: enable after testing
+                        // Actor::spawn_linked(
+                        //     Some(GITLAB_PIPELINE_OBSERVER.to_string()),
+                        //     GitlabPipelineObserver,
+                        //     args.clone(),
+                        //     myself.clone().into(),
+                        // )
+                        // .await?;
 
-                        Actor::spawn_linked(
-                            Some(GITLAB_JOBS_OBSERVER.to_string()),
-                            GitlabJobObserver,
-                            args.clone(),
-                            myself.clone().into(),
-                        )
-                        .await?;
+                        // Actor::spawn_linked(
+                        //     Some(GITLAB_JOBS_OBSERVER.to_string()),
+                        //     GitlabJobObserver,
+                        //     args.clone(),
+                        //     myself.clone().into(),
+                        // )
+                        // .await?;
 
-                        Actor::spawn_linked(
-                            Some(GITLAB_GROUPS_OBSERVER.to_string()),
-                            GitlabGroupObserver,
-                            args.clone(),
-                            myself.clone().into(),
-                        )
-                        .await?;
+                        // Actor::spawn_linked(
+                        //     Some(GITLAB_GROUPS_OBSERVER.to_string()),
+                        //     GitlabGroupObserver,
+                        //     args.clone(),
+                        //     myself.clone().into(),
+                        // )
+                        // .await?;
 
-                        Actor::spawn_linked(
-                            Some(GITLAB_RUNNER_OBSERVER.to_string()),
-                            GitlabRunnerObserver,
-                            args.clone(),
-                            myself.clone().into(),
-                        )
-                        .await?;
+                        // Actor::spawn_linked(
+                        //     Some(GITLAB_RUNNER_OBSERVER.to_string()),
+                        //     GitlabRunnerObserver,
+                        //     args.clone(),
+                        //     myself.clone().into(),
+                        // )
+                        // .await?;
 
-                        Actor::spawn_linked(
-                            Some(GITLAB_REPOSITORY_OBSERVER.to_string()),
-                            GitlabRepositoryObserver,
-                            args.clone(),
-                            myself.clone().into(),
-                        )
-                        .await?;
+                        // Actor::spawn_linked(
+                        //     Some(GITLAB_REPOSITORY_OBSERVER.to_string()),
+                        //     GitlabRepositoryObserver,
+                        //     args.clone(),
+                        //     myself.clone().into(),
+                        // )
+                        // .await?;
                     }
                     ClientEvent::MessagePublished { .. } => {
                         todo!("Deserialize and dispatch message from the queue");

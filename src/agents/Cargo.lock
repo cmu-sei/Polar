@@ -1980,7 +1980,15 @@ dependencies = [
 ]
 
 [[package]]
-name = "git"
+name = "git-agent-common"
+version = "0.1.0"
+dependencies = [
+ "git2",
+ "rkyv 0.8.12",
+]
+
+[[package]]
+name = "git-repo-observer"
 version = "0.1.0"
 dependencies = [
  "cassini-client",
@@ -1993,14 +2001,6 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
-]
-
-[[package]]
-name = "git-agent-common"
-version = "0.1.0"
-dependencies = [
- "git2",
- "rkyv 0.8.12",
 ]
 
 [[package]]

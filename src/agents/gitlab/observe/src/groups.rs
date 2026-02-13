@@ -84,7 +84,7 @@ impl GitlabGroupObserver {
     async fn get_group_members(
         state: &mut GitlabObserverState,
         op: Operation<GroupMembersQuery, GroupPathVariable>,
-    ) -> Result<(), String> {
+    ) -> Result<(), ActorProcessingErr> {
         debug!("Sending query: {:?}", op.query);
 
         let token = state.token.clone().unwrap_or_default();
@@ -113,7 +113,7 @@ impl GitlabGroupObserver {
                                         .join("\n");
 
                                     error!("Failed to query instance! {errors}");
-                                    return Err(errors);
+                                    return Err(errors.into());
                                 }
 
                                 let query = deserialized
@@ -135,14 +135,14 @@ impl GitlabGroupObserver {
                             }
                             Err(e) => {
                                 error!("{e}");
-                                Err(e.to_string())
+                                Err(e.into())
                             }
                         }
                     }
-                    Err(e) => Err(e.to_string()),
+                    Err(e) => Err(e.into()),
                 }
             }
-            Err(e) => Err(e.to_string()),
+            Err(e) => Err(e.into()),
         }
     }
 
@@ -150,7 +150,7 @@ impl GitlabGroupObserver {
     async fn get_group_projects(
         state: &mut GitlabObserverState,
         op: Operation<GroupProjectsQuery, GroupPathVariable>,
-    ) -> Result<(), String> {
+    ) -> Result<(), ActorProcessingErr> {
         debug!("Sending query: {:?}", op.query);
 
         let token = state.token.clone().unwrap_or_default();
@@ -175,7 +175,7 @@ impl GitlabGroupObserver {
                                 .join("\n");
 
                             error!("Failed to query instance! {errors}");
-                            return Err(errors);
+                            return Err(errors.into());
                         }
 
                         let query = deserialized
@@ -195,10 +195,10 @@ impl GitlabGroupObserver {
 
                         Ok(())
                     }
-                    Err(e) => Err(e.to_string()),
+                    Err(e) => Err(e.into()),
                 }
             }
-            Err(e) => Err(e.to_string()),
+            Err(e) => Err(e.into()),
         }
     }
 
@@ -206,7 +206,7 @@ impl GitlabGroupObserver {
     async fn get_group_runners(
         state: &mut GitlabObserverState,
         op: Operation<GroupRunnersQuery, GroupPathVariable>,
-    ) -> Result<(), String> {
+    ) -> Result<(), ActorProcessingErr> {
         debug!("Sending query: {:?}", op.query);
 
         let token = state.token.clone().unwrap_or_default();
@@ -229,7 +229,7 @@ impl GitlabGroupObserver {
                             .join("\n");
 
                         error!("Failed to query instance! {errors}");
-                        return Err(errors);
+                        return Err(errors.into());
                     }
 
                     let query = deserialized
@@ -248,9 +248,9 @@ impl GitlabGroupObserver {
 
                     Ok(())
                 }
-                Err(e) => Err(e.to_string()),
+                Err(e) => Err(e.into()),
             },
-            Err(e) => Err(e.to_string()),
+            Err(e) => Err(e.into()),
         }
     }
 }
@@ -339,6 +339,7 @@ impl Actor for GitlabGroupObserver {
                                                             )
                                                             .await
                                                             {
+                                                                error!("Failed to get group members {e}");
                                                                 return Err(ActorProcessingErr::from(e))
                                                             }
 
@@ -357,6 +358,7 @@ impl Actor for GitlabGroupObserver {
                                                             )
                                                             .await
                                                             {
+                                                                error!("Failed to get group projects {e}");
                                                                 return Err(ActorProcessingErr::from(e));
                                                             }
 
@@ -374,6 +376,7 @@ impl Actor for GitlabGroupObserver {
                                                                 get_group_runners,
                                                             )
                                                             .await {
+                                                                error!("Failed to get group runners {e}");
                                                                 return Err(ActorProcessingErr::from(e));
                                                             }
 

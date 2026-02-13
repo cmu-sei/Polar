@@ -1,8 +1,11 @@
 use neo4rs::{BoltNull, BoltType, Graph, Query};
-use ractor::ActorProcessingErr;
+use ractor::{ActorProcessingErr, ActorRef};
 use serde::{Deserialize, Serialize};
 use std::fmt::Debug;
 use tracing::{debug, instrument, trace};
+
+// Type alias to add a generic wrapper to the graphcontroller.
+pub type GraphController<T> = ActorRef<GraphControllerMsg<T>>;
 
 /// Graph relationship type constants.
 /// ------ IMPORTANT!!!!! ------
@@ -210,6 +213,48 @@ where
     txn.commit().await?;
     trace!("transaction committed");
     Ok(())
+}
+
+#[macro_export]
+macro_rules! impl_graph_controller {
+    (
+        $actor_name:ident,
+        node_key = $node_key:ty
+    ) => {
+        pub struct GraphControllerState {
+            pub graph: neo4rs::Graph,
+        }
+        pub struct $actor_name;
+
+        #[ractor::async_trait]
+        impl ractor::Actor for $actor_name {
+            type Msg = GraphControllerMsg<$node_key>;
+            type State = GraphControllerState;
+            type Arguments = neo4rs::Graph;
+
+            async fn pre_start(
+                &self,
+                _myself: ractor::ActorRef<Self::Msg>,
+                graph: Self::Arguments,
+            ) -> Result<Self::State, ractor::ActorProcessingErr> {
+                Ok(GraphControllerState { graph })
+            }
+
+            async fn handle(
+                &self,
+                _myself: ractor::ActorRef<Self::Msg>,
+                op: Self::Msg,
+                state: &mut Self::State,
+            ) -> Result<(), ractor::ActorProcessingErr> {
+                match op {
+                    GraphControllerMsg::Op(op) => {
+                        polar::graph::handle_op::<$node_key>(&state.graph, &op).await?;
+                    }
+                }
+                Ok(())
+            }
+        }
+    };
 }
 
 #[cfg(test)]

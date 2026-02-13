@@ -4,19 +4,12 @@ use crate::{
 };
 use cassini_client::{TCPClientConfig, TcpClientActor, TcpClientArgs, TcpClientMessage};
 use cassini_types::ClientEvent;
-use git2::{Oid, Repository};
-use git_agent_common::{GitRepositoryMessage, GIT_REPO_CONFIG_RESPONSES};
-use polar::{Supervisor, SupervisorMessage};
-use ractor::{
-    async_trait, registry::where_is, Actor, ActorProcessingErr, ActorRef, OutputPort, RpcReplyPort,
-    SupervisionEvent,
-};
-use rkyv::{from_bytes, Archive, Deserialize, Serialize};
-use std::collections::HashMap;
-use std::fs;
+use git_agent_common::{ConfigurationEvent, GIT_REPO_CONFIG_EVENTS};
+use polar::SupervisorMessage;
+use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef, OutputPort, SupervisionEvent};
+use rkyv::from_bytes;
 use std::path::PathBuf;
-use tokio::task::spawn_blocking;
-use tracing::{debug, error, info, instrument, trace, warn};
+use tracing::{debug, error, info, instrument, warn};
 
 pub struct RootSupervisor;
 
@@ -31,24 +24,19 @@ impl RootSupervisor {
         payload: Vec<u8>,
         state: &mut RootSupervisorState,
     ) -> Result<(), ActorProcessingErr> {
-        trace!("Received message from topic {topic}");
-        let message = from_bytes::<GitRepositoryMessage, rkyv::rancor::Error>(&payload)?;
-
-        if let Some(repo_supervisor) = &state.repo_supervisor {
-            // quick check for expected message type, we only care about configuration events
-            let GitRepositoryMessage::ConfigurationResponse { config } = message else {
-                warn!("Received unexpected message type: {:?}", message);
-                return Ok(());
-            };
-            trace!("Forwarding message to repo supervisor");
-
-            Ok(repo_supervisor.cast(RepoSupervisorMessage::SpawnWorker { config })?)
+        debug!("Received message from topic {topic}");
+        if let Ok(ev) = from_bytes::<ConfigurationEvent, rkyv::rancor::Error>(&payload) {
+            if let Some(s) = &state.repo_supervisor {
+                return Ok(s.cast(RepoSupervisorMessage::SpawnWorker { config: ev.config })?);
+            } else {
+                return Err("Failed to find repo supervisor".into());
+            }
         } else {
-            return Err(ActorProcessingErr::from(
-                "missing repo supervisor".to_string(),
-            ));
+            warn!("Failed to deserialize event");
+            return Ok(());
         }
     }
+
     #[instrument(skip_all, level = "debug")]
     async fn init(
         myself: ActorRef<SupervisorMessage>,
@@ -91,7 +79,7 @@ impl RootSupervisor {
 
         // subscribe to configuration messages
         state.tcp_client.cast(TcpClientMessage::Subscribe(
-            GIT_REPO_CONFIG_RESPONSES.to_string(),
+            GIT_REPO_CONFIG_EVENTS.to_string(),
         ))?;
 
         Ok(())

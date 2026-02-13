@@ -10,7 +10,6 @@ use tracing::{debug, info};
 pub mod graph;
 /// wrapper definition for a ractor outputport where a raw message payload and a topic can be piped to a necessary dispatcher
 pub type QueueOutput = Arc<OutputPort<(Vec<u8>, String)>>;
-
 /// name of the agent responsible receiving provenance events related to discovery of certain artifacts.
 /// Including container images and software bill of materials.
 pub const PROVENANCE_DISCOVERY_TOPIC: &str = "polar.provenance.resolver";
@@ -19,7 +18,7 @@ pub const TRANSACTION_FAILED_ERROR: &str = "Expected to start a transaction with
 pub const QUERY_COMMIT_FAILED: &str = "Error committing transaction to graph";
 pub const QUERY_RUN_FAILED: &str = "Error running query on the graph.";
 pub const UNEXPECTED_MESSAGE_STR: &str = "Received unexpected message!";
-pub const GIT_REPOSITORIES_TOPIC: &str = "polar.git.repositories";
+pub const GIT_REPO_DISCOGERY_TOPIC: &str = "polar.git.repositories";
 pub trait Supervisor {
     /// Helper function to dispatch messages off of message queues to the associated actors within an agent supervision tree.
     /// Payload : a series of raw bytes containing an expected data structure/enum for the agent.
@@ -112,6 +111,13 @@ pub struct NormalizedSbom {
     pub components: Vec<NormalizedComponent>,
 }
 
+/// A simple event that says a git repo was discovered
+///
+#[derive(Debug, rkyv::Serialize, rkyv::Deserialize, rkyv::Archive)]
+pub struct GitRepositoryDiscoveredEvent {
+    pub http_url: Option<String>,
+    pub ssh_url: Option<String>,
+}
 /// Represents normalized provenance-related events emitted across agents.
 /// Each variant communicates new or updated knowledge about entities in the provenance graph.
 ///

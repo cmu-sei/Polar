@@ -25,9 +25,9 @@ use gitlab_queries::{
     groups::{GroupData, GroupMemberConnection},
     projects::{
         ContainerRepository, ContainerRepositoryTag, GitlabCiJob, Package, Pipeline, Project,
-        ProjectConnection, ProjectMemberConnection,
+        ProjectCoreConnection, ProjectMemberConnection,
     },
-    runners::{CiRunner, CiRunnerConnection},
+    runners::{CiRunner, CiRunnerConnection, CiRunnerIdConnection},
     users::UserCoreFragment,
     LicenseHistoryEntry, Metadata,
 };
@@ -56,8 +56,8 @@ pub enum GitlabData {
     ProjectRunners(ResourceLink<CiRunnerConnection>),
     Groups(Vec<GroupData>),
     GroupMembers(ResourceLink<GroupMemberConnection>),
-    GroupRunners(ResourceLink<CiRunnerConnection>),
-    GroupProjects(ResourceLink<ProjectConnection>),
+    GroupRunners(ResourceLink<CiRunnerIdConnection>),
+    GroupProjects(ResourceLink<ProjectCoreConnection>),
     Runners(Vec<CiRunner>),
     // RunnerJob((u32, Job)),
     Jobs((String, Vec<GitlabCiJob>)),

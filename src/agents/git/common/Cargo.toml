@@ -4,6 +4,6 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
-git2 = "0.20.4"
+git2 = "0.20.3"
 
 rkyv = { workspace = true }
