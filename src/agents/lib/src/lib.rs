@@ -160,7 +160,7 @@ pub struct GitRepositoryDiscoveredEvent {
 #[derive(Debug, rkyv::Serialize, rkyv::Deserialize, rkyv::Archive)]
 pub enum ProvenanceEvent {
     /// Emitted when more generic unclassified artifacts.
-    ArtifactDisocvered { name: String, url: String },
+    ArtifactDiscovered { name: String, url: String },
     SBOMResolved {
         uid: String,
         name: String,

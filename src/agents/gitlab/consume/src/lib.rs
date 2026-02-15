@@ -21,22 +21,20 @@
    DM24-0470
 */
 
-use cassini_client::{TcpClient, TcpClientMessage};
+use cassini_client::TcpClient;
 use common::types::GitlabEnvelope;
 use neo4rs::BoltType;
-use polar::graph::{GraphController, GraphOp};
+use polar::graph::GraphController;
 use polar::graph::{GraphControllerMsg, GraphNodeKey};
 use polar::impl_graph_controller;
-use ractor::registry::where_is;
-use ractor::{ActorProcessingErr, ActorRef};
-use std::error::Error;
+use ractor::ActorRef;
 
-// pub mod groups;
+pub mod groups;
 pub mod meta;
-// pub mod pipelines;
+pub mod pipelines;
 pub mod projects;
-// pub mod repositories;
-// pub mod runners;
+pub mod repositories;
+pub mod runners;
 pub mod supervisor;
 pub mod users;
 pub type GitlabConsumer = ActorRef<GitlabEnvelope>;
@@ -81,21 +79,30 @@ pub enum GitlabNodeKey {
 
     /// A container registry repository
     ContainerRepository {
-        instance_id: String,
+        project_id: String,
         repository_id: String,
+    },
+    Package {
+        package_id: String,
+    },
+    PackageFile {
+        file_id: String,
+        package_id: String,
+    },
+    ContainerRepositoryTag {
+        repository_id: String,
+        digest: String,
     },
 
     /// A CI pipeline run
     Pipeline {
         instance_id: String,
-        project_id: String,
         pipeline_id: String,
     },
 
     /// A CI job
     Job {
         instance_id: String,
-        project_id: String,
         job_id: String,
     },
 
@@ -108,9 +115,7 @@ pub enum GitlabNodeKey {
     /// A pipeline artifact (logical artifact, not individual files)
     PipelineArtifact {
         instance_id: String,
-        project_id: String,
-        job_id: String,
-        artifact_name: String,
+        artifact_id: String,
     },
 }
 
@@ -168,36 +173,41 @@ impl GraphNodeKey for GitlabNodeKey {
                 ],
             ),
             GitlabNodeKey::ContainerRepository {
-                instance_id,
                 repository_id,
+                project_id,
             } => (
                 format!(
-                    "(:GitlabContainerRepository {{ instance_id: ${prefix}_instance_id, repository_id: ${prefix}_repository_id }})"
+                    "(:GitlabContainerRepository {{ project_id: ${prefix}_project_id, repository_id: ${prefix}_repository_id }})"
                 ),
                 vec![
-                    (format!("{prefix}_instance_id"), instance_id.clone().into()),
                     (format!("{prefix}_repository_id"), (repository_id).to_owned().into()),
+                    (format!("{prefix}_project_id"), (project_id).to_owned().into()),
                 ],
             ),
-
+            GitlabNodeKey::ContainerRepositoryTag { repository_id, digest } => (
+                format!(
+                    "(:ContainerRepositoryTag {{ repository_id: ${prefix}_repository_id, digest: ${prefix}_digest }})"
+                ),
+                vec![
+                    (format!("{prefix}_repository_id"), (repository_id).to_owned().into()),
+                    (format!("{prefix}_digest"), (digest).to_owned().into()),
+                ],
+            ),
             GitlabNodeKey::Pipeline {
                 instance_id,
-                project_id,
                 pipeline_id,
             } => (
                 format!(
-                    "(:GitlabPipeline {{ instance_id: ${prefix}_instance_id, project_id: ${prefix}_project_id, pipeline_id: ${prefix}_pipeline_id }})"
+                    "(:GitlabPipeline {{  instance_id: ${prefix}_instance_id, pipeline_id: ${prefix}_pipeline_id }})"
                 ),
                 vec![
-                    (format!("{prefix}_instance_id"), instance_id.clone().into()),
-                    (format!("{prefix}_project_id"), project_id.to_owned().into()),
+                    (format!("{prefix}_instance_id"), instance_id.to_owned().into()),
                     (format!("{prefix}_pipeline_id"), pipeline_id.to_owned().into()),
                 ],
             ),
 
             GitlabNodeKey::Job {
                 instance_id,
-                project_id,
                 job_id,
             } => (
                 format!(
@@ -205,7 +215,6 @@ impl GraphNodeKey for GitlabNodeKey {
                 ),
                 vec![
                     (format!("{prefix}_instance_id"), instance_id.clone().into()),
-                    (format!("{prefix}_project_id"), project_id.to_owned().into()),
                     (format!("{prefix}_job_id"), job_id.to_owned().into()),
                 ],
             ),
@@ -225,18 +234,29 @@ impl GraphNodeKey for GitlabNodeKey {
 
             GitlabNodeKey::PipelineArtifact {
                 instance_id,
-                project_id,
-                job_id,
-                artifact_name,
+                artifact_id,
             } => (
                 format!(
-                    "(:GitlabPipelineArtifact {{ instance_id: ${prefix}_instance_id, project_id: ${prefix}_project_id, job_id: ${prefix}_job_id, name: ${prefix}_name }})"
+                    "(:GitlabPipelineArtifact {{ instance_id: ${prefix}_instance_id, name: ${prefix}_artifact_id }})"
                 ),
                 vec![
                     (format!("{prefix}_instance_id"), instance_id.clone().into()),
-                    (format!("{prefix}_project_id"), project_id.to_owned().into()),
-                    (format!("{prefix}_job_id"), job_id.to_owned().into()),
-                    (format!("{prefix}_name"), artifact_name.clone().into()),
+                    (format!("{prefix}_artifact_id"), artifact_id.clone().into()),
+                ],
+            ),
+            GitlabNodeKey::Package { package_id } => (
+                format!("(:GitlabPackage {{ package_id: ${prefix}_package_id }})"),
+                vec![
+                    (format!("{prefix}_package_id"), package_id.clone().into()),
+                ]
+            ),
+            GitlabNodeKey::PackageFile { file_id, package_id } => (
+                format!(
+                    "(:GitlabPackageFile {{ file_id: ${prefix}_file_id, repository_id: ${prefix}_package_id}})"
+                ),
+                vec![
+                    (format!("{prefix}_package_id"), package_id.clone().into()),
+                    (format!("{prefix}_file_id"), file_id.to_owned().into()),
                 ],
             ),
         }

@@ -10,7 +10,8 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tracing::{debug, error, info, instrument, trace, warn};
+use tracing::info;
+use tracing::{debug, error, instrument, trace, warn};
 use url::Url;
 
 pub const SERVICE_NAME: &str = "polar.git.observer";
@@ -78,9 +79,13 @@ impl StaticCredentialConfig {
     }
 
     pub fn from_env(var: &str) -> Result<Self, CredentialConfigError> {
-        debug!("Loading credentials from {var}");
-        let path = std::env::var(var)
-            .map_err(|_| std::io::Error::new(std::io::ErrorKind::NotFound, "env var missing"))?;
+        info!("Loading credentials from {var}");
+        let path = std::env::var(var).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("env var missing: {var}"),
+            )
+        })?;
         Self::from_file(path)
     }
 }

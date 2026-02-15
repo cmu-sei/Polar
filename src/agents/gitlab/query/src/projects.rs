@@ -44,12 +44,14 @@ pub struct SingleProjectQueryArguments {
 #[derive(cynic::QueryFragment, Clone, Deserialize, Serialize, rkyv::Archive)]
 #[cynic(schema = "gitlab", graphql_type = "Project")]
 pub struct ProjectPipelineFragment {
+    pub id: IdString,
     pub pipelines: Option<PipelineConnection>,
 }
 
 #[derive(cynic::QueryFragment, Clone, Deserialize, Serialize, rkyv::Archive)]
 #[cynic(schema = "gitlab", graphql_type = "Project")]
 pub struct ProjectPipelineJobsragment {
+    pub id: IdString,
     pub pipelines: Option<PipelineJobsConnection>,
 }
 

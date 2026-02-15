@@ -22,15 +22,14 @@
 */
 
 use crate::GitlabConsumerState;
-use cassini_client::TcpClientMessage;
-use gitlab_queries::{projects::ProjectMember, users::UserCoreFragment};
-use polar::graph::{GraphControllerMsg, GraphOp, GraphValue, Property};
-
 use crate::GitlabNodeKey;
+use cassini_client::TcpClientMessage;
 use common::{
     types::{GitlabData, GitlabEnvelope},
     USER_CONSUMER_TOPIC,
 };
+use gitlab_queries::{projects::ProjectMember, users::UserCoreFragment};
+use polar::graph::{GraphControllerMsg, GraphOp, GraphValue, Property};
 use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef};
 use tracing::{debug, info};
 
@@ -44,21 +43,19 @@ impl GitlabUserConsumer {
     /// - Ensures each GitLab user node exists
     /// - Sets user attributes (non-identity)
     /// - Records that the instance has observed the user
-    pub fn ops_for_gitlab_users(
+    pub fn handle_gitlab_users(
         instance_id: String,
         users: &[UserCoreFragment],
-    ) -> Vec<GraphOp<GitlabNodeKey>> {
+        graph: &ActorRef<GraphControllerMsg<GitlabNodeKey>>,
+    ) -> Result<(), ActorProcessingErr> {
         let instance_key = GitlabNodeKey::GitlabInstance {
             instance_id: instance_id.clone(),
         };
 
-        let mut ops = Vec::new();
-
-        // Instance node is canonical; upsert once per batch is fine
-        ops.push(GraphOp::UpsertNode {
+        graph.cast(GraphControllerMsg::Op(GraphOp::UpsertNode {
             key: instance_key.clone(),
             props: vec![],
-        });
+        }))?;
 
         for user in users {
             let user_key = GitlabNodeKey::User {
@@ -120,20 +117,20 @@ impl GitlabUserConsumer {
                 GraphValue::String(user.web_path.clone()),
             ));
 
-            ops.push(GraphOp::UpsertNode {
+            graph.cast(GraphControllerMsg::Op(GraphOp::UpsertNode {
                 key: user_key.clone(),
                 props,
-            });
+            }))?;
 
-            ops.push(GraphOp::EnsureEdge {
+            graph.cast(GraphControllerMsg::Op(GraphOp::EnsureEdge {
                 from: instance_key.clone(),
                 to: user_key,
                 rel_type: "OBSERVED_USER".into(),
                 props: vec![],
-            });
+            }))?;
         }
 
-        ops
+        Ok(())
     }
 
     /// Generate graph operations for GitLab project membership relationships.
@@ -142,23 +139,21 @@ impl GitlabUserConsumer {
     /// - Ensures user and project nodes exist
     /// - Ensures MEMBER_OF relationship exists
     /// - Sets relationship attributes
-    pub fn ops_for_project_memberships(
+    pub fn handle_project_memberships(
         instance_id: String,
         user_id: String,
         memberships: &[ProjectMember],
-    ) -> Vec<GraphOp<GitlabNodeKey>> {
+        graph: &ActorRef<GraphControllerMsg<GitlabNodeKey>>,
+    ) -> Result<(), ActorProcessingErr> {
         let user_key = GitlabNodeKey::User {
             instance_id: instance_id.clone(),
             user_id,
         };
 
-        let mut ops = Vec::new();
-
-        // Ensure user exists (attributes handled elsewhere)
-        ops.push(GraphOp::UpsertNode {
+        graph.cast(GraphControllerMsg::Op(GraphOp::UpsertNode {
             key: user_key.clone(),
             props: vec![],
-        });
+        }))?;
 
         for membership in memberships {
             let Some(project) = &membership.project else {
@@ -170,10 +165,10 @@ impl GitlabUserConsumer {
                 project_id: project.id.to_string(),
             };
 
-            ops.push(GraphOp::UpsertNode {
+            graph.cast(GraphControllerMsg::Op(GraphOp::UpsertNode {
                 key: project_key.clone(),
                 props: vec![],
-            });
+            }))?;
 
             let mut rel_props = Vec::new();
 
@@ -200,17 +195,18 @@ impl GitlabUserConsumer {
                 ));
             }
 
-            ops.push(GraphOp::EnsureEdge {
+            graph.cast(GraphControllerMsg::Op(GraphOp::EnsureEdge {
                 from: user_key.clone(),
                 to: project_key,
                 rel_type: "MEMBER_OF".into(),
                 props: rel_props,
-            });
+            }))?;
         }
 
-        ops
+        Ok(())
     }
 }
+
 #[async_trait]
 impl Actor for GitlabUserConsumer {
     type Msg = GitlabEnvelope;
@@ -248,28 +244,21 @@ impl Actor for GitlabUserConsumer {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message.data {
-            GitlabData::Users(users) => {
-                let ops = Self::ops_for_gitlab_users(message.instance_id.clone(), &users);
-                for op in ops {
-                    state.graph_controller.cast(GraphControllerMsg::Op(op))?;
-                }
-            }
+            GitlabData::Users(users) => Self::handle_gitlab_users(
+                message.instance_id.clone(),
+                &users,
+                &state.graph_controller,
+            )?,
             GitlabData::ProjectMembers(link) => {
                 if let Some(memberships) = link.connection.nodes {
-                    let memberships = memberships
-                        .iter()
-                        .map(|m| m.clone().unwrap())
-                        .collect::<Vec<_>>();
+                    let memberships = memberships.into_iter().flatten().collect::<Vec<_>>();
 
-                    let ops = Self::ops_for_project_memberships(
+                    Self::handle_project_memberships(
                         message.instance_id.clone(),
                         link.resource_id.to_string(),
                         &memberships,
-                    );
-
-                    for op in ops {
-                        state.graph_controller.cast(GraphControllerMsg::Op(op))?;
-                    }
+                        &state.graph_controller,
+                    )?;
                 }
             }
             _ => todo!(),

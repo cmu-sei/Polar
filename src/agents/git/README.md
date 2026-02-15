@@ -187,6 +187,24 @@ Expected behavior:
 
 ### Running the Observer
 
+**Setup**
+The Git Observer is configured via a JSON file in a similar fashion to many docker-compatible tooling.
+The structure is as follows. 
+
+```json
+{
+  "hosts": {
+    "gitlab.com": {
+      "http": {
+        "username": "username",
+        "token": "token"
+      }
+    }
+  }
+}
+```
+Ensure one of these files exists before running the agent.
+
 ```bash
 ## Ensure you set the environment variable to point the agent to a json file containing necessary credentials.
 export GIT_AGENT_CONFIG="git.json"

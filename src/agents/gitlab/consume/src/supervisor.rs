@@ -1,20 +1,18 @@
 use std::time::Duration;
 
+use crate::groups::GitlabGroupConsumer;
+use crate::meta::MetaConsumer;
+use crate::pipelines::GitlabPipelineConsumer;
+use crate::projects::GitlabProjectConsumer;
+use crate::repositories::GitlabRepositoryConsumer;
+use crate::runners::GitlabRunnerConsumer;
+use crate::users::GitlabUserConsumer;
 use crate::GitlabConsumer;
 use crate::GitlabConsumerState;
-// use crate::groups::GitlabGroupConsumer;
-// use crate::meta::MetaConsumer;
-// use crate::pipelines::GitlabPipelineConsumer;
-use crate::projects::GitlabProjectConsumer;
-// use crate::repositories::GitlabRepositoryConsumer;
-// use crate::runners::GitlabRunnerConsumer;
-use crate::users::GitlabUserConsumer;
 use crate::GitlabGraphController;
 use crate::BROKER_CLIENT_NAME;
-use cassini_backoff::{Backoff, ExponentialBackoff};
 use cassini_client::*;
 use cassini_types::ClientEvent;
-use common::types::GitlabData;
 use common::types::GitlabEnvelope;
 
 use common::GROUPS_CONSUMER_TOPIC;
@@ -28,9 +26,6 @@ use polar::get_neo_config;
 use polar::Supervisor;
 use polar::SupervisorMessage;
 use ractor::async_trait;
-use ractor::registry::where_is;
-use ractor::rpc::call;
-use ractor::rpc::CallResult;
 use ractor::Actor;
 use ractor::ActorProcessingErr;
 use ractor::ActorRef;
@@ -135,17 +130,17 @@ impl Actor for ConsumerSupervisor {
                         tcp_client: state.tcp_client.clone(),
                     };
 
-                    // if let Err(e) = Actor::spawn_linked(
-                    //     Some(METADATA_CONSUMER_TOPIC.to_string()),
-                    //     MetaConsumer,
-                    //     graph_controller.clone(),
-                    //     myself.clone().into(),
-                    // )
-                    // .await
-                    // {
-                    //     error!("failed to start meta consumer. {e}");
-                    //     myself.stop(None);
-                    // }
+                    if let Err(e) = Actor::spawn_linked(
+                        Some(METADATA_CONSUMER_TOPIC.to_string()),
+                        MetaConsumer,
+                        c_state.clone(),
+                        myself.clone().into(),
+                    )
+                    .await
+                    {
+                        error!("failed to start meta consumer. {e}");
+                        myself.stop(None);
+                    }
                     state.u_consumer = Some(
                         Actor::spawn_linked(
                             Some(USER_CONSUMER_TOPIC.to_string()),
@@ -157,28 +152,28 @@ impl Actor for ConsumerSupervisor {
                         .0,
                     );
 
-                    // if let Err(e) = Actor::spawn_linked(
-                    //     Some(GROUPS_CONSUMER_TOPIC.to_string()),
-                    //     GitlabGroupConsumer,
-                    //     graph_controller.clone(),
-                    //     myself.clone().into(),
-                    // )
-                    // .await
-                    // {
-                    //     error!("failed to start groups consumer. {e}");
-                    //     myself.stop(None);
-                    // }
-                    // if let Err(e) = Actor::spawn_linked(
-                    //     Some(RUNNERS_CONSUMER_TOPIC.to_string()),
-                    //     GitlabRunnerConsumer,
-                    //     graph_controller.clone(),
-                    //     myself.clone().into(),
-                    // )
-                    // .await
-                    // {
-                    //     error!("failed to start runners consumer. {e}");
-                    //     myself.stop(None);
-                    // }
+                    if let Err(e) = Actor::spawn_linked(
+                        Some(GROUPS_CONSUMER_TOPIC.to_string()),
+                        GitlabGroupConsumer,
+                        c_state.clone(),
+                        myself.clone().into(),
+                    )
+                    .await
+                    {
+                        error!("failed to start groups consumer. {e}");
+                        myself.stop(None);
+                    }
+                    if let Err(e) = Actor::spawn_linked(
+                        Some(RUNNERS_CONSUMER_TOPIC.to_string()),
+                        GitlabRunnerConsumer,
+                        c_state.clone(),
+                        myself.clone().into(),
+                    )
+                    .await
+                    {
+                        error!("failed to start runners consumer. {e}");
+                        myself.stop(None);
+                    }
                     if let Err(e) = Actor::spawn_linked(
                         Some(PROJECTS_CONSUMER_TOPIC.to_string()),
                         GitlabProjectConsumer,
@@ -190,28 +185,28 @@ impl Actor for ConsumerSupervisor {
                         error!("failed to start projects consumer. {e}");
                         myself.stop(None);
                     }
-                    // if let Err(e) = Actor::spawn_linked(
-                    //     Some(PIPELINE_CONSUMER_TOPIC.to_string()),
-                    //     GitlabPipelineConsumer,
-                    //     graph_controller.clone(),
-                    //     myself.clone().into(),
-                    // )
-                    // .await
-                    // {
-                    //     error!("failed to start pipeline consumer. {e}");
-                    //     myself.stop(None);
-                    // }
-                    // if let Err(e) = Actor::spawn_linked(
-                    //     Some(REPOSITORY_CONSUMER_TOPIC.to_string()),
-                    //     GitlabRepositoryConsumer,
-                    //     graph_controller.clone(),
-                    //     myself.clone().into(),
-                    // )
-                    // .await
-                    // {
-                    //     error!("failed to start pipeline consumer. {e}");
-                    //     myself.stop(None);
-                    // }
+                    if let Err(e) = Actor::spawn_linked(
+                        Some(PIPELINE_CONSUMER_TOPIC.to_string()),
+                        GitlabPipelineConsumer,
+                        c_state.clone(),
+                        myself.clone().into(),
+                    )
+                    .await
+                    {
+                        error!("failed to start pipeline consumer. {e}");
+                        myself.stop(None);
+                    }
+                    if let Err(e) = Actor::spawn_linked(
+                        Some(REPOSITORY_CONSUMER_TOPIC.to_string()),
+                        GitlabRepositoryConsumer,
+                        c_state.clone(),
+                        myself.clone().into(),
+                    )
+                    .await
+                    {
+                        error!("failed to start pipeline consumer. {e}");
+                        myself.stop(None);
+                    }
                 }
                 ClientEvent::MessagePublished { topic, payload } => {
                     ConsumerSupervisor::deserialize_and_dispatch(topic, payload);

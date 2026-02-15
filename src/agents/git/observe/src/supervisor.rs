@@ -157,7 +157,11 @@ impl Actor for RootSupervisor {
     ) -> Result<(), ActorProcessingErr> {
         match message {
             SupervisorMessage::ClientEvent { event } => match event {
-                ClientEvent::Registered { .. } => Self::init(myself, state).await?,
+                ClientEvent::Registered { .. } => {
+                    if let Err(e) = Self::init(myself.clone(), state).await {
+                        myself.stop(Some(e.to_string()));
+                    }
+                }
                 ClientEvent::MessagePublished { topic, payload } => {
                     Self::deserialize_and_dispatch(topic, payload, state)?
                 }

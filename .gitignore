@@ -29,7 +29,7 @@ authorized_keys
 *-output.json
 env.fish
 src/agents/cassini/test/producer/config.dhall
-
+git.json
 # ephemeral bullshit - do not check this in
 my.env
 .env.nuon
