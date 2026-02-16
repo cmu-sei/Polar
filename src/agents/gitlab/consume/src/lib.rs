@@ -21,9 +21,13 @@
    DM24-0470
 */
 
-use cassini_client::TcpClientMessage;
-use ractor::registry::where_is;
-use std::error::Error;
+use cassini_client::TcpClient;
+use common::types::GitlabEnvelope;
+use neo4rs::BoltType;
+use polar::graph::GraphController;
+use polar::graph::{GraphControllerMsg, GraphNodeKey};
+use polar::impl_graph_controller;
+use ractor::ActorRef;
 
 pub mod groups;
 pub mod meta;
@@ -33,39 +37,230 @@ pub mod repositories;
 pub mod runners;
 pub mod supervisor;
 pub mod users;
-
+pub type GitlabConsumer = ActorRef<GitlabEnvelope>;
 pub const BROKER_CLIENT_NAME: &str = "GITLAB_CONSUMER_CLIENT";
 pub const GITLAB_USER_CONSUMER: &str = "users";
 
+// in case we unwrap optional fields
+pub const UNKNOWN_FILED: &str = "unknown";
+
+#[derive(Clone)]
 pub struct GitlabConsumerState {
-    pub registration_id: String,
-    graph: neo4rs::Graph,
-}
-#[derive(Clone, Debug)]
-pub struct GitlabConsumerArgs {
-    pub registration_id: String,
-    pub graph_config: neo4rs::Config,
+    tcp_client: TcpClient,
+    graph_controller: GraphController<GitlabNodeKey>,
 }
 
-///
-/// Helper fn to setup consumer state, subscribe to a given topic, and connect to the graph database
-pub async fn subscribe_to_topic(
-    registration_id: String,
-    topic: String,
-    config: neo4rs::Config,
-) -> Result<GitlabConsumerState, Box<dyn Error>> {
-    let client = where_is(BROKER_CLIENT_NAME.to_string()).expect("Expected to find TCP client.");
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum GitlabNodeKey {
+    /// A GitLab instance (SaaS or self-managed)
+    GitlabInstance {
+        instance_id: String, // UUIDv5 or canonical hostname hash
+    },
+    License {
+        instance_id: String,
+        license_id: String,
+    },
+    /// A project/repository
+    Project {
+        instance_id: String,
+        project_id: String, // GitLab internal project ID
+    },
 
-    client.send_message(TcpClientMessage::Subscribe(topic))?;
+    /// A GitLab user
+    User {
+        instance_id: String,
+        user_id: String,
+    },
 
-    //load neo config and connect to graph db
+    Group {
+        instance_id: String,
+        group_id: String,
+    },
 
-    let graph = neo4rs::Graph::connect(config)?;
+    /// A container registry repository
+    ContainerRepository {
+        project_id: String,
+        repository_id: String,
+    },
+    Package {
+        package_id: String,
+    },
+    PackageFile {
+        file_id: String,
+        package_id: String,
+    },
+    ContainerRepositoryTag {
+        repository_id: String,
+        digest: String,
+    },
 
-    Ok(GitlabConsumerState {
-        registration_id,
-        graph,
-    })
+    /// A CI pipeline run
+    Pipeline {
+        instance_id: String,
+        pipeline_id: String,
+    },
+
+    /// A CI job
+    Job {
+        instance_id: String,
+        job_id: String,
+    },
+
+    /// A GitLab runner
+    Runner {
+        instance_id: String,
+        runner_id: String,
+    },
+
+    /// A pipeline artifact (logical artifact, not individual files)
+    PipelineArtifact {
+        instance_id: String,
+        artifact_id: String,
+    },
+}
+
+impl_graph_controller!(GitlabGraphController, node_key = GitlabNodeKey);
+
+impl GraphNodeKey for GitlabNodeKey {
+    fn cypher_match(&self, prefix: &str) -> (String, Vec<(String, BoltType)>) {
+        match self {
+            GitlabNodeKey::GitlabInstance { instance_id } => (
+                format!("(:GitlabInstance {{ id: ${prefix}_id }})"),
+                vec![
+                    (format!("{prefix}_id"), instance_id.clone().into()),
+                ],
+            ),
+            GitlabNodeKey::License { instance_id, license_id } => (
+                format!("(:GitlabLicense {{ instance_id: ${prefix}_instance_id, license_id: ${prefix}_license_id  }})"),
+                vec![
+                    (format!("{prefix}_id"), instance_id.clone().into()),
+                    (format!("{prefix}_license_id"), license_id.clone().into()),
+                ],
+            ),
+            GitlabNodeKey::Project {
+                instance_id,
+                project_id,
+            } => (
+                format!(
+                    "(:GitlabProject {{ instance_id: ${prefix}_instance_id, project_id: ${prefix}_project_id }})"
+                ),
+                vec![
+                    (format!("{prefix}_instance_id"), instance_id.clone().into()),
+                    (format!("{prefix}_project_id"), (project_id).to_owned().into()),
+                ],
+            ),
+
+            GitlabNodeKey::User {
+                instance_id,
+                user_id,
+            } => (
+                format!(
+                    "(:GitlabUser {{ instance_id: ${prefix}_instance_id, user_id: ${prefix}_user_id }})"
+                ),
+                vec![
+                    (format!("{prefix}_instance_id"), instance_id.clone().into()),
+                    (format!("{prefix}_user_id"), (user_id).to_owned().into()),
+                ],
+            ),
+            GitlabNodeKey::Group {instance_id, group_id } =>
+            (
+                format!(
+                    "(:GitlabGroup {{ instance_id: ${prefix}_instance_id, group_id: ${prefix}_group_id }})"
+                ),
+                vec![
+                    (format!("{prefix}_instance_id"), instance_id.clone().into()),
+                    (format!("{prefix}_group_id"), (group_id).to_owned().into()),
+                ],
+            ),
+            GitlabNodeKey::ContainerRepository {
+                repository_id,
+                project_id,
+            } => (
+                format!(
+                    "(:GitlabContainerRepository {{ project_id: ${prefix}_project_id, repository_id: ${prefix}_repository_id }})"
+                ),
+                vec![
+                    (format!("{prefix}_repository_id"), (repository_id).to_owned().into()),
+                    (format!("{prefix}_project_id"), (project_id).to_owned().into()),
+                ],
+            ),
+            GitlabNodeKey::ContainerRepositoryTag { repository_id, digest } => (
+                format!(
+                    "(:ContainerRepositoryTag {{ repository_id: ${prefix}_repository_id, digest: ${prefix}_digest }})"
+                ),
+                vec![
+                    (format!("{prefix}_repository_id"), (repository_id).to_owned().into()),
+                    (format!("{prefix}_digest"), (digest).to_owned().into()),
+                ],
+            ),
+            GitlabNodeKey::Pipeline {
+                instance_id,
+                pipeline_id,
+            } => (
+                format!(
+                    "(:GitlabPipeline {{  instance_id: ${prefix}_instance_id, pipeline_id: ${prefix}_pipeline_id }})"
+                ),
+                vec![
+                    (format!("{prefix}_instance_id"), instance_id.to_owned().into()),
+                    (format!("{prefix}_pipeline_id"), pipeline_id.to_owned().into()),
+                ],
+            ),
+
+            GitlabNodeKey::Job {
+                instance_id,
+                job_id,
+            } => (
+                format!(
+                    "(:GitlabJob {{ instance_id: ${prefix}_instance_id, project_id: ${prefix}_project_id, job_id: ${prefix}_job_id }})"
+                ),
+                vec![
+                    (format!("{prefix}_instance_id"), instance_id.clone().into()),
+                    (format!("{prefix}_job_id"), job_id.to_owned().into()),
+                ],
+            ),
+
+            GitlabNodeKey::Runner {
+                instance_id,
+                runner_id,
+            } => (
+                format!(
+                    "(:GitlabRunner {{ instance_id: ${prefix}_instance_id, runner_id: ${prefix}_runner_id }})"
+                ),
+                vec![
+                    (format!("{prefix}_instance_id"), instance_id.clone().into()),
+                    (format!("{prefix}_runner_id"), runner_id.to_owned().into()),
+                ],
+            ),
+
+            GitlabNodeKey::PipelineArtifact {
+                instance_id,
+                artifact_id,
+            } => (
+                format!(
+                    "(:GitlabPipelineArtifact {{ instance_id: ${prefix}_instance_id, name: ${prefix}_artifact_id }})"
+                ),
+                vec![
+                    (format!("{prefix}_instance_id"), instance_id.clone().into()),
+                    (format!("{prefix}_artifact_id"), artifact_id.clone().into()),
+                ],
+            ),
+            GitlabNodeKey::Package { package_id } => (
+                format!("(:GitlabPackage {{ package_id: ${prefix}_package_id }})"),
+                vec![
+                    (format!("{prefix}_package_id"), package_id.clone().into()),
+                ]
+            ),
+            GitlabNodeKey::PackageFile { file_id, package_id } => (
+                format!(
+                    "(:GitlabPackageFile {{ file_id: ${prefix}_file_id, repository_id: ${prefix}_package_id}})"
+                ),
+                vec![
+                    (format!("{prefix}_package_id"), package_id.clone().into()),
+                    (format!("{prefix}_file_id"), file_id.to_owned().into()),
+                ],
+            ),
+        }
+    }
 }
 
 #[derive(Debug)]

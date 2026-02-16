@@ -20,41 +20,231 @@
 
    DM24-0470
 */
-use crate::{subscribe_to_topic, GitlabConsumerArgs, GitlabConsumerState};
+use crate::{GitlabConsumerState, GitlabNodeKey};
 use common::types::{GitlabData, GitlabEnvelope};
 use common::GROUPS_CONSUMER_TOPIC;
-use neo4rs::Query;
-use polar::{QUERY_COMMIT_FAILED, QUERY_RUN_FAILED, TRANSACTION_FAILED_ERROR};
+use gitlab_queries::groups::{GroupData, GroupMember};
+use gitlab_queries::projects::ProjectCoreFragment;
+use gitlab_queries::runners::CiRunnerIdFragment;
+use polar::graph::{GraphController, GraphControllerMsg, GraphOp, GraphValue, Property};
 use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef};
-use tracing::{debug, info};
+use tracing::debug;
 
 pub struct GitlabGroupConsumer;
+
+impl GitlabGroupConsumer {
+    pub fn handle_groups(
+        instance_id: String,
+        groups: &[GroupData],
+        graph: &GraphController<GitlabNodeKey>,
+    ) -> Result<(), ActorProcessingErr> {
+        let instance_key = GitlabNodeKey::GitlabInstance {
+            instance_id: instance_id.clone(),
+        };
+
+        graph.cast(GraphControllerMsg::Op(GraphOp::UpsertNode {
+            key: instance_key.clone(),
+            props: vec![],
+        }))?;
+
+        for group in groups {
+            let group_key = GitlabNodeKey::Group {
+                instance_id: instance_id.clone(),
+                group_id: group.id.to_string(),
+            };
+
+            let mut props = vec![
+                Property(
+                    "full_name".into(),
+                    GraphValue::String(group.full_name.to_string()),
+                ),
+                Property(
+                    "full_path".into(),
+                    GraphValue::String(group.full_path.to_string()),
+                ),
+            ];
+
+            if let Some(created_at) = &group.created_at {
+                props.push(Property(
+                    "created_at".into(),
+                    GraphValue::String(created_at.to_string()),
+                ));
+            }
+
+            graph.cast(GraphControllerMsg::Op(GraphOp::UpsertNode {
+                key: group_key.clone(),
+                props,
+            }))?;
+
+            graph.cast(GraphControllerMsg::Op(GraphOp::EnsureEdge {
+                from: instance_key.clone(),
+                to: group_key,
+                rel_type: "OBSERVED_GROUP".into(),
+                props: vec![],
+            }))?;
+        }
+
+        Ok(())
+    }
+
+    pub fn handle_group_members(
+        instance_id: String,
+        group_id: String,
+        memberships: &[GroupMember],
+        graph: &GraphController<GitlabNodeKey>,
+    ) -> Result<(), ActorProcessingErr> {
+        let group_key = GitlabNodeKey::Group {
+            instance_id: instance_id.clone(),
+            group_id,
+        };
+
+        graph.cast(GraphControllerMsg::Op(GraphOp::UpsertNode {
+            key: group_key.clone(),
+            props: vec![],
+        }))?;
+
+        for membership in memberships {
+            let Some(user) = &membership.user else {
+                continue;
+            };
+
+            let user_key = GitlabNodeKey::User {
+                instance_id: instance_id.clone(),
+                user_id: user.id.to_string(),
+            };
+
+            graph.cast(GraphControllerMsg::Op(GraphOp::UpsertNode {
+                key: user_key.clone(),
+                props: vec![],
+            }))?;
+
+            graph.cast(GraphControllerMsg::Op(GraphOp::EnsureEdge {
+                from: user_key,
+                to: group_key.clone(),
+                rel_type: "IN_GROUP".into(),
+                props: vec![],
+            }))?;
+        }
+
+        Ok(())
+    }
+
+    /// Handle projects associated with a group.
+    ///
+    /// Semantics:
+    /// - Ensures group node exists
+    /// - Ensures each project node exists
+    /// - Ensures (project)-[:IN_GROUP]->(group)
+    pub fn handle_group_projects(
+        instance_id: String,
+        group_id: String,
+        projects: &[ProjectCoreFragment],
+        graph: &ActorRef<GraphControllerMsg<GitlabNodeKey>>,
+    ) -> Result<(), ActorProcessingErr> {
+        let group_key = GitlabNodeKey::Group {
+            instance_id: instance_id.clone(),
+            group_id,
+        };
+
+        // Ensure group exists
+        graph.cast(GraphControllerMsg::Op(GraphOp::UpsertNode {
+            key: group_key.clone(),
+            props: vec![],
+        }))?;
+
+        for project in projects {
+            let project_key = GitlabNodeKey::Project {
+                instance_id: instance_id.clone(),
+                project_id: project.id.to_string(),
+            };
+
+            // Ensure project exists
+            graph.cast(GraphControllerMsg::Op(GraphOp::UpsertNode {
+                key: project_key.clone(),
+                props: vec![],
+            }))?;
+
+            // Ensure relationship
+            graph.cast(GraphControllerMsg::Op(GraphOp::EnsureEdge {
+                from: project_key,
+                to: group_key.clone(),
+                rel_type: "IN_GROUP".into(),
+                props: vec![],
+            }))?;
+        }
+
+        Ok(())
+    }
+    /// Handle runners associated with a group.
+    ///
+    /// Semantics:
+    /// - Ensures group node exists
+    /// - Ensures runner node exists
+    /// - Sets runner attributes
+    /// - Ensures (runner)-[:IN_GROUP]->(group)
+    pub fn handle_group_runners(
+        instance_id: String,
+        group_id: String,
+        runners: &[CiRunnerIdFragment],
+        graph: &ActorRef<GraphControllerMsg<GitlabNodeKey>>,
+    ) -> Result<(), ActorProcessingErr> {
+        debug!("Handling runners for group {group_id}");
+
+        let group_key = GitlabNodeKey::Group {
+            instance_id: instance_id.clone(),
+            group_id,
+        };
+
+        // Ensure group exists
+        graph.cast(GraphControllerMsg::Op(GraphOp::UpsertNode {
+            key: group_key.clone(),
+            props: vec![],
+        }))?;
+
+        for runner in runners {
+            let runner_key = GitlabNodeKey::Runner {
+                instance_id: instance_id.clone(),
+                runner_id: runner.id.0.to_string(),
+            };
+
+            // Runner properties
+            graph.cast(GraphControllerMsg::Op(GraphOp::UpsertNode {
+                key: runner_key.clone(),
+                props: vec![],
+            }))?;
+
+            graph.cast(GraphControllerMsg::Op(GraphOp::EnsureEdge {
+                from: runner_key,
+                to: group_key.clone(),
+                rel_type: "IN_GROUP".into(),
+                props: vec![],
+            }))?;
+        }
+
+        Ok(())
+    }
+}
 
 #[async_trait]
 impl Actor for GitlabGroupConsumer {
     type Msg = GitlabEnvelope;
     type State = GitlabConsumerState;
-    type Arguments = GitlabConsumerArgs;
+    type Arguments = GitlabConsumerState;
 
     async fn pre_start(
         &self,
-        _myself: ActorRef<Self::Msg>,
-        args: GitlabConsumerArgs,
+        myself: ActorRef<Self::Msg>,
+        state: Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
-        //subscribe to topic
-        match subscribe_to_topic(
-            args.registration_id,
-            GROUPS_CONSUMER_TOPIC.to_string(),
-            args.graph_config,
-        )
-        .await
-        {
-            Ok(state) => Ok(state),
-            Err(e) => {
-                let err_msg = format!("Error starting actor: {GROUPS_CONSUMER_TOPIC} {e}");
-                Err(ActorProcessingErr::from(err_msg))
-            }
-        }
+        // fire off subscribe message
+        state
+            .tcp_client
+            .cast(cassini_client::TcpClientMessage::Subscribe(
+                GROUPS_CONSUMER_TOPIC.to_string(),
+            ))?;
+
+        debug!("{myself:?} starting");
+        Ok(state)
     }
 
     async fn post_start(
@@ -67,214 +257,53 @@ impl Actor for GitlabGroupConsumer {
     }
     async fn handle(
         &self,
-        myself: ActorRef<Self::Msg>,
+        _myself: ActorRef<Self::Msg>,
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        match state.graph.start_txn().await {
-            Ok(mut transaction) => {
-                match message.data {
-                    GitlabData::Groups(vec) => {
-                        let group_data = vec.iter().map(|g| {
-                            format!(
-                                r#"{{group_id: "{group_id}", full_path: "{full_path}", full_name: "{full_name}", created_at: "{created_at}" }}"#,
-                                group_id = g.id,
-                                full_name = g.full_name,
-                                full_path = g.full_path,
-                                created_at = g.created_at.as_ref().unwrap())
-                        })
-                        .collect::<Vec<_>>()
-                        .join(",\n");
+        match message.data {
+            GitlabData::Groups(groups) => {
+                Self::handle_groups(message.instance_id, &groups, &state.graph_controller)?
+            }
+            GitlabData::GroupMembers(link) => {
+                if let Some(memberships) = link.connection.nodes {
+                    // we have to strip out the optional values.
+                    let memberships = memberships.into_iter().flatten().collect::<Vec<_>>();
 
-                        let query = format!(
-                            r#"
-                                UNWIND [{group_data}] as g
-                                WITH g
-                                MERGE (group: GitlabGroup {{ group_id: g.group_id, full_path: g.full_path, full_name: g.full_name, created_at: g.created_at }})
-                                WITH group
-                                MERGE (instance: GitlabInstance {{instance_id: "{instance_id}" }})
-                                WITH group, instance
-                                MERGE (instance)-[:OBSERVED_GROUP]->(group)
-                            "#,
-                            instance_id = message.instance_id
-                        );
-                        debug!(query);
-                        transaction
-                            .run(Query::new(query))
-                            .await
-                            .expect("Expected to run query on transaction.");
-
-                        transaction
-                            .commit()
-                            .await
-                            .expect("Expected to commit transaction");
-                    }
-                    GitlabData::GroupMembers(link) => {
-                        if let Some(vec) = link.connection.nodes {
-                            let group_memberships = vec
-                                .iter()
-                                .map(|option| {
-                                    let membership = option.as_ref().unwrap();
-
-                                    //create a list of attribute sets
-                                    format!(
-                                        r#"{{
-                                        user_id: "{user_id}",
-                                        access_level: "{access_level}",
-                                        created_at: "{created_at}",
-                                        updated_at: "{updated_at}",
-                                        expires_at: "{expires_at}"
-                                    }}"#,
-                                        user_id = membership.user.as_ref().map_or_else(
-                                            || String::default(),
-                                            |user| user.id.to_string()
-                                        ),
-                                        access_level =
-                                            membership.access_level.as_ref().map_or_else(
-                                                || String::default(),
-                                                |al| {
-                                                    al.integer_value.unwrap_or_default().to_string()
-                                                }
-                                            ),
-                                        created_at = membership.created_at.as_ref().map_or_else(
-                                            || String::default(),
-                                            |date| date.to_string()
-                                        ),
-                                        updated_at = membership.updated_at.as_ref().map_or_else(
-                                            || String::default(),
-                                            |date| date.to_string()
-                                        ),
-                                        expires_at = membership.expires_at.as_ref().map_or_else(
-                                            || String::default(),
-                                            |date| date.to_string()
-                                        ),
-                                    )
-                                })
-                                .collect::<Vec<_>>()
-                                .join(",\n");
-
-                            let cypher_query = format!(
-                                "
-                                MERGE (group:GitlabGroup {{ group_id: \"{group_id}\" }})
-                                WITH group
-                                UNWIND [{group_memberships}] AS membership
-                                MERGE (user:GitlabUser {{ user_id: membership.user_id }})
-                                WITH membership, user
-                                MERGE (user)-[r:IN_GROUP]->(group)
-                                SET r.access_level = membership.access_level,
-                                    r.created_at = membership.created_at,
-                                    r.expires_at = membership.expires_at,
-                                    r.updated_at = membership.updated_at
-
-                                ",
-                                group_id = link.resource_id
-                            );
-
-                            debug!(cypher_query);
-                            transaction
-                                .run(Query::new(cypher_query))
-                                .await
-                                .expect("Expected to run query.");
-
-                            if let Err(_e) = transaction.commit().await {
-                                myself.stop(Some(QUERY_COMMIT_FAILED.to_string()))
-                            }
-                            info!("Committed transaction to database");
-                        }
-                    }
-                    GitlabData::GroupProjects(link) => {
-                        if let Some(vec) = link.connection.nodes {
-                            let projects = vec
-                                .iter()
-                                .map(|option| {
-                                    let project = option.as_ref().unwrap();
-
-                                    //create a list of attribute sets
-                                    format!(
-                                        r#"{{ project_id: "{project_id}" }}"#,
-                                        project_id = project.id
-                                    )
-                                })
-                                .collect::<Vec<_>>()
-                                .join(",\n");
-
-                            let cypher_query = format!(
-                                "
-                                MERGE (group:GitlabGroup {{ group_id: \"{group_id}\" }})
-                                WITH group
-                                UNWIND [{projects}] AS project_data
-                                MERGE (project:GitlabProject {{ project_id: project_data.project_id }})
-                                with project, group
-                                MERGE (project)-[r:IN_GROUP]->(group)
-                                ",
-                                group_id = link.resource_id
-                            );
-
-                            debug!(cypher_query);
-                            if let Err(_e) = transaction.run(Query::new(cypher_query)).await {
-                                myself.stop(Some(QUERY_RUN_FAILED.to_string()));
-                            }
-
-                            if let Err(_e) = transaction.commit().await {
-                                myself.stop(Some(QUERY_COMMIT_FAILED.to_string()));
-                            }
-                            info!("Committed transaction to database");
-                        }
-                    }
-                    GitlabData::GroupRunners(link) => {
-                        let mut transaction = state
-                            .graph
-                            .start_txn()
-                            .await
-                            .expect(TRANSACTION_FAILED_ERROR);
-
-                        if let Some(vec) = link.connection.nodes {
-                            let runners = vec
-                                .iter()
-                                .map(|option| {
-                                    let runner = option.as_ref().unwrap();
-
-                                    //create a list of attribute sets
-                                    format!(
-                                        r#"{{
-                                    runner_id: "{runner_id}",
-                                    paused: "{paused}"
-                                }}"#,
-                                        runner_id = runner.id.0,
-                                        paused = runner.paused
-                                    )
-                                })
-                                .collect::<Vec<_>>()
-                                .join(",\n");
-
-                            let cypher_query = format!(
-                                "
-                                MERGE (group:GitlabGroup {{ group_id: \"{group_id}\" }})
-                                WITH group
-                                UNWIND [{runners}] AS runner_data
-                                MERGE (runner:GitlabRunner {{ project_id: runner_data.runner_id }})
-                                WITH runner, group
-                                MERGE (runner)-[r:IN_GROUP]->(group)
-                                ",
-                                group_id = link.resource_id
-                            );
-
-                            debug!(cypher_query);
-                            if let Err(_e) = transaction.run(Query::new(cypher_query)).await {
-                                myself.stop(Some(QUERY_RUN_FAILED.to_string()));
-                            }
-
-                            if let Err(_e) = transaction.commit().await {
-                                myself.stop(Some(QUERY_COMMIT_FAILED.to_string()));
-                            }
-                            info!("Committed transaction to database");
-                        }
-                    }
-
-                    _ => (),
+                    Self::handle_group_members(
+                        message.instance_id,
+                        link.resource_id.to_string(),
+                        &memberships,
+                        &state.graph_controller,
+                    )?;
                 }
             }
-            Err(e) => myself.stop(Some(format!("{TRANSACTION_FAILED_ERROR}. {e}"))),
+            GitlabData::GroupProjects(link) => {
+                if let Some(nodes) = link.connection.nodes {
+                    let projects = nodes.into_iter().flatten().collect::<Vec<_>>();
+
+                    Self::handle_group_projects(
+                        message.instance_id.clone(),
+                        link.resource_id.to_string(),
+                        &projects,
+                        &state.graph_controller,
+                    )?;
+                }
+            }
+
+            GitlabData::GroupRunners(link) => {
+                if let Some(nodes) = link.connection.nodes {
+                    let runners = nodes.into_iter().flatten().collect::<Vec<_>>();
+
+                    Self::handle_group_runners(
+                        message.instance_id.clone(),
+                        link.resource_id.to_string(),
+                        &runners,
+                        &state.graph_controller,
+                    )?;
+                }
+            }
+            _ => (),
         }
 
         Ok(())

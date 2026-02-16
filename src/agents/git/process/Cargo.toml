@@ -15,4 +15,5 @@ cassini-client = { path = "../../cassini/client" }
 cassini-types = { path = "../../cassini/types" }
 polar          = { path = "../../lib" }
 
+chrono = {version = "0.4", default-features = false, features = ["clock", "std"] }
 neo4rs = { workspace = true }

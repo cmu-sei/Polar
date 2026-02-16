@@ -9,7 +9,6 @@ use std::env;
 use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
 use tokio::io::{split, AsyncReadExt, BufWriter, ReadHalf, WriteHalf};
-use tokio::net::tcp::ReuniteError;
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 use tokio::task::AbortHandle;
@@ -19,6 +18,7 @@ use tracing::{
     debug, debug_span, error, info, info_span, trace, trace_span, warn, warn_span, Instrument,
 };
 
+pub type TcpClient = ActorRef<TcpClientMessage>;
 pub const UNEXPECTED_DISCONNECT: &str = "UNEXPECTED_DISCONNECT";
 pub const REGISTRATION_EXPECTED: &str =
     "Expected client to be registered to conduct this operation.";

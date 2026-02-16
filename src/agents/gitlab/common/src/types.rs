@@ -25,9 +25,9 @@ use gitlab_queries::{
     groups::{GroupData, GroupMemberConnection},
     projects::{
         ContainerRepository, ContainerRepositoryTag, GitlabCiJob, Package, Pipeline, Project,
-        ProjectConnection, ProjectMemberConnection,
+        ProjectCoreConnection, ProjectMemberConnection,
     },
-    runners::{CiRunner, CiRunnerConnection},
+    runners::{CiRunner, CiRunnerConnection, CiRunnerIdConnection},
     users::UserCoreFragment,
     LicenseHistoryEntry, Metadata,
 };
@@ -56,16 +56,35 @@ pub enum GitlabData {
     ProjectRunners(ResourceLink<CiRunnerConnection>),
     Groups(Vec<GroupData>),
     GroupMembers(ResourceLink<GroupMemberConnection>),
-    GroupRunners(ResourceLink<CiRunnerConnection>),
-    GroupProjects(ResourceLink<ProjectConnection>),
+    GroupRunners(ResourceLink<CiRunnerIdConnection>),
+    GroupProjects(ResourceLink<ProjectCoreConnection>),
     Runners(Vec<CiRunner>),
     // RunnerJob((u32, Job)),
-    Jobs((String, Vec<GitlabCiJob>)),
-    Pipelines((String, Vec<Pipeline>)),
-    ProjectPackages((String, Vec<Package>)),
-    PackageFiles((String, Vec<GitlabPackageFile>)),
-    ProjectContainerRepositories((String, Vec<ContainerRepository>)),
-    ContainerRepositoryTags((String, Vec<ContainerRepositoryTag>)),
+    Jobs {
+        pipeline_id: String,
+        jobs: Vec<GitlabCiJob>,
+    },
+    Pipelines {
+        project_id: String,
+        pipelines: Vec<Pipeline>,
+    },
+    ProjectPackages {
+        project_id: String,
+        packages: Vec<Package>,
+    },
+    PackageFiles {
+        package_id: String,
+        files: Vec<GitlabPackageFile>,
+    },
+    ProjectContainerRepositories {
+        project_id: String,
+        repositories: Vec<ContainerRepository>,
+    },
+    ContainerRepositoryTags {
+        project_id: String,
+        repository_id: String,
+        tags: Vec<ContainerRepositoryTag>,
+    },
     Instance(GitlabInstance),
     Licenses(Vec<LicenseHistoryEntry>),
 }

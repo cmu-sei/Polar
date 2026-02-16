@@ -124,10 +124,12 @@ impl Actor for GitlabPipelineObserver {
 
                                                                 debug!("Found {0} pipeline run(s) for project {1}", read_pipelines.len(), full_path);
 
-                                                                let data = GitlabData::Pipelines((
-                                                                    full_path.0,
-                                                                    read_pipelines,
-                                                                ));
+                                                                let data = GitlabData::Pipelines {
+                                                                    project_id: project
+                                                                        .id
+                                                                        .to_string(),
+                                                                    pipelines: read_pipelines,
+                                                                };
 
                                                                 return send_to_broker(
                                                                     state,
@@ -265,14 +267,19 @@ impl Actor for GitlabJobObserver {
                                                                                     // the meat of everything happens here
                                                                                     // wrap up job and add it to the vec
 
-                                                                                    read_jobs.extend(jobs.into_iter().map(|option| {
-                                                                                        let job = option.unwrap();
+                                                                                    let j = jobs
+                                                                                        .into_iter()
+                                                                                        .flatten()
+                                                                                        .into_iter(
+                                                                                        );
 
-                                                                                        // TODO: We need to emit provenance events about any artifacts here
-                                                                                        job
-                                                                                    }));
+                                                                                    read_jobs
+                                                                                        .extend(j);
 
-                                                                                    let data = GitlabData::Jobs((pipeline.id.0, read_jobs));
+                                                                                    let data = GitlabData::Jobs {
+                                                                                        pipeline_id: pipeline.id.to_string(),
+                                                                                        jobs: read_jobs
+                                                                                    };
 
                                                                                     if let Err(e) = send_to_broker(state, data, PIPELINE_CONSUMER_TOPIC) { return Err(e) }
                                                                                 }

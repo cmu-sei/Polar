@@ -1,4 +1,4 @@
-use git::{supervisor::RootSupervisor, SERVICE_NAME};
+use git_repo_observer::{supervisor::RootSupervisor, SERVICE_NAME};
 use ractor::Actor;
 
 #[tokio::main]

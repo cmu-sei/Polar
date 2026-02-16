@@ -615,7 +615,7 @@ impl Actor for ResolverAgent {
                     }
                 }
             }
-            ProvenanceEvent::ArtifactDisocvered { name, url } => {
+            ProvenanceEvent::ArtifactDiscovered { name, url } => {
                 trace!("Received ArtifactDiscovered directive");
                 // forward for classification
                 //

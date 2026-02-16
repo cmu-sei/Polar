@@ -21,42 +21,129 @@
    DM24-0470
 */
 
-use crate::{subscribe_to_topic, GitlabConsumerArgs, GitlabConsumerState};
-use polar::{QUERY_COMMIT_FAILED, QUERY_RUN_FAILED, TRANSACTION_FAILED_ERROR};
+use crate::{GitlabConsumerState, GitlabNodeKey, UNKNOWN_FILED};
+use cassini_client::{TcpClient, TcpClientMessage};
+use polar::{
+    graph::{GraphController, GraphControllerMsg, GraphOp, GraphValue, Property},
+    GitRepositoryDiscoveredEvent, GIT_REPO_DISCOGERY_TOPIC,
+};
+use tracing::trace;
 
-use common::types::{GitlabData, GitlabEnvelope};
-use common::PROJECTS_CONSUMER_TOPIC;
-use neo4rs::Query;
+use common::{
+    types::{GitlabData, GitlabEnvelope},
+    PROJECTS_CONSUMER_TOPIC,
+};
+use gitlab_queries::projects::Project;
 use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef};
+use rkyv::to_bytes;
 use tracing::{debug, info};
 
 pub struct GitlabProjectConsumer;
+
+impl GitlabProjectConsumer {
+    fn handle_projects(
+        tcp_client: &TcpClient,
+        graph_controller: &GraphController<GitlabNodeKey>,
+        instance_id: String,
+        projects: &[Project],
+    ) -> Result<(), ActorProcessingErr> {
+        let instance_k = GitlabNodeKey::GitlabInstance {
+            instance_id: instance_id.clone(),
+        };
+
+        for project in projects {
+            Self::emit_repo_discovered(tcp_client, project)?;
+
+            let project_k = GitlabNodeKey::Project {
+                instance_id: instance_id.clone(),
+                project_id: project.id.to_string(),
+            };
+
+            let created_at = project
+                .created_at
+                .clone()
+                .map_or(GraphValue::String(UNKNOWN_FILED.to_string()), |d| {
+                    GraphValue::String(d.to_string())
+                });
+            let last_activity_at = project
+                .last_activity_at
+                .clone()
+                .map_or(GraphValue::String(UNKNOWN_FILED.to_string()), |d| {
+                    GraphValue::String(d.to_string())
+                });
+
+            graph_controller.cast(GraphControllerMsg::Op(GraphOp::UpsertNode {
+                key: project_k.clone(),
+                props: vec![
+                    Property("name".into(), GraphValue::String(project.name.clone())),
+                    Property(
+                        "full_path".into(),
+                        GraphValue::String(project.full_path.to_string()),
+                    ),
+                    Property("created_at".into(), created_at),
+                    Property("last_activity_at".into(), last_activity_at),
+                    Property(
+                        "http_url_to_repo".into(),
+                        GraphValue::String(project.http_url_to_repo.clone().unwrap_or_default()),
+                    ),
+                    Property(
+                        "ssh_url_to_repo".into(),
+                        GraphValue::String(project.ssh_url_to_repo.clone().unwrap_or_default()),
+                    ),
+                ],
+            }))?;
+
+            graph_controller.cast(GraphControllerMsg::Op(GraphOp::EnsureEdge {
+                from: instance_k.clone(),
+                to: project_k,
+                rel_type: "OBSERVED_PROJECT".into(),
+                props: Vec::default(),
+            }))?;
+        }
+        Ok(())
+    }
+
+    fn emit_repo_discovered(
+        tcp_client: &TcpClient,
+        project: &Project,
+    ) -> Result<(), ActorProcessingErr> {
+        if project.http_url_to_repo.is_none() && project.ssh_url_to_repo.is_none() {
+            return Ok(());
+        }
+
+        let event = GitRepositoryDiscoveredEvent {
+            http_url: project.http_url_to_repo.clone(),
+            ssh_url: project.ssh_url_to_repo.clone(),
+        };
+
+        let payload = to_bytes::<rkyv::rancor::Error>(&event)?.to_vec();
+        trace!("emitting event {event:?}");
+        tcp_client.cast(TcpClientMessage::Publish {
+            topic: GIT_REPO_DISCOGERY_TOPIC.to_string(),
+            payload,
+        })?;
+
+        Ok(())
+    }
+}
 
 #[async_trait]
 impl Actor for GitlabProjectConsumer {
     type Msg = GitlabEnvelope;
     type State = GitlabConsumerState;
-    type Arguments = GitlabConsumerArgs;
+    type Arguments = GitlabConsumerState;
 
     async fn pre_start(
         &self,
         myself: ActorRef<Self::Msg>,
-        args: GitlabConsumerArgs,
+        state: Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
-        debug!("{myself:?} starting, connecting to broker");
-        match subscribe_to_topic(
-            args.registration_id,
+        debug!("{myself:?} starting");
+
+        state.tcp_client.cast(TcpClientMessage::Subscribe(
             PROJECTS_CONSUMER_TOPIC.to_string(),
-            args.graph_config,
-        )
-        .await
-        {
-            Ok(state) => Ok(state),
-            Err(e) => {
-                let err_msg = format!("Error starting actor: \"{PROJECTS_CONSUMER_TOPIC}\" {e}");
-                Err(ActorProcessingErr::from(err_msg))
-            }
-        }
+        ))?;
+        Ok(state)
     }
 
     async fn post_start(
@@ -65,66 +152,25 @@ impl Actor for GitlabProjectConsumer {
         _: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         info!("{:?} waiting to consume", myself.get_name());
-
         Ok(())
     }
 
     async fn handle(
         &self,
-        myself: ActorRef<Self::Msg>,
+        _myself: ActorRef<Self::Msg>,
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        match state.graph.start_txn().await {
-            Ok(mut transaction) => {
-                match message.data {
-                    GitlabData::Projects(projects) => {
-                        // Create list of projects
-                        let project_array = projects.iter()
-                            .map(|project| {
-                                format!(
-                                    r#"{{ project_id: "{project_id}", name: "{name}", full_path: "{full_path}", created_at: "{created_at}", last_activity_at: "{last_activity_at}" }}"#,
-                                    project_id = project.id,
-                                    name = project.name,
-                                    full_path = project.full_path,
-                                    created_at = project.created_at.clone().unwrap_or_default(),
-                                    last_activity_at = project.last_activity_at.clone().unwrap_or_default(),
-                                )
-                            })
-                            .collect::<Vec<_>>()
-                            .join(",\n");
-
-                        // Here, we write a query that creates additional nodes for the group and namespace of the project
-                        let cypher_query = format!(
-                            "
-                            UNWIND [{project_array}] AS project_data
-                            MERGE (project:GitlabProject {{ project_id: project_data.project_id }})
-                            SET project.name = project_data.name,
-                                project.full_path = project_data.full_path,
-                                project.created_at = project_data.created_at,
-                                project.last_activity_at = project_data.last_activity_at
-                                MERGE (instance: GitlabInstance {{instance_id: \"{}\" }})
-                                WITH  project, instance
-                                MERGE (instance)-[:OBSERVED_PROJECT]->(project)
-                            ",
-                            message.instance_id
-                        );
-
-                        debug!(cypher_query);
-                        if let Err(_e) = transaction.run(Query::new(cypher_query)).await {
-                            myself.stop(Some(QUERY_RUN_FAILED.to_string()));
-                        }
-
-                        if let Err(_e) = transaction.commit().await {
-                            myself.stop(Some(QUERY_COMMIT_FAILED.to_string()));
-                        }
-                        info!("Transaction committed.");
-                    }
-                    _ => (),
-                }
-            }
-            Err(e) => myself.stop(Some(format!("{TRANSACTION_FAILED_ERROR}. {e}"))),
+        if let GitlabData::Projects(projects) = message.data {
+            debug!("Handling projects {:?}", projects.len());
+            Self::handle_projects(
+                &state.tcp_client,
+                &state.graph_controller,
+                message.instance_id.clone(),
+                &projects,
+            )?;
         }
+
         Ok(())
     }
 }

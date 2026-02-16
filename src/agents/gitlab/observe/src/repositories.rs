@@ -26,7 +26,6 @@ use crate::{
     init_observer_state, send_to_broker, BackoffReason, Command, GitlabObserverArgs,
     GitlabObserverMessage, GitlabObserverState, MESSAGE_FORWARDING_FAILED,
 };
-use cassini_client::TcpClientMessage;
 use common::types::{GitlabData, GitlabPackageFile};
 use common::REPOSITORY_CONSUMER_TOPIC;
 use cynic::{GraphQlResponse, QueryBuilder};
@@ -36,10 +35,9 @@ use gitlab_queries::projects::{
     SingleProjectQueryArguments,
 };
 use gitlab_schema::ContainerRepositoryID;
-use polar::{ProvenanceEvent, PROVENANCE_DISCOVERY_TOPIC, PROVENANCE_LINKER_TOPIC};
 use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef};
 use serde_json::from_str;
-use tracing::{debug, error, info, trace, warn};
+use tracing::{debug, error, info, warn};
 
 pub struct GitlabRepositoryObserver;
 
@@ -66,12 +64,14 @@ impl GitlabRepositoryObserver {
             .bearer_auth(state.token.clone().unwrap_or_default())
             .header("Accept", "application/json")
             .send()
-            .await
-            .unwrap();
+            .await?;
 
-        let files: Vec<GitlabPackageFile> = res.json().await.unwrap();
+        let files: Vec<GitlabPackageFile> = res.json().await?;
 
-        let data = GitlabData::PackageFiles((package_gid.to_string(), files));
+        let data = GitlabData::PackageFiles {
+            package_id: package_gid.to_string(),
+            files,
+        };
 
         send_to_broker(state, data, REPOSITORY_CONSUMER_TOPIC)
     }
@@ -231,48 +231,12 @@ impl Actor for GitlabRepositoryObserver {
                                                                             graphql_endpoint(&state.gitlab_endpoint))
                                                                             .await;
 
-                                                                        // Emit provenance envent
-                                                                        let event = ProvenanceEvent::OCIRegistryDiscovered { hostname: repository.location.clone() };
-                                                                        trace!(
-                                                                            "Emitting event: {:?}",
-                                                                            event
-                                                                        );
-                                                                        let payload =
-                                                                            rkyv::to_bytes::<
-                                                                                rkyv::rancor::Error,
-                                                                            >(
-                                                                                &event
-                                                                            )?;
-
-                                                                        // Emit the event strait to the linker, this counts the registry as "Discovered" even if we didn't ping it directly via REST.
-                                                                        state.tcp_client.cast(TcpClientMessage::Publish { topic: PROVENANCE_LINKER_TOPIC.to_string(), payload: payload.into() })?;
-
                                                                         match result {
                                                                             Ok(tags) => {
                                                                                 //send tag data
                                                                                 if !tags.is_empty()
                                                                                 {
-                                                                                    // For the record, I'm not a fan of doing this loop. It'll "work" but I wonder if there's a better way.
-                                                                                    //  At time of writing, we iterate all over again to generate cypher.
-                                                                                    for tag in &tags
-                                                                                    {
-                                                                                        // Emit provenance event
-                                                                                        let event = ProvenanceEvent::OCIArtifactDiscovered { uri: tag.location.clone() };
-                                                                                        trace!(
-                                                                                            "Emitting event: {:?}",
-                                                                                            event
-                                                                                        );
-                                                                                        let payload =
-                                                                                            rkyv::to_bytes::<
-                                                                                                rkyv::rancor::Error,
-                                                                                            >(
-                                                                                                &event
-                                                                                            )?;
-
-                                                                                        // OCI artifact discoveries however, are a "claim" that they exist. Gitlab told us a lot, but we still need to verify them.
-                                                                                        state.tcp_client.cast(TcpClientMessage::Publish { topic: PROVENANCE_DISCOVERY_TOPIC.to_string(), payload: payload.into() })?;
-                                                                                    }
-                                                                                    let data = GitlabData::ContainerRepositoryTags((full_path.clone().to_string(), tags));
+                                                                                    let data = GitlabData::ContainerRepositoryTags { repository_id: repository.id.to_string(), project_id: project.id.to_string(), tags};
                                                                                     if let Err(e) = send_to_broker(state, data, REPOSITORY_CONSUMER_TOPIC) { return Err(e) }
                                                                                 }
                                                                             }
@@ -288,7 +252,10 @@ impl Actor for GitlabRepositoryObserver {
 
                                                             // send off repository data
                                                             if !read_repositories.is_empty() {
-                                                                let data = GitlabData::ProjectContainerRepositories((full_path.to_string(), read_repositories));
+                                                                let data = GitlabData::ProjectContainerRepositories {
+                                                                    project_id: project.id.to_string(),
+                                                                    repositories: read_repositories
+                                                                };
 
                                                                 if let Err(e) = send_to_broker(
                                                                     state,
@@ -363,10 +330,12 @@ impl Actor for GitlabRepositoryObserver {
                                                                 }
 
                                                                 let data =
-                                                                    GitlabData::ProjectPackages((
-                                                                        full_path.to_string(),
-                                                                        read_packages,
-                                                                    ));
+                                                                    GitlabData::ProjectPackages {
+                                                                        project_id: project
+                                                                            .id
+                                                                            .to_string(),
+                                                                        packages: read_packages,
+                                                                    };
 
                                                                 if let Err(e) = send_to_broker(
                                                                     state,

@@ -85,22 +85,12 @@ tcp-stream = "0.34"
 webpki-roots = "1"
 bytecheck = "0.8.2"
 bytecheck_derive = "0.8.2"
-lapin = { version = "4.0.0-rc.1", default-features = false, features = ["tokio", "rustls"] }
-amq-protocol = { git = "https://github.com/amqp-rs/amq-protocol", tag = "v10.0.0-rc.3" }
-amq-protocol-types = { git = "https://github.com/amqp-rs/amq-protocol", tag = "v10.0.0-rc.3" }
-amq-protocol-uri = { git = "https://github.com/amqp-rs/amq-protocol", tag = "v10.0.0-rc.3" }
-amq-protocol-tcp = { git = "https://github.com/amqp-rs/amq-protocol", tag = "v10.0.0-rc.3" }
 cassini-client = { path = "cassini/client" }
 cassini-types  = { path = "cassini/types" }
 kube = { version = "2.0.1", default-features = false, features = ["client", "aws-lc-rs", "rustls-tls", "runtime", "derive"] }
-
+chrono = {version = "0.4", default-features = false, features = ["clock", "std"] }
 [patch.crates-io]
 getrandom = { git = "https://github.com/rust-random/getrandom", tag = "v0.3.3" }
 
 dhall = { git = "https://github.com/daveman1010221/dhall-rust", branch = "modernize-rkyv" }
 serde_dhall = { git = "https://github.com/daveman1010221/dhall-rust", branch = "modernize-rkyv" }
-lapin = { git = "https://github.com/amqp-rs/lapin", tag = "v4.0.0-rc.1" }
-amq-protocol = { git = "https://github.com/amqp-rs/amq-protocol", tag = "v10.0.0-rc.3" }
-amq-protocol-types = { git = "https://github.com/amqp-rs/amq-protocol", tag = "v10.0.0-rc.3" }
-amq-protocol-uri = { git = "https://github.com/amqp-rs/amq-protocol", tag = "v10.0.0-rc.3" }
-amq-protocol-tcp = { git = "https://github.com/amqp-rs/amq-protocol", tag = "v10.0.0-rc.3" }

@@ -1,9 +1,8 @@
-use git2::Oid;
 use rkyv::{Archive, Deserialize, Serialize};
 
-pub const GIT_REPO_CONFIG_REQUESTS: &str = "git.repo.config.requests";
-pub const GIT_REPO_CONFIG_RESPONSES: &str = "git.repo.config.responses";
+pub const GIT_REPO_CONFIG_EVENTS: &str = "git.repo.config.events";
 pub const GIT_REPO_EVENTS: &str = "git.repo.events";
+pub const GIT_REPO_PROCESSING_TOPIC: &str = "polar.git.processor";
 /* ============================
  * Shared types
  * ============================
@@ -15,6 +14,7 @@ pub const GIT_REPO_EVENTS: &str = "git.repo.events";
 /// It must be supplied externally (scheduler, config, graph).
 #[derive(Serialize, Deserialize, Archive, Debug, Clone)]
 pub struct RepoObservationConfig {
+    pub repo_id: RepoId,
     pub repo_url: String,
 
     pub remotes: Vec<String>,
@@ -40,12 +40,14 @@ impl RepoObservationConfig {
     /// We want to be reasonable and not too aggressive, git repositories can incredibly large, with chains that go back a very long time.
     /// The can also be updated infrequently. So we default to a reasonable value for the frequency we check them and the depth we walk.
     pub fn new(
+        repo_id: RepoId,
         repo_url: String,
         remotes: Vec<String>,
         shallow_depth: Option<usize>,
         refs: Vec<String>,
     ) -> Self {
         Self {
+            repo_id,
             repo_url,
             remotes,
             refs,
@@ -75,14 +77,12 @@ impl RepoId {
 }
 
 #[derive(Serialize, Deserialize, Archive, Debug)]
-pub enum GitRepositoryMessage {
-    ConfigurationRequest {
-        repo_url: String,
-    },
-    ConfigurationResponse {
-        config: RepoObservationConfig,
-    },
+pub struct ConfigurationEvent {
+    pub config: RepoObservationConfig,
+}
 
+#[derive(Serialize, Deserialize, Archive, Debug)]
+pub enum GitRepositoryMessage {
     ///Emitted once per commit per repo, ever.
     /// - “This commit exists”
     /// - “Here is its immutable metadata”
@@ -123,10 +123,5 @@ pub enum GitRepositoryMessage {
         old: Option<String>,
         new: String,
         observed_at: String,
-    },
-
-    RepositoryObserved {
-        repo: RepoId,
-        observed_at: i64,
     },
 }

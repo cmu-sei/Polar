@@ -1,20 +1,208 @@
 use cassini_client::TcpClientMessage;
 use git2::{FetchOptions, Oid, RemoteCallbacks, Repository};
 use git_agent_common::{
-    GitRepositoryMessage, RepoId, RepoObservationConfig, GIT_REPO_CONFIG_REQUESTS,
+    GitRepositoryMessage, RepoId, RepoObservationConfig, GIT_REPO_PROCESSING_TOPIC,
 };
-use polar::GIT_REPOSITORIES_TOPIC;
-use ractor::concurrency::{self, Duration};
 use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef, SupervisionEvent};
 use rkyv::{rancor, to_bytes, Archive, Deserialize, Serialize};
+use serde::Deserialize as SerdeDeserialize;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use tracing::{debug, error, info, instrument, trace, warn};
+use std::sync::Arc;
+use tracing::info;
+use tracing::{debug, error, instrument, trace, warn};
+use url::Url;
+
 pub const SERVICE_NAME: &str = "polar.git.observer";
 pub const REPO_SUPERVISOR_NAME: &str = "polar.git.observer.repo.supervisor";
 
 pub mod supervisor;
+
+use git2::{Cred, CredentialType, Error};
+
+/// Root credential configuration.
+///
+/// Designed to mirror a Docker-style config layout,
+/// but intentionally minimal.
+#[derive(Debug, Clone, SerdeDeserialize)]
+pub struct StaticCredentialConfig {
+    pub hosts: HashMap<String, HostCredentialConfig>,
+}
+
+#[derive(Debug, Clone, SerdeDeserialize)]
+pub struct HostCredentialConfig {
+    pub http: Option<HttpCredential>,
+    // TODO: Future:
+    // pub ssh: Option<SshCredential>,
+}
+
+#[derive(Debug, Clone, SerdeDeserialize)]
+pub struct HttpCredential {
+    pub username: String,
+    pub token: String,
+}
+
+/// Errors during credential configuration loading.
+///
+/// This keeps parsing failures separate from git2 errors.
+#[derive(Debug)]
+pub enum CredentialConfigError {
+    Io(std::io::Error),
+    Parse(serde_json::Error),
+}
+
+impl From<std::io::Error> for CredentialConfigError {
+    fn from(e: std::io::Error) -> Self {
+        Self::Io(e)
+    }
+}
+
+impl From<serde_json::Error> for CredentialConfigError {
+    fn from(e: serde_json::Error) -> Self {
+        Self::Parse(e)
+    }
+}
+
+impl StaticCredentialConfig {
+    /// Load credential configuration from a JSON file.
+    ///
+    /// # Design Notes
+    ///
+    /// - Performs a single file read.
+    /// - Fully validates JSON structure.
+    /// - Returns structured error types.
+    pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self, CredentialConfigError> {
+        let contents = fs::read_to_string(path)?;
+        let parsed = serde_json::from_str::<StaticCredentialConfig>(&contents)?;
+        Ok(parsed)
+    }
+
+    pub fn from_env(var: &str) -> Result<Self, CredentialConfigError> {
+        info!("Loading credentials from {var}");
+        let path = std::env::var(var).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("env var missing: {var}"),
+            )
+        })?;
+        Self::from_file(path)
+    }
+}
+
+/// A simple in-memory credential provider backed by a static config.
+///
+/// Characteristics:
+/// - Immutable after construction
+/// - O(1) host lookup
+/// - No runtime allocations except URL parsing
+/// - Fully unit testable
+pub struct StaticCredentialProvider {
+    config: Arc<StaticCredentialConfig>,
+}
+
+/// A source of Git credentials.
+///
+/// This abstraction intentionally:
+/// - Hides secret storage details
+/// - Allows host-based lookup
+/// - Is compatible with git2's callback model
+///
+/// This represents the acknowledgement of a first principle: Credentials Are Not Repo Config
+/// credentials are:
+/// * Cross-repo
+/// * Cross-instance
+/// * Environment-specific
+/// * Potentially rotated
+///
+/// So we don’t embed credentials per repo.
+/// A provider enables the workers to read from external sources operators can control
+///
+/// Implementations MUST:
+/// - Be cheap to call (no blocking IO)
+/// - Avoid heap churn in hot paths
+/// - Be thread-safe
+pub trait GitCredentialProvider: Send + Sync {
+    /// Resolve credentials for a Git operation.
+    ///
+    /// Parameters are passed through from git2's credentials callback.
+    ///
+    /// # Arguments
+    ///
+    /// * `url` - Full remote URL (e.g. https://gitlab.com/group/repo.git)
+    /// * `username_from_url` - Optional username parsed from URL
+    /// * `allowed` - Credential types git2 is willing to accept
+    ///
+    /// # Behavior
+    ///
+    /// Implementations should:
+    /// - Prefer HTTP token-based auth when available
+    /// - Fall back gracefully when host not configured
+    /// - Return `Error::from_str("...")` for unsupported hosts
+    fn credentials(
+        &self,
+        url: &str,
+        username_from_url: Option<&str>,
+        allowed: CredentialType,
+    ) -> Result<Cred, Error>;
+}
+
+impl StaticCredentialProvider {
+    /// Construct from already-loaded config.
+    ///
+    /// Prefer loading + parsing JSON outside this type.
+    pub fn new(config: StaticCredentialConfig) -> Self {
+        Self {
+            config: Arc::new(config),
+        }
+    }
+
+    /// Extract host from a remote URL.
+    ///
+    /// Supports:
+    /// - https://gitlab.com/group/repo.git
+    /// - http://...
+    ///
+    /// Does NOT yet support SCP-style SSH URLs.
+    fn extract_host(url: &str) -> Result<String, git2::Error> {
+        let parsed =
+            Url::parse(url).map_err(|_| git2::Error::from_str("invalid repository URL"))?;
+
+        parsed
+            .host_str()
+            .map(|h| h.to_string())
+            .ok_or_else(|| git2::Error::from_str("URL missing host"))
+    }
+}
+
+impl GitCredentialProvider for StaticCredentialProvider {
+    fn credentials(
+        &self,
+        url: &str,
+        _username_from_url: Option<&str>,
+        allowed: CredentialType,
+    ) -> Result<Cred, git2::Error> {
+        // Only handle plaintext user/pass (HTTP).
+        if !allowed.contains(CredentialType::USER_PASS_PLAINTEXT) {
+            return Err(git2::Error::from_str("unsupported credential type"));
+        }
+
+        let host = Self::extract_host(url)?;
+
+        let host_config = self
+            .config
+            .hosts
+            .get(&host)
+            .ok_or_else(|| git2::Error::from_str("no credentials configured for host"))?;
+
+        let http = host_config
+            .http
+            .as_ref()
+            .ok_or_else(|| git2::Error::from_str("no HTTP credentials configured"))?;
+
+        Cred::userpass_plaintext(&http.username, &http.token)
+    }
+}
 
 #[instrument]
 pub fn send_event(
@@ -53,11 +241,13 @@ pub struct GitRepoSupervisorState {
     /// Registry enforcing one worker per repo.
     workers: HashMap<RepoId, ActorRef<GitRepoWorkerMsg>>,
     tcp_client: ActorRef<TcpClientMessage>,
+    credential_config: StaticCredentialConfig,
 }
 
 pub struct GitRepoSupervisorArgs {
     cache_root: PathBuf,
     tcp_client: ActorRef<TcpClientMessage>,
+    credential_config: StaticCredentialConfig,
 }
 
 /// Messages the supervisor accepts.
@@ -66,9 +256,6 @@ pub struct GitRepoSupervisorArgs {
 /// It routes, spawns, and enforces invariants.
 #[derive(Serialize, Deserialize, Archive, Debug)]
 pub enum RepoSupervisorMessage {
-    ObserveRepo {
-        repo_url: String,
-    },
     SpawnWorker {
         config: RepoObservationConfig,
     },
@@ -99,27 +286,13 @@ impl Actor for GitRepoSupervisor {
             .map_err(|e| ActorProcessingErr::from(e.to_string()))?;
 
         Ok(GitRepoSupervisorState {
+            credential_config: args.credential_config,
             cache_root: args.cache_root,
             tcp_client: args.tcp_client,
             workers: HashMap::new(),
         })
     }
 
-    async fn post_start(
-        &self,
-        myself: ActorRef<Self::Msg>,
-        state: &mut Self::State,
-    ) -> Result<(), ActorProcessingErr> {
-        // TODO: REMOVE THIS AFTER TESTING
-        myself.send_after(concurrency::Duration::from_secs(3), || {
-            debug!("Observing repo");
-            RepoSupervisorMessage::ObserveRepo {
-                repo_url: "https://github.com/cmu-sei/Polar.git".to_string(),
-            }
-        });
-
-        Ok(())
-    }
     async fn handle(
         &self,
         myself: ActorRef<Self::Msg>,
@@ -127,40 +300,17 @@ impl Actor for GitRepoSupervisor {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match msg {
-            RepoSupervisorMessage::ObserveRepo { repo_url } => {
-                let repo_id = RepoId::from_url(&repo_url);
-
-                if let Some(worker) = state.workers.get(&repo_id) {
-                    trace!(
-                        "Forwarding observe request to worker for repo {}",
-                        repo_id.to_string()
-                    );
-                    // Forward work to the worker.
-                    worker.send_message(GitRepoWorkerMsg::Observe)?;
-                } else {
-                    //Before starting a worker, send a request to see if there's some schedule out there for this repo\
-                    info!(
-                        "No worker found for repo {}, requesting configuration",
-                        repo_id.to_string()
-                    );
-                    let request = GitRepositoryMessage::ConfigurationRequest {
-                        repo_url: repo_url.clone(),
-                    };
-
-                    send_event(
-                        state.tcp_client.clone(),
-                        request,
-                        GIT_REPO_CONFIG_REQUESTS.to_string(),
-                    )?;
-                }
-            }
             RepoSupervisorMessage::SpawnWorker { config } => {
                 trace!("Received SpawnWorker message");
-                let repo_id = RepoId::from_url(&config.repo_url);
+                let repo_id = config.repo_id.clone();
+
+                let credential_provider = Arc::new(StaticCredentialProvider::new(
+                    state.credential_config.clone(),
+                ));
 
                 let args = GitRepoWorkerArgs {
-                    repo_id: repo_id.clone(),
                     config,
+                    credential_provider,
                     repo_path: state.cache_root.join(&repo_id.to_string()),
                     tcp_client: state.tcp_client.clone(),
                 };
@@ -177,14 +327,15 @@ impl Actor for GitRepoSupervisor {
 
                 state.workers.insert(repo_id, worker);
             }
-            RepoSupervisorMessage::StopWorker { repo_id } => {
-                trace!("Received stop message for repo {}", repo_id.to_string());
-                if let Some(worker) = state.workers.remove(&repo_id) {
-                    info!("Stopping worker for repo {}", repo_id.to_string());
-                    worker
-                        .stop_and_wait(None, Some(Duration::from_secs(300)))
-                        .await?;
-                }
+            RepoSupervisorMessage::StopWorker { .. } => {
+                todo!("Implement cleanup logic for the filesystem");
+                // trace!("Received stop message for repo {}", repo_id.to_string());
+                // if let Some(worker) = state.workers.remove(&repo_id) {
+                //     info!("Stopping worker for repo {}", repo_id.to_string());
+                //     worker
+                //         .stop_and_wait(None, Some(Duration::from_secs(300)))
+                //         .await?;
+                // }
             }
         }
         Ok(())
@@ -235,7 +386,6 @@ pub struct GitRepoWorker;
 ///
 /// No other actor is allowed to touch this repo path.
 pub struct GitRepoWorkerState {
-    repo_id: RepoId,
     config: RepoObservationConfig,
     tcp_client: ActorRef<TcpClientMessage>,
     repo: Repository,
@@ -243,13 +393,14 @@ pub struct GitRepoWorkerState {
     ///
     /// This MUST be persisted.
     last_seen: HashMap<String, Oid>,
+    credential_provider: Arc<StaticCredentialProvider>,
 }
 
 pub struct GitRepoWorkerArgs {
-    repo_id: RepoId,
     config: RepoObservationConfig,
     repo_path: PathBuf,
     tcp_client: ActorRef<TcpClientMessage>,
+    credential_provider: Arc<StaticCredentialProvider>,
 }
 
 fn on_commit(
@@ -277,7 +428,7 @@ fn on_commit(
         parents: commit.parent_ids().map(|id| id.to_string()).collect(),
     };
 
-    send_event(tcp_client, event, GIT_REPOSITORIES_TOPIC.to_string())?;
+    send_event(tcp_client, event, GIT_REPO_PROCESSING_TOPIC.to_string())?;
 
     Ok(())
 }
@@ -301,10 +452,42 @@ fn emit_ref_update(
         observed_at: now.to_string(),
     };
 
-    send_event(tcp_client, event, GIT_REPOSITORIES_TOPIC.to_string())
+    send_event(tcp_client, event, GIT_REPO_PROCESSING_TOPIC.to_string())
 }
 
 impl GitRepoWorker {
+    /// Helper for constructing git2 RemoteCallbacks from a credential provider.
+    ///
+    /// This is intentionally isolated so:
+    /// - Clone and fetch share identical auth behavior
+    /// - Unit tests can inject a mock provider
+    /// - No duplicated callback wiring logic exists
+    fn build_remote_callbacks(provider: Arc<StaticCredentialProvider>) -> RemoteCallbacks<'static> {
+        let mut callbacks = RemoteCallbacks::new();
+
+        callbacks.credentials(move |url, username_from_url, allowed| {
+            provider.credentials(url, username_from_url, allowed)
+        });
+
+        callbacks
+    }
+
+    /// Helper for constructing FetchOptions consistently.
+    ///
+    /// All network operations should go through this.
+    fn build_fetch_options(
+        provider: Arc<StaticCredentialProvider>,
+        depth: Option<usize>,
+    ) -> FetchOptions<'static> {
+        let mut fetch_opts = FetchOptions::new();
+        fetch_opts.remote_callbacks(Self::build_remote_callbacks(provider));
+
+        if let Some(d) = depth {
+            fetch_opts.depth(d as i32);
+        }
+
+        fetch_opts
+    }
     /// Open an existing bare repository or clone a new one as bare.
     ///
     /// - No working tree
@@ -313,13 +496,22 @@ impl GitRepoWorker {
     ///
     /// This dramatically reduces filesystem churn and makes
     /// concurrent observation viable.
-    pub fn open_or_clone_bare(repo_path: &Path, repo_url: &str) -> Result<Repository, git2::Error> {
+    pub fn open_or_clone_bare(
+        repo_path: &Path,
+        repo_url: &str,
+        credential_provider: Arc<StaticCredentialProvider>,
+        shallow_depth: Option<usize>,
+    ) -> Result<Repository, git2::Error> {
         if repo_path.exists() {
-            // SAFETY: Repository::open_bare enforces that this is bare.
             Repository::open_bare(repo_path)
         } else {
             let mut builder = git2::build::RepoBuilder::new();
             builder.bare(true);
+
+            let fetch_opts = Self::build_fetch_options(credential_provider, shallow_depth);
+
+            builder.fetch_options(fetch_opts);
+
             builder.clone(repo_url, repo_path)
         }
     }
@@ -331,29 +523,18 @@ impl GitRepoWorker {
     ///
     /// If `depth` is None, this performs a normal incremental fetch.
     /// If `depth` is Some(N), this performs a depth-limited fetch.
-    pub fn fetch_with_optional_depth(
+    fn fetch_with_optional_depth(
         repo: &Repository,
+        credential_provider: Arc<StaticCredentialProvider>,
         remotes: &[String],
-        depth: Option<usize>,
+        shallow_depth: Option<usize>,
     ) -> Result<(), git2::Error> {
-        if remotes.is_empty() {
-            // No fetch configured — valid and intentional.
-            return Ok(());
-        }
-
-        let mut callbacks = RemoteCallbacks::new();
-        callbacks.credentials(|_url, _username, _allowed| git2::Cred::default());
-
-        let mut fetch_opts = FetchOptions::new();
-        fetch_opts.remote_callbacks(callbacks);
-
-        if let Some(d) = depth {
-            fetch_opts.depth(d as i32);
-        }
-
         for remote_name in remotes {
-            trace!("Attempting to find remote {remote_name}");
             let mut remote = repo.find_remote(remote_name)?;
+
+            let mut fetch_opts =
+                Self::build_fetch_options(credential_provider.clone(), shallow_depth);
+
             remote.fetch(&[] as &[&str], Some(&mut fetch_opts), None)?;
         }
 
@@ -444,7 +625,8 @@ impl GitRepoWorker {
     /// - Stable graph anchoring
     pub fn observe_repository<F>(
         repo: &Repository,
-        config: &RepoObservationConfig,
+        credential_provider: &Arc<StaticCredentialProvider>,
+        obs_config: &RepoObservationConfig,
         last_seen: &mut HashMap<String, Oid>,
         mut on_commit: F,
         mut on_ref_update: impl FnMut(&str, Option<Oid>, Oid),
@@ -452,44 +634,35 @@ impl GitRepoWorker {
     where
         F: FnMut(&str, &git2::Commit),
     {
-        // Always fetch first; refs must represent current truth.
-        Self::fetch_with_optional_depth(repo, &config.remotes, config.shallow_depth)?;
+        // Always fetch first so refs represent remote truth.
+        Self::fetch_with_optional_depth(
+            repo,
+            credential_provider.clone(),
+            &obs_config.remotes,
+            obs_config.shallow_depth,
+        )?;
 
-        for ref_name in &config.refs {
-            // Resolve ref tip *once* up front.
+        for ref_name in &obs_config.refs {
             let reference = match repo.find_reference(ref_name) {
                 Ok(r) => r,
-                Err(_) => {
-                    // Ref does not exist locally; skip cleanly.
-                    trace!("Ref {ref_name} does not exist, skipping");
-                    continue;
-                }
+                Err(_) => continue,
             };
 
             let tip = match reference.target() {
                 Some(t) => t,
-                None => {
-                    trace!("Ref {ref_name} has no target, skipping");
-                    continue;
-                }
+                None => continue,
             };
 
             let prev = last_seen.get(ref_name).copied();
 
-            // Walk commits reachable from the tip, bounded by last_seen.
-            let newest =
-                Self::walk_commits_incremental(repo, ref_name, prev, config.max_depth, |commit| {
-                    on_commit(ref_name, commit);
-                })?;
+            Self::walk_commits_incremental(repo, ref_name, prev, obs_config.max_depth, |commit| {
+                on_commit(ref_name, commit)
+            })?;
 
-            // Emit ref update *once*, after traversal completes.
-            //
-            // IMPORTANT:
-            // - Uses resolved tip, not newest walked commit
-            // - Fires even if no new commits were discovered
+            // Emit ref update exactly once per cycle
             on_ref_update(ref_name, prev, tip);
 
-            // Update checkpoint only after successful observation.
+            // Update checkpoint only after successful traversal
             last_seen.insert(ref_name.to_string(), tip);
         }
 
@@ -510,11 +683,16 @@ impl Actor for GitRepoWorker {
     ) -> Result<Self::State, ActorProcessingErr> {
         debug!("{myself:?} starting");
         // Open or clone repo during actor startup.
-        let repo = Self::open_or_clone_bare(&args.repo_path, &args.config.repo_url)?;
+        let repo = Self::open_or_clone_bare(
+            &args.repo_path,
+            &args.config.repo_url,
+            args.credential_provider.clone(),
+            args.config.shallow_depth,
+        )?;
         // TODO: Load persisted last_seen checkpoints here.
 
         Ok(GitRepoWorkerState {
-            repo_id: args.repo_id,
+            credential_provider: args.credential_provider,
             config: args.config,
             tcp_client: args.tcp_client,
             repo,
@@ -525,12 +703,15 @@ impl Actor for GitRepoWorker {
     async fn post_start(
         &self,
         myself: ActorRef<Self::Msg>,
-        state: &mut Self::State,
+        _state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         debug!("{myself:?} started");
 
         // send self an Observe message on startup once we've properly cloned or opened the repo.
         myself.cast(GitRepoWorkerMsg::Observe)?;
+
+        // TODO: Figure out how we're gonna implement the actual scheduled observation
+
         Ok(())
     }
 
@@ -544,14 +725,14 @@ impl Actor for GitRepoWorker {
             GitRepoWorkerMsg::Observe => {
                 trace!("Received Observe message");
 
-                let mut message_send_failed = false;
                 Self::observe_repository(
                     &state.repo,
+                    &state.credential_provider,
                     &state.config,
                     &mut state.last_seen,
                     |ref_name, commit| {
                         on_commit(
-                            state.repo_id.clone(),
+                            state.config.repo_id.clone(),
                             ref_name,
                             commit,
                             state.tcp_client.clone(),
@@ -561,7 +742,7 @@ impl Actor for GitRepoWorker {
                     },
                     |ref_name, old, new| {
                         emit_ref_update(
-                            state.repo_id.clone(),
+                            state.config.repo_id.clone(),
                             ref_name,
                             old,
                             new,
@@ -571,10 +752,6 @@ impl Actor for GitRepoWorker {
                         .ok();
                     },
                 )?;
-
-                if message_send_failed {
-                    return Err(ActorProcessingErr::from("Failed to send commit"));
-                }
             }
         }
 
@@ -585,8 +762,9 @@ impl Actor for GitRepoWorker {
 #[cfg(test)]
 mod unittests {
     use super::*;
-    use git2::{Commit, Oid, Repository};
+    use git2::{Commit, CredentialType, Oid, Repository};
     use std::collections::HashMap;
+    use std::fs;
     use std::sync::Once;
     use tempfile::TempDir;
 
@@ -599,15 +777,20 @@ mod unittests {
     }
 
     fn dummy_config(refs: Vec<String>) -> RepoObservationConfig {
-        RepoObservationConfig::new("local".into(), Vec::new(), Some(100), refs)
+        let id = RepoId::from_url("local");
+        RepoObservationConfig::new(id, "local".into(), Vec::new(), Some(100), refs)
     }
 
-    /// Create a bare repository for testing.
     fn bare_repo() -> (TempDir, Repository) {
         let dir = tempfile::tempdir().unwrap();
         let repo = Repository::init_bare(dir.path()).unwrap();
-
         (dir, repo)
+    }
+    ///Since local tests don’t fetch from remotes, we can pass a no-op credential provider.
+    fn noop_provider() -> Arc<StaticCredentialProvider> {
+        Arc::new(StaticCredentialProvider::new(StaticCredentialConfig {
+            hosts: HashMap::new(),
+        }))
     }
 
     /// Create an empty-tree commit with optional parents.
@@ -642,6 +825,86 @@ mod unittests {
             .unwrap();
 
         commits
+    }
+
+    /// Writes a valid credential config to a temp file and returns its path.
+    fn write_test_config() -> (TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("creds.json");
+
+        let json = r#"
+        {
+            "hosts": {
+                "gitlab.com": {
+                    "http": {
+                        "username": "oauth2",
+                        "token": "token123"
+                    }
+                }
+            }
+        }
+        "#;
+
+        fs::write(&path, json).unwrap();
+        (dir, path)
+    }
+
+    #[test]
+    fn loads_config_from_file() {
+        let (_dir, path) = write_test_config();
+
+        let config = StaticCredentialConfig::from_file(&path).unwrap();
+
+        assert!(config.hosts.contains_key("gitlab.com"));
+        assert_eq!(
+            config.hosts["gitlab.com"].http.as_ref().unwrap().username,
+            "oauth2"
+        );
+    }
+
+    #[test]
+    fn resolves_http_credentials_from_file_config() {
+        let (_dir, path) = write_test_config();
+
+        let config = StaticCredentialConfig::from_file(&path).unwrap();
+        let provider = StaticCredentialProvider::new(config);
+
+        let cred = provider
+            .credentials(
+                "https://gitlab.com/group/repo.git",
+                None,
+                CredentialType::USER_PASS_PLAINTEXT,
+            )
+            .unwrap();
+
+        assert!(cred.has_username());
+    }
+
+    #[test]
+    fn fails_for_unknown_host_from_file_config() {
+        let (_dir, path) = write_test_config();
+
+        let config = StaticCredentialConfig::from_file(&path).unwrap();
+        let provider = StaticCredentialProvider::new(config);
+
+        let result = provider.credentials(
+            "https://github.com/org/repo.git",
+            None,
+            CredentialType::USER_PASS_PLAINTEXT,
+        );
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn fails_on_invalid_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bad.json");
+
+        fs::write(&path, "{ this is not valid json").unwrap();
+
+        let result = StaticCredentialConfig::from_file(&path);
+        assert!(result.is_err());
     }
 
     #[test]
@@ -706,11 +969,13 @@ mod unittests {
         let mut seen = Vec::new();
         let mut refs_seen = HashMap::new();
 
-        let config = dummy_config(vec!["refs/heads/main".into(), "refs/heads/dev".into()]);
+        let obs_config = dummy_config(vec!["refs/heads/main".into(), "refs/heads/dev".into()]);
 
+        let provider = Arc::new(noop_provider());
         GitRepoWorker::observe_repository(
             &repo,
-            &config,
+            &provider,
+            &obs_config,
             &mut last_seen,
             |r, c| seen.push((r.to_string(), c.id())),
             |ref_name, old, new| {
@@ -745,9 +1010,10 @@ mod unittests {
             .unwrap();
 
         let config = dummy_config(vec!["refs/heads/dev".into()]);
-
+        let provider = Arc::new(noop_provider());
         GitRepoWorker::observe_repository(
             &repo,
+            &provider,
             &config,
             &mut last_seen,
             |_r, _c| {},
@@ -767,8 +1033,11 @@ mod unittests {
         let mut last_seen = HashMap::new();
         let config = dummy_config(vec!["refs/heads/main".into()]);
 
+        let provider = noop_provider();
+
         let result = GitRepoWorker::observe_repository(
             &repo,
+            &provider,
             &config,
             &mut last_seen,
             |_r, _c| {},

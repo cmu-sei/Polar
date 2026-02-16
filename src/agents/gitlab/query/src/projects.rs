@@ -1,20 +1,17 @@
-
-
-use std::fmt;
+use crate::runners::CiRunnerIdFragment;
+use crate::Namespace;
+use crate::PageInfo;
 use gitlab_schema::gitlab::{self as schema};
-use gitlab_schema::{CiJobArtifactID, DateTimeString};
+use gitlab_schema::BigInt;
+use gitlab_schema::ContainerRepositoryID;
 use gitlab_schema::IdString;
 use gitlab_schema::JobIdString;
-use gitlab_schema::ContainerRepositoryID;
-use gitlab_schema::BigInt;
-use crate::runners::CiRunnerIdFragment;
-use crate::PageInfo;
-use crate::Namespace;
+use gitlab_schema::{CiJobArtifactID, DateTimeString};
+use std::fmt;
 
 use rkyv::Archive;
 use rkyv::Deserialize;
 use rkyv::Serialize;
-
 
 #[derive(cynic::QueryFragment, Clone, Deserialize, Serialize, rkyv::Archive)]
 #[cynic(schema = "gitlab")]
@@ -26,41 +23,59 @@ pub struct Project {
     pub created_at: Option<DateTimeString>,
     pub namespace: Option<Namespace>,
     pub last_activity_at: Option<DateTimeString>,
+    pub http_url_to_repo: Option<String>,
+    pub ssh_url_to_repo: Option<String>,
+}
+
+/// A smaller stubbed fragement of a project containing its unique identifier and human readable name
+#[derive(cynic::QueryFragment, Clone, Deserialize, Serialize, rkyv::Archive)]
+#[cynic(schema = "gitlab", graphql_type = "Project")]
+pub struct ProjectCoreFragment {
+    pub id: IdString,
+    pub name: String,
 }
 
 #[derive(cynic::QueryVariables, Clone, Deserialize, Serialize, rkyv::Archive)]
 pub struct SingleProjectQueryArguments {
-    pub full_path: IdString
+    pub full_path: IdString,
 }
 
 /// A lighter query to just get a project's pipelines
 #[derive(cynic::QueryFragment, Clone, Deserialize, Serialize, rkyv::Archive)]
 #[cynic(schema = "gitlab", graphql_type = "Project")]
 pub struct ProjectPipelineFragment {
-    pub pipelines: Option<PipelineConnection>
+    pub id: IdString,
+    pub pipelines: Option<PipelineConnection>,
 }
 
 #[derive(cynic::QueryFragment, Clone, Deserialize, Serialize, rkyv::Archive)]
 #[cynic(schema = "gitlab", graphql_type = "Project")]
 pub struct ProjectPipelineJobsragment {
-    pub pipelines: Option<PipelineJobsConnection>
+    pub id: IdString,
+    pub pipelines: Option<PipelineJobsConnection>,
 }
 
-
 #[derive(cynic::QueryFragment, Clone, Deserialize, Serialize, rkyv::Archive)]
-#[cynic(schema = "gitlab", graphql_type = "Query", variables = "SingleProjectQueryArguments")]
+#[cynic(
+    schema = "gitlab",
+    graphql_type = "Query",
+    variables = "SingleProjectQueryArguments"
+)]
 pub struct ProjectPipelineQuery {
     #[arguments(fullPath: $full_path)]
-    pub project: Option<ProjectPipelineFragment>
+    pub project: Option<ProjectPipelineFragment>,
 }
 
 #[derive(cynic::QueryFragment, Clone, Deserialize, Serialize, rkyv::Archive)]
-#[cynic(schema = "gitlab", graphql_type = "Query", variables = "SingleProjectQueryArguments")]
+#[cynic(
+    schema = "gitlab",
+    graphql_type = "Query",
+    variables = "SingleProjectQueryArguments"
+)]
 pub struct ProjectPipelineJobsQuery {
     #[arguments(fullPath: $full_path)]
-    pub project: Option<ProjectPipelineJobsragment>
+    pub project: Option<ProjectPipelineJobsragment>,
 }
-
 
 #[derive(cynic::QueryFragment, Clone, Deserialize, Serialize, Archive)]
 #[cynic(schema = "gitlab")]
@@ -74,8 +89,25 @@ pub struct ProjectEdge {
 pub struct ProjectConnection {
     pub count: i32, //Int! 	Total count of collection.
     pub edges: Option<Vec<Option<ProjectEdge>>>,
-    pub nodes: Option<Vec<Option<Project>>>, //[UserCore] 	A list of nodes.
-    pub page_info: PageInfo,                 // 	PageInfo! 	Information to aid in pagination.
+    pub nodes: Option<Vec<Option<Project>>>,
+    pub page_info: PageInfo, // 	PageInfo! 	Information to aid in pagination.
+}
+
+#[derive(cynic::QueryFragment, Clone, Deserialize, Serialize, Archive)]
+#[cynic(schema = "gitlab", graphql_type = "ProjectEdge")]
+pub struct ProjectCoreEdge {
+    pub cursor: String,
+    pub node: Option<ProjectCoreFragment>,
+}
+
+/// A project connection that cotnains just a projects core.
+#[derive(cynic::QueryFragment, Clone, Deserialize, Serialize, rkyv::Archive)]
+#[cynic(schema = "gitlab", graphql_type = "ProjectConnection")]
+pub struct ProjectCoreConnection {
+    pub count: i32, //Int! 	Total count of collection.
+    pub edges: Option<Vec<Option<ProjectCoreEdge>>>,
+    pub nodes: Option<Vec<Option<ProjectCoreFragment>>>,
+    pub page_info: PageInfo, // 	PageInfo! 	Information to aid in pagination.
 }
 
 #[derive(cynic::QueryVariables, Debug, Clone)]
@@ -172,16 +204,16 @@ pub struct ProjectMemberConnection {
 
 #[derive(cynic::QueryFragment, Deserialize, Serialize, rkyv::Archive, Clone)]
 #[cynic(schema = "gitlab")]
-pub struct PipelineConnection {  
-  pub nodes: Option<Vec<Option<Pipeline>>>,
-  pub page_info: PageInfo
+pub struct PipelineConnection {
+    pub nodes: Option<Vec<Option<Pipeline>>>,
+    pub page_info: PageInfo,
 }
 
 #[derive(cynic::QueryFragment, Deserialize, Serialize, rkyv::Archive, Clone)]
 #[cynic(schema = "gitlab", graphql_type = "PipelineConnection")]
-pub struct PipelineJobsConnection {  
-  pub nodes: Option<Vec<Option<PipelineJobsFragment>>>,
-  pub page_info: PageInfo
+pub struct PipelineJobsConnection {
+    pub nodes: Option<Vec<Option<PipelineJobsFragment>>>,
+    pub page_info: PageInfo,
 }
 
 #[derive(cynic::Enum, Deserialize, Serialize, rkyv::Archive, Clone)]
@@ -199,7 +231,7 @@ pub enum CiJobStatus {
     Canceled,
     Skipped,
     Manual,
-    Scheduled
+    Scheduled,
 }
 
 impl fmt::Display for CiJobStatus {
@@ -252,7 +284,11 @@ pub enum JobArtifactFileType {
     RequirementsV2,
     CoverageFuzzing,
     ApiFuzzing,
-    ClusterApplications, Cobertura, Dotenv, LoadPerformance, NetworkReferee
+    ClusterApplications,
+    Cobertura,
+    Dotenv,
+    LoadPerformance,
+    NetworkReferee,
 }
 
 impl fmt::Display for JobArtifactFileType {
@@ -298,7 +334,7 @@ impl fmt::Display for JobArtifactFileType {
 #[cynic(schema = "gitlab")]
 pub struct CiJobConnection {
     pub nodes: Option<Vec<Option<GitlabCiJob>>>,
-    pub page_info: PageInfo
+    pub page_info: PageInfo,
 }
 
 /// A shallow pipeline query fragment, gets pipeline metadata
@@ -330,14 +366,14 @@ pub struct Pipeline {
 #[derive(cynic::QueryFragment, Deserialize, Serialize, rkyv::Archive, Clone)]
 #[cynic(schema = "gitlab", graphql_type = "Pipeline")]
 pub struct PipelineFragment {
-    pub id: IdString, 
+    pub id: IdString,
 }
 
 #[derive(cynic::QueryFragment, Deserialize, Serialize, rkyv::Archive, Clone)]
 #[cynic(schema = "gitlab", graphql_type = "Pipeline")]
 pub struct PipelineJobsFragment {
     pub id: IdString,
-    pub jobs: Option<CiJobConnection>
+    pub jobs: Option<CiJobConnection>,
 }
 
 #[derive(cynic::QueryFragment, Deserialize, Serialize, rkyv::Archive, Clone)]
@@ -345,7 +381,7 @@ pub struct PipelineJobsFragment {
 pub struct GitlabCiJob {
     pub id: Option<JobIdString>,
     pub status: Option<CiJobStatus>,
-    
+
     pub runner: Option<CiRunnerIdFragment>,
     pub name: Option<String>,
     pub short_sha: String,
@@ -354,17 +390,13 @@ pub struct GitlabCiJob {
     pub created_at: Option<DateTimeString>,
     pub started_at: Option<DateTimeString>,
     pub finished_at: Option<DateTimeString>,
-    pub duration: Option<i32>, 
+    pub duration: Option<i32>,
     pub failure_message: Option<String>,
-    pub artifacts: Option<CiJobArtifactConnection>
+    pub artifacts: Option<CiJobArtifactConnection>,
 }
 
-
 #[derive(cynic::QueryFragment, Deserialize, Serialize, rkyv::Archive, Clone)]
-#[cynic(
-    schema = "gitlab",
-    graphql_type = "Commit"
-)]
+#[cynic(schema = "gitlab", graphql_type = "Commit")]
 pub struct Commit {
     pub author: Option<crate::users::UserCoreFragment>,
     pub author_email: Option<String>,
@@ -403,9 +435,9 @@ pub struct CiJobArtifact {
 
 #[derive(cynic::QueryFragment, Deserialize, Serialize, rkyv::Archive, Clone)]
 #[cynic(schema = "gitlab")]
-pub struct CiJobArtifactConnection {  
-  pub nodes: Option<Vec<Option<CiJobArtifact>>>,
-  pub page_info: PageInfo
+pub struct CiJobArtifactConnection {
+    pub nodes: Option<Vec<Option<CiJobArtifact>>>,
+    pub page_info: PageInfo,
 }
 
 #[derive(cynic::Enum, Deserialize, Serialize, rkyv::Archive)]
@@ -467,26 +499,30 @@ pub struct ContainerRepositoryTagConnection {
 #[derive(cynic::QueryFragment, Deserialize, Serialize, rkyv::Archive)]
 #[cynic(schema = "gitlab", graphql_type = "ContainerRepositoryDetails")]
 pub struct ContainerRepositoryTags {
-    pub tags: Option<ContainerRepositoryTagConnection>
+    pub tags: Option<ContainerRepositoryTagConnection>,
 }
 
 #[derive(cynic::QueryVariables, Deserialize, Serialize, rkyv::Archive)]
 pub struct ContainerRepositoryDetailsArgs {
-    pub id: ContainerRepositoryID
+    pub id: ContainerRepositoryID,
 }
 
 #[derive(cynic::QueryFragment, Deserialize, Serialize, rkyv::Archive)]
-#[cynic(schema = "gitlab", graphql_type = "Query", variables = "ContainerRepositoryDetailsArgs")]
+#[cynic(
+    schema = "gitlab",
+    graphql_type = "Query",
+    variables = "ContainerRepositoryDetailsArgs"
+)]
 pub struct ContainerRepositoryDetailsQuery {
     #[arguments(id: $id)]
-    pub container_repository: Option<ContainerRepositoryTags>
+    pub container_repository: Option<ContainerRepositoryTags>,
 }
 
 #[derive(cynic::QueryFragment, Deserialize, Serialize, rkyv::Archive)]
 #[cynic(schema = "gitlab", graphql_type = "ContainerRepositoryConnection")]
 pub struct ContainerRepositoryConnection {
     pub nodes: Option<Vec<Option<ContainerRepository>>>,
-    pub page_info: PageInfo
+    pub page_info: PageInfo,
 }
 
 /// A lighter query to just get a project's container repositories
@@ -494,14 +530,18 @@ pub struct ContainerRepositoryConnection {
 #[cynic(schema = "gitlab", graphql_type = "Project")]
 pub struct ProjectContainerRepositoriesFragment {
     pub id: IdString,
-    pub container_repositories: Option<ContainerRepositoryConnection>
+    pub container_repositories: Option<ContainerRepositoryConnection>,
 }
 
 #[derive(cynic::QueryFragment, Deserialize, Serialize, rkyv::Archive)]
-#[cynic(schema = "gitlab", graphql_type = "Query", variables = "SingleProjectQueryArguments")]
+#[cynic(
+    schema = "gitlab",
+    graphql_type = "Query",
+    variables = "SingleProjectQueryArguments"
+)]
 pub struct ProjectContainerRepositoriesQuery {
     #[arguments(fullPath: $full_path)]
-    pub project: Option<ProjectContainerRepositoriesFragment>
+    pub project: Option<ProjectContainerRepositoriesFragment>,
 }
 
 #[derive(cynic::QueryFragment, Deserialize, Serialize, rkyv::Archive)]
@@ -509,7 +549,7 @@ pub struct PackageTag {
     pub id: IdString,
     pub created_at: DateTimeString,
     pub name: String,
-    updated_at: DateTimeString
+    updated_at: DateTimeString,
 }
 
 #[derive(cynic::QueryFragment, Deserialize, Serialize, rkyv::Archive)]
@@ -521,7 +561,7 @@ pub struct PackageTagConnection {
 #[derive(cynic::QueryFragment, Deserialize, Serialize, rkyv::Archive)]
 #[cynic(schema = "gitlab", graphql_type = "PipelineConnection")]
 pub struct PipelineFragmentConnection {
-    pub nodes: Option<Vec<Option<PipelineFragment>>>
+    pub nodes: Option<Vec<Option<PipelineFragment>>>,
 }
 
 #[derive(cynic::QueryFragment, Deserialize, Serialize, rkyv::Archive)]
@@ -555,7 +595,9 @@ pub enum PackageTypeEnum {
     Generic,
     Golang,
     Debian,
-    MlModel, Rpm, Rubygems
+    MlModel,
+    Rpm,
+    Rubygems,
 }
 
 #[derive(cynic::Enum, Debug, Deserialize, Serialize, rkyv::Archive)]
@@ -563,7 +605,9 @@ pub enum PackageTypeEnum {
 pub enum PackageStatus {
     Default,
     Hidden,
-    PendingDestruction, Error, Processing
+    PendingDestruction,
+    Error,
+    Processing,
 }
 
 impl fmt::Display for PackageTypeEnum {
@@ -601,23 +645,26 @@ impl fmt::Display for PackageStatus {
     }
 }
 
-
 #[derive(cynic::QueryFragment, Deserialize, Serialize, rkyv::Archive)]
 pub struct PackageConnection {
     pub nodes: Option<Vec<Option<Package>>>,
-    pub page_info: PageInfo
+    pub page_info: PageInfo,
 }
 
 #[derive(cynic::QueryFragment, Deserialize, Serialize, rkyv::Archive)]
 #[cynic(schema = "gitlab", graphql_type = "Project")]
 pub struct ProjectPackagesFragment {
     pub id: IdString,
-    pub packages: Option<PackageConnection>
+    pub packages: Option<PackageConnection>,
 }
 
 #[derive(cynic::QueryFragment, Deserialize, Serialize, rkyv::Archive)]
-#[cynic(schema = "gitlab", graphql_type = "Query", variables = "SingleProjectQueryArguments")]
+#[cynic(
+    schema = "gitlab",
+    graphql_type = "Query",
+    variables = "SingleProjectQueryArguments"
+)]
 pub struct ProjectPackagesQuery {
     #[arguments(fullPath: $full_path)]
-    pub project: Option<ProjectPackagesFragment>
+    pub project: Option<ProjectPackagesFragment>,
 }

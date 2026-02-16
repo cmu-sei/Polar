@@ -31,7 +31,6 @@ license = "MIT"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-lapin = { workspace = true }
 tokio = { version = "1", features = ["full"] }
 futures-lite = "2.6.1"
 serde_json = "1.0"
@@ -47,6 +46,7 @@ gitlab-queries = { path = "../query" }
 gitlab-schema = { path = "../schema" }
 cassini-backoff = { workspace = true }
 rkyv = { workspace = true }
+chrono = { workspace = true }
 [[bin]]
 name = "gitlab-consumer"
 path = "src/entrypoint.rs"

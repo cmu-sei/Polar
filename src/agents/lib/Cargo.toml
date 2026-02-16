@@ -14,6 +14,7 @@ tracing-opentelemetry = "0.32.0"
 opentelemetry_sdk = "0.31.0"
 opentelemetry-otlp = "0.31.0"
 cassini-types = { path = "../cassini/types" }
+cassini-client = { path = "../cassini/client" }
 serde = {version = "1", features = ["derive"]}
 ractor = { version = "0.15.8", features = ["async-trait"] }
 neo4rs = { workspace = true }

@@ -1,15 +1,20 @@
+use cassini_client::{TCPClientConfig, TcpClient, TcpClientActor, TcpClientArgs};
 use cassini_types::ClientEvent;
-use ractor::{ActorProcessingErr, OutputPort};
+use ractor::OutputPort;
+use ractor::{Actor, ActorProcessingErr, ActorRef};
 use reqwest::{Certificate, Client, ClientBuilder};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::io::Read;
 use std::sync::Arc;
 use tracing::{debug, info};
-
 pub mod graph;
 /// wrapper definition for a ractor outputport where a raw message payload and a topic can be piped to a necessary dispatcher
 pub type QueueOutput = Arc<OutputPort<(Vec<u8>, String)>>;
+
+/// Canonical serialization error type for the system.
+/// Change once, globally.
+type RkyvError = rkyv::rancor::Error;
 
 /// name of the agent responsible receiving provenance events related to discovery of certain artifacts.
 /// Including container images and software bill of materials.
@@ -19,7 +24,7 @@ pub const TRANSACTION_FAILED_ERROR: &str = "Expected to start a transaction with
 pub const QUERY_COMMIT_FAILED: &str = "Error committing transaction to graph";
 pub const QUERY_RUN_FAILED: &str = "Error running query on the graph.";
 pub const UNEXPECTED_MESSAGE_STR: &str = "Received unexpected message!";
-pub const GIT_REPOSITORIES_TOPIC: &str = "polar.git.repositories";
+pub const GIT_REPO_DISCOGERY_TOPIC: &str = "polar.git.repositories";
 pub trait Supervisor {
     /// Helper function to dispatch messages off of message queues to the associated actors within an agent supervision tree.
     /// Payload : a series of raw bytes containing an expected data structure/enum for the agent.
@@ -31,6 +36,36 @@ pub enum SupervisorMessage {
     ClientEvent { event: ClientEvent },
 }
 
+/// Helper to spawn a TCP client to connect to the message broker, Cassini.
+pub async fn spawn_tcp_client<M, F>(
+    service_name: &str,
+    supervisor: ActorRef<M>,
+    map_event: F,
+) -> Result<TcpClient, ActorProcessingErr>
+where
+    M: Send + 'static,
+    F: Fn(ClientEvent) -> Option<M> + Send + Sync + 'static,
+{
+    let events_output = std::sync::Arc::new(OutputPort::default());
+
+    events_output.subscribe(supervisor.clone(), map_event);
+
+    let config = TCPClientConfig::new()?;
+
+    let (tcp_client, _) = Actor::spawn_linked(
+        Some(format!("{service_name}.tcp")),
+        TcpClientActor,
+        TcpClientArgs {
+            config,
+            registration_id: None,
+            events_output,
+        },
+        supervisor.into(),
+    )
+    .await?;
+
+    Ok(tcp_client)
+}
 /// Helper function to parse a file at a given path and return the raw bytes as a vector
 pub fn get_file_as_byte_vec(filename: &String) -> Result<Vec<u8>, std::io::Error> {
     let mut f = std::fs::File::open(&filename)?;
@@ -112,6 +147,13 @@ pub struct NormalizedSbom {
     pub components: Vec<NormalizedComponent>,
 }
 
+/// A simple event that says a git repo was discovered
+///
+#[derive(Debug, rkyv::Serialize, rkyv::Deserialize, rkyv::Archive)]
+pub struct GitRepositoryDiscoveredEvent {
+    pub http_url: Option<String>,
+    pub ssh_url: Option<String>,
+}
 /// Represents normalized provenance-related events emitted across agents.
 /// Each variant communicates new or updated knowledge about entities in the provenance graph.
 ///
@@ -123,7 +165,7 @@ pub struct NormalizedSbom {
 #[derive(Debug, rkyv::Serialize, rkyv::Deserialize, rkyv::Archive)]
 pub enum ProvenanceEvent {
     /// Emitted when more generic unclassified artifacts.
-    ArtifactDisocvered { name: String, url: String },
+    ArtifactDiscovered { name: String, url: String },
     SBOMResolved {
         uid: String,
         name: String,
@@ -361,4 +403,19 @@ impl ContainerImageReference {
             _ => format!("{}/{}", self.registry, self.repository),
         }
     }
+}
+
+pub fn emit_provenance_event(
+    ev: ProvenanceEvent,
+    client: &TcpClient,
+) -> Result<(), ActorProcessingErr> {
+    let payload = rkyv::to_bytes::<RkyvError>(&ev)?.to_vec();
+
+    tracing::trace!("Emitting event {ev:?}");
+    client.cast(cassini_client::TcpClientMessage::Publish {
+        topic: PROVENANCE_DISCOVERY_TOPIC.to_string(),
+        payload,
+    })?;
+
+    Ok(())
 }
