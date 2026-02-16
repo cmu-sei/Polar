@@ -1,5 +1,3 @@
-use std::time::Duration;
-
 use crate::groups::GitlabGroupConsumer;
 use crate::meta::MetaConsumer;
 use crate::pipelines::GitlabPipelineConsumer;
@@ -14,7 +12,6 @@ use crate::BROKER_CLIENT_NAME;
 use cassini_client::*;
 use cassini_types::ClientEvent;
 use common::types::GitlabEnvelope;
-
 use common::GROUPS_CONSUMER_TOPIC;
 use common::METADATA_CONSUMER_TOPIC;
 use common::PIPELINE_CONSUMER_TOPIC;
@@ -27,6 +24,7 @@ use polar::Supervisor;
 use polar::SupervisorMessage;
 use ractor::async_trait;
 use ractor::Actor;
+use ractor::ActorCell;
 use ractor::ActorProcessingErr;
 use ractor::ActorRef;
 use ractor::OutputPort;
@@ -62,6 +60,87 @@ impl Supervisor for ConsumerSupervisor {
     }
 }
 
+impl ConsumerSupervisor {
+    pub async fn spawn_children(
+        myself: ActorCell,
+        state: &mut ConsumerSupervisorState,
+        c_state: GitlabConsumerState,
+    ) -> Result<(), ActorProcessingErr> {
+        if let Err(e) = Actor::spawn_linked(
+            Some(METADATA_CONSUMER_TOPIC.to_string()),
+            MetaConsumer,
+            c_state.clone(),
+            myself.clone(),
+        )
+        .await
+        {
+            return Err(format!("failed to start meta consumer. {e}").into());
+        }
+        state.u_consumer = Some(
+            Actor::spawn_linked(
+                Some(USER_CONSUMER_TOPIC.to_string()),
+                GitlabUserConsumer,
+                c_state.clone(),
+                myself.clone(),
+            )
+            .await?
+            .0,
+        );
+
+        if let Err(e) = Actor::spawn_linked(
+            Some(GROUPS_CONSUMER_TOPIC.to_string()),
+            GitlabGroupConsumer,
+            c_state.clone(),
+            myself.clone().into(),
+        )
+        .await
+        {
+            return Err(format!("failed to start groups consumer. {e}").into());
+        }
+        if let Err(e) = Actor::spawn_linked(
+            Some(RUNNERS_CONSUMER_TOPIC.to_string()),
+            GitlabRunnerConsumer,
+            c_state.clone(),
+            myself.clone().into(),
+        )
+        .await
+        {
+            return Err(format!("failed to start runners consumer. {e}").into());
+        }
+        if let Err(e) = Actor::spawn_linked(
+            Some(PROJECTS_CONSUMER_TOPIC.to_string()),
+            GitlabProjectConsumer,
+            c_state.clone(),
+            myself.clone().into(),
+        )
+        .await
+        {
+            return Err(format!("failed to start projects consumer. {e}").into());
+        }
+        if let Err(e) = Actor::spawn_linked(
+            Some(PIPELINE_CONSUMER_TOPIC.to_string()),
+            GitlabPipelineConsumer,
+            c_state.clone(),
+            myself.clone().into(),
+        )
+        .await
+        {
+            return Err(format!("failed to start pipeline consumer. {e}").into());
+        }
+        if let Err(e) = Actor::spawn_linked(
+            Some(REPOSITORY_CONSUMER_TOPIC.to_string()),
+            GitlabRepositoryConsumer,
+            c_state.clone(),
+            myself.clone().into(),
+        )
+        .await
+        {
+            return Err(format!("failed to start repository consumer. {e}").into());
+        }
+
+        Ok(())
+    }
+}
 #[async_trait]
 impl Actor for ConsumerSupervisor {
     type Msg = SupervisorMessage;
@@ -114,99 +193,36 @@ impl Actor for ConsumerSupervisor {
         match message {
             SupervisorMessage::ClientEvent { event } => match event {
                 ClientEvent::Registered { .. } => {
-                    let graph = neo4rs::Graph::connect(state.graph_config.clone())?;
-
-                    let (graph_controller, _) = Actor::spawn_linked(
-                        None,
-                        GitlabGraphController,
-                        graph,
-                        myself.clone().into(),
-                    )
-                    .await?;
-
-                    // TODO: I guess technically we coul wrap this state in an arc and not have to copy it at all?
-                    let c_state = GitlabConsumerState {
-                        graph_controller,
-                        tcp_client: state.tcp_client.clone(),
-                    };
-
-                    if let Err(e) = Actor::spawn_linked(
-                        Some(METADATA_CONSUMER_TOPIC.to_string()),
-                        MetaConsumer,
-                        c_state.clone(),
-                        myself.clone().into(),
-                    )
-                    .await
-                    {
-                        error!("failed to start meta consumer. {e}");
-                        myself.stop(None);
-                    }
-                    state.u_consumer = Some(
-                        Actor::spawn_linked(
-                            Some(USER_CONSUMER_TOPIC.to_string()),
-                            GitlabUserConsumer,
-                            c_state.clone(),
+                    info!("Initializing agent.");
+                    if let Ok(graph) = neo4rs::Graph::connect(state.graph_config.clone()) {
+                        match Actor::spawn_linked(
+                            None,
+                            GitlabGraphController,
+                            graph,
                             myself.clone().into(),
                         )
-                        .await?
-                        .0,
-                    );
+                        .await
+                        {
+                            Ok((graph_controller, _)) => {
+                                // TODO: I guess technically we could wrap this state in an arc and not have to copy it at all?
+                                let c_state = GitlabConsumerState {
+                                    graph_controller,
+                                    tcp_client: state.tcp_client.clone(),
+                                };
 
-                    if let Err(e) = Actor::spawn_linked(
-                        Some(GROUPS_CONSUMER_TOPIC.to_string()),
-                        GitlabGroupConsumer,
-                        c_state.clone(),
-                        myself.clone().into(),
-                    )
-                    .await
-                    {
-                        error!("failed to start groups consumer. {e}");
-                        myself.stop(None);
+                                Self::spawn_children(myself.get_cell(), state, c_state).await?;
+                            }
+                            Err(e) => {
+                                error!("{e}");
+                                myself.stop(Some(e.to_string()));
+                            }
+                        }
+                    } else {
+                        let err = "Failed to initialize connection to graph database.".into();
+                        error!("{err}");
+                        myself.stop(Some(err));
                     }
-                    if let Err(e) = Actor::spawn_linked(
-                        Some(RUNNERS_CONSUMER_TOPIC.to_string()),
-                        GitlabRunnerConsumer,
-                        c_state.clone(),
-                        myself.clone().into(),
-                    )
-                    .await
-                    {
-                        error!("failed to start runners consumer. {e}");
-                        myself.stop(None);
-                    }
-                    if let Err(e) = Actor::spawn_linked(
-                        Some(PROJECTS_CONSUMER_TOPIC.to_string()),
-                        GitlabProjectConsumer,
-                        c_state.clone(),
-                        myself.clone().into(),
-                    )
-                    .await
-                    {
-                        error!("failed to start projects consumer. {e}");
-                        myself.stop(None);
-                    }
-                    if let Err(e) = Actor::spawn_linked(
-                        Some(PIPELINE_CONSUMER_TOPIC.to_string()),
-                        GitlabPipelineConsumer,
-                        c_state.clone(),
-                        myself.clone().into(),
-                    )
-                    .await
-                    {
-                        error!("failed to start pipeline consumer. {e}");
-                        myself.stop(None);
-                    }
-                    if let Err(e) = Actor::spawn_linked(
-                        Some(REPOSITORY_CONSUMER_TOPIC.to_string()),
-                        GitlabRepositoryConsumer,
-                        c_state.clone(),
-                        myself.clone().into(),
-                    )
-                    .await
-                    {
-                        error!("failed to start pipeline consumer. {e}");
-                        myself.stop(None);
-                    }
+                    info!("Finished initialization. Waiting for messages...");
                 }
                 ClientEvent::MessagePublished { topic, payload } => {
                     ConsumerSupervisor::deserialize_and_dispatch(topic, payload);
@@ -219,9 +235,9 @@ impl Actor for ConsumerSupervisor {
 
     async fn handle_supervisor_evt(
         &self,
-        myself: ActorRef<Self::Msg>,
+        _myself: ActorRef<Self::Msg>,
         msg: SupervisionEvent,
-        state: &mut Self::State,
+        _state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match msg {
             SupervisionEvent::ActorStarted(actor_cell) => {

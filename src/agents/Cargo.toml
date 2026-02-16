@@ -88,6 +88,7 @@ bytecheck_derive = "0.8.2"
 cassini-client = { path = "cassini/client" }
 cassini-types  = { path = "cassini/types" }
 kube = { version = "2.0.1", default-features = false, features = ["client", "aws-lc-rs", "rustls-tls", "runtime", "derive"] }
+chrono = {version = "0.4", default-features = false, features = ["clock", "std"] }
 [patch.crates-io]
 getrandom = { git = "https://github.com/rust-random/getrandom", tag = "v0.3.3" }
 

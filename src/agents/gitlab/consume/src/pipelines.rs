@@ -23,22 +23,20 @@
 
 use crate::GitlabConsumerState;
 use crate::GitlabNodeKey;
-use crate::UNKNOWN_FILED;
 use cassini_client::TcpClient;
 use cassini_client::TcpClientMessage;
+use chrono::Utc;
 use common::types::GitlabData;
 use common::types::GitlabEnvelope;
 use common::PIPELINE_CONSUMER_TOPIC;
-
 use gitlab_queries::projects::CiJobArtifact;
 use gitlab_queries::projects::GitlabCiJob;
 use polar::graph::GraphController;
 use polar::graph::{GraphControllerMsg, GraphOp, GraphValue, Property};
 use polar::ProvenanceEvent;
-use polar::PROVENANCE_DISCOVERY_TOPIC;
 
-use ractor::{async_trait, rpc::cast, Actor, ActorProcessingErr, ActorRef};
-use tracing::{debug, error, info, trace};
+use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef};
+use tracing::debug;
 
 fn fmt_download_path(base_url: &str, download_url: &str) -> String {
     format!("{base_url}{download_url}")
@@ -47,30 +45,6 @@ fn fmt_download_path(base_url: &str, download_url: &str) -> String {
 pub struct GitlabPipelineConsumer;
 
 impl GitlabPipelineConsumer {
-    fn emit_artifact_discovered(
-        tcp_client: &TcpClient,
-        artifact: &CiJobArtifact,
-        download_path: &str,
-    ) {
-        let name = artifact
-            .name
-            .clone()
-            .unwrap_or_else(|| artifact.id.0.clone());
-        let event = ProvenanceEvent::ArtifactDiscovered {
-            name,
-            url: download_path.to_string(),
-        };
-
-        if let Ok(payload) = rkyv::to_bytes::<rkyv::rancor::Error>(&event) {
-            let message = TcpClientMessage::Publish {
-                topic: PROVENANCE_DISCOVERY_TOPIC.to_string(),
-                payload: payload.into(),
-            };
-
-            cast(tcp_client, message).ok();
-        }
-    }
-
     fn handle_artifacts(
         instance_id: &str,
         base_url: &str,
@@ -79,11 +53,22 @@ impl GitlabPipelineConsumer {
         graph: &ActorRef<GraphControllerMsg<GitlabNodeKey>>,
         tcp_client: &TcpClient,
     ) -> Result<(), ActorProcessingErr> {
+        debug!("Handling artifacts for job {job_key:?}");
         for artifact in artifacts {
             if let Some(p) = &artifact.download_path {
                 let download_path = fmt_download_path(base_url, p);
 
-                Self::emit_artifact_discovered(tcp_client, artifact, &download_path);
+                let name = artifact
+                    .name
+                    .clone()
+                    .unwrap_or_else(|| artifact.id.0.clone());
+
+                let ev = ProvenanceEvent::ArtifactDiscovered {
+                    name,
+                    url: download_path.to_string(),
+                };
+
+                polar::emit_provenance_event(ev, tcp_client)?;
             }
 
             let artifact_key = GitlabNodeKey::PipelineArtifact {
@@ -139,6 +124,7 @@ impl GitlabPipelineConsumer {
         graph: &GraphController<GitlabNodeKey>,
         tcp_client: &TcpClient,
     ) -> Result<(), ActorProcessingErr> {
+        debug!("Handling jobs for pipeline {pipeline_id}");
         let pipeline_key = GitlabNodeKey::Pipeline {
             instance_id: instance_id.into(),
             pipeline_id: pipeline_id.into(),
@@ -169,6 +155,10 @@ impl GitlabPipelineConsumer {
                     GraphValue::String(job.name.clone().unwrap_or_default()),
                 ),
                 Property(
+                    "created_at".into(),
+                    GraphValue::String(job.created_at.clone().unwrap_or_default().0),
+                ),
+                Property(
                     "short_sha".into(),
                     GraphValue::String(job.short_sha.clone()),
                 ),
@@ -179,6 +169,10 @@ impl GitlabPipelineConsumer {
                 Property(
                     "failure_message".into(),
                     GraphValue::String(job.failure_message.clone().unwrap_or_default()),
+                ),
+                Property(
+                    "observed_at".into(),
+                    GraphValue::String(Utc::now().to_rfc3339()),
                 ),
             ];
 
@@ -232,6 +226,7 @@ impl GitlabPipelineConsumer {
         pipelines: &[gitlab_queries::projects::Pipeline],
         graph: &GraphController<GitlabNodeKey>,
     ) -> Result<(), ActorProcessingErr> {
+        debug!("Handling pipeline runs for project {project_id}");
         let project_key = GitlabNodeKey::Project {
             instance_id: instance_id.to_string(),
             project_id: project_id.clone(),
@@ -253,6 +248,10 @@ impl GitlabPipelineConsumer {
                 Property(
                     "created_at".into(),
                     GraphValue::String(pipeline.created_at.to_string()),
+                ),
+                Property(
+                    "finished_at".into(),
+                    GraphValue::String(pipeline.finished_at.clone().unwrap_or_default().0),
                 ),
                 Property(
                     "sha".into(),
@@ -282,6 +281,10 @@ impl GitlabPipelineConsumer {
                 ),
                 Property("trigger".into(), GraphValue::Bool(pipeline.trigger)),
                 Property("latest".into(), GraphValue::Bool(pipeline.latest)),
+                Property(
+                    "observed_at".into(),
+                    GraphValue::String(Utc::now().to_rfc3339()),
+                ),
             ];
 
             graph.cast(GraphControllerMsg::Op(GraphOp::UpsertNode {

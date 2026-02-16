@@ -1,3 +1,4 @@
+use chrono::Utc;
 use polar::graph::{self, rel, GraphValue};
 use polar::graph::{GraphControllerMsg, GraphOp, Property};
 use polar::ProvenanceEvent;
@@ -103,6 +104,10 @@ impl Actor for ProvenanceLinker {
                         Property("digest".into(), GraphValue::String(digest)),
                         Property("uri".into(), GraphValue::String(uri)),
                         Property("media_type".into(), GraphValue::String(media_type)),
+                        Property(
+                            "observed_at".into(),
+                            GraphValue::String(Utc::now().to_rfc3339()),
+                        ),
                     ],
                     "failed to upsert OCIArtifact",
                 )?;

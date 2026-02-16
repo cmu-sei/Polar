@@ -22,6 +22,7 @@
 */
 
 use cassini_client::TcpClientMessage;
+use chrono::Utc;
 use k8s_openapi::api::core::v1::Pod;
 use kube_common::KubeMessage;
 use polar::{
@@ -68,6 +69,10 @@ impl PodConsumer {
                 GraphValue::String(namespace.clone()),
             ),
             Property("sa_name".to_string(), GraphValue::String(sa_name)),
+            Property(
+                "observed_at".to_string(),
+                GraphValue::String(Utc::now().to_rfc3339()),
+            ),
         ];
 
         graph_controller.cast(GraphOp::UpsertNode {

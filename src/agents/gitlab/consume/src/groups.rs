@@ -28,7 +28,7 @@ use gitlab_queries::projects::ProjectCoreFragment;
 use gitlab_queries::runners::CiRunnerIdFragment;
 use polar::graph::{GraphController, GraphControllerMsg, GraphOp, GraphValue, Property};
 use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef};
-use tracing::{debug, info};
+use tracing::debug;
 
 pub struct GitlabGroupConsumer;
 
@@ -188,6 +188,8 @@ impl GitlabGroupConsumer {
         runners: &[CiRunnerIdFragment],
         graph: &ActorRef<GraphControllerMsg<GitlabNodeKey>>,
     ) -> Result<(), ActorProcessingErr> {
+        debug!("Handling runners for group {group_id}");
+
         let group_key = GitlabNodeKey::Group {
             instance_id: instance_id.clone(),
             group_id,
@@ -255,7 +257,7 @@ impl Actor for GitlabGroupConsumer {
     }
     async fn handle(
         &self,
-        myself: ActorRef<Self::Msg>,
+        _myself: ActorRef<Self::Msg>,
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {

@@ -1,5 +1,6 @@
 use cassini_client::TcpClient;
 use cassini_types::ClientEvent;
+use chrono::Utc;
 use git_agent_common::{GitRepositoryMessage, RepoId, GIT_REPO_PROCESSING_TOPIC};
 use neo4rs::BoltType;
 use polar::get_neo_config;
@@ -28,7 +29,6 @@ pub enum GitNodeKey {
     },
 
     Author {
-        name: String,
         email: String,
     },
 }
@@ -54,7 +54,7 @@ impl GraphNodeKey for GitNodeKey {
                 ],
             ),
 
-            GitNodeKey::Author { name, email } => (
+            GitNodeKey::Author { email } => (
                 "(:GitAuthor { email: $email })".to_string(),
                 vec![
                     ("email".to_string(), email.clone().into()),
@@ -109,6 +109,10 @@ impl GitRepoProcessingManager {
                         Property("message".into(), GraphValue::String(message)),
                         Property("authored_time".into(), GraphValue::I64(time)),
                         Property("committer".into(), GraphValue::String(committer)),
+                        Property(
+                            "observed_at".into(),
+                            GraphValue::String(Utc::now().to_rfc3339()),
+                        ),
                     ],
                 }))?;
                 // Repository contains commit

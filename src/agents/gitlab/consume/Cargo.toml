@@ -46,6 +46,7 @@ gitlab-queries = { path = "../query" }
 gitlab-schema = { path = "../schema" }
 cassini-backoff = { workspace = true }
 rkyv = { workspace = true }
+chrono = { workspace = true }
 [[bin]]
 name = "gitlab-consumer"
 path = "src/entrypoint.rs"

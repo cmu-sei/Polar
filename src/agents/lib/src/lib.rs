@@ -11,6 +11,11 @@ use tracing::{debug, info};
 pub mod graph;
 /// wrapper definition for a ractor outputport where a raw message payload and a topic can be piped to a necessary dispatcher
 pub type QueueOutput = Arc<OutputPort<(Vec<u8>, String)>>;
+
+/// Canonical serialization error type for the system.
+/// Change once, globally.
+type RkyvError = rkyv::rancor::Error;
+
 /// name of the agent responsible receiving provenance events related to discovery of certain artifacts.
 /// Including container images and software bill of materials.
 pub const PROVENANCE_DISCOVERY_TOPIC: &str = "polar.provenance.resolver";
@@ -398,4 +403,19 @@ impl ContainerImageReference {
             _ => format!("{}/{}", self.registry, self.repository),
         }
     }
+}
+
+pub fn emit_provenance_event(
+    ev: ProvenanceEvent,
+    client: &TcpClient,
+) -> Result<(), ActorProcessingErr> {
+    let payload = rkyv::to_bytes::<RkyvError>(&ev)?.to_vec();
+
+    tracing::trace!("Emitting event {ev:?}");
+    client.cast(cassini_client::TcpClientMessage::Publish {
+        topic: PROVENANCE_DISCOVERY_TOPIC.to_string(),
+        payload,
+    })?;
+
+    Ok(())
 }

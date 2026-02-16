@@ -22,11 +22,13 @@
 */
 
 use crate::{GitlabConsumerState, GitlabNodeKey};
+use cassini_client::TcpClient;
 use common::types::{GitlabData, GitlabEnvelope, GitlabPackageFile};
 use common::REPOSITORY_CONSUMER_TOPIC;
 use gitlab_queries::projects::{ContainerRepository, ContainerRepositoryTag, Package};
 
-use polar::graph::{GraphControllerMsg, GraphOp, GraphValue, Property};
+use polar::graph::{GraphController, GraphControllerMsg, GraphOp, GraphValue, Property};
+use polar::ProvenanceEvent;
 use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef};
 use tracing::{debug, info};
 
@@ -113,12 +115,20 @@ impl GitlabRepositoryConsumer {
         project_id: String,
         repository_id: String,
         tags: &[ContainerRepositoryTag],
-        graph: &ActorRef<GraphControllerMsg<GitlabNodeKey>>,
+        graph: &GraphController<GitlabNodeKey>,
+        tcp_client: &TcpClient,
     ) -> Result<(), ActorProcessingErr> {
         for tag in tags {
             if tag.digest.is_none() {
                 continue;
             }
+
+            polar::emit_provenance_event(
+                ProvenanceEvent::OCIArtifactDiscovered {
+                    uri: tag.location.clone(),
+                },
+                tcp_client,
+            )?;
 
             let tag_key = GitlabNodeKey::ContainerRepositoryTag {
                 repository_id: repository_id.clone(),
@@ -146,6 +156,10 @@ impl GitlabRepositoryConsumer {
                 Property(
                     "total_size".into(),
                     GraphValue::String(tag.total_size.clone().map(|v| v.0).unwrap_or_default()),
+                ),
+                Property(
+                    "created_at".into(),
+                    GraphValue::String(tag.created_at.clone().map(|v| v.0).unwrap_or_default()),
                 ),
             ];
 
@@ -335,6 +349,7 @@ impl Actor for GitlabRepositoryConsumer {
                     repository_id,
                     &tags,
                     &state.graph_controller,
+                    &state.tcp_client,
                 )?;
             }
 
