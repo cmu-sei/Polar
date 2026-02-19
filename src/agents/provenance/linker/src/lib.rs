@@ -1,11 +1,8 @@
 use std::fmt::Debug;
 
-use neo4rs::{BoltType, Graph};
-use polar::graph::handle_op;
-use polar::graph::{GraphControllerMsg, GraphControllerState, GraphNodeKey};
-use polar::NormalizedSbom;
-use ractor::{Actor, ActorProcessingErr, ActorRef};
-use tracing::debug;
+use neo4rs::BoltType;
+use polar::graph::{GraphControllerMsg, GraphNodeKey};
+use polar::{impl_graph_controller, NormalizedSbom};
 
 use serde::{Deserialize, Serialize};
 pub mod linker;
@@ -144,32 +141,4 @@ impl GraphNodeKey for ArtifactNodeKey {
 
 /// A concrete instance of a GraphController for the artifact linker.
 
-pub struct LinkerGraphController;
-
-#[ractor::async_trait]
-impl Actor for LinkerGraphController {
-    type Msg = GraphControllerMsg<ArtifactNodeKey>;
-    type State = GraphControllerState;
-    type Arguments = Graph;
-
-    async fn pre_start(
-        &self,
-        myself: ActorRef<Self::Msg>,
-        graph: Self::Arguments,
-    ) -> Result<Self::State, ActorProcessingErr> {
-        debug!("{myself:?} starting. Connecting to neo4j.");
-        Ok(GraphControllerState { graph })
-    }
-
-    async fn handle(
-        &self,
-        _me: ActorRef<Self::Msg>,
-        msg: Self::Msg,
-        state: &mut Self::State,
-    ) -> Result<(), ActorProcessingErr> {
-        match msg {
-            GraphControllerMsg::Op(op) => handle_op(&state.graph, &op).await?,
-        }
-        Ok(())
-    }
-}
+impl_graph_controller!(LinkerGraphController, node_key = ArtifactNodeKey);

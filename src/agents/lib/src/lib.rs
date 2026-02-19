@@ -14,7 +14,7 @@ pub type QueueOutput = Arc<OutputPort<(Vec<u8>, String)>>;
 
 /// Canonical serialization error type for the system.
 /// Change once, globally.
-type RkyvError = rkyv::rancor::Error;
+pub type RkyvError = rkyv::rancor::Error;
 
 /// name of the agent responsible receiving provenance events related to discovery of certain artifacts.
 /// Including container images and software bill of materials.

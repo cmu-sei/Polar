@@ -1,4 +1,4 @@
-use neo4rs::{BoltNull, BoltType, Graph, Query};
+use neo4rs::{BoltMap, BoltNull, BoltType, Graph, Query};
 use ractor::{ActorProcessingErr, ActorRef};
 use serde::{Deserialize, Serialize};
 use std::fmt::Debug;
@@ -6,6 +6,21 @@ use tracing::{debug, instrument, trace};
 
 // Type alias to add a generic wrapper to the graphcontroller.
 pub type GraphController<T> = ActorRef<GraphControllerMsg<T>>;
+
+// #[derive(Debug, Clone)]
+// pub enum TypeNodeKey {
+//     State,
+//     Type,
+// }
+
+// impl GraphNodeKey for TypeNodeKey {
+//     fn cypher_match(&self, _prefix: &str) -> (String, Vec<(String, BoltType)>) {
+//         match self {
+
+//             TypeNodeKey::Type => (format!("(:Type)"), vec![]),
+//         }
+//     }
+// }
 
 /// Graph relationship type constants.
 /// ------ IMPORTANT!!!!! ------
@@ -91,7 +106,10 @@ where
     K: GraphNodeKey,
 {
     /// Upsert a canonical node with properties.
-    UpsertNode { key: K, props: Vec<Property> },
+    UpsertNode {
+        key: K,
+        props: Vec<Property>,
+    },
 
     /// Ensure a directed relationship exists between two canonical nodes.
     EnsureEdge {
@@ -100,10 +118,28 @@ where
         rel_type: String,
         props: Vec<Property>,
     },
-}
-
-pub struct GraphControllerState {
-    pub graph: Graph,
+    ReplaceEdge {
+        from: K,
+        rel_type: String,
+        to: K,
+    },
+    RemoveEdges {
+        from: K,
+        rel_type: String,
+    },
+    /// Transition a resource node to a new state.
+    /// Handles:
+    /// 1. Upserting the abstract state node (State type)
+    /// 2. Upserting the append-only state instance node
+    /// 3. Linking resource -> state instance (history)
+    /// 4. Linking state instance -> abstract state
+    /// 5. Replacing the current abstract state edge (HAS_STATE)
+    UpdateState {
+        resource_key: K,
+        state_type_key: K,
+        state_instance_key: K,
+        state_instance_props: Vec<Property>,
+    },
 }
 
 /// Message wrapper for GraphController
@@ -114,7 +150,7 @@ pub struct GraphControllerState {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum GraphControllerMsg<K>
 where
-    K: GraphNodeKey + Debug,
+    K: GraphNodeKey + Debug + Clone,
 {
     Op(GraphOp<K>),
 }
@@ -123,7 +159,7 @@ where
 /// Pure and deterministic.
 pub fn compile_graph_op<K>(op: &GraphOp<K>) -> Query
 where
-    K: GraphNodeKey + Debug,
+    K: GraphNodeKey + Debug + Clone,
 {
     let (cypher, params) = match op {
         GraphOp::UpsertNode { key, props } => {
@@ -186,6 +222,109 @@ where
 
             (cypher, params)
         }
+        GraphOp::ReplaceEdge { from, rel_type, to } => {
+            trace!("Received ReplaceEdge directive {from:?} -[{rel_type}]-> {to:?}");
+
+            let (from_pat, mut params) = from.cypher_match("from");
+            let (to_pat, mut to_params) = to.cypher_match("to");
+            params.append(&mut to_params);
+
+            let cypher = format!(
+                "
+                MERGE (a {from})
+                WITH a
+                OPTIONAL MATCH (a)-[r:{rel_type}]->()
+                DELETE r
+                WITH a
+                MERGE (b {to})
+                MERGE (a)-[:{rel_type}]->(b)
+                ",
+                from = from_pat.trim_start_matches('(').trim_end_matches(')'),
+                to = to_pat.trim_start_matches('(').trim_end_matches(')'),
+            );
+
+            (cypher, params)
+        }
+
+        GraphOp::RemoveEdges { from, rel_type } => {
+            trace!("Received RemoveEdges directive {from:?} -[{rel_type}]-> *");
+
+            let (from_pat, params) = from.cypher_match("from");
+
+            let cypher = format!(
+                "
+                MATCH (a {from})
+                OPTIONAL MATCH (a)-[r:{rel_type}]->()
+                DELETE r
+                ",
+                from = from_pat.trim_start_matches('(').trim_end_matches(')'),
+            );
+
+            (cypher, params)
+        }
+        GraphOp::UpdateState {
+            resource_key,
+            state_type_key,
+            state_instance_key,
+            state_instance_props,
+        } => {
+            trace!(
+                "Received UpdateState directive {resource_key:?} -> {state_type_key:?} via {state_instance_key:?}"
+            );
+
+            // Generate node match patterns
+            let (res_pat, mut params) = resource_key.cypher_match("res");
+            let (stype_pat, mut stype_params) = state_type_key.cypher_match("stype");
+            let (sinst_pat, mut sinst_params) = state_instance_key.cypher_match("sinst");
+
+            params.append(&mut stype_params);
+            params.append(&mut sinst_params);
+
+            // Add state instance property SETs if provided
+            let mut state_instance_set_clause = String::new();
+
+            if !state_instance_props.is_empty() {
+                let sets = state_instance_props
+                    .iter()
+                    .map(|Property(k, _)| format!("sinst.{k} = ${k}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+
+                state_instance_set_clause = format!("\nSET {sets}");
+
+                for Property(k, v) in state_instance_props {
+                    params.push((k.clone(), v.clone().into()));
+                }
+            }
+
+            let cypher = format!(
+                "
+                // Upsert resource, state type, and state instance
+                MERGE (res {res})
+                MERGE (stype {stype})
+                MERGE (sinst {sinst})
+                {state_instance_set}
+
+                // Record transition
+                MERGE (res)-[:TRANSITIONED_TO]->(sinst)
+
+                // Bind instance to its type
+                MERGE (sinst)-[:OF_TYPE]->(stype)
+
+                // Replace current state pointer
+                WITH res, stype
+                OPTIONAL MATCH (res)-[r:HAS_STATE]->()
+                DELETE r
+                MERGE (res)-[:HAS_STATE]->(stype)
+                ",
+                res = res_pat.trim_start_matches('(').trim_end_matches(')'),
+                stype = stype_pat.trim_start_matches('(').trim_end_matches(')'),
+                sinst = sinst_pat.trim_start_matches('(').trim_end_matches(')'),
+                state_instance_set = state_instance_set_clause,
+            );
+
+            (cypher, params)
+        }
     };
 
     let mut q = Query::new(cypher);
@@ -201,12 +340,13 @@ where
 #[instrument(level = "trace", skip(graph))]
 pub async fn handle_op<K>(graph: &Graph, op: &GraphOp<K>) -> Result<(), ActorProcessingErr>
 where
-    K: GraphNodeKey + Debug,
+    K: GraphNodeKey + Debug + Clone,
 {
     let q = compile_graph_op(&op);
 
     let mut txn = graph.start_txn().await?;
     debug!("{}", q.query());
+    debug!("{:?}", q.get_params());
     txn.run(q)
         .await
         .map_err(|e| ActorProcessingErr::from(format!("neo4j execution failed: {:?}", e)))?;
@@ -221,11 +361,11 @@ macro_rules! impl_graph_controller {
         $actor_name:ident,
         node_key = $node_key:ty
     ) => {
+        pub struct $actor_name;
+
         pub struct GraphControllerState {
             pub graph: neo4rs::Graph,
         }
-        pub struct $actor_name;
-
         #[ractor::async_trait]
         impl ractor::Actor for $actor_name {
             type Msg = GraphControllerMsg<$node_key>;
@@ -268,7 +408,7 @@ mod tests {
     use testcontainers::runners::AsyncRunner;
     use testcontainers_modules::neo4j::Neo4j;
 
-    #[derive(Debug)]
+    #[derive(Debug, Clone)]
     enum TestNodeKey {
         Node,
     }
