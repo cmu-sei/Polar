@@ -24,6 +24,7 @@ DM24-0470
 use std::fs;
 use serde::Deserialize;
 use neo4rs::*;
+use neo4rs::ConfigBuilder;
 
 // TOML Data Struct
 #[derive(Deserialize,Clone)]
@@ -67,15 +68,15 @@ async fn main() {
             // Config file string is now a TOML document.
             let toml: MyToml = toml::from_str(&config_as_string).unwrap();
 
-            let config = config()
-            .uri(toml.connection.uri.as_str())
-            .user(toml.connection.user.as_str())
-            .password(toml.connection.pass.as_str())
-            .db("neo4j")
-            .fetch_size(500)
-            .max_connections(10)
-            .build()
-            .unwrap();
+            let config = ConfigBuilder::default()
+                .uri(toml.connection.uri.as_str())
+                .user(toml.connection.user.as_str())
+                .password(toml.connection.pass.as_str())
+                .db("neo4j")
+                .fetch_size(500)
+                .max_connections(10)
+                .build()
+                .unwrap();
             // Creating the graph in a separate function is not happening.
             let graph = Graph::connect(config).await.unwrap();
 
@@ -161,7 +162,7 @@ async fn main() {
                             execute_query(&graph, the_query).await;
                         }
                     }
-                    previous_activity = n.clone();
+                    previous_activity = n;
                 }
             }
         }
