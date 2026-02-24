@@ -45,7 +45,7 @@ impl Actor for ShutdownController {
             config,
             registration_id: None,
             events_output: None,
-            event_handler: Some(forwarder.into()),
+            event_handler: Some(forwarder),
         };
 
         let (client, _) = Actor::spawn_linked(
@@ -119,7 +119,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     info!("Starting shutdown tool...");
 
-    let (controller, handle) = Actor::spawn(
+    let (_controller, handle) = Actor::spawn(
         Some("shutdown-controller".to_string()),
         ShutdownController,
         (),

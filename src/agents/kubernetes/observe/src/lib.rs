@@ -305,6 +305,7 @@ async fn emit_event(tcp_client: &TcpClient, ev: RawKubeEvent) -> Result<(), Acto
     tcp_client.cast(TcpClientMessage::Publish {
         topic: KUBERNETES_CONSUMER.to_string(),
         payload,
+        trace_ctx: None,
     })?;
 
     Ok(())

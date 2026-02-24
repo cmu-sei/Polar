@@ -253,7 +253,10 @@ impl Actor for ClusterConsumerSupervisor {
                         //
                         if let Err(e) = state
                             .broker_client
-                            .cast(TcpClientMessage::Subscribe(KUBERNETES_CONSUMER.into()))
+                            .cast(TcpClientMessage::Subscribe {
+                                topic: KUBERNETES_CONSUMER.into(),
+                                trace_ctx: None,
+                            })
                         {
                             error!("{e}");
                             myself.stop(None);

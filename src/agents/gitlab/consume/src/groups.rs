@@ -239,9 +239,10 @@ impl Actor for GitlabGroupConsumer {
         // fire off subscribe message
         state
             .tcp_client
-            .cast(cassini_client::TcpClientMessage::Subscribe(
-                GROUPS_CONSUMER_TOPIC.to_string(),
-            ))?;
+            .cast(cassini_client::TcpClientMessage::Subscribe {
+                topic: GROUPS_CONSUMER_TOPIC.to_string(),
+                trace_ctx: None,
+            })?;
 
         debug!("{myself:?} starting");
         Ok(state)

@@ -250,6 +250,7 @@ impl GraphOperable for Pod {
             tcp_client.cast(TcpClientMessage::Publish {
                 topic: PROVENANCE_DISCOVERY_TOPIC.into(),
                 payload: payload.into(),
+                trace_ctx: None,
             })?;
 
             if let Some(envs) = container.env {

@@ -121,6 +121,7 @@ impl GitlabProjectConsumer {
         tcp_client.cast(TcpClientMessage::Publish {
             topic: GIT_REPO_DISCOGERY_TOPIC.to_string(),
             payload,
+            trace_ctx: None,
         })?;
 
         Ok(())
@@ -140,9 +141,10 @@ impl Actor for GitlabProjectConsumer {
     ) -> Result<Self::State, ActorProcessingErr> {
         debug!("{myself:?} starting");
 
-        state.tcp_client.cast(TcpClientMessage::Subscribe(
-            PROJECTS_CONSUMER_TOPIC.to_string(),
-        ))?;
+        state.tcp_client.cast(TcpClientMessage::Subscribe {
+            topic: PROJECTS_CONSUMER_TOPIC.to_string(),
+            trace_ctx: None,
+        })?;
         Ok(state)
     }
 

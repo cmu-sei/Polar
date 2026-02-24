@@ -1,5 +1,5 @@
 use cassini_client::{TCPClientConfig, TcpClient, TcpClientActor, TcpClientArgs};
-use cassini_types::ClientEvent;
+use cassini_types::{ClientEvent, WireTraceCtx};
 use ractor::OutputPort;
 use ractor::{Actor, ActorProcessingErr, ActorRef};
 use reqwest::{Certificate, Client, ClientBuilder};
@@ -58,7 +58,8 @@ where
         TcpClientArgs {
             config,
             registration_id: None,
-            events_output,
+            events_output: Some(events_output),   // <-- wrap in Some
+            event_handler: None,                   // <-- add this field
         },
         supervisor.into(),
     )
@@ -66,6 +67,7 @@ where
 
     Ok(tcp_client)
 }
+
 /// Helper function to parse a file at a given path and return the raw bytes as a vector
 pub fn get_file_as_byte_vec(filename: &String) -> Result<Vec<u8>, std::io::Error> {
     let mut f = std::fs::File::open(&filename)?;
@@ -427,10 +429,12 @@ pub fn emit_provenance_event(
 ) -> Result<(), ActorProcessingErr> {
     let payload = rkyv::to_bytes::<RkyvError>(&ev)?.to_vec();
 
+    let trace_ctx = WireTraceCtx::from_current_span();
     tracing::trace!("Emitting event {ev:?}");
     client.cast(cassini_client::TcpClientMessage::Publish {
         topic: PROVENANCE_DISCOVERY_TOPIC.to_string(),
         payload,
+        trace_ctx,
     })?;
 
     Ok(())

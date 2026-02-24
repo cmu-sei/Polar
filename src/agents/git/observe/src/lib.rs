@@ -212,7 +212,11 @@ pub fn send_event(
 ) -> Result<(), ActorProcessingErr> {
     let payload = to_bytes::<rancor::Error>(&event)?.to_vec();
     trace!("Forwarding event {event:?} on topic {topic}");
-    let message = TcpClientMessage::Publish { topic, payload };
+    let message = TcpClientMessage::Publish {
+        topic,
+        payload,
+        trace_ctx: None,  // or WireTraceCtx::from_current_span() if you want context
+    };
     Ok(client.send_message(message)?)
 }
 

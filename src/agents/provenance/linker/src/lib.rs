@@ -1,5 +1,5 @@
 use neo4rs::{BoltType, Graph};
-use polar::graph::{compile_graph_op, GraphControllerMsg, GraphControllerState, GraphNodeKey, GraphOp};
+use polar::graph::{GraphControllerMsg, GraphNodeKey};
 use polar::{impl_graph_controller, NormalizedSbom};
 use ractor::{Actor, ActorProcessingErr, ActorRef};
 use serde::{Deserialize, Serialize};

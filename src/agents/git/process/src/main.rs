@@ -294,18 +294,22 @@ impl Actor for GitRepoProcessingManager {
                     debug!("Subscribing to topic {}", GIT_REPO_PROCESSING_TOPIC);
                     state
                         .tcp_client
-                        .cast(cassini_client::TcpClientMessage::Subscribe(
-                            GIT_REPO_PROCESSING_TOPIC.to_string(),
-                        ))?;
+                        .cast(cassini_client::TcpClientMessage::Subscribe {
+                            topic: GIT_REPO_PROCESSING_TOPIC.to_string(),
+                            trace_ctx: None,
+                        })?;
 
                     state.graph_controller = Some(controller);
                 }
-                ClientEvent::MessagePublished { topic, payload } => {
+                ClientEvent::MessagePublished { topic, payload, .. } => {
                     Self::deserialize_and_dispatch(topic, payload, state)?
                 }
                 ClientEvent::TransportError { reason } => {
                     error!("Transport error: {reason}");
                     myself.stop(Some(reason))
+                }
+                ClientEvent::ControlResponse { .. } => {
+                    error!("ControlResponse not implemented here!");
                 }
             },
         }

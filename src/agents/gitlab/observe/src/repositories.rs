@@ -39,6 +39,8 @@ use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef};
 use serde_json::from_str;
 use tracing::{debug, error, info, trace, warn};
 use cassini_types::WireTraceCtx;
+use polar::{ProvenanceEvent, PROVENANCE_LINKER_TOPIC, PROVENANCE_DISCOVERY_TOPIC};
+use cassini_client::TcpClientMessage;
 
 pub struct GitlabRepositoryObserver;
 

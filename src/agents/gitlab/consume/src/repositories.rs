@@ -303,9 +303,10 @@ impl Actor for GitlabRepositoryConsumer {
         // fire off subscribe message
         state
             .tcp_client
-            .cast(cassini_client::TcpClientMessage::Subscribe(
-                REPOSITORY_CONSUMER_TOPIC.to_string(),
-            ))?;
+            .cast(cassini_client::TcpClientMessage::Subscribe {
+                topic: REPOSITORY_CONSUMER_TOPIC.to_string(),
+                trace_ctx: None,
+            })?;
 
         debug!("{myself:?} starting");
         Ok(state)

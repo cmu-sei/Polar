@@ -221,7 +221,10 @@ impl Actor for GitlabUserConsumer {
         // fire off subscribe message
         state
             .tcp_client
-            .cast(TcpClientMessage::Subscribe(USER_CONSUMER_TOPIC.to_string()))?;
+            .cast(TcpClientMessage::Subscribe {
+                topic: USER_CONSUMER_TOPIC.to_string(),
+                trace_ctx: None,
+            })?;
 
         debug!("{myself:?} starting");
         Ok(state)

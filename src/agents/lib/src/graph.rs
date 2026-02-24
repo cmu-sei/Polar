@@ -1,4 +1,4 @@
-use neo4rs::{BoltMap, BoltNull, BoltType, Graph, Query};
+use neo4rs::{BoltNull, BoltType, Graph, Query};
 use ractor::{ActorProcessingErr, ActorRef};
 use serde::{Deserialize, Serialize};
 use std::fmt::Debug;

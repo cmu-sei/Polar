@@ -137,6 +137,7 @@ impl Actor for ArtifactClassifier {
                         state.tcp_client.cast(TcpClientMessage::Publish {
                             topic: PROVENANCE_LINKER_TOPIC.to_string(),
                             payload: payload.into(),
+                            trace_ctx: None,
                         })?;
                     }
                     Err(e) => debug!("Couldn't parse as cycloneDx {e}"),

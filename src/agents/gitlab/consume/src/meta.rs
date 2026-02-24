@@ -89,9 +89,10 @@ impl Actor for MetaConsumer {
         state: Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
         debug!("{myself:?} starting, connecting to broker");
-        state.tcp_client.cast(TcpClientMessage::Subscribe(
-            METADATA_CONSUMER_TOPIC.to_string(),
-        ))?;
+        state.tcp_client.cast(TcpClientMessage::Subscribe {
+            topic: METADATA_CONSUMER_TOPIC.to_string(),
+            trace_ctx: None,
+        })?;
         Ok(state)
     }
 

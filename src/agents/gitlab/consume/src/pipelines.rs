@@ -318,9 +318,10 @@ impl Actor for GitlabPipelineConsumer {
         state: GitlabConsumerState,
     ) -> Result<Self::State, ActorProcessingErr> {
         // fire off subscribe message
-        state.tcp_client.cast(TcpClientMessage::Subscribe(
-            PIPELINE_CONSUMER_TOPIC.to_string(),
-        ))?;
+        state.tcp_client.cast(TcpClientMessage::Subscribe {
+            topic: PIPELINE_CONSUMER_TOPIC.to_string(),
+            trace_ctx: None,
+        })?;
 
         debug!("{myself:?} starting");
         Ok(state)

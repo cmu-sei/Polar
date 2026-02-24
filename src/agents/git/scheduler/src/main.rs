@@ -2,11 +2,11 @@ use cassini_client::{TCPClientConfig, TcpClientActor, TcpClientArgs, TcpClientMe
 use cassini_types::ClientEvent;
 use git_agent_common::{ConfigurationEvent, RepoId, RepoObservationConfig, GIT_REPO_CONFIG_EVENTS};
 use polar::{
-    GitRepositoryDiscoveredEvent, ProvenanceEvent, SupervisorMessage, GIT_REPO_DISCOGERY_TOPIC,
+    GitRepositoryDiscoveredEvent, SupervisorMessage, GIT_REPO_DISCOGERY_TOPIC,
 };
 use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef, OutputPort, SupervisionEvent};
 use rkyv::{from_bytes, rancor, to_bytes};
-use tracing::{debug, error, event, info, instrument, trace, warn};
+use tracing::{debug, error, info, instrument, trace, warn};
 
 pub const SERVICE_NAME: &str = "polar.git.scheduler";
 pub const TCP: &str = "tcp";
@@ -25,9 +25,10 @@ impl RootSupervisor {
     ) -> Result<(), ActorProcessingErr> {
         debug!("{myself:?} initializing");
         // subscribe to supervision events
-        state.tcp_client.cast(TcpClientMessage::Subscribe(
-            GIT_REPO_DISCOGERY_TOPIC.to_string(),
-        ))?;
+        state.tcp_client.cast(TcpClientMessage::Subscribe {
+            topic: GIT_REPO_DISCOGERY_TOPIC.to_string(),
+            trace_ctx: None,
+        })?;
 
         Ok(())
     }
@@ -63,6 +64,7 @@ impl RootSupervisor {
         let message = TcpClientMessage::Publish {
             topic: GIT_REPO_CONFIG_EVENTS.to_string(),
             payload: payload.to_vec(),
+            trace_ctx: None,
         };
 
         state.tcp_client.cast(message)?;
@@ -100,7 +102,8 @@ impl Actor for RootSupervisor {
             TcpClientArgs {
                 config,
                 registration_id: None,
-                events_output,
+                events_output: Some(events_output),
+                event_handler: None,
             },
             myself.clone().into(),
         )
@@ -145,12 +148,15 @@ impl Actor for RootSupervisor {
         match message {
             SupervisorMessage::ClientEvent { event } => match event {
                 ClientEvent::Registered { .. } => Self::init(myself, state).await?,
-                ClientEvent::MessagePublished { topic, payload } => {
+                ClientEvent::MessagePublished { topic, payload, .. } => {
                     Self::deserialize_and_dispatch(topic, payload, state)?
                 }
                 ClientEvent::TransportError { reason } => {
                     error!("Transport error occurred! {reason}");
                     myself.stop(Some(reason))
+                }
+                ClientEvent::ControlResponse { .. } => {
+                    error!("ControlResponse not implemented here!");
                 }
             },
         }
