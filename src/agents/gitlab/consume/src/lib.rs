@@ -24,6 +24,7 @@
 use cassini_client::TcpClientMessage;
 use ractor::registry::where_is;
 use std::error::Error;
+use cassini_types::WireTraceCtx;
 
 pub mod groups;
 pub mod meta;
@@ -56,7 +57,10 @@ pub async fn subscribe_to_topic(
 ) -> Result<GitlabConsumerState, Box<dyn Error>> {
     let client = where_is(BROKER_CLIENT_NAME.to_string()).expect("Expected to find TCP client.");
 
-    client.send_message(TcpClientMessage::Subscribe(topic))?;
+    client.send_message(TcpClientMessage::Subscribe {
+        topic,
+        trace_ctx: WireTraceCtx::from_current_span(),
+    })?;
 
     //load neo config and connect to graph db
 

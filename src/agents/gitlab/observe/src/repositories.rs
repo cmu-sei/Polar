@@ -40,6 +40,7 @@ use polar::{ProvenanceEvent, PROVENANCE_DISCOVERY_TOPIC, PROVENANCE_LINKER_TOPIC
 use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef};
 use serde_json::from_str;
 use tracing::{debug, error, info, trace, warn};
+use cassini_types::WireTraceCtx;
 
 pub struct GitlabRepositoryObserver;
 
@@ -245,7 +246,11 @@ impl Actor for GitlabRepositoryObserver {
                                                                             )?;
 
                                                                         // Emit the event strait to the linker, this counts the registry as "Discovered" even if we didn't ping it directly via REST.
-                                                                        state.tcp_client.cast(TcpClientMessage::Publish { topic: PROVENANCE_LINKER_TOPIC.to_string(), payload: payload.into() })?;
+                                                                        state.tcp_client.cast(TcpClientMessage::Publish {
+                                                                            topic: PROVENANCE_LINKER_TOPIC.to_string(),
+                                                                            payload: payload.into(),
+                                                                            trace_ctx: WireTraceCtx::from_current_span(),
+                                                                        })?;
 
                                                                         match result {
                                                                             Ok(tags) => {
@@ -270,7 +275,11 @@ impl Actor for GitlabRepositoryObserver {
                                                                                             )?;
 
                                                                                         // OCI artifact discoveries however, are a "claim" that they exist. Gitlab told us a lot, but we still need to verify them.
-                                                                                        state.tcp_client.cast(TcpClientMessage::Publish { topic: PROVENANCE_DISCOVERY_TOPIC.to_string(), payload: payload.into() })?;
+                                                                                        state.tcp_client.cast(TcpClientMessage::Publish {
+                                                                                            topic: PROVENANCE_DISCOVERY_TOPIC.to_string(),
+                                                                                            payload: payload.into(),
+                                                                                            trace_ctx: WireTraceCtx::from_current_span(),
+                                                                                        })?;
                                                                                     }
                                                                                     let data = GitlabData::ContainerRepositoryTags((full_path.clone().to_string(), tags));
                                                                                     if let Err(e) = send_to_broker(state, data, REPOSITORY_CONSUMER_TOPIC) { return Err(e) }

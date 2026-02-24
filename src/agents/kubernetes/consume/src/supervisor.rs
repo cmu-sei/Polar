@@ -125,7 +125,8 @@ impl Actor for ClusterConsumerSupervisor {
             TcpClientArgs {
                 config: client_config,
                 registration_id: None,
-                events_output,
+                events_output: Some(events_output),
+                event_handler: None,
             },
             myself.clone().into(),
         )
@@ -169,12 +170,16 @@ impl Actor for ClusterConsumerSupervisor {
                             error!("{e}");
                         }
                     }
-                    ClientEvent::MessagePublished { topic, payload } => {
+                    ClientEvent::MessagePublished { topic, payload, .. } => {
                         ClusterConsumerSupervisor::deserialize_and_dispatch(topic, payload)
                     }
                     ClientEvent::TransportError { reason } => {
                         error!("Transport error occurred! {reason}");
                         myself.stop(Some(reason))
+                    }
+                    ClientEvent::ControlResponse { .. } => {
+                        // ignore or log
+                        debug!("Ignoring ControlResponse in consumer supervisor");
                     }
                 }
             }

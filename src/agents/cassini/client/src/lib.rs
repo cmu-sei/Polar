@@ -1,5 +1,6 @@
-use cassini_types::{ClientEvent, ClientMessage, ControlOp};
-use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef, OutputPort, RpcReplyPort};
+use cassini_types::{ClientEvent, ClientMessage, ControlOp, WireTraceCtx};
+use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef, OutputPort, RpcReplyPort, Message};
+use ractor::concurrency::{sleep, Duration};
 use rkyv::rancor::Error;
 use rustls::client::WebPkiServerVerifier;
 use rustls::pki_types::pem::PemObject;
@@ -15,12 +16,71 @@ use tokio::task::AbortHandle;
 use tokio_rustls::client::TlsStream;
 use tokio_rustls::TlsConnector;
 use tracing::{debug, debug_span, trace_span, warn_span, error, info, info_span, trace, warn, Instrument};
+use std::marker::PhantomData;
+pub use cassini_tracing::{init_tracing, shutdown_tracing};
+pub use cassini_tracing::{try_set_parent_otel, try_set_parent_wire};
+use socket2::SockRef;
 
 pub const UNEXPECTED_DISCONNECT: &str = "UNEXPECTED_DISCONNECT";
 pub const REGISTRATION_EXPECTED: &str =
     "Expected client to be registered to conduct this operation.";
 
 pub const CLIENT_DISCONNECTED: &str = "CLIENT_DISCONNECTED";
+
+/// Bridges [`ClientEvent`] messages from the TCP client to any actor using a mapping closure.
+///
+/// This is the recommended way to receive events from [`TcpClientActor`]. Unlike subscribing
+/// to the [`OutputPort`], this uses ractor's normal mpsc mailbox and will never silently drop
+/// messages under load. See: https://github.com/slawlor/ractor/issues/225
+pub struct ClientEventForwarder<M: Message + Sync>(PhantomData<M>);
+
+impl<M: Message + Sync> ClientEventForwarder<M> {
+    pub fn new() -> Self {
+        ClientEventForwarder(PhantomData)
+    }
+}
+
+pub struct ClientEventForwarderArgs<M: Message + Sync> {
+    pub target: ActorRef<M>,
+    pub mapper: Box<dyn Fn(ClientEvent) -> Option<M> + Send + Sync + 'static>,
+}
+
+pub struct ClientEventForwarderState<M: Message + Sync> {
+    target: ActorRef<M>,
+    mapper: Box<dyn Fn(ClientEvent) -> Option<M> + Send + Sync + 'static>,
+}
+
+#[async_trait]
+impl<M: Message + Sync> Actor for ClientEventForwarder<M> {
+    type Msg = ClientEvent;
+    type State = ClientEventForwarderState<M>;
+    type Arguments = ClientEventForwarderArgs<M>;
+
+    async fn pre_start(
+        &self,
+        _myself: ActorRef<Self::Msg>,
+        args: Self::Arguments,
+    ) -> Result<Self::State, ActorProcessingErr> {
+        Ok(ClientEventForwarderState {
+            target: args.target,
+            mapper: args.mapper,
+        })
+    }
+
+    async fn handle(
+        &self,
+        _myself: ActorRef<Self::Msg>,
+        msg: Self::Msg,
+        state: &mut Self::State,
+    ) -> Result<(), ActorProcessingErr> {
+        if let Some(mapped) = (state.mapper)(msg) {
+            if let Err(e) = state.target.send_message(mapped) {
+                warn!("ClientEventForwarder: target actor unreachable: {e}");
+            }
+        }
+        Ok(())
+    }
+}
 
 /// A basse configuration for a TCP Client actor
 pub struct TCPClientConfig {
@@ -74,16 +134,42 @@ pub enum TcpClientMessage {
     Publish {
         topic: String,
         payload: Vec<u8>,
+        trace_ctx: Option<WireTraceCtx>,
     },
-    Subscribe(String),
+    Subscribe {
+        topic: String,
+        trace_ctx: Option<WireTraceCtx>,
+    },
     /// Unsubscribe request from the client.
     /// Contains the topic
-    UnsubscribeRequest(String),
+    UnsubscribeRequest {
+        topic: String,
+        trace_ctx: Option<WireTraceCtx>,
+    },
     ///Disconnect, sending a session id to end, if any
-    Disconnect,
-    ListSessions,
-    ListTopics,
-    GetSession,
+    Disconnect {
+        trace_ctx: Option<WireTraceCtx>,
+    },
+    /// Control plane operations
+    ControlRequest {
+        op: cassini_types::ControlOp,
+        trace_ctx: Option<WireTraceCtx>,
+    },
+    ListSessions {
+        trace_ctx: Option<WireTraceCtx>,
+    },
+    ListTopics {
+        trace_ctx: Option<WireTraceCtx>,
+    },
+    GetSession {
+        trace_ctx: Option<WireTraceCtx>,
+    },
+    SetEventHandler(ActorRef<ClientEvent>),
+    Reconnect,
+    Reconnected {
+        reader: Option<ReadHalf<TlsStream<TcpStream>>>,
+        writer: Arc<Mutex<BufWriter<WriteHalf<TlsStream<TcpStream>>>>>,
+    },
 }
 
 /// Actor state for the TCP client
@@ -98,18 +184,27 @@ pub struct TcpClientState {
     /// Output port where message payloads and the topic it came from is piped to a dispatcher
     events_output: Arc<OutputPort<ClientEvent>>,
     abort_handle: Option<AbortHandle>, // abort handle switch for the stream read loop
+    pub event_handler: Option<ActorRef<ClientEvent>>,
 }
 
 pub struct TcpClientArgs {
     pub config: TCPClientConfig,
     pub registration_id: Option<String>,
-    pub events_output: Arc<OutputPort<ClientEvent>>,
+    /// If `None`, a default unsubscribed port is created internally.
+    /// Prefer [`event_handler`] via [`ClientEventForwarder`] for reliable delivery.
+    pub events_output: Option<Arc<OutputPort<ClientEvent>>>,
+    pub event_handler: Option<ActorRef<ClientEvent>>,
 }
 
 /// TCP client actor
 pub struct TcpClientActor;
 
 impl TcpClientActor {
+    fn current_trace_ctx() -> Option<WireTraceCtx> {
+        // Use the helper method from WireTraceCtx itself
+        WireTraceCtx::from_current_span()
+    }
+    
     #[tracing::instrument(name="cassini.tcp_client.connect_with_backoff", skip(client_config))]
     async fn connect_with_backoff(
         addr: String,
@@ -121,32 +216,42 @@ impl TcpClientActor {
         let max_backoff = std::time::Duration::from_secs(2);
         let max_attempts = 8;
 
-        // OWNED ServerName with 'static lifetime
         let server_name = ServerName::try_from(server_name)
             .map_err(|_| ActorProcessingErr::from("Invalid DNS name"))?;
 
         for attempt in 1..=max_attempts {
-            let backoff_ms = backoff.as_millis();
-            warn!(attempt, backoff_ms, "connect failed; retrying");
             match TcpStream::connect(addr.clone()).await {
-                Ok(tcp) => match connector.connect(server_name.clone(), tcp).await {
-                    Ok(tls) => return Ok(tls),
-                    Err(e) => {
-                        debug!(attempt, error = %e, "TLS handshake failed, retrying");
-                    }
-                },
-                Err(e) => {
-                    debug!(attempt, error = %e, "TCP connect failed, retrying");
-                }
-            }
+                Ok(tcp) => {
+                    // Convert to std::net::TcpStream to set socket options
+                    let std_stream = tcp.into_std().map_err(|e| {
+                        ActorProcessingErr::from(format!("Failed to convert to std stream: {}", e))
+                    })?;
 
+                    // Use socket2 to set buffer sizes
+                    let sock_ref = SockRef::from(&std_stream);
+                    sock_ref.set_recv_buffer_size(100 * 1024 * 1024).map_err(|e| {
+                        ActorProcessingErr::from(format!("Failed to set recv buffer size: {}", e))
+                    })?;
+                    sock_ref.set_send_buffer_size(100 * 1024 * 1024).map_err(|e| {
+                        ActorProcessingErr::from(format!("Failed to set send buffer size: {}", e))
+                    })?;
+
+                    // Convert back to tokio stream
+                    let tcp = tokio::net::TcpStream::from_std(std_stream).map_err(|e| {
+                        ActorProcessingErr::from(format!("Failed to convert back to tokio stream: {}", e))
+                    })?;
+
+                    match connector.connect(server_name.clone(), tcp).await {
+                        Ok(tls) => return Ok(tls),
+                        Err(e) => debug!(attempt, error = %e, "TLS handshake failed, retrying"),
+                    }
+                }
+                Err(e) => debug!(attempt, error = %e, "TCP connect failed, retrying"),
+            }
             tokio::time::sleep(backoff).await;
             backoff = (backoff * 2).min(max_backoff);
         }
-
-        Err(ActorProcessingErr::from(
-            "Failed to connect to broker after retries",
-        ))
+        Err(ActorProcessingErr::from("Failed to connect after retries"))
     }
 
     fn spawn_reader(
@@ -158,18 +263,17 @@ impl TcpClientActor {
         let reader = state.reader.take().expect("Reader already taken");
 
         let queue_out = state.events_output.clone();
+        let handler = state.event_handler.clone(); // clone the optional direct handler
         let broker_addr = state.bind_addr.clone();
-        // If you have a stable ID, use it here; otherwise addr is still useful.
-        // (You can add registration_id later once known.)
-        let read_loop_span = info_span!(
-            "cassini.tcp_client.read_loop",
-            broker_addr = %broker_addr,
-        );
+
+        let read_loop_span = info_span!("cassini.tcp_client.read_loop", broker_addr = %broker_addr,);
 
         let abort = tokio::spawn(async move {
-
+            let mut msg_count = 0;
             let mut buf_reader = tokio::io::BufReader::new(reader);
             loop {
+                msg_count += 1;
+                trace!("TCP client read loop iteration {}", msg_count);
                 match buf_reader.read_u32().await {
                     Ok(incoming_msg_length) => {
                         if incoming_msg_length > 0 {
@@ -177,7 +281,6 @@ impl TcpClientActor {
 
                             trace!("Reading {incoming_msg_length} byte(s).");
                             if let Ok(_) = buf_reader.read_exact(&mut buffer).await {
-                                // Now we *actually* have a frame. Scope the span to just decode+dispatch.
                                 let _fg = trace_span!(
                                     "tcp_client.read_frame",
                                     len = incoming_msg_length,
@@ -194,10 +297,13 @@ impl TcpClientActor {
                                 match rkyv::from_bytes::<ClientMessage, Error>(&buffer) {
                                     Ok(message) => {
                                         match message {
-                                            ClientMessage::RegistrationResponse { result } => {
+                                            ClientMessage::RegistrationResponse { result, trace_ctx } => {
+                                                let span = trace_span!("client.handle_registration_response");
+                                                try_set_parent_wire(&span, trace_ctx);
+                                                let _g = span.enter();
+
                                                 match result {
                                                     Ok(registration_id) => {
-                                                        //emit registration event for consumers
                                                         myself
                                                             .send_message(
                                                                 TcpClientMessage::RegistrationResponse(
@@ -207,11 +313,7 @@ impl TcpClientActor {
                                                             .expect("Could not forward message to {myself:?");
                                                     }
                                                     Err(e) => {
-                                                        warn!(
-                                                            "Failed to register session with the server. {e}"
-                                                        );
-                                                        //TODO: We practically never fail to register unless there's some sort of connection error.
-                                                        // Should this change, how do we want to react?
+                                                        warn!("Failed to register session with the server. {e}");
                                                     }
                                                 }
                                             }
@@ -219,16 +321,40 @@ impl TcpClientActor {
                                                 topic,
                                                 payload,
                                                 result,
+                                                trace_ctx,
                                             } => {
-                                                //new message on topic
+                                                let span = trace_span!("client.handle_publish_response");
+                                                if let Some(wire_ctx) = trace_ctx {
+                                                    tracing::debug!("Sink TCP client received PublishResponse with trace_id: {:02x?}", wire_ctx.trace_id);
+                                                }
+                                                try_set_parent_wire(&span, trace_ctx);
+                                                let _g = span.enter();
+
                                                 if result.is_ok() {
-                                                    queue_out
-                                                        .send(ClientEvent::MessagePublished { topic, payload });
+                                                    let current_trace_ctx = WireTraceCtx::from_current_span();
+                                                    let event = ClientEvent::MessagePublished {
+                                                        topic: topic.clone(),
+                                                        payload: payload.to_vec(),
+                                                        trace_ctx: current_trace_ctx,
+                                                    };
+                                                    // Send to output port (existing)
+                                                    queue_out.send(event.clone());
+                                                    trace!("TCP client sent MessagePublished to output port for topic {}", topic);
+                                                    // Send to direct handler if present
+                                                    if let Some(ref handler) = handler {
+                                                        if let Err(e) = handler.send_message(event) {
+                                                            error!("Failed to send MessagePublished to direct handler: {}", e);
+                                                        }
+                                                    }
                                                 } else {
                                                     warn!("Failed to publish message to topic: {topic}");
                                                 }
                                             }
-                                            ClientMessage::SubscribeAcknowledgment { topic, result } => {
+                                            ClientMessage::SubscribeAcknowledgment { topic, result, trace_ctx } => {
+                                                let span = trace_span!("client.handle_subscribe_ack");
+                                                try_set_parent_wire(&span, trace_ctx);
+                                                let _g = span.enter();
+
                                                 if result.is_ok() {
                                                     info!("Successfully subscribed to topic: {topic}");
                                                 } else {
@@ -236,14 +362,55 @@ impl TcpClientActor {
                                                 }
                                             }
 
-                                            ClientMessage::UnsubscribeAcknowledgment { topic, result } => {
+                                            ClientMessage::UnsubscribeAcknowledgment { topic, result, trace_ctx } => {
+                                                let span = trace_span!("client.handle_unsubscribe_ack");
+                                                try_set_parent_wire(&span, trace_ctx);
+                                                let _g = span.enter();
+
                                                 if result.is_ok() {
                                                     info!("Successfully unsubscribed from topic: {topic}");
                                                 } else {
                                                     warn!("Failed to unsubscribe from topic: {topic}");
                                                 }
                                             }
-                                            _ => (),
+                                            ClientMessage::ErrorMessage { error, trace_ctx } => {
+                                                let span = trace_span!("client.handle_error_message").entered();
+                                                try_set_parent_wire(&span, trace_ctx);
+                                                let _g = span.enter();
+                                                warn!("Received error from broker: {error}");
+                                            }
+                                            ClientMessage::PublishRequestAck { topic, trace_ctx } => {
+                                                let span = trace_span!("client.handle_publish_ack");
+                                                try_set_parent_wire(&span, trace_ctx);
+                                                let _g = span.enter();
+                                                trace!("Received publish ack for topic: {topic}");
+                                            }
+                                            ClientMessage::ControlResponse { registration_id, result, trace_ctx } => {
+                                                let span = trace_span!("client.handle_control_response");
+                                                try_set_parent_wire(&span, trace_ctx);
+                                                let _g = span.enter();
+
+                                                trace!("Received control response for registration: {registration_id}, result: {:?}", result);
+
+                                                let current_trace_ctx = WireTraceCtx::from_current_span();
+                                                let event = ClientEvent::ControlResponse {
+                                                    registration_id,
+                                                    result,
+                                                    trace_ctx: current_trace_ctx,
+                                                };
+                                                // Send to output port
+                                                queue_out.send(event.clone());
+                                                // Send to direct handler if present
+                                                if let Some(ref handler) = handler {
+                                                    if let Err(e) = handler.send_message(event) {
+                                                        error!("Failed to send ControlResponse to direct handler: {}", e);
+                                                    }
+                                                }
+                                            }
+                                            _ => {
+                                                let _g = trace_span!("client.handle_unknown_message").entered();
+                                                trace!("Received unexpected message type");
+                                            },
                                         }
                                     }
                                     Err(e) => {
@@ -259,15 +426,20 @@ impl TcpClientActor {
                         }
                     }
                     Err(e) => {
-                        // This is the main "lifetime end" signal for the read loop.
-                        // Use warn so it stands out in traces; it usually means disconnect.
                         warn!(error = %e, "TCP reader terminating");
-                        queue_out.send(ClientEvent::TransportError {
+                        let event = ClientEvent::TransportError {
                             reason: format!("{UNEXPECTED_DISCONNECT} {e}")
-                        });
+                        };
+                        queue_out.send(event.clone());
+                        if let Some(ref handler) = handler {
+                            if let Err(e) = handler.send_message(event) {
+                                error!("Failed to send TransportError to direct handler: {}", e);
+                            }
+                        }
+                        // Instead of breaking, send Reconnect to self
+                        let _ = myself.send_message(TcpClientMessage::Reconnect);
                         break;
                     }
-
                 }
             }
         }.instrument(read_loop_span))
@@ -276,19 +448,29 @@ impl TcpClientActor {
         state.abort_handle = Some(abort);
         Ok(())
     }
+
     /// Send a payload to the broker over the write.
     pub async fn send_message(
         message: ClientMessage,
         state: &mut TcpClientState,
     ) -> Result<(), ActorProcessingErr> {
+        // Get current trace context
+        let trace_ctx = WireTraceCtx::from_current_span();
+        debug!("Sending message with trace_ctx: {:?}", trace_ctx);
+
+        // NOTE: Broker expects u32 length prefix, NOT u64
         match rkyv::to_bytes::<Error>(&message) {
             Ok(bytes) => {
-                //create new buffer
-                let mut buffer = Vec::new();
-
-                //get message length as header
-                let len = (bytes.len() as u64).to_be_bytes();
-                buffer.extend_from_slice(&len);
+                // Validate frame size fits in u32
+                let len: u32 = bytes.len().try_into().map_err(|_| {
+                    ActorProcessingErr::from("Frame too large (>4GB)")
+                })?;
+                
+                // Pre-allocate buffer with exact capacity (4 bytes + payload)
+                let mut buffer = Vec::with_capacity(4 + bytes.len());
+                
+                // Write 4-byte BE length prefix (matching broker's read_u32)
+                buffer.extend_from_slice(&len.to_be_bytes());
 
                 //add message to buffer
                 buffer.extend_from_slice(&bytes);
@@ -296,10 +478,15 @@ impl TcpClientActor {
                 //write message
                 if let Some(arc_writer) = state.writer.as_ref() {
                     let mut writer = arc_writer.lock().await;
+
+                    // Write entire buffer in one go
                     writer.write_all(&buffer).await?;
+
+                    // Flush to ensure data is sent immediately (CRITICAL!)
                     writer.flush().await?;
                     Ok(())
                 } else {
+                    error!("No writer available in TcpClientState");
                     let reason = "No writer assigned to client!".to_string();
                     return Err(ActorProcessingErr::from(reason));
                 }
@@ -424,6 +611,9 @@ impl Actor for TcpClientActor {
 
         // --- 7. Construct final state ---
         // init_span ends when this function returns (no long-lived spawned tasks here)
+        let events_output = args.events_output
+            .unwrap_or_else(|| Arc::new(OutputPort::default()));
+
         let state = TcpClientState {
             bind_addr: args.config.broker_endpoint,
             server_name: args.config.server_name,
@@ -431,8 +621,9 @@ impl Actor for TcpClientActor {
             writer: None,
             registration,
             client_config: Arc::new(client_config),
-            events_output: args.events_output,
+            events_output,
             abort_handle: None,
+            event_handler: args.event_handler,
         };
 
         Ok(state)
@@ -484,12 +675,14 @@ impl Actor for TcpClientActor {
     async fn post_stop(
         &self,
         myself: ActorRef<Self::Msg>,
-        _: &mut Self::State,
+        state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         debug!("Successfully stopped {myself:?}");
+        if let Some(handle) = state.abort_handle.take() {
+            handle.abort();
+        }
         Ok(())
     }
-
     #[tracing::instrument(
         name = "cassini.tcp_client.handle",
         skip(self, myself, state),
@@ -502,142 +695,173 @@ impl Actor for TcpClientActor {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match (&mut state.registration, message) {
-            // If we're unregistered, register
+            // ---- SetEventHandler (always handled) ----
+            (_, TcpClientMessage::SetEventHandler(handler)) => {
+                state.event_handler = Some(handler);
+            }
+
+            // ---- Reconnected (always handled) ----
+            (_, TcpClientMessage::Reconnected { reader, writer }) => {
+                state.reader = reader;
+                state.writer = Some(writer);
+                self.spawn_reader(myself.clone(), state)?;
+            }
+
+            // ---- Reconnect (only when registered) ----
+            (RegistrationState::Registered { .. }, TcpClientMessage::Reconnect) => {
+                info!("Attempting to reconnect...");
+                state.writer = None;
+                if let Some(handle) = state.abort_handle.take() {
+                    handle.abort();
+                }
+
+                let addr = state.bind_addr.clone();
+                let server_name = state.server_name.clone();
+                let client_config = state.client_config.clone();
+                let myself_clone = myself.clone();
+                tokio::spawn(async move {
+                    match TcpClientActor::connect_with_backoff(addr, server_name, &client_config).await {
+                        Ok(tls_stream) => {
+                            let (reader, write_half) = split(tls_stream);
+                            let writer = tokio::io::BufWriter::new(write_half);
+                            let _ = myself_clone.send_message(TcpClientMessage::Reconnected {
+                                reader: Some(reader),
+                                writer: Arc::new(Mutex::new(writer)),
+                            });
+                            let _ = myself_clone.send_message(TcpClientMessage::Register);
+                        }
+                        Err(e) => {
+                            error!("Reconnection failed: {}", e);
+                            myself_clone.stop(Some("Reconnection failed".to_string()));
+                        }
+                    }
+                });
+            }
+
+            // ---- Unregistered state ----
             (RegistrationState::Unregistered, TcpClientMessage::Register) => {
                 let envelope = ClientMessage::RegistrationRequest {
                     registration_id: None,
+                    trace_ctx: Self::current_trace_ctx(),
                 };
                 if let Err(e) = TcpClientActor::send_message(envelope, state).await {
                     TcpClientActor::emit_transport_err_and_stop(myself, state, e.to_string())
                 }
             }
-            // We might've initialized with a registration id,
-            // but we need to actually tell the broker to restore our session.
-            (RegistrationState::Registered { registration_id }, TcpClientMessage::Register) => {
-                let envelope = ClientMessage::RegistrationRequest {
-                    registration_id: Some(registration_id.to_owned()),
-                };
-                if let Err(e) = TcpClientActor::send_message(envelope, state).await {
-                    TcpClientActor::emit_transport_err_and_stop(myself, state, e.to_string())
-                }
-            }
-            (
-                RegistrationState::Registered { registration_id },
-                TcpClientMessage::GetRegistrationId(reply),
-            ) => {
-                // in this case, no one should be asking for the session id if we're not registered, but if they do, we'll ignore them.
-                // We also don't really care if they fail to receive it, this actor is useless on its own.
-                reply.send(Some(registration_id.to_owned())).ok();
-            }
-            (
-                RegistrationState::Unregistered,
-                TcpClientMessage::RegistrationResponse(registration_id),
-            ) => {
-                // update state and send
+
+            (RegistrationState::Unregistered, TcpClientMessage::RegistrationResponse(registration_id)) => {
                 state.registration = RegistrationState::Registered {
                     registration_id: registration_id.clone(),
                 };
-                // emit event
-                state
-                    .events_output
-                    .send(ClientEvent::Registered { registration_id });
+                let event = ClientEvent::Registered { registration_id };
+                state.events_output.send(event.clone());
+                if let Some(handler) = &state.event_handler {
+                    if let Err(e) = handler.send_message(event) {
+                        error!("Failed to send Registered to direct handler: {}", e);
+                    }
+                }
             }
 
-            // ignore all other messages while unregistered.
             (RegistrationState::Unregistered, _) => {
-                warn!("Ignoring message, client is unregistered with a cassini instance.");
+                warn!("Ignoring message, client is unregistered.");
             }
+
+            // ---- Registered state ----
             (RegistrationState::Registered { registration_id }, message) => {
-                // handle message variants
                 match message {
-                    TcpClientMessage::Publish { topic, payload } => {
-                        let envelope = ClientMessage::PublishRequest {
-                            topic,
-                            payload,
-                            registration_id: registration_id.to_owned(),
+                    TcpClientMessage::Register => {
+                        let envelope = ClientMessage::RegistrationRequest {
+                            registration_id: Some(registration_id.to_owned()),
+                            trace_ctx: Self::current_trace_ctx(),
                         };
                         if let Err(e) = TcpClientActor::send_message(envelope, state).await {
-                            TcpClientActor::emit_transport_err_and_stop(
-                                myself,
-                                state,
-                                e.to_string(),
-                            );
+                            TcpClientActor::emit_transport_err_and_stop(myself, state, e.to_string())
                         }
                     }
-                    TcpClientMessage::Subscribe(topic) => {
+                    TcpClientMessage::GetRegistrationId(reply) => {
+                        reply.send(Some(registration_id.to_owned())).ok();
+                    }
+                    TcpClientMessage::Publish { topic, payload, trace_ctx } => {
+                        let envelope = ClientMessage::PublishRequest {
+                            topic,
+                            payload: payload.into(),
+                            registration_id: registration_id.to_owned(),
+                            trace_ctx,
+                        };
+                        if let Err(e) = TcpClientActor::send_message(envelope, state).await {
+                            TcpClientActor::emit_transport_err_and_stop(myself, state, e.to_string());
+                        }
+                    }
+                    TcpClientMessage::Subscribe { topic, trace_ctx } => {
                         let envelope = ClientMessage::SubscribeRequest {
                             registration_id: registration_id.to_owned(),
                             topic,
+                            trace_ctx,
                         };
                         if let Err(e) = TcpClientActor::send_message(envelope, state).await {
-                            TcpClientActor::emit_transport_err_and_stop(
-                                myself,
-                                state,
-                                e.to_string(),
-                            );
+                            TcpClientActor::emit_transport_err_and_stop(myself, state, e.to_string());
                         }
                     }
-                    TcpClientMessage::Disconnect => {
-                        info!("Received disconnect signal. Shutting down client.",);
-                        let envelope =
-                            ClientMessage::DisconnectRequest(Some(registration_id.to_owned()));
+                    TcpClientMessage::Disconnect { trace_ctx } => {
+                        info!("Received disconnect signal. Shutting down client.");
+                        debug!("Flushing pending writes before disconnect...");
+                        sleep(Duration::from_millis(100)).await;
+                        let envelope = ClientMessage::DisconnectRequest {
+                            registration_id: Some(registration_id.to_owned()),
+                            trace_ctx,
+                        };
                         if let Err(e) = TcpClientActor::send_message(envelope, state).await {
-                            TcpClientActor::emit_transport_err_and_stop(
-                                myself.clone(),
-                                state,
-                                e.to_string(),
-                            );
+                            TcpClientActor::emit_transport_err_and_stop(myself.clone(), state, e.to_string());
                         }
-                        // if we're disconnecting explicitly, we're  good to just stop here.
-                        state.abort_handle.as_ref().map(|handle| handle.abort());
-
+                        if let Some(handle) = state.abort_handle.take() {
+                            handle.abort();
+                        }
                         myself.stop(Some(CLIENT_DISCONNECTED.to_string()));
                     }
-                    TcpClientMessage::UnsubscribeRequest(topic) => {
+                    TcpClientMessage::UnsubscribeRequest { topic, trace_ctx } => {
                         let envelope = ClientMessage::UnsubscribeRequest {
                             registration_id: registration_id.to_owned(),
                             topic,
+                            trace_ctx,
                         };
                         if let Err(e) = TcpClientActor::send_message(envelope, state).await {
-                            TcpClientActor::emit_transport_err_and_stop(
-                                myself.clone(),
-                                state,
-                                e.to_string(),
-                            );
+                            TcpClientActor::emit_transport_err_and_stop(myself.clone(), state, e.to_string());
                         }
                     }
                     TcpClientMessage::ErrorMessage(error) => {
                         warn!("Received error from broker: {error}");
                     }
-                    TcpClientMessage::ListSessions => {
+                    TcpClientMessage::ListSessions { trace_ctx } => {
                         let envelope = ClientMessage::ControlRequest {
                             registration_id: registration_id.to_owned(),
                             op: ControlOp::ListSessions,
+                            trace_ctx,
                         };
-
                         if let Err(e) = TcpClientActor::send_message(envelope, state).await {
-                            TcpClientActor::emit_transport_err_and_stop(
-                                myself.clone(),
-                                state,
-                                e.to_string(),
-                            );
+                            TcpClientActor::emit_transport_err_and_stop(myself.clone(), state, e.to_string());
                         }
                     }
-                    TcpClientMessage::ListTopics => {
+                    TcpClientMessage::ListTopics { trace_ctx } => {
                         let envelope = ClientMessage::ControlRequest {
                             registration_id: registration_id.to_owned(),
                             op: ControlOp::ListTopics,
+                            trace_ctx,
                         };
-
                         if let Err(e) = TcpClientActor::send_message(envelope, state).await {
-                            TcpClientActor::emit_transport_err_and_stop(
-                                myself.clone(),
-                                state,
-                                e.to_string(),
-                            );
+                            TcpClientActor::emit_transport_err_and_stop(myself.clone(), state, e.to_string());
                         }
                     }
-                    // other variants handled elsewhere
+                    TcpClientMessage::ControlRequest { op, trace_ctx } => {
+                        let envelope = ClientMessage::ControlRequest {
+                            registration_id: registration_id.to_owned(),
+                            op,
+                            trace_ctx,
+                        };
+                        if let Err(e) = TcpClientActor::send_message(envelope, state).await {
+                            TcpClientActor::emit_transport_err_and_stop(myself.clone(), state, e.to_string());
+                        }
+                    }
+                    // Ignore other messages like Reconnect (already handled at top level)
                     _ => (),
                 }
             }

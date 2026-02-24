@@ -13,14 +13,26 @@ REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || true)"
 CASSINI_ROOT="${REPO_ROOT}/src/agents/cassini"
 [[ -d "${CASSINI_ROOT}" ]] || die "cassini root not found at ${CASSINI_ROOT}"
 
+: "${BUILD_PROFILE:=debug}"
+
 # Workspace target dir (your actual build output location)
 AGENTS_ROOT="${REPO_ROOT}/src/agents"
-WORKSPACE_TARGET_DIR="${AGENTS_ROOT}/target/debug"
+
+# Validate
+if [[ "${BUILD_PROFILE}" != "debug" && "${BUILD_PROFILE}" != "release" ]]; then
+    die "BUILD_PROFILE must be 'debug' or 'release'"
+fi
+
+# Update WORKSPACE_TARGET_DIR
+WORKSPACE_TARGET_DIR="${AGENTS_ROOT}/target/${BUILD_PROFILE}"
 
 RUNS_ROOT="${CASSINI_ROOT}/output/dev/runs"
 mkdir -p "${RUNS_ROOT}"
 
 CURRENT_LINK="${CASSINI_ROOT}/output/dev/current"
+
+: "${ENABLE_JAEGER_TRACING:=1}"
+: "${JAEGER_OTLP_ENDPOINT:=http://localhost:4318/v1/traces}"
 
 # These will be set per-run by begin_run()
 RUN_ID=""
@@ -62,7 +74,7 @@ need_file "${TLS_SERVER_KEY}"
 need_file "${TLS_CLIENT_CERT}"
 need_file "${TLS_CLIENT_KEY}"
 
-# Defaults (don’t clobber user overrides)
+# Defaults (don't clobber user overrides)
 : "${BROKER_ADDR:=127.0.0.1:8080}"
 : "${CONTROLLER_BIND_ADDR:=127.0.0.1:3030}"
 : "${CONTROLLER_ADDR:=${CONTROLLER_BIND_ADDR}}"
@@ -140,17 +152,27 @@ compose_down() {
   "${DC[@]}" -f "${COMPOSE_FILE}" -p cassini down || true
 }
 
+# Function to strip console control characters
+strip_control_chars() {
+  # Remove ANSI escape sequences (colors, cursor movement, etc.)
+  # Remove other control characters (bell, backspace, etc.)
+  # Keep newlines, tabs, and printable characters
+  sed -e 's/\x1b\[[0-9;]*[a-zA-Z]//g' \
+      -e 's/\x1b[=><]//g' \
+      -e 's/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]//g' \
+      "$@"
+}
+
 # --- Key point: DO NOT start broker directly here.
 # The control plane spawns:
-#   ./target/debug/cassini-server
-#   ./target/debug/harness-producer
-#   ./target/debug/harness-sink
-# but in this repo those binaries live in src/agents/target/debug.
+#   - cassini-server
+#   - harness-producer
+#   - harness-sink
 #
 # We solve this in two layers:
 #   1) Build the bins into the workspace target dir.
-#   2) Provide a compatibility symlink tree at cassini/target/debug -> workspace bins,
-#      so the control plane's hardcoded ./target/debug/... paths work.
+#   2) Provide a compatibility symlink tree at cassini/target/xxxxx -> workspace bins,
+#      so the control plane's hardcoded ./target/xxxxx/... paths work.
 #
 # Returns 0 if python3 exists; we use it to parse cargo metadata without jq.
 need_python() { command -v python3 >/dev/null 2>&1 || die "missing command: python3 (needed to parse cargo metadata)"; }
@@ -161,9 +183,9 @@ build_binaries() {
   need_dir "${AGENTS_ROOT}"
 
   # These are the binaries the control plane tries to spawn at:
-  #   ./target/debug/cassini-server
-  #   ./target/debug/harness-producer
-  #   ./target/debug/harness-sink
+  #   - cassini-server
+  #   - harness-producer
+  #   - harness-sink
   local wanted_bins=(cassini-server harness-producer harness-sink)
 
   log "discovering cassini harness binaries via cargo metadata..."
@@ -213,10 +235,14 @@ for bin_name, pkg_name in out:
   fi
 
   log "building harness binaries into workspace target dir..."
+  local cargo_flags=()
+  [[ "${BUILD_PROFILE}" == "release" ]] && cargo_flags+=(--release)
+
   while IFS=$'\t' read -r bin pkg; do
     [[ -n "${bin}" && -n "${pkg}" ]] || continue
-    log "  cargo build -p ${pkg} --bin ${bin}"
-    ( cd "${AGENTS_ROOT}" && cargo build -q -p "${pkg}" --bin "${bin}" ) || die "cargo build failed for ${pkg} (${bin})"
+    log "  cargo build -p ${pkg} --bin ${bin} ${cargo_flags[*]}"
+    ( cd "${AGENTS_ROOT}" && cargo build -q -p "${pkg}" --bin "${bin}" "${cargo_flags[@]}" ) \
+      || die "cargo build failed for ${pkg} (${bin})"
   done <<< "${pairs}"
 
   # Final check: ensure the binaries exist where we expect them (workspace target dir)
@@ -227,7 +253,7 @@ for bin_name, pkg_name in out:
 
 ensure_target_symlinks() {
   # Control plane expects ./target/debug/* relative to CASSINI_ROOT
-  local compat_target="${CASSINI_ROOT}/target/debug"
+  local compat_target="${CASSINI_ROOT}/target/${BUILD_PROFILE}"
   mkdir -p "${compat_target}"
   need_dir "${WORKSPACE_TARGET_DIR}"
 
@@ -262,7 +288,10 @@ native_up() {
     cd "${CASSINI_ROOT}"
     exec cargo run --quiet --manifest-path "${CTRL_MANIFEST}" -- \
       --config "${CONFIG_PATH}" \
-      2>&1 | tee -a "${CTRL_LOG}"
+      --broker-path "./target/${BUILD_PROFILE}/cassini-server" \
+      --producer-path "./target/${BUILD_PROFILE}/harness-producer" \
+      --sink-path "./target/${BUILD_PROFILE}/harness-sink" \
+      2>&1 | tee >(strip_control_chars >> "${CTRL_LOG}")
   ) &
   echo $! > "${CTRL_PID}"
 }
@@ -313,7 +342,8 @@ status() {
 logs() {
   [[ "${MODE}" == "native" ]] || die "logs is for native mode (compose has docker logs)"
   [[ -L "${CURRENT_LINK}" ]] || die "no current run symlink at ${CURRENT_LINK} (run: $0 up)"
-  tail -n 200 -f "${CURRENT_LINK}/logs/control.log"
+  # Also strip control characters when tailing logs
+  tail -n 200 -f "${CURRENT_LINK}/logs/control.log" | strip_control_chars
 }
 
 wait_mtls() {
@@ -361,6 +391,7 @@ up() {
   begin_run
 
   log "bringing up cassini harness stack (mode=${MODE})"
+  log "  BUILD_PROFILE=${BUILD_PROFILE}"
   log "  BROKER_ADDR=${BROKER_ADDR}"
   log "  CONTROLLER_BIND_ADDR=${CONTROLLER_BIND_ADDR}"
   log "  CONTROLLER_ADDR=${CONTROLLER_ADDR}"
@@ -380,14 +411,14 @@ up() {
   # Readiness checks:
   # - Controller: just wait for the port to accept a TCP connect.
   #   Do NOT TLS-probe it; openssl vs rustls can create flaky aborts.
-  # - Broker: verify it’s accepting mTLS (client cert + CA verify + SNI).
+  # - Broker: verify it's accepting mTLS (client cert + CA verify + SNI).
   local ch cp bh bp
   ch="$(host_of "${CONTROLLER_BIND_ADDR}")"; cp="$(port_of "${CONTROLLER_BIND_ADDR}")"
   bh="$(host_of "${BROKER_ADDR}")";          bp="$(port_of "${BROKER_ADDR}")"
 
   wait_port "${ch}" "${cp}" "control plane"
 
-  # Broker is spawned by the controller; verify it’s accepting mTLS.
+  # Broker is spawned by the controller; verify it's accepting mTLS.
   if ! wait_mtls "${bh}" "${bp}" "${CASSINI_SERVER_NAME}" "broker"; then
     if [[ "${STRICT_READY:-0}" == "1" ]]; then
       die "broker mTLS probe failed (CA/SNI/cert/key mismatch?) host=${bh} port=${bp} sni=${CASSINI_SERVER_NAME}"

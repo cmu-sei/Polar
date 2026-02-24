@@ -422,6 +422,12 @@ in {
       : "''${HARNESS_SERVER_NAME:=localhost}"
       export CASSINI_SERVER_NAME CONTROLLER_SERVER_NAME HARNESS_SERVER_NAME
 
+      export BROKER_SHUTDOWN_TOKEN=HEYTHERE
+      export TMPDIR=$(mktemp -d)
+      export ENABLE_JAEGER_TRACING=1
+      export JAEGER_OTLP_ENDPOINT=http://localhost:4318/v1/traces
+      export RUST_LOG=trace
+
       # -------------------------------------------------------------------
       # IMPORTANT: do NOT override SSL_CERT_FILE with the dev CA.
       # Keep system CA bundle for GitHub/Cargo/etc.

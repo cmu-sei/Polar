@@ -7,6 +7,7 @@ use polar::SupervisorMessage;
 use ractor::OutputPort;
 use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef, SupervisionEvent};
 use tracing::{debug, error, info, warn};
+use cassini_types::WireTraceCtx;
 
 use crate::{
     pods::{PodObserver, PodObserverArgs},
@@ -45,7 +46,8 @@ impl ClusterObserverSupervisor {
                     TcpClientArgs {
                         config: client_config,
                         registration_id: None,
-                        events_output,
+                        events_output: Some(events_output),
+                        event_handler: None,
                     },
                     myself.into(),
                 )
@@ -190,6 +192,9 @@ impl Actor for ClusterObserverSupervisor {
                 ClientEvent::TransportError { reason } => {
                     error!("Transport error occurred! {reason}");
                     myself.stop(Some(reason))
+                }
+                ClientEvent::ControlResponse { .. } => {
+                    // ignore
                 }
             },
         }

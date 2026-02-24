@@ -16,3 +16,4 @@ tracing = "0.1.41"
 rustls = { version = "0.23", features = ["aws-lc-rs"] }
 tokio-rustls = "0.26.4"
 anyhow = "1.0.100"
+cassini-types = {path = "../../types"}

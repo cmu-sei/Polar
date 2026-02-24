@@ -52,6 +52,7 @@ use reqwest::Response;
 use serde::Deserialize;
 use tokio::task::AbortHandle;
 use tracing::{debug, error};
+use cassini_types::WireTraceCtx;
 
 pub const META_OBSERVER: &str = "gitlab:observer:metadata";
 pub const GITLAB_USERS_OBSERVER: &str = "gitlab:observer:users";
@@ -223,6 +224,7 @@ pub fn send_to_broker(
         if let Err(e) = client.send_message(TcpClientMessage::Publish {
             topic: topic.to_string(),
             payload: bytes.to_vec(),
+            trace_ctx: WireTraceCtx::from_current_span(),
         }) {
             return Err(ActorProcessingErr::from(format!(
                 "Failed to message TCP client {e}"

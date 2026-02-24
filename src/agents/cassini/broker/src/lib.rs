@@ -30,6 +30,7 @@ pub const REGISTRATION_REQ_FAILED_TXT: &str = "Failed to register session!";
 pub const LISTENER_MGR_NOT_FOUND_TXT: &str = "Listener Manager not found!";
 pub const TIMEOUT_REASON: &str = "SESSION_TIMEDOUT";
 pub const DISCONNECTED_REASON: &str = "CLIENT_DISCONNECTED";
+pub const SHUTDOWN_AUTH_TOKEN: &str = "BROKER_SHUTDOWN_TOKEN";
 
 #[derive(Debug, Clone)]
 pub enum BrokerConfigError {
@@ -47,65 +48,6 @@ impl fmt::Display for BrokerConfigError {
     }
 }
 
-pub fn init_logging() {
-    use opentelemetry::{global, KeyValue};
-    use opentelemetry_otlp::Protocol;
-    use opentelemetry_otlp::WithExportConfig;
-    use opentelemetry_sdk::Resource;
-    use tracing_subscriber::filter::EnvFilter;
-    use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
-
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-
-    let enable_jaeger = std::env::var("ENABLE_JAEGER_TRACING")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
-
-    if enable_jaeger {
-        let endpoint = std::env::var("JAEGER_OTLP_ENDPOINT")
-            .unwrap_or_else(|_| "http://localhost:4318/v1/traces".to_string());
-
-        if !endpoint.is_empty() {
-            if let Ok(exporter) = opentelemetry_otlp::SpanExporter::builder()
-                .with_http()
-                .with_protocol(Protocol::HttpBinary)
-                .with_endpoint(endpoint)
-                .build()
-            {
-                let tracer_provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
-                    .with_batch_exporter(exporter)
-                    .with_resource(
-                        Resource::builder_empty()
-                            .with_attributes([KeyValue::new("service.name", "cassini-server")])
-                            .build(),
-                    )
-                    .build();
-
-                global::set_tracer_provider(tracer_provider);
-                let tracer = global::tracer(format!("cassini-tracing"));
-
-                if tracing_subscriber::registry()
-                    .with(filter)
-                    .with(tracing_subscriber::fmt::layer())
-                    .with(tracing_opentelemetry::layer().with_tracer(tracer))
-                    .try_init()
-                    .is_err()
-                {
-                    eprintln!("Logging registry already initialized");
-                }
-            }
-        }
-    } else {
-        if tracing_subscriber::registry()
-            .with(filter)
-            .with(tracing_subscriber::fmt::layer())
-            .try_init()
-            .is_err()
-        {
-            eprintln!("Logging registry already initialized");
-        }
-    }
-}
 ///Consider a different naming convention for the subscribers, right now they're named directly after the session they represent and the topic they subscribe to
 /// IF we wanted to support topics subscribing to topics e.g overloading the type of subscriber topics can have, we will want to reconsider this approach.
 pub fn get_subscriber_name(registration_id: &str, topic: &str) -> String {

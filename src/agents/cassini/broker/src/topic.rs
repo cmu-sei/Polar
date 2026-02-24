@@ -1,13 +1,15 @@
-use crate::PUBLISH_REQ_FAILED_TXT;
+use crate::{PUBLISH_REQ_FAILED_TXT};
 use crate::UNEXPECTED_MESSAGE_STR;
-use cassini_types::BrokerMessage;
+use cassini_types::{BrokerMessage, ShutdownPhase};
 use ractor::registry::where_is;
 use ractor::rpc::CallResult;
-use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef};
+use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef, SupervisionEvent};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::Duration;
+use std::sync::Arc;
 use tracing::{debug, error, info, trace, trace_span, warn};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
+use cassini_tracing::try_set_parent_otel;
 
 pub const TOPIC_ADD_FAILED_TXT: &str = "Failed to add topic \"{topic}!\"";
 
@@ -20,6 +22,7 @@ pub struct TopicManager;
 pub struct TopicManagerState {
     pub topics: HashMap<String, ActorRef<BrokerMessage>>,
     pub subscriber_mgr: Option<ActorRef<BrokerMessage>>,
+    pub is_shutting_down: bool,
 }
 
 pub struct TopicManagerArgs {
@@ -37,6 +40,9 @@ impl TopicManager {
         myself: ActorRef<BrokerMessage>,
         state: &mut TopicManagerState,
     ) -> Result<ActorRef<BrokerMessage>, ActorProcessingErr> {
+        if state.is_shutting_down {
+            return Err(ActorProcessingErr::from("TopicManager is shutting down"));
+        }
         match state.topics.entry(topic.clone()) {
             std::collections::hash_map::Entry::Occupied(entry) => {
                 // Return the existing actor
@@ -194,6 +200,7 @@ impl Actor for TopicManager {
         let mut state = TopicManagerState {
             topics: HashMap::new(),
             subscriber_mgr: args.subscriber_mgr,
+            is_shutting_down: false,
         };
 
         if let Some(topics) = args.topics {
@@ -235,21 +242,44 @@ impl Actor for TopicManager {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
+            BrokerMessage::InitiateShutdownPhase { phase } if phase == ShutdownPhase::FlushTopicQueues => {
+                info!("Starting flush of topic queues");
+                state.is_shutting_down = true;
+
+                // Ask each topic agent to flush its queue and then shut down
+                for (_topic_name, topic_actor) in &state.topics {
+                    let _ = topic_actor.send_message(BrokerMessage::FlushQueue {
+                        reply_to: myself.clone().into(),
+                    });
+                    let _ = topic_actor.send_message(BrokerMessage::PrepareForShutdown { auth_token: None });
+                }
+
+                if state.topics.is_empty() {
+                    self.signal_flush_complete(myself.clone(), state).await?;
+                }
+                // No timeout – ControlManager will handle phase timeout and force‑stop.
+            }
+
+            BrokerMessage::PrepareForShutdown { .. } => {
+                info!("TopicManager preparing for shutdown");
+                state.is_shutting_down = true;
+            }
+
             BrokerMessage::PublishRequest {
                 registration_id,
                 topic,
                 payload,
                 trace_ctx,
             } => {
-                let span = trace_span!(
-                    "cassini.topic_manager.publish_request",
-                    %registration_id,
-                    topic = %topic,
-                    payload_len = payload.len()
-                );
-                if let Some(ctx) = trace_ctx {
-                    let _ = span.set_parent(ctx);
+                let span = trace_span!("cassini.topic_manager.publish_request", %registration_id, topic = %topic, payload_len = payload.len());
+                
+                // Reject new publishes during shutdown
+                if state.is_shutting_down {
+                    warn!("Rejecting publish request during shutdown");
+                    return Ok(());
                 }
+
+                try_set_parent_otel(&span, trace_ctx);
                 let _g = span.enter();
 
                 // Always go through ensure_topic
@@ -288,29 +318,24 @@ impl Actor for TopicManager {
                 trace_ctx,
                 ..
             } => {
-                let span = trace_span!(
-                    "cassini.topic_manager.publish_response",
-                    topic = %topic,
-                    payload_len = payload.len()
-                );
-                if let Some(ctx) = trace_ctx {
-                    let _ = span.set_parent(ctx);
-                }
+                let span = trace_span!("cassini.topic_manager.publish_response", topic = %topic, payload_len = payload.len());
+                try_set_parent_otel(&span, trace_ctx);
                 let _g = span.enter();
 
                 trace!("Topic manager received publish response for \"{topic}\"");
 
                 // forward to broker
-                match myself.try_get_supervisor() {
-                    Some(broker) => broker
-                        .send_message(BrokerMessage::PublishResponse {
-                            topic,
-                            payload,
-                            result: Result::Ok(()),
-                            trace_ctx: Some(span.context()),
-                        })
-                        .expect("Expected to forward message to broker"),
-                    None => todo!(),
+                if let Some(broker) = myself.try_get_supervisor() {
+                    if let Err(e) = broker.send_message(BrokerMessage::PublishResponse {
+                        topic,
+                        payload,
+                        result: Ok(()),
+                        trace_ctx: Some(span.context()),
+                    }) {
+                        error!("Failed to forward publish response to broker: {}", e);
+                    }
+                } else {
+                    error!("TopicManager has no supervisor – dropping PublishResponse");
                 }
             }
 
@@ -319,21 +344,21 @@ impl Actor for TopicManager {
                 topic,
                 trace_ctx,
             } => {
-                let span = trace_span!(
-                    "cassini.topic_manager.subscribe_request",
-                    %registration_id,
-                    topic = %topic
-                );
-                if let Some(ctx) = trace_ctx.clone() {
-                    let _ = span.set_parent(ctx);
+                // Reject new subscriptions during shutdown
+                if state.is_shutting_down {
+                    warn!("Rejecting subscribe request during shutdown");
+                    return Ok(());
                 }
+
+                let span = trace_span!("cassini.topic_manager.subscribe_request", %registration_id, topic = %topic);
+                try_set_parent_otel(&span, trace_ctx.clone());
                 let _g = span.enter();
 
                 if let Err(e) = self
                     .ensure_topic_and_subscribe(
                         registration_id.clone(),
                         topic.clone(),
-                        trace_ctx.clone(),
+                        trace_ctx,
                         myself.clone(),
                         state,
                     )
@@ -349,9 +374,7 @@ impl Actor for TopicManager {
                 trace_ctx,
             } => {
                 let span = trace_span!("cassini.topic_manager.get_topics", %registration_id);
-                if let Some(ctx) = trace_ctx {
-                    let _ = span.set_parent(ctx);
-                }
+                try_set_parent_otel(&span, trace_ctx);
                 let _g = span.enter();
 
                 trace!("Topic Manager retrieving topics.");
@@ -369,6 +392,48 @@ impl Actor for TopicManager {
         }
         Ok(())
     }
+
+    async fn handle_supervisor_evt(
+        &self,
+        myself: ActorRef<Self::Msg>,
+        msg: SupervisionEvent,
+        state: &mut Self::State,
+    ) -> Result<(), ActorProcessingErr> {
+        match msg {
+            SupervisionEvent::ActorTerminated(actor_cell, _, _) => {
+                if let Some(name) = actor_cell.get_name() {
+                    // Remove from topics map if it exists
+                    state.topics.remove(&name);
+                    // If we are in shutdown (flush phase) and no topics remain, complete
+                    if state.is_shutting_down && state.topics.is_empty() {
+                        self.signal_flush_complete(myself.clone(), state).await?;
+                    }
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+}
+
+impl TopicManager {
+    async fn signal_flush_complete(
+        &self,
+        myself: ActorRef<BrokerMessage>,
+        _state: &mut TopicManagerState,
+    ) -> Result<(), ActorProcessingErr> {
+        info!("All topic queues flushed");
+
+        if let Some(supervisor) = myself.try_get_supervisor() {
+            supervisor.send_message(BrokerMessage::ShutdownPhaseComplete {
+                phase: ShutdownPhase::FlushTopicQueues,
+            })?;
+        }
+
+        // Stop the manager – no children left
+        myself.stop(Some("SHUTDOWN_FLUSHED".to_string()));
+        Ok(())
+    }
 }
 
 // ============================== Topic Worker definition ============================== //
@@ -378,7 +443,8 @@ struct TopicAgent;
 
 struct TopicAgentState {
     subscribers: Vec<ActorRef<BrokerMessage>>,
-    queue: VecDeque<Vec<u8>>,
+    queue: VecDeque<Arc<Vec<u8>>>,  // Changed from VecDeque<Vec<u8>>
+    flushing: bool, // whether we are in flush phase
 }
 
 #[async_trait]
@@ -395,6 +461,7 @@ impl Actor for TopicAgent {
         Ok(TopicAgentState {
             subscribers: Vec::new(),
             queue: VecDeque::new(),
+            flushing: false,
         })
     }
 
@@ -414,6 +481,62 @@ impl Actor for TopicAgent {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
+            BrokerMessage::FlushQueue { reply_to } => {
+                debug!("Topic agent flushing queue");
+                state.flushing = true;
+
+                // If there are no subscribers and no queue, we're done immediately
+                if state.subscribers.is_empty() && state.queue.is_empty() {
+                    reply_to.send_message(BrokerMessage::FlushQueueComplete {
+                        topic: myself.get_name().unwrap_or_default(),
+                    })?;
+                    return Ok(());
+                }
+
+                // If there are no subscribers but queue has messages, we cannot deliver them.
+                // According to the design, we should still consider the queue flushed? 
+                // Actually, during shutdown, there are no active subscribers (they are terminated in phase 4).
+                // But phase 3 (flush) happens before phase 4 (terminate subscribers). So subscribers might still exist.
+                // We must attempt to deliver all queued messages to existing subscribers.
+                while let Some(msg) = state.queue.pop_front() {
+                    if state.subscribers.is_empty() {
+                        // No one to deliver to; we discard the message (but log it).
+                        warn!("Discarding queued message on topic {} during flush: no subscribers", myself.get_name().unwrap_or_default());
+                        continue;
+                    }
+                    for subscriber in &state.subscribers {
+                        if let Err(e) = subscriber.send_message(BrokerMessage::PublishResponse {
+                            topic: myself.get_name().unwrap_or_default(),
+                            payload: msg.clone(),
+                            result: Ok(()),
+                            trace_ctx: None,
+                        }) {
+                            warn!("Failed to deliver queued message to subscriber: {}", e);
+                        }
+                    }
+                }
+
+                // After delivering, we signal completion.
+                // Note: We don't wait for acknowledgments from subscribers; that's the subscriber's responsibility.
+                reply_to.send_message(BrokerMessage::FlushQueueComplete {
+                    topic: myself.get_name().unwrap_or_default(),
+                })?;
+                
+                state.flushing = false;
+            }
+
+            // BrokerMessage::PrepareForShutdown { .. } => {
+            //     // Mark as shutting down; we may still need to deliver queued messages.
+            //     debug!("Topic agent preparing for shutdown");
+            //     // No immediate action; flush will be triggered later.
+            // }
+            BrokerMessage::PrepareForShutdown { .. } => {
+                debug!("Topic agent received shutdown notification, stopping");
+                // No ongoing work besides queue flush – that’s handled by FlushQueue.
+                // Just stop.
+                myself.stop(Some("SHUTDOWN_GRACEFUL".to_string()));
+            }
+
             BrokerMessage::PublishRequest {
                 registration_id,
                 topic,
@@ -426,28 +549,43 @@ impl Actor for TopicAgent {
                     topic = %topic,
                     payload_len = payload.len()
                 );
-                if let Some(ctx) = trace_ctx {
-                    let _ = span.set_parent(ctx);
-                }
+                
+                // If we are in flush phase, we should still accept publishes? Actually no, 
+                // the TopicManager rejects new publishes during shutdown. But if we are here,
+                // it's because the message was already accepted before shutdown.
+                try_set_parent_otel(&span, trace_ctx);
                 let _g = span.enter();
 
                 trace!("Topic agent received publish request for \"{topic}\"");
 
                 // alert subscribers
                 if !state.subscribers.is_empty() {
+                    // If we are in flush phase, we still deliver normally.
                     for subscriber in &state.subscribers {
-                        if let Err(e) = subscriber.send_message(BrokerMessage::PublishResponse {
-                            topic: topic.clone(),
-                            payload: payload.clone(),
-                            result: Ok(()),
-                            trace_ctx: Some(span.context()),
-                        }) {
+                        // Clone payload for each subscriber
+                        let send_result = if state.flushing {
+                            // During flush, we may want to be more aggressive, but it's the same.
+                            subscriber.send_message(BrokerMessage::PublishResponse {
+                                topic: topic.clone(),
+                                payload: payload.clone(),
+                                result: Ok(()),
+                                trace_ctx: Some(span.context()),
+                            })
+                        } else {
+                            subscriber.send_message(BrokerMessage::PublishResponse {
+                                topic: topic.clone(),
+                                payload: payload.clone(),
+                                result: Ok(()),
+                                trace_ctx: Some(span.context()),
+                            })
+                        };
+                        if let Err(e) = send_result {
                             warn!("{PUBLISH_REQ_FAILED_TXT}: {e}")
                         }
                     }
                 } else {
-                    // queue message
-                    state.queue.push_back(payload);
+                    // No subscribers, queue the message
+                    state.queue.push_back(payload.clone());
                     info!(
                         "{}",
                         format!(
@@ -476,10 +614,14 @@ impl Actor for TopicAgent {
                 subscriber_ref,
                 trace_ctx,
             } => {
-                let span = trace_span!("cassini.topic_agent.add_subscriber");
-                if let Some(ctx) = trace_ctx.clone() {
-                    let _ = span.set_parent(ctx);
+                // If we are in flush phase and already delivered all queued messages, we may still get new subscribers?
+                // During shutdown, we shouldn't get new subscriptions, but just in case, we still add them.
+                if state.flushing {
+                    debug!("Adding subscriber during flush phase");
                 }
+
+                let span = trace_span!("cassini.topic_agent.add_subscriber");
+                try_set_parent_otel(&span, trace_ctx);
                 let _g = span.enter();
 
                 trace!("Received subscribe session directive");
@@ -487,14 +629,14 @@ impl Actor for TopicAgent {
                 state.subscribers.push(subscriber_ref.clone());
 
                 // Drain queued messages now that someone is listening.
-                // NOTE: avoid taking a reference to a temporary; take ownership of the vec.
+                // This is the normal drain, not the shutdown flush.
                 while let Some(msg) = state.queue.pop_front() {
                     // if this were to fail, user probably unsubscribed while we were dequeuing
                     // It should be ok to ignore this case.
                     subscriber_ref
                         .send_message(BrokerMessage::PublishResponse {
                             topic: myself.get_name().unwrap(),
-                            payload: msg,
+                            payload: msg.clone(),
                             result: Ok(()),
                             trace_ctx: Some(span.context()),
                         })
@@ -507,14 +649,8 @@ impl Actor for TopicAgent {
                 topic,
                 trace_ctx,
             } => {
-                let span = trace_span!(
-                    "cassini.topic_agent.unsubscribe_request",
-                    %registration_id,
-                    topic = %topic
-                );
-                if let Some(ctx) = trace_ctx {
-                    let _ = span.set_parent(ctx);
-                }
+                let span = trace_span!("cassini.topic_agent.unsubscribe_request", %registration_id, topic = %topic);
+                try_set_parent_otel(&span, trace_ctx);
                 let _g = span.enter();
 
                 trace!("topic actor received unsubscribe request.");

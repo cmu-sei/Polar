@@ -19,6 +19,7 @@ use tracing::warn;
 use utoipa::openapi::Deprecated;
 use utoipa::openapi::OpenApi;
 use web_agent_common::AppData;
+use cassini_types::WireTraceCtx;
 
 /// The supervisor for our consumer actors
 pub struct ConsumerSupervisor;
@@ -74,7 +75,8 @@ impl Actor for ConsumerSupervisor {
             TcpClientArgs {
                 config,
                 registration_id: None,
-                events_output,
+                events_output: Some(events_output),
+                event_handler: None,
             },
             myself.clone().into(),
         )
@@ -109,13 +111,12 @@ impl Actor for ConsumerSupervisor {
                             state.consumer_agent = Some(agent);
                             state
                                 .cassini_client
-                                .send_message(TcpClientMessage::Subscribe(
-                                    WEB_CONSUMER_NAME.to_string(),
-                                ))
+                                .send_message(TcpClientMessage::Subscribe {
+                                    topic: WEB_CONSUMER_NAME.to_string(),
+                                    trace_ctx: WireTraceCtx::from_current_span(),
+                                })
                                 .map_err(|e| {
-                                    tracing::error!(
-                                        "Failed to forward subscribe request to client. {e}"
-                                    )
+                                    tracing::error!("Failed to forward subscribe request to client. {e}")
                                 })
                                 .ok();
                         }

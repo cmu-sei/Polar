@@ -35,6 +35,7 @@ use tracing::{debug, info};
 
 use serde_json::Value;
 use std::collections::HashMap;
+use cassini_types::WireTraceCtx;
 
 pub struct JiraIssueObserver;
 
@@ -174,8 +175,9 @@ impl Actor for JiraIssueObserver {
 
                                     let msg = ClientMessage::PublishRequest {
                                         topic: JIRA_ISSUES_CONSUMER_TOPIC.to_string(),
-                                        payload: bytes.to_vec(),
+                                        payload: bytes.to_vec().into(),
                                         registration_id: state.registration_id.clone(),
+                                        trace_ctx: None,
                                     };
 
                                     // Serialize the inner client message before sending
@@ -188,8 +190,8 @@ impl Actor for JiraIssueObserver {
                                         .send_message(TcpClientMessage::Publish {
                                             topic: JIRA_ISSUES_CONSUMER_TOPIC.to_string(),
                                             payload: payload.into_vec(),
-                                        })
-                                        .expect("Expected to publish message");
+                                            trace_ctx: WireTraceCtx::from_current_span(),
+                                        })?;
                                 }
                             }
                             let fetched = max_results;

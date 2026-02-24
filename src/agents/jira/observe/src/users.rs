@@ -32,6 +32,7 @@ use ractor::{async_trait, registry::where_is, Actor, ActorProcessingErr, ActorRe
 use rkyv::rancor::Error;
 use std::time::Duration;
 use tracing::{debug, info};
+use cassini_types::WireTraceCtx;
 
 pub struct JiraUserObserver;
 
@@ -144,8 +145,9 @@ impl Actor for JiraUserObserver {
 
                         let msg = ClientMessage::PublishRequest {
                             topic: JIRA_USERS_CONSUMER_TOPIC.to_string(),
-                            payload: bytes.to_vec(),
+                            payload: bytes.to_vec().into(),
                             registration_id: state.registration_id.clone(),
+                            trace_ctx: None,
                         };
 
                         // serialize the inner message before sending
@@ -156,8 +158,8 @@ impl Actor for JiraUserObserver {
                             .send_message(TcpClientMessage::Publish {
                                 topic: JIRA_USERS_CONSUMER_TOPIC.to_string(),
                                 payload: payload.into_vec(),
-                            })
-                            .expect("Expected to publish message");
+                                trace_ctx: WireTraceCtx::from_current_span(),
+                            })?
                     }
                     _ => (),
                 }

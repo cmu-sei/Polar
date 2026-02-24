@@ -1,5 +1,8 @@
 // use cassini_client::*;
-use cassini_client::{TCPClientConfig, TcpClientActor, TcpClientArgs, TcpClientMessage};
+use cassini_client::{
+    ClientEventForwarder, ClientEventForwarderArgs, TCPClientConfig, TcpClientActor,
+    TcpClientArgs, TcpClientMessage,
+};
 use cassini_types::ClientEvent as CassiniEvent;
 use fake::Fake;
 use harness_common::{
@@ -8,15 +11,15 @@ use harness_common::{
         ControlClientMsg,
     },
     compute_checksum, ControllerCommand, Envelope, MessagePattern, ProducerConfig,
-    SupervisorMessage,
+    SupervisorMessage, WireTraceCtx,
 };
 use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef, OutputPort, SupervisionEvent};
 use serde::Serialize;
 use serde_json::to_string_pretty;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::time;
-use tracing::{debug, error, info, warn};
+use tokio::time::{self, sleep};
+use tracing::{debug, error, info, warn, info_span};
 const PRODUCER_FINISHED_SUCCESSFULLY: &str = "PRODUCER_FINISHED_SUCCESSFULLY";
 // const PRODUCER_ENCOUNTERED_ERROR: &str = "PRODUCER_ENCOUNTERED_ERROR";
 
@@ -36,6 +39,7 @@ pub struct RootActor;
 pub struct RootActorState {
     harness_client: ActorRef<ControlClientMsg>,
     producer: Option<ActorRef<ProducerMessage>>,
+    work_completed: bool,  // true when the producer agent finished successfully
 }
 
 #[async_trait]
@@ -79,6 +83,7 @@ impl Actor for RootActor {
         Ok(RootActorState {
             harness_client,
             producer: None,
+            work_completed: false,
         })
     }
 
@@ -105,6 +110,9 @@ impl Actor for RootActor {
                         role: harness_common::AgentRole::Producer,
                     },
                 ))?;
+            }
+            SupervisorMessage::SinkReady => {
+                debug!("Received SinkReady (ignoring)");
             }
             SupervisorMessage::CommandReceived { command } => match command {
                 ControllerCommand::ProducerConfig { producer } => {
@@ -135,7 +143,11 @@ impl Actor for RootActor {
                 _ => warn!("Received unexpected command."),
             },
             SupervisorMessage::TransportError { reason } => {
-                error!("Lost connection to the controller: {}", reason);
+                if state.work_completed {
+                    info!("Controller disconnected after work completed (shutdown): {}", reason);
+                } else {
+                    error!("Lost connection to the controller: {}", reason);
+                }
                 myself.stop(Some(reason))
             }
             SupervisorMessage::AgentError { reason } => {
@@ -171,16 +183,38 @@ impl Actor for RootActor {
                 myself.stop(Some(error));
             }
             SupervisionEvent::ActorTerminated(dead_actor, _, reason) => {
-                tracing::info!("{dead_actor:?} stopped {reason:?}");
-                // this is the happy case, child producer stopped for good reason, let's tell the controller we're done.
-                state
-                    .harness_client
-                    .send_message(ControlClientMsg::SendCommand(
-                        ControllerCommand::TestComplete {
-                            client_id: String::default(),
-                            role: harness_common::AgentRole::Producer,
-                        },
-                    ))?;
+                let actor_name = dead_actor.get_name().unwrap_or_default();
+                let actor_id = dead_actor.get_id();
+                tracing::info!("Worker agent: {0}:{1:?} stopped {reason:?}", actor_name, actor_id);
+
+                // If this is the producer agent, mark work as completed and stop supervisor
+                if let Some(producer_ref) = &state.producer {
+                    if producer_ref.get_id() == actor_id {
+                        state.work_completed = true;
+                        state.producer = None;
+
+                        // Notify controller that the producer has finished its test
+                        state.harness_client.send_message(ControlClientMsg::SendCommand(
+                                ControllerCommand::TestComplete {
+                                    client_id: String::default(),
+                                    role: harness_common::AgentRole::Producer,
+                                },
+                            ))?;
+
+                        info!("Producer agent finished, delaying stop to allow message delivery");
+                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+                        info!("Stopping supervisor now");
+                        myself.stop(Some("Producer finished".to_string()));
+                        return Ok(());
+                    }
+                }
+
+                // If no children remain, stop supervisor (failsafe)
+                if myself.get_children().is_empty() {
+                    info!("No children left, stopping supervisor");
+                    myself.stop(Some("All children terminated".to_string()));
+                }
             }
             other => {
                 tracing::info!("RootActor: received supervisor event '{other}'");
@@ -217,25 +251,32 @@ impl Actor for ProducerAgent {
     ) -> Result<Self::State, ActorProcessingErr> {
         debug!("{myself:?} starting");
         // Create the output ports the client expects
-        let events_output: std::sync::Arc<OutputPort<CassiniEvent>> =
-            std::sync::Arc::new(OutputPort::default());
+        let (forwarder, _) = Actor::spawn_linked(
+            Some(format!("producer.{}.event-forwarder", args.topic)),
+            ClientEventForwarder::new(),
+            ClientEventForwarderArgs {
+                target: myself.clone(),
+                mapper: Box::new(|event| match event {
+                    CassiniEvent::Registered { .. } => Some(ProducerMessage::Start),
+                    CassiniEvent::MessagePublished { .. } => None,
+                    CassiniEvent::ControlResponse { .. } => None,
+                    CassiniEvent::TransportError { reason } => {
+                        Some(ProducerMessage::AgentError { reason })
+                    }
+                }),
+            },
+            myself.clone().into(),
+        )
+        .await?;
 
-        // Subscribe to events (registration strings, etc.)
-        events_output.subscribe(myself.clone(), |event| match event {
-            CassiniEvent::Registered { .. } => Some(ProducerMessage::Start),
-            CassiniEvent::MessagePublished { .. } => None,
-            CassiniEvent::TransportError { reason } => {
-                error!("Lost connection to the message broker! {reason}");
-                Some(ProducerMessage::AgentError { reason })
-            }
-        });
 
         let config = TCPClientConfig::new()?;
         // Prepare TcpClientArgs and spawn the client actor
         let tcp_args = TcpClientArgs {
             config,
             registration_id: None,
-            events_output: events_output.clone(),
+            events_output: None,
+            event_handler: Some(forwarder.into()),
         };
 
         let (tcp_client, _) = TcpClientActor::spawn_linked(
@@ -271,14 +312,22 @@ impl Actor for ProducerAgent {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         info!("Running test.");
-        // here, we take on different actions depending on behavior pattern
+
+        // Create a root span for the entire test
+        let test_span = info_span!(
+            "cassini.producer.test_run",
+            topic = %state.cfg.topic,
+            duration_seconds = state.cfg.duration
+        );
+        let _g = test_span.enter();
+
         match state.cfg.pattern {
             MessagePattern::Drip { idle_time_seconds } => {
                 let interval = Duration::from_secs_f64(1.0 / idle_time_seconds as f64);
                 let duration = Duration::from_secs(state.cfg.duration);
                 let topic = state.cfg.topic.clone();
 
-                let size = state.cfg.message_size.clone() as usize;
+                let size = state.cfg.message_size as usize;
                 let tcp_client = state.tcp_client.clone();
 
                 let mut ticker = time::interval(interval);
@@ -291,10 +340,21 @@ impl Actor for ProducerAgent {
                     ticker.tick().await;
                     seqno += 1;
 
-                    // generate a checksum for the message
-                    // wrap it in an envelope
-                    // send it
-                    // create a payload of the desired message size using fake
+                    // Create a span for each message
+                    let message_span = info_span!(
+                        "cassini.producer.send_message",
+                        seqno = seqno,
+                        topic = %topic
+                    );
+                    let _g = message_span.enter();
+
+                    // Capture the trace context from the current span
+                    let trace_ctx_opt = WireTraceCtx::from_current_span();
+                    if let Some(ctx) = trace_ctx_opt {
+                        tracing::debug!("Producer sending message with trace_id: {:02x?}", ctx.trace_id);
+                    }
+                    // Extract the inner value for the envelope (non‑optional)
+                    let trace_ctx_inner = trace_ctx_opt.expect("active span should have a valid context");
 
                     let faked = (0..=size).fake::<String>();
                     let checksum = compute_checksum(faked.as_bytes());
@@ -303,6 +363,7 @@ impl Actor for ProducerAgent {
                         seqno,
                         data: faked,
                         checksum,
+                        trace_ctx: trace_ctx_inner,   // envelope expects WireTraceCtx (non‑optional)
                     };
 
                     let payload = rkyv::to_bytes::<rkyv::rancor::Error>(&envelope)
@@ -311,6 +372,7 @@ impl Actor for ProducerAgent {
                     let message = TcpClientMessage::Publish {
                         topic: topic.clone(),
                         payload: payload.into(),
+                        trace_ctx: Some(trace_ctx_inner),   // client message expects Option
                     };
 
                     if let Err(e) = tcp_client.send_message(message) {
@@ -320,19 +382,22 @@ impl Actor for ProducerAgent {
                     state.metrics.sent += 1;
                 }
 
-                state.metrics.elapsed_ms =
-                    (crate::get_timestamp_in_milliseconds()? - state.metrics.start_ms);
+                state.metrics.elapsed_ms = crate::get_timestamp_in_milliseconds()? - state.metrics.start_ms;
 
-                // when done, print metrics and exit
+                // Wait for any pending acknowledgments before disconnecting
+                debug!("Waiting for pending acknowledgments...");
+                sleep(Duration::from_millis(200)).await;
+
                 info!(
                     "{}",
                     to_string_pretty(&state.metrics).expect("expected to serialize to json")
                 );
 
                 tcp_client
-                    .send_message(TcpClientMessage::Disconnect)
+                    .send_message(TcpClientMessage::Disconnect { trace_ctx: None })
                     .unwrap();
             }
+
             MessagePattern::Burst {
                 idle_time_seconds,
                 burst_size,
@@ -341,10 +406,9 @@ impl Actor for ProducerAgent {
                 let duration = Duration::from_secs(state.cfg.duration);
                 let topic = state.cfg.topic.clone();
 
-                let size = state.cfg.message_size.clone() as usize;
+                let size = state.cfg.message_size as usize;
                 let tcp_client = state.tcp_client.clone();
 
-                info!("Starting test...");
                 state.metrics.start_ms = crate::get_timestamp_in_milliseconds()?;
 
                 let mut ticker = time::interval(interval);
@@ -355,45 +419,63 @@ impl Actor for ProducerAgent {
                     ticker.tick().await;
                     seqno += 1;
 
-                    let faked = (0..=size).fake::<String>();
+                    // Create a span for each message
+                    let message_span = info_span!(
+                        "cassini.producer.send_message",
+                        seqno = seqno,
+                        topic = %topic
+                    );
+                    let _g = message_span.enter();
 
+                    // Capture the trace context from the current span
+                    let trace_ctx_opt = WireTraceCtx::from_current_span();
+                    if let Some(ctx) = trace_ctx_opt {
+                        tracing::debug!("Producer sending message with trace_id: {:02x?}", ctx.trace_id);
+                    }
+                    let trace_ctx_inner = trace_ctx_opt.expect("active span should have a valid context");
+
+                    let faked = (0..=size).fake::<String>();
                     let checksum = compute_checksum(faked.as_bytes());
 
                     let envelope = Envelope {
                         seqno,
                         data: faked,
                         checksum,
+                        trace_ctx: trace_ctx_inner,   // envelope expects non‑optional
                     };
 
                     let payload = rkyv::to_bytes::<rkyv::rancor::Error>(&envelope)
                         .expect("Expected to serialize payload to bytes");
 
-                    // send a bulk number of messages
+                    // Send a burst of messages (all using the same trace context)
                     for _ in 1..burst_size {
                         let message = TcpClientMessage::Publish {
                             topic: topic.clone(),
                             payload: payload.clone().into(),
+                            trace_ctx: Some(trace_ctx_inner),   // client message expects Option
                         };
 
                         if let Err(e) = tcp_client.send_message(message) {
                             tracing::warn!("Failed to send message {e}");
                             state.metrics.errors += 1;
                         }
-
                         state.metrics.sent += 1;
                     }
                 }
+
                 state.metrics.elapsed_ms =
                     crate::get_timestamp_in_milliseconds()? - state.metrics.start_ms;
 
-                // when done, print metrics and exit
+                debug!("Waiting for pending acknowledgments...");
+                sleep(Duration::from_millis(200)).await;
+
                 info!(
                     "{}",
                     to_string_pretty(&state.metrics).expect("expected to serialize to json")
                 );
 
                 tcp_client
-                    .send_message(TcpClientMessage::Disconnect)
+                    .send_message(TcpClientMessage::Disconnect { trace_ctx: None })
                     .unwrap();
             }
         }

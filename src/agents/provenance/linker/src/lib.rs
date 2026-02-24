@@ -4,7 +4,8 @@ use neo4rs::{BoltType, Graph};
 use polar::graph::compile_graph_op;
 use polar::graph::{GraphControllerMsg, GraphControllerState, GraphNodeKey, GraphOp};
 use ractor::{Actor, ActorProcessingErr, ActorRef};
-use tracing::{debug, trace, warn};
+use tracing::trace;
+use tracing::debug;
 
 use serde::{Deserialize, Serialize};
 pub mod linker;

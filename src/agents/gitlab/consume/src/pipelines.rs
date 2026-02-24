@@ -36,6 +36,7 @@ use polar::PROVENANCE_DISCOVERY_TOPIC;
 use polar::{QUERY_COMMIT_FAILED, TRANSACTION_FAILED_ERROR};
 use ractor::{async_trait, rpc::cast, Actor, ActorProcessingErr, ActorRef};
 use tracing::{debug, error, info};
+use cassini_types::WireTraceCtx;
 
 fn dowwnload_path(base_url: &str, download_url: &str) -> String {
     format!("{base_url}{download_url}")
@@ -73,6 +74,7 @@ impl GitlabPipelineConsumer {
                                         let message = TcpClientMessage::Publish {
                                             topic: PROVENANCE_DISCOVERY_TOPIC.to_string(),
                                             payload: payload.into(),
+                                            trace_ctx: WireTraceCtx::from_current_span(),
                                         };
                                         cast(&client, message).ok();
                                     }

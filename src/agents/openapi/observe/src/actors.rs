@@ -15,6 +15,7 @@ use tracing::debug;
 use tracing::info;
 use tracing::warn;
 use web_agent_common::AppData;
+use cassini_types::WireTraceCtx;
 
 pub struct ObserverSupervisor;
 
@@ -61,7 +62,8 @@ impl Actor for ObserverSupervisor {
             TcpClientArgs {
                 config,
                 registration_id: None,
-                events_output,
+                events_output: Some(events_output),   // wrap in Some
+                event_handler: None,                   // add missing field
             },
             myself.clone().into(),
         )
@@ -94,8 +96,6 @@ impl Actor for ObserverSupervisor {
                         let args = ApiObserverArgs {
                             openapi_endpoint: state.openapi_endpoint.clone(),
                         };
-
-                        // finish init
                         if let Err(e) = Actor::spawn_linked(
                             Some("polar.web.observer".to_string()),
                             ApiObserver,
@@ -107,8 +107,17 @@ impl Actor for ObserverSupervisor {
                             return Err(ActorProcessingErr::from(e));
                         }
                     }
-                    ClientEvent::TransportError { .. } => todo!("handle transport errors"),
-                    ClientEvent::MessagePublished { .. } => todo!(),
+                    ClientEvent::TransportError { reason } => {
+                        warn!("Transport error in observer: {}", reason);
+                        // Optionally stop the supervisor
+                        // myself.stop(Some(reason));
+                    }
+                    ClientEvent::MessagePublished { .. } => {
+                        // Ignore – observer only publishes, doesn't subscribe
+                    }
+                    ClientEvent::ControlResponse { .. } => {
+                        // Ignore control responses
+                    }
                 }
             }
         }
@@ -224,12 +233,11 @@ impl Actor for ApiObserver {
                         let client = where_is(BROKER_CLIENT_NAME.to_owned())
                             .expect("Expected to find TCP client");
 
-                        client
-                            .send_message(TcpClientMessage::Publish {
-                                topic: "polar.web.consumer".to_string(),
-                                payload: payload.to_vec(),
-                            })
-                            .expect("Expected to send publish message");
+                        client.send_message(TcpClientMessage::Publish {
+                            topic: "polar.web.consumer".to_string(),
+                            payload: payload.to_vec(),
+                            trace_ctx: WireTraceCtx::from_current_span(),
+                        })?;
                     }
                     Err(_) => todo!(),
                 }

@@ -17,8 +17,12 @@ tokio-util = "0.7.16"
 rustls = { version = "0.23", features = ["aws-lc-rs"] }
 tokio-rustls = "0.26.4"
 polar = { path = "../../lib" }
+cassini-tracing = { path = "../cassini-tracing" }
 cassini-types = { path = "../types" }
 # Fix a vulnerability in a transitive dependency.
 ring = { version = "=0.17.14" }
 url = "2.5.7"
 anyhow = "1.0.100"
+tracing-opentelemetry = "0.32.0"
+opentelemetry = "0.31.0"
+socket2 = "0.5"

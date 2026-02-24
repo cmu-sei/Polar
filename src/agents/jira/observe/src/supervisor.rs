@@ -97,7 +97,8 @@ impl Actor for ObserverSupervisor {
             TcpClientArgs {
                 config,
                 registration_id: None,
-                events_output,
+                events_output: Some(events_output),
+                event_handler: None,
             },
             myself.clone().into(),
         )
@@ -180,10 +181,13 @@ impl Actor for ObserverSupervisor {
                         warn!("failed to start issue observer {e}")
                     }
                 }
-                ClientEvent::MessagePublished { topic, payload } => {
+                ClientEvent::MessagePublished { topic, payload, .. } => {
                     todo!()
                 }
                 ClientEvent::TransportError { reason } => todo!(),
+                ClientEvent::ControlResponse { .. } => {
+                    // ignore
+                },
             },
         }
         Ok(())

@@ -148,9 +148,10 @@ pub fn init_logging(service_name: String) {
     use opentelemetry::{global, KeyValue};
     use opentelemetry_otlp::Protocol;
     use opentelemetry_otlp::WithExportConfig;
-    use opentelemetry_sdk::Resource;
+    use opentelemetry_sdk::{trace::{self, RandomIdGenerator}, Resource};
     use tracing_subscriber::filter::EnvFilter;
     use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+    use tracing_subscriber::Layer;
 
     eprintln!("INIT_LOGGING called");
 
@@ -171,22 +172,37 @@ pub fn init_logging(service_name: String) {
                 .with_endpoint(endpoint)
                 .build()
             {
-                let tracer_provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
+                let tracer_provider = trace::SdkTracerProvider::builder()
                     .with_batch_exporter(exporter)
+                    .with_sampler(trace::Sampler::AlwaysOn)
+                    .with_id_generator(RandomIdGenerator::default())
                     .with_resource(
-                        Resource::builder_empty()
-                            .with_attributes([KeyValue::new("service.name", service_name.clone())])
+                        Resource::builder()
+                            // FIX: Pass service_name directly, not a reference
+                            .with_service_name(service_name.clone())
+                            .with_attributes([
+                                KeyValue::new("service.name", service_name.clone()),
+                                KeyValue::new("service.version", env!("CARGO_PKG_VERSION")),
+                            ])
                             .build(),
                     )
                     .build();
 
                 global::set_tracer_provider(tracer_provider);
-                let tracer = global::tracer(format!("{service_name}.tracing"));
+                
+                // CRITICAL: Use the SAME tracer name as the broker
+                let tracer = global::tracer("cassini-tracing");
+                
+                let telemetry_layer = tracing_opentelemetry::layer()
+                    .with_tracer(tracer);
+                    
+                // Apply the filter separately
+                let filtered_telemetry_layer = telemetry_layer.with_filter(EnvFilter::from_default_env());
 
                 if tracing_subscriber::registry()
                     .with(filter)
                     .with(tracing_subscriber::fmt::layer())
-                    .with(tracing_opentelemetry::layer().with_tracer(tracer))
+                    .with(filtered_telemetry_layer)
                     .try_init()
                     .is_err()
                 {

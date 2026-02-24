@@ -16,6 +16,7 @@ use ractor::{
 use std::sync::Arc;
 use tracing::{debug, warn};
 use tracing::{error, instrument, trace};
+use cassini_types::WireTraceCtx;
 
 // === Supervisor state ===
 pub struct ProvenanceSupervisorState {
@@ -68,12 +69,12 @@ impl Actor for ProvenanceSupervisor {
             debug!("Received event: {event:?}");
             Some(SupervisorMessage::ClientEvent { event })
         });
-        let client_config = TCPClientConfig::new()?;
-        // start client
+        let config = TCPClientConfig::new()?;  // create config (adjust error handling as needed)
         let client_args = TcpClientArgs {
-            config: client_config,
+            config,
             registration_id: None,
-            events_output: events_output.clone(),
+            events_output: Some(events_output.clone()),
+            event_handler: None,
         };
 
         let (broker_client, _) = Actor::spawn_linked(
@@ -116,9 +117,10 @@ impl Actor for ProvenanceSupervisor {
                     debug!("Subscribing to topic {}", PROVENANCE_LINKER_TOPIC);
                     state
                         .broker_client
-                        .cast(cassini_client::TcpClientMessage::Subscribe(
-                            PROVENANCE_LINKER_TOPIC.to_string(),
-                        ))?;
+                        .cast(cassini_client::TcpClientMessage::Subscribe {
+                            topic: PROVENANCE_LINKER_TOPIC.to_string(),
+                            trace_ctx: WireTraceCtx::from_current_span(),
+                        })?;
 
                     let graph = neo4rs::Graph::connect(get_neo_config()?)?;
 
@@ -140,12 +142,16 @@ impl Actor for ProvenanceSupervisor {
                     )
                     .await?;
                 }
-                ClientEvent::MessagePublished { topic, payload } => {
+                ClientEvent::MessagePublished { topic, payload, .. } => {
                     Self::deserialize_and_dispatch(topic, payload)
                 }
                 ClientEvent::TransportError { reason } => {
                     error!("Transport error: {reason}");
                     myself.stop(Some(reason))
+                }
+                ClientEvent::ControlResponse { .. } => {
+                    // ignore or log
+                    debug!("Ignoring ControlResponse in linker");
                 }
             },
         }
@@ -163,7 +169,7 @@ impl Actor for ProvenanceSupervisor {
                 error!("Actor {name:?} failed! {err:?}");
                 myself.stop(Some(format!("{err:?}")));
             }
-            SupervisionEvent::ActorTerminated(name, state, reason) => {
+            SupervisionEvent::ActorTerminated(name, _state, reason) => {
                 error!("Actor {name:?} failed! {reason:?}");
                 myself.stop(reason)
             }

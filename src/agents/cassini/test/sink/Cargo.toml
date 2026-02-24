@@ -6,13 +6,14 @@ license = "MIT"
 
 [dependencies]
 harness-common = { path = "../common" }
-ractor = { version = "0.15.8", features = ["async-trait"] }
+ractor = { version = "0.15.8", features = ["async-trait", "monitors"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1.47.1", features = ["full"] }
 cassini-client = { path = "../../client" }
 cassini-types = { path = "../../types" }
 polar = { path = "../../../lib" }
+cassini-tracing = { path = "../../cassini-tracing" }
 tracing = "0.1.41"
 rustls = { version = "0.23", features = ["aws-lc-rs"] }
 tokio-rustls = "0.26.4"
@@ -20,3 +21,8 @@ rkyv = { workspace = true }
 uuid = { version = "1.18.1", features = ["v4"]}
 
 tokio-util = "0.7.16"
+
+opentelemetry = "0.31.0"
+opentelemetry_sdk = "0.31.0"
+tracing-opentelemetry = "0.32.0"
+tracing-subscriber = { version ="0.3.20", features=["std", "env-filter"]}

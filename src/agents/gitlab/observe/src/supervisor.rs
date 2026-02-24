@@ -84,7 +84,8 @@ impl Actor for ObserverSupervisor {
             TcpClientArgs {
                 config: client_config,
                 registration_id: None,
-                events_output,
+                events_output: Some(events_output),
+                event_handler: None,
             },
             myself.clone().into(),
         )
@@ -196,6 +197,8 @@ impl Actor for ObserverSupervisor {
                     }
                     ClientEvent::TransportError { .. } => {
                         todo!("Handle client transport error")
+                    }
+                    ClientEvent::ControlResponse { .. } => {
                     }
                 }
             }

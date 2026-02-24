@@ -1,0 +1,15 @@
+[package]
+name = "cassini-tracing"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[dependencies]
+opentelemetry = "0.31.0"
+opentelemetry-otlp = "0.31.0"
+opentelemetry_sdk = "0.31.0"
+tracing-opentelemetry = "0.32.1"
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.20", features = ["std", "env-filter"] }
+tracing-glog = "0.4.1"
+cassini-types = { path = "../types" }

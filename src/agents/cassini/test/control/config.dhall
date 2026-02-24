@@ -39,9 +39,9 @@ let TestPlan = { name : Text, tests : List Test }
 --that all used the same client.
 let producer =
        { topic = "steady"
-        , message_size = 4096
-        , duration = 60
-        , pattern = Pattern.Drip { idle_time_seconds = 250 }
+        , message_size = 128
+        , duration = 10
+        , pattern = Pattern.Drip { idle_time_seconds = 3000 }
         }
 
 

@@ -30,6 +30,7 @@ use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef};
 use rkyv::rancor;
 use serde_json::from_value;
 use tracing::{debug, error, info, instrument, trace};
+use cassini_types::WireTraceCtx;
 
 use crate::{KubeConsumerArgs, KubeConsumerState};
 
@@ -247,7 +248,10 @@ impl Actor for PodConsumer {
         debug!("{myself:?} starting, connecting to broker");
 
         args.broker_client
-            .send_message(TcpClientMessage::Subscribe(myself.get_name().unwrap()))?;
+            .send_message(TcpClientMessage::Subscribe {
+                topic: myself.get_name().unwrap().to_string(),
+                trace_ctx: WireTraceCtx::from_current_span(),
+            })?;
 
         //load neo config and connect to graph db
         match neo4rs::Graph::connect(args.graph_config) {

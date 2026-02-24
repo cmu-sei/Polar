@@ -5,11 +5,12 @@ use cassini_broker::{
 };
 use ractor::Actor;
 use tracing::error;
+use cassini_tracing::init_tracing;
 // ============================== Main ============================== //
 
 #[tokio::main]
 async fn main() {
-    cassini_broker::init_logging();
+    init_tracing("cassini-broker");
 
     //introspect invironment to generate args
     match BrokerArgs::new() {
@@ -28,4 +29,5 @@ async fn main() {
             std::process::exit(1);
         }
     }
+    std::process::exit(0);
 }

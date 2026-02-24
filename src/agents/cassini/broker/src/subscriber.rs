@@ -1,15 +1,21 @@
-use crate::UNEXPECTED_MESSAGE_STR;
+use crate::{UNEXPECTED_MESSAGE_STR};
 use crate::{
     get_subscriber_name, CLIENT_NOT_FOUND_TXT, DISCONNECTED_REASON, REGISTRATION_REQ_FAILED_TXT,
     SESSION_NOT_FOUND_TXT, SUBSCRIBE_REQUEST_FAILED_TXT, TIMEOUT_REASON,
 };
-use cassini_types::BrokerMessage;
+use cassini_types::{BrokerMessage, ShutdownPhase};
 use ractor::{
-    async_trait, registry::where_is, Actor, ActorProcessingErr, ActorRef, SupervisionEvent,
+    Actor,
+    ActorProcessingErr,
+    ActorRef,
+    registry::where_is,
+    SupervisionEvent,
 };
 use std::collections::VecDeque;
 use tracing::{debug, error, info, trace, trace_span, warn, Instrument};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
+use std::sync::Arc;
+use cassini_tracing::try_set_parent_otel;
 
 pub const SUBSCRIBER_NOT_FOUND_TXT: &str = "Subscriber not found!";
 
@@ -19,8 +25,9 @@ pub const SUBSCRIBER_NOT_FOUND_TXT: &str = "Subscriber not found!";
 /// Clients are only considered subscribed if an actor process exists and is managed by this actor
 pub struct SubscriberManager;
 
-/// Define the state for the actor
-pub struct SubscriberManagerState;
+pub struct SubscriberManagerState {
+    is_shutting_down: bool,
+}
 
 impl SubscriberManager {
     /// Removes all subscriptions for a given session
@@ -47,7 +54,7 @@ impl SubscriberManager {
     }
 }
 
-#[async_trait]
+#[ractor::async_trait]
 impl Actor for SubscriberManager {
     type Msg = BrokerMessage; // Messages this actor handles
     type State = SubscriberManagerState; // Internal state
@@ -59,13 +66,15 @@ impl Actor for SubscriberManager {
         _: (),
     ) -> Result<Self::State, ActorProcessingErr> {
         tracing::debug!("{myself:?} starting");
-        Ok(SubscriberManagerState)
+        Ok(SubscriberManagerState {
+            is_shutting_down: false,
+        })
     }
 
     async fn post_start(
         &self,
         myself: ActorRef<Self::Msg>,
-        _: &mut Self::State,
+        _state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         tracing::debug!("{myself:?} Started");
         Ok(())
@@ -75,27 +84,43 @@ impl Actor for SubscriberManager {
         &self,
         myself: ActorRef<Self::Msg>,
         message: Self::Msg,
-        _: &mut Self::State,
+        state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
+            BrokerMessage::InitiateShutdownPhase { phase } if phase == ShutdownPhase::TerminateSubscribers => {
+                info!("Starting termination of subscriber agents");
+                state.is_shutting_down = true;
+
+                // 1️⃣ Tell all subscriber agents to stop
+                let children: Vec<_> = myself.get_children();
+
+                for subscriber in &children {
+                    let _ = subscriber.send_message(BrokerMessage::PrepareForShutdown { auth_token: None });
+                    subscriber.stop(Some("SHUTDOWN_TERMINATE".to_string()));
+                }
+
+                if children.is_empty() {
+                    self.signal_terminate_complete(myself.clone(), state).await?;
+                }
+
+                // No timeout – ControlManager handles phase timeout.
+            }
+            
             BrokerMessage::RegistrationRequest {
                 registration_id,
                 client_id,
                 trace_ctx,
             } => {
-                let span = trace_span!(
-                    "cassini.subscriber_manager.handle_registration_request",
-                    %client_id,
-                    has_registration_id = registration_id.is_some()
-                );
-                if let Some(ctx) = trace_ctx {
-                    let _ = span.set_parent(ctx);
+                // Reject new registrations during shutdown
+                if state.is_shutting_down {
+                    warn!("Rejecting registration request during shutdown termination phase");
+                    return Ok(());
                 }
+              
+                let span = trace_span!("cassini.subscriber_manager.handle_registration_request", %client_id, has_registration_id = registration_id.is_some());
+                try_set_parent_otel(&span, trace_ctx);
                 let _g = span.enter();
-
-                trace!(
-                    "Subscriber manager for received registration request for client {client_id}"
-                );
+                trace!("Subscriber manager for received registration request for client {client_id}");
 
                 // find all subscribers for a given registration id
                 if let Some(registration_id) = registration_id {
@@ -153,15 +178,15 @@ impl Actor for SubscriberManager {
                 trace_ctx,
                 reply,
             } => {
-                let span = trace_span!(
-                    "cassini.subscriber_manager.create_subscriber",
-                    %registration_id,
-                    %topic
-                );
-                if let Some(ctx) = trace_ctx {
-                    let _ = span.set_parent(ctx);
+                // Reject new subscriber creation during shutdown
+                if state.is_shutting_down {
+                    warn!("Rejecting subscriber creation during shutdown");
+                    let _ = reply.send(Err(ActorProcessingErr::from("Broker is shutting down")));
+                    return Ok(());
                 }
-
+ 
+                let span = trace_span!("cassini.subscriber_manager.create_subscriber", %registration_id, %topic);
+                try_set_parent_otel(&span, trace_ctx);
                 trace!("Subscriber manager received subscribe command");
 
                 let subscriber_id = get_subscriber_name(&registration_id, &topic);
@@ -191,16 +216,10 @@ impl Actor for SubscriberManager {
                 topic,
                 trace_ctx,
             } => {
-                let span = trace_span!(
-                    "cassini.subscriber_manager.unsubscribe_request",
-                    %registration_id,
-                    %topic
-                );
-                if let Some(ctx) = trace_ctx {
-                    let _ = span.set_parent(ctx);
-                }
+                // Allow unsubscribes even during shutdown; they reduce work.
+                let span = trace_span!("cassini.subscriber_manager.unsubscribe_request", %registration_id, %topic);
+                try_set_parent_otel(&span, trace_ctx);
                 let _g = span.enter();
-
                 trace!("subscriber manager received unsubscribe request");
 
                 let subscriber_name = format!("{registration_id}:{topic}");
@@ -229,14 +248,8 @@ impl Actor for SubscriberManager {
                 trace_ctx,
                 ..
             } => {
-                let span = trace_span!(
-                    "cassini.subscriber_manager.disconnect_request",
-                    %client_id,
-                    has_registration_id = registration_id.is_some()
-                );
-                if let Some(ctx) = trace_ctx {
-                    let _ = span.set_parent(ctx);
-                }
+                let span = trace_span!("cassini.subscriber_manager.disconnect_request", %client_id, has_registration_id = registration_id.is_some());
+                try_set_parent_otel(&span, trace_ctx);
                 let _g = span.enter();
 
                 if let Some(registration_id) = registration_id {
@@ -245,6 +258,11 @@ impl Actor for SubscriberManager {
                         myself.clone(),
                         Some(DISCONNECTED_REASON.to_string()),
                     );
+                    
+                    // If we are in terminate phase, check if we can complete
+                    if state.is_shutting_down {
+                        self.check_terminate_complete(myself.clone(), state).await?;
+                    }
                 } else {
                     warn!("Failed to process disconnect request! registration_id missing.")
                 }
@@ -256,6 +274,9 @@ impl Actor for SubscriberManager {
                     myself.clone(),
                     Some(TIMEOUT_REASON.to_string()),
                 );
+                if state.is_shutting_down {
+                    self.check_terminate_complete(myself.clone(), state).await?;
+                }
             }
 
             other => warn!(?other, "{UNEXPECTED_MESSAGE_STR}"),
@@ -265,9 +286,9 @@ impl Actor for SubscriberManager {
 
     async fn handle_supervisor_evt(
         &self,
-        _: ActorRef<Self::Msg>,
+        myself: ActorRef<Self::Msg>,
         msg: SupervisionEvent,
-        _: &mut Self::State,
+        state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match msg {
             SupervisionEvent::ActorStarted(_) => (),
@@ -276,12 +297,53 @@ impl Actor for SubscriberManager {
                     "Subscription ended for session {0:?}, {reason:?}",
                     actor_cell.get_name()
                 );
+                // If we are in shutdown and no children remain, complete
+                if state.is_shutting_down {
+                    self.check_terminate_complete(myself.clone(), state).await?;
+                }
             }
-            SupervisionEvent::ActorFailed(..) => {
-                todo!("Subscriber failed unexpectedly, restart subscription and update state")
+            SupervisionEvent::ActorFailed(actor_cell, error) => {
+                error!(
+                    "Subscriber actor {} ({:?}) failed unexpectedly: {}",
+                    actor_cell.get_name().unwrap_or("<unnamed>".to_string()),
+                    actor_cell.get_id(),
+                    error
+                );
+                // No restart logic implemented; the actor is dead and will be removed from supervision.
+                // If we are in shutdown, check completion later via ActorTerminated.
             }
             SupervisionEvent::ProcessGroupChanged(..) => (),
         }
+        Ok(())
+    }
+}
+
+impl SubscriberManager {
+    async fn check_terminate_complete(
+        &self,
+        myself: ActorRef<BrokerMessage>,
+        state: &mut SubscriberManagerState,
+    ) -> Result<(), ActorProcessingErr> {
+        if state.is_shutting_down && myself.get_children().is_empty() {
+            self.signal_terminate_complete(myself.clone(), state).await?;
+        }
+        Ok(())
+    }
+
+    async fn signal_terminate_complete(
+        &self,
+        myself: ActorRef<BrokerMessage>,
+        _state: &mut SubscriberManagerState,
+    ) -> Result<(), ActorProcessingErr> {
+        info!("All subscriber agents terminated");
+
+        if let Some(supervisor) = myself.try_get_supervisor() {
+            supervisor.send_message(BrokerMessage::ShutdownPhaseComplete {
+                phase: ShutdownPhase::TerminateSubscribers,
+            })?;
+        }
+
+        myself.stop(Some("SHUTDOWN_TERMINATED".to_string()));
         Ok(())
     }
 }
@@ -295,10 +357,10 @@ pub struct SubscriberAgent;
 pub struct SubscriberAgentState {
     registration_id: String,
     topic: String,
-    dead_letter_queue: VecDeque<Vec<u8>>,
+    dead_letter_queue: VecDeque<Arc<Vec<u8>>>,  // Changed from VecDeque<Vec<u8>>
 }
 
-#[async_trait]
+#[ractor::async_trait]
 impl Actor for SubscriberAgent {
     type Msg = BrokerMessage; // Messages this actor handles
     type State = SubscriberAgentState; // Internal state
@@ -351,14 +413,8 @@ impl Actor for SubscriberAgent {
                 client_id,
                 trace_ctx,
             } => {
-                let span = trace_span!(
-                    "cassini.subscriber.handle_registration_request",
-                    %client_id,
-                    has_registration_id = registration_id.is_some()
-                );
-                if let Some(ctx) = trace_ctx {
-                    let _ = span.set_parent(ctx);
-                }
+                let span = trace_span!("cassini.subscriber.handle_registration_request", %client_id, has_registration_id = registration_id.is_some());
+                try_set_parent_otel(&span, trace_ctx);
                 let _enter = span.enter();
 
                 trace!("Subscriber actor received registration request for client {client_id}");
@@ -393,27 +449,20 @@ impl Actor for SubscriberAgent {
                 ..
             } => {
                 let span = trace_span!("cassini.subscriber.publish_response", %topic);
-                if let Some(ctx) = trace_ctx {
-                    let _ = span.set_parent(ctx);
-                }
+                try_set_parent_otel(&span, trace_ctx);
                 let _enter = span.enter();
-
                 trace!("Subscriber actor received publish response for topic \"{topic}\"");
-
-                debug!(
-                    "New message on topic: \"{topic}\", forwarding to session: {}",
-                    state.registration_id
-                );
+                debug!("New message on topic: \"{topic}\", forwarding to session: {}", state.registration_id);
 
                 if let Some(session) = where_is(state.registration_id.clone()) {
                     // Forward the message; if we fail to send, session is likely dead (timeout/disconnect),
                     // and message can drop (or be DLQ'd by session).
                     if let Err(e) = session.send_message(BrokerMessage::PushMessage {
-                        payload,
+                        payload: payload.clone(),  // Changed from payload.to_vec()
                         topic,
                         trace_ctx: Some(span.context()),
                     }) {
-                        warn!("Failed to forward message to subscirber! {e} Ending subscription");
+                        warn!("Failed to forward message to subscriber! {e} Ending subscription");
                         myself.stop(None);
                     }
                 } else {
@@ -422,9 +471,10 @@ impl Actor for SubscriberAgent {
                 }
             }
 
+            // Also update the PushMessageFailed handler (around line 248):
             BrokerMessage::PushMessageFailed { payload } => {
                 // session couldn't talk to listener, add message to DLQ
-                state.dead_letter_queue.push_back(payload);
+                state.dead_letter_queue.push_back(payload.clone());  // Changed from just payload
                 debug!(
                     "Subscriber {0} queue has {1} message(s) waiting",
                     myself
@@ -433,7 +483,6 @@ impl Actor for SubscriberAgent {
                     state.dead_letter_queue.len()
                 );
             }
-
             _ => {
                 warn!(?message, "{UNEXPECTED_MESSAGE_STR}");
             }

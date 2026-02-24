@@ -4,8 +4,7 @@ use crate::{
     SESSION_MISSING_REASON_STR, SESSION_NOT_FOUND_TXT, SUBSCRIBE_REQUEST_FAILED_TXT,
 };
 use async_trait::async_trait;
-use cassini_types::{ArchivedClientMessage, BrokerMessage, ClientMessage, DisconnectReason};
-use opentelemetry::Context;
+use cassini_types::{ArchivedClientMessage, BrokerMessage, ClientMessage, DisconnectReason, WireTraceCtx, ShutdownPhase};
 use ractor::{registry::where_is, Actor, ActorProcessingErr, ActorRef, SupervisionEvent};
 use rkyv::{
     deserialize,
@@ -29,6 +28,9 @@ use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
+use std::collections::HashSet;
+use tokio_util::sync::CancellationToken;
+use cassini_tracing::try_set_parent_otel;
 
 static ZERO_LEN_LAST_LOG_MS: AtomicU64 = AtomicU64::new(0);
 static ZERO_LEN_COUNT: AtomicU64 = AtomicU64::new(0);
@@ -47,6 +49,11 @@ pub struct ListenerManager;
 pub struct ListenerManagerState {
     bind_addr: String,
     server_config: Arc<ServerConfig>,
+    is_shutting_down: bool,
+    terminating_listeners: bool,
+    accept_task_abort: Option<tokio::task::AbortHandle>,
+    shutdown_token: CancellationToken,
+    active_listeners: HashSet<String>, // client_ids
 }
 
 pub struct ListenerManagerArgs {
@@ -54,6 +61,7 @@ pub struct ListenerManagerArgs {
     pub server_cert_file: String,
     pub private_key_file: String,
     pub ca_cert_file: String,
+    pub shutdown_auth_token: Option<String>,
 }
 
 #[async_trait]
@@ -69,6 +77,8 @@ impl Actor for ListenerManager {
     ) -> Result<Self::State, ActorProcessingErr> {
         let span = debug_span!("cassini.listener_manager.init", actor = ?myself, bind_addr = %args.bind_addr);
         let _g = span.enter();
+
+        let _shutdown_auth_token = args.shutdown_auth_token.clone();
 
         debug!("ListenerManager starting");
 
@@ -114,6 +124,11 @@ impl Actor for ListenerManager {
         Ok(ListenerManagerState {
             bind_addr: args.bind_addr,
             server_config: Arc::new(server_config),
+            is_shutting_down: false,
+            accept_task_abort: None,
+            shutdown_token: CancellationToken::new(),
+            terminating_listeners: false,
+            active_listeners: HashSet::new(),
         })
     }
 
@@ -136,9 +151,10 @@ impl Actor for ListenerManager {
             .map_err(|e| ActorProcessingErr::from(e))?;
 
         info!("Server running on {bind_addr}");
+        let shutdown_token = state.shutdown_token.clone();
 
         // Accept loop runs in its own task; do NOT keep an entered span alive forever.
-        let _ = tokio::spawn({
+        let join_handle = tokio::spawn({
             let myself = myself.clone();
             async move {
                 loop {
@@ -149,6 +165,12 @@ impl Actor for ListenerManager {
                             continue;
                         }
                     };
+
+                    // Check if we're shutting down before accepting new connection
+                    if shutdown_token.is_cancelled() {
+                        debug!("ListenerManager not accepting new connections, stopping accept loop");
+                        break;
+                    }
 
                     let handshake_span = info_span!(
                         "cassini.listener_manager.accept",
@@ -201,14 +223,16 @@ impl Actor for ListenerManager {
             }
         });
 
+        state.accept_task_abort = Some(join_handle.abort_handle());
+
         Ok(())
     }
 
     async fn handle_supervisor_evt(
         &self,
-        _: ActorRef<Self::Msg>,
+        myself: ActorRef<Self::Msg>,
         msg: SupervisionEvent,
-        _: &mut Self::State,
+        state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match msg {
             SupervisionEvent::ActorStarted(actor_cell) => {
@@ -217,6 +241,23 @@ impl Actor for ListenerManager {
                     worker_id = ?actor_cell.get_id(),
                     "Worker started"
                 );
+                if let Some(name) = actor_cell.get_name() {
+                    state.active_listeners.insert(name);
+                }
+            }
+            SupervisionEvent::ActorTerminated(actor_cell, _, _) => {
+                if let Some(name) = actor_cell.get_name() {
+                    state.active_listeners.remove(&name);
+                    // If we are in TerminateListeners phase and no listeners remain, stop manager
+                    if state.terminating_listeners && state.active_listeners.is_empty() {
+                        if let Some(supervisor) = myself.try_get_supervisor() {
+                            let _ = supervisor.send_message(BrokerMessage::ShutdownPhaseComplete {
+                                phase: ShutdownPhase::TerminateListeners,
+                            });
+                        }
+                        myself.stop(Some("SHUTDOWN_LISTENERS_TERMINATED".to_string()));
+                    }
+                }
             }
             _ => (),
         }
@@ -225,23 +266,84 @@ impl Actor for ListenerManager {
 
     async fn handle(
         &self,
-        _: ActorRef<Self::Msg>,
+        myself: ActorRef<Self::Msg>,
         message: Self::Msg,
-        _: &mut Self::State,
+        state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
+            // Phase 1: stop accepting new connections, but keep existing listeners alive
+            BrokerMessage::InitiateShutdownPhase { phase } if phase == ShutdownPhase::StopAcceptingNewConnections => {
+                if state.is_shutting_down {
+                    warn!("ListenerManager already shutting down");
+                    return Ok(());
+                }
+                
+                info!("ListenerManager: stopping new connections");
+                state.is_shutting_down = true;
+                
+                // Cancel the accept loop
+                state.shutdown_token.cancel();
+                if let Some(handle) = state.accept_task_abort.take() {
+                    handle.abort();
+                }
+
+                // Signal that we have completed the phase
+                if let Some(supervisor) = myself.try_get_supervisor() {
+                    supervisor.send_message(BrokerMessage::ShutdownPhaseComplete {
+                        phase: ShutdownPhase::StopAcceptingNewConnections,
+                    })?;
+                }
+                // DO NOT STOP the manager; keep it alive for the final phase.
+            }
+
+            // Final phase: terminate all listener actors and then stop
+            BrokerMessage::InitiateShutdownPhase { phase } if phase == ShutdownPhase::TerminateListeners => {
+                if state.terminating_listeners {
+                    return Ok(());
+                }
+                info!("ListenerManager: terminating all listener actors");
+                state.terminating_listeners = true;
+
+                // Stop all active listeners
+                for client_id in state.active_listeners.clone() {
+                    if let Some(listener) = where_is(client_id) {
+                        listener.stop(Some("SHUTDOWN_TERMINATE_LISTENER".to_string()));
+                    }
+                }
+
+                // If no listeners were active, complete immediately
+                if state.active_listeners.is_empty() {
+                    if let Some(supervisor) = myself.try_get_supervisor() {
+                        let _ = supervisor.send_message(BrokerMessage::ShutdownPhaseComplete {
+                            phase: ShutdownPhase::TerminateListeners,
+                        });
+                    }
+                    myself.stop(Some("SHUTDOWN_NO_LISTENERS".to_string()));
+                }
+                // Otherwise, wait for ActorTerminated events to trigger completion
+            }
+
             BrokerMessage::RegistrationResponse {
                 client_id,
                 result,
                 trace_ctx,
             } => {
-                let span = trace_span!("cassini.listener_manager.registration_response", %client_id);
-                if let Some(ctx) = trace_ctx {
-                    let _ = span.set_parent(ctx);
+                // Reject new registrations during shutdown
+                if state.is_shutting_down {
+                    warn!("Rejecting registration response during shutdown");
+                    return Ok(());
                 }
+
+                let span = trace_span!("cassini.request.registration", %client_id);
+                try_set_parent_otel(&span, trace_ctx);
                 let _g = span.enter();
 
                 trace!("Forwarding registration response to listener");
+                
+                // Check if broker is shutting down
+                if let Some(broker) = where_is(BROKER_NAME.to_string()) {
+                    let _broker = broker; // Keep for potential future use
+                }
 
                 match where_is(client_id.clone()) {
                     Some(listener) => {
@@ -258,61 +360,51 @@ impl Actor for ListenerManager {
                     }
                 }
             }
-
-            BrokerMessage::DisconnectRequest {
-                reason,
-                client_id,
-                registration_id,
-                trace_ctx,
-            } => {
-                let span = trace_span!(
-                    "cassini.listener_manager.disconnect_request",
-                    %client_id,
-                    registration_id = ?registration_id,
-                    reason = ?reason
-                );
-                if let Some(ctx) = trace_ctx {
-                    let _ = span.set_parent(ctx);
-                }
+            BrokerMessage::DisconnectRequest { reason, client_id, registration_id, trace_ctx } => {
+                let span = trace_span!("cassini.listener_manager.disconnect_request", %client_id, registration_id = ?registration_id, reason = ?reason);
+                try_set_parent_otel(&span, trace_ctx);
                 let _g = span.enter();
-
                 trace!("ListenerManager handling disconnect");
 
-                match where_is(client_id.clone()) {
-                    Some(listener) => {
-                        if let Some(id) = registration_id {
-                            match where_is(id.clone()) {
-                                Some(session) => match reason {
-                                    DisconnectReason::RemoteClosed => {
-                                        info!("Client disconnected (remote closed)");
-                                        let _ = session.send_message(BrokerMessage::DisconnectRequest {
-                                            reason,
-                                            client_id: client_id.clone(),
-                                            registration_id: Some(id),
-                                            trace_ctx: Some(span.context()),
-                                        });
-                                    }
-                                    DisconnectReason::TransportError(err) => {
-                                        warn!("Client disconnected unexpectedly; notifying session");
-                                        let _ = session.send_message(BrokerMessage::TimeoutMessage {
-                                            client_id: client_id.clone(),
-                                            registration_id: id,
-                                            error: Some(err),
-                                        });
-                                    }
-                                },
-                                None => warn!("{SESSION_NOT_FOUND_TXT}: {id}"),
+                // Always notify the session if we have a registration_id
+                if let Some(id) = registration_id {
+                    if let Some(session) = where_is(id.clone()) {
+                        match reason {
+                            DisconnectReason::RemoteClosed => {
+                                info!("Client disconnected (remote closed)");
+                                let _ = session.send_message(BrokerMessage::DisconnectRequest {
+                                    reason,
+                                    client_id: client_id.clone(),
+                                    registration_id: Some(id),
+                                    trace_ctx: Some(span.context()),
+                                });
+                            }
+                            DisconnectReason::TransportError(err) => {
+                                warn!("Client disconnected unexpectedly; notifying session");
+                                let _ = session.send_message(BrokerMessage::TimeoutMessage {
+                                    client_id: client_id.clone(),
+                                    registration_id: id,
+                                    error: Some(err),
+                                });
                             }
                         }
-                        listener.stop(None);
+                    } else {
+                        warn!("Session not found for registration_id: {}", id);
                     }
-                    None => warn!("Couldn't find listener {client_id}"),
+                } else {
+                    warn!("DisconnectRequest missing registration_id");
                 }
-            }
 
+                // Optionally stop the listener if it still exists (it is already stopping itself)
+                if let Some(listener) = where_is(client_id.clone()) {
+                    listener.stop(None);
+                }
+
+                // If we are in TerminateListeners phase and this listener was the last one,
+                // the ActorTerminated handler will take care of completion.
+            }
             _ => (),
         }
-
         Ok(())
     }
 }
@@ -348,7 +440,6 @@ impl Listener {
     ) -> Result<(), Error> {
         let bytes = rkyv::to_bytes::<Error>(&message)?;
 
-        // CAUTION: keep this u32. The reader expects u32.
         let len_u32: u32 = bytes
             .len()
             .try_into()
@@ -531,13 +622,11 @@ impl Actor for Listener {
             BrokerMessage::RegistrationRequest {
                 registration_id,
                 client_id,
-                ..
+                trace_ctx,
             } => {
-                // Fresh root per inbound request so Jaeger shows broker/session spans clearly.
                 let span = trace_span!("cassini.request.registration", %client_id, registration_id = ?registration_id);
-                let _ = span.set_parent(Context::new()); // break any ambient parent
+                try_set_parent_otel(&span, trace_ctx);
                 let _g = span.enter();
-
                 trace!("Listener received registration request");
 
                 match where_is(BROKER_NAME.to_string()) {
@@ -552,6 +641,7 @@ impl Actor for Listener {
 
                             let msg = ClientMessage::RegistrationResponse {
                                 result: Err(err_msg.clone()),
+                                trace_ctx: WireTraceCtx::from_current_span(),
                             };
 
                             if let Err(e) = Listener::write(client_id.clone(), msg, Arc::clone(&state.writer)).await {
@@ -568,6 +658,7 @@ impl Actor for Listener {
 
                         let msg = ClientMessage::RegistrationResponse {
                             result: Err(err_msg.clone()),
+                            trace_ctx: WireTraceCtx::from_current_span(),
                         };
 
                         if let Err(e) = Listener::write(client_id.clone(), msg, Arc::clone(&state.writer)).await {
@@ -585,11 +676,8 @@ impl Actor for Listener {
                 trace_ctx,
             } => {
                 let span = trace_span!("cassini.listener.registration_response", %client_id);
-                if let Some(ctx) = trace_ctx {
-                    let _ = span.set_parent(ctx);
-                }
+                try_set_parent_otel(&span, trace_ctx);
                 let _g = span.enter();
-
                 trace!("Listener received registration response");
 
                 match result {
@@ -598,6 +686,7 @@ impl Actor for Listener {
 
                         let msg = ClientMessage::RegistrationResponse {
                             result: Ok(registration_id),
+                            trace_ctx: WireTraceCtx::from_current_span(),
                         };
 
                         if let Err(e) = Listener::write(client_id.clone(), msg, Arc::clone(&state.writer)).await {
@@ -613,6 +702,7 @@ impl Actor for Listener {
                         let err_msg = format!("{REGISTRATION_REQ_FAILED_TXT}: {error}");
                         let msg = ClientMessage::RegistrationResponse {
                             result: Err(err_msg.clone()),
+                            trace_ctx: WireTraceCtx::from_current_span(),
                         };
 
                         if let Err(e) = Listener::write(client_id.clone(), msg, Arc::clone(&state.writer)).await {
@@ -622,23 +712,43 @@ impl Actor for Listener {
                 }
             }
 
+            BrokerMessage::DisconnectRequest { reason, client_id, registration_id, trace_ctx } => {
+                let span = trace_span!("cassini.listener.disconnect_request", %client_id, registration_id = ?registration_id, reason = ?reason);
+                try_set_parent_otel(&span, trace_ctx);
+                let _g = span.enter();
+
+                // Use the registration_id from the message if present, otherwise stored one
+                let effective_reg = registration_id.or_else(|| state.registration_id.clone());
+                if let Some(reg) = effective_reg {
+                    if let Some(manager) = myself.try_get_supervisor() {
+                        let _ = manager.send_message(BrokerMessage::DisconnectRequest {
+                            reason: reason.clone(),
+                            client_id: client_id.clone(),
+                            registration_id: Some(reg),
+                            trace_ctx: Some(span.context()),
+                        });
+                    }
+                }
+
+                debug!("Listener received disconnect request, stopping");
+                myself.stop(Some(format!("Disconnect: {:?}", reason)));
+            }
+
+            // When the manager tells us to stop (final phase), we just stop.
+            BrokerMessage::PrepareForShutdown { .. } => {
+                debug!("Listener received shutdown notification, stopping");
+                myself.stop(Some("SHUTDOWN_GRACEFUL".to_string()));
+            }
+
             BrokerMessage::PublishRequest {
                 topic,
                 payload,
                 registration_id,
-                ..
+                trace_ctx,
             } => {
-                let span = trace_span!(
-                    "cassini.request.publish",
-                    client_id = %state.client_id,
-                    %registration_id,
-                    topic = ?topic,
-                    payload_bytes = payload.len()
-                );
-                let _ = span.set_parent(Context::new());
-                let otel_ctx = span.context();
+                let span = info_span!("cassini.request.publish_request", client_id = %state.client_id, %registration_id, topic = ?topic, payload_bytes = payload.len());
+                try_set_parent_otel(&span, trace_ctx.clone());
                 let _g = span.enter();
-
                 trace!("Listener received publish request");
 
                 let Some(listener_reg) = state.registration_id.clone() else {
@@ -646,7 +756,10 @@ impl Actor for Listener {
                     warn!("{err_msg}");
                     let _ = Listener::write(
                         state.client_id.clone(),
-                        ClientMessage::ErrorMessage(err_msg),
+                        ClientMessage::ErrorMessage { 
+                            error: err_msg, 
+                            trace_ctx: WireTraceCtx::from_current_span() 
+                        },
                         Arc::clone(&state.writer),
                     )
                     .await;
@@ -658,7 +771,10 @@ impl Actor for Listener {
                     warn!("{err_msg}");
                     let _ = Listener::write(
                         state.client_id.clone(),
-                        ClientMessage::ErrorMessage(err_msg),
+                        ClientMessage::ErrorMessage { 
+                            error: err_msg, 
+                            trace_ctx: WireTraceCtx::from_current_span() 
+                        },
                         Arc::clone(&state.writer),
                     )
                     .await;
@@ -671,7 +787,7 @@ impl Actor for Listener {
                             registration_id: registration_id.clone(),
                             topic: topic.clone(),
                             payload: payload.clone(),
-                            trace_ctx: Some(otel_ctx),
+                            trace_ctx,
                         }) {
                             let msg = ClientMessage::PublishResponse {
                                 topic,
@@ -679,6 +795,7 @@ impl Actor for Listener {
                                 result: Err(format!(
                                     "{PUBLISH_REQ_FAILED_TXT}: {SESSION_NOT_FOUND_TXT}: {e}"
                                 )),
+                                trace_ctx: WireTraceCtx::from_current_span(),
                             };
                             if let Err(e) = Listener::write(state.client_id.clone(), msg, Arc::clone(&state.writer)).await {
                                 error!(error = ?e, "Failed to write PublishResponse");
@@ -690,6 +807,7 @@ impl Actor for Listener {
                             topic,
                             payload,
                             result: Err(format!("{PUBLISH_REQ_FAILED_TXT}: {SESSION_NOT_FOUND_TXT}")),
+                            trace_ctx: WireTraceCtx::from_current_span(),
                         };
                         let _ = Listener::write(state.client_id.clone(), msg, Arc::clone(&state.writer)).await;
                     }
@@ -703,14 +821,16 @@ impl Actor for Listener {
                 result,
             } => {
                 let span = trace_span!("cassini.listener.publish_response", topic = ?topic, ok = result.is_ok());
-                if let Some(ctx) = trace_ctx {
-                    let _ = span.set_parent(ctx);
-                }
+                try_set_parent_otel(&span, trace_ctx);
                 let _g = span.enter();
-
                 trace!("Listener received publish response");
 
-                let msg = ClientMessage::PublishResponse { topic, payload, result };
+                let msg = ClientMessage::PublishResponse { 
+                    topic, 
+                    payload, 
+                    result,
+                    trace_ctx: WireTraceCtx::from_current_span(),
+                };
                 if let Err(e) = Listener::write(state.client_id.clone(), msg, Arc::clone(&state.writer)).await {
                     error!(error = ?e, "Failed to write PublishResponse");
                 }
@@ -718,12 +838,13 @@ impl Actor for Listener {
 
             BrokerMessage::PublishRequestAck { topic, trace_ctx } => {
                 let span = trace_span!("cassini.listener.publish_ack", topic = ?topic);
-                if let Some(ctx) = trace_ctx {
-                    let _ = span.set_parent(ctx);
-                }
+                try_set_parent_otel(&span, trace_ctx);
                 let _g = span.enter();
 
-                let msg = ClientMessage::PublishRequestAck(topic);
+                let msg = ClientMessage::PublishRequestAck {
+                    topic,
+                    trace_ctx: WireTraceCtx::from_current_span(),
+                };
                 if let Err(e) = Listener::write(state.client_id.clone(), msg, Arc::clone(&state.writer)).await {
                     error!(error = ?e, "Failed to write PublishRequestAck");
                 }
@@ -736,12 +857,14 @@ impl Actor for Listener {
                 result,
             } => {
                 let span = trace_span!("cassini.listener.subscribe_ack", %registration_id, topic = ?topic, ok = result.is_ok());
-                if let Some(ctx) = trace_ctx {
-                    let _ = span.set_parent(ctx);
-                }
+                try_set_parent_otel(&span, trace_ctx);
                 let _g = span.enter();
 
-                let msg = ClientMessage::SubscribeAcknowledgment { topic, result };
+                let msg = ClientMessage::SubscribeAcknowledgment { 
+                    topic, 
+                    result,
+                    trace_ctx: WireTraceCtx::from_current_span(),
+                };
                 if let Err(e) = Listener::write(state.client_id.clone(), msg, Arc::clone(&state.writer)).await {
                     error!(error = ?e, "Failed to write SubscribeAcknowledgment");
                 }
@@ -750,12 +873,11 @@ impl Actor for Listener {
             BrokerMessage::SubscribeRequest {
                 registration_id,
                 topic,
-                ..
+                trace_ctx,
             } => {
                 let span = trace_span!("cassini.request.subscribe", client_id = %state.client_id, %registration_id, topic = ?topic);
-                let _ = span.set_parent(Context::new());
+                try_set_parent_otel(&span, trace_ctx);
                 let _g = span.enter();
-
                 trace!("Listener received subscribe request");
 
                 let Some(listener_reg) = state.registration_id.clone() else {
@@ -763,6 +885,7 @@ impl Actor for Listener {
                     let msg = ClientMessage::SubscribeAcknowledgment {
                         topic,
                         result: Err("Bad request: not registered".to_string()),
+                        trace_ctx: WireTraceCtx::from_current_span(),
                     };
                     let _ = Listener::write(state.client_id.clone(), msg, Arc::clone(&state.writer)).await;
                     return Ok(());
@@ -773,6 +896,7 @@ impl Actor for Listener {
                     let msg = ClientMessage::SubscribeAcknowledgment {
                         topic,
                         result: Err("Bad request: session mismatch".to_string()),
+                        trace_ctx: WireTraceCtx::from_current_span(),
                     };
                     let _ = Listener::write(state.client_id.clone(), msg, Arc::clone(&state.writer)).await;
                     return Ok(());
@@ -791,7 +915,10 @@ impl Actor for Listener {
                             error!("{err_msg}");
                             let _ = Listener::write(
                                 state.client_id.clone(),
-                                ClientMessage::ErrorMessage(err_msg),
+                                ClientMessage::ErrorMessage { 
+                                    error: err_msg, 
+                                    trace_ctx: WireTraceCtx::from_current_span() 
+                                },
                                 Arc::clone(&state.writer),
                             )
                             .await;
@@ -802,6 +929,7 @@ impl Actor for Listener {
                         let msg = ClientMessage::SubscribeAcknowledgment {
                             topic,
                             result: Err("Failed to complete request: session missing".to_string()),
+                            trace_ctx: WireTraceCtx::from_current_span(),
                         };
                         let _ = Listener::write(state.client_id.clone(), msg, Arc::clone(&state.writer)).await;
                         myself.stop(Some(SESSION_MISSING_REASON_STR.to_string()));
@@ -812,12 +940,11 @@ impl Actor for Listener {
             BrokerMessage::UnsubscribeRequest {
                 registration_id,
                 topic,
-                ..
+                trace_ctx,
             } => {
                 let span = trace_span!("cassini.request.unsubscribe", client_id = %state.client_id, %registration_id, topic = ?topic);
-                let _ = span.set_parent(Context::new());
+                try_set_parent_otel(&span, trace_ctx);
                 let _g = span.enter();
-
                 trace!("Listener received unsubscribe request");
 
                 let Some(listener_reg) = state.registration_id.clone() else {
@@ -843,7 +970,10 @@ impl Actor for Listener {
                             error!("{err_msg}");
                             let _ = Listener::write(
                                 state.client_id.clone(),
-                                ClientMessage::ErrorMessage(err_msg),
+                                ClientMessage::ErrorMessage { 
+                                    error: err_msg, 
+                                    trace_ctx: WireTraceCtx::from_current_span() 
+                                },
                                 Arc::clone(&state.writer),
                             )
                             .await;
@@ -855,7 +985,10 @@ impl Actor for Listener {
                         error!("{err_msg}");
                         let _ = Listener::write(
                             state.client_id.clone(),
-                            ClientMessage::ErrorMessage(err_msg),
+                            ClientMessage::ErrorMessage { 
+                                error: err_msg, 
+                                trace_ctx: WireTraceCtx::from_current_span() 
+                            },
                             Arc::clone(&state.writer),
                         )
                         .await;
@@ -866,45 +999,29 @@ impl Actor for Listener {
             BrokerMessage::UnsubscribeAcknowledgment {
                 registration_id: _,
                 topic,
-                ..
+                result,
             } => {
+                let span = trace_span!("cassini.listener.unsubscribe_ack", topic = ?topic);
+                let _g = span.enter();
+                
                 debug!(topic = ?topic, "Unsubscribe acknowledged");
                 let msg = ClientMessage::UnsubscribeAcknowledgment {
                     topic,
-                    result: Ok(()),
+                    result,
+                    trace_ctx: WireTraceCtx::from_current_span(),
                 };
                 let _ = Listener::write(state.client_id.clone(), msg, Arc::clone(&state.writer)).await;
-            }
-
-            BrokerMessage::DisconnectRequest { reason, client_id, .. } => {
-                let span = trace_span!("cassini.request.disconnect", %client_id, reason = ?reason);
-                let _ = span.set_parent(Context::new());
-                let _g = span.enter();
-
-                trace!("Listener received disconnect request");
-
-                if let Some(manager) = myself.try_get_supervisor() {
-                    let _ = manager.send_message(BrokerMessage::DisconnectRequest {
-                        reason,
-                        client_id,
-                        registration_id: state.registration_id.clone(),
-                        trace_ctx: Some(span.context()),
-                    });
-                } else {
-                    error!("Failed to locate ListenerManager; killing listener");
-                    myself.kill();
-                }
             }
 
             BrokerMessage::ControlRequest {
                 registration_id,
                 op,
+                trace_ctx,
                 ..
             } => {
                 let span = trace_span!("cassini.request.control", client_id = %state.client_id, %registration_id, op = ?op);
-                let _ = span.set_parent(Context::new());
+                try_set_parent_otel(&span, trace_ctx);
                 let _g = span.enter();
-
                 trace!("Listener received control request");
 
                 let Some(listener_reg) = state.registration_id.clone() else {
@@ -933,16 +1050,14 @@ impl Actor for Listener {
                 trace_ctx,
             } => {
                 let span = trace_span!("cassini.listener.control_response", %registration_id, ok = result.is_ok());
-                if let Some(ctx) = trace_ctx {
-                    let _ = span.set_parent(ctx);
-                }
+                try_set_parent_otel(&span, trace_ctx);
                 let _g = span.enter();
-
                 trace!("Received ControlResponse");
 
                 let msg = ClientMessage::ControlResponse {
                     registration_id,
                     result,
+                    trace_ctx: WireTraceCtx::from_current_span(),
                 };
 
                 if let Err(e) = Listener::write(state.client_id.clone(), msg, Arc::clone(&state.writer)).await {

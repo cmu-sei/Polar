@@ -29,6 +29,7 @@ members = [
     "cassini/broker",
     "cassini/client",
     "cassini/types",
+    "cassini/cassini-c2",
     "cassini/test/common",
     "cassini/test/control",
     "cassini/test/producer",

@@ -20,6 +20,7 @@ use std::str::FromStr;
 use tracing::{debug, error, field::debug, info, instrument, trace, warn};
 pub const BROKER_CLIENT_NAME: &str = "polar.provenance.resolver.tcp";
 use serde::Deserialize;
+use cassini_types::WireTraceCtx;
 
 #[derive(Debug, serde::Serialize, Deserialize, Clone)]
 pub struct ResolverConfig {
@@ -114,7 +115,8 @@ impl Actor for ResolverSupervisor {
             TcpClientArgs {
                 config,
                 registration_id: None,
-                events_output,
+                events_output: Some(events_output),  // wrap in Some
+                event_handler: None,                  // add missing field
             },
             myself.clone().into(),
         )
@@ -157,7 +159,7 @@ impl Actor for ResolverSupervisor {
                     )
                     .await?;
                 }
-                ClientEvent::MessagePublished { topic, payload } => {
+                ClientEvent::MessagePublished { topic, payload, .. } => {
                     Self::deserialize_and_dispatch(topic, payload)
                 }
                 ClientEvent::TransportError { reason } => {
@@ -165,6 +167,9 @@ impl Actor for ResolverSupervisor {
                     // TODO: Handle transport errors appropriately
                     // Ideally we
                     myself.stop(Some(reason))
+                }
+                ClientEvent::ControlResponse { .. } => {
+                    // ignore
                 }
             },
         }
@@ -243,6 +248,7 @@ impl ResolverAgent {
         tcp_client.cast(TcpClientMessage::Publish {
             topic: PROVENANCE_LINKER_TOPIC.to_string(),
             payload: payload.into(),
+            trace_ctx: WireTraceCtx::from_current_span(),
         })?;
 
         let catalog_url = format!("https://{}/v2/_catalog", base);
@@ -462,6 +468,7 @@ impl ResolverAgent {
         Ok(state.cassini_client.cast(TcpClientMessage::Publish {
             topic: PROVENANCE_LINKER_TOPIC.to_string(),
             payload: payload.into(),
+            trace_ctx: WireTraceCtx::from_current_span(),
         })?)
     }
 
@@ -533,9 +540,10 @@ impl Actor for ResolverAgent {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         info!("Subscribing to topic {PROVENANCE_DISCOVERY_TOPIC}");
-        state.cassini_client.cast(TcpClientMessage::Subscribe(
-            PROVENANCE_DISCOVERY_TOPIC.to_string(),
-        ))?;
+        state.cassini_client.cast(TcpClientMessage::Subscribe {
+            topic: PROVENANCE_DISCOVERY_TOPIC.to_string(),
+            trace_ctx: WireTraceCtx::from_current_span(),
+        })?;
 
         // fire-and-forget startup scrape
         if let Err(e) = Self::startup_scrape(myself.clone(), state).await {

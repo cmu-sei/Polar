@@ -16,6 +16,7 @@ use rkyv::{rancor, to_bytes};
 use serde_json::to_vec;
 use tokio::task::AbortHandle;
 use tracing::{debug, error, info, instrument, trace, warn};
+use cassini_types::WireTraceCtx;
 
 pub struct PodObserver;
 
@@ -76,6 +77,7 @@ impl PodObserver {
                                 tcp_client.cast(TcpClientMessage::Publish {
                                     topic: PROVENANCE_DISCOVERY_TOPIC.to_string(),
                                     payload: payload.into(),
+                                    trace_ctx: WireTraceCtx::from_current_span(),
                                 })?;
                             }
                         }
@@ -84,6 +86,7 @@ impl PodObserver {
                             tcp_client.cast(TcpClientMessage::Publish {
                                 topic: KUBERNETES_CONSUMER.to_string(),
                                 payload,
+                                trace_ctx: WireTraceCtx::from_current_span(),
                             })?;
                         }
                     }
@@ -103,6 +106,7 @@ impl PodObserver {
                             tcp_client.cast(TcpClientMessage::Publish {
                                 topic: KUBERNETES_CONSUMER.to_string(),
                                 payload,
+                                trace_ctx: WireTraceCtx::from_current_span(),
                             })?;
                         }
                         Err(e) => warn!("{e}"),
@@ -268,6 +272,7 @@ impl Actor for PodObserver {
                                         state.tcp_client.cast(TcpClientMessage::Publish {
                                             topic: PROVENANCE_DISCOVERY_TOPIC.to_string(),
                                             payload: payload.into(),
+                                            trace_ctx: WireTraceCtx::from_current_span(),
                                         })?;
 
                                         if let Some(uid) = pod.metadata.uid.clone() {
@@ -282,6 +287,7 @@ impl Actor for PodObserver {
                                             state.tcp_client.cast(TcpClientMessage::Publish {
                                                 topic: PROVENANCE_LINKER_TOPIC.to_string(),
                                                 payload: payload.into(),
+                                                trace_ctx: WireTraceCtx::from_current_span(),
                                             })?;
                                         }
                                     }
@@ -299,7 +305,11 @@ impl Actor for PodObserver {
 
                                 let payload = serde_json::to_string(&event).unwrap().into_bytes();
 
-                                let envelope = TcpClientMessage::Publish { topic, payload };
+                                let envelope = TcpClientMessage::Publish {
+                                    topic,
+                                    payload: payload.into(),
+                                    trace_ctx: WireTraceCtx::from_current_span(),
+                                };
 
                                 // send data for batch processing
                                 state.tcp_client.cast(envelope)?;

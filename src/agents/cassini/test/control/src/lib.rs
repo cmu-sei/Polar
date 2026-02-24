@@ -33,33 +33,6 @@ pub struct Arguments {
     pub sink_path: String,
 }
 
-pub fn init_logging() {
-    let dir = tracing_subscriber::filter::Directive::from(tracing::Level::TRACE);
-
-    use std::io::stderr;
-    use std::io::IsTerminal;
-    use tracing_glog::Glog;
-    use tracing_glog::GlogFields;
-    use tracing_subscriber::filter::EnvFilter;
-    use tracing_subscriber::layer::SubscriberExt;
-    use tracing_subscriber::Registry;
-
-    let fmt = tracing_subscriber::fmt::Layer::default()
-        .with_ansi(stderr().is_terminal())
-        .with_writer(std::io::stderr)
-        .event_format(Glog::default().with_timer(tracing_glog::LocalTime::default()))
-        .fmt_fields(GlogFields::default().compact());
-
-    let filter = vec![dir]
-        .into_iter()
-        .fold(EnvFilter::from_default_env(), |filter, directive| {
-            filter.add_directive(directive)
-        });
-
-    let subscriber = Registry::default().with(filter).with(fmt);
-    tracing::subscriber::set_global_default(subscriber).expect("to set global subscriber");
-}
-
 pub fn read_test_config(path: &str) -> TestPlan {
     let dhall_str =
         std::fs::read_to_string(path).expect("Expected to find dhall configuration at {path}");
