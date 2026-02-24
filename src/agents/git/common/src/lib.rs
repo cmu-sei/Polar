@@ -71,8 +71,13 @@ impl RepoId {
         // Replace with UUIDv5 if you want cryptographic guarantees.
         Self(url.replace("://", "_").replace('/', "_"))
     }
+
     pub fn to_string(&self) -> String {
         self.0.clone()
+    }
+
+    pub fn new(url: String) -> Self {
+        RepoId(url)
     }
 }
 

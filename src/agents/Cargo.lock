@@ -4932,9 +4932,12 @@ dependencies = [
  "cassini-client",
  "cassini-types",
  "git-agent-common",
+ "neo4rs",
  "polar",
  "ractor",
  "rkyv 0.8.12",
+ "testcontainers",
+ "testcontainers-modules",
  "tokio",
  "tracing",
 ]

@@ -10,7 +10,12 @@ tracing = "0.1.41"
 ractor = { version = "0.15.8", features = ["async-trait"] }
 rkyv = { workspace = true }
 git-agent-common = { path = "../common" }
+neo4rs = { workspace = true }
 # --- Cassini ecosystem ---
 cassini-client = { path = "../../cassini/client" }
 cassini-types = { path = "../../cassini/types" }
 polar          = { path = "../../lib" }
+
+[dev-dependencies]
+testcontainers = "0.26.3"
+testcontainers-modules = { version = "0.14.0", features = ["neo4j"]}

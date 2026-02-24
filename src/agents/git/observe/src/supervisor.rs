@@ -1,15 +1,15 @@
 use crate::{
-    CredentialConfigError, GitRepoSupervisor, GitRepoSupervisorArgs, HostCredentialConfig,
+    CredentialConfigError, GitRepoSupervisor, GitRepoSupervisorArgs,
     RepoSupervisorMessage, StaticCredentialConfig, REPO_SUPERVISOR_NAME, SERVICE_NAME,
 };
 use cassini_client::TcpClientMessage;
 use cassini_types::ClientEvent;
 use git_agent_common::{ConfigurationEvent, GIT_REPO_CONFIG_EVENTS};
 use polar::SupervisorMessage;
-use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef, OutputPort, SupervisionEvent};
+use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef, SupervisionEvent};
 use rkyv::from_bytes;
 use std::path::PathBuf;
-use tracing::{debug, error, info, instrument, warn};
+use tracing::{debug, error, instrument, warn};
 
 pub struct RootSupervisor;
 

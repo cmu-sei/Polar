@@ -96,7 +96,10 @@ impl GraphOperable for Pod {
             resource_key: pod_key.clone(),
             state_type_key: KubeNodeKey::State,
             state_instance_key: new_state_key,
-            state_instance_props: vec![Property("phase".into(), GraphValue::String(phase))],
+            state_instance_props: vec![
+                Property("phase".into(), GraphValue::String(phase)),
+                Property("ready".into(), GraphValue::Bool(ready)),
+            ],
         };
 
         graph.cast(GraphControllerMsg::Op(op))?;
@@ -332,8 +335,6 @@ impl GraphOperable for Deployment {
         graph: &GraphController<KubeNodeKey>,
         _tcp_client: &TcpClient,
     ) -> Result<(), ActorProcessingErr> {
-        let kind = "Deployment";
-
         let uid = self.metadata.uid.clone().unwrap_or_default();
         let name = self.metadata.name.unwrap_or_default();
         let namespace = self.metadata.namespace.unwrap_or_else(|| "default".into());

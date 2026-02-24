@@ -22,7 +22,9 @@ rkyv = { workspace = true }
 uuid = "1.18.1"
 reqwest = { workspace = true, features = ["json", "rustls-tls"] }
 tokio = { version = "1.49.0", features = ["full"] }
-testcontainers = "0.26.3"
-testcontainers-modules = { version = "0.14.0", features = ["neo4j"]}
 sha2 = "0.10.9"
 hex = "0.4.3"
+
+[dev-dependencies]
+testcontainers = "0.26.3"
+testcontainers-modules = { version = "0.14.0", features = ["neo4j"]}
