@@ -78,7 +78,7 @@ async fn main() {
                 .build()
                 .unwrap();
             // Creating the graph in a separate function is not happening.
-            let graph = Graph::connect(config).await.unwrap();
+            let graph = Graph::connect(config).unwrap();
 
             let mut iter = get_csv_reader_iter(toml.task.csv_path);
             for result in iter.deserialize() {
