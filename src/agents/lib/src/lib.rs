@@ -1,14 +1,20 @@
+use cassini_client::{TCPClientConfig, TcpClient, TcpClientActor, TcpClientArgs};
 use cassini_types::ClientEvent;
-use ractor::{ActorProcessingErr, OutputPort};
+use ractor::OutputPort;
+use ractor::{Actor, ActorProcessingErr, ActorRef};
 use reqwest::{Certificate, Client, ClientBuilder};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::io::Read;
 use std::sync::Arc;
 use tracing::{debug, info};
-
 pub mod graph;
 /// wrapper definition for a ractor outputport where a raw message payload and a topic can be piped to a necessary dispatcher
 pub type QueueOutput = Arc<OutputPort<(Vec<u8>, String)>>;
+
+/// Canonical serialization error type for the system.
+/// Change once, globally.
+pub type RkyvError = rkyv::rancor::Error;
 
 /// name of the agent responsible receiving provenance events related to discovery of certain artifacts.
 /// Including container images and software bill of materials.
@@ -18,7 +24,7 @@ pub const TRANSACTION_FAILED_ERROR: &str = "Expected to start a transaction with
 pub const QUERY_COMMIT_FAILED: &str = "Error committing transaction to graph";
 pub const QUERY_RUN_FAILED: &str = "Error running query on the graph.";
 pub const UNEXPECTED_MESSAGE_STR: &str = "Received unexpected message!";
-
+pub const GIT_REPO_DISCOGERY_TOPIC: &str = "polar.git.repositories";
 pub trait Supervisor {
     /// Helper function to dispatch messages off of message queues to the associated actors within an agent supervision tree.
     /// Payload : a series of raw bytes containing an expected data structure/enum for the agent.
@@ -30,6 +36,36 @@ pub enum SupervisorMessage {
     ClientEvent { event: ClientEvent },
 }
 
+/// Helper to spawn a TCP client to connect to the message broker, Cassini.
+pub async fn spawn_tcp_client<M, F>(
+    service_name: &str,
+    supervisor: ActorRef<M>,
+    map_event: F,
+) -> Result<TcpClient, ActorProcessingErr>
+where
+    M: Send + 'static,
+    F: Fn(ClientEvent) -> Option<M> + Send + Sync + 'static,
+{
+    let events_output = std::sync::Arc::new(OutputPort::default());
+
+    events_output.subscribe(supervisor.clone(), map_event);
+
+    let config = TCPClientConfig::new()?;
+
+    let (tcp_client, _) = Actor::spawn_linked(
+        Some(format!("{service_name}.tcp")),
+        TcpClientActor,
+        TcpClientArgs {
+            config,
+            registration_id: None,
+            events_output,
+        },
+        supervisor.into(),
+    )
+    .await?;
+
+    Ok(tcp_client)
+}
 /// Helper function to parse a file at a given path and return the raw bytes as a vector
 pub fn get_file_as_byte_vec(filename: &String) -> Result<Vec<u8>, std::io::Error> {
     let mut f = std::fs::File::open(&filename)?;
@@ -42,6 +78,82 @@ pub fn get_file_as_byte_vec(filename: &String) -> Result<Vec<u8>, std::io::Error
     Ok(buffer)
 }
 
+/// Generate a content-addressed UID for an artifact based on its raw bytes.
+/// This is the *only* valid way artifacts should acquire identity.
+pub fn artifact_uid_from_bytes(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    let digest = hasher.finalize();
+
+    // Lowercase hex encoding, stable across languages and systems
+    hex::encode(digest)
+}
+
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Hash,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+    rkyv::Archive,
+)]
+pub enum SbomFormat {
+    CycloneDx,
+    Spdx,
+}
+
+impl SbomFormat {
+    pub fn as_str(&self) -> &str {
+        match self {
+            SbomFormat::CycloneDx => "CycloneDx",
+            SbomFormat::Spdx => "spdx",
+        }
+    }
+}
+
+#[derive(
+    Debug,
+    Clone,
+    serde::Serialize,
+    serde::Deserialize,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+    rkyv::Archive,
+)]
+pub struct NormalizedComponent {
+    pub name: String,
+    pub version: String,
+    pub purl: String,
+    pub component_type: String,
+}
+// TODO: We probably want a normalized definition of what an SBOM for our purproses here
+#[derive(
+    Debug,
+    Clone,
+    serde::Serialize,
+    serde::Deserialize,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+    rkyv::Archive,
+)]
+pub struct NormalizedSbom {
+    pub format: SbomFormat,
+    pub spec_version: String,
+    /// Strongly validated components
+    pub components: Vec<NormalizedComponent>,
+}
+
+/// A simple event that says a git repo was discovered
+///
+#[derive(Debug, rkyv::Serialize, rkyv::Deserialize, rkyv::Archive)]
+pub struct GitRepositoryDiscoveredEvent {
+    pub http_url: Option<String>,
+    pub ssh_url: Option<String>,
+}
 /// Represents normalized provenance-related events emitted across agents.
 /// Each variant communicates new or updated knowledge about entities in the provenance graph.
 ///
@@ -52,6 +164,13 @@ pub fn get_file_as_byte_vec(filename: &String) -> Result<Vec<u8>, std::io::Error
 /// - Internal Neo4j IDs (`id(node)`) MUST NOT be emitted in events — they are ephemeral.
 #[derive(Debug, rkyv::Serialize, rkyv::Deserialize, rkyv::Archive)]
 pub enum ProvenanceEvent {
+    /// Emitted when more generic unclassified artifacts.
+    ArtifactDiscovered { name: String, url: String },
+    SBOMResolved {
+        uid: String,
+        name: String,
+        sbom: NormalizedSbom,
+    },
     /// Emitted when a new OCI registry is discovered
     /// (e.g., observed in a Gitlab, Gitea, Artifactory or registry listing).
     ///
@@ -111,21 +230,16 @@ pub enum ProvenanceEvent {
         image_ref: String,
     },
 
-    /// Emitted when an SBOM artifact (CycloneDX, SPDX, etc.) has been
-    /// discovered in a build system or artifact store.
-    ///
-    /// `artifact_id`: Logical identifier of the artifact (e.g. a GitLab artifact ID or UUIDv5 of its path).
-    /// `uri`: Resolved download URI or location of the SBOM file.
-    SbomDiscovered { artifact_id: String, uri: String },
-
     /// Emitted when an SBOM has been parsed and its internal dependency graph
     /// extracted, ready to be linked to images or build outputs.
     ///
-    /// `component_id`: Logical identifier of the top-level software component (e.g. package name or UUIDv5).
-    /// `dependencies`: List of dependency identifiers discovered in the SBOM.
-    SbomParsed {
-        component_id: String,
-        dependencies: Vec<String>,
+    /// `uid`: Logical identifier of the artifact
+    /// `sbom`: the normalized sbom instance of the artifact
+    /// `name`: filename observed
+    SbomResolved {
+        uid: String,
+        sbom: NormalizedSbom,
+        name: String,
     },
 
     /// Emitted when a new build pipeline or job run has been discovered.
@@ -152,8 +266,6 @@ pub fn init_logging(service_name: String) {
     use tracing_subscriber::filter::EnvFilter;
     use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
     use tracing_subscriber::Layer;
-
-    eprintln!("INIT_LOGGING called");
 
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 
@@ -246,6 +358,7 @@ pub fn get_web_client() -> Result<Client, ActorProcessingErr> {
         }
     })
 }
+
 /// Standard helper fn to get a neo4rs configuration based on environment variables
 /// All of the following variables are required fields unless otherwise specified.
 /// GRAPH_DB - name of the neo4j database
@@ -306,4 +419,19 @@ impl ContainerImageReference {
             _ => format!("{}/{}", self.registry, self.repository),
         }
     }
+}
+
+pub fn emit_provenance_event(
+    ev: ProvenanceEvent,
+    client: &TcpClient,
+) -> Result<(), ActorProcessingErr> {
+    let payload = rkyv::to_bytes::<RkyvError>(&ev)?.to_vec();
+
+    tracing::trace!("Emitting event {ev:?}");
+    client.cast(cassini_client::TcpClientMessage::Publish {
+        topic: PROVENANCE_DISCOVERY_TOPIC.to_string(),
+        payload,
+    })?;
+
+    Ok(())
 }

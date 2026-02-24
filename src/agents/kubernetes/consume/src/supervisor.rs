@@ -1,102 +1,184 @@
 use cassini_client::*;
 use cassini_types::ClientEvent;
-use kube_common::{KubeMessage, RawKubeEvent};
+use k8s_openapi::api::apps::v1::{Deployment, ReplicaSet};
+use k8s_openapi::api::core::v1::Pod;
+use kube_common::{RawKubeEvent, KUBERNETES_CONSUMER};
+use kube_common::{RESOURCE_APPLIED_ACTION, RESOURCE_DELETED_ACTION};
+use neo4rs::{Config, Graph};
 use polar::get_neo_config;
-use polar::{Supervisor, SupervisorMessage};
+use polar::SupervisorMessage;
 use ractor::async_trait;
-use ractor::registry::where_is;
 use ractor::Actor;
 use ractor::ActorProcessingErr;
 use ractor::ActorRef;
 use ractor::SupervisionEvent;
+use serde::de::DeserializeOwned;
+use serde_json::from_value;
 use tracing::debug;
 use tracing::error;
 use tracing::info;
 use tracing::warn;
 
-use crate::pods::PodConsumer;
+use polar::graph::GraphController;
 // use crate::pods::PodConsumer;
-use crate::KubeConsumerArgs;
-use crate::BROKER_CLIENT_NAME;
-use kube_common::{
-    get_consumer_name, BATCH_PROCESS_ACTION, RESOURCE_APPLIED_ACTION, RESOURCE_DELETED_ACTION,
-    RESYNC_ACTIUON,
-};
-pub struct ClusterConsumerSupervisor;
+use crate::ClusterGraphController;
+use crate::GraphOperable;
+use crate::{KubeNodeKey, BROKER_CLIENT_NAME};
 
-pub struct ClusterConsumerSupervisorState {
-    graph_config: neo4rs::Config,
-    broker_client: ActorRef<TcpClientMessage>,
+use std::collections::HashMap;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StateFingerprint {
+    /// Canonical serialized state payload.
+    /// Could be JSON, or stable key=value pairs.
+    pub signature: String,
+
+    /// The valid_from timestamp used when we emitted it.
+    pub valid_from: String,
+    pub last_state_node_id: Option<String>,
+}
+// TODO: Impl this?
+// impl StateFingerprint {
+//     /// More compact. Faster comparisons. Cleaner.
+//     pub fn hash_signature(payload: &str) -> String {
+//         let mut hasher = Sha256::new();
+//         hasher.update(payload.as_bytes());
+//         format!("{:x}", hasher.finalize())
+//     }
+// }
+
+#[derive(Default)]
+pub struct ProjectionCache {
+    // key: (kind, uid)
+    entries: HashMap<(String, String), StateFingerprint>,
 }
 
-impl Supervisor for ClusterConsumerSupervisor {
-    fn deserialize_and_dispatch(_topic: String, payload: Vec<u8>) {
-        // 1) Parse the raw message into your RawKubeEvent
-        let raw_event: RawKubeEvent = match serde_json::from_slice(&payload) {
-            Ok(ev) => ev,
-            Err(err) => {
-                error!("Failed to deserialize RawKubeEvent: {}", err);
-                return;
-            }
-        };
+pub enum EmitDecision {
+    Suppress,
+    Emit {
+        previous_state_node_id: Option<String>,
+    },
+}
 
-        let kind = raw_event.kind; // e.g. "Pod"
-        let action = raw_event.action; // e.g. "Applied" or "BatchProcess"
-        let payload = raw_event.object; // serde_json::Value
+impl ProjectionCache {
+    /// Returns true if this is a new state and should be emitted.
+    pub fn should_emit(
+        &mut self,
+        kind: String,
+        uid: String,
+        new_signature: String,
+        valid_from: String,
+    ) -> EmitDecision {
+        let key = (kind.clone(), uid.clone());
 
-        // 2) Build the consumer’s name from cluster + kind
-        let consumer_name = get_consumer_name("cluster", &kind);
+        match self.entries.get(&key) {
+            Some(existing) if existing.signature == new_signature => EmitDecision::Suppress,
+            Some(existing) => {
+                let prev = existing.last_state_node_id.clone();
 
-        // 3) Look up the actor in Ractor’s registry
-        match where_is(consumer_name.clone()) {
-            Some(consumer_ref) => {
-                // 4) Build a typed KubeMessage based on action
-                let kube_msg = match action.as_str() {
-                    BATCH_PROCESS_ACTION => KubeMessage::ResourceBatch {
-                        kind: kind.clone(),
-                        resources: payload,
+                self.entries.insert(
+                    key,
+                    StateFingerprint {
+                        signature: new_signature,
+                        valid_from,
+                        last_state_node_id: None, // filled after graph write
                     },
-                    RESOURCE_APPLIED_ACTION => KubeMessage::ResourceApplied {
-                        kind: kind.clone(),
-                        resource: payload,
-                    },
-                    RESOURCE_DELETED_ACTION => KubeMessage::ResourceDeleted {
-                        kind: kind.clone(),
-                        resource: payload,
-                    },
-                    RESYNC_ACTIUON => KubeMessage::ResyncStarted {
-                        kind: kind.clone(),
-                        resource: payload,
-                    },
-                    other => {
-                        warn!(
-                            "Unhandled K8s action \"{}\" for kind \"{}\", dropping",
-                            other, kind
-                        );
-                        return;
-                    }
-                };
+                );
 
-                // 5) Send message, logging any failure
-                if let Err(err) = consumer_ref.send_message(kube_msg) {
-                    error!(
-                        "Failed to send KubeMessage to {}: {}",
-                        consumer_ref.get_name().unwrap_or_default(),
-                        err
-                    );
+                EmitDecision::Emit {
+                    previous_state_node_id: prev,
                 }
             }
-
             None => {
-                // No consumer registered for this kind
-                warn!(
-                    "No consumer found for topic \"{}\" (kind=\"{}\")",
-                    consumer_name, kind
+                self.entries.insert(
+                    key,
+                    StateFingerprint {
+                        signature: new_signature,
+                        valid_from,
+                        last_state_node_id: None,
+                    },
                 );
+
+                EmitDecision::Emit {
+                    previous_state_node_id: None,
+                }
             }
         }
     }
+    pub fn set_last_state_node_id(&mut self, kind: &str, uid: &str, node_id: String) {
+        if let Some(entry) = self.entries.get_mut(&(kind.to_string(), uid.to_string())) {
+            entry.last_state_node_id = Some(node_id);
+        }
+    }
+
+    /// Remove from cache on terminal deletion if desired.
+    pub fn evict(&mut self, kind: String, uid: &str) {
+        self.entries.remove(&(kind, uid.to_string()));
+    }
 }
+
+pub struct ClusterConsumerSupervisor;
+
+pub struct ClusterConsumerSupervisorState {
+    graph_config: Config,
+    broker_client: ActorRef<TcpClientMessage>,
+    graph_controller: Option<GraphController<KubeNodeKey>>,
+    projection_cache: ProjectionCache,
+}
+
+impl ClusterConsumerSupervisor {
+    pub fn handle_event<T>(
+        ev: RawKubeEvent,
+        cache: &mut ProjectionCache,
+        graph_controller: &GraphController<KubeNodeKey>,
+        tcp_client: &TcpClient,
+    ) -> Result<(), ActorProcessingErr>
+    where
+        T: DeserializeOwned + GraphOperable,
+    {
+        debug!("Handling event for resource {}", ev.kind);
+        let obj = from_value::<T>(ev.object)?;
+
+        match ev.action.as_str() {
+            RESOURCE_APPLIED_ACTION => {
+                debug!("handling RESOURCE_APPLIED_ACTION.");
+                obj.project_into_graph(graph_controller, tcp_client)?
+            }
+            RESOURCE_DELETED_ACTION => {
+                debug!("handling RESOURCE_DELETED_ACTION.");
+                obj.project_delete(graph_controller)?;
+            }
+            _ => todo!(),
+        }
+        Ok(())
+    }
+
+    fn deserialize_and_dispatch(
+        _topic: String,
+        payload: Vec<u8>,
+        cache: &mut ProjectionCache,
+        graph_controller: &GraphController<KubeNodeKey>,
+        tcp_client: &TcpClient,
+    ) -> Result<(), ActorProcessingErr> {
+        // 1) Parse the raw message into your RawKubeEvent
+        let ev: RawKubeEvent = serde_json::from_slice(&payload)?;
+
+        match ev.kind.as_str() {
+            "Pod" => Self::handle_event::<Pod>(ev, cache, graph_controller, tcp_client)?,
+            "Deployment" => {
+                Self::handle_event::<Deployment>(ev, cache, graph_controller, tcp_client)?
+            }
+            "ReplicaSet" => {
+                Self::handle_event::<ReplicaSet>(ev, cache, graph_controller, tcp_client)?
+            }
+            "Node" => todo!("Nodes"),
+            _ => warn!("Unexpected resource type {}", ev.kind),
+        }
+
+        Ok(())
+    }
+}
+
 #[async_trait]
 impl Actor for ClusterConsumerSupervisor {
     type Msg = SupervisorMessage;
@@ -106,7 +188,7 @@ impl Actor for ClusterConsumerSupervisor {
     async fn pre_start(
         &self,
         myself: ActorRef<Self::Msg>,
-        args: (),
+        _args: (),
     ) -> Result<Self::State, ActorProcessingErr> {
         debug!("{myself:?} starting");
 
@@ -135,6 +217,10 @@ impl Actor for ClusterConsumerSupervisor {
         let state = ClusterConsumerSupervisorState {
             graph_config,
             broker_client,
+            graph_controller: None,
+            projection_cache: ProjectionCache {
+                entries: HashMap::new(),
+            },
         };
 
         Ok(state)
@@ -149,29 +235,43 @@ impl Actor for ClusterConsumerSupervisor {
         match message {
             SupervisorMessage::ClientEvent { event } => {
                 match event {
-                    ClientEvent::Registered { registration_id } => {
-                        //start actors
-                        let args = KubeConsumerArgs {
-                            broker_client: state.broker_client.clone(),
-                            registration_id,
-                            graph_config: state.graph_config.clone(),
-                        };
+                    ClientEvent::Registered { .. } => {
+                        // try to conect to the graph
+                        let graph = Graph::connect(state.graph_config.clone())?;
 
-                        // TODO: The anticipated naming convention for these will be kubernetes.clustername.rrole.resource - but cluster name isn't really known ahead of time at the moment.
-                        // For now, we'll test using either minikube or kind, so for now we can simply use kubernetes.cluster.default.pods
-                        if let Err(e) = Actor::spawn_linked(
-                            Some(kube_common::get_consumer_name("cluster", "Pod")),
-                            PodConsumer,
-                            args,
-                            myself.get_cell().clone(),
+                        state.graph_controller = Actor::spawn_linked(
+                            Some("kubernetes.cluster.graph.controller".to_string()),
+                            ClusterGraphController,
+                            graph,
+                            myself.clone().into(),
                         )
-                        .await
+                        .await?
+                        .0
+                        .into();
+
+                        // subscribe
+                        //
+                        if let Err(e) = state
+                            .broker_client
+                            .cast(TcpClientMessage::Subscribe(KUBERNETES_CONSUMER.into()))
                         {
                             error!("{e}");
+                            myself.stop(None);
                         }
                     }
                     ClientEvent::MessagePublished { topic, payload, .. } => {
-                        ClusterConsumerSupervisor::deserialize_and_dispatch(topic, payload)
+                        if let Some(controller) = &state.graph_controller {
+                            Self::deserialize_and_dispatch(
+                                topic,
+                                payload,
+                                &mut state.projection_cache,
+                                &controller,
+                                &state.broker_client,
+                            )?;
+                        } else {
+                            error!("No graph controller present!");
+                            myself.stop(None);
+                        }
                     }
                     ClientEvent::TransportError { reason } => {
                         error!("Transport error occurred! {reason}");
@@ -210,18 +310,6 @@ impl Actor for ClusterConsumerSupervisor {
                     actor_name,
                     actor_cell.get_id()
                 );
-
-                //    match ClusterConsumerSupervisor::restart_actor(actor_name.clone(), myself.clone(), state.graph_config.clone()).await {
-                //         Ok(actor) => {
-                //             info!("Restarted actor {0:?}:{1:?}",
-                //             actor_name,
-                //             actor.get_id())
-                //         }
-                //         Err(e) => {
-                //             error!("Failed to recover actor: {e}");
-                //             myself.stop(Some(e))
-                //         }
-                //    }
             }
             SupervisionEvent::ActorFailed(actor_cell, e) => {
                 // we no actors start w/o names
@@ -232,17 +320,6 @@ impl Actor for ClusterConsumerSupervisor {
                     actor_name,
                     actor_cell.get_id()
                 );
-                //     match ClusterConsumerSupervisor::restart_actor(actor_name.clone(), myself.clone(), state.graph_config.clone()).await {
-                //         Ok(actor) => {
-                //             info!("Restarted actor {0:?}:{1:?}",
-                //             actor_name,
-                //             actor.get_id())
-                //         }
-                //         Err(e) => {
-                //             error!("Failed to recover actor: {e}");
-                //             myself.stop(Some(e))
-                //         }
-                //    }
             }
 
             SupervisionEvent::ProcessGroupChanged(..) => todo!(),

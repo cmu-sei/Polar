@@ -8,16 +8,16 @@ license = "MIT"
 # NOTE cassini and the other services use the aws-lc-rs crypto provider for their work. So we will too!
 serde = { version = "1", features = ["derive"] }
 serde_json = "1.0"
-tokio = {version="1.47.1", features=["full"]}
+tokio = {version="1.49.0", features=["full"]}
 k8s-openapi = { workspace = true,features = ["v1_32"]}
-futures = "0.3.31"
-ractor = { version = "0.15.8", features = ["async-trait"] }
+futures = "0.3.32"
+ractor = { version = "0.15.10", features = ["async-trait"] }
 rkyv = { workspace = true }
 cassini-client = { workspace = true }
 cassini-types  = { workspace = true }
-tracing = "0.1.41"
+tracing = "0.1.44"
 tracing-glog = "0.4.1"
-tracing-subscriber = { version ="0.3.20", features=["std", "env-filter"]}
+tracing-subscriber = { version ="0.3.22", features=["std", "env-filter"]}
 polar = {path = "../../lib"}
 kube-common = {path = "../common" }
 kube = { workspace = true }

@@ -7,18 +7,18 @@ license = "MIT"
 [dependencies]
 web-agent-common = { path = "../common" }
 futures-lite = "2.6.1"
-tracing = "0.1.41"
-tracing-subscriber = { version = "0.3.20", features = ["std", "env-filter"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.22", features = ["std", "env-filter"] }
 reqwest = { workspace = true, features = ["json"] }
 serde = { version = "1.0.228", features = ["derive"] }
-tokio = { version = "1.47.1", features = ["full"] }
-ractor = { version = "0.15.8", features = ["async-trait"] }
-serde_json = "1.0.145"
+tokio = { version = "1.49.0", features = ["full"] }
+ractor = { version = "0.15.10", features = ["async-trait"] }
+serde_json = "1.0.149"
 cassini-client = { workspace = true }
 cassini-types  = { workspace = true }
 utoipa = "5.4.0"
 neo4rs = { workspace = true }
-url = "2.5.7"
+url = "2.5.8"
 polar = { path = "../../lib" }
 rkyv = { workspace = true }
 # Fix a vulnerability in a transitive dependency.

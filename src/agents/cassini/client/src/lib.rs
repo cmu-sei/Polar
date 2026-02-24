@@ -15,12 +15,13 @@ use tokio::sync::Mutex;
 use tokio::task::AbortHandle;
 use tokio_rustls::client::TlsStream;
 use tokio_rustls::TlsConnector;
-use tracing::{debug, debug_span, trace_span, warn_span, error, info, info_span, trace, warn, Instrument};
 use std::marker::PhantomData;
 pub use cassini_tracing::{init_tracing, shutdown_tracing};
 pub use cassini_tracing::{try_set_parent_otel, try_set_parent_wire};
 use socket2::SockRef;
+use tracing::{debug, debug_span, trace_span, warn_span, error, info, info_span, trace, warn, Instrument,};
 
+pub type TcpClient = ActorRef<TcpClientMessage>;
 pub const UNEXPECTED_DISCONNECT: &str = "UNEXPECTED_DISCONNECT";
 pub const REGISTRATION_EXPECTED: &str =
     "Expected client to be registered to conduct this operation.";
@@ -205,7 +206,7 @@ impl TcpClientActor {
         WireTraceCtx::from_current_span()
     }
     
-    #[tracing::instrument(name="cassini.tcp_client.connect_with_backoff", skip(client_config))]
+    #[tracing::instrument(name = "cassini.tcp_client.connect_with_backoff", skip(client_config))]
     async fn connect_with_backoff(
         addr: String,
         server_name: String,
@@ -869,3 +870,39 @@ impl Actor for TcpClientActor {
         Ok(())
     }
 }
+
+// TODO: I really hate that I can't figure out this helper.
+// Starting and intgrating a client requires
+// Creating an output port
+// subscribing to its events and creating a callback handler.
+// There's an issue with passing the callback handler to the outputport across threads that makes this difficult
+// And then there's subscribing to it. We need to pass in a generic enough ActorRef
+// pub async fn spawn_client<F, M>(
+//     name: Option<String>,
+//     registration_id: Option<String>,
+//     events_output: OutputPort<ClientEvent>,
+//     supervisor: ActorRef<TcpClientMessage>,
+//     handler: F,
+// ) -> Result<ActorRef<TcpClientMessage>, ReuniteError>
+// where
+//     F: Fn(ClientEvent) -> Result<(), ReuniteError>,
+// {
+//     //subscribe to registration event
+//     events_output.subscribe(myself.clone(), handler);
+
+//     let config = TCPClientConfig::new()?;
+
+//     let (tcp_client, _) = Actor::spawn_linked(
+//         name,
+//         TcpClientActor,
+//         TcpClientArgs {
+//             config,
+//             registration_id,
+//             events_output,
+//         },
+//         myself.clone().into(),
+//     )
+//     .await?;
+
+//     Ok(())
+// }

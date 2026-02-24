@@ -5,10 +5,10 @@ edition.workspace = true
 license = "MIT"
 
 [dependencies]
-ractor = { version="0.15.8" }
-tracing = "0.1.41"
+ractor = { version="0.15.10" }
+tracing = "0.1.44"
 rkyv = { workspace = true }
 opentelemetry = "0.31.0"
-tracing-opentelemetry = "0.32.0"
+tracing-opentelemetry = "0.32.1"
 rand = { version = "0.10.0", features = ["thread_rng", "default"] }
 serde = { version = "1", features = ["derive"] }

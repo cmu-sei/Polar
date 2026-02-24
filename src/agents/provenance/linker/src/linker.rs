@@ -1,11 +1,12 @@
-use polar::graph::{self, GraphValue};
+use chrono::Utc;
+use polar::graph::{self, rel, GraphValue};
 use polar::graph::{GraphControllerMsg, GraphOp, Property};
 use polar::ProvenanceEvent;
 use ractor::async_trait;
 use ractor::Actor;
 use ractor::ActorProcessingErr;
 use ractor::ActorRef;
-use tracing::{debug, trace, warn};
+use tracing::{trace, warn};
 
 use crate::ArtifactNodeKey;
 
@@ -103,6 +104,10 @@ impl Actor for ProvenanceLinker {
                         Property("digest".into(), GraphValue::String(digest)),
                         Property("uri".into(), GraphValue::String(uri)),
                         Property("media_type".into(), GraphValue::String(media_type)),
+                        Property(
+                            "observed_at".into(),
+                            GraphValue::String(Utc::now().to_rfc3339()),
+                        ),
                     ],
                     "failed to upsert OCIArtifact",
                 )?;
@@ -257,6 +262,32 @@ impl Actor for ProvenanceLinker {
                             e
                         ))
                     })?;
+            }
+            ProvenanceEvent::SbomResolved { uid, sbom, name } => {
+                trace!("Received SBOMResolved directive");
+                let sbom_k = ArtifactNodeKey::Sbom {
+                    uid: uid.clone(),
+                    sbom: sbom.clone(),
+                };
+
+                Self::upsert_node(
+                    state,
+                    sbom_k.clone(),
+                    Vec::default(),
+                    "Failed to upsert sbom_key in graph",
+                )?;
+
+                Self::ensure_edge(state, ArtifactNodeKey::Artifact, sbom_k.clone(), rel::IS)?;
+
+                for component in &sbom.components {
+                    let component_k = ArtifactNodeKey::Component {
+                        claim_type: component.component_type.clone(),
+                        name: name.clone(),
+                        version: component.version.clone(),
+                    };
+
+                    Self::ensure_edge(state, sbom_k.clone(), component_k.clone(), rel::DESCRIBES)?;
+                }
             }
             _ => warn!("unexpected linker command"),
         }

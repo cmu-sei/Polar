@@ -21,43 +21,107 @@
    DM24-0470
 */
 
-use crate::{subscribe_to_topic, GitlabConsumerArgs, GitlabConsumerState};
+use crate::{GitlabConsumerState, GitlabNodeKey};
 use common::types::{GitlabData, GitlabEnvelope};
 use common::RUNNERS_CONSUMER_TOPIC;
-use neo4rs::Query;
-use polar::{QUERY_COMMIT_FAILED, QUERY_RUN_FAILED, TRANSACTION_FAILED_ERROR};
-
+use gitlab_queries::runners::CiRunner;
+use polar::graph::{GraphControllerMsg, GraphOp, GraphValue, Property};
 use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef};
 use tracing::{debug, info};
 
+use cassini_client::TcpClientMessage;
 pub struct GitlabRunnerConsumer;
 
+impl GitlabRunnerConsumer {
+    /// Handles a batch of runners observed from a GitLab instance.
+    ///
+    /// Semantics:
+    /// - Ensures GitlabInstance node exists
+    /// - Ensures each GitlabRunner node exists
+    /// - Upserts runner properties
+    /// - Ensures (instance)-[:OBSERVED_RUNNER]->(runner)
+    ///
+    /// This function performs no I/O.
+    /// It emits GraphOp messages to the GraphController actor.
+    /// This makes it deterministic and unit-testable.
+    pub fn handle_runners(
+        instance_id: String,
+        runners: &[CiRunner],
+        graph: &ActorRef<GraphControllerMsg<GitlabNodeKey>>,
+    ) -> Result<(), ActorProcessingErr> {
+        let instance_key = GitlabNodeKey::GitlabInstance {
+            instance_id: instance_id.clone(),
+        };
+
+        // Ensure instance exists
+        graph.cast(GraphControllerMsg::Op(GraphOp::UpsertNode {
+            key: instance_key.clone(),
+            props: vec![],
+        }))?;
+
+        for runner in runners {
+            let runner_key = GitlabNodeKey::Runner {
+                instance_id: instance_id.clone(),
+                runner_id: runner.id.0.to_string(),
+            };
+
+            let props = vec![
+                Property("paused".into(), GraphValue::Bool(runner.paused)),
+                Property(
+                    "runner_type".into(),
+                    GraphValue::String(format!("{:?}", runner.runner_type)),
+                ),
+                Property(
+                    "status".into(),
+                    GraphValue::String(format!("{:?}", runner.status)),
+                ),
+                Property(
+                    "access_level".into(),
+                    GraphValue::String(format!("{:?}", runner.access_level)),
+                ),
+                Property("run_untagged".into(), GraphValue::Bool(runner.run_untagged)),
+                Property(
+                    "tag_list".into(),
+                    GraphValue::String(runner.tag_list.clone().unwrap_or_default().join(",")),
+                ),
+            ];
+
+            // Upsert runner node with properties
+            graph.cast(GraphControllerMsg::Op(GraphOp::UpsertNode {
+                key: runner_key.clone(),
+                props,
+            }))?;
+
+            // Ensure relationship
+            graph.cast(GraphControllerMsg::Op(GraphOp::EnsureEdge {
+                from: instance_key.clone(),
+                to: runner_key,
+                rel_type: "OBSERVED_RUNNER".into(),
+                props: vec![],
+            }))?;
+        }
+
+        Ok(())
+    }
+}
 #[async_trait]
 impl Actor for GitlabRunnerConsumer {
     type Msg = GitlabEnvelope;
     type State = GitlabConsumerState;
-    type Arguments = GitlabConsumerArgs;
+    type Arguments = GitlabConsumerState;
 
     async fn pre_start(
         &self,
         myself: ActorRef<Self::Msg>,
-        args: GitlabConsumerArgs,
+        state: Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
-        debug!("{myself:?} starting, connecting to broker");
-        //subscribe to topic
-        match subscribe_to_topic(
-            args.registration_id,
+        // fire off subscribe message
+        state.tcp_client.cast(TcpClientMessage::Subscribe(
             RUNNERS_CONSUMER_TOPIC.to_string(),
-            args.graph_config,
-        )
-        .await
-        {
-            Ok(state) => Ok(state),
-            Err(e) => {
-                let err_msg = format!("Error starting actor: \"{RUNNERS_CONSUMER_TOPIC}\" {e}");
-                Err(ActorProcessingErr::from(err_msg))
-            }
-        }
+        ))?;
+
+        debug!("{myself:?} starting");
+        Ok(state)
     }
 
     async fn post_start(
@@ -71,67 +135,12 @@ impl Actor for GitlabRunnerConsumer {
     }
     async fn handle(
         &self,
-        myself: ActorRef<Self::Msg>,
+        _myself: ActorRef<Self::Msg>,
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        match state.graph.start_txn().await {
-            Ok(mut transaction) => match message.data {
-                GitlabData::Runners(runners) => {
-                    let runner_data = runners
-                        .iter()
-                        .map(|runner| {
-                            format!(
-                                r#"{{
-                            runner_id: '{runner_id}',
-                            paused: '{paused}',
-                            runner_type: '{runner_type:?}',
-                            status: '{status:?}',
-                            access_level: '{access_level:?}',
-                            run_untagged: '{run_untagged}',
-                            tag_list: '{tag_list:?}'
-                            }}"#,
-                                runner_id = runner.id.0,
-                                paused = runner.paused,
-                                runner_type = runner.runner_type,
-                                status = runner.status,
-                                access_level = runner.access_level,
-                                run_untagged = runner.run_untagged,
-                                tag_list = runner.tag_list.clone().unwrap_or_default()
-                            )
-                        })
-                        .collect::<Vec<_>>()
-                        .join(",\n");
-
-                    let cypher_query = format!(
-                        r#"
-                            UNWIND [{runner_data}] AS runner_data
-                            MERGE (runner:GitlabRunner {{ runner_id: runner_data.runner_id }})
-                            SET runner.paused = runner_data.paused,
-                                runner.runner_type = runner_data.runner_type,
-                                runner.status = runner_data.status,
-                                runner.access_level = runner_data.access_level,
-                                runner.run_untagged = runner_data.run_untagged,
-                                runner.tag_list = runner_data.tag_list
-                            MERGE (instance: GitlabInstance {{instance_id: "{}" }})
-                            WITH instance, runner
-                            MERGE (instance)-[:OBSERVED_RUNNER]->(runner)
-                        "#,
-                        message.instance_id
-                    );
-                    debug!(cypher_query);
-                    if let Err(_e) = transaction.run(Query::new(cypher_query)).await {
-                        myself.stop(Some(QUERY_RUN_FAILED.to_string()));
-                    }
-
-                    if let Err(_e) = transaction.commit().await {
-                        myself.stop(Some(QUERY_COMMIT_FAILED.to_string()));
-                    }
-                    info!("Committed transaction to database");
-                }
-                _ => (),
-            },
-            Err(e) => myself.stop(Some(format!("{TRANSACTION_FAILED_ERROR}. {e}"))),
+        if let GitlabData::Runners(runners) = message.data {
+            Self::handle_runners(message.instance_id, &runners, &state.graph_controller)?;
         }
 
         Ok(())

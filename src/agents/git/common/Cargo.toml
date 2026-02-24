@@ -1,0 +1,9 @@
+[package]
+name = "git-agent-common"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+git2 = "=0.20.2"
+
+rkyv = { workspace = true }

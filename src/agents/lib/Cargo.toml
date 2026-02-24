@@ -5,22 +5,23 @@ edition.workspace = true
 license = "MIT"
 
 [dependencies]
-# gitlab-queries = { path = "../gitlab/query"}
-tracing-glog = "0.4.1"
+cassini-client = { path = "../cassini/client" }
 cassini-types = { path = "../cassini/types" }
-serde = {version = "1", features = ["derive"]}
-ractor = { version = "0.15.8", features = ["async-trait"] }
+hex = "0.4.3"
 neo4rs = { workspace = true }
-rkyv = { workspace = true }
-uuid = "1.18.1"
-reqwest = { workspace = true, features = ["json", "rustls-tls"] }
-tokio = { version = "1.49.0", features = ["full"] }
-testcontainers = "0.26.3"
-testcontainers-modules = { version = "0.14.0", features = ["neo4j"]}
-
-tracing = "0.1.41"
 opentelemetry = "0.31.0"
 opentelemetry-otlp = "0.31.0"
 opentelemetry_sdk = "0.31.0"
-tracing-opentelemetry = "0.32.0"
-tracing-subscriber = { version ="0.3.20", features=["std", "env-filter"]}
+ractor = { version = "0.15.10", features = ["async-trait"] }
+reqwest = { workspace = true, features = ["json", "rustls-tls"] }
+rkyv = { workspace = true }
+serde = {version = "1", features = ["derive"]}
+sha2 = "0.10.9"
+testcontainers = "0.26.3"
+testcontainers-modules = { version = "0.14.0", features = ["neo4j"]}
+tokio = { version = "1.49.0", features = ["full"] }
+tracing = "0.1.44"
+tracing-glog = "0.4.1"
+tracing-opentelemetry = "0.32.1"
+tracing-subscriber = { version ="0.3.22", features=["std", "env-filter"]}
+uuid = "1.21.0"

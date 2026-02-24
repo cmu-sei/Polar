@@ -6,15 +6,15 @@ license = "MIT"
 
 [dependencies]
 polar = { path = "../../lib" }
-ractor = { version = "0.15.8", features = ["async-trait"] }
+ractor = { version = "0.15.10", features = ["async-trait"] }
 rkyv = { workspace = true }
 serde = { version = "1.0.228", features = ["derive"] }
-tracing = "0.1.41"
+tracing = "0.1.44"
 tracing-glog = "0.4.1"
-tracing-subscriber = { version = "0.3.20", features = ["std", "env-filter"] }
+tracing-subscriber = { version = "0.3.22", features = ["std", "env-filter"] }
 
 # Dependent packages require tokio and the version they include is vulnerable...
-tokio = "1.47.1"
+tokio = "1.49.0"
 
 [dev-dependencies]
-tokio = "1.47.1"
+tokio = "1.49.0"

@@ -26,7 +26,6 @@ use crate::{
     init_observer_state, send_to_broker, BackoffReason, Command, GitlabObserverArgs,
     GitlabObserverMessage, GitlabObserverState, MESSAGE_FORWARDING_FAILED,
 };
-use cassini_client::TcpClientMessage;
 use common::types::{GitlabData, GitlabPackageFile};
 use common::REPOSITORY_CONSUMER_TOPIC;
 use cynic::{GraphQlResponse, QueryBuilder};
@@ -36,7 +35,6 @@ use gitlab_queries::projects::{
     SingleProjectQueryArguments,
 };
 use gitlab_schema::ContainerRepositoryID;
-use polar::{ProvenanceEvent, PROVENANCE_DISCOVERY_TOPIC, PROVENANCE_LINKER_TOPIC};
 use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef};
 use serde_json::from_str;
 use tracing::{debug, error, info, trace, warn};
@@ -67,12 +65,14 @@ impl GitlabRepositoryObserver {
             .bearer_auth(state.token.clone().unwrap_or_default())
             .header("Accept", "application/json")
             .send()
-            .await
-            .unwrap();
+            .await?;
 
-        let files: Vec<GitlabPackageFile> = res.json().await.unwrap();
+        let files: Vec<GitlabPackageFile> = res.json().await?;
 
-        let data = GitlabData::PackageFiles((package_gid.to_string(), files));
+        let data = GitlabData::PackageFiles {
+            package_id: package_gid.to_string(),
+            files,
+        };
 
         send_to_broker(state, data, REPOSITORY_CONSUMER_TOPIC)
     }
@@ -281,7 +281,11 @@ impl Actor for GitlabRepositoryObserver {
                                                                                             trace_ctx: WireTraceCtx::from_current_span(),
                                                                                         })?;
                                                                                     }
-                                                                                    let data = GitlabData::ContainerRepositoryTags((full_path.clone().to_string(), tags));
+                                                                                    let data = GitlabData::ContainerRepositoryTags { 
+                                                                                        repository_id: repository.id.to_string(), 
+                                                                                        project_id: project.id.to_string(), 
+                                                                                        tags
+                                                                                    };
                                                                                     if let Err(e) = send_to_broker(state, data, REPOSITORY_CONSUMER_TOPIC) { return Err(e) }
                                                                                 }
                                                                             }
@@ -297,7 +301,10 @@ impl Actor for GitlabRepositoryObserver {
 
                                                             // send off repository data
                                                             if !read_repositories.is_empty() {
-                                                                let data = GitlabData::ProjectContainerRepositories((full_path.to_string(), read_repositories));
+                                                                let data = GitlabData::ProjectContainerRepositories {
+                                                                    project_id: project.id.to_string(),
+                                                                    repositories: read_repositories
+                                                                };
 
                                                                 if let Err(e) = send_to_broker(
                                                                     state,
@@ -372,10 +379,12 @@ impl Actor for GitlabRepositoryObserver {
                                                                 }
 
                                                                 let data =
-                                                                    GitlabData::ProjectPackages((
-                                                                        full_path.to_string(),
-                                                                        read_packages,
-                                                                    ));
+                                                                    GitlabData::ProjectPackages {
+                                                                        project_id: project
+                                                                            .id
+                                                                            .to_string(),
+                                                                        packages: read_packages,
+                                                                    };
 
                                                                 if let Err(e) = send_to_broker(
                                                                     state,

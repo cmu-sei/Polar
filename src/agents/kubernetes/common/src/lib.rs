@@ -25,7 +25,8 @@ pub struct RawKubeEvent {
     pub action: String,
     /// the raw JSON of the object
     pub object: Value,
-    // pub namespace: Option<String>,
+
+    pub resource_version: Option<String>,
 }
 
 /// Messages intended to be serialized and set across the broker boundary to consumers for processing

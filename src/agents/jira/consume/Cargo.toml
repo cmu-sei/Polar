@@ -30,7 +30,6 @@ license = "MIT"
 
 [dependencies]
 # Workspace crates
-lapin = { workspace = true }
 neo4rs = { workspace = true }
 cassini-backoff = { workspace = true }
 
@@ -47,9 +46,9 @@ tokio = { version = "1", features = ["full"] }
 async-global-executor = "3.1.0"
 futures-lite = "2.6.1"
 serde_json = "1.0"
-url = "2.5.7"
-tracing = "0.1.41"
-ractor = { version = "0.15.8", features = ["async-trait"] }
+url = "2.5.8"
+tracing = "0.1.44"
+ractor = { version = "0.15.10", features = ["async-trait"] }
 
 rkyv = { workspace = true, features = ["std", "alloc"] }
 [[bin]]

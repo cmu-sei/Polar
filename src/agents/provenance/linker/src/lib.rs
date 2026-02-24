@@ -1,13 +1,11 @@
-use std::fmt::Debug;
-
 use neo4rs::{BoltType, Graph};
-use polar::graph::compile_graph_op;
-use polar::graph::{GraphControllerMsg, GraphControllerState, GraphNodeKey, GraphOp};
+use polar::graph::{compile_graph_op, GraphControllerMsg, GraphControllerState, GraphNodeKey, GraphOp};
+use polar::{impl_graph_controller, NormalizedSbom};
 use ractor::{Actor, ActorProcessingErr, ActorRef};
-use tracing::trace;
-use tracing::debug;
-
 use serde::{Deserialize, Serialize};
+use std::fmt::Debug;
+use tracing::{debug, trace};
+
 pub mod linker;
 pub mod supervisor;
 pub const PROVENANCE_LIKER_NAME: &str = "polar.provenance.linker";
@@ -21,9 +19,11 @@ pub enum ArtifactType {
 
 /// Minimal typed intent that processors emit.
 /// CAUTION: Keep this small and stable; extend later with versions.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ArtifactNodeKey {
     /// Our understanding of what an "artifact" in the general sense is.
+    /// This particular nodekey represents the datatype, not an instance of an artifact.
+    /// Other typed artifacts are related to it using an :IS
     Artifact,
     PodContainer {
         pod_uid: String,
@@ -53,8 +53,13 @@ pub enum ArtifactNodeKey {
         entrypoint: String,
         cmd: String,
     },
+    Sbom {
+        /// A Hash generated from the bytes of the sbom file.
+        uid: String,
+        sbom: NormalizedSbom,
+    },
     /// Observed / asserted software component
-    ComponentClaim {
+    Component {
         claim_type: String, // "rpm", "deb", "pip", "file", ...
         name: String,
         version: String,
@@ -90,14 +95,34 @@ impl GraphNodeKey for ArtifactNodeKey {
                 format!("(:OCILayer {{ digest: ${prefix}_digest }})"),
                 vec![(format!("{prefix}_digest"), digest.clone().into())],
             ),
-
-            // TODO: Add other types to the cypher
             Self::OCIConfig { digest, ..} => (
                 format!("(:OCIConfig {{ digest: ${prefix}_digest }})"),
                 vec![(format!("{prefix}_digest"), digest.clone().into())],
             ),
-
-            Self::ComponentClaim {
+            ArtifactNodeKey::Sbom {
+                uid,
+                sbom
+            } =>
+            (
+                    format!(
+                        "({prefix}:SBOM {{ artifact_uid: ${prefix}_artifact_uid, format: ${prefix}_format, spec_version: ${prefix}_spec_version }})"
+                    ),
+                    vec![
+                        (
+                            format!("{prefix}_artifact_uid"),
+                            BoltType::String(uid.clone().into()),
+                        ),
+                        (
+                            format!("{prefix}_format"),
+                            BoltType::String(format!("{}", sbom.format.as_str()).into()),
+                        ),
+                        (
+                            format!("{prefix}_spec_version"),
+                            BoltType::String(sbom.spec_version.clone().into()),
+                        ),
+                    ],
+                ),
+            Self::Component {
                 claim_type,
                 name,
                 version,
@@ -117,56 +142,4 @@ impl GraphNodeKey for ArtifactNodeKey {
 
 /// A concrete instance of a GraphController for the artifact linker.
 
-pub struct LinkerGraphController;
-
-impl LinkerGraphController {
-    /// Here we provide an async helper, just to make the Actor implementation as lean as possible. Async traits aren't well supported yet, so until then this is the best we've got
-    async fn handle_op<ArtifactNodeKey>(
-        graph: &Graph,
-        op: &GraphOp<ArtifactNodeKey>,
-    ) -> Result<(), ActorProcessingErr>
-    where
-        ArtifactNodeKey: GraphNodeKey + Debug,
-    {
-        let span = tracing::trace_span!("GraphController.handle_op");
-        let _guard = span.enter();
-        let q = compile_graph_op(&op);
-
-        let mut txn = graph.start_txn().await?;
-        debug!("{q:?}");
-        txn.run(q)
-            .await
-            .map_err(|e| ActorProcessingErr::from(format!("neo4j execution failed: {:?}", e)))?;
-        txn.commit().await?;
-        trace!("transaction committed");
-        Ok(())
-    }
-}
-
-#[ractor::async_trait]
-impl Actor for LinkerGraphController {
-    type Msg = GraphControllerMsg<ArtifactNodeKey>;
-    type State = GraphControllerState;
-    type Arguments = Graph;
-
-    async fn pre_start(
-        &self,
-        myself: ActorRef<Self::Msg>,
-        graph: Self::Arguments,
-    ) -> Result<Self::State, ActorProcessingErr> {
-        debug!("{myself:?} starting. Connecting to neo4j.");
-        Ok(GraphControllerState { graph })
-    }
-
-    async fn handle(
-        &self,
-        _me: ActorRef<Self::Msg>,
-        msg: Self::Msg,
-        state: &mut Self::State,
-    ) -> Result<(), ActorProcessingErr> {
-        match msg {
-            GraphControllerMsg::Op(op) => Self::handle_op(&state.graph, &op).await?,
-        }
-        Ok(())
-    }
-}
+impl_graph_controller!(LinkerGraphController, node_key = ArtifactNodeKey);

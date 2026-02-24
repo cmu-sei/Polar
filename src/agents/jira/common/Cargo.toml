@@ -31,18 +31,16 @@ license = "MIT"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-lapin = { workspace = true }
 futures-lite = "2.6.1"
-indexmap = "2.11"
-url = "2.5.7"
-tracing = "0.1.41"
-amq-protocol-uri = { workspace = true }
+indexmap = "2.13"
+url = "2.5.8"
+tracing = "0.1.44"
 tcp-stream = { workspace = true }
 sysinfo = { workspace = true }
 serde = {version = "1", features = ["derive"]}
 serde_json = "1.0"
-ractor = { version="0.15.8", features = ["async-trait"]}
+ractor = { version="0.15.10", features = ["async-trait"]}
 cassini-broker = { path = "../../cassini/broker" }
 polar = {path = "../../lib" }
 rkyv = { workspace = true, features = ["std", "alloc"] }
-rkyv_derive = "0.8.12"
+rkyv_derive = "0.8.15"

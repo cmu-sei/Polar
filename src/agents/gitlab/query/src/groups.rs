@@ -1,4 +1,4 @@
-use crate::projects::ProjectConnection;
+use crate::projects::ProjectCoreConnection;
 use crate::users::UserCoreFragment;
 use gitlab_schema::gitlab::{self as schema};
 use gitlab_schema::DateTimeString;
@@ -61,7 +61,7 @@ pub struct GroupMembersFragment {
 #[cynic(schema = "gitlab", graphql_type = "Group")]
 pub struct GroupProjectsFragment {
     pub id: IdString,
-    pub projects: Option<ProjectConnection>,
+    pub projects: Option<ProjectCoreConnection>,
     pub projects_count: i32,
 }
 
@@ -69,7 +69,7 @@ pub struct GroupProjectsFragment {
 #[cynic(schema = "gitlab", graphql_type = "Group")]
 pub struct GroupRunnersFragment {
     pub id: IdString,
-    pub runners: Option<crate::runners::CiRunnerConnection>,
+    pub runners: Option<crate::runners::CiRunnerIdConnection>,
 }
 
 /// Datatype representing a users's membership for a group

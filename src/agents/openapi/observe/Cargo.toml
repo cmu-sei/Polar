@@ -5,14 +5,14 @@ edition = "2021"
 license = "MIT"
 
 [dependencies]
-tracing = "0.1.41"
+tracing = "0.1.44"
 reqwest = { workspace = true, features = ["json"] }
 serde = { version = "1.0.228", features = ["derive"] }
-tokio = { version = "1.47.1", features = ["full"] }
-serde_json = "1.0.145"
+tokio = { version = "1.49.0", features = ["full"] }
+serde_json = "1.0.149"
 utoipa = "5.4.0"
 web-agent-common = { path = "../common" }
-ractor = { version = "0.15.8", features = ["async-trait"] }
+ractor = { version = "0.15.10", features = ["async-trait"] }
 rkyv = { workspace = true }
 polar = { path = "../../lib" }
 # Fix a vulnerability in a transitive dependency.

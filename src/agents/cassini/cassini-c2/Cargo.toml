@@ -9,10 +9,10 @@ opentelemetry = "0.31.0"
 opentelemetry-otlp = "0.31.0"
 opentelemetry_sdk = "0.31.0"
 tracing-opentelemetry = "0.32.1"
-tracing = "0.1.41"
-tracing-subscriber = { version = "0.3.20", features = ["std", "env-filter"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.22", features = ["std", "env-filter"] }
 tracing-glog = "0.4.1"
 cassini-types = { path = "../types" }
 cassini-client.workspace = true
-ractor = { version = "0.15.8", features = ["async-trait"] }
-tokio = { version = "1.47", features = ["full"] }
+ractor = { version = "0.15.10", features = ["async-trait"] }
+tokio = { version = "1.49", features = ["full"] }

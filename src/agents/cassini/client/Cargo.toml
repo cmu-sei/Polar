@@ -5,24 +5,25 @@ edition.workspace = true
 license = "MIT"
 
 [dependencies]
+anyhow = "1.0.102"
 async-trait = "0.1.89"
-ractor = { version="0.15.8", features = ["async-trait"]}
-rkyv = { workspace = true }
-tokio = { version = "1.47", features = ["full"] }
-tracing = "0.1.41"
-tracing-glog = "0.4.1"
-tracing-subscriber = { version ="0.3.20", features=["std", "env-filter"]}
-uuid = { version = "1.18.1", features = ["v4"] }
-tokio-util = "0.7.16"
-rustls = { version = "0.23", features = ["aws-lc-rs"] }
-tokio-rustls = "0.26.4"
-polar = { path = "../../lib" }
 cassini-tracing = { path = "../cassini-tracing" }
 cassini-types = { path = "../types" }
+opentelemetry = "0.31.0"
+ractor = { version="0.15.10", features = ["async-trait"]}
+
 # Fix a vulnerability in a transitive dependency.
 ring = { version = "=0.17.14" }
-url = "2.5.7"
-anyhow = "1.0.100"
-tracing-opentelemetry = "0.32.0"
-opentelemetry = "0.31.0"
+
+rkyv = { workspace = true }
+rustls = { version = "0.23", features = ["aws-lc-rs"] }
 socket2 = "0.5"
+tokio-rustls = "0.26.4"
+tokio-util = "0.7.18"
+tokio = { version = "1.49", features = ["full"] }
+tracing = "0.1.44"
+tracing-glog = "0.4.1"
+tracing-opentelemetry = "0.32.1"
+tracing-subscriber = { version ="0.3.22", features=["std", "env-filter"]}
+url = "2.5.8"
+uuid = { version = "1.21.0", features = ["v4"] }

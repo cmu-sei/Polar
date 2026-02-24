@@ -1,180 +1,139 @@
-use crate::{subscribe_to_topic, GitlabConsumerArgs, GitlabConsumerState};
-use common::types::{GitlabData, GitlabEnvelope};
-use common::METADATA_CONSUMER_TOPIC;
-use polar::TRANSACTION_FAILED_ERROR;
+use crate::{GitlabConsumerState, UNKNOWN_FILED};
+use cassini_client::TcpClientMessage;
+use common::{
+    types::{GitlabData, GitlabEnvelope},
+    METADATA_CONSUMER_TOPIC,
+};
+use gitlab_queries::LicenseHistoryEntry;
 
-use neo4rs::Query;
-use polar::QUERY_COMMIT_FAILED;
+use crate::GitlabNodeKey;
+use polar::graph::{GraphControllerMsg, GraphOp, GraphValue, Property};
 use ractor::{Actor, ActorProcessingErr, ActorRef};
-use tracing::{debug, error, info};
+use tracing::debug;
 
 pub struct MetaConsumer;
+
+impl MetaConsumer {
+    pub fn ops_for_licenses(
+        instance_id: String,
+        licenses: &[LicenseHistoryEntry],
+    ) -> Vec<GraphOp<GitlabNodeKey>> {
+        let mut ops = vec![];
+
+        let instance_k = GitlabNodeKey::GitlabInstance {
+            instance_id: instance_id.clone(),
+        };
+
+        // ensure instance exists
+        ops.push(GraphOp::UpsertNode {
+            key: instance_k.clone(),
+            props: Vec::default(),
+        });
+
+        for entry in licenses {
+            let license_key = GitlabNodeKey::License {
+                instance_id: instance_id.clone(),
+                license_id: entry.id.to_string(),
+            };
+
+            let created_at = entry
+                .created_at
+                .clone()
+                .map_or(UNKNOWN_FILED.to_string(), |d| d.to_string());
+            let starts_at = entry
+                .starts_at
+                .clone()
+                .map_or(UNKNOWN_FILED.to_string(), |d| d.to_string());
+            let expires_at = entry
+                .expires_at
+                .clone()
+                .map_or(UNKNOWN_FILED.to_string(), |d| d.to_string());
+
+            let users_in = entry
+                .users_in_license_count
+                .map_or(GraphValue::I64(0), |u| GraphValue::I64(u as i64));
+
+            ops.push(GraphOp::UpsertNode {
+                key: license_key.clone(),
+                props: vec![
+                    Property("createdAt".into(), GraphValue::String(created_at)),
+                    Property("startsAt".into(), GraphValue::String(starts_at)),
+                    Property("expiresAt".into(), GraphValue::String(expires_at)),
+                    Property("plan".into(), GraphValue::String(entry.plan.clone())),
+                    Property("type".into(), GraphValue::String(entry.entry_type.clone())),
+                    Property("usersInLicenseCount".into(), users_in),
+                ],
+            });
+
+            ops.push(GraphOp::EnsureEdge {
+                from: instance_k.clone(),
+                to: license_key,
+                rel_type: "OBSERVED_LICENSE".into(),
+                props: Vec::default(),
+            });
+        }
+
+        ops
+    }
+}
 
 #[ractor::async_trait]
 impl Actor for MetaConsumer {
     type Msg = GitlabEnvelope;
-
     type State = GitlabConsumerState;
-    type Arguments = GitlabConsumerArgs;
+    type Arguments = GitlabConsumerState;
 
     async fn pre_start(
         &self,
         myself: ActorRef<Self::Msg>,
-        args: GitlabConsumerArgs,
+        state: Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
         debug!("{myself:?} starting, connecting to broker");
-        //subscribe to topic
-        match subscribe_to_topic(
-            args.registration_id,
+        state.tcp_client.cast(TcpClientMessage::Subscribe(
             METADATA_CONSUMER_TOPIC.to_string(),
-            args.graph_config,
-        )
-        .await
-        {
-            Ok(state) => Ok(state),
-            Err(e) => {
-                let err_msg =
-                    format!("Error subscribing to topic \"{METADATA_CONSUMER_TOPIC}\" {e}");
-                Err(ActorProcessingErr::from(err_msg))
-            }
-        }
+        ))?;
+        Ok(state)
     }
 
     async fn handle(
         &self,
-        myself: ActorRef<Self::Msg>,
+        _myself: ActorRef<Self::Msg>,
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        match state.graph.start_txn().await {
-            Ok(mut transaction) => match message.data {
-                GitlabData::Instance(instance) => {
-                    let cypher_query = format!(
-                        r#"
-                            MERGE (instance:GitlabInstance
-                            {{
-                                instance_id: "{}",
-                                enterprise: "{}",
-                                version: "{}",
-                                base_url: "{}"
-                            }}
-                            )
-                        "#,
-                        message.instance_id,
-                        instance.metadata.enterprise,
-                        instance.metadata.version,
-                        instance.base_url
-                    );
+        match message.data {
+            GitlabData::Instance(instance) => {
+                let op = GraphOp::UpsertNode {
+                    key: GitlabNodeKey::GitlabInstance {
+                        instance_id: message.instance_id.clone(),
+                    },
+                    props: vec![
+                        Property(
+                            "enterprise".into(),
+                            GraphValue::Bool(instance.metadata.enterprise.clone()),
+                        ),
+                        Property(
+                            "version".into(),
+                            GraphValue::String(instance.metadata.version.clone()),
+                        ),
+                        Property(
+                            "base_url".into(),
+                            GraphValue::String(instance.base_url.clone()),
+                        ),
+                    ],
+                };
 
-                    debug!("{cypher_query}");
+                state.graph_controller.cast(GraphControllerMsg::Op(op))?;
+            }
+            GitlabData::Licenses(licenses) => {
+                let ops = Self::ops_for_licenses(message.instance_id.clone(), &licenses);
 
-                    if let Err(e) = transaction.run(Query::new(cypher_query)).await {
-                        error!("{e}");
-                        myself.stop(Some(e.to_string()));
-                    }
-
-                    if let Err(_e) = transaction.commit().await {
-                        myself.stop(Some(QUERY_COMMIT_FAILED.to_string()))
-                    }
-
-                    info!("Committed transaction to database");
+                for op in ops {
+                    state.graph_controller.cast(GraphControllerMsg::Op(op))?;
                 }
-                GitlabData::Licenses(licenses) => {
-                    let entries_data = licenses
-                        .iter()
-                        .map(|entry| {
-                            format!(
-                                r#"{{
-                                     id: "{id}",
-                                     createdAt: "{created_at}",
-                                     startsAt: "{starts_at}",
-                                     expiresAt: "{expires_at}",
-                                     blockChangesAt: "{block_changes_at}",
-                                     activatedAt: "{activated_at}",
-                                     name: "{name}",
-                                     email: "{email}",
-                                     company: "{company}",
-                                     plan: "{plan}",
-                                     type: "{entry_type}",
-                                     usersInLicenseCount: {users_in_license_count}
-                                 }}"#,
-                                id = entry.id,
-                                created_at = entry
-                                    .created_at
-                                    .as_ref()
-                                    .map_or("".into(), |d| d.to_string()),
-                                starts_at = entry
-                                    .starts_at
-                                    .as_ref()
-                                    .map_or("".into(), |d| d.to_string()),
-                                expires_at = entry
-                                    .expires_at
-                                    .as_ref()
-                                    .map_or("".into(), |d| d.to_string()),
-                                block_changes_at = entry
-                                    .block_changes_at
-                                    .as_ref()
-                                    .map_or("".into(), |d| d.to_string()),
-                                activated_at = entry
-                                    .activated_at
-                                    .as_ref()
-                                    .map_or("".into(), |d| d.to_string()),
-                                name = entry.name.clone().unwrap_or_default(),
-                                email = entry.email.clone().unwrap_or_default(),
-                                company = entry.company.clone().unwrap_or_default(),
-                                plan = entry.plan.clone(),
-                                entry_type = entry.entry_type,
-                                users_in_license_count = entry
-                                    .users_in_license_count
-                                    .map(|n| n.to_string())
-                                    .unwrap_or_else(|| "null".into()),
-                            )
-                        })
-                        .collect::<Vec<_>>()
-                        .join(",\n");
-
-                    //TODO: Add connection to instance node
-                    let cypher_query = format!(
-                        r#"
-                        UNWIND [{entries_data}] AS entry
-                        MERGE (lic:LicenseEntry {{ id: entry.id }})
-                        SET lic.createdAt = entry.createdAt,
-                            lic.startsAt = entry.startsAt,
-                            lic.expiresAt = entry.expiresAt,
-                            lic.blockChangesAt = entry.blockChangesAt,
-                            lic.activatedAt = entry.activatedAt,
-                            lic.name = entry.name,
-                            lic.email = entry.email,
-                            lic.company = entry.company,
-                            lic.plan = entry.plan,
-                            lic.type = entry.type,
-                            lic.usersInLicenseCount = entry.usersInLicenseCount
-                        WITH lic
-                        MERGE (instance: GitlabInstance {{instance_id: "{}" }})
-                        WITH lic, instance
-                        MERGE (instance)-[:OBSERVED_LICENSE]->(lic)
-                        "#,
-                        message.instance_id
-                    );
-
-                    debug!("{cypher_query}");
-
-                    if let Err(e) = transaction.run(Query::new(cypher_query)).await {
-                        error!("{e}");
-                        myself.stop(Some(e.to_string()));
-                    }
-
-                    if let Err(_e) = transaction.commit().await {
-                        myself.stop(Some(QUERY_COMMIT_FAILED.to_string()))
-                    }
-
-                    info!("Committed transaction to database");
-                }
-                _ => (),
-            },
-            Err(e) => myself.stop(Some(format!("{TRANSACTION_FAILED_ERROR}. {e}"))),
+            }
+            _ => (),
         }
-
         Ok(())
     }
 }
