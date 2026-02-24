@@ -2,7 +2,7 @@ use cassini_client::{TcpClient, TcpClientMessage};
 use chrono::Utc;
 use k8s_openapi::api::apps::v1::Deployment;
 use k8s_openapi::{api::core::v1::Pod, apimachinery::pkg::apis::meta::v1::OwnerReference};
-use neo4rs::{BoltString, BoltType};
+use neo4rs::BoltType;
 use polar::{
     graph::{GraphController, GraphControllerMsg, GraphNodeKey, GraphOp, GraphValue, Property},
     impl_graph_controller, ProvenanceEvent, RkyvError, PROVENANCE_DISCOVERY_TOPIC,
@@ -61,7 +61,7 @@ impl GraphOperable for Pod {
             .and_then(|s| s.phase.clone())
             .unwrap_or_else(|| "Unknown".into());
 
-        let ready = self
+        let _ready = self
             .status
             .as_ref()
             .and_then(|s| s.conditions.as_ref())
@@ -333,7 +333,7 @@ impl GraphOperable for Deployment {
         graph: &GraphController<KubeNodeKey>,
         _tcp_client: &TcpClient,
     ) -> Result<(), ActorProcessingErr> {
-        let kind = "Deployment";
+        let _kind = "Deployment";
 
         let uid = self.metadata.uid.clone().unwrap_or_default();
         let name = self.metadata.name.unwrap_or_default();
@@ -433,7 +433,7 @@ impl GraphOperable for Deployment {
         self,
         graph: &ActorRef<GraphControllerMsg<KubeNodeKey>>,
     ) -> Result<(), ActorProcessingErr> {
-        let uid = self.metadata.uid.clone().unwrap();
+        let _uid = self.metadata.uid.clone().unwrap();
         let uid = self.metadata.uid.clone().unwrap_or_default();
 
         let status = self.status.unwrap_or_default();

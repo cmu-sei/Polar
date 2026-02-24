@@ -11,13 +11,11 @@ use cassini_backoff::{Backoff, ExponentialBackoff};
 use cassini_client::TCPClientConfig;
 use cassini_client::{TcpClientActor, TcpClientArgs, TcpClientMessage};
 use cassini_types::ClientEvent;
-use jira_common::dispatch::MessageDispatcher;
 use jira_common::types::JiraData;
 use jira_common::JIRA_GROUPS_CONSUMER_TOPIC;
 use jira_common::JIRA_ISSUES_CONSUMER_TOPIC;
 use jira_common::JIRA_PROJECTS_CONSUMER_TOPIC;
 use jira_common::JIRA_USERS_CONSUMER_TOPIC;
-use polar::DispatcherMessage;
 use polar::{Supervisor, SupervisorMessage};
 use ractor::async_trait;
 use ractor::registry::where_is;
@@ -142,7 +140,7 @@ impl Actor for ConsumerSupervisor {
     async fn pre_start(
         &self,
         myself: ActorRef<Self::Msg>,
-        args: (),
+        _args: (),
     ) -> Result<Self::State, ActorProcessingErr> {
         debug!("{myself:?} starting");
 
@@ -237,7 +235,7 @@ impl Actor for ConsumerSupervisor {
                 ClientEvent::MessagePublished { topic, payload, .. } => {
                     ConsumerSupervisor::deserialize_and_dispatch(topic, payload);
                 }
-                ClientEvent::TransportError { reason } => todo!(),
+                ClientEvent::TransportError { reason: _ } => todo!(),
                 ClientEvent::ControlResponse { .. } => {
                     // ignore
                 },

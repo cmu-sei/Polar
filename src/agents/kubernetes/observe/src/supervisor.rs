@@ -12,7 +12,6 @@ use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef, SupervisionEvent}
 use serde_json::to_value;
 use std::collections::HashMap;
 use tracing::{debug, error, info, warn};
-use cassini_types::WireTraceCtx;
 use tracing::{instrument, trace};
 
 use crate::{

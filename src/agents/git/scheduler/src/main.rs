@@ -168,7 +168,7 @@ impl Actor for RootSupervisor {
 async fn main() {
     polar::init_logging(SERVICE_NAME.to_string());
 
-    let (scheduler, handle) = Actor::spawn(
+    let (_scheduler, handle) = Actor::spawn(
         Some(format!("{SERVICE_NAME}.supervisor")),
         RootSupervisor,
         (),

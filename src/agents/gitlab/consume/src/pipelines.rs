@@ -34,11 +34,8 @@ use gitlab_queries::projects::GitlabCiJob;
 use polar::graph::GraphController;
 use polar::graph::{GraphControllerMsg, GraphOp, GraphValue, Property};
 use polar::ProvenanceEvent;
-use polar::PROVENANCE_DISCOVERY_TOPIC;
-use polar::{QUERY_COMMIT_FAILED, TRANSACTION_FAILED_ERROR};
-use ractor::{async_trait, rpc::cast, Actor, ActorProcessingErr, ActorRef};
-use tracing::{debug, error, info};
-use cassini_types::WireTraceCtx;
+use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef};
+use tracing::debug;
 
 fn fmt_download_path(base_url: &str, download_url: &str) -> String {
     format!("{base_url}{download_url}")

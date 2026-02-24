@@ -181,10 +181,10 @@ impl Actor for ObserverSupervisor {
                         warn!("failed to start issue observer {e}")
                     }
                 }
-                ClientEvent::MessagePublished { topic, payload, .. } => {
+                ClientEvent::MessagePublished { topic: _, payload: _, .. } => {
                     todo!()
                 }
-                ClientEvent::TransportError { reason } => todo!(),
+                ClientEvent::TransportError { reason: _ } => todo!(),
                 ClientEvent::ControlResponse { .. } => {
                     // ignore
                 },

@@ -177,7 +177,7 @@ impl Actor for JiraIssueConsumer {
                                             for (i, item) in v.into_iter().enumerate() {
                                                 match item {
                                                     NestedListTypes::Option(Some(val)) => {
-                                                        let sub_key = String::new();
+                                                        let _sub_key = String::new();
                                                         let new_key = String::from(format!("field{field_count}"));
                                                         field_count += 1;
                                                         params.insert(new_key.clone(), val.to_string());
@@ -327,7 +327,7 @@ impl Actor for JiraIssueConsumer {
                                                 for subkey in v.keys() {
                                                     if let Some(value) = v.get(subkey) {
                                                         match value {
-                                                            FirstTierField::Object(val) => {
+                                                            FirstTierField::Object(_val) => {
                                                                 // Check for object first
                                                                 //println!("Skipping sub field key Object: {}", subkey);
                                                             },

@@ -129,7 +129,7 @@ pub struct ClusterConsumerSupervisorState {
 impl ClusterConsumerSupervisor {
     pub fn handle_event<T>(
         ev: RawKubeEvent,
-        cache: &mut ProjectionCache,
+        _cache: &mut ProjectionCache,
         graph_controller: &GraphController<KubeNodeKey>,
         tcp_client: &TcpClient,
     ) -> Result<(), ActorProcessingErr>

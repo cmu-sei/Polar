@@ -21,11 +21,7 @@
    DM24-0470
 */
 
-use cassini_client::TcpClientMessage;
 use cassini_client::TcpClient;
-use ractor::registry::where_is;
-use std::error::Error;
-use cassini_types::WireTraceCtx;
 use common::types::GitlabEnvelope;
 use neo4rs::BoltType;
 use polar::graph::GraphController;
