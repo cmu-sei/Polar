@@ -481,7 +481,7 @@ impl Actor for JiraIssueConsumer {
                                         )
                                     );
                                 }
-                                if let Some(option) = item.fromString {
+                                if let Some(option) = item.from_string { // renamed field
                                     let new_field_key = String::from(format!("field{field_count}"));
                                     field_count += 1;
                                     params.insert(new_field_key.clone(), option);
@@ -503,7 +503,7 @@ impl Actor for JiraIssueConsumer {
                                         )
                                     );
                                 }
-                                if let Some(option) = item.toString {
+                                if let Some(option) = item.to_string { // renamed field
                                     let new_field_key = String::from(format!("field{field_count}"));
                                     field_count += 1;
                                     params.insert(new_field_key.clone(), option);

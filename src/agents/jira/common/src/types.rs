@@ -21,20 +21,20 @@
    DM24-0470
 */
 
-use rkyv::{Archive, Deserialize, Serialize, };
+use rkyv::{Archive, Deserialize, Serialize};
+use serde::{Deserialize as SerdeDeserialize, Serialize as SerdeSerialize};
 use std::collections::HashMap;
 
-use serde::Deserialize as SerdeDeserialize;
-
-#[derive(Debug, Deserialize, Serialize, Archive, SerdeDeserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Archive, SerdeDeserialize, SerdeSerialize, Clone)]
 pub struct JiraProject {
     pub id: String,
     pub key: String,
     pub name: String,
-    pub projectTypeKey: String,
+    #[serde(rename = "projectTypeKey")]
+    pub project_type_key: String,
 }
 
-#[derive(Debug, Deserialize, Serialize, Archive, SerdeDeserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Archive, SerdeDeserialize, SerdeSerialize, Clone)]
 pub struct JiraGroup {
     //pub groupId: String,
     pub name: String,
@@ -42,26 +42,29 @@ pub struct JiraGroup {
     pub label: Option<String>,
 }
 
-#[derive(Debug, Deserialize, Serialize, Archive, SerdeDeserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Archive, SerdeDeserialize, SerdeSerialize, Clone)]
 pub struct JiraUser {
     pub name: String,
     pub key: String,
     pub html: Option<String>,
-    pub displayName: String,
+    #[serde(rename = "displayName")]
+    pub display_name: String,
 }
 
-#[derive(Debug, Deserialize, Serialize, Archive, SerdeDeserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Archive, SerdeDeserialize, SerdeSerialize, Clone)]
 pub struct JiraFieldSchema {
     pub custom: Option<String>,
-    pub customId: Option<f64>,
+    #[serde(rename = "customId")]
+    pub custom_id: Option<f64>,
     pub items: Option<String>,
     pub system: Option<String>,
     pub r#type: String,
 }
 
-#[derive(Debug, Deserialize, Serialize, Archive, SerdeDeserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Archive, SerdeDeserialize, SerdeSerialize, Clone)]
 pub struct JiraField {
-    pub clauseNames: Option<Vec<String>>,
+    #[serde(rename = "clauseNames")]
+    pub clause_names: Option<Vec<String>>,
     pub custom: bool,
     pub id: String,
     //pub key: String,
@@ -72,28 +75,34 @@ pub struct JiraField {
     pub searchable: bool,
 }
 
-#[derive(Deserialize, Serialize, Archive, SerdeDeserialize, Clone, Debug)]
+#[derive(Deserialize, Serialize, Archive, SerdeDeserialize, SerdeSerialize, Clone, Debug)]
 pub struct JiraAuthor {
     pub name: String,
     pub key: String,
-    pub emailAddress: String,
-    pub avatarUrls: HashMap<String, String>,
-    pub displayName: String,
+    #[serde(rename = "emailAddress")]
+    pub email_address: String,
+    #[serde(rename = "avatarUrls")]
+    pub avatar_urls: HashMap<String, String>,
+    #[serde(rename = "displayName")]
+    pub display_name: String,
     pub active: bool,
-    pub timeZone: String,
+    #[serde(rename = "timeZone")]
+    pub time_zone: String,
 }
 
-#[derive(Deserialize, Serialize, Archive, SerdeDeserialize, Clone, Debug)]
+#[derive(Deserialize, Serialize, Archive, SerdeDeserialize, SerdeSerialize, Clone, Debug)]
 pub struct JiraItemHistory {
     pub field: String,
     pub fieldtype: String,
     pub from: Option<String>,
-    pub fromString: Option<String>,
+    #[serde(rename = "fromString")]
+    pub from_string: Option<String>,
     pub to: Option<String>,
-    pub toString: Option<String>,
+    #[serde(rename = "toString")]
+    pub to_string: Option<String>,
 }
 
-#[derive(Deserialize, Serialize, Archive, SerdeDeserialize, Clone, Debug)]
+#[derive(Deserialize, Serialize, Archive, SerdeDeserialize, SerdeSerialize, Clone, Debug)]
 pub struct JiraHistory {
     pub id: String,
     pub author: JiraAuthor,
@@ -101,15 +110,17 @@ pub struct JiraHistory {
     pub items: Vec<JiraItemHistory>,
 }
 
-#[derive(Deserialize, Serialize, Archive, SerdeDeserialize, Clone, Debug)]
+#[derive(Deserialize, Serialize, Archive, SerdeDeserialize, SerdeSerialize, Clone, Debug)]
 pub struct JiraIssueChangeLog {
-    pub startAt: f64,
-    pub maxResults: f64,
+    #[serde(rename = "startAt")]
+    pub start_at: f64,
+    #[serde(rename = "maxResults")]
+    pub max_results: f64,
     pub total: f64,
     pub histories: Vec<JiraHistory>,
 }
 
-#[derive(Clone, Archive, Serialize, Deserialize, SerdeDeserialize, Debug)]
+#[derive(Clone, Archive, Serialize, Deserialize, SerdeDeserialize, SerdeSerialize, Debug)]
 #[serde(untagged)]
 pub enum FifthTierField {
     Option(Option<String>),
@@ -118,7 +129,7 @@ pub enum FifthTierField {
     Null,
 }
 
-#[derive(Clone, Archive, Serialize, Deserialize, SerdeDeserialize, Debug)]
+#[derive(Clone, Archive, Serialize, Deserialize, SerdeDeserialize, SerdeSerialize, Debug)]
 #[serde(untagged)]
 pub enum FourthTierField {
     Object(HashMap<String, FifthTierField>),
@@ -128,7 +139,7 @@ pub enum FourthTierField {
     Null,
 }
 
-#[derive(Clone, Archive, Serialize, Deserialize, SerdeDeserialize, Debug)]
+#[derive(Clone, Archive, Serialize, Deserialize, SerdeDeserialize, SerdeSerialize, Debug)]
 #[serde(untagged)]
 pub enum ThirdTierField {
     Object(HashMap<String, FourthTierField>),
@@ -138,7 +149,7 @@ pub enum ThirdTierField {
     Null,
 }
 
-#[derive(Clone, Archive, Serialize, Deserialize, SerdeDeserialize, Debug)]
+#[derive(Clone, Archive, Serialize, Deserialize, SerdeDeserialize, SerdeSerialize, Debug)]
 #[serde(untagged)]
 pub enum SecondTierField {
     Object(HashMap<String, ThirdTierField>),
@@ -148,7 +159,7 @@ pub enum SecondTierField {
     Null,
 }
 
-#[derive(Clone, Archive, Serialize, Deserialize, SerdeDeserialize,Debug)]
+#[derive(Clone, Archive, Serialize, Deserialize, SerdeDeserialize, SerdeSerialize, Debug)]
 #[serde(untagged)]
 pub enum FirstTierField {
     Object(HashMap<String, SecondTierField>),
@@ -159,7 +170,7 @@ pub enum FirstTierField {
     Null,
 }
 
-#[derive(Clone, Archive, Serialize, Deserialize, SerdeDeserialize, Debug)]
+#[derive(Clone, Archive, Serialize, Deserialize, SerdeDeserialize, SerdeSerialize, Debug)]
 #[serde(untagged)]
 pub enum NestedListTypes {
     Object(HashMap<String, FirstTierField>),
@@ -169,7 +180,7 @@ pub enum NestedListTypes {
     Null,
 }
 
-#[derive(Clone, Archive, Serialize, Deserialize, SerdeDeserialize, Debug)]
+#[derive(Clone, Archive, Serialize, Deserialize, SerdeDeserialize, SerdeSerialize, Debug)]
 #[serde(untagged)]
 pub enum FieldValue {
     Object(HashMap<String, FirstTierField>),
@@ -180,7 +191,7 @@ pub enum FieldValue {
     Null,
 }
 
-#[derive(Deserialize, Serialize, Archive, SerdeDeserialize, Clone, Debug)]
+#[derive(Deserialize, Serialize, Archive, SerdeDeserialize, SerdeSerialize, Clone, Debug)]
 pub struct JiraIssue {
     pub expand: String,
     pub id: String,
@@ -188,22 +199,22 @@ pub struct JiraIssue {
     pub self_url: String,
     pub key: String,
     pub fields: HashMap<String, FieldValue>,
-    pub renderedFields: Option<String>,
+    #[serde(rename = "renderedFields")]
+    pub rendered_fields: Option<String>,
     pub changelog: JiraIssueChangeLog,
 }
 
-#[derive(Debug, Serialize, Deserialize, serde::Deserialize, serde::Serialize, Archive, Clone, Default,)]
+#[derive(Debug, Serialize, Deserialize, serde::Deserialize, serde::Serialize, Archive, Clone, Default)]
 pub struct IdString(pub String);
 
-#[derive(Debug, Serialize, Deserialize, serde::Deserialize, serde::Serialize, Archive, Clone, Default,)]
+#[derive(Debug, Serialize, Deserialize, serde::Deserialize, serde::Serialize, Archive, Clone, Default)]
 pub struct JsonString {
-    pub json: String
+    pub json: String,
 }
-
 
 /// This enum mostly serves as a way to inform the deserializer what datatype to map the bytes into.
 /// The underlying byte vector contains a message meant for some consumer on a given topic
-#[derive(Serialize, Deserialize, Archive, SerdeDeserialize, Debug)]
+#[derive(Serialize, Deserialize, Archive, SerdeDeserialize, SerdeSerialize, Debug)]
 pub enum JiraData {
     Projects(Vec<JiraProject>),
     Groups(Vec<JiraGroup>),

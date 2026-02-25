@@ -83,11 +83,11 @@ impl Actor for JiraProjectConsumer {
                         let project_array = projects.iter()
                             .map(|project| {
                                 format!(
-                                    r#"{{ project_id: "{project_id}", name: "{name}", key: "{key}", projectTypeKey: "{projectTypeKey}" }}"#,
+                                    r#"{{ project_id: "{project_id}", name: "{name}", key: "{key}", projectTypeKey: "{project_type_key}" }}"#,
                                     project_id = project.id,
                                     name = project.name,
                                     key = project.key,
-                                    projectTypeKey = project.projectTypeKey,
+                                    project_type_key = project.project_type_key, // renamed field
                                 )
                             })
                             .collect::<Vec<_>>()

@@ -87,7 +87,7 @@ impl Actor for JiraUserConsumer {
                                     <Option<std::string::String> as Clone>::clone(&user.html).unwrap_or("".to_string()).clone(),
                                     user.name.to_string().clone(),
                                     user.key.to_string().clone(),
-                                    user.displayName.to_string().clone(),
+                                    user.display_name.to_string().clone(), // renamed field
                                 )
                             })
                             .collect::<Vec<_>>()
