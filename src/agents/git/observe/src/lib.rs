@@ -10,8 +10,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tracing::info;
-use tracing::{debug, error, instrument, trace, warn};
+use tracing::{debug, error, info, instrument, trace, warn};
 use url::Url;
 
 pub const SERVICE_NAME: &str = "polar.git.observer";
@@ -687,21 +686,28 @@ impl Actor for GitRepoWorker {
     ) -> Result<Self::State, ActorProcessingErr> {
         debug!("{myself:?} starting");
         // Open or clone repo during actor startup.
-        let repo = Self::open_or_clone_bare(
+        match Self::open_or_clone_bare(
             &args.repo_path,
             &args.config.repo_url,
             args.credential_provider.clone(),
             args.config.shallow_depth,
-        )?;
-        // TODO: Load persisted last_seen checkpoints here.
-
-        Ok(GitRepoWorkerState {
-            credential_provider: args.credential_provider,
-            config: args.config,
-            tcp_client: args.tcp_client,
-            repo,
-            last_seen: HashMap::new(),
-        })
+        ) {
+            Ok(repo) =>
+            // TODO: Load persisted last_seen checkpoints here.
+            {
+                Ok(GitRepoWorkerState {
+                    credential_provider: args.credential_provider,
+                    config: args.config,
+                    tcp_client: args.tcp_client,
+                    repo,
+                    last_seen: HashMap::new(),
+                })
+            }
+            Err(e) => {
+                error!("Failed to initialize repository for observation. {e}");
+                Err(e.into())
+            }
+        }
     }
 
     async fn post_start(

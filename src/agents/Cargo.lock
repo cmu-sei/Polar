@@ -4955,9 +4955,18 @@ dependencies = [
  "cassini-client",
  "cassini-types",
  "git-agent-common",
+ "neo4rs",
  "polar",
  "ractor",
+<<<<<<< HEAD
  "rkyv 0.8.15",
+||||||| 4a9ae2c
+ "rkyv 0.8.12",
+=======
+ "rkyv 0.8.12",
+ "testcontainers",
+ "testcontainers-modules",
+>>>>>>> schedule-git-observation
  "tokio",
  "tracing",
 ]

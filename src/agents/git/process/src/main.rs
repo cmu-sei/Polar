@@ -37,13 +37,13 @@ impl GraphNodeKey for GitNodeKey {
     fn cypher_match(&self, prefix: &str) -> (String, Vec<(String, BoltType)>) {
         match self {
             GitNodeKey::Repository { repo_id } => (
-                "(:GitRepository { id: $repo_id })".to_string(),
-                vec![("repo_id".to_string(), repo_id.to_string().into())],
+                format!("(:GitRepository {{ id: ${prefix}_repo_id }})"),
+                vec![(format!("{prefix}_repo_id"), repo_id.to_string().into())],
             ),
 
             GitNodeKey::Commit { oid } => (
-                "(:GitCommit { oid: $oid })".to_string(),
-                vec![("oid".to_string(), oid.clone().into())],
+                format!("(:GitCommit {{ oid: ${prefix}_oid }})"),
+                vec![(format!("{prefix}_oid"), oid.clone().into())],
             ),
 
             GitNodeKey::Ref { repo_id, name } => (
@@ -53,11 +53,10 @@ impl GraphNodeKey for GitNodeKey {
                     (format!("{prefix}_name"), name.clone().into()),
                 ],
             ),
-
             GitNodeKey::Author { email } => (
-                "(:GitAuthor { email: $email })".to_string(),
+                format!("(:GitAuthor {{ email: ${prefix}_email }})"),
                 vec![
-                    ("email".to_string(), email.clone().into()),
+                    (format!("{prefix}_email"), email.clone().into()),
                     // name should be SET, not matched on
                 ],
             ),
@@ -343,37 +342,6 @@ impl Actor for GitRepoProcessingManager {
 
 // A concrete instance of a GraphController for the artifact linker.
 impl_graph_controller!(GitRepoGraphController, node_key = GitNodeKey);
-
-// // TODO: replace with imp_graph_controller! macro
-// pub struct ;
-
-// #[ractor::async_trait]
-// impl Actor for GitRepoGraphController {
-//     type Msg = GraphControllerMsg<GitNodeKey>;
-//     type State = GraphControllerState;
-//     type Arguments = Graph;
-
-//     async fn pre_start(
-//         &self,
-//         myself: ActorRef<Self::Msg>,
-//         graph: Self::Arguments,
-//     ) -> Result<Self::State, ActorProcessingErr> {
-//         debug!("{myself:?} starting. Connecting to neo4j.");
-//         Ok(GraphControllerState { graph })
-//     }
-
-//     async fn handle(
-//         &self,
-//         _me: ActorRef<Self::Msg>,
-//         msg: Self::Msg,
-//         state: &mut Self::State,
-//     ) -> Result<(), ActorProcessingErr> {
-//         match msg {
-//             GraphControllerMsg::Op(op) => handle_op(&state.graph, &op).await?,
-//         }
-//         Ok(())
-//     }
-// }
 
 #[tokio::main]
 async fn main() {

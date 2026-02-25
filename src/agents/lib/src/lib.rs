@@ -58,8 +58,8 @@ where
         TcpClientArgs {
             config,
             registration_id: None,
-            events_output: Some(events_output),   // <-- wrap in Some
-            event_handler: None,                   // <-- add this field
+            events_output: Some(events_output),
+            event_handler: None,
         },
         supervisor.into(),
     )
@@ -264,10 +264,13 @@ pub fn init_logging(service_name: String) {
     use opentelemetry::{global, KeyValue};
     use opentelemetry_otlp::Protocol;
     use opentelemetry_otlp::WithExportConfig;
-    use opentelemetry_sdk::{trace::{self, RandomIdGenerator}, Resource};
+    use opentelemetry_sdk::{
+        trace::{self, RandomIdGenerator},
+        Resource,
+    };
     use tracing_subscriber::filter::EnvFilter;
-    use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
     use tracing_subscriber::Layer;
+    use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 
@@ -303,15 +306,15 @@ pub fn init_logging(service_name: String) {
                     .build();
 
                 global::set_tracer_provider(tracer_provider);
-                
+
                 // CRITICAL: Use the SAME tracer name as the broker
                 let tracer = global::tracer("cassini-tracing");
-                
-                let telemetry_layer = tracing_opentelemetry::layer()
-                    .with_tracer(tracer);
-                    
+
+                let telemetry_layer = tracing_opentelemetry::layer().with_tracer(tracer);
+
                 // Apply the filter separately
-                let filtered_telemetry_layer = telemetry_layer.with_filter(EnvFilter::from_default_env());
+                let filtered_telemetry_layer =
+                    telemetry_layer.with_filter(EnvFilter::from_default_env());
 
                 if tracing_subscriber::registry()
                     .with(filter)
