@@ -25,7 +25,7 @@ The scheduler reacts to `GitRepositoryDiscovered` events. Upon receiving such an
 * Emits a directive instructing the Git Repository Observer to clone and analyze the repository.
 * Does not perform cloning or repository introspection itself.
 
-It is strictly orchestration logic.
+It is strictly policy application logic.
 
 #### Git Repository Observer Agent
 
