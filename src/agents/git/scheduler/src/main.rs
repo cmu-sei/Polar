@@ -65,9 +65,10 @@ impl RootSupervisor {
     ) -> Result<(), ActorProcessingErr> {
         debug!("{myself:?} initializing");
         // subscribe to supervision events
-        state.tcp_client.cast(TcpClientMessage::Subscribe(
-            GIT_REPO_DISCOGERY_TOPIC.to_string(),
-        ))?;
+        state.tcp_client.cast(TcpClientMessage::Subscribe {
+            topic: GIT_REPO_DISCOGERY_TOPIC.to_string(),
+            trace_ctx: None,   // or WireTraceCtx::from_current_span() if you have a span
+        })?;
 
         Ok(())
     }
@@ -217,9 +218,9 @@ impl Actor for RootSupervisor {
         match message {
             SupervisorMessage::ClientEvent { event } => match event {
                 ClientEvent::ControlResponse {
-                    registration_id,
-                    result,
-                    trace_ctx,
+                    registration_id: _,
+                    result: _,
+                    trace_ctx: _,
                 } => todo!("handle control response"),
                 ClientEvent::Registered { .. } => Self::init(myself, state).await?,
                 ClientEvent::MessagePublished { topic, payload, .. } => {
@@ -239,7 +240,7 @@ impl Actor for RootSupervisor {
 async fn main() {
     polar::init_logging(SERVICE_NAME.to_string());
 
-    let (scheduler, handle) = Actor::spawn(
+    let (_scheduler, handle) = Actor::spawn(
         Some(format!("{SERVICE_NAME}.supervisor")),
         RootSupervisor,
         (),
