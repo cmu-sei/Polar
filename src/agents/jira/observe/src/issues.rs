@@ -147,23 +147,20 @@ impl Actor for JiraIssueObserver {
                                     let mut cloned_issue = issue.clone();
 
                                     // Replace the "customfield_*" with the name
-                                    if let fields = cloned_issue.get_mut("fields").expect("FIELDS")
-                                    {
-                                        let mut replacements = vec![];
-                                        for (key, value) in fields.as_object().unwrap() {
-                                            if let Some(found_field) = field_map.get(key.as_str()) {
-                                                if let new_key = found_field.name.clone() {
-                                                    replacements
-                                                        .push((new_key.to_string(), value.clone()));
-                                                }
-                                            }
+                                    let fields = cloned_issue.get_mut("fields").expect("FIELDS");
+
+                                    let mut replacements = vec![];
+                                    for (key, value) in fields.as_object().unwrap() {
+                                        if let Some(found_field) = field_map.get(key.as_str()) {
+                                            let new_key = found_field.name.clone();
+                                            replacements.push((new_key.to_string(), value.clone()));
                                         }
-                                        for (new_key, value) in replacements {
-                                            fields[new_key] = value;
-                                        }
-                                        for key in field_map.keys() {
-                                            fields.as_object_mut().unwrap().remove(key);
-                                        }
+                                    }
+                                    for (new_key, value) in replacements {
+                                        fields[new_key] = value;
+                                    }
+                                    for key in field_map.keys() {
+                                        fields.as_object_mut().unwrap().remove(key);
                                     }
 
                                     let tcp_client = where_is(BROKER_CLIENT_NAME.to_string())

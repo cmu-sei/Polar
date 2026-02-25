@@ -29,9 +29,6 @@ pub mod supervisor;
 
 use parse_link_header::parse_with_rel;
 use ractor::concurrency::Duration;
-use rand::rngs::SmallRng;
-use rand::Rng;
-use rand::SeedableRng;
 use reqwest::header::LINK;
 use reqwest::Client;
 use reqwest::Error;
@@ -40,6 +37,7 @@ use reqwest::Response;
 use serde::Deserialize;
 use tokio::task::AbortHandle;
 use tracing::{debug, error};
+use rand::RngExt;
 
 const JIRA_PROJECT_OBSERVER: &str = "jira.observer.projects";
 const JIRA_GROUP_OBSERVER: &str = "jira.observer.groups";
@@ -67,8 +65,6 @@ pub struct JiraObserverState {
     max_backoff: Duration, 
     /// Times we failed to query jira for one reason or another
     failed_attempts: u64, 
-    /// RNG used to calculate jitter
-    rng: rand::rngs::SmallRng,
     /// minimum amount of time an observer will wait between queries
     base_interval: Duration,
     /// thread handle containing the observer loop 
@@ -86,12 +82,6 @@ impl JiraObserverState {
         max_backoff: Duration,
     ) -> Self {
 
-        //init rng
-
-        let mut rng = rand::rng();
-
-        let small = SmallRng::from_rng(&mut rng);
-
         // state
         JiraObserverState {
             jira_url,
@@ -102,7 +92,6 @@ impl JiraObserverState {
             base_interval,
             backoff_interval: base_interval, // start with the base interval
             failed_attempts: 0,
-            rng: small,
             task_handle: None,
         }
     }
@@ -114,7 +103,7 @@ impl JiraObserverState {
 
     /// Increase backoff interval with exponential backoff and jitter
     pub fn apply_backoff(&mut self) {
-        let jitter = Duration::from_secs(self.rng.random_range(0..30));
+        let jitter = Duration::from_secs(rand::rng().random_range(0..30));
         let new_interval = self.backoff_interval * 2 + jitter;
         self.backoff_interval = std::cmp::min(new_interval, self.max_backoff);
         self.failed_attempts +=1;
