@@ -2,6 +2,6 @@
 name = "config-ops"
 version.workspace = true
 edition.workspace = true
-license = "MIT"
+license.workspace = true
 
 [dependencies]

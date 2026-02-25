@@ -52,46 +52,110 @@ members = [
     "config-ops",
     "openapi/observe",
     "openapi/consume",
-    "openapi/common", "provenance/provenance-common", "logger", "git/observe",  "git/common", "git/scheduler", "git/process",
+    "openapi/common",
+    "provenance/provenance-common",
+    "logger",
+    "git/observe",
+    "git/common",
+    "git/scheduler",
+    "git/process",
 ]
 
-
 [workspace.package]
-version = "0.1.0"
-edition = "2021"
+version = "1.0.0"
+edition = "2024"
+license = "MIT"
 
 [workspace.metadata.crane]
 name = "polar"
 
 [workspace.dependencies]
+# External crates – common across many members
 ahash = "0.8.12"
+anyhow = "1.0.102"
 async-global-executor-trait = "3.1.0"
-cassini-backoff = { git = "https://github.com/daveman1010221/backoff", branch = "master" }
+async-trait = "0.1.89"
 base64 = "0.22.1"
 bitflags = "2.11.0"
-executor-trait = "3.1.0"
-getrandom = "0.3.4"
-k8s-openapi = "0.26"
-libloading = "0.8.9"
-neo4rs = { version = "0.9.0-rc.8", git = "https://github.com/neo4j-labs/neo4rs", tag = "v0.9.0-rc.8" }
-parse_link_header = "0.4"
-rand = "0.9"
-rand_core = "0.9"
-reactor-trait = "3.1.1"
-reqwest = "0.12"
-rkyv = "0.8.15"
-tracing = "0.1.44"
-sysinfo = "0.36"
-tcp-stream = "0.34"
-webpki-roots = "1"
 bytecheck = "0.8.2"
 bytecheck_derive = "0.8.2"
-cassini-client = { path = "cassini/client" }
-cassini-types  = { path = "cassini/types" }
+cassini-backoff = { git = "https://github.com/daveman1010221/backoff", branch = "master" }
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+clap = { version = "4.5.60", features = ["derive"] }   # only used in one place, but added for consistency
+clokwerk = "0.4.0"
+cyclonedx-bom = "0.8.0"                                 # used in provenance
+cynic = "3.12.0"                                        # used in gitlab, jira?
+dhall = { git = "https://github.com/daveman1010221/dhall-rust", branch = "modernize-rkyv" }
+docker_credential = "1.3.2"                             # used in resolver
+executor-trait = "3.1.0"
+fake = "4.4.0"                                           # only in producer, but ok
+features = "0.10.0"                                      # used in resolver
+futures = "0.3.32"                                       # used in kube-observer
+futures-lite = "2.6.1"
+getrandom = "0.3.4"
+git2 = "=0.20.2"
+hex = "0.4.3"
+indexmap = "2.13"                                        # used in jira/common
+k8s-openapi = { version = "0.26", features = ["v1_32"] }
 kube = { version = "2.0.1", default-features = false, features = ["client", "aws-lc-rs", "rustls-tls", "runtime", "derive"] }
-chrono = {version = "0.4", default-features = false, features = ["clock", "std"] }
+libloading = "0.8.9"
+log = "0.4.29"                                            # used in jira/observe
+neo4rs = { version = "0.9.0-rc.8", git = "https://github.com/neo4j-labs/neo4rs", tag = "v0.9.0-rc.8" }
+oci-client = "0.15.0"                                     # used in resolver
+opentelemetry = "0.31.0"
+opentelemetry-otlp = "0.31.0"
+opentelemetry_sdk = "0.31.0"
+parse_link_header = "0.4"
+proptest = "1.10.0"                                       # only in policy-config dev, but ok
+ractor = { version = "0.15.10", features = ["async-trait"] }
+rand = "0.10.0"                                            # upgraded from 0.9
+rand_core = "0.10.0"
+reactor-trait = "3.1.1"
+reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
+ring = "=0.17.14"
+rkyv = "0.8.15"
+rustls = { version = "0.23", features = ["aws-lc-rs"] }
+rustls-webpki = "0.103"                                   # used in openapi/consume
+serde = { version = "1", features = ["derive"] }
+serde_dhall = { git = "https://github.com/daveman1010221/dhall-rust", branch = "modernize-rkyv" }
+serde_json = "1.0"
+serde_path_to_error = "0.1"                               # used in jira/observe
+serde_yaml = "0.9"                                         # used in jira/observe
+sha2 = "0.10.9"
+socket2 = "0.5"                                            # used in cassini/client
+sysinfo = "0.36"
+tcp-stream = "0.34"
+tempfile = "3.26.0"                                        # used in tests
+tokio = { version = "1.49.0", features = ["full"] }       # full included for simplicity
+tokio-rustls = "0.26.4"
+tokio-util = "0.7.18"
+tracing = "0.1.44"
+tracing-glog = "0.4.1"
+tracing-opentelemetry = "0.32.1"
+tracing-subscriber = { version = "0.3.22", features = ["std", "env-filter"] }
+url = "2.5.8"
+urlencoding = "2.1.3"
+utoipa = "5.4.0"                                           # used in openapi
+uuid = "1.21.0"
+webpki-roots = "1"
+
+# Internal crates (members) – add as workspace dependencies with paths
+cassini-broker = { path = "cassini/broker" }
+cassini-c2 = { path = "cassini/cassini-c2" }
+cassini-client = { path = "cassini/client" }
+cassini-tracing = { path = "cassini/cassini-tracing" }
+cassini-types = { path = "cassini/types" }
+common = { path = "gitlab/common" }                         # gitlab common
+git-agent-common = { path = "git/common" }
+gitlab-queries = { path = "gitlab/query" }
+gitlab-schema = { path = "gitlab/schema" }
+harness-common = { path = "cassini/test/common" }
+jira_common = { path = "jira/common" }
+kube-common = { path = "kubernetes/common" }
+polar = { path = "lib" }
+provenance-common = { path = "provenance/provenance-common" }
+web-agent-common = { path = "openapi/common" }
+
+# Remove dhall and serde_dhall from patch – they are now workspace deps
 [patch.crates-io]
 getrandom = { git = "https://github.com/rust-random/getrandom", tag = "v0.3.3" }
-
-dhall = { git = "https://github.com/daveman1010221/dhall-rust", branch = "modernize-rkyv" }
-serde_dhall = { git = "https://github.com/daveman1010221/dhall-rust", branch = "modernize-rkyv" }

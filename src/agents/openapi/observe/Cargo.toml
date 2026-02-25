@@ -1,23 +1,21 @@
 [package]
 name = "openapi-observer"
-version = "0.1.0"
-edition = "2021"
-license = "MIT"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
 
 [dependencies]
-tracing = "0.1.44"
+cassini-client.workspace = true
+cassini-types.workspace = true
+native-tls = "=0.2.14"
+polar.workspace = true
+ractor.workspace = true
 reqwest = { workspace = true, features = ["json"] }
-serde = { version = "1.0.228", features = ["derive"] }
-tokio = { version = "1.49.0", features = ["full"] }
-serde_json = "1.0.149"
-utoipa = "5.4.0"
-web-agent-common = { path = "../common" }
-ractor = { version = "0.15.10", features = ["async-trait"] }
-rkyv = { workspace = true }
-polar = { path = "../../lib" }
-# Fix a vulnerability in a transitive dependency.
-ring = { version = "=0.17.14" }
-cassini-client = { workspace = true }
-cassini-types  = { workspace = true }
-
-native-tls = { version = "=0.2.14" }
+ring.workspace = true
+rkyv.workspace = true
+serde_json.workspace = true
+serde.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+utoipa.workspace = true
+web-agent-common.workspace = true

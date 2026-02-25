@@ -2,18 +2,17 @@
 name = "logger"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+
+[dependencies]
+cassini-client.workspace = true
+cassini-types.workspace = true
+polar.workspace = true
+ractor.workspace = true
+rkyv.workspace = true
+tokio.workspace = true
+tracing.workspace = true
 
 [[bin]]
 name = "event-logger"
 path = "src/entrypoint.rs"
-
-[dependencies]
-ractor = { version = "0.15.10", features = ["async-trait"] }
-# rocksdb = "0.24.0"
-tokio = { version = "1.49.0", features = ["full"] }
-polar = {path = "../lib"}
-cassini-client = { workspace = true }
-cassini-types  = { workspace = true }
-tracing = "0.1.44"
-
-rkyv = { workspace = true }

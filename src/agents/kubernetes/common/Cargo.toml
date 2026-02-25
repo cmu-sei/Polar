@@ -2,19 +2,19 @@
 name = "kube-common"
 version.workspace = true
 edition.workspace = true
-license = "MIT"
+license.workspace = true
 
 [dependencies]
-futures-lite = "2.6.1"
-url = "2.5.8"
-tracing = "0.1.44"
-tcp-stream = { workspace = true }
-sysinfo = { workspace = true }
-serde = {version = "1", features = ["derive"]}
-serde_json = "1.0"
-ractor = { version="0.15.10", features = ["async-trait"]}
-cassini-broker = { path = "../../cassini/broker" }
-polar = {path = "../../lib" }
-cynic = "3.12.0"
-rkyv = { workspace = true }
-kube = { workspace = true }
+cassini-broker.workspace = true
+cynic.workspace = true
+futures-lite.workspace = true
+kube.workspace = true
+polar.workspace = true
+ractor.workspace = true
+rkyv.workspace = true
+serde_json.workspace = true
+serde.workspace = true
+sysinfo.workspace = true
+tcp-stream.workspace = true
+tracing.workspace = true
+url.workspace = true

@@ -2,22 +2,26 @@
 name = "polar"
 version.workspace = true
 edition.workspace = true
-license = "MIT"
+license.workspace = true
 
 [dependencies]
-cassini-client = { path = "../cassini/client" }
-cassini-types = { path = "../cassini/types" }
-hex = "0.4.3"
-neo4rs = { workspace = true }
-opentelemetry = "0.31.0"
-opentelemetry-otlp = "0.31.0"
-opentelemetry_sdk = "0.31.0"
-ractor = { version = "0.15.10", features = ["async-trait"] }
+cassini-client.workspace = true
+cassini-types.workspace = true
+hex.workspace = true
+neo4rs.workspace = true
+opentelemetry-otlp.workspace = true
+opentelemetry_sdk.workspace = true
+opentelemetry.workspace = true
+ractor.workspace = true
 reqwest = { workspace = true, features = ["json", "rustls-tls"] }
-tokio = { version = "1.49.0", features = ["full"] }
-sha2 = "0.10.9"
-hex = "0.4.3"
+rkyv.workspace = true
+serde.workspace = true
+sha2.workspace = true
+tokio.workspace = true
+tracing-opentelemetry.workspace = true
+tracing-subscriber.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
 testcontainers = "0.26.3"
-testcontainers-modules = { version = "0.14.0", features = ["neo4j"]}
+testcontainers-modules = { version = "0.14.0", features = ["neo4j"] }

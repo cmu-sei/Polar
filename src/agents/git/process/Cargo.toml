@@ -2,18 +2,16 @@
 name = "git-repo-processor"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 
 [dependencies]
-# --- Workspace & third-party ---
-tokio = { version = "1", features = ["full"] }
-tracing = "0.1.44"
-ractor = { version = "0.15.10", features = ["async-trait"] }
-rkyv = { workspace = true }
-git-agent-common = { path = "../common" }
-# --- Cassini ecosystem ---
-cassini-client = { path = "../../cassini/client" }
-cassini-types = { path = "../../cassini/types" }
-polar          = { path = "../../lib" }
-
-chrono = {version = "0.4", default-features = false, features = ["clock", "std"] }
-neo4rs = { workspace = true }
+cassini-client.workspace = true
+cassini-types.workspace = true
+chrono.workspace = true
+git-agent-common.workspace = true
+neo4rs.workspace = true
+polar.workspace = true
+ractor.workspace = true
+rkyv.workspace = true
+tokio.workspace = true
+tracing.workspace = true

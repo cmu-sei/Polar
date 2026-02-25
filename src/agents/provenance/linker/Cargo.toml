@@ -2,21 +2,21 @@
 name = "provenance-linker"
 version.workspace = true
 edition.workspace = true
-license = "MIT"
+license.workspace = true
 
 [dependencies]
-tokio = { version = "1", features = ["full"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1.0"
-tracing = "0.1.44"
-ractor = { version = "0.15.10", features = ["async-trait"] }
-rkyv = { workspace = true }
-polar = { path = "../../lib" }
-neo4rs = { workspace = true }
+anyhow.workspace = true
+cassini-client.workspace = true
+cassini-types.workspace = true
+chrono.workspace = true
+cyclonedx-bom.workspace = true
+neo4rs.workspace = true
+polar.workspace = true
+provenance-common.workspace = true
+ractor.workspace = true
 reqwest = { workspace = true, features = ["json"] }
-cyclonedx-bom = "0.8.0"
-anyhow = "1.0.102"
-provenance-common = { path = "../provenance-common/" }
-cassini-client = { path = "../../cassini/client" }
-cassini-types = { path = "../../cassini/types" }
-chrono = { workspace = true }
+rkyv.workspace = true
+serde_json.workspace = true
+serde.workspace = true
+tokio.workspace = true
+tracing.workspace = true

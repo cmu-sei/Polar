@@ -2,13 +2,12 @@
 name = "gitlab-schema"
 version.workspace = true
 edition.workspace = true
-license = "MIT"
+license.workspace = true
 
 [dependencies]
-cynic = { version = "3.12.0", features = ["rkyv"]}
+cynic = { workspace = true, features = ["rkyv"] }
 rkyv = { workspace = true }
-serde = { version = "1", features = ["derive"] }
-# chrono = {version = "0.4.39", features = ["rkyv-32"]}
+serde = { workspace = true }
 
 [build-dependencies]
 cynic-codegen = { version = "3.12.0", features = ["rkyv"] }

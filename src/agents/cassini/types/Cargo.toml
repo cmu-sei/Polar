@@ -2,13 +2,13 @@
 name = "cassini-types"
 version.workspace = true
 edition.workspace = true
-license = "MIT"
+license.workspace = true
 
 [dependencies]
-ractor = { version="0.15.10" }
-tracing = "0.1.44"
+ractor.workspace = true
+tracing.workspace = true
 rkyv = { workspace = true }
-opentelemetry = "0.31.0"
-tracing-opentelemetry = "0.32.1"
-rand = { version = "0.10.0", features = ["thread_rng", "default"] }
-serde = { version = "1", features = ["derive"] }
+opentelemetry.workspace = true
+tracing-opentelemetry.workspace = true
+rand = { workspace = true, features = ["thread_rng", "default"] }  # workspace rand is 0.10
+serde = { workspace = true }

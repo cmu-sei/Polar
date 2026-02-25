@@ -1,32 +1,27 @@
 [package]
 name = "web-consumer"
-version = "0.1.0"
-edition = "2021"
-license = "MIT"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
 
 [dependencies]
-web-agent-common = { path = "../common" }
-futures-lite = "2.6.1"
-tracing = "0.1.44"
-tracing-subscriber = { version = "0.3.22", features = ["std", "env-filter"] }
+cassini-client.workspace = true
+cassini-types.workspace = true
+futures-lite.workspace = true
+neo4rs.workspace = true
+polar.workspace = true
+ractor.workspace = true
 reqwest = { workspace = true, features = ["json"] }
-serde = { version = "1.0.228", features = ["derive"] }
-tokio = { version = "1.49.0", features = ["full"] }
-ractor = { version = "0.15.10", features = ["async-trait"] }
-serde_json = "1.0.149"
-cassini-client = { workspace = true }
-cassini-types  = { workspace = true }
-utoipa = "5.4.0"
-neo4rs = { workspace = true }
-url = "2.5.8"
-polar = { path = "../../lib" }
-rkyv = { workspace = true }
-# Fix a vulnerability in a transitive dependency.
-ring = { version = "=0.17.14" }
-rustls = { version = "0.23", default-features = false, features = [
-    "aws-lc-rs",
-    "ring",
-    "std",
-] }
-rustls-webpki = { version = "0.103" }
-webpki-roots = { workspace = true }
+ring.workspace = true
+rkyv.workspace = true
+rustls-webpki.workspace = true
+rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", "ring", "std"] }
+serde_json.workspace = true
+serde.workspace = true
+tokio.workspace = true
+tracing-subscriber.workspace = true
+tracing.workspace = true
+url.workspace = true
+utoipa.workspace = true
+web-agent-common.workspace = true
+webpki-roots.workspace = true

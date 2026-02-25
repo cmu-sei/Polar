@@ -24,39 +24,32 @@
 
 [package]
 name = "jira-observer"
-version = "0.1.0"
-edition = "2021"
-license = "MIT"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
 description = "Observer agent for Jira — polls APIs, publishes updates via Cassini broker."
 
 [dependencies]
-# --- Workspace dependencies ---
-rkyv = { workspace = true }
+cassini-client.workspace = true
+cassini-types.workspace = true
+clokwerk.workspace = true
+jira_common.workspace = true
+log.workspace = true
+parse_link_header.workspace = true
+polar.workspace = true
+ractor.workspace = true
+rand.workspace = true
 reqwest = { workspace = true, features = ["json", "rustls-tls"] }
-parse_link_header = { workspace = true }
-rand = { workspace = true, features = ["small_rng"] }
-
-# --- Cassini ecosystem ---
-cassini-client = { path = "../../cassini/client" }
-cassini-types  = { path = "../../cassini/types" }
-polar = { path = "../../lib" }
-
-# --- Jira-specific shared types ---
-jira_common = { path = "../common" }
-
-# --- Third-party crates ---
-tokio = { version = "1", features = ["full"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1.0"
-serde_yaml = "0.9"
-serde_path_to_error = "0.1"
-url = "2.5.8"
-clokwerk = "0.4.0"
-log = "0.4.29"
-tracing = "0.1.44"
-tracing-glog = "0.4.1"
-tracing-subscriber = { version = "0.3.22", features = ["std", "env-filter"] }
-ractor = { version = "0.15.10", features = ["async-trait"] }
+rkyv.workspace = true
+serde_json.workspace = true
+serde_path_to_error.workspace = true
+serde.workspace = true
+serde_yaml.workspace = true
+tokio.workspace = true
+tracing-glog.workspace = true
+tracing-subscriber.workspace = true
+tracing.workspace = true
+url.workspace = true
 
 [[bin]]
 name = "jira-observer"

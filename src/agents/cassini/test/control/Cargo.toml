@@ -2,24 +2,25 @@
 name = "harness-controller"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 
 [dependencies]
-harness-common = { path = "../common" }
-cassini-client = { path = "../../client" }
-cassini-types = { path = "../../types" }
-ractor = { version = "0.15.10", features = ["async-trait"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-tokio = { version = "1.49.0", features = ["full"] }
-polar = { path = "../../../lib" }
-cassini-tracing = { path = "../../cassini-tracing" }
-tracing = "0.1.44"
-rustls = { version = "0.23", features = ["aws-lc-rs"] }
-tokio-rustls = "0.26.4"
-rkyv = { workspace = true }
-uuid = { version = "1.21.0", features = ["v4"]}
-serde_dhall = "0.13.0"
-tokio-util = "0.7.18"
-tracing-glog = "0.4.1"
-tracing-subscriber = "0.3.22"
-clap = { version = "4.5.60", features = ["derive"] }
+cassini-client.workspace = true
+cassini-tracing.workspace = true
+cassini-types.workspace = true
+clap.workspace = true
+harness-common.workspace = true
+polar.workspace = true
+ractor.workspace = true
+rkyv.workspace = true
+rustls.workspace = true
+serde_dhall.workspace = true
+serde_json.workspace = true
+serde.workspace = true
+tokio-rustls.workspace = true
+tokio-util.workspace = true
+tokio.workspace = true
+tracing-glog.workspace = true
+tracing-subscriber.workspace = true
+tracing.workspace = true
+uuid = { workspace = true, features = ["v4"] }

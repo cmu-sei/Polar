@@ -1,20 +1,18 @@
 [package]
 name = "web-agent-common"
-version = "0.1.0"
-edition = "2021"
-license = "MIT"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
 
 [dependencies]
-polar = { path = "../../lib" }
-ractor = { version = "0.15.10", features = ["async-trait"] }
-rkyv = { workspace = true }
-serde = { version = "1.0.228", features = ["derive"] }
-tracing = "0.1.44"
-tracing-glog = "0.4.1"
-tracing-subscriber = { version = "0.3.22", features = ["std", "env-filter"] }
-
-# Dependent packages require tokio and the version they include is vulnerable...
-tokio = "1.49.0"
+polar.workspace = true
+ractor.workspace = true
+rkyv.workspace = true
+serde.workspace = true
+tracing.workspace = true
+tracing-glog.workspace = true
+tracing-subscriber.workspace = true
+tokio.workspace = true
 
 [dev-dependencies]
-tokio = "1.49.0"
+tokio.workspace = true

@@ -1,18 +1,18 @@
 [package]
 name = "cassini-c2"
-version = "0.1.0"
-edition = "2021"
-license = "MIT"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
 
 [dependencies]
-opentelemetry = "0.31.0"
-opentelemetry-otlp = "0.31.0"
-opentelemetry_sdk = "0.31.0"
-tracing-opentelemetry = "0.32.1"
-tracing = "0.1.44"
-tracing-subscriber = { version = "0.3.22", features = ["std", "env-filter"] }
-tracing-glog = "0.4.1"
-cassini-types = { path = "../types" }
 cassini-client.workspace = true
-ractor = { version = "0.15.10", features = ["async-trait"] }
-tokio = { version = "1.49", features = ["full"] }
+cassini-types.workspace = true
+opentelemetry-otlp.workspace = true
+opentelemetry_sdk.workspace = true
+opentelemetry.workspace = true
+ractor.workspace = true
+tokio.workspace = true
+tracing-glog.workspace = true
+tracing-opentelemetry.workspace = true
+tracing-subscriber.workspace = true
+tracing.workspace = true

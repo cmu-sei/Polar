@@ -24,33 +24,26 @@
 
 [package]
 name = "jira-consumer"
-version = "0.1.0"
-edition = "2021"
-license = "MIT"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
 
 [dependencies]
-# Workspace crates
-neo4rs = { workspace = true }
-cassini-backoff = { workspace = true }
-
-# Cassini internal crates
-cassini-client = { path = "../../cassini/client" }
-cassini-types  = { path = "../../cassini/types" }
-
-# Other internal agents/libraries
-polar = { path = "../../lib" }
-jira_common = { path = "../common" }
-
-# Third-party deps
-tokio = { version = "1", features = ["full"] }
 async-global-executor = "3.1.0"
-futures-lite = "2.6.1"
-serde_json = "1.0"
-url = "2.5.8"
-tracing = "0.1.44"
-ractor = { version = "0.15.10", features = ["async-trait"] }
+cassini-backoff.workspace = true
+cassini-client.workspace = true
+cassini-types.workspace = true
+futures-lite.workspace = true
+jira_common.workspace = true
+neo4rs.workspace = true
+polar.workspace = true
+ractor.workspace = true
+rkyv.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+url.workspace = true
 
-rkyv = { workspace = true, features = ["std", "alloc"] }
 [[bin]]
 name = "jira-consumer"
 path = "src/entrypoint.rs"

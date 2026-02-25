@@ -2,28 +2,25 @@
 name = "cassini-client"
 version.workspace = true
 edition.workspace = true
-license = "MIT"
+license.workspace = true
 
 [dependencies]
-anyhow = "1.0.102"
-async-trait = "0.1.89"
-cassini-tracing = { path = "../cassini-tracing" }
-cassini-types = { path = "../types" }
-opentelemetry = "0.31.0"
-ractor = { version="0.15.10", features = ["async-trait"]}
-
-# Fix a vulnerability in a transitive dependency.
-ring = { version = "=0.17.14" }
-
+anyhow.workspace = true
+async-trait.workspace = true
+cassini-tracing.workspace = true
+cassini-types.workspace = true
+opentelemetry.workspace = true
+ractor.workspace = true
+ring.workspace = true
 rkyv = { workspace = true }
-rustls = { version = "0.23", features = ["aws-lc-rs"] }
-socket2 = "0.5"
-tokio-rustls = "0.26.4"
-tokio-util = "0.7.18"
-tokio = { version = "1.49", features = ["full"] }
-tracing = "0.1.44"
-tracing-glog = "0.4.1"
-tracing-opentelemetry = "0.32.1"
-tracing-subscriber = { version ="0.3.22", features=["std", "env-filter"]}
-url = "2.5.8"
-uuid = { version = "1.21.0", features = ["v4"] }
+rustls.workspace = true
+socket2.workspace = true
+tokio-rustls.workspace = true
+tokio-util.workspace = true
+tokio.workspace = true
+tracing-glog.workspace = true
+tracing-opentelemetry.workspace = true
+tracing-subscriber.workspace = true
+tracing.workspace = true
+url.workspace = true
+uuid = { workspace = true, features = ["v4"] }
