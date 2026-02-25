@@ -29,6 +29,7 @@ pub struct ClusterObserverSupervisor;
 pub struct ClusterObserverSupervisorState {
     kube_client: kube::Client,
     tcp_client: ActorRef<TcpClientMessage>,
+    #[allow(dead_code)]
     node_watcher: Option<Watcher>,
     namespace_watcher: Option<Watcher>,
 }

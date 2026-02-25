@@ -61,7 +61,7 @@ impl GraphOperable for Pod {
             .and_then(|s| s.phase.clone())
             .unwrap_or_else(|| "Unknown".into());
 
-        let _ready = self
+        let ready = self
             .status
             .as_ref()
             .and_then(|s| s.conditions.as_ref())
@@ -336,14 +336,7 @@ impl GraphOperable for Deployment {
         graph: &GraphController<KubeNodeKey>,
         _tcp_client: &TcpClient,
     ) -> Result<(), ActorProcessingErr> {
-<<<<<<< HEAD
         let _kind = "Deployment";
-
-||||||| 4a9ae2c
-        let kind = "Deployment";
-
-=======
->>>>>>> schedule-git-observation
         let uid = self.metadata.uid.clone().unwrap_or_default();
         let name = self.metadata.name.unwrap_or_default();
         let namespace = self.metadata.namespace.unwrap_or_else(|| "default".into());
