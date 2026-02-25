@@ -42,7 +42,6 @@ use parse_link_header::parse_with_rel;
 use ractor::concurrency::Duration;
 use ractor::{registry::where_is, ActorProcessingErr, ActorRef};
 use rand::rngs::SmallRng;
-use rand::Rng;
 use rand::SeedableRng;
 use reqwest::header::LINK;
 use reqwest::Client;
@@ -53,6 +52,7 @@ use serde::Deserialize;
 use tokio::task::AbortHandle;
 use tracing::{debug, error};
 use cassini_types::WireTraceCtx;
+use rand::RngExt;
 
 pub const META_OBSERVER: &str = "gitlab:observer:metadata";
 pub const GITLAB_USERS_OBSERVER: &str = "gitlab:observer:users";

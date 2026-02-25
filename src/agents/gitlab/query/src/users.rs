@@ -1,36 +1,29 @@
+#![allow(non_camel_case_types)]
+
 use crate::projects::ProjectMemberConnection;
 use crate::PageInfo;
 use cynic::Id;
 use gitlab_schema::gitlab::{self as schema};
-use gitlab_schema::DateString;
-use gitlab_schema::DateTimeString;
-use rkyv::Archive;
-use rkyv::Deserialize;
-use rkyv::Serialize;
-
+use gitlab_schema::{DateString, DateTimeString};
+use rkyv::{Archive, Deserialize, Serialize};
 use std::fmt;
+
 /// -----------------  CAUTION!!!!!! DO NOT CHANGE THESE VARIANTS UNLESS THE UNDERLYING SCHEMA HAS CHANGED  -----------------
 ///
-/// typically, rust enums should be named in UpperCamelCase, but the gitlab graphql schema breaks convention by not using SCREAMING_SNAKE_CASE for this enum.
-/// Cynic tries to match rust variants up to their equivalent SCREAMING_SNAKE_CASE GraphQL variants when provided with a typical pascalcase enum.
-/// However, it will fail unless we match the schema directly.
-/// REFERENECE: https://cynic-rs.dev/derives/enums
+/// Typically, Rust enums should be named in UpperCamelCase, but the GitLab GraphQL schema
+/// breaks convention by not using SCREAMING_SNAKE_CASE for this enum. Cynic tries to match
+/// Rust variants to their SCREAMING_SNAKE_CASE GraphQL equivalents when provided with typical
+/// PascalCase enums, but it will fail unless we match the schema directly.
+/// Reference: https://cynic-rs.dev/derives/enums
 #[derive(cynic::Enum, Clone, Copy, Deserialize, Serialize, Archive, Debug)]
 #[cynic(schema = "gitlab", rename_all = "None")]
 pub enum UserState {
-    #[allow(non_camel_case_types)]
     active,
-    #[allow(non_camel_case_types)]
     banned,
-    #[allow(non_camel_case_types)]
     blocked,
-    #[allow(non_camel_case_types)]
     blocked_pending_approval,
-    #[allow(non_camel_case_types)]
     deactivated,
-    #[allow(non_camel_case_types)]
     ldap_blocked,
-    #[allow(non_camel_case_types)]
     #[cynic(fallback)]
     unknown,
 }
@@ -66,8 +59,8 @@ pub struct UserCoreGroupsConnection {
     pub page_info: PageInfo,
 }
 
-/// Gitlab's core user representation. Add fields here to get more data back.
-#[derive(cynic::QueryFragment, Clone, Deserialize, Serialize, rkyv::Archive)]
+/// GitLab's core user representation. Add fields here to get more data back.
+#[derive(cynic::QueryFragment, Clone, Deserialize, Serialize, Archive)]
 #[cynic(schema = "gitlab", graphql_type = "UserCore")]
 pub struct UserCoreFragment {
     pub id: gitlab_schema::IdString,
@@ -84,14 +77,14 @@ pub struct UserCoreFragment {
     pub project_memberships: Option<ProjectMemberConnection>,
 }
 
-#[derive(cynic::QueryFragment, Clone, Deserialize, Serialize, rkyv::Archive)]
+#[derive(cynic::QueryFragment, Clone, Deserialize, Serialize, Archive)]
 #[cynic(schema = "gitlab", graphql_type = "UserCore")]
 pub struct UserCoreGroups {
     pub id: gitlab_schema::IdString,
     pub groups: Option<crate::groups::GroupConnection>,
 }
 
-#[derive(cynic::QueryFragment, Clone, Deserialize, Serialize, rkyv::Archive)]
+#[derive(cynic::QueryFragment, Clone, Deserialize, Serialize, Archive)]
 #[cynic(schema = "gitlab", graphql_type = "UserCore")]
 pub struct UserCoreProjects {
     pub id: gitlab_schema::IdString,
@@ -101,6 +94,7 @@ pub struct UserCoreProjects {
 #[derive(cynic::QueryFragment)]
 #[cynic(schema = "gitlab")]
 pub struct UserCoreEdge {
+    // These fields are required by the GraphQL query but not directly used in Rust code.
     #[allow(dead_code)]
     cursor: String,
     #[allow(dead_code)]
@@ -109,7 +103,7 @@ pub struct UserCoreEdge {
 
 /// Arguments type for the User Observer. Akin to the query.users parameters in the schema
 ///
-/// This datatype represents the arguments that will populate the query to the graphql database.
+/// This datatype represents the arguments that will populate the query to the GraphQL database.
 #[derive(cynic::QueryVariables, Debug, Clone)]
 pub struct MultiUserQueryArguments {
     pub after: Option<String>,
