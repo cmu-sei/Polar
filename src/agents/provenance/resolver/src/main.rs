@@ -338,19 +338,19 @@ impl ResolverAgent {
 
         Ok(())
     }
-    /// Check if the registry is allowed based on the configuration.
-    /// TODO: I think this is worth checking on if we consider the resolver untrusted.
-    /// It could be configured into a "strict" mode that only reads from configured registries.
-    ///  Or should this be the default behavior? Incentivizing operators
-    /// to know exactly which registries they should be talking to?
-    fn registry_allowed(config: &ResolverConfig, reference: &Reference) -> bool {
-        let registry = Self::normalize_registry_host(reference.resolve_registry());
+    // /// Check if the registry is allowed based on the configuration.
+    // /// TODO: I think this is worth checking on if we consider the resolver untrusted.
+    // /// It could be configured into a "strict" mode that only reads from configured registries.
+    // ///  Or should this be the default behavior? Incentivizing operators
+    // /// to know exactly which registries they should be talking to?
+    // fn registry_allowed(config: &ResolverConfig, reference: &Reference) -> bool {
+    //     let registry = Self::normalize_registry_host(reference.resolve_registry());
 
-        config
-            .registries
-            .iter()
-            .any(|r| ResolverAgent::normalize_registry_host(&r.url) == registry)
-    }
+    //     config
+    //         .registries
+    //         .iter()
+    //         .any(|r| ResolverAgent::normalize_registry_host(&r.url) == registry)
+    // }
 
     fn build_oci_client(config: &ResolverConfig) -> Result<OciClient, ActorProcessingErr> {
         let mut certs = Vec::new();

@@ -138,6 +138,5 @@ impl GraphNodeKey for ArtifactNodeKey {
     }
 }
 
-/// A concrete instance of a GraphController for the artifact linker.
-
+// A concrete instance of a GraphController for the artifact linker.
 impl_graph_controller!(LinkerGraphController, node_key = ArtifactNodeKey);
