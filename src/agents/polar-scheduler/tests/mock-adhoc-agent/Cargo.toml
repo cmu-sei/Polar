@@ -1,0 +1,15 @@
+[package]
+name = "mock-adhoc-agent"
+version = "1.0.0"
+edition = "2021"
+
+[dependencies]
+cassini-client = { path = "../../../cassini/client" }
+cassini-types = { path = "../../../cassini/types" }
+polar = { path = "../../../lib" }
+ractor.workspace = true
+rkyv.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["full"] }
+tracing.workspace = true
+polar-scheduler-common = { path = "../../common" }
