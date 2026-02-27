@@ -27,38 +27,43 @@ resolver = "2"
 
 members = [
     "cassini/broker",
-    "cassini/client",
-    "cassini/types",
     "cassini/cassini-c2",
+    "cassini/client",
     "cassini/test/common",
     "cassini/test/control",
     "cassini/test/producer",
     "cassini/test/sink",
-    "lib",
+    "cassini/types",
+    "config-ops",
+    "git/common",
     "gitlab/common",
     "gitlab/consume",
     "gitlab/observe",
+    "gitlab/query",
+    "gitlab/schema",
+    "git/observe",
+    "git/process",
+    "git/scheduler",
     "jira/common",
     "jira/consume",
     "jira/observe",
-    "gitlab/schema",
-    "gitlab/query",
-    "policy-config",
-    "kubernetes/observe",
-    "kubernetes/consume",
     "kubernetes/common",
-    "provenance/linker",
-    "provenance/resolver",
-    "config-ops",
-    "openapi/observe",
-    "openapi/consume",
-    "openapi/common",
-    "provenance/provenance-common",
+    "kubernetes/consume",
+    "kubernetes/observe",
+    "lib",
     "logger",
-    "git/observe",
-    "git/common",
-    "git/scheduler",
-    "git/process",
+    "openapi/common",
+    "openapi/consume",
+    "openapi/observe",
+    "policy-config",
+    "provenance/linker",
+    "provenance/provenance-common",
+    "provenance/resolver",
+    "polar-scheduler/common",
+    "polar-scheduler/observer",
+    "polar-scheduler/processor",
+    "polar-scheduler/tests/mock-agent",
+    "polar-scheduler/tests/mock-adhoc-agent",
 ]
 
 [workspace.package]
@@ -100,6 +105,7 @@ k8s-openapi = { version = "0.26", features = ["v1_32"] }
 kube = { version = "2.0.1", default-features = false, features = ["client", "aws-lc-rs", "rustls-tls", "runtime", "derive"] }
 libloading = "0.8.9"
 log = "0.4.29"                                            # used in jira/observe
+notify = "7"
 neo4rs = { version = "0.9.0-rc.8", git = "https://github.com/neo4j-labs/neo4rs", tag = "v0.9.0-rc.8" }
 oci-client = "0.15.0"                                     # used in resolver
 opentelemetry = "0.31.0"
@@ -137,7 +143,7 @@ url = "2.5.8"
 urlencoding = "2.1.3"
 utoipa = "5.4.0"                                           # used in openapi
 uuid = "1.21.0"
-webpki-roots = "1"
+webpki-roots = "1.0"
 
 # Internal crates (members) – add as workspace dependencies with paths
 cassini-broker = { path = "cassini/broker" }
