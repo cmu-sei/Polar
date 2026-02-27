@@ -1,0 +1,64 @@
+# docker-compose.yml for scheduler integration tests
+# Brings up Neo4j, Jaeger, and Gitea.
+# Cassini broker is run natively (outside compose) for simplicity.
+
+services:
+  neo4j:
+    image: neo4j:5-community
+    container_name: scheduler-neo4j
+    restart: unless-stopped
+    environment:
+      - NEO4J_AUTH=neo4j/somepassword
+      - NEO4J_PLUGINS='["apoc"]'
+    ports:
+      - "7474:7474"   # HTTP
+      - "7687:7687"   # Bolt
+    networks:
+      - polar
+    volumes:
+      - neo4j-data:/data
+      - neo4j-logs:/logs
+
+  jaeger:
+    image: jaegertracing/jaeger:2.11.0
+    container_name: scheduler-jaeger
+    ports:
+      - "16686:16686"   # UI
+      - "4317:4317"     # OTLP gRPC
+      - "4318:4318"     # OTLP HTTP
+    networks:
+      - polar
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+
+  gitea:
+    image: gitea/gitea:latest
+    container_name: scheduler-gitea
+    restart: unless-stopped
+    environment:
+      - USER_UID=1000
+      - USER_GID=1000
+      - GITEA__database__DB_TYPE=sqlite3
+      - GITEA__server__DOMAIN=localhost
+      - GITEA__server__HTTP_PORT=3000
+      - GITEA__server__ROOT_URL=http://localhost:3000
+      - GITEA__webhook__ALLOWED_HOST_LIST=*
+    ports:
+      - "3000:3000"     # Web UI
+      - "2222:22"       # SSH (optional)
+    networks:
+      - polar
+    volumes:
+      - gitea-data:/data
+      - /etc/timezone:/etc/timezone:ro
+      - /etc/localtime:/etc/localtime:ro
+
+networks:
+  polar:
+    name: polar
+    driver: bridge
+
+volumes:
+  neo4j-data:
+  neo4j-logs:
+  gitea-data:
