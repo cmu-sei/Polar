@@ -1,0 +1,21 @@
+flowchart LR
+    subgraph Scheduler Information Processor
+        Ingest[Ingest Actor<br/>subscribes to scheduler.in, scheduler.adhoc, events.#]
+        Cache[Schedule Cache]
+        GraphWriter[Graph Writer]
+        Publisher[Schedule Publisher]
+        EventRouter[Event Router]
+    end
+
+    Broker -- "scheduler.in" --> Ingest
+    Broker -- "scheduler.adhoc" --> Ingest
+    Broker -- "events.#" --> Ingest
+
+    Ingest --> GraphWriter
+    Ingest --> Cache
+    GraphWriter --> Graph[(Knowledge Graph)]
+    Cache --> Publisher
+    Publisher --> Broker
+
+    Ingest --> EventRouter
+    EventRouter --> Launcher[Ephemeral Launcher]

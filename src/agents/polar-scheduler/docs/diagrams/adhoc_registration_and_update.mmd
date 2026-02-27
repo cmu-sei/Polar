@@ -1,0 +1,21 @@
+sequenceDiagram
+    participant Agent as Ad‑hoc Agent (type T)
+    participant Broker as Cassini Broker
+    participant Sched as Scheduler Info Processor
+    participant Graph as Knowledge Graph
+
+    Note over Agent: Container starts
+    Agent->>Broker: Publish default schedule to scheduler.adhoc (type T, config)
+    Broker-->>Sched: Deliver registration
+    Sched->>Graph: Create/update Schedule node for type T
+    Sched->>Sched: Update local cache
+    Sched->>Broker: (optional) Publish acknowledgment or initial schedule to agent.type.T.schedule
+    Broker-->>Agent: (if subscribed) receive schedule
+
+    Note over Sched: Later, a Git change occurs
+    GitWatcher->>Broker: Publish update for type T
+    Broker-->>Sched: Deliver
+    Sched->>Graph: Update node
+    Sched->>Broker: Publish to agent.type.T.schedule
+    Broker-->>Agent: Deliver new schedule
+    Agent->>Agent: Apply update

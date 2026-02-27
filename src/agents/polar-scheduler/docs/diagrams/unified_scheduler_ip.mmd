@@ -1,0 +1,34 @@
+flowchart TD
+    subgraph Trusted Zone
+        Git[Git Repository]
+        Graph[(Knowledge Graph)]
+        Broker(Cassini Broker)
+        GitWatcher[Git Watcher Observer]
+        Scheduler[Scheduler Information Processor]
+        Launcher[Ephemeral Launcher]
+    end
+
+    subgraph Untrusted Zone
+        PermAgent[Permanent Agents]
+        AdhocAgent[Ad‑hoc Agents]
+        EphiAgent[Ephemeral Agents]
+    end
+
+    Git -- "webhook/poll" --> GitWatcher
+    GitWatcher -- "publish schedule file change" --> Broker
+    Broker -- "scheduler.in" --> Scheduler
+
+    AdhocAgent -- "register default schedule (on startup)" --> Broker
+    Broker -- "scheduler.adhoc" --> Scheduler
+
+    Scheduler -- "write schedule nodes" --> Graph
+    Scheduler -- "read schedule nodes (as needed)" --> Graph
+    Scheduler -- "publish to agent topics" --> Broker
+
+    Broker -- "agent.<id>.schedule" --> PermAgent
+    Broker -- "agent.type.<type>.schedule" --> AdhocAgent
+    Broker -- "agent.instance.<id>.config" --> EphiAgent
+
+    Broker -- "events.#" --> Scheduler
+    Scheduler -- "trigger ephemeral" --> Launcher
+    Launcher -- "create pod" --> EphiAgent

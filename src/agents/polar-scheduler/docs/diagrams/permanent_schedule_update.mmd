@@ -1,0 +1,18 @@
+sequenceDiagram
+    participant User
+    participant Git
+    participant Watcher as Git Watcher Observer
+    participant Broker as Cassini Broker
+    participant Sched as Scheduler Info Processor
+    participant Graph as Knowledge Graph
+    participant Agent as Permanent Agent
+
+    User->>Git: Edit permanent schedule Dhall
+    Git-->>Watcher: Notify change
+    Watcher->>Broker: Publish to scheduler.in (file path, content, operation)
+    Broker-->>Sched: Deliver message
+    Sched->>Graph: Upsert Schedule node
+    Sched->>Sched: Update local cache
+    Sched->>Broker: Publish to agent.<id>.schedule (full schedule JSON)
+    Broker-->>Agent: Deliver schedule update
+    Agent->>Agent: Adjust behavior

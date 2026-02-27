@@ -1,0 +1,24 @@
+sequenceDiagram
+    participant GitWatcher
+    participant Broker
+    participant Sched as Scheduler Info Processor
+    participant Graph
+    participant Launcher
+    participant Agent as Ephemeral Instance
+
+    GitWatcher->>Broker: Publish new ephemeral schedule (type E, pattern P)
+    Broker-->>Sched: Deliver
+    Sched->>Graph: Create Schedule node for type E
+    Sched->>Sched: Register pattern P internally
+
+    Note over Broker: Later, an event occurs
+    Broker-->>Sched: Deliver event on events.P
+    Sched->>Launcher: Trigger ephemeral (event data + schedule)
+    Launcher->>Broker: Create instance config topic agent.instance.<id>.config
+    Launcher->>Agent: Start container (with instance ID)
+    Agent->>Broker: Subscribe to agent.instance.<id>.config
+    Launcher->>Broker: Publish config to that topic
+    Broker-->>Agent: Deliver config
+    Agent->>Agent: Execute task, write results to graph
+    Agent-->>Broker: Publish completion status
+    Broker-->>Sched: (optional) record in graph
