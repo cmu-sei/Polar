@@ -1,0 +1,16 @@
+[package]
+name = "polar-scheduler-observer"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+cassini-client.workspace = true
+cassini-types.workspace = true
+polar.workspace = true
+ractor.workspace = true
+rkyv.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+notify.workspace = true
+polar-scheduler-common = { path = "../common" }
+walkdir = "2"
