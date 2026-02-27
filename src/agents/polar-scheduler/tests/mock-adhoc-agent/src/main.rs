@@ -9,15 +9,7 @@ use tracing::{error, info};
 const AGENT_TYPE: &str = "test-adhoc";
 
 // EventForwarder actor (same as before)
-struct EventForwarder {
-    tx: UnboundedSender<ClientEvent>,
-}
-
-impl EventForwarder {
-    fn new(tx: UnboundedSender<ClientEvent>) -> Self {
-        Self { tx }
-    }
-}
+struct EventForwarder;
 
 #[ractor::async_trait]
 impl Actor for EventForwarder {
@@ -68,7 +60,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Spawn event forwarder
     let (forwarder, _) = Actor::spawn(
         Some("event-forwarder".to_string()),
-        EventForwarder::new(tx.clone()),
+        EventForwarder,
         tx,
     )
     .await?;

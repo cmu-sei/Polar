@@ -1,24 +1,15 @@
 use cassini_client::{TCPClientConfig, TcpClientActor, TcpClientArgs, TcpClientMessage};
 use cassini_types::ClientEvent;
-use neo4rs::Graph;
 use polar_scheduler_common::ScheduleNotification;
 use ractor::{Actor, ActorProcessingErr, ActorRef, OutputPort};
 use std::sync::Arc;
 use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
-use tracing::{error, info, warn};
+use tracing::{error, info};
 
 const AGENT_ID: &str = "test-permanent";
 
 // Actor that forwards ClientEvents into a channel
-struct EventForwarder {
-    tx: UnboundedSender<ClientEvent>,
-}
-
-impl EventForwarder {
-    fn new(tx: UnboundedSender<ClientEvent>) -> Self {
-        Self { tx }
-    }
-}
+struct EventForwarder;
 
 #[ractor::async_trait]
 impl Actor for EventForwarder {
@@ -55,7 +46,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Spawn the event forwarder actor
     let (forwarder, _) = Actor::spawn(
         Some("event-forwarder".to_string()),
-        EventForwarder::new(tx.clone()),
+        EventForwarder,
         tx,
     )
     .await?;
@@ -128,7 +119,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     match rkyv::from_bytes::<ScheduleNotification, rkyv::rancor::Error>(&payload) {
                         Ok(notif) => {
                             info!("Received notification: {:?}", notif);
-                            if let ScheduleNotification::PermanentUpdate { agent_id, schedule_json } = notif {
+                            if let ScheduleNotification::PermanentUpdate { schedule_json, .. } = notif {
                                 // // Fetch full schedule from graph
                                 // let mut result = graph
                                 //     .execute(
@@ -144,7 +135,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 // } else {
                                 //     warn!("No schedule found for agent {}", agent_id);
                                 // }
-                                let schedule: serde_json::Value = serde_json::from_str(&schedule_json)?;
+                                let _schedule: serde_json::Value = serde_json::from_str(&schedule_json)?;
                             }
                         }
                         Err(e) => error!("Failed to deserialize notification: {:?}", e),
