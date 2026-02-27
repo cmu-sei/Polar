@@ -1,0 +1,27 @@
+[package]
+name = "polar-scheduler"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+cassini-client.workspace = true
+cassini-types.workspace = true
+chrono.workspace = true
+git-agent-common.workspace = true   # for RepoId, etc. (shared types)
+neo4rs.workspace = true
+polar.workspace = true               # common polar utilities (logging, graph helpers)
+ractor.workspace = true
+rkyv.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_dhall.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+url.workspace = true
+polar-scheduler-common = { path = "../common" }
+
+[dev-dependencies]
+reqwest.workspace = true
+serde_json.workspace = true
+futures.workspace = true
