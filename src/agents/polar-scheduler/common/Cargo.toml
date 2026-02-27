@@ -1,0 +1,8 @@
+[package]
+name = "polar-scheduler-common"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+rkyv.workspace = true
+serde.workspace = true
