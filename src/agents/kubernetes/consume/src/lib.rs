@@ -4,8 +4,9 @@ use k8s_openapi::api::apps::v1::Deployment;
 use k8s_openapi::{api::core::v1::Pod, apimachinery::pkg::apis::meta::v1::OwnerReference};
 use neo4rs::BoltType;
 use polar::{
+    PROVENANCE_DISCOVERY_TOPIC, ProvenanceEvent, RkyvError,
     graph::{GraphController, GraphControllerMsg, GraphNodeKey, GraphOp, GraphValue, Property},
-    impl_graph_controller, ProvenanceEvent, RkyvError, PROVENANCE_DISCOVERY_TOPIC,
+    impl_graph_controller,
 };
 use ractor::{ActorProcessingErr, ActorRef};
 use rkyv::to_bytes;
@@ -25,7 +26,7 @@ pub trait GraphOperable {
     ) -> Result<(), ActorProcessingErr>;
 
     fn project_delete(self, graph: &GraphController<KubeNodeKey>)
-        -> Result<(), ActorProcessingErr>;
+    -> Result<(), ActorProcessingErr>;
 }
 
 fn handle_owner_refs(
@@ -89,7 +90,7 @@ impl GraphOperable for Pod {
         // deterministic state node key
         let new_state_key = KubeNodeKey::PodState {
             pod_uid: uid.clone(),
-            valid_from: transition_time,
+            valid_from: transition_time.clone(),
         };
 
         let op = GraphOp::UpdateState {
@@ -132,9 +133,6 @@ impl GraphOperable for Pod {
 
         if let Some(volumes) = spec.volumes {
             for volume in volumes {
-                // TODO: At the moment,
-                // this enables multiple pods that use the same volume spec to connect to the same node
-                // Not sure that's desirable
                 let vol_key = KubeNodeKey::Volume {
                     name: volume.name.clone(),
                     namespace: namespace.clone(),
@@ -234,6 +232,43 @@ impl GraphOperable for Pod {
                 name: container.name.clone(),
             };
 
+            if let Some(mounts) = container.volume_mounts {
+                for mount in mounts {
+                    let volume_name = &mount.name;
+
+                    let volume_key = KubeNodeKey::Volume {
+                        name: volume_name.clone(),
+                        namespace: namespace.clone(),
+                    };
+
+                    let op = GraphOp::EnsureEdge {
+                        from: container_key.clone(),
+                        to: volume_key,
+                        rel_type: "USES_VOLUME".into(),
+                        props: vec![
+                            // Mount-specific metadata belongs on the edge.
+                            // This is important: the same volume can be mounted
+                            // differently by different containers.
+                            Property(
+                                "mount_path".into(),
+                                GraphValue::String(mount.mount_path.clone()),
+                            ),
+                            Property(
+                                "read_only".into(),
+                                GraphValue::Bool(mount.read_only.unwrap_or(false)),
+                            ),
+                            Property("name".into(), GraphValue::String(mount.name.clone())),
+                            Property(
+                                "observed_at".into(),
+                                GraphValue::String(transition_time.clone()),
+                            ),
+                        ],
+                    };
+
+                    graph.cast(GraphControllerMsg::Op(op))?;
+                }
+            }
+
             graph.cast(GraphControllerMsg::Op(GraphOp::UpsertNode {
                 key: container_key.clone(),
                 props: Vec::new(),
@@ -242,7 +277,7 @@ impl GraphOperable for Pod {
             graph.cast(GraphControllerMsg::Op(GraphOp::EnsureEdge {
                 from: pod_key.clone(),
                 rel_type: "HAS_CONTAINER".into(),
-                to: container_key,
+                to: container_key.clone(),
                 props: Vec::new(),
             }))?;
 
@@ -255,6 +290,121 @@ impl GraphOperable for Pod {
                 payload: payload.into(),
                 trace_ctx: None,
             })?;
+
+            // ---- Container Lifecycle ----
+
+            if let Some(status) = self.status.as_ref() {
+                let statuses = status
+                    .container_statuses
+                    .clone()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .chain(status.init_container_statuses.clone().unwrap_or_default());
+
+                for cs in statuses {
+                    if cs.name != container.name {
+                        continue;
+                    }
+
+                    let (state_type, valid_from, mut state_props) = if let Some(waiting) =
+                        cs.state.as_ref().and_then(|s| s.waiting.as_ref())
+                    {
+                        (
+                            "Waiting",
+                            Utc::now().to_rfc3339(),
+                            vec![
+                                Property(
+                                    "reason".into(),
+                                    GraphValue::String(waiting.reason.clone().unwrap_or_default()),
+                                ),
+                                Property(
+                                    "message".into(),
+                                    GraphValue::String(waiting.message.clone().unwrap_or_default()),
+                                ),
+                                Property(
+                                    "restart_count".into(),
+                                    GraphValue::I64(cs.restart_count as i64),
+                                ),
+                            ],
+                        )
+                    } else if let Some(running) = cs.state.as_ref().and_then(|s| s.running.as_ref())
+                    {
+                        (
+                            "Running",
+                            running
+                                .clone()
+                                .started_at
+                                .map(|t| t.0.to_rfc3339())
+                                .unwrap_or_else(|| Utc::now().to_rfc3339()),
+                            vec![
+                                Property(
+                                    "started".into(),
+                                    GraphValue::Bool(cs.started.unwrap_or(false)),
+                                ),
+                                Property("ready".into(), GraphValue::Bool(cs.ready)),
+                                Property(
+                                    "restart_count".into(),
+                                    GraphValue::I64(cs.restart_count as i64),
+                                ),
+                            ],
+                        )
+                    } else if let Some(term) = cs.state.as_ref().and_then(|s| s.terminated.as_ref())
+                    {
+                        (
+                            "Terminated",
+                            term.clone()
+                                .finished_at
+                                .map(|t| t.0.to_rfc3339())
+                                .unwrap_or_else(|| Utc::now().to_rfc3339()),
+                            vec![
+                                Property(
+                                    "exit_code".into(),
+                                    GraphValue::I64(term.exit_code as i64),
+                                ),
+                                Property(
+                                    "reason".into(),
+                                    GraphValue::String(term.reason.clone().unwrap_or_default()),
+                                ),
+                                Property(
+                                    "restart_count".into(),
+                                    GraphValue::I64(cs.restart_count as i64),
+                                ),
+                            ],
+                        )
+                    } else {
+                        (
+                            "Unknown",
+                            Utc::now().to_rfc3339(),
+                            vec![Property(
+                                "restart_count".into(),
+                                GraphValue::I64(cs.restart_count as i64),
+                            )],
+                        )
+                    };
+
+                    // Deterministic state instance key
+                    let state_instance_key = KubeNodeKey::PodContainerState {
+                        pod_uid: uid.clone(),
+                        name: container.name.clone(),
+                        valid_from: valid_from.clone(),
+                    };
+
+                    let op = GraphOp::UpdateState {
+                        resource_key: container_key.clone(),
+                        state_type_key: KubeNodeKey::State, // abstract taxonomy
+                        state_instance_key,
+                        state_instance_props: {
+                            state_props.push(Property(
+                                "phase".into(),
+                                GraphValue::String(state_type.into()),
+                            ));
+                            state_props
+                        },
+                    };
+
+                    graph.cast(GraphControllerMsg::Op(op))?;
+                }
+            }
 
             if let Some(envs) = container.env {
                 for env in envs {
@@ -325,6 +475,11 @@ impl GraphOperable for Pod {
             rel_type: "TRANSITIONED_TO".into(),
             props: vec![Property("at".into(), GraphValue::String(now))],
         }))?;
+
+        let Some(spec) = self.spec else {
+            // if no spec just return
+            return Ok(());
+        };
 
         Ok(())
     }
@@ -677,6 +832,11 @@ pub enum KubeNodeKey {
         pod_uid: String,
         name: String,
     },
+    PodContainerState {
+        pod_uid: String,
+        name: String,
+        valid_from: String,
+    },
     Volume {
         name: String,
         namespace: String,
@@ -779,11 +939,16 @@ impl GraphNodeKey for KubeNodeKey {
                 let pod_uid_k = format!("{prefix}_pod_uid");
                 let valid_from_k = format!("{prefix}_valid_from");
                 (
-                format!("(:PodState {{ {prefix}_uid: ${pod_uid_k}, {prefix}_valid_from: ${valid_from_k} }}"),
-                vec![
-                    (pod_uid_k,BoltType::String(pod_uid.to_string().into())),
-                    (valid_from_k, BoltType::String(valid_from.to_string().into()))
-                ],
+                    format!(
+                        "(:PodState {{ {prefix}_uid: ${pod_uid_k}, {prefix}_valid_from: ${valid_from_k} }}"
+                    ),
+                    vec![
+                        (pod_uid_k, BoltType::String(pod_uid.to_string().into())),
+                        (
+                            valid_from_k,
+                            BoltType::String(valid_from.to_string().into()),
+                        ),
+                    ],
                 )
             }
             KubeNodeKey::PodContainer { pod_uid, name } => {
@@ -794,6 +959,28 @@ impl GraphNodeKey for KubeNodeKey {
                     vec![
                         (pod_uid_k, BoltType::String(pod_uid.to_string().into())),
                         (name_k, BoltType::String(name.clone().into())),
+                    ],
+                )
+            }
+            KubeNodeKey::PodContainerState {
+                pod_uid,
+                name,
+                valid_from,
+            } => {
+                let pod_uid_k = format!("{prefix}_pod_uid");
+                let name_k = format!("{prefix}_name");
+                let valid_from_k = format!("{prefix}_valid_from");
+                (
+                    format!(
+                        "(:PodContainerState {{ pod_uid: ${pod_uid_k}, name: ${name_k}, valid_from: ${valid_from_k} }})"
+                    ),
+                    vec![
+                        (pod_uid_k, BoltType::String(pod_uid.to_string().into())),
+                        (name_k, BoltType::String(name.clone().into())),
+                        (
+                            valid_from_k,
+                            BoltType::String(valid_from.to_string().into()),
+                        ),
                     ],
                 )
             }
@@ -943,7 +1130,7 @@ mod graph_node_key_tests {
 #[cfg(test)]
 mod compile_graph_op_tests {
     use super::*;
-    use polar::graph::{compile_graph_op, GraphValue, Property};
+    use polar::graph::{GraphValue, Property, compile_graph_op};
 
     #[test]
     fn upsert_node_compiles_with_set_clause() {

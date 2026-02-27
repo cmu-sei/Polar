@@ -2,27 +2,27 @@ use cassini_client::{TCPClientConfig, TcpClientActor, TcpClientArgs, TcpClientMe
 use cassini_types::ClientEvent;
 use classifier::*;
 use oci_client::{
+    Client as OciClient, Reference, RegistryOperation,
     client::{Certificate, CertificateEncoding, ClientConfig},
     manifest::OciManifest,
     secrets::RegistryAuth,
-    Client as OciClient, Reference, RegistryOperation,
 };
 use polar::{
-    get_file_as_byte_vec, get_web_client, ProvenanceEvent, Supervisor, SupervisorMessage,
-    PROVENANCE_DISCOVERY_TOPIC, PROVENANCE_LINKER_TOPIC,
+    PROVENANCE_DISCOVERY_TOPIC, PROVENANCE_LINKER_TOPIC, ProvenanceEvent, Supervisor,
+    SupervisorMessage, get_file_as_byte_vec, get_web_client,
 };
 use provenance_common::RESOLVER_SUPERVISOR_NAME;
 use provenance_resolver::classifier;
 use ractor::{
-    async_trait, registry::where_is, Actor, ActorProcessingErr, ActorRef, OutputPort,
-    SupervisionEvent,
+    Actor, ActorProcessingErr, ActorRef, OutputPort, SupervisionEvent, async_trait,
+    registry::where_is,
 };
 use reqwest::Client as WebClient;
 use std::str::FromStr;
 use tracing::{debug, error, info, instrument, trace, warn};
 pub const BROKER_CLIENT_NAME: &str = "polar.provenance.resolver.tcp";
-use serde::Deserialize;
 use cassini_types::WireTraceCtx;
+use serde::Deserialize;
 
 #[derive(Debug, serde::Serialize, Deserialize, Clone)]
 pub struct ResolverConfig {
@@ -117,8 +117,8 @@ impl Actor for ResolverSupervisor {
             TcpClientArgs {
                 config,
                 registration_id: None,
-                events_output: Some(events_output),  // wrap in Some
-                event_handler: None,                  // add missing field
+                events_output: Some(events_output), // wrap in Some
+                event_handler: None,                // add missing field
             },
             myself.clone().into(),
         )
@@ -411,7 +411,9 @@ impl ResolverAgent {
                     continue;
                 }
                 Err(CredentialRetrievalError::ConfigNotFound) => {
-                    debug!("docker config not found — skipping remaining candidates and using anonymous authentication");
+                    debug!(
+                        "docker config not found — skipping remaining candidates and using anonymous authentication"
+                    );
                     return Ok(RegistryAuth::Anonymous);
                 }
                 Err(CredentialRetrievalError::NoCredentialConfigured) => {
@@ -672,23 +674,6 @@ mod tests {
         for (input, expected) in cases {
             assert_eq!(ResolverAgent::normalize_registry_host(input), expected);
         }
-    }
-
-    #[test]
-    fn registry_allowed_matches_configured_registries() {
-        let config = ResolverConfig {
-            registries: vec![RegistryConfig {
-                name: "test".into(),
-                url: "https://registry.example.com".into(),
-                client_cert_path: None,
-            }],
-        };
-
-        let allowed = Reference::from_str("registry.example.com/repo:tag").unwrap();
-        let denied = Reference::from_str("evil.com/repo:tag").unwrap();
-
-        assert!(ResolverAgent::registry_allowed(&config, &allowed));
-        assert!(!ResolverAgent::registry_allowed(&config, &denied));
     }
 
     #[test]

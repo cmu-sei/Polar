@@ -2,23 +2,23 @@ use cassini_client::{TcpClient, TcpClientMessage};
 use cassini_types::ClientEvent;
 use k8s_openapi::api::apps::v1::{Deployment, ReplicaSet};
 use k8s_openapi::api::core::v1::{ConfigMap, Namespace, Pod, Secret};
-use kube::runtime::{watcher, watcher::Event};
 use kube::Config;
 use kube::ResourceExt;
-use kube::{api::ListParams, Api, Client};
-use polar::{spawn_tcp_client, SupervisorMessage};
+use kube::runtime::{watcher, watcher::Event};
+use kube::{Api, Client, api::ListParams};
+use polar::{SupervisorMessage, spawn_tcp_client};
 use ractor::concurrency::Duration;
-use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef, SupervisionEvent};
+use ractor::{Actor, ActorProcessingErr, ActorRef, SupervisionEvent, async_trait};
 use serde_json::to_value;
 use std::collections::HashMap;
 use tracing::{debug, error, info, warn};
 use tracing::{instrument, trace};
 
 use crate::{
-    emit_event, impl_namespaced_watcher, NamespacedWatcherState, WatcherMsg, TCP_CLIENT_NAME,
+    NamespacedWatcherState, TCP_CLIENT_NAME, WatcherMsg, emit_event, impl_namespaced_watcher,
 };
 use futures::{StreamExt, TryStreamExt};
-use kube_common::{RawKubeEvent, RESOURCE_APPLIED_ACTION, RESOURCE_DELETED_ACTION};
+use kube_common::{RESOURCE_APPLIED_ACTION, RESOURCE_DELETED_ACTION, RawKubeEvent};
 
 // TODO: establish what kind of messages these receive
 pub type NamespaceWatcherMap = HashMap<String, ActorRef<()>>;
@@ -44,11 +44,10 @@ impl ClusterObserverSupervisor {
             Ok(kube_client) => {
                 debug!("Kubernetes client initialized");
 
-                let tcp_client = spawn_tcp_client(
-                    TCP_CLIENT_NAME, 
-                    myself.into(), 
-                    |event| Some(SupervisorMessage::ClientEvent { event })
-                ).await?;
+                let tcp_client = spawn_tcp_client(TCP_CLIENT_NAME, myself.into(), |event| {
+                    Some(SupervisorMessage::ClientEvent { event })
+                })
+                .await?;
 
                 Ok(ClusterObserverSupervisorState {
                     kube_client,
@@ -181,6 +180,7 @@ impl_namespaced_watcher!(
 impl_namespaced_watcher!(PodWatcher, resource = Pod, kind = "Pod");
 impl_namespaced_watcher!(SecretWatcher, resource = Secret, kind = "Secret");
 impl_namespaced_watcher!(ConfigMapWatcher, resource = ConfigMap, kind = "ConfigMap");
+// impl_namespaced_watcher!(ContainerWatcher, resource = Container, kind = "Container");
 
 pub struct NamespaceWatcherSupervisor;
 pub struct NamespaceWatcherSupervisorArgs {

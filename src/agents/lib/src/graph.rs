@@ -7,21 +7,6 @@ use tracing::{debug, instrument, trace};
 // Type alias to add a generic wrapper to the graphcontroller.
 pub type GraphController<T> = ActorRef<GraphControllerMsg<T>>;
 
-// #[derive(Debug, Clone)]
-// pub enum TypeNodeKey {
-//     State,
-//     Type,
-// }
-
-// impl GraphNodeKey for TypeNodeKey {
-//     fn cypher_match(&self, _prefix: &str) -> (String, Vec<(String, BoltType)>) {
-//         match self {
-
-//             TypeNodeKey::Type => (format!("(:Type)"), vec![]),
-//         }
-//     }
-// }
-
 /// Graph relationship type constants.
 /// ------ IMPORTANT!!!!! ------
 /// These must stay in sync with the Neo4j schema.
@@ -133,7 +118,6 @@ where
     /// 2. Upserting the append-only state instance node
     /// 3. Linking resource -> state instance (history)
     /// 4. Linking state instance -> abstract state
-    /// 5. Replacing the current abstract state edge (HAS_STATE)
     UpdateState {
         resource_key: K,
         state_type_key: K,
@@ -397,7 +381,7 @@ macro_rules! impl_graph_controller {
 #[cfg(test)]
 mod tests {
     use crate::{
-        graph::{handle_op, GraphNodeKey},
+        graph::{GraphNodeKey, handle_op},
         init_logging,
     };
 
