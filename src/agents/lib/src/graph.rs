@@ -164,12 +164,9 @@ where
     let (cypher, params) = match op {
         GraphOp::UpsertNode { key, props } => {
             trace!("Received UpsertNode directive. {key:?}, {props:?}");
-            let (node_pattern, mut params) = key.cypher_match("n");
 
-            let mut cypher = format!(
-                "MERGE (n {})",
-                node_pattern.trim_start_matches('(').trim_end_matches(')')
-            );
+            let (node_pattern, mut params) = key.cypher_match("n");
+            let mut cypher = format!("MERGE {}", node_pattern);
 
             if !props.is_empty() {
                 let sets = props
