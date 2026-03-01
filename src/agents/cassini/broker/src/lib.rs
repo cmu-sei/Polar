@@ -30,7 +30,7 @@ pub const REGISTRATION_REQ_FAILED_TXT: &str = "Failed to register session!";
 pub const LISTENER_MGR_NOT_FOUND_TXT: &str = "Listener Manager not found!";
 pub const TIMEOUT_REASON: &str = "SESSION_TIMEDOUT";
 pub const DISCONNECTED_REASON: &str = "CLIENT_DISCONNECTED";
-pub const SHUTDOWN_AUTH_TOKEN: &str = "BROKER_SHUTDOWN_TOKEN";
+pub const SHUTDOWN_AUTH_TOKEN: &str = "CASSINI_SHUTDOWN_TOKEN";
 
 #[derive(Debug, Clone)]
 pub enum BrokerConfigError {

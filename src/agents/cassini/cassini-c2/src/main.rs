@@ -71,7 +71,7 @@ impl Actor for ShutdownController {
                     info!("Registered with broker: {}", registration_id);
                     if let Some(client) = state.as_ref() {
                         // Read shutdown token from environment.
-                        let auth_token = env::var("BROKER_SHUTDOWN_TOKEN").unwrap_or_default();
+                        let auth_token = env::var("CASSINI_SHUTDOWN_TOKEN").unwrap_or_default();
                         info!("Sending shutdown command with token: {}", auth_token);
                         let cmd = TcpClientMessage::ControlRequest {
                             op: ControlOp::PrepareForShutdown { auth_token },

@@ -23,7 +23,7 @@ static TRACER_PROVIDER: Mutex<Option<opentelemetry_sdk::trace::SdkTracerProvider
 /// Initialises logging and tracing.
 ///
 /// - Always logs human‑readable lines to stderr (with optional ANSI colours).
-/// - If `ENABLE_JAEGER_TRACING=1` and `JAEGER_OTLP_ENDPOINT` is set,
+/// - If `JAEGER_ENABLE_TRACING=1` and `JAEGER_OTLP_ENDPOINT` is set,
 ///   also exports spans via OTLP HTTP to the given endpoint.
 /// - The `service.name` attribute in traces is set to the provided `service_name`.
 pub fn init_tracing(service_name: &str) {

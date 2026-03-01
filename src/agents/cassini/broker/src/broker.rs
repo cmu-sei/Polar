@@ -65,7 +65,7 @@ impl BrokerArgs {
         let bind_addr =
             env::var("CASSINI_BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".to_string());
 
-        let shutdown_auth_token = env::var("BROKER_SHUTDOWN_TOKEN").ok();
+        let shutdown_auth_token = env::var("CASSINI_SHUTDOWN_TOKEN").ok();
 
         Ok(BrokerArgs {
             bind_addr,

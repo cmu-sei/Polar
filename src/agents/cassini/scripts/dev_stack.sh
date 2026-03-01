@@ -31,7 +31,7 @@ mkdir -p "${RUNS_ROOT}"
 
 CURRENT_LINK="${CASSINI_ROOT}/output/dev/current"
 
-: "${ENABLE_JAEGER_TRACING:=1}"
+: "${JAEGER_ENABLE_TRACING:=1}"
 : "${JAEGER_OTLP_ENDPOINT:=http://localhost:4318/v1/traces}"
 
 # These will be set per-run by begin_run()

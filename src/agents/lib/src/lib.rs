@@ -274,7 +274,7 @@ pub fn init_logging(service_name: String) {
 
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 
-    let enable_jaeger = std::env::var("ENABLE_JAEGER_TRACING")
+    let enable_jaeger = std::env::var("JAEGER_ENABLE_TRACING")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
 

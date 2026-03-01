@@ -865,7 +865,7 @@ impl Actor for HarnessController {
                             state.expected_message_count = Some(expected);
                             info!("Expected messages for last test: {}", expected);
                         }
-                        let shutdown_token = std::env::var("BROKER_SHUTDOWN_TOKEN").ok();
+                        let shutdown_token = std::env::var("CASSINI_SHUTDOWN_TOKEN").ok();
                         info!(
                             "Sending broker shutdown command (token present: {})",
                             shutdown_token.is_some()
