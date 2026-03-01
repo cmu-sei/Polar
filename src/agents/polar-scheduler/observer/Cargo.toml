@@ -4,13 +4,17 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+anyhow.workspace = true
 cassini-client.workspace = true
 cassini-types.workspace = true
+git2.workspace = true
+notify.workspace = true
+polar-scheduler-common = { path = "../common" }
 polar.workspace = true
 ractor.workspace = true
 rkyv.workspace = true
+serde_dhall.workspace = true
+serde_json.workspace = true
 tokio.workspace = true
 tracing.workspace = true
-notify.workspace = true
-polar-scheduler-common = { path = "../common" }
 walkdir = "2"

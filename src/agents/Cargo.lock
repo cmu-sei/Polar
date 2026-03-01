@@ -4262,19 +4262,24 @@ version = "1.0.0"
 dependencies = [
  "rkyv 0.8.15",
  "serde",
+ "serde_json",
 ]
 
 [[package]]
 name = "polar-scheduler-observer"
 version = "1.0.0"
 dependencies = [
+ "anyhow",
  "cassini-client",
  "cassini-types",
+ "git2",
  "notify",
  "polar",
  "polar-scheduler-common",
  "ractor",
  "rkyv 0.8.15",
+ "serde_dhall",
+ "serde_json",
  "tokio",
  "tracing",
  "walkdir",

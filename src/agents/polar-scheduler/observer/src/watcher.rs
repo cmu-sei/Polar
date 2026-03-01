@@ -1,5 +1,5 @@
 use cassini_client::TcpClientMessage;
-use polar_scheduler_common::GitScheduleChange;
+use polar_scheduler_common::{GitScheduleChange, ScheduleNode};
 use ractor::{Actor, ActorProcessingErr, ActorRef};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use std::path::Path;
@@ -15,6 +15,24 @@ pub struct GitWatcherState {
 }
 
 impl GitWatcherActor {
+    fn evaluate_dhall_file_to_json(file_path: &Path) -> Result<String, ActorProcessingErr> {
+        let simple: serde_dhall::SimpleValue = serde_dhall::from_file(file_path)
+            .parse()
+            .map_err(|e| ActorProcessingErr::from(format!("Dhall error: {}", e)))?;
+        let json = serde_json::to_value(&simple)
+            .map_err(|e| ActorProcessingErr::from(format!("JSON conversion error: {}", e)))?;
+        Ok(serde_json::to_string(&json)?)
+    }
+
+    fn is_schedule_file(path: &Path, repo_path: &str) -> bool {
+        let repo_path = Path::new(repo_path);
+        let relative = path.strip_prefix(repo_path).unwrap_or(path);
+        relative.components().any(|c| {
+            let s = c.as_os_str().to_string_lossy();
+            s == "permanent" || s == "adhoc" || s == "ephemeral"
+        })
+    }
+
     async fn start_filesystem_watcher(
         state: &GitWatcherState,
         myself: ActorRef<GitWatcherMsg>,
@@ -27,7 +45,6 @@ impl GitWatcherActor {
             let mut watcher: RecommendedWatcher = Watcher::new(
                 move |res: notify::Result<notify::Event>| {
                     if let Ok(event) = res {
-                        // Send event path to actor
                         let _ = tx.blocking_send(event);
                     }
                 },
@@ -42,33 +59,46 @@ impl GitWatcherActor {
         // Process filesystem events
         while let Some(event) = rx.recv().await {
             for path in event.paths {
-                if path.extension().and_then(|s| s.to_str()) == Some("dhall") {
+                if path.extension().and_then(|s| s.to_str()) == Some("dhall")
+                    && Self::is_schedule_file(&path, &state.repo_path)
+                {
                     let path_str = path.to_string_lossy().to_string();
-                    let change = if event.kind.is_create() {
-                        // Read file content
-                        if let Ok(content) = tokio::fs::read(&path).await {
-                            GitScheduleChange::Create { path: path_str, content }
-                        } else {
-                            continue;
-                        }
-                    } else if event.kind.is_modify() {
-                        if let Ok(content) = tokio::fs::read(&path).await {
-                            GitScheduleChange::Update { path: path_str, content }
-                        } else {
-                            continue;
-                        }
-                    } else if event.kind.is_remove() {
-                        GitScheduleChange::Delete { path: path_str }
-                    } else {
+
+                    // Handle delete immediately
+                    if event.kind.is_remove() {
+                        let change = GitScheduleChange::Delete { path: path_str };
+                        myself.cast(GitWatcherMsg::PublishChange(change))?;
                         continue;
-                    };
-                    // Send change to self for publishing
-                    myself.cast(GitWatcherMsg::PublishChange(change))?;
+                    }
+
+                    // For create/modify, evaluate the file directly
+                    if event.kind.is_create() || event.kind.is_modify() {
+                        let path_clone = path.clone();
+                        let result = tokio::task::spawn_blocking(move || {
+                            Self::evaluate_dhall_file_to_json(&path_clone)
+                        }).await;
+
+                        match result {
+                            Ok(Ok(json)) => {
+                                let change = if event.kind.is_create() {
+                                    GitScheduleChange::Create { path: path_str, json }
+                                } else {
+                                    GitScheduleChange::Update { path: path_str, json }
+                                };
+                                myself.cast(GitWatcherMsg::PublishChange(change))?;
+                            }
+                            Ok(Err(e)) => {
+                                error!("Failed to evaluate Dhall file {}: {:?}", path_str, e);
+                            }
+                            Err(e) => error!("Task join error for {}: {}", path_str, e),
+                        }
+                    }
                 }
             }
         }
         Ok(())
     }
+
     async fn initial_scan(
         state: &GitWatcherState,
         myself: ActorRef<GitWatcherMsg>,
@@ -84,10 +114,21 @@ impl GitWatcherActor {
                 if let Some(ext) = entry.path().extension() {
                     if ext == "dhall" {
                         let path = entry.path().to_path_buf();
+                        if !Self::is_schedule_file(&path, &state.repo_path) {
+                            continue;
+                        }
                         let path_str = path.to_string_lossy().to_string();
-                        if let Ok(content) = tokio::fs::read(&path).await {
-                            let change = GitScheduleChange::Create { path: path_str, content };
-                            myself.cast(GitWatcherMsg::PublishChange(change))?;
+                        let path_clone = path.clone();
+                        let result = tokio::task::spawn_blocking(move || {
+                            Self::evaluate_dhall_file_to_json(&path_clone)
+                        }).await;
+                        match result {
+                            Ok(Ok(json)) => {
+                                let change = GitScheduleChange::Create { path: path_str, json };
+                                myself.cast(GitWatcherMsg::PublishChange(change))?;
+                            }
+                            Ok(Err(e)) => error!("Failed to evaluate Dhall file {}: {:?}", path_str, e),
+                            Err(e) => error!("Task join error for {}: {}", path_str, e),
                         }
                     }
                 }
@@ -100,13 +141,14 @@ impl GitWatcherActor {
 #[derive(Debug)]
 pub enum GitWatcherMsg {
     PublishChange(GitScheduleChange),
+    PerformInitialScan,
 }
 
 #[ractor::async_trait]
 impl Actor for GitWatcherActor {
     type Msg = GitWatcherMsg;
     type State = GitWatcherState;
-    type Arguments = (String, ActorRef<TcpClientMessage>); // (repo_path, tcp_client)
+    type Arguments = (String, ActorRef<TcpClientMessage>);
 
     async fn pre_start(
         &self,
@@ -134,14 +176,6 @@ impl Actor for GitWatcherActor {
             }
         });
 
-        // Perform initial scan
-        let myself_clone = myself.clone();
-        let state_clone = state.clone(); // need to clone state; derive Clone for GitWatcherState
-        tokio::spawn(async move {
-            if let Err(e) = Self::initial_scan(&state_clone, myself_clone).await {
-                error!("Initial scan error: {:?}", e);
-            }
-        });
         Ok(())
     }
 
@@ -160,6 +194,15 @@ impl Actor for GitWatcherActor {
                     trace_ctx: None,
                 })?;
                 debug!("Published schedule change");
+            }
+            GitWatcherMsg::PerformInitialScan => {
+                let myself = _myself.clone();
+                let state_clone = state.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = Self::initial_scan(&state_clone, myself).await {
+                        error!("Initial scan error: {:?}", e);
+                    }
+                });
             }
         }
         Ok(())
