@@ -476,11 +476,6 @@ impl GraphOperable for Pod {
             props: vec![Property("at".into(), GraphValue::String(now))],
         }))?;
 
-        let Some(spec) = self.spec else {
-            // if no spec just return
-            return Ok(());
-        };
-
         Ok(())
     }
 }
