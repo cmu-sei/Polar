@@ -1,6 +1,5 @@
 # docker-compose.yml for scheduler integration tests
-# Brings up Neo4j, Jaeger, and Gitea.
-# Cassini broker is run natively (outside compose) for simplicity.
+# Brings up Neo4j and Jaeger. Cassini broker is run natively (outside compose).
 
 services:
   neo4j:
@@ -31,28 +30,6 @@ services:
     environment:
       - COLLECTOR_OTLP_ENABLED=true
 
-  gitea:
-    image: gitea/gitea:latest
-    container_name: scheduler-gitea
-    restart: unless-stopped
-    environment:
-      - USER_UID=1000
-      - USER_GID=1000
-      - GITEA__database__DB_TYPE=sqlite3
-      - GITEA__server__DOMAIN=localhost
-      - GITEA__server__HTTP_PORT=3000
-      - GITEA__server__ROOT_URL=http://localhost:3000
-      - GITEA__webhook__ALLOWED_HOST_LIST=*
-    ports:
-      - "3000:3000"     # Web UI
-      - "2222:22"       # SSH (optional)
-    networks:
-      - polar
-    volumes:
-      - gitea-data:/data
-      - /etc/timezone:/etc/timezone:ro
-      - /etc/localtime:/etc/localtime:ro
-
 networks:
   polar:
     name: polar
@@ -61,4 +38,3 @@ networks:
 volumes:
   neo4j-data:
   neo4j-logs:
-  gitea-data:

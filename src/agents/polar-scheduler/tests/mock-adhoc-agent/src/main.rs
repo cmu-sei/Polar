@@ -6,7 +6,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc::UnboundedSender;
 use tracing::{error, info};
 
-const AGENT_TYPE: &str = "test-adhoc";
+const AGENT_TYPE: &str = "git-repo-observer"; // Changed to match the ad‑hoc file
 
 // EventForwarder actor (same as before)
 struct EventForwarder;
@@ -38,7 +38,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "agent_id": null,
         "agent_type": AGENT_TYPE,
         "schedule": {
-            "Periodic": { "interval": 60, "unit": "Seconds" }
+            "Periodic": { "interval": 60, "unit": "Minutes" } // Fixed unit
         },
         "config": { "dummy": "default" },
         "metadata": {

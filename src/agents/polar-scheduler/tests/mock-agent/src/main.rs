@@ -6,7 +6,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 use tracing::{error, info};
 
-const AGENT_ID: &str = "test-permanent";
+const AGENT_ID: &str = "jenkins-observer-1";
 
 // Actor that forwards ClientEvents into a channel
 struct EventForwarder;

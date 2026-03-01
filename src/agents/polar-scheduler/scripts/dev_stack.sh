@@ -34,6 +34,15 @@ need_file "${TLS_SERVER_KEY}"
 need_file "${TLS_CLIENT_CERT}"
 need_file "${TLS_CLIENT_KEY}"
 
+# For integration tests, we need a remote Git repository with schedules.
+# If not set, we'll print a warning and exit (unless we're only bringing down the stack).
+if [[ -z "${POLAR_SCHEDULER_REMOTE_URL:-}" ]]; then
+    log "WARNING: POLAR_SCHEDULER_REMOTE_URL is not set. Integration tests will fail."
+    log "Set this to the URL of a Git repository containing your Dhall schedules."
+    log "If you only want to bring down the stack, use '$0 down'."
+    exit 1
+fi
+
 # Broker defaults
 : "${BROKER_ADDR:=127.0.0.1:8080}"
 : "${CASSINI_SERVER_NAME:=localhost}"
@@ -89,7 +98,7 @@ compose_up() {
         need_cmd docker-compose
         DC=(docker-compose)
     fi
-    log "starting compose services (neo4j, jaeger, gitea)..."
+    log "starting compose services (neo4j, jaeger)..."
     "${DC[@]}" -f "${SCHEDULER_ROOT}/docker-compose.yml" -p scheduler up -d
 }
 
@@ -189,11 +198,12 @@ begin_run() {
 # ----------------------------------------------------------------------
 up() {
     begin_run
-    log "bringing up scheduler stack (mode=compose+native)"
+    log "bringing up scheduler stack (compose+native)"
     log "  BROKER_ADDR=${BROKER_ADDR}"
     log "  CASSINI_SERVER_NAME=${CASSINI_SERVER_NAME}"
     log "  RUST_LOG=${RUST_LOG}"
     log "  BUILD_PROFILE=${BUILD_PROFILE}"
+    log "  POLAR_SCHEDULER_REMOTE_URL=${POLAR_SCHEDULER_REMOTE_URL}"
 
     compose_up
     broker_up
@@ -201,10 +211,12 @@ up() {
     log "stack is ready"
     log "  - Neo4j:  http://localhost:7474 (neo4j/somepassword)"
     log "  - Jaeger: http://localhost:16686"
-    log "  - Gitea:  http://localhost:3000"
     log ""
-    log "To run integration tests:"
-    log "  cd ${SCHEDULER_ROOT} && cargo test -- --nocapture"
+    log "Now you can run the scheduler observer and processor with:"
+    log "  export POLAR_SCHEDULER_REMOTE_URL=\"$POLAR_SCHEDULER_REMOTE_URL\""
+    log "  export POLAR_SCHEDULER_LOCAL_PATH=\"/tmp/polar-schedules-test\"  # or any temp dir"
+    log "  cd ${SCHEDULER_ROOT}/observer && cargo run"
+    log "  cd ${SCHEDULER_ROOT}/processor && cargo run"
     log ""
     log "To stop: $0 down"
 }
@@ -256,6 +268,7 @@ Env:
   BROKER_ADDR=127.0.0.1:8080
   CASSINI_SERVER_NAME=localhost
   RUST_LOG=info
+  POLAR_SCHEDULER_REMOTE_URL   (required for integration tests)
 
 Requires: nix develop / direnv (for TLS certs)
 EOF
