@@ -1,5 +1,6 @@
-use crate::types::*;
-use polar_scheduler_common::{GitScheduleChange, AdhocAgentAnnouncement};
+use polar_scheduler_common::{
+    AdhocAgentAnnouncement, GitScheduleChange, ScheduleNode, ScheduleNotification, ScheduleKind,
+};
 use cassini_client::TcpClientMessage;
 use neo4rs::Graph;
 use polar::graph::{GraphControllerMsg, GraphOp, GraphValue, Property};
@@ -7,7 +8,9 @@ use ractor::{Actor, ActorProcessingErr, ActorRef};
 use std::collections::HashMap;
 use tracing::{error, info};
 
-// Use the macro to generate the graph controller actor
+// Import local types
+use crate::types::{ProcessorMsg, ScheduleKey};
+
 polar::impl_graph_controller!(ScheduleGraphController, node_key = ScheduleKey);
 
 pub struct ScheduleInfoProcessor;
@@ -26,15 +29,23 @@ impl ScheduleInfoProcessor {
         change: GitScheduleChange,
     ) -> Result<(), ActorProcessingErr> {
         match change {
-            GitScheduleChange::Create { path: _, content } | GitScheduleChange::Update { path: _, content } => {
-                let schedule_node = evaluate_dhall(&content)?;
+            GitScheduleChange::Create { path, json } | GitScheduleChange::Update { path, json } => {
+                let schedule_node: ScheduleNode = match serde_json::from_str(&json) {
+                    Ok(node) => node,
+                    Err(e) => {
+                        error!("Failed to parse schedule JSON from {}: {:?}", path, e);
+                        return Ok(());
+                    }
+                };
                 let node_key = match schedule_node.kind {
                     ScheduleKind::Permanent => ScheduleKey::Permanent { agent_id: schedule_node.agent_id.clone().unwrap() },
                     ScheduleKind::Adhoc => ScheduleKey::Adhoc { agent_type: schedule_node.agent_type.clone().unwrap() },
                     ScheduleKind::Ephemeral => ScheduleKey::Ephemeral { agent_type: schedule_node.agent_type.clone().unwrap() },
                 };
 
-                let schedule_json = serde_json::to_string(&schedule_node)?;
+                // Use the original JSON string for storage
+                let schedule_json = json;
+
                 state.graph_controller.cast(GraphControllerMsg::Op(GraphOp::UpsertNode {
                     key: node_key.clone(),
                     props: vec![Property("schedule".to_string(), GraphValue::String(schedule_json.clone()))],
@@ -79,8 +90,9 @@ impl ScheduleInfoProcessor {
                     }
                 }
             }
-            GitScheduleChange::Delete { path: _ } => {
-                // Handle deletion (omitted for brevity)
+            GitScheduleChange::Delete { path } => {
+                info!("Schedule file deleted: {}", path);
+                // TODO: handle deletion in graph and caches
             }
         }
         Ok(())
@@ -134,18 +146,6 @@ async fn publish_notification(
         trace_ctx: None,
     })?;
     Ok(())
-}
-
-fn evaluate_dhall(content: &[u8]) -> Result<ScheduleNode, ActorProcessingErr> {
-    // Try Dhall first, fallback to JSON (for testing)
-    if let Ok(text) = std::str::from_utf8(content) {
-        if let Ok(node) = serde_dhall::from_str(text).parse() {
-            return Ok(node);
-        }
-    }
-    let json_str = std::str::from_utf8(content)?;
-    let node: ScheduleNode = serde_json::from_str(json_str)?;
-    Ok(node)
 }
 
 #[ractor::async_trait]

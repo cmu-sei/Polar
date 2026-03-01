@@ -1,11 +1,11 @@
 use crate::processor::ScheduleInfoProcessor;
 use crate::types::ProcessorMsg;
-use polar_scheduler_common::{GitScheduleChange, AdhocAgentAnnouncement};
+use polar_scheduler_common::{AdhocAgentAnnouncement, GitScheduleChange};
 use cassini_client::{TCPClientConfig, TcpClientActor, TcpClientArgs, TcpClientMessage};
 use cassini_types::ClientEvent;
 use polar::SupervisorMessage;
 use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef, OutputPort, SupervisionEvent};
-use tracing::{debug, error, warn, info};
+use tracing::{debug, error, info, warn};
 
 pub const SERVICE_NAME: &str = "polar.scheduler";
 
@@ -57,7 +57,7 @@ impl Actor for RootSupervisor {
     async fn post_start(
         &self,
         _myself: ActorRef<Self::Msg>,
-        _state: &mut Self::State,  // prefix with underscore
+        _state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         Ok(())
     }
@@ -138,7 +138,7 @@ impl Actor for RootSupervisor {
                                 }
                                 Err(e) => error!("Failed to deserialize GitScheduleChange: {:?}", e),
                             }
-                        } else if topic == "scheduler.adhoc" {   // Changed topic name to avoid "registration"
+                        } else if topic == "scheduler.adhoc" {
                             match rkyv::from_bytes::<AdhocAgentAnnouncement, rkyv::rancor::Error>(&payload) {
                                 Ok(ann) => {
                                     info!("Deserialized ad-hoc agent announcement, forwarding");
