@@ -422,11 +422,26 @@ in {
       : "''${HARNESS_SERVER_NAME:=localhost}"
       export CASSINI_SERVER_NAME CONTROLLER_SERVER_NAME HARNESS_SERVER_NAME
 
-      export BROKER_SHUTDOWN_TOKEN=HEYTHERE
+      export CASSINI_SHUTDOWN_TOKEN=HEYTHERE
+
       export TMPDIR=$(mktemp -d)
-      export ENABLE_JAEGER_TRACING=1
+
+      export JAEGER_ENABLE_TRACING=1
       export JAEGER_OTLP_ENDPOINT=http://localhost:4318/v1/traces
+
       export RUST_LOG=trace
+
+      export GRAPH_DB="neo4j"
+      export GRAPH_ENDPOINT="bolt://127.0.0.1:7687"
+      export GRAPH_PASSWORD="somepassword"
+      export GRAPH_USER="neo4j"
+
+      export POLAR_SCHEDULER_LOCAL_PATH="/home/djshepard/Documents/projects/polar-sched-test"
+      export POLAR_SCHEDULER_REMOTE_URL="https://github.com/daveman1010221/polar-schedules.git"
+      export POLAR_SCHEDULER_SYNC_INTERVAL="120"
+      export POLAR_SCHEDULER_GIT_USERNAME=""
+      export POLAR_SCHEDULER_GIT_PASSWORD=""
+
 
       # -------------------------------------------------------------------
       # IMPORTANT: do NOT override SSL_CERT_FILE with the dev CA.
