@@ -134,3 +134,36 @@ remote GitOps repo.
 | `POLAR_SCHEDULER_GIT_PASSWORD` | HTTPS password or token | `token` |
 
 These variables are read by the observer; the processor only needs the standard Neo4j environment variables (`GRAPH_ENDPOINT`, `GRAPH_USER`, `GRAPH_PASSWORD`, `GRAPH_DB`).
+
+## Container Images
+
+Both scheduler components are available as minimal container images built with Nix. To build them:
+
+```bash
+# Build the processor image
+nix build .#polarPkgs.scheduler.processorImage -o processor-image
+
+# Build the observer image
+nix build .#polarPkgs.scheduler.observerImage -o observer-image
+```
+
+The resulting images will be in `./processor-image` and `./observer-image` as compressed tarballs (Docker archives). You can load them into Docker/Podman with:
+
+```bash
+docker load < processor-image
+docker load < observer-image
+```
+
+### Verify the images
+
+Run the containers locally to ensure they start correctly (you'll need to supply the required environment variables):
+
+```bash
+# For the processor (Neo4j must be reachable)
+docker run --rm -e GRAPH_ENDPOINT=bolt://host.docker.internal:7687 ... polar-scheduler-processor:latest
+
+# For the observer (needs Git remote URL and local path)
+docker run --rm -e POLAR_SCHEDULER_REMOTE_URL=... -e POLAR_SCHEDULER_LOCAL_PATH=/data ... polar-scheduler-observer:latest
+```
+
+All configuration is done via environment variables at runtime.
