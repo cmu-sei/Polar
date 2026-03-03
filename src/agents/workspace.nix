@@ -120,11 +120,15 @@ let
     };
 
     provenance = import ./provenance/package.nix {
-       inherit pkgs commonPaths craneLib  workspaceFileset cargoArtifacts commonUser;
-       crateArgs = individualCrateArgs;
+      inherit pkgs commonPaths craneLib  workspaceFileset cargoArtifacts commonUser;
+      crateArgs = individualCrateArgs;
     };
 
+    scheduler = import ./polar-scheduler/package.nix {
+      inherit pkgs commonPaths craneLib workspaceFileset cargoArtifacts commonUser;
+      crateArgs = individualCrateArgs;
+    };
 in
 {
-  inherit workspacePackages gitlabAgent cassini kubeAgent webAgent provenance;
+  inherit workspacePackages gitlabAgent cassini kubeAgent webAgent provenance scheduler;
 }
