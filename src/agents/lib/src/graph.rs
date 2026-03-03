@@ -7,6 +7,8 @@ use tracing::{debug, instrument, trace};
 // Type alias to add a generic wrapper to the graphcontroller.
 pub type GraphController<T> = ActorRef<GraphControllerMsg<T>>;
 
+pub const NULL_FIELD: &str = "null";
+
 /// Graph relationship type constants.
 /// ------ IMPORTANT!!!!! ------
 /// These must stay in sync with the Neo4j schema.
@@ -149,13 +151,16 @@ where
         GraphOp::UpsertNode { key, props } => {
             trace!("Received UpsertNode directive. {key:?}, {props:?}");
 
-            let (node_pattern, mut params) = key.cypher_match("n");
+            // set a default prefix for the node's variable
+            let prefix = "n";
+
+            let (node_pattern, mut params) = key.cypher_match(prefix);
             let mut cypher = format!("MERGE {}", node_pattern);
 
             if !props.is_empty() {
                 let sets = props
                     .iter()
-                    .map(|Property(k, _)| format!("n.{k} = ${k}"))
+                    .map(|Property(k, _)| format!("{prefix}.{k} = ${k}"))
                     .collect::<Vec<_>>()
                     .join(", ");
 
@@ -176,12 +181,15 @@ where
             props,
         } => {
             trace!("Received EnsureEdge directive {to:?} {rel_type} {props:?}");
-            let (from_pat, mut params) = from.cypher_match("from");
-            let (to_pat, mut to_params) = to.cypher_match("to");
+
+            let from_node = "n";
+            let to_node = "m";
+            let (from_pat, mut params) = from.cypher_match(from_node);
+            let (to_pat, mut to_params) = to.cypher_match(to_node);
             params.append(&mut to_params);
 
             let mut cypher = format!(
-                "MERGE (a {})\nMERGE (b {})\nMERGE (a)-[r:{}]->(b)",
+                "MERGE ({})\nMERGE ({})\nMERGE ({from_node})-[r:{}]->({to_node})",
                 from_pat.trim_start_matches('(').trim_end_matches(')'),
                 to_pat.trim_start_matches('(').trim_end_matches(')'),
                 rel_type
@@ -281,9 +289,9 @@ where
             let cypher = format!(
                 "
                 // Upsert resource, state type, and state instance
-                MERGE (res {res})
+                MERGE ({res})
                 MERGE (stype {stype})
-                MERGE (sinst {sinst})
+                MERGE ({sinst})
                 {state_instance_set}
 
                 // Record transition

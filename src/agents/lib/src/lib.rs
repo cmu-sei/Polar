@@ -69,6 +69,7 @@ where
 }
 
 /// Helper function to parse a file at a given path and return the raw bytes as a vector
+#[deprecated = "Using this in some actors might block their executution and cause what looks like deadlock, so we should do this async wherever we're doing async"]
 pub fn get_file_as_byte_vec(filename: &String) -> Result<Vec<u8>, std::io::Error> {
     let mut f = std::fs::File::open(&filename)?;
 
@@ -77,6 +78,16 @@ pub fn get_file_as_byte_vec(filename: &String) -> Result<Vec<u8>, std::io::Error
     let mut buffer = vec![0; metadata.len() as usize];
     f.read(&mut buffer).expect("buffer overflow");
 
+    Ok(buffer)
+}
+
+use tokio::fs;
+use tokio::io::AsyncReadExt;
+
+pub async fn async_get_file_as_byte_vec(path: &str) -> Result<Vec<u8>, std::io::Error> {
+    let mut file = fs::File::open(path).await?;
+    let mut buffer = Vec::new();
+    file.read_to_end(&mut buffer).await?;
     Ok(buffer)
 }
 
@@ -188,11 +199,11 @@ pub enum ProvenanceEvent {
     ///
     ///
     /// `uri`: The canonical reference string (e.g. `"ghcr.io/org/app:1.2.3"`).
-    ///
+    /// `manifest_data`: raw byte payload containing the OCIManifest Structure, to be deserialized and analyzed
     OCIArtifactResolved {
         uri: String,
         digest: String,
-        media_type: String,
+        manifest_data: Vec<u8>,
         registry: String,
     },
 
@@ -261,15 +272,15 @@ pub enum DispatcherMessage {
 }
 
 pub fn init_logging(service_name: String) {
-    use opentelemetry::{global, KeyValue};
+    use opentelemetry::{KeyValue, global};
     use opentelemetry_otlp::Protocol;
     use opentelemetry_otlp::WithExportConfig;
     use opentelemetry_sdk::{
-        trace::{self, RandomIdGenerator},
         Resource,
+        trace::{self, RandomIdGenerator},
     };
-    use tracing_subscriber::filter::EnvFilter;
     use tracing_subscriber::Layer;
+    use tracing_subscriber::filter::EnvFilter;
     use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
@@ -339,6 +350,16 @@ pub fn init_logging(service_name: String) {
     }
 }
 
+pub async fn try_get_proxy_ca_cert() -> Option<Vec<u8>> {
+    return match std::env::var("PROXY_CA_CERT") {
+        Ok(path) => {
+            info!("Attempting to load a ca certificate at {path}");
+            async_get_file_as_byte_vec(&path).await.ok()
+        }
+        Err(_e) => None,
+    };
+}
+
 /// Helper function to get a web client with optional proxy CA certificate
 /// Attempts to find a path to the proxy CA certificate provided by the environment variable PROXY_CA_CERT
 pub fn get_web_client() -> Result<Client, ActorProcessingErr> {
@@ -350,7 +371,7 @@ pub fn get_web_client() -> Result<Client, ActorProcessingErr> {
             let root_cert =
                 Certificate::from_pem(&cert_data).expect("Expected {path} to be in PEM format.");
 
-            debug!("Found PROXY_CA_CERT at: {path}, Configuring web client...");
+            debug!("Found PROXY_CA_CERT at: {path}. Configuring web client...");
 
             ClientBuilder::new()
                 .add_root_certificate(root_cert)
@@ -358,7 +379,9 @@ pub fn get_web_client() -> Result<Client, ActorProcessingErr> {
                 .build()?
         }
         Err(e) => {
-            debug!("Failed to find PROXY_CA_CERT. {e} Configuring web client without proxy CA certificate...");
+            debug!(
+                "Failed to find PROXY_CA_CERT. {e} Configuring web client without proxy CA certificate..."
+            );
             ClientBuilder::new().build()?
         }
     })

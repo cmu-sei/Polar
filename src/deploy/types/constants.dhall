@@ -5,6 +5,8 @@ let Agent = ./agents.dhall
 -- TODO: Define a set of constants for environment variable strings
 let commitSha = env:CI_COMMIT_SHORT_SHA as Text ? "latest"
 
+let imagePullSecretName =  "registry-secret"
+
 let SandboxRegistry =
       { url = "sandboxaksacr.azurecr.us"
       , imagePullSecrets =
@@ -16,11 +18,18 @@ let GraphNamespace = "polar-db"
 
 let neo4jConfigmapName = "neo4j-config"
 let graphSecretName = "polar-graph-pw"
+
 let neo4jSecret =
       kubernetes.SecretKeySelector::{
       , key = "secret"
       , name = Some "neo4j-secret"
       }
+
+let graphSecretKeySelector = kubernetes.SecretKeySelector::{
+        , name = Some "polar-graph-pw"
+        , key = "secret"
+        }
+
 let neo4jSecretEnv = kubernetes.EnvVar::{
           , name = "NEO4J_AUTH"
           , valueFrom = Some kubernetes.EnvVarSource::{
@@ -91,7 +100,11 @@ let deployRepository =
         }
       }
 
-
+let gitlabSecretKeySelector =
+    kubernetes.SecretKeySelector::{
+    , key = "token"
+    , name = Some "gitlab-secret"
+    }
 
 let graphPassword =
       kubernetes.SecretKeySelector::{
@@ -134,11 +147,12 @@ let commonClientEnv =
         }
       ]
 
+
 let ClientTlsVolume =
       kubernetes.Volume::{
-      , name = polarAgentCertificateSpec.secretName
+      , name = "client-tls"
       , secret = Some kubernetes.SecretVolumeSource::{
-        , secretName = Some polarAgentCertificateSpec.secretName
+        , secretName = Some "client-tls"
         }
       }
 
@@ -160,7 +174,8 @@ let ProvenanceLinkerName = "provenance-linker"
 let ProvenanceResolverName = "provenance-resolver"
 
 let OciRegistrySecret =
-      { name = "oci-registry-auth", value = env:OCI_REGISTRY_AUTH as Text }
+      { name = "oci-registry-auth", value = env:DOCKER_AUTH_JSON as Text }
+
 let neo4jCredentialSecret = kubernetes.Secret::{
       apiVersion = "v1"
       , kind = "Secret"
@@ -192,7 +207,17 @@ let graphClientEnvVars = [      kubernetes.EnvVar::{
         }
       ]
 
-      in  { commitSha
+let gitObserverSecretName = "git-observer-secret"
+-- constant volumes mounted by every agent
+let commonVolumes = [ ClientTlsVolume ]
+
+      in  {
+      graphSecretKeySelector
+      , imagePullSecretName
+      ,polarAgentCertificateSpec
+      ,commitSha
+      , commonVolumes
+      ,gitlabSecretKeySelector
     , SandboxRegistry
     , graphSecretName
     , tlsPath
@@ -223,4 +248,5 @@ let graphClientEnvVars = [      kubernetes.EnvVar::{
     , ProvenanceLinkerName
     , ProvenanceResolverName
     , OciRegistrySecret
+    , gitObserverSecretName
     }

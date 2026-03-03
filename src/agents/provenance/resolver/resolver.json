@@ -3,6 +3,10 @@
     {
       "name": "sandbox-acr",
       "url": "sanbboxaksacr.azurecr.us"
+    },
+    {
+      "name": "sandbox-registry",
+      "url": "registry.sandbox.labz.s-box.org"
     }
   ]
 }

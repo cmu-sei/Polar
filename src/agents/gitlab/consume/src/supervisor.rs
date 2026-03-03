@@ -1,3 +1,7 @@
+use crate::BROKER_CLIENT_NAME;
+use crate::GitlabConsumer;
+use crate::GitlabConsumerState;
+use crate::GitlabGraphController;
 use crate::groups::GitlabGroupConsumer;
 use crate::meta::MetaConsumer;
 use crate::pipelines::GitlabPipelineConsumer;
@@ -5,13 +9,8 @@ use crate::projects::GitlabProjectConsumer;
 use crate::repositories::GitlabRepositoryConsumer;
 use crate::runners::GitlabRunnerConsumer;
 use crate::users::GitlabUserConsumer;
-use crate::GitlabConsumer;
-use crate::GitlabConsumerState;
-use crate::GitlabGraphController;
-use crate::BROKER_CLIENT_NAME;
 use cassini_client::*;
 use cassini_types::ClientEvent;
-use common::types::GitlabEnvelope;
 use common::GROUPS_CONSUMER_TOPIC;
 use common::METADATA_CONSUMER_TOPIC;
 use common::PIPELINE_CONSUMER_TOPIC;
@@ -19,16 +18,17 @@ use common::PROJECTS_CONSUMER_TOPIC;
 use common::REPOSITORY_CONSUMER_TOPIC;
 use common::RUNNERS_CONSUMER_TOPIC;
 use common::USER_CONSUMER_TOPIC;
-use polar::get_neo_config;
+use common::types::GitlabEnvelope;
 use polar::Supervisor;
 use polar::SupervisorMessage;
-use ractor::async_trait;
+use polar::get_neo_config;
 use ractor::Actor;
 use ractor::ActorCell;
 use ractor::ActorProcessingErr;
 use ractor::ActorRef;
 use ractor::OutputPort;
 use ractor::SupervisionEvent;
+use ractor::async_trait;
 use tracing::debug;
 use tracing::error;
 use tracing::info;
@@ -44,7 +44,7 @@ pub struct ConsumerSupervisorState {
 }
 
 impl Supervisor for ConsumerSupervisor {
-    #[instrument(level = "trace", fields(topic=topic))]
+    #[instrument(level = "trace", fields(topic=topic), skip(payload))]
     fn deserialize_and_dispatch(topic: String, payload: Vec<u8>) {
         match rkyv::from_bytes::<GitlabEnvelope, rkyv::rancor::Error>(&payload) {
             Ok(message) => {
@@ -197,7 +197,7 @@ impl Actor for ConsumerSupervisor {
                     info!("Initializing agent.");
                     if let Ok(graph) = neo4rs::Graph::connect(state.graph_config.clone()) {
                         match Actor::spawn_linked(
-                            None,
+                            Some("polar.gitlab.consumer.graph".to_string()),
                             GitlabGraphController,
                             graph,
                             myself.clone().into(),
@@ -228,10 +228,10 @@ impl Actor for ConsumerSupervisor {
                 ClientEvent::MessagePublished { topic, payload, .. } => {
                     ConsumerSupervisor::deserialize_and_dispatch(topic, payload);
                 }
-                ClientEvent::TransportError { ..} => todo!("Handle transport error"),
+                ClientEvent::TransportError { .. } => todo!("Handle transport error"),
                 ClientEvent::ControlResponse { .. } => {
                     // ignore
-                },
+                }
             },
         }
         Ok(())
@@ -253,7 +253,7 @@ impl Actor for ConsumerSupervisor {
             }
             SupervisionEvent::ActorTerminated(actor_cell, _, reason) => {
                 // we no actors start w/o names
-                let actor_name = actor_cell.get_name().unwrap();
+                let actor_name = actor_cell.get_name();
 
                 warn!(
                     "CONSUMER_SUPERVISOR: {0:?}:{1:?} terminated. {reason:?}",
@@ -263,7 +263,7 @@ impl Actor for ConsumerSupervisor {
             }
             SupervisionEvent::ActorFailed(actor_cell, e) => {
                 // we no actors start w/o names
-                let actor_name = actor_cell.get_name().unwrap();
+                let actor_name = actor_cell.get_name();
 
                 error!(
                     "Consumer_SUPERVISOR: {0:?}:{1:?} failed! {e:?}",

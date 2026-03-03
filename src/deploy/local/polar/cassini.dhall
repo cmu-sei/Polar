@@ -77,7 +77,6 @@ let containers =
       [ kubernetes.Container::{
         , name = "cassini"
         , image = Some values.cassini.image
-        , imagePullPolicy = Some "Never"
         , securityContext = Some kubernetes.SecurityContext::{
           , runAsGroup = Some 1000
           , runAsNonRoot = Some True
@@ -99,7 +98,8 @@ let containers =
         }
       ]
 
-let spec = kubernetes.PodSpec::{ containers, volumes = Some volumes }
+let spec = kubernetes.PodSpec::{ containers, volumes = Some volumes , imagePullSecrets = Some values.imagePullSecrets  }
+
 
 let deployment =
       kubernetes.Deployment::{
@@ -122,9 +122,6 @@ let deployment =
           }
         }
       }
-
-
-
 
 in  [ kubernetes.Resource.Service cassiniService
     , kubernetes.Resource.Deployment deployment

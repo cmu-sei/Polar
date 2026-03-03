@@ -4471,6 +4471,7 @@ dependencies = [
  "chrono",
  "cyclonedx-bom",
  "neo4rs",
+ "oci-client",
  "polar",
  "provenance-common",
  "ractor",

@@ -1,25 +1,27 @@
+pub use cassini_tracing::{init_tracing, shutdown_tracing};
+pub use cassini_tracing::{try_set_parent_otel, try_set_parent_wire};
 use cassini_types::{ClientEvent, ClientMessage, ControlOp, WireTraceCtx};
-use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef, OutputPort, RpcReplyPort, Message};
-use ractor::concurrency::{sleep, Duration};
+use ractor::concurrency::{Duration, sleep};
+use ractor::{Actor, ActorProcessingErr, ActorRef, Message, OutputPort, RpcReplyPort, async_trait};
 use rkyv::rancor::Error;
+use rustls::ClientConfig;
 use rustls::client::WebPkiServerVerifier;
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
-use rustls::ClientConfig;
+use socket2::SockRef;
 use std::env;
+use std::marker::PhantomData;
 use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
-use tokio::io::{split, AsyncReadExt, BufWriter, ReadHalf, WriteHalf};
+use tokio::io::{AsyncReadExt, BufWriter, ReadHalf, WriteHalf, split};
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 use tokio::task::AbortHandle;
-use tokio_rustls::client::TlsStream;
 use tokio_rustls::TlsConnector;
-use std::marker::PhantomData;
-pub use cassini_tracing::{init_tracing, shutdown_tracing};
-pub use cassini_tracing::{try_set_parent_otel, try_set_parent_wire};
-use socket2::SockRef;
-use tracing::{debug, debug_span, trace_span, warn_span, error, info, info_span, trace, warn, Instrument,};
+use tokio_rustls::client::TlsStream;
+use tracing::{
+    Instrument, debug, debug_span, error, info, info_span, trace, trace_span, warn, warn_span,
+};
 
 pub type TcpClient = ActorRef<TcpClientMessage>;
 pub const UNEXPECTED_DISCONNECT: &str = "UNEXPECTED_DISCONNECT";
@@ -205,7 +207,7 @@ impl TcpClientActor {
         // Use the helper method from WireTraceCtx itself
         WireTraceCtx::from_current_span()
     }
-    
+
     #[tracing::instrument(name = "cassini.tcp_client.connect_with_backoff", skip(client_config))]
     async fn connect_with_backoff(
         addr: String,
@@ -230,16 +232,29 @@ impl TcpClientActor {
 
                     // Use socket2 to set buffer sizes
                     let sock_ref = SockRef::from(&std_stream);
-                    sock_ref.set_recv_buffer_size(100 * 1024 * 1024).map_err(|e| {
-                        ActorProcessingErr::from(format!("Failed to set recv buffer size: {}", e))
-                    })?;
-                    sock_ref.set_send_buffer_size(100 * 1024 * 1024).map_err(|e| {
-                        ActorProcessingErr::from(format!("Failed to set send buffer size: {}", e))
-                    })?;
+                    sock_ref
+                        .set_recv_buffer_size(100 * 1024 * 1024)
+                        .map_err(|e| {
+                            ActorProcessingErr::from(format!(
+                                "Failed to set recv buffer size: {}",
+                                e
+                            ))
+                        })?;
+                    sock_ref
+                        .set_send_buffer_size(100 * 1024 * 1024)
+                        .map_err(|e| {
+                            ActorProcessingErr::from(format!(
+                                "Failed to set send buffer size: {}",
+                                e
+                            ))
+                        })?;
 
                     // Convert back to tokio stream
                     let tcp = tokio::net::TcpStream::from_std(std_stream).map_err(|e| {
-                        ActorProcessingErr::from(format!("Failed to convert back to tokio stream: {}", e))
+                        ActorProcessingErr::from(format!(
+                            "Failed to convert back to tokio stream: {}",
+                            e
+                        ))
                     })?;
 
                     match connector.connect(server_name.clone(), tcp).await {
@@ -267,7 +282,8 @@ impl TcpClientActor {
         let handler = state.event_handler.clone(); // clone the optional direct handler
         let broker_addr = state.bind_addr.clone();
 
-        let read_loop_span = info_span!("cassini.tcp_client.read_loop", broker_addr = %broker_addr,);
+        let read_loop_span =
+            info_span!("cassini.tcp_client.read_loop", broker_addr = %broker_addr,);
 
         let abort = tokio::spawn(async move {
             let mut msg_count = 0;
@@ -326,7 +342,7 @@ impl TcpClientActor {
                                             } => {
                                                 let span = trace_span!("client.handle_publish_response");
                                                 if let Some(wire_ctx) = trace_ctx {
-                                                    tracing::debug!("Sink TCP client received PublishResponse with trace_id: {:02x?}", wire_ctx.trace_id);
+                                                    tracing::trace!("Received PublishResponse with trace_id: {:02x?}", wire_ctx.trace_id);
                                                 }
                                                 try_set_parent_wire(&span, trace_ctx);
                                                 let _g = span.enter();
@@ -463,13 +479,14 @@ impl TcpClientActor {
         match rkyv::to_bytes::<Error>(&message) {
             Ok(bytes) => {
                 // Validate frame size fits in u32
-                let len: u32 = bytes.len().try_into().map_err(|_| {
-                    ActorProcessingErr::from("Frame too large (>4GB)")
-                })?;
-                
+                let len: u32 = bytes
+                    .len()
+                    .try_into()
+                    .map_err(|_| ActorProcessingErr::from("Frame too large (>4GB)"))?;
+
                 // Pre-allocate buffer with exact capacity (4 bytes + payload)
                 let mut buffer = Vec::with_capacity(4 + bytes.len());
-                
+
                 // Write 4-byte BE length prefix (matching broker's read_u32)
                 buffer.extend_from_slice(&len.to_be_bytes());
 
@@ -612,7 +629,8 @@ impl Actor for TcpClientActor {
 
         // --- 7. Construct final state ---
         // init_span ends when this function returns (no long-lived spawned tasks here)
-        let events_output = args.events_output
+        let events_output = args
+            .events_output
             .unwrap_or_else(|| Arc::new(OutputPort::default()));
 
         let state = TcpClientState {
@@ -721,7 +739,9 @@ impl Actor for TcpClientActor {
                 let client_config = state.client_config.clone();
                 let myself_clone = myself.clone();
                 tokio::spawn(async move {
-                    match TcpClientActor::connect_with_backoff(addr, server_name, &client_config).await {
+                    match TcpClientActor::connect_with_backoff(addr, server_name, &client_config)
+                        .await
+                    {
                         Ok(tls_stream) => {
                             let (reader, write_half) = split(tls_stream);
                             let writer = tokio::io::BufWriter::new(write_half);
@@ -750,7 +770,10 @@ impl Actor for TcpClientActor {
                 }
             }
 
-            (RegistrationState::Unregistered, TcpClientMessage::RegistrationResponse(registration_id)) => {
+            (
+                RegistrationState::Unregistered,
+                TcpClientMessage::RegistrationResponse(registration_id),
+            ) => {
                 state.registration = RegistrationState::Registered {
                     registration_id: registration_id.clone(),
                 };
@@ -776,13 +799,21 @@ impl Actor for TcpClientActor {
                             trace_ctx: Self::current_trace_ctx(),
                         };
                         if let Err(e) = TcpClientActor::send_message(envelope, state).await {
-                            TcpClientActor::emit_transport_err_and_stop(myself, state, e.to_string())
+                            TcpClientActor::emit_transport_err_and_stop(
+                                myself,
+                                state,
+                                e.to_string(),
+                            )
                         }
                     }
                     TcpClientMessage::GetRegistrationId(reply) => {
                         reply.send(Some(registration_id.to_owned())).ok();
                     }
-                    TcpClientMessage::Publish { topic, payload, trace_ctx } => {
+                    TcpClientMessage::Publish {
+                        topic,
+                        payload,
+                        trace_ctx,
+                    } => {
                         let envelope = ClientMessage::PublishRequest {
                             topic,
                             payload: payload.into(),
@@ -790,7 +821,11 @@ impl Actor for TcpClientActor {
                             trace_ctx,
                         };
                         if let Err(e) = TcpClientActor::send_message(envelope, state).await {
-                            TcpClientActor::emit_transport_err_and_stop(myself, state, e.to_string());
+                            TcpClientActor::emit_transport_err_and_stop(
+                                myself,
+                                state,
+                                e.to_string(),
+                            );
                         }
                     }
                     TcpClientMessage::Subscribe { topic, trace_ctx } => {
@@ -800,7 +835,11 @@ impl Actor for TcpClientActor {
                             trace_ctx,
                         };
                         if let Err(e) = TcpClientActor::send_message(envelope, state).await {
-                            TcpClientActor::emit_transport_err_and_stop(myself, state, e.to_string());
+                            TcpClientActor::emit_transport_err_and_stop(
+                                myself,
+                                state,
+                                e.to_string(),
+                            );
                         }
                     }
                     TcpClientMessage::Disconnect { trace_ctx } => {
@@ -812,7 +851,11 @@ impl Actor for TcpClientActor {
                             trace_ctx,
                         };
                         if let Err(e) = TcpClientActor::send_message(envelope, state).await {
-                            TcpClientActor::emit_transport_err_and_stop(myself.clone(), state, e.to_string());
+                            TcpClientActor::emit_transport_err_and_stop(
+                                myself.clone(),
+                                state,
+                                e.to_string(),
+                            );
                         }
                         if let Some(handle) = state.abort_handle.take() {
                             handle.abort();
@@ -826,7 +869,11 @@ impl Actor for TcpClientActor {
                             trace_ctx,
                         };
                         if let Err(e) = TcpClientActor::send_message(envelope, state).await {
-                            TcpClientActor::emit_transport_err_and_stop(myself.clone(), state, e.to_string());
+                            TcpClientActor::emit_transport_err_and_stop(
+                                myself.clone(),
+                                state,
+                                e.to_string(),
+                            );
                         }
                     }
                     TcpClientMessage::ErrorMessage(error) => {
@@ -839,7 +886,11 @@ impl Actor for TcpClientActor {
                             trace_ctx,
                         };
                         if let Err(e) = TcpClientActor::send_message(envelope, state).await {
-                            TcpClientActor::emit_transport_err_and_stop(myself.clone(), state, e.to_string());
+                            TcpClientActor::emit_transport_err_and_stop(
+                                myself.clone(),
+                                state,
+                                e.to_string(),
+                            );
                         }
                     }
                     TcpClientMessage::ListTopics { trace_ctx } => {
@@ -849,7 +900,11 @@ impl Actor for TcpClientActor {
                             trace_ctx,
                         };
                         if let Err(e) = TcpClientActor::send_message(envelope, state).await {
-                            TcpClientActor::emit_transport_err_and_stop(myself.clone(), state, e.to_string());
+                            TcpClientActor::emit_transport_err_and_stop(
+                                myself.clone(),
+                                state,
+                                e.to_string(),
+                            );
                         }
                     }
                     TcpClientMessage::ControlRequest { op, trace_ctx } => {
@@ -859,7 +914,11 @@ impl Actor for TcpClientActor {
                             trace_ctx,
                         };
                         if let Err(e) = TcpClientActor::send_message(envelope, state).await {
-                            TcpClientActor::emit_transport_err_and_stop(myself.clone(), state, e.to_string());
+                            TcpClientActor::emit_transport_err_and_stop(
+                                myself.clone(),
+                                state,
+                                e.to_string(),
+                            );
                         }
                     }
                     // Ignore other messages like Reconnect (already handled at top level)

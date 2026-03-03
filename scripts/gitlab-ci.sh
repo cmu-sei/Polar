@@ -50,7 +50,10 @@ echo Building the Provenance Linker
 nix build --quiet .#polarPkgs.provenance.linkerImage -o linker
 echo Building the Provenance Resolver
 nix build --quiet .#polarPkgs.provenance.resolverImage -o resolver
-
+echo "Building Git Agents"
+nix build --quiet .#polarPkgs.git.observerImage -o git-observer
+nix build --quiet .#polarPkgs.git.consumerImage -o git-consumer
+nix build --quiet .#polarPkgs.git.schedulerImage -o git-scheduler
 # Run vulnerability scan
 # vulnix returns nonzero exit codes, so we need to check for ourselves
 # TODO: We're getting blocked by firewalls (again), unfreeze this when that gets handled.
@@ -85,6 +88,9 @@ if [ "$CI_COMMIT_REF_NAME" = "main" ]; then
     upload_image gitlab-consumer "docker-archive:$(readlink -f gitlab-consumer)" "docker://$CI_REGISTRY_IMAGE/polar-gitlab-consumer:$CI_COMMIT_SHORT_SHA"
     upload_image kube-observer "docker-archive:$(readlink -f kube-observer)" "docker://$CI_REGISTRY_IMAGE/polar-kube-observer:$CI_COMMIT_SHORT_SHA"
     upload_image kube-consumer "docker-archive:$(readlink -f kube-consumer)" "docker://$CI_REGISTRY_IMAGE/polar-kube-consumer:$CI_COMMIT_SHORT_SHA"
+    upload_image git-observer "docker-archive:$(readlink -f git-observer)" "docker://$CI_REGISTRY_IMAGE/polar-git-observer:$CI_COMMIT_SHORT_SHA"
+    upload_image git-consumer "docker-archive:$(readlink -f git-consumer)" "docker://$CI_REGISTRY_IMAGE/polar-git-consumer:$CI_COMMIT_SHORT_SHA"
+    upload_image git-scheudler "docker-archive:$(readlink -f git-scheduler)" "docker://$CI_REGISTRY_IMAGE/polar-git-scheduler:$CI_COMMIT_SHORT_SHA"
     upload_image linker "docker-archive:$(readlink -f linker)" "docker://$CI_REGISTRY_IMAGE/polar-linker-agent:$CI_COMMIT_SHORT_SHA"
     upload_image resolver "docker-archive:$(readlink -f resolver)" "docker://$CI_REGISTRY_IMAGE/polar-resolver-agent:$CI_COMMIT_SHORT_SHA"
 
@@ -93,6 +99,9 @@ if [ "$CI_COMMIT_REF_NAME" = "main" ]; then
     skopeo copy docker-archive://$(readlink -f gitlab-consumer) docker://$AZURE_REGISTRY/polar-gitlab-consumer:$CI_COMMIT_SHORT_SHA
     skopeo copy docker-archive://$(readlink -f kube-observer) docker://$AZURE_REGISTRY/polar-kube-observer:$CI_COMMIT_SHORT_SHA
     skopeo copy docker-archive://$(readlink -f kube-consumer) docker://$AZURE_REGISTRY/polar-kube-consumer:$CI_COMMIT_SHORT_SHA
+    skopeo copy docker-archive://$(readlink -f git-observer) docker://$AZURE_REGISTRY/polar-git-observer:$CI_COMMIT_SHORT_SHA
+    skopeo copy docker-archive://$(readlink -f git-consumer) docker://$AZURE_REGISTRY/polar-git-consumer:$CI_COMMIT_SHORT_SHA
+    skopeo copy docker-archive://$(readlink -f git-scheduler) docker://$AZURE_REGISTRY/polar-git-scheudler:$CI_COMMIT_SHORT_SHA
     skopeo copy docker-archive://$(readlink -f linker) docker://$AZURE_REGISTRY/polar-linker-agent:$CI_COMMIT_SHORT_SHA
     skopeo copy docker-archive://$(readlink -f resolver) docker://$AZURE_REGISTRY/polar-resolver-agent:$CI_COMMIT_SHORT_SHA
 

@@ -1,6 +1,6 @@
 use cassini_client::TcpClientMessage;
-use polar::{NormalizedComponent, NormalizedSbom, ProvenanceEvent, PROVENANCE_LINKER_TOPIC};
-use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef};
+use polar::{NormalizedComponent, NormalizedSbom, PROVENANCE_LINKER_TOPIC, ProvenanceEvent};
+use ractor::{Actor, ActorProcessingErr, ActorRef, async_trait};
 use reqwest::Client as WebClient;
 use rkyv::rancor;
 use tracing::{debug, instrument, trace};
@@ -100,10 +100,20 @@ impl Actor for ArtifactClassifier {
 
     async fn pre_start(
         &self,
-        _myself: ActorRef<Self::Msg>,
+        myself: ActorRef<Self::Msg>,
         args: Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
+        debug!("{myself:?} starting");
         Ok(args)
+    }
+
+    async fn post_start(
+        &self,
+        myself: ActorRef<Self::Msg>,
+        _state: &mut Self::State,
+    ) -> Result<(), ActorProcessingErr> {
+        debug!("{myself:?} started.");
+        Ok(())
     }
 
     async fn handle(

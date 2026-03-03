@@ -3,7 +3,7 @@ let kubernetes = ../../types/kubernetes.dhall
 let Constants = ../../types/constants.dhall
 let values = ../values.dhall
 let setupScript = ../../../../scripts/setup-neo4j.sh as Text
-let configContent = ../../../conf/neo4j-no-ssl.conf as Text
+let configContent = ../conf/neo4j-no-ssl.conf as Text
 
 let instanceName = "polar-neo4j"
 let namespace =
@@ -42,41 +42,6 @@ let secret =
       , type = Some "Opaque"
       }
 
-let logVolume =
-      kubernetes.PersistentVolume::{
-      , apiVersion = "v1"
-      , kind = "PersistentVolume"
-      , metadata = kubernetes.ObjectMeta::{
-        , name = Some values.neo4j.volumes.logs.name
-        , namespace = Some Constants.GraphNamespace
-        }
-      , spec = Some kubernetes.PersistentVolumeSpec::{
-        , accessModes = Some [ "ReadWriteOnce" ]
-        , capacity = Some [ { mapKey = "storage", mapValue = "10Gi" } ]
-        , hostPath = Some kubernetes.HostPathVolumeSource::{
-          , path = "/tmp/neo4j/logs"
-          }
-        , storageClassName = Some "standard"
-        }
-      }
-
-let dataVolume =
-      kubernetes.PersistentVolume::{
-      , apiVersion = "v1"
-      , kind = "PersistentVolume"
-      , metadata = kubernetes.ObjectMeta::{
-        , name = Some values.neo4j.volumes.data.name
-        , namespace = Some values.neo4j.namespace
-        }
-      , spec = Some kubernetes.PersistentVolumeSpec::{
-        , accessModes = Some [ "ReadWriteOnce" ]
-        , capacity = Some [ { mapKey = "storage", mapValue = "10Gi" } ]
-        , hostPath = Some kubernetes.HostPathVolumeSource::{
-          , path = "/tmp/neo4j/data"
-          }
-        , storageClassName = Some "standard"
-        }
-      }
 
 let logVolumeClaim =
       kubernetes.PersistentVolumeClaim::{
@@ -155,7 +120,7 @@ let podSpec =
       , initContainers = Some
         [ kubernetes.Container::{
           , name = "neo4j-init"
-          , image = Some "alpine:3.14.0"
+          , image = Some "docker.io/alpine:3.14.0"
           , command = Some [ "/bin/sh", "-c" ]
           , args = Some [ setupScript ]
           , volumeMounts = Some
@@ -277,8 +242,6 @@ let statefulSet =
 in  [ kubernetes.Resource.Namespace namespace
     , kubernetes.Resource.ConfigMap configMap
     , kubernetes.Resource.Secret secret
-    , kubernetes.Resource.PersistentVolume logVolume
-    , kubernetes.Resource.PersistentVolume dataVolume
     , kubernetes.Resource.PersistentVolumeClaim dataVolumeClaim
     , kubernetes.Resource.PersistentVolumeClaim logVolumeClaim
     , kubernetes.Resource.Service service

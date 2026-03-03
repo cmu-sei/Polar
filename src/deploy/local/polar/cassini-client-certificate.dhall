@@ -1,6 +1,8 @@
-{ apiVersion = "cert-manager.io/v1"
+let Constants = ../../types/constants.dhall
+
+in { apiVersion = "cert-manager.io/v1"
 , kind = "Certificate"
-, metadata = { name = "gitlab-agent-certificate", namespace = "polar" }
+, metadata = { name = "cassini-client-certificate", namespace = Constants.PolarNamespace }
 , spec =
   { commonName = "polar"
   , dnsNames = [ "cassini-ip-svc.polar.svc.cluster.local" ]

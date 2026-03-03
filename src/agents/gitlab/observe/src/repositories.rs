@@ -23,11 +23,13 @@
 
 use crate::graphql_endpoint;
 use crate::{
-    init_observer_state, send_to_broker, BackoffReason, Command, GitlabObserverArgs,
-    GitlabObserverMessage, GitlabObserverState, MESSAGE_FORWARDING_FAILED,
+    BackoffReason, Command, GitlabObserverArgs, GitlabObserverMessage, GitlabObserverState,
+    MESSAGE_FORWARDING_FAILED, init_observer_state, send_to_broker,
 };
-use common::types::{GitlabData, GitlabPackageFile};
+use cassini_client::TcpClientMessage;
+use cassini_types::WireTraceCtx;
 use common::REPOSITORY_CONSUMER_TOPIC;
+use common::types::{GitlabData, GitlabPackageFile};
 use cynic::{GraphQlResponse, QueryBuilder};
 use gitlab_queries::projects::{
     ContainerRepository, ContainerRepositoryDetailsArgs, ContainerRepositoryDetailsQuery,
@@ -35,12 +37,10 @@ use gitlab_queries::projects::{
     SingleProjectQueryArguments,
 };
 use gitlab_schema::ContainerRepositoryID;
-use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef};
+use polar::{PROVENANCE_DISCOVERY_TOPIC, ProvenanceEvent};
+use ractor::{Actor, ActorProcessingErr, ActorRef, async_trait};
 use serde_json::from_str;
 use tracing::{debug, error, info, trace, warn};
-use cassini_types::WireTraceCtx;
-use polar::{ProvenanceEvent, PROVENANCE_LINKER_TOPIC, PROVENANCE_DISCOVERY_TOPIC};
-use cassini_client::TcpClientMessage;
 
 pub struct GitlabRepositoryObserver;
 
@@ -234,26 +234,6 @@ impl Actor for GitlabRepositoryObserver {
                                                                             graphql_endpoint(&state.gitlab_endpoint))
                                                                             .await;
 
-                                                                        // Emit provenance envent
-                                                                        let event = ProvenanceEvent::OCIRegistryDiscovered { hostname: repository.location.clone() };
-                                                                        trace!(
-                                                                            "Emitting event: {:?}",
-                                                                            event
-                                                                        );
-                                                                        let payload =
-                                                                            rkyv::to_bytes::<
-                                                                                rkyv::rancor::Error,
-                                                                            >(
-                                                                                &event
-                                                                            )?;
-
-                                                                        // Emit the event strait to the linker, this counts the registry as "Discovered" even if we didn't ping it directly via REST.
-                                                                        state.tcp_client.cast(TcpClientMessage::Publish {
-                                                                            topic: PROVENANCE_LINKER_TOPIC.to_string(),
-                                                                            payload: payload.into(),
-                                                                            trace_ctx: WireTraceCtx::from_current_span(),
-                                                                        })?;
-
                                                                         match result {
                                                                             Ok(tags) => {
                                                                                 //send tag data
@@ -283,9 +263,9 @@ impl Actor for GitlabRepositoryObserver {
                                                                                             trace_ctx: WireTraceCtx::from_current_span(),
                                                                                         })?;
                                                                                     }
-                                                                                    let data = GitlabData::ContainerRepositoryTags { 
-                                                                                        repository_id: repository.id.to_string(), 
-                                                                                        project_id: project.id.to_string(), 
+                                                                                    let data = GitlabData::ContainerRepositoryTags {
+                                                                                        repository_id: repository.id.to_string(),
+                                                                                        project_id: project.id.to_string(),
                                                                                         tags
                                                                                     };
                                                                                     if let Err(e) = send_to_broker(state, data, REPOSITORY_CONSUMER_TOPIC) { return Err(e) }

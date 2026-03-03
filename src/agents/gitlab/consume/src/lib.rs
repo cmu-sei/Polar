@@ -125,15 +125,18 @@ impl GraphNodeKey for GitlabNodeKey {
     fn cypher_match(&self, prefix: &str) -> (String, Vec<(String, BoltType)>) {
         match self {
             GitlabNodeKey::GitlabInstance { instance_id } => (
-                format!("(:GitlabInstance {{ id: ${prefix}_id }})"),
-                vec![
-                    (format!("{prefix}_id"), instance_id.clone().into()),
-                ],
+                format!("({prefix}:GitlabInstance {{ id: ${prefix}_instance_id }})"),
+                vec![(format!("{prefix}_instance_id"), instance_id.clone().into())],
             ),
-            GitlabNodeKey::License { instance_id, license_id } => (
-                format!("(:GitlabLicense {{ instance_id: ${prefix}_instance_id, license_id: ${prefix}_license_id  }})"),
+            GitlabNodeKey::License {
+                instance_id,
+                license_id,
+            } => (
+                format!(
+                    "({prefix}:GitlabLicense {{ instance_id: ${prefix}_instance_id, license_id: ${prefix}_license_id  }})"
+                ),
                 vec![
-                    (format!("{prefix}_id"), instance_id.clone().into()),
+                    (format!("{prefix}_instance_id"), instance_id.clone().into()),
                     (format!("{prefix}_license_id"), license_id.clone().into()),
                 ],
             ),
@@ -142,11 +145,14 @@ impl GraphNodeKey for GitlabNodeKey {
                 project_id,
             } => (
                 format!(
-                    "(:GitlabProject {{ instance_id: ${prefix}_instance_id, project_id: ${prefix}_project_id }})"
+                    "({prefix}:GitlabProject {{ instance_id: ${prefix}_instance_id, project_id: ${prefix}_project_id }})"
                 ),
                 vec![
                     (format!("{prefix}_instance_id"), instance_id.clone().into()),
-                    (format!("{prefix}_project_id"), (project_id).to_owned().into()),
+                    (
+                        format!("{prefix}_project_id"),
+                        (project_id).to_owned().into(),
+                    ),
                 ],
             ),
 
@@ -155,17 +161,19 @@ impl GraphNodeKey for GitlabNodeKey {
                 user_id,
             } => (
                 format!(
-                    "(:GitlabUser {{ instance_id: ${prefix}_instance_id, user_id: ${prefix}_user_id }})"
+                    "({prefix}:GitlabUser {{ instance_id: ${prefix}_instance_id, user_id: ${prefix}_user_id }})"
                 ),
                 vec![
                     (format!("{prefix}_instance_id"), instance_id.clone().into()),
                     (format!("{prefix}_user_id"), (user_id).to_owned().into()),
                 ],
             ),
-            GitlabNodeKey::Group {instance_id, group_id } =>
-            (
+            GitlabNodeKey::Group {
+                instance_id,
+                group_id,
+            } => (
                 format!(
-                    "(:GitlabGroup {{ instance_id: ${prefix}_instance_id, group_id: ${prefix}_group_id }})"
+                    "({prefix}:GitlabGroup {{ instance_id: ${prefix}_instance_id, group_id: ${prefix}_group_id }})"
                 ),
                 vec![
                     (format!("{prefix}_instance_id"), instance_id.clone().into()),
@@ -177,19 +185,31 @@ impl GraphNodeKey for GitlabNodeKey {
                 project_id,
             } => (
                 format!(
-                    "(:GitlabContainerRepository {{ project_id: ${prefix}_project_id, repository_id: ${prefix}_repository_id }})"
+                    "({prefix}:GitlabContainerRepository {{ project_id: ${prefix}_project_id, repository_id: ${prefix}_repository_id }})"
                 ),
                 vec![
-                    (format!("{prefix}_repository_id"), (repository_id).to_owned().into()),
-                    (format!("{prefix}_project_id"), (project_id).to_owned().into()),
+                    (
+                        format!("{prefix}_repository_id"),
+                        (repository_id).to_owned().into(),
+                    ),
+                    (
+                        format!("{prefix}_project_id"),
+                        (project_id).to_owned().into(),
+                    ),
                 ],
             ),
-            GitlabNodeKey::ContainerRepositoryTag { repository_id, digest } => (
+            GitlabNodeKey::ContainerRepositoryTag {
+                repository_id,
+                digest,
+            } => (
                 format!(
-                    "(:ContainerRepositoryTag {{ repository_id: ${prefix}_repository_id, digest: ${prefix}_digest }})"
+                    "({prefix}:ContainerRepositoryTag {{ repository_id: ${prefix}_repository_id, digest: ${prefix}_digest }})"
                 ),
                 vec![
-                    (format!("{prefix}_repository_id"), (repository_id).to_owned().into()),
+                    (
+                        format!("{prefix}_repository_id"),
+                        (repository_id).to_owned().into(),
+                    ),
                     (format!("{prefix}_digest"), (digest).to_owned().into()),
                 ],
             ),
@@ -198,11 +218,17 @@ impl GraphNodeKey for GitlabNodeKey {
                 pipeline_id,
             } => (
                 format!(
-                    "(:GitlabPipeline {{  instance_id: ${prefix}_instance_id, pipeline_id: ${prefix}_pipeline_id }})"
+                    "({prefix}:GitlabPipeline {{  instance_id: ${prefix}_instance_id, pipeline_id: ${prefix}_pipeline_id }})"
                 ),
                 vec![
-                    (format!("{prefix}_instance_id"), instance_id.to_owned().into()),
-                    (format!("{prefix}_pipeline_id"), pipeline_id.to_owned().into()),
+                    (
+                        format!("{prefix}_instance_id"),
+                        instance_id.to_owned().into(),
+                    ),
+                    (
+                        format!("{prefix}_pipeline_id"),
+                        pipeline_id.to_owned().into(),
+                    ),
                 ],
             ),
 
@@ -211,7 +237,7 @@ impl GraphNodeKey for GitlabNodeKey {
                 job_id,
             } => (
                 format!(
-                    "(:GitlabJob {{ instance_id: ${prefix}_instance_id, project_id: ${prefix}_project_id, job_id: ${prefix}_job_id }})"
+                    "({prefix}:GitlabJob {{ instance_id: ${prefix}_instance_id, job_id: ${prefix}_job_id }})"
                 ),
                 vec![
                     (format!("{prefix}_instance_id"), instance_id.clone().into()),
@@ -224,7 +250,7 @@ impl GraphNodeKey for GitlabNodeKey {
                 runner_id,
             } => (
                 format!(
-                    "(:GitlabRunner {{ instance_id: ${prefix}_instance_id, runner_id: ${prefix}_runner_id }})"
+                    "({prefix}:GitlabRunner {{ instance_id: ${prefix}_instance_id, runner_id: ${prefix}_runner_id }})"
                 ),
                 vec![
                     (format!("{prefix}_instance_id"), instance_id.clone().into()),
@@ -237,7 +263,7 @@ impl GraphNodeKey for GitlabNodeKey {
                 artifact_id,
             } => (
                 format!(
-                    "(:GitlabPipelineArtifact {{ instance_id: ${prefix}_instance_id, name: ${prefix}_artifact_id }})"
+                    "({prefix}:GitlabPipelineArtifact {{ instance_id: ${prefix}_instance_id, name: ${prefix}_artifact_id }})"
                 ),
                 vec![
                     (format!("{prefix}_instance_id"), instance_id.clone().into()),
@@ -245,14 +271,15 @@ impl GraphNodeKey for GitlabNodeKey {
                 ],
             ),
             GitlabNodeKey::Package { package_id } => (
-                format!("(:GitlabPackage {{ package_id: ${prefix}_package_id }})"),
-                vec![
-                    (format!("{prefix}_package_id"), package_id.clone().into()),
-                ]
+                format!("({prefix}:GitlabPackage {{ package_id: ${prefix}_package_id }})"),
+                vec![(format!("{prefix}_package_id"), package_id.clone().into())],
             ),
-            GitlabNodeKey::PackageFile { file_id, package_id } => (
+            GitlabNodeKey::PackageFile {
+                file_id,
+                package_id,
+            } => (
                 format!(
-                    "(:GitlabPackageFile {{ file_id: ${prefix}_file_id, repository_id: ${prefix}_package_id}})"
+                    "({prefix}:GitlabPackageFile {{ file_id: ${prefix}_file_id, repository_id: ${prefix}_package_id}})"
                 ),
                 vec![
                     (format!("{prefix}_package_id"), package_id.clone().into()),

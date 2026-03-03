@@ -21,7 +21,6 @@ tokio.workspace = true
 tracing-opentelemetry.workspace = true
 tracing-subscriber.workspace = true
 tracing.workspace = true
-
 [dev-dependencies]
 testcontainers = "0.26.3"
 testcontainers-modules = { version = "0.14.0", features = ["neo4j"] }

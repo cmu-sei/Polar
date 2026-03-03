@@ -22,14 +22,16 @@
 */
 
 use crate::{GitlabConsumerState, GitlabNodeKey};
-use cassini_client::TcpClient;
-use common::types::{GitlabData, GitlabEnvelope, GitlabPackageFile};
+use cassini_client::{TcpClient, TcpClientMessage};
+use cassini_types::WireTraceCtx;
 use common::REPOSITORY_CONSUMER_TOPIC;
+use common::types::{GitlabData, GitlabEnvelope, GitlabPackageFile};
 use gitlab_queries::projects::{ContainerRepository, ContainerRepositoryTag, Package};
 
 use polar::graph::{GraphController, GraphControllerMsg, GraphOp, GraphValue, Property};
-use polar::ProvenanceEvent;
-use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef};
+use polar::{PROVENANCE_LINKER_TOPIC, ProvenanceEvent, RkyvError};
+use ractor::{Actor, ActorProcessingErr, ActorRef, async_trait};
+use rkyv::to_bytes;
 use tracing::{debug, info};
 
 const UNKNOWN_FIELD: &str = "unknown";
@@ -42,6 +44,7 @@ impl GitlabRepositoryConsumer {
         project_id: &String,
         repos: &[ContainerRepository],
         graph: &ActorRef<GraphControllerMsg<GitlabNodeKey>>,
+        tcp_client: &TcpClient,
     ) -> Result<(), ActorProcessingErr> {
         let project_key = GitlabNodeKey::Project {
             instance_id: instance_id.into(),
@@ -94,18 +97,26 @@ impl GitlabRepositoryConsumer {
                 props: vec![],
             }))?;
 
-            // registry host relationship
-            let registry_key = GitlabNodeKey::ContainerRepository {
-                project_id: project_id.clone(),
-                repository_id: repo.id.to_string(),
+            fn normalize_registry_host(s: &str) -> String {
+                s.trim()
+                    .trim_end_matches('/')
+                    .trim_start_matches("https://")
+                    .trim_start_matches("http://")
+                    .to_string()
+            }
+
+            //emit provenance event
+            let ev = ProvenanceEvent::OCIRegistryDiscovered {
+                hostname: normalize_registry_host(&repo.location),
             };
 
-            graph.cast(GraphControllerMsg::Op(GraphOp::EnsureEdge {
-                from: registry_key,
-                to: repo_key,
-                rel_type: "HOSTS_REPOSITORY".into(),
-                props: vec![],
-            }))?;
+            let payload = to_bytes::<RkyvError>(&ev)?.to_vec();
+
+            tcp_client.cast(TcpClientMessage::Publish {
+                topic: PROVENANCE_LINKER_TOPIC.to_string(),
+                payload,
+                trace_ctx: WireTraceCtx::from_current_span(),
+            })?;
         }
 
         Ok(())
@@ -337,6 +348,7 @@ impl Actor for GitlabRepositoryConsumer {
                     &project_id,
                     &repositories,
                     &state.graph_controller,
+                    &state.tcp_client,
                 )?;
             }
 

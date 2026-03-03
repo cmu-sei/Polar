@@ -1,18 +1,13 @@
 let kubernetes = ./kubernetes.dhall
 
--- a kubernetes type we copied
 let SecretKeySelector =
-      { key : Text
-      , name : Optional Text
-      , optional : Optional Bool
-      }
+      { key : Text, name : Optional Text, optional : Optional Bool }
 
 let GraphConfig =
       { graphDB : Text
       , graphUsername : Text
       , graphPassword : SecretKeySelector
       }
-
 
 let ClientTlsConfig =
       { broker_endpoint : Text
@@ -22,24 +17,38 @@ let ClientTlsConfig =
       , client_ca_cert_path : Text
       }
 
+{- ============================================================================
+    Git Agent Static Credential Configuration Types
+    ----------------------------------------------------------------------------
+-}
 
-let GraphConfig =
-      { graphDB : Text
-      , graphUsername : Text
-      , graphPassword : SecretKeySelector
-      }
+let HttpCredential =
+    { username : Text
+    , token : Text
+    }
+
+let HostCredentialConfig =
+    { http : Optional HttpCredential
+    }
+
+let StaticCredentialConfig =
+    { hosts : List
+        { mapKey : Text
+        , mapValue : HostCredentialConfig
+        }
+    }
 
 let GitlabObserver =
       { name : Text
       , image : Text
-      , base_interval_secs : Natural
-      , max_backoff_secs : Natural
-      , gitlab_endpoint : Text
-      , gitlab_token : Optional Text
+      , baseIntervalSecs : Natural
+      , maxBackoffSecs : Natural
+      , endpoint : Text
+      , token : Optional Text
       , tls : ClientTlsConfig
       }
 
-let GitlabConsumer = { graph : GraphConfig, tls : ClientTlsConfig }
+let GitlabConsumer = { name: Text, image: Text, graph : GraphConfig, tls : ClientTlsConfig }
 
 let KubeObserver =
       { name : Text
@@ -52,13 +61,31 @@ let KubeObserver =
 let KubeConsumer =
       { name : Text, image : Text, graph : GraphConfig, tls : ClientTlsConfig }
 
-let ProvenanceLinker = { name : Text, image : Text, tls : ClientTlsConfig, graph : GraphConfig }
+let ProvenanceLinker =
+      { name : Text, image : Text, tls : ClientTlsConfig, graph : GraphConfig }
 
-let ProvenanceResolver =
-      { name : Text, image : Text, tls : ClientTlsConfig }
 
-in  {
-    , SecretKeySelector
+
+-- simple data types to configure the resolver with.
+let Registry =
+    { name : Text
+    , url : Text
+    , clientCertPath : Optional Text
+    }
+
+let ResolverConfig =
+    { registries : List Registry }
+
+-- TODO: Add resolver config as a field
+let ProvenanceResolver = { name : Text, image : Text, tls : ClientTlsConfig }
+
+let GitObserver = { name : Text, image : Text, tls: ClientTlsConfig, config: Text }
+
+let GitConsumer = { name : Text, image : Text, tls: ClientTlsConfig, graph : GraphConfig }
+
+let GitScheduler = { name : Text, image : Text, tls: ClientTlsConfig, graph : GraphConfig }
+
+in  { SecretKeySelector
     , ClientTlsConfig
     , GraphConfig
     , GitlabObserver
@@ -67,4 +94,8 @@ in  {
     , KubeConsumer
     , ProvenanceLinker
     , ProvenanceResolver
+    , StaticCredentialConfig
+    , GitObserver
+    , GitConsumer
+    , GitScheduler
     }

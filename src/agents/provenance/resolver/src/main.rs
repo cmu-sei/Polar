@@ -2,20 +2,20 @@ use cassini_client::{TCPClientConfig, TcpClientActor, TcpClientArgs, TcpClientMe
 use cassini_types::ClientEvent;
 use classifier::*;
 use oci_client::{
-    Client as OciClient, Reference, RegistryOperation,
+    Client as OciClient, Reference,
     client::{Certificate, CertificateEncoding, ClientConfig},
     manifest::OciManifest,
     secrets::RegistryAuth,
 };
 use polar::{
     PROVENANCE_DISCOVERY_TOPIC, PROVENANCE_LINKER_TOPIC, ProvenanceEvent, Supervisor,
-    SupervisorMessage, get_file_as_byte_vec, get_web_client,
+    SupervisorMessage, async_get_file_as_byte_vec, get_web_client, spawn_tcp_client,
+    try_get_proxy_ca_cert,
 };
 use provenance_common::RESOLVER_SUPERVISOR_NAME;
 use provenance_resolver::classifier;
 use ractor::{
-    Actor, ActorProcessingErr, ActorRef, OutputPort, SupervisionEvent, async_trait,
-    registry::where_is,
+    Actor, ActorProcessingErr, ActorRef, SupervisionEvent, async_trait, registry::where_is,
 };
 use reqwest::Client as WebClient;
 use std::str::FromStr;
@@ -41,7 +41,9 @@ pub struct ResolverSupervisor;
 
 #[derive(Clone)]
 pub struct ResolverSupervisorState {
-    cassini_client: ActorRef<TcpClientMessage>,
+    tcp_client: ActorRef<TcpClientMessage>,
+    config: Option<ResolverConfig>,
+    oci_client: Option<OciClient>,
 }
 
 impl Supervisor for ResolverSupervisor {
@@ -66,12 +68,61 @@ impl Supervisor for ResolverSupervisor {
 }
 
 impl ResolverSupervisor {
-    fn load_resolver_config() -> Result<ResolverConfig, ActorProcessingErr> {
-        debug!("Attemnpting to load configuration");
+    async fn build_oci_client(
+        state: &mut ResolverSupervisorState,
+    ) -> Result<(), ActorProcessingErr> {
+        let mut certs = Vec::new();
+
+        // load proxy ca certificate
+        try_get_proxy_ca_cert().await.inspect(|data| {
+            debug!("Configuring OCI Client with PROXY_CA_CERT");
+            certs.push(Certificate {
+                encoding: CertificateEncoding::Pem,
+                data: data.to_owned(),
+            });
+        });
+
+        if let Some(config) = &state.config {
+            for registry in &config.registries {
+                if let Some(cert_path) = &registry.client_cert_path {
+                    let data = async_get_file_as_byte_vec(cert_path).await?;
+                    debug!("found certificate for {} at {cert_path}", registry.url);
+                    certs.push(Certificate {
+                        encoding: CertificateEncoding::Pem,
+                        data,
+                    });
+                }
+            }
+        }
+
+        state.oci_client = {
+            if certs.is_empty() {
+                debug!("Initializing OCI client without certificates");
+                OciClient::default()
+            } else {
+                debug!(
+                    "Initializing OCI client with {} extra root certificates",
+                    certs.len()
+                );
+                OciClient::new(ClientConfig {
+                    extra_root_certificates: certs,
+                    ..ClientConfig::default()
+                })
+            }
+        }
+        .into();
+
+        Ok(())
+    }
+
+    async fn load_resolver_config(
+        state: &mut ResolverSupervisorState,
+    ) -> Result<(), ActorProcessingErr> {
         let path =
             std::env::var("POLAR_RESOLVER_CONFIG").unwrap_or_else(|_| "resolver.json".to_string());
 
-        let bytes = get_file_as_byte_vec(&path)?;
+        debug!("Loading configuration from {path}");
+        let bytes = async_get_file_as_byte_vec(&path).await?;
 
         match serde_json::from_slice::<ResolverConfig>(&bytes) {
             Ok(config) => {
@@ -80,7 +131,8 @@ impl ResolverSupervisor {
                     config,
                     serde_json::to_string_pretty(&config).unwrap_or_default()
                 );
-                Ok(config)
+                state.config = config.into();
+                Ok(())
             }
             Err(e) => Err(ActorProcessingErr::from(format!(
                 "Failed to load resolver configuration! {e}"
@@ -102,29 +154,16 @@ impl Actor for ResolverSupervisor {
     ) -> Result<Self::State, ActorProcessingErr> {
         debug!("{myself:?} starting");
 
-        let events_output = std::sync::Arc::new(OutputPort::default());
-
-        //subscribe to registration event
-        events_output.subscribe(myself.clone(), |event| {
-            Some(SupervisorMessage::ClientEvent { event })
-        });
-
-        let config = TCPClientConfig::new()?;
-
-        let (cassini_client, _) = Actor::spawn_linked(
-            Some(BROKER_CLIENT_NAME.to_string()),
-            TcpClientActor,
-            TcpClientArgs {
-                config,
-                registration_id: None,
-                events_output: Some(events_output), // wrap in Some
-                event_handler: None,                // add missing field
-            },
-            myself.clone().into(),
-        )
+        let tcp_client = spawn_tcp_client(BROKER_CLIENT_NAME, myself, |ev| {
+            Some(SupervisorMessage::ClientEvent { event: ev })
+        })
         .await?;
 
-        let state = ResolverSupervisorState { cassini_client };
+        let state = ResolverSupervisorState {
+            tcp_client,
+            config: None,
+            oci_client: None,
+        };
 
         Ok(state)
     }
@@ -147,30 +186,46 @@ impl Actor for ResolverSupervisor {
         match msg {
             SupervisorMessage::ClientEvent { event } => match event {
                 ClientEvent::Registered { .. } => {
+                    let web_client = get_web_client()?;
+
                     let (classifier, _) = Actor::spawn_linked(
                         Some("polar.provenance.classifier".to_string()),
                         ArtifactClassifier,
                         ArtifactClassifierState {
-                            web_client: get_web_client()?,
-                            tcp_client: state.cassini_client.clone(),
+                            web_client: web_client.clone(),
+                            tcp_client: state.tcp_client.clone(),
                         },
                         myself.clone().into(),
                     )
-                    .await?;
+                    .await
+                    .inspect_err(|e| error!("Failed to start classifier {e}"))?;
 
-                    let config = Self::load_resolver_config()?;
-                    let args = ResolverAgentArgs {
-                        classifier,
-                        cassini_client: state.cassini_client.clone(),
-                        config,
+                    if let Err(e) = Self::load_resolver_config(state).await {
+                        error!("Failed to load resolver configuration. {e}");
+                        return Err(e);
+                    }
+
+                    if let Err(e) = Self::build_oci_client(state).await {
+                        error!("Failed to build oci client {e}");
+                        return Err(e);
+                    }
+
+                    let args = ResolverAgentState {
+                        classifier: Some(classifier),
+                        cassini_client: state.tcp_client.clone(),
+                        config: state.config.clone().unwrap(),
+                        web_client,
+                        oci_client: state.oci_client.clone().unwrap(),
                     };
+
                     Actor::spawn_linked(
                         Some(PROVENANCE_DISCOVERY_TOPIC.to_string()),
                         ResolverAgent,
                         args,
                         myself.clone().into(),
                     )
-                    .await?;
+                    .await
+                    .inspect_err(|e| error!("Failed to spawn resolver agent: {e:?}"))?;
                 }
                 ClientEvent::MessagePublished { topic, payload, .. } => {
                     Self::deserialize_and_dispatch(topic, payload)
@@ -204,7 +259,10 @@ impl Actor for ResolverSupervisor {
                 warn!("Actor {name:?} terminated! {reason:?}");
                 myself.stop(reason)
             }
-            _ => {}
+            SupervisionEvent::ActorStarted(actor) => {
+                debug!("{actor:?} started!");
+            }
+            _ => (),
         }
         Ok(())
     }
@@ -243,144 +301,6 @@ impl ResolverAgent {
             .collect()
     }
 
-    #[instrument(name = "resolver.scrape_registry", level = "trace")]
-    async fn scrape_registry(
-        myself: ActorRef<ProvenanceEvent>,
-        tcp_client: ActorRef<TcpClientMessage>,
-        web_client: &WebClient,
-        registry: &RegistryConfig,
-    ) -> Result<(), ActorProcessingErr> {
-        let base = Self::normalize_registry_host(&registry.url);
-
-        // Emit registry discovery backed by successful network reachability
-        let event = ProvenanceEvent::OCIRegistryDiscovered {
-            hostname: base.clone(),
-        };
-
-        let payload = rkyv::to_bytes::<rkyv::rancor::Error>(&event)?;
-        tcp_client.cast(TcpClientMessage::Publish {
-            topic: PROVENANCE_LINKER_TOPIC.to_string(),
-            payload: payload.into(),
-            trace_ctx: WireTraceCtx::from_current_span(),
-        })?;
-
-        let catalog_url = format!("https://{}/v2/_catalog", base);
-        debug!("Scraping registry catalog: {}", catalog_url);
-
-        let resp = web_client.get(&catalog_url).send().await?;
-        if !resp.status().is_success() {
-            warn!(
-                status = %resp.status(),
-                registry = %registry.name,
-                "Registry does not support catalog listing"
-            );
-            return Ok(());
-        }
-
-        #[derive(Deserialize)]
-        struct Catalog {
-            repositories: Vec<String>,
-        }
-
-        let catalog: Catalog = resp.json().await?;
-
-        for repo in &catalog.repositories {
-            let tags_url = format!("https://{}/v2/{}/tags/list", base, repo);
-            let resp = web_client.get(&tags_url).send().await?;
-            if !resp.status().is_success() {
-                debug!(
-                    status = %resp.status(),
-                    repo,
-                    "Skipping repository without tag listing"
-                );
-                continue;
-            }
-
-            #[derive(Deserialize)]
-            struct Tags {
-                tags: Option<Vec<String>>,
-            }
-
-            let tags: Tags = resp.json().await?;
-            let uris = Self::discover_images_from_tags(&base, repo, tags.tags);
-
-            for uri in uris {
-                myself.cast(ProvenanceEvent::ImageRefDiscovered { uri })?;
-            }
-        }
-
-        Ok(())
-    }
-
-    #[instrument(skip_all, name = "ArtifactResolver.startup_scrape", level = "trace")]
-    async fn startup_scrape(
-        myself: ActorRef<ProvenanceEvent>,
-        state: &mut ResolverAgentState,
-    ) -> Result<(), ActorProcessingErr> {
-        info!("Starting resolver startup scrape");
-
-        for registry in &state.config.registries {
-            if let Err(e) = Self::scrape_registry(
-                myself.clone(),
-                state.cassini_client.clone(),
-                &state.web_client,
-                registry,
-            )
-            .await
-            {
-                warn!(
-                    registry = %registry.name,
-                    error = %e,
-                    "Registry scrape failed"
-                );
-            }
-        }
-
-        Ok(())
-    }
-    // /// Check if the registry is allowed based on the configuration.
-    // /// TODO: I think this is worth checking on if we consider the resolver untrusted.
-    // /// It could be configured into a "strict" mode that only reads from configured registries.
-    // ///  Or should this be the default behavior? Incentivizing operators
-    // /// to know exactly which registries they should be talking to?
-    // fn registry_allowed(config: &ResolverConfig, reference: &Reference) -> bool {
-    //     let registry = Self::normalize_registry_host(reference.resolve_registry());
-
-    //     config
-    //         .registries
-    //         .iter()
-    //         .any(|r| ResolverAgent::normalize_registry_host(&r.url) == registry)
-    // }
-
-    fn build_oci_client(config: &ResolverConfig) -> Result<OciClient, ActorProcessingErr> {
-        let mut certs = Vec::new();
-        debug!("Attempting to load certificates");
-        for registry in &config.registries {
-            if let Some(cert_path) = &registry.client_cert_path {
-                let data = get_file_as_byte_vec(cert_path)?;
-                trace!("found certificate for {} at {cert_path}", registry.url);
-                certs.push(Certificate {
-                    encoding: CertificateEncoding::Pem,
-                    data,
-                });
-            }
-        }
-
-        if certs.is_empty() {
-            debug!("Initializing OCI client without certificates");
-            Ok(OciClient::default())
-        } else {
-            debug!(
-                "Initializing OCI client with {} extra root certificates",
-                certs.len()
-            );
-            Ok(OciClient::new(ClientConfig {
-                extra_root_certificates: certs,
-                ..ClientConfig::default()
-            }))
-        }
-    }
-
     fn resolve_registry_auth(reference: &Reference) -> Result<RegistryAuth, ActorProcessingErr> {
         use docker_credential::{self, CredentialRetrievalError, DockerCredential};
         let registry = reference.resolve_registry();
@@ -395,8 +315,6 @@ impl ResolverAgent {
             match docker_credential::get_credential(&candidate) {
                 Ok(DockerCredential::UsernamePassword(u, p)) => {
                     debug!(
-                        username = u,
-                        password = p,
                         "Resolved credentials from docker config for key {}",
                         candidate
                     );
@@ -424,7 +342,7 @@ impl ResolverAgent {
                     return Ok(RegistryAuth::Anonymous);
                 }
                 Err(e) => {
-                    error!("Error reading docker credentials for {}: {}", candidate, e);
+                    error!("Error reading credentials for {}: {}", candidate, e);
                     return Err(ActorProcessingErr::from(e));
                 }
             }
@@ -466,10 +384,14 @@ impl ResolverAgent {
         // }
 
         let auth = Self::resolve_registry_auth(&reference)?;
-        state
-            .oci_client
-            .auth(&reference, &auth, RegistryOperation::Pull)
-            .await?;
+
+        // I'm not really sure this is necessary,
+        // not all registreis use Oauth2 and if there are some, we're going to have to figure out a way to tell the agent that it is
+        // so this doesn't get in the way when HTTP basic will work fine
+        // state
+        //     .oci_client
+        //     .auth(&reference, &auth, RegistryOperation::Pull)
+        //     .await?;
 
         match state.oci_client.pull_manifest(&reference, &auth).await {
             Ok(response) => Ok(Some(response)),
@@ -497,19 +419,29 @@ impl ResolverAgent {
         manifest: OciManifest,
         digest: String,
     ) -> Result<(), ActorProcessingErr> {
+        // TODO: WE have an issue open to also represent image layers as nodoes connected to the artifact
+        //  Which would enable extremely powerfyl analysis of the supply chain, but first we have to figure out this serialization problem.
+        // Instead of stripping fields here, we should just reserailize the OCiManifest structure to bytes using serde, then rehydrate it on the other side to enable crawling
+        // of the vector of layers and get additonal data
+
         if let Some(hostname) = Self::registry_from_image_ref(&uri) {
-            let event = ProvenanceEvent::OCIRegistryDiscovered {
-                hostname: hostname.clone(),
-            };
-            Self::forward_event(state, event)?;
+            // let event = ProvenanceEvent::OCIRegistryDiscovered {
+            //     hostname: hostname.clone(),
+            // };
+            // Self::forward_event(state, event)?;
+
+            //serialize manifest
+            //
+            let manifest_data = serde_json::to_vec(&manifest)?;
 
             // emit OCIArtifactResolved event
             let event = ProvenanceEvent::OCIArtifactResolved {
                 uri: uri.clone(),
-                digest: digest.clone(),
-                media_type: manifest.content_type().to_owned(),
-                registry: hostname.clone(),
+                digest: digest,
+                manifest_data,
+                registry: hostname,
             };
+
             Ok(Self::forward_event(state, event)?)
         } else {
             // tODO: I'm very interested to see how we'd fail here, considering that by the time we call this fn, we've already resolved it over the web.
@@ -519,15 +451,9 @@ impl ResolverAgent {
     }
 }
 
-pub struct ResolverAgentArgs {
-    pub cassini_client: ActorRef<TcpClientMessage>,
-    pub classifier: ActorRef<ArtifactClassifierMsg>,
-    pub config: ResolverConfig,
-}
-
 pub struct ResolverAgentState {
     pub cassini_client: ActorRef<TcpClientMessage>,
-    pub classifier: ActorRef<ArtifactClassifierMsg>,
+    pub classifier: Option<ActorRef<ArtifactClassifierMsg>>,
     pub web_client: WebClient,
     pub oci_client: OciClient,
     pub config: ResolverConfig,
@@ -537,7 +463,7 @@ pub struct ResolverAgentState {
 impl Actor for ResolverAgent {
     type Msg = ProvenanceEvent;
     type State = ResolverAgentState;
-    type Arguments = ResolverAgentArgs;
+    type Arguments = ResolverAgentState;
 
     async fn pre_start(
         &self,
@@ -545,15 +471,8 @@ impl Actor for ResolverAgent {
         args: Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
         debug!("{myself:?} starting");
-        let oci_client = Self::build_oci_client(&args.config)?;
-        let state = ResolverAgentState {
-            cassini_client: args.cassini_client,
-            web_client: polar::get_web_client()?,
-            oci_client,
-            classifier: args.classifier,
-            config: args.config,
-        };
-        Ok(state)
+
+        Ok(args)
     }
 
     async fn post_start(
@@ -567,10 +486,10 @@ impl Actor for ResolverAgent {
             trace_ctx: WireTraceCtx::from_current_span(),
         })?;
 
-        // fire-and-forget startup scrape
-        if let Err(e) = Self::startup_scrape(myself.clone(), state).await {
-            warn!("Startup scrape failed: {}", e);
-        }
+        // // fire-and-forget startup scrape
+        // if let Err(e) = Self::startup_scrape(myself.clone(), state).await {
+        //     warn!("Startup scrape failed: {}", e);
+        // }
 
         Ok(())
     }
@@ -589,9 +508,7 @@ impl Actor for ResolverAgent {
 
                         Self::emit_oci_resolved_event(state, uri, manifest, digest)?
                     }
-
                     Ok(None) => {}
-
                     Err(e) => {
                         error!("Failed to resolve image: {uri}, {e}");
                     }
@@ -629,10 +546,13 @@ impl Actor for ResolverAgent {
                 trace!("Received ArtifactDiscovered directive");
                 // forward for classification
                 //
-                state.classifier.cast(ArtifactClassifierMsg::Classify {
-                    download_url: url,
-                    filename: name,
-                })?;
+                state.classifier.as_ref().map(|c| {
+                    c.cast(ArtifactClassifierMsg::Classify {
+                        download_url: url,
+                        filename: name,
+                    })
+                    .map_err(|e| error!("Failed to contact classifier: {c:?}. {e}"))
+                });
             }
             _ => warn!("Received unexpected message! {msg:?}"),
         }

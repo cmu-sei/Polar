@@ -5,7 +5,10 @@ use k8s_openapi::{api::core::v1::Pod, apimachinery::pkg::apis::meta::v1::OwnerRe
 use neo4rs::BoltType;
 use polar::{
     PROVENANCE_DISCOVERY_TOPIC, ProvenanceEvent, RkyvError,
-    graph::{GraphController, GraphControllerMsg, GraphNodeKey, GraphOp, GraphValue, Property},
+    graph::{
+        GraphController, GraphControllerMsg, GraphNodeKey, GraphOp, GraphValue, NULL_FIELD,
+        Property,
+    },
     impl_graph_controller,
 };
 use ractor::{ActorProcessingErr, ActorRef};
@@ -48,6 +51,36 @@ fn handle_owner_refs(
     Ok(())
 }
 
+fn opt_string(v: &Option<String>) -> GraphValue {
+    match v {
+        Some(s) => GraphValue::String(s.clone()),
+        None => GraphValue::Null,
+    }
+}
+
+fn opt_bool(v: &Option<bool>) -> GraphValue {
+    match v {
+        Some(b) => GraphValue::Bool(*b),
+        None => GraphValue::Null,
+    }
+}
+
+fn opt_string_vec(v: &Option<Vec<String>>) -> GraphValue {
+    match v {
+        Some(vec) => GraphValue::List(vec.iter().map(|s| GraphValue::String(s.clone())).collect()),
+        None => GraphValue::Null,
+    }
+}
+
+fn opt_json<T: serde::Serialize>(v: &Option<T>) -> GraphValue {
+    match v {
+        Some(inner) => {
+            GraphValue::String(serde_json::to_string(inner).expect("serialization should not fail"))
+        }
+        None => GraphValue::Null,
+    }
+}
+
 impl GraphOperable for Pod {
     fn project_into_graph(
         self,
@@ -60,7 +93,7 @@ impl GraphOperable for Pod {
             .status
             .as_ref()
             .and_then(|s| s.phase.clone())
-            .unwrap_or_else(|| "Unknown".into());
+            .unwrap_or_else(|| NULL_FIELD.into());
 
         let ready = self
             .status
@@ -232,6 +265,57 @@ impl GraphOperable for Pod {
                 name: container.name.clone(),
             };
 
+            let props = vec![
+                Property("name".into(), GraphValue::String(container.name.clone())),
+                Property("image".into(), opt_string(&container.image)),
+                Property(
+                    "image_pull_policy".into(),
+                    opt_string(&container.image_pull_policy),
+                ),
+                Property(
+                    "restart_policy".into(),
+                    opt_string(&container.restart_policy),
+                ),
+                Property("working_dir".into(), opt_string(&container.working_dir)),
+                Property("stdin".into(), opt_bool(&container.stdin)),
+                Property("stdin_once".into(), opt_bool(&container.stdin_once)),
+                Property("tty".into(), opt_bool(&container.tty)),
+                Property(
+                    "termination_message_path".into(),
+                    opt_string(&container.termination_message_path),
+                ),
+                Property(
+                    "termination_message_policy".into(),
+                    opt_string(&container.termination_message_policy),
+                ),
+                Property("args".into(), opt_string_vec(&container.args)),
+                Property("command".into(), opt_string_vec(&container.command)),
+                // These are complex structs — serialize them wholesale
+                Property("env".into(), opt_json(&container.env)),
+                Property("env_from".into(), opt_json(&container.env_from)),
+                Property("ports".into(), opt_json(&container.ports)),
+                Property("resources".into(), opt_json(&container.resources)),
+                Property("resize_policy".into(), opt_json(&container.resize_policy)),
+                Property(
+                    "security_context".into(),
+                    opt_json(&container.security_context),
+                ),
+                Property("lifecycle".into(), opt_json(&container.lifecycle)),
+                Property("liveness_probe".into(), opt_json(&container.liveness_probe)),
+                Property(
+                    "readiness_probe".into(),
+                    opt_json(&container.readiness_probe),
+                ),
+                Property("startup_probe".into(), opt_json(&container.startup_probe)),
+                Property("volume_devices".into(), opt_json(&container.volume_devices)),
+                Property("volume_mounts".into(), opt_json(&container.volume_mounts)),
+            ];
+
+            graph.cast(GraphControllerMsg::Op(GraphOp::UpsertNode {
+                key: container_key.clone(),
+                props,
+            }))?;
+
             if let Some(mounts) = container.volume_mounts {
                 for mount in mounts {
                     let volume_name = &mount.name;
@@ -268,11 +352,6 @@ impl GraphOperable for Pod {
                     graph.cast(GraphControllerMsg::Op(op))?;
                 }
             }
-
-            graph.cast(GraphControllerMsg::Op(GraphOp::UpsertNode {
-                key: container_key.clone(),
-                props: Vec::new(),
-            }))?;
 
             graph.cast(GraphControllerMsg::Op(GraphOp::EnsureEdge {
                 from: pod_key.clone(),
@@ -373,7 +452,7 @@ impl GraphOperable for Pod {
                         )
                     } else {
                         (
-                            "Unknown",
+                            NULL_FIELD,
                             Utc::now().to_rfc3339(),
                             vec![Property(
                                 "restart_count".into(),
@@ -476,6 +555,11 @@ impl GraphOperable for Pod {
             props: vec![Property("at".into(), GraphValue::String(now))],
         }))?;
 
+        let Some(_spec) = self.spec else {
+            // if no spec just return
+            return Ok(());
+        };
+
         Ok(())
     }
 }
@@ -506,7 +590,7 @@ impl GraphOperable for Deployment {
                     .find(|c| c.type_ == "Progressing")
                     .map(|c| c.status.clone())
             })
-            .unwrap_or_else(|| "Unknown".into());
+            .unwrap_or_else(|| NULL_FIELD.into());
 
         let available_condition = status
             .conditions
@@ -517,7 +601,7 @@ impl GraphOperable for Deployment {
                     .find(|c| c.type_ == "Available")
                     .map(|c| c.status.clone())
             })
-            .unwrap_or_else(|| "Unknown".into());
+            .unwrap_or_else(|| NULL_FIELD.into());
 
         let deployment_key = KubeNodeKey::Deployment { uid: uid.clone() };
 
@@ -603,7 +687,7 @@ impl GraphOperable for Deployment {
                     .find(|c| c.type_ == "Progressing")
                     .map(|c| c.status.clone())
             })
-            .unwrap_or_else(|| "Unknown".into());
+            .unwrap_or_else(|| NULL_FIELD.into());
 
         let available_condition = status
             .conditions
@@ -614,7 +698,7 @@ impl GraphOperable for Deployment {
                     .find(|c| c.type_ == "Available")
                     .map(|c| c.status.clone())
             })
-            .unwrap_or_else(|| "Unknown".into());
+            .unwrap_or_else(|| NULL_FIELD.into());
 
         let deployment_key = KubeNodeKey::Deployment { uid: uid.clone() };
 
@@ -860,7 +944,7 @@ impl GraphNodeKey for KubeNodeKey {
             KubeNodeKey::Cluster { uid } => {
                 let uid_k = format!("{prefix}_uid");
                 (
-                    format!("(:KubernetesCluster {{ uid: ${uid_k} }})"),
+                    format!("({prefix}:KubernetesCluster {{ uid: ${uid_k} }})"),
                     vec![(uid_k, BoltType::String(uid.clone().into()))],
                 )
             }
@@ -870,7 +954,9 @@ impl GraphNodeKey for KubeNodeKey {
                 let name_k = format!("{prefix}_name");
                 let cluster_uid_k = format!("{prefix}_cluster_uid");
                 (
-                    format!("(:Namespace {{ name: ${name_k}, cluster_uid: ${cluster_uid_k} }})"),
+                    format!(
+                        "({prefix}:Namespace {{ name: ${name_k}, cluster_uid: ${cluster_uid_k} }})"
+                    ),
                     vec![
                         (name_k, BoltType::String(name.clone().into())),
                         (
@@ -883,7 +969,7 @@ impl GraphNodeKey for KubeNodeKey {
             KubeNodeKey::Deployment { uid } => {
                 let uid_k = format!("{prefix}_uid");
                 (
-                    format!("(:KubernetesDeployment {{ uid: ${uid_k} }}"),
+                    format!("({prefix}:KubernetesDeployment {{ uid: ${uid_k} }})"),
                     vec![(uid_k, BoltType::String(uid.to_string().into()))],
                 )
             }
@@ -892,7 +978,7 @@ impl GraphNodeKey for KubeNodeKey {
                 let valid_k = format!("{prefix}_valid_from");
                 (
                     format!(
-                        "(:DeploymentState {{ deployment_uid: ${uid_k}, valid_from: ${valid_k} }}"
+                        "({prefix}:DeploymentState {{ deployment_uid: ${uid_k}, valid_from: ${valid_k} }}"
                     ),
                     vec![
                         (uid_k, BoltType::String(uid.to_string().into())),
@@ -903,7 +989,7 @@ impl GraphNodeKey for KubeNodeKey {
             KubeNodeKey::ReplicaSet { uid } => {
                 let uid_k = format!("{prefix}_uid");
                 (
-                    format!("(:ReplicaSet {{ uid: ${uid_k} }}"),
+                    format!("({prefix}:ReplicaSet {{ uid: ${uid_k} }})"),
                     vec![(uid_k, BoltType::String(uid.to_string().into()))],
                 )
             }
@@ -912,7 +998,7 @@ impl GraphNodeKey for KubeNodeKey {
                 let valid_k = format!("{prefix}_valid_from");
                 (
                     format!(
-                        "(:ReplicaSetState {{ deployment_uid: ${uid_k}, valid_from: ${valid_k} }}"
+                        "({prefix}:ReplicaSetState {{ deployment_uid: ${uid_k}, valid_from: ${valid_k} }}"
                     ),
                     vec![
                         (uid_k, BoltType::String(uid.to_string().into())),
@@ -923,7 +1009,7 @@ impl GraphNodeKey for KubeNodeKey {
             KubeNodeKey::Pod { uid } => {
                 let uid_k = format!("{prefix}_uid");
                 (
-                    format!("(:Pod {{ uid: ${uid_k} }})"),
+                    format!("({prefix}:Pod {{ uid: ${uid_k} }})"),
                     vec![(uid_k, BoltType::String(uid.to_string().into()))],
                 )
             }
@@ -935,7 +1021,7 @@ impl GraphNodeKey for KubeNodeKey {
                 let valid_from_k = format!("{prefix}_valid_from");
                 (
                     format!(
-                        "(:PodState {{ {prefix}_uid: ${pod_uid_k}, {prefix}_valid_from: ${valid_from_k} }}"
+                        "({prefix}:PodState {{ {prefix}_uid: ${pod_uid_k}, {prefix}_valid_from: ${valid_from_k} }}"
                     ),
                     vec![
                         (pod_uid_k, BoltType::String(pod_uid.to_string().into())),
@@ -950,7 +1036,7 @@ impl GraphNodeKey for KubeNodeKey {
                 let pod_uid_k = format!("{prefix}_pod_uid");
                 let name_k = format!("{prefix}_name");
                 (
-                    format!("(:PodContainer {{ pod_uid: ${pod_uid_k}, name: ${name_k} }})"),
+                    format!("({prefix}:PodContainer {{ pod_uid: ${pod_uid_k}, name: ${name_k} }})"),
                     vec![
                         (pod_uid_k, BoltType::String(pod_uid.to_string().into())),
                         (name_k, BoltType::String(name.clone().into())),
@@ -967,7 +1053,7 @@ impl GraphNodeKey for KubeNodeKey {
                 let valid_from_k = format!("{prefix}_valid_from");
                 (
                     format!(
-                        "(:PodContainerState {{ pod_uid: ${pod_uid_k}, name: ${name_k}, valid_from: ${valid_from_k} }})"
+                        "({prefix}:PodContainerState {{ pod_uid: ${pod_uid_k}, name: ${name_k}, valid_from: ${valid_from_k} }})"
                     ),
                     vec![
                         (pod_uid_k, BoltType::String(pod_uid.to_string().into())),
@@ -983,7 +1069,7 @@ impl GraphNodeKey for KubeNodeKey {
                 let name_k = format!("{prefix}_name");
                 let namespace_k = format!("{prefix}_namespace");
                 (
-                    format!("(:Volume {{ name: ${name_k}, namespace: ${namespace_k} }})"),
+                    format!("({prefix}:Volume {{ name: ${name_k}, namespace: ${namespace_k} }})"),
                     vec![
                         (name_k, BoltType::String(name.clone().into())),
                         (namespace_k, BoltType::String(namespace.clone().into())),
@@ -996,7 +1082,7 @@ impl GraphNodeKey for KubeNodeKey {
                 let namespace_k = format!("{prefix}_namespace");
                 (
                     format!(
-                        "(:PersistentVolumeClaim {{ name: ${name_k}, namespace: ${namespace_k} }})"
+                        "({prefix}:PersistentVolumeClaim {{ name: ${name_k}, namespace: ${namespace_k} }})"
                     ),
                     vec![
                         (name_k, BoltType::String(name.clone().into())),
@@ -1008,7 +1094,7 @@ impl GraphNodeKey for KubeNodeKey {
                 let name_k = format!("{prefix}_name");
                 let namespace_k = format!("{prefix}_namespace");
                 (
-                    format!("(:Secret {{ name: ${name_k}, namespace: ${namespace_k} }})"),
+                    format!("({prefix}:Secret {{ name: ${name_k}, namespace: ${namespace_k} }})"),
                     vec![
                         (name_k, BoltType::String(name.clone().into())),
                         (namespace_k, BoltType::String(namespace.clone().into())),
@@ -1020,7 +1106,9 @@ impl GraphNodeKey for KubeNodeKey {
                 let name_k = format!("{prefix}_name");
                 let namespace_k = format!("{prefix}_namespace");
                 (
-                    format!("(:ConfigMap {{ name: ${name_k}, namespace: ${namespace_k} }})"),
+                    format!(
+                        "({prefix}:ConfigMap {{ name: ${name_k}, namespace: ${namespace_k} }})"
+                    ),
                     vec![
                         (name_k, BoltType::String(name.clone().into())),
                         (namespace_k, BoltType::String(namespace.clone().into())),

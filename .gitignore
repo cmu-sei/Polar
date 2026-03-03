@@ -34,3 +34,4 @@ git.json
 my.env
 .env.nuon
 ci.env
+docker.json

@@ -2,16 +2,16 @@ use cassini_client::*;
 use cassini_types::ClientEvent;
 use k8s_openapi::api::apps::v1::{Deployment, ReplicaSet};
 use k8s_openapi::api::core::v1::Pod;
-use kube_common::{RawKubeEvent, KUBERNETES_CONSUMER};
+use kube_common::{KUBERNETES_CONSUMER, RawKubeEvent};
 use kube_common::{RESOURCE_APPLIED_ACTION, RESOURCE_DELETED_ACTION};
 use neo4rs::{Config, Graph};
-use polar::get_neo_config;
 use polar::SupervisorMessage;
-use ractor::async_trait;
+use polar::get_neo_config;
 use ractor::Actor;
 use ractor::ActorProcessingErr;
 use ractor::ActorRef;
 use ractor::SupervisionEvent;
+use ractor::async_trait;
 use serde::de::DeserializeOwned;
 use serde_json::from_value;
 use tracing::debug;
@@ -23,7 +23,7 @@ use polar::graph::GraphController;
 // use crate::pods::PodConsumer;
 use crate::ClusterGraphController;
 use crate::GraphOperable;
-use crate::{KubeNodeKey, BROKER_CLIENT_NAME};
+use crate::{BROKER_CLIENT_NAME, KubeNodeKey};
 
 use std::collections::HashMap;
 
@@ -251,13 +251,10 @@ impl Actor for ClusterConsumerSupervisor {
 
                         // subscribe
                         //
-                        if let Err(e) = state
-                            .broker_client
-                            .cast(TcpClientMessage::Subscribe {
-                                topic: KUBERNETES_CONSUMER.into(),
-                                trace_ctx: None,
-                            })
-                        {
+                        if let Err(e) = state.broker_client.cast(TcpClientMessage::Subscribe {
+                            topic: KUBERNETES_CONSUMER.into(),
+                            trace_ctx: None,
+                        }) {
                             error!("{e}");
                             myself.stop(None);
                         }
@@ -318,7 +315,7 @@ impl Actor for ClusterConsumerSupervisor {
                 // we no actors start w/o names
                 let actor_name = actor_cell.get_name().unwrap();
 
-                warn!(
+                error!(
                     "Consumer_SUPERVISOR: {0:?}:{1:?} failed! {e:?}",
                     actor_name,
                     actor_cell.get_id()

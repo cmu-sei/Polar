@@ -1,12 +1,13 @@
 use chrono::Utc;
-use polar::graph::{self, rel, GraphValue};
-use polar::graph::{GraphControllerMsg, GraphOp, Property};
+use oci_client::manifest::OciManifest;
 use polar::ProvenanceEvent;
-use ractor::async_trait;
+use polar::graph::{self, GraphValue, rel};
+use polar::graph::{GraphControllerMsg, GraphOp, Property};
 use ractor::Actor;
 use ractor::ActorProcessingErr;
 use ractor::ActorRef;
-use tracing::{trace, warn};
+use ractor::async_trait;
+use tracing::{debug, trace, warn};
 
 use crate::ArtifactNodeKey;
 
@@ -45,6 +46,7 @@ impl ProvenanceLinker {
         from: ArtifactNodeKey,
         to: ArtifactNodeKey,
         rel_type: &'static str,
+        props: Vec<Property>,
     ) -> Result<(), ActorProcessingErr> {
         Self::send_op(
             state,
@@ -52,7 +54,7 @@ impl ProvenanceLinker {
                 from,
                 to,
                 rel_type: rel_type.to_string(),
-                props: vec![],
+                props,
             },
             "failed to ensure edge",
         )
@@ -88,56 +90,261 @@ impl Actor for ProvenanceLinker {
             ProvenanceEvent::OCIArtifactResolved {
                 uri,
                 digest,
-                media_type,
+                manifest_data,
                 registry,
             } => {
-                trace!("OCIArtifact resolved: {uri}");
+                debug!("OCIArtifact resolved: {uri}");
 
-                let artifact_key = ArtifactNodeKey::OCIArtifact {
-                    digest: digest.clone(),
-                };
+                match serde_json::from_slice(&manifest_data)? {
+                    OciManifest::Image(manifest) => {
+                        let artifact_key = ArtifactNodeKey::OCIArtifact {
+                            digest: digest.clone(),
+                        };
 
-                Self::upsert_node(
-                    state,
-                    artifact_key.clone(),
-                    vec![
-                        Property("digest".into(), GraphValue::String(digest)),
-                        Property("uri".into(), GraphValue::String(uri)),
-                        Property("media_type".into(), GraphValue::String(media_type)),
-                        Property(
-                            "observed_at".into(),
-                            GraphValue::String(Utc::now().to_rfc3339()),
-                        ),
-                    ],
-                    "failed to upsert OCIArtifact",
-                )?;
+                        let media_type = manifest.media_type.unwrap_or("null".to_string());
 
-                let registry_key = ArtifactNodeKey::OCIRegistry {
-                    hostname: registry.clone(),
-                };
+                        Self::upsert_node(
+                            state,
+                            artifact_key.clone(),
+                            vec![
+                                Property("digest".into(), GraphValue::String(digest)),
+                                Property("uri".into(), GraphValue::String(uri)),
+                                Property("media_type".into(), GraphValue::String(media_type)),
+                                Property(
+                                    "observed_at".into(),
+                                    GraphValue::String(Utc::now().to_rfc3339()),
+                                ),
+                            ],
+                            "failed to upsert OCIArtifact",
+                        )?;
 
-                Self::upsert_node(
-                    state,
-                    registry_key.clone(),
-                    vec![Property("hostname".into(), GraphValue::String(registry))],
-                    "failed to upsert OCIRegistry",
-                )?;
+                        let registry_key = ArtifactNodeKey::OCIRegistry {
+                            hostname: registry.clone(),
+                        };
 
-                // ensure edges between the "Artifat" type node, the OCIartifact itself, and the registry
-                Self::ensure_edge(
-                    state,
-                    ArtifactNodeKey::Artifact,
-                    artifact_key.clone(),
-                    graph::rel::IS,
-                )?;
-                Self::ensure_edge(
-                    state,
-                    registry_key.clone(),
-                    ArtifactNodeKey::Artifact,
-                    graph::rel::CONTAINS,
-                )?;
+                        Self::upsert_node(
+                            state,
+                            registry_key.clone(),
+                            vec![Property("hostname".into(), GraphValue::String(registry))],
+                            "failed to upsert OCIRegistry",
+                        )?;
 
-                Self::ensure_edge(state, artifact_key, registry_key, graph::rel::HOSTED_BY)?;
+                        // ensure edges between the "Artifat" type node, the OCIartifact itself, and the registry
+                        Self::ensure_edge(
+                            state,
+                            ArtifactNodeKey::Artifact,
+                            artifact_key.clone(),
+                            graph::rel::IS,
+                            vec![],
+                        )?;
+                        Self::ensure_edge(
+                            state,
+                            registry_key.clone(),
+                            ArtifactNodeKey::Artifact,
+                            graph::rel::CONTAINS,
+                            vec![],
+                        )?;
+
+                        Self::ensure_edge(
+                            state,
+                            artifact_key.clone(),
+                            registry_key,
+                            graph::rel::HOSTED_BY,
+                            vec![],
+                        )?;
+
+                        // handle image layers
+                        for layer in manifest.layers {
+                            let layer_k = ArtifactNodeKey::OCILayer {
+                                digest: layer.digest.clone(),
+                            };
+
+                            let urls = match layer.urls {
+                                Some(urls) => urls
+                                    .iter()
+                                    .map(|url| GraphValue::String(url.to_owned()))
+                                    .collect::<Vec<_>>(),
+                                None => vec![],
+                            };
+
+                            let layer_props = vec![
+                                Property(
+                                    "media_type".to_string(),
+                                    GraphValue::String(layer.media_type.clone()),
+                                ),
+                                Property("size".to_string(), GraphValue::I64(layer.size.clone())),
+                                Property("urls".to_string(), GraphValue::List(urls)), // TODO: What to do with these? these should give us an opportunity to chase downthe rest of the supply chain
+                            ];
+
+                            Self::upsert_node(
+                                state,
+                                layer_k.clone(),
+                                layer_props,
+                                "Failed to upset layer node",
+                            )?;
+
+                            Self::ensure_edge(
+                                state,
+                                artifact_key.clone(),
+                                layer_k,
+                                "HAS_LAYER",
+                                vec![],
+                            )?;
+                        }
+                    }
+                    // Index and manifest are both artifacts
+                    // They differ only in media type and outgoing relationships.
+                    // Child manifests are addressable content
+                    // We must create a stub node even if we haven’t fetched it yet.
+                    // Otherwise we cannot traverse supply chains correctly.
+                    // Platform belongs on descriptor edge
+                    // The same manifest digest can appear in multiple indices with different descriptor metadata.
+                    // Platform is not intrinsic to the manifest — it’s part of the descriptor.
+                    // This supports recursive chasing:
+                    // Later we can:
+                    // detect child digests missing full manifest data
+                    // enqueue them
+                    // hydrate layers
+                    // build a full closure
+                    //
+                    // TODO:
+                    // we may want A boolean property is_index = true for faster filtering
+                    // Or simply rely on media_type prefixes
+                    // application/vnd.oci.image.index.v1+json
+                    // application/vnd.docker.distribution.manifest.list.v2+json
+                    OciManifest::ImageIndex(index) => {
+                        let artifact_key = ArtifactNodeKey::OCIArtifact {
+                            digest: digest.clone(),
+                        };
+
+                        let media_type = index.media_type.unwrap_or("null".to_string());
+
+                        Self::upsert_node(
+                            state,
+                            artifact_key.clone(),
+                            vec![
+                                Property("digest".into(), GraphValue::String(digest.clone())),
+                                Property("uri".into(), GraphValue::String(uri.clone())),
+                                Property("media_type".into(), GraphValue::String(media_type)),
+                                Property(
+                                    "schema_version".into(),
+                                    GraphValue::I64(index.schema_version as i64),
+                                ),
+                                Property(
+                                    "artifact_type".into(),
+                                    GraphValue::String(
+                                        index.artifact_type.unwrap_or_else(|| "null".into()),
+                                    ),
+                                ),
+                                Property(
+                                    "observed_at".into(),
+                                    GraphValue::String(Utc::now().to_rfc3339()),
+                                ),
+                            ],
+                            "failed to upsert OCI index artifact",
+                        )?;
+
+                        let registry_key = ArtifactNodeKey::OCIRegistry {
+                            hostname: registry.clone(),
+                        };
+
+                        Self::upsert_node(
+                            state,
+                            registry_key.clone(),
+                            vec![Property(
+                                "hostname".into(),
+                                GraphValue::String(registry.clone()),
+                            )],
+                            "failed to upsert OCIRegistry",
+                        )?;
+
+                        // Type linkage
+                        Self::ensure_edge(
+                            state,
+                            ArtifactNodeKey::Artifact,
+                            artifact_key.clone(),
+                            graph::rel::IS,
+                            vec![],
+                        )?;
+
+                        Self::ensure_edge(
+                            state,
+                            registry_key.clone(),
+                            ArtifactNodeKey::Artifact,
+                            graph::rel::CONTAINS,
+                            vec![],
+                        )?;
+
+                        Self::ensure_edge(
+                            state,
+                            artifact_key.clone(),
+                            registry_key.clone(),
+                            graph::rel::HOSTED_BY,
+                            vec![],
+                        )?;
+
+                        // Handle child manifests
+                        for entry in index.manifests {
+                            let child_key = ArtifactNodeKey::OCIArtifact {
+                                digest: entry.digest.clone(),
+                            };
+
+                            // Upsert stub artifact node for referenced manifest.
+                            // You may not have fetched it yet — that's fine.
+                            Self::upsert_node(
+                                state,
+                                child_key.clone(),
+                                vec![
+                                    Property(
+                                        "digest".into(),
+                                        GraphValue::String(entry.digest.clone()),
+                                    ),
+                                    Property(
+                                        "media_type".into(),
+                                        GraphValue::String(entry.media_type.clone()),
+                                    ),
+                                    Property("size".into(), GraphValue::I64(entry.size)),
+                                ],
+                                "failed to upsert child manifest stub",
+                            )?;
+
+                            // Platform properties belong on the edge.
+                            let mut edge_props = vec![
+                                Property(
+                                    "descriptor_media_type".into(),
+                                    GraphValue::String(entry.media_type.clone()),
+                                ),
+                                Property("descriptor_size".into(), GraphValue::I64(entry.size)),
+                            ];
+
+                            if let Some(platform) = entry.platform {
+                                edge_props.push(Property(
+                                    "platform_os".into(),
+                                    GraphValue::String(platform.os),
+                                ));
+                                edge_props.push(Property(
+                                    "platform_arch".into(),
+                                    GraphValue::String(platform.architecture),
+                                ));
+
+                                if let Some(variant) = platform.variant {
+                                    edge_props.push(Property(
+                                        "platform_variant".into(),
+                                        GraphValue::String(variant),
+                                    ));
+                                }
+                            }
+
+                            Self::ensure_edge(
+                                state,
+                                artifact_key.clone(),
+                                child_key,
+                                "HAS_MANIFEST",
+                                edge_props,
+                            )?;
+                        }
+                    }
+                }
             }
 
             ProvenanceEvent::ImageRefResolved {
@@ -178,26 +385,30 @@ impl Actor for ProvenanceLinker {
                     ArtifactNodeKey::Artifact,
                     artifact_key.clone(),
                     graph::rel::IS,
+                    vec![],
                 )?;
                 Self::ensure_edge(
                     state,
                     ref_key.clone(),
                     artifact_key.clone(),
                     graph::rel::INSTANCE_OF,
+                    vec![],
                 )?;
             }
             ProvenanceEvent::OCIRegistryDiscovered { hostname } => {
-                trace!("OCI registry discovered: {hostname}");
+                debug!("OCI registry discovered: {hostname}");
 
                 Self::upsert_node(
                     state,
                     ArtifactNodeKey::OCIRegistry {
                         hostname: hostname.clone(),
                     },
-                    vec![Property("hostname".into(), GraphValue::String(hostname))],
+                    vec![],
                     "failed to upsert OCIRegistry",
                 )?;
             }
+            // TODO: This is cross containimation of the vocabulary, it might be better to just leave this logic with the kube processor
+            // all the linker has to do is just create the OCIArtifact node, then further processing can connect the two.
             ProvenanceEvent::PodContainerUsesImage {
                 pod_uid,
                 container_name,
@@ -205,9 +416,7 @@ impl Actor for ProvenanceLinker {
             } => {
                 trace!(
                     "PodContainer {} / {} observed image ref {}",
-                    pod_uid,
-                    container_name,
-                    image_ref
+                    pod_uid, container_name, image_ref
                 );
                 // 1. Upsert PodContainer (idempotent, no inference)
                 let pod_container_key = ArtifactNodeKey::PodContainer {
@@ -277,7 +486,13 @@ impl Actor for ProvenanceLinker {
                     "Failed to upsert sbom_key in graph",
                 )?;
 
-                Self::ensure_edge(state, ArtifactNodeKey::Artifact, sbom_k.clone(), rel::IS)?;
+                Self::ensure_edge(
+                    state,
+                    ArtifactNodeKey::Artifact,
+                    sbom_k.clone(),
+                    rel::IS,
+                    vec![],
+                )?;
 
                 for component in &sbom.components {
                     let component_k = ArtifactNodeKey::Component {
@@ -286,7 +501,13 @@ impl Actor for ProvenanceLinker {
                         version: component.version.clone(),
                     };
 
-                    Self::ensure_edge(state, sbom_k.clone(), component_k.clone(), rel::DESCRIBES)?;
+                    Self::ensure_edge(
+                        state,
+                        sbom_k.clone(),
+                        component_k.clone(),
+                        rel::DESCRIBES,
+                        vec![],
+                    )?;
                 }
             }
             _ => warn!("unexpected linker command"),

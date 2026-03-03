@@ -1,7 +1,7 @@
 use cassini_client::TcpClientMessage;
-use polar_scheduler_common::{GitScheduleChange, ScheduleNode};
-use ractor::{Actor, ActorProcessingErr, ActorRef};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
+use polar_scheduler_common::{GitScheduleChange};
+use ractor::{Actor, ActorProcessingErr, ActorRef};
 use std::path::Path;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info};
@@ -49,8 +49,11 @@ impl GitWatcherActor {
                     }
                 },
                 notify::Config::default(),
-            ).unwrap();
-            watcher.watch(Path::new(&path), RecursiveMode::Recursive).unwrap();
+            )
+            .unwrap();
+            watcher
+                .watch(Path::new(&path), RecursiveMode::Recursive)
+                .unwrap();
             loop {
                 std::thread::sleep(std::time::Duration::from_secs(1));
             }
@@ -76,14 +79,21 @@ impl GitWatcherActor {
                         let path_clone = path.clone();
                         let result = tokio::task::spawn_blocking(move || {
                             Self::evaluate_dhall_file_to_json(&path_clone)
-                        }).await;
+                        })
+                        .await;
 
                         match result {
                             Ok(Ok(json)) => {
                                 let change = if event.kind.is_create() {
-                                    GitScheduleChange::Create { path: path_str, json }
+                                    GitScheduleChange::Create {
+                                        path: path_str,
+                                        json,
+                                    }
                                 } else {
-                                    GitScheduleChange::Update { path: path_str, json }
+                                    GitScheduleChange::Update {
+                                        path: path_str,
+                                        json,
+                                    }
                                 };
                                 myself.cast(GitWatcherMsg::PublishChange(change))?;
                             }
@@ -107,7 +117,12 @@ impl GitWatcherActor {
         let walker = walkdir::WalkDir::new(&state.repo_path)
             .follow_links(true)
             .into_iter()
-            .filter_entry(|e| !e.file_name().to_str().map(|s| s.starts_with('.')).unwrap_or(false));
+            .filter_entry(|e| {
+                !e.file_name()
+                    .to_str()
+                    .map(|s| s.starts_with('.'))
+                    .unwrap_or(false)
+            });
         for entry in walker {
             let entry = entry?;
             if entry.file_type().is_file() {
@@ -121,13 +136,19 @@ impl GitWatcherActor {
                         let path_clone = path.clone();
                         let result = tokio::task::spawn_blocking(move || {
                             Self::evaluate_dhall_file_to_json(&path_clone)
-                        }).await;
+                        })
+                        .await;
                         match result {
                             Ok(Ok(json)) => {
-                                let change = GitScheduleChange::Create { path: path_str, json };
+                                let change = GitScheduleChange::Create {
+                                    path: path_str,
+                                    json,
+                                };
                                 myself.cast(GitWatcherMsg::PublishChange(change))?;
                             }
-                            Ok(Err(e)) => error!("Failed to evaluate Dhall file {}: {:?}", path_str, e),
+                            Ok(Err(e)) => {
+                                error!("Failed to evaluate Dhall file {}: {:?}", path_str, e)
+                            }
                             Err(e) => error!("Task join error for {}: {}", path_str, e),
                         }
                     }
@@ -156,7 +177,10 @@ impl Actor for GitWatcherActor {
         (repo_path, tcp_client): Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
         info!("GitWatcher starting, watching {}", repo_path);
-        Ok(GitWatcherState { tcp_client, repo_path })
+        Ok(GitWatcherState {
+            tcp_client,
+            repo_path,
+        })
     }
 
     async fn post_start(
@@ -169,9 +193,14 @@ impl Actor for GitWatcherActor {
         let state_clone = (state.tcp_client.clone(), state.repo_path.clone());
         tokio::spawn(async move {
             if let Err(e) = Self::start_filesystem_watcher(
-                &GitWatcherState { tcp_client: state_clone.0, repo_path: state_clone.1 },
+                &GitWatcherState {
+                    tcp_client: state_clone.0,
+                    repo_path: state_clone.1,
+                },
                 myself_clone,
-            ).await {
+            )
+            .await
+            {
                 error!("Filesystem watcher error: {:?}", e);
             }
         });

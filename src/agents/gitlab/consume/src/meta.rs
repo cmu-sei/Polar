@@ -1,8 +1,8 @@
 use crate::{GitlabConsumerState, UNKNOWN_FILED};
 use cassini_client::TcpClientMessage;
 use common::{
-    types::{GitlabData, GitlabEnvelope},
     METADATA_CONSUMER_TOPIC,
+    types::{GitlabData, GitlabEnvelope},
 };
 use gitlab_queries::LicenseHistoryEntry;
 
@@ -56,12 +56,12 @@ impl MetaConsumer {
             ops.push(GraphOp::UpsertNode {
                 key: license_key.clone(),
                 props: vec![
-                    Property("createdAt".into(), GraphValue::String(created_at)),
-                    Property("startsAt".into(), GraphValue::String(starts_at)),
-                    Property("expiresAt".into(), GraphValue::String(expires_at)),
+                    Property("created_at".into(), GraphValue::String(created_at)),
+                    Property("starts_at".into(), GraphValue::String(starts_at)),
+                    Property("expires_at".into(), GraphValue::String(expires_at)),
                     Property("plan".into(), GraphValue::String(entry.plan.clone())),
                     Property("type".into(), GraphValue::String(entry.entry_type.clone())),
-                    Property("usersInLicenseCount".into(), users_in),
+                    Property("users_in_licenseCount".into(), users_in),
                 ],
             });
 

@@ -1,6 +1,6 @@
 let kubernetes = ../../types/kubernetes.dhall
 let Constants = ../../types/constants.dhall
-let Functions = ../../types/functions.dhall
+let values = ../values.dhall
 
 let namespace = kubernetes.Namespace::{
       , apiVersion = "v1"
@@ -24,4 +24,23 @@ apiVersion = "v1"
 , type = Some "Opaque"
 }
 
-in [ kubernetes.Resource.Namespace namespace, kubernetes.Resource.Secret neo4jCredentialSecret ]
+let ociSecret = env:DOCKER_CONFIG_STR as Text
+
+-- Secret used for image pulling
+let imagePullSecret = kubernetes.Secret::{
+  apiVersion = "v1"
+, kind       = "Secret"
+, metadata   = kubernetes.ObjectMeta::{
+      name      = Some Constants.imagePullSecretName
+    , namespace = Some Constants.PolarNamespace
+    }
+, type       = Some "kubernetes.io/dockerconfigjson"
+, data       = Some
+    [ { mapKey = ".dockerconfigjson"
+      , mapValue = ociSecret
+      }
+    ]
+}
+
+
+in [ kubernetes.Resource.Namespace namespace, kubernetes.Resource.Secret neo4jCredentialSecret, kubernetes.Resource.Secret imagePullSecret ]

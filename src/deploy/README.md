@@ -11,9 +11,7 @@ The `render-manifests.sh` script (located under the `scripts` folder) automates 
 ## On Kubernetes
 
 ### GitOps & Immutability
-To maintain immutability, we commit the kubernetes manifests to a versioned, accessed controlled git repository. All secrets are then handled per [our secrets management poilicy](../../docs/architecture/secrets-management.md).
-
-[In the near-future, we'll package our manifests as OCI artifacts instead to save overhead.](https://github.com/cmu-sei/Polar/issues/77)
+To maintain immutability, we package our manifests as OCI artifacts using the oras too. That way, our container images can be provided alongside our deployment artifacts and share versioning.
 
 
 ### Why Immutability Matters
@@ -24,7 +22,7 @@ By ensuring the kubernetes manifest is generated **before deployment and version
 - Improve auditability and traceability of deployments.
 
 ## Tools
-To accomplish this, we leverage some of the following tooling.
+To accomplish this, we leverage the following tooling.
 - **Dhall-to-YAML** (`dhall-to-yaml`): Converts Dhall configurations into Kubernetes YAML.
 - A `neo4j.conf` file to configure neo4j.
 - [Minikube](https://minikube.sigs.k8s.io/docs/start/) - Initially used for local testing, feel free to use your own!
@@ -32,7 +30,6 @@ To accomplish this, we leverage some of the following tooling.
 - A Personal Access Token for a Gitlab instance with, at minimum, read permissions for apis, registries, and repositories.
 - Container images for neo4j, cassini, and the gitlab agent should also be present. [See the documentation for info on building them](../agents/README.md). You can use your own preferred neo4j container image.
 - [cert-manager ](https://cert-manager.io/docs/installation/)
-- [sops](https://github.com/getsops/sops)
 
 
 ## Layout
