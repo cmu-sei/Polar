@@ -82,7 +82,7 @@ in
       ps
       ripgrep
       rsync
-      rustlings
+      # rustlings <- not cross-compiler safe
       strace
       tree
       tree-sitter

@@ -125,8 +125,8 @@ grep -v '^nixbld:' /etc/gshadow > /etc/gshadow.new 2>/dev/null || true
 echo "nixbld:x:30000:${member_list}" >> /etc/group.new
 echo "nixbld:!:${member_list}:"      >> /etc/gshadow.new 2>/dev/null || true
 
-mv /etc/group.new   /etc/group
-mv /etc/gshadow.new /etc/gshadow 2>/dev/null || true
+mv -f /etc/group.new   /etc/group
+mv -f /etc/gshadow.new /etc/gshadow 2>/dev/null || true
 
 # Start the nix-daemon if not running
 if ! pgrep -x nix-daemon >/dev/null ; then
