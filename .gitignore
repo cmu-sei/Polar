@@ -35,3 +35,7 @@ my.env
 .env.nuon
 ci.env
 docker.json
+
+ca_certificates/
+client/
+server/

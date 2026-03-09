@@ -69,7 +69,7 @@ where
 }
 
 /// Helper function to parse a file at a given path and return the raw bytes as a vector
-#[deprecated = "Using this in some actors might block their executution and cause what looks like deadlock, so we should do this async wherever we're doing async"]
+#[deprecated = "Use async_get_file_as_byte_vec instead to avoid blocking."]
 pub fn get_file_as_byte_vec(filename: &String) -> Result<Vec<u8>, std::io::Error> {
     let mut f = std::fs::File::open(&filename)?;
 
@@ -364,27 +364,23 @@ pub async fn try_get_proxy_ca_cert() -> Option<Vec<u8>> {
 /// Attempts to find a path to the proxy CA certificate provided by the environment variable PROXY_CA_CERT
 pub fn get_web_client() -> Result<Client, ActorProcessingErr> {
     debug!("Attempting to find PROXY_CA_CERT");
-    Ok(match std::env::var("PROXY_CA_CERT") {
+    match std::env::var("PROXY_CA_CERT") {
         Ok(path) => {
-            let cert_data = get_file_as_byte_vec(&path)
-                .expect("Expected to find a proxy CA certificate at {path}");
-            let root_cert =
-                Certificate::from_pem(&cert_data).expect("Expected {path} to be in PEM format.");
+            let cert_data = std::fs::read(&path)?;
+            let root_cert = Certificate::from_pem(&cert_data)?;
 
-            debug!("Found PROXY_CA_CERT at: {path}. Configuring web client...");
+            debug!("Found PROXY_CA_CERT at: {}. Configuring web client...", path);
 
-            ClientBuilder::new()
+            Ok(ClientBuilder::new()
                 .add_root_certificate(root_cert)
                 .use_rustls_tls()
-                .build()?
+                .build()?)
         }
-        Err(e) => {
-            debug!(
-                "Failed to find PROXY_CA_CERT. {e} Configuring web client without proxy CA certificate..."
-            );
-            ClientBuilder::new().build()?
+        Err(_) => {
+            debug!("Failed to find PROXY_CA_CERT. Configuring web client without proxy CA certificate...");
+            Ok(ClientBuilder::new().build()?)
         }
-    })
+    }
 }
 
 /// Standard helper fn to get a neo4rs configuration based on environment variables
@@ -412,8 +408,7 @@ pub fn get_neo_config() -> Result<neo4rs::Config, ractor::ActorProcessingErr> {
                 .fetch_size(500)
                 .with_client_certificate(client_certificate)
                 .max_connections(10)
-                .build()
-                .expect("Expected to build neo4rs configuration")
+                .build()?
         }
         Err(_) => neo4rs::ConfigBuilder::default()
             .uri(neo4j_endpoint)
@@ -422,8 +417,7 @@ pub fn get_neo_config() -> Result<neo4rs::Config, ractor::ActorProcessingErr> {
             .db(database_name)
             .fetch_size(500)
             .max_connections(10)
-            .build()
-            .expect("Expected to build neo4rs configuration"),
+            .build()?
     };
 
     Ok(config)
