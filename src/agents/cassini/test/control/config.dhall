@@ -41,7 +41,7 @@ let producer =
        { topic = "steady"
         , message_size = 128
         , duration = 10
-        , pattern = Pattern.Drip { idle_time_seconds = 3000 }
+        , pattern = Pattern.Drip { idle_time_seconds = 2000 }
         }
 
 

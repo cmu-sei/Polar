@@ -2,21 +2,23 @@ use crate::{
     control::{ControlManager, ControlManagerState},
     listener::{ListenerManager, ListenerManagerArgs},
     session::{SessionManager, SessionManagerArgs},
-    subscriber::SubscriberManager,
+    subscriber::{SubscriberManager,SubscriberManagerArgs},
     topic::{TopicManager, TopicManagerArgs},
     BrokerConfigError, LISTENER_MANAGER_NAME, SESSION_MANAGER_NAME, SUBSCRIBER_MANAGER_NAME,
-    TOPIC_MANAGER_NAME, UNEXPECTED_MESSAGE_STR, BROKER_NAME
+    TOPIC_MANAGER_NAME, UNEXPECTED_MESSAGE_STR
 };
 use cassini_types::{BrokerMessage, ShutdownPhase};
 use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef, SupervisionEvent};
 use ractor::concurrency::Duration;
-use ractor::registry::where_is;
 use tracing::{debug, error, info, trace, trace_span, warn};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 use std::env;
 use tokio_util::sync::CancellationToken;
 use cassini_tracing::try_set_parent_otel;
+use std::sync::Arc;
+use cassini_types::DisconnectReason;
+use cassini_types::ControlOp;
 
 // ============================== Broker Supervisor Actor Definition ============================== //
 
@@ -170,11 +172,29 @@ impl Actor for Broker {
 
         debug!(actor = ?myself, "Broker starting");
 
+        // Create SessionManager without listener manager (will set later)
+        let (session_mgr, _) = Actor::spawn_linked(
+            Some(SESSION_MANAGER_NAME.to_owned()),
+            SessionManager,
+            SessionManagerArgs {
+                broker: myself.clone(),
+                listener_mgr: None,
+            },
+            myself.clone().into(),
+        )
+        .await
+        .map_err(|e| {
+            error!(error = ?e, "Broker startup failed: SessionManager failed to start");
+            ActorProcessingErr::from(e)
+        })?;
+
+        // Now create ListenerManager, which needs the session manager
         let listener_manager_args = ListenerManagerArgs {
             bind_addr: args.bind_addr,
             server_cert_file: args.server_cert_file,
             private_key_file: args.private_key_file,
             ca_cert_file: args.ca_cert_file,
+            session_mgr: session_mgr.clone(),
             shutdown_auth_token: args.shutdown_auth_token.clone(),
         };
 
@@ -190,23 +210,13 @@ impl Actor for Broker {
             ActorProcessingErr::from(e)
         })?;
 
-        // SessionManagerArgs is a unit struct now (no timeout needed)
-        let (session_mgr, _) = Actor::spawn_linked(
-            Some(SESSION_MANAGER_NAME.to_owned()),
-            SessionManager,
-            SessionManagerArgs,  // unit struct
-            myself.clone().into(),
-        )
-        .await
-        .map_err(|e| {
-            error!(error = ?e, "Broker startup failed: SessionManager failed to start");
-            ActorProcessingErr::from(e)
-        })?;
+        // Send listener manager ref to the existing session manager
+        let _ = session_mgr.send_message(BrokerMessage::SetListenerManager { listener_mgr: listener_mgr.clone() });
 
         let (subscriber_mgr, _sub_handle) = Actor::spawn_linked(
             Some(SUBSCRIBER_MANAGER_NAME.to_string()),
             SubscriberManager,
-            (),
+            SubscriberManagerArgs { session_mgr: session_mgr.clone() },
             myself.clone().into(),
         )
         .await
@@ -282,11 +292,11 @@ impl Actor for Broker {
             let mut interval = tokio::time::interval(Duration::from_secs(1));
             loop {
                 interval.tick().await;
-                if let Some(broker) = where_is(BROKER_NAME.to_string()) {
-                    let _ = broker.send_message(BrokerMessage::CheckShutdownComplete);
-                } else {
+                if myself.send_message(BrokerMessage::CheckShutdownComplete).is_err() {
+                    // Broker is gone, exit loop
                     break;
                 }
+                // Continue loop
             }
         });
         Ok(())
@@ -303,445 +313,533 @@ impl Actor for Broker {
 
     async fn handle(
         &self,
-        _myself: ActorRef<Self::Msg>,
+        myself: ActorRef<Self::Msg>,
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
-
             // Order definitely matters here. We must check for shutdown messages first and handle those.
             BrokerMessage::PrepareForShutdown { auth_token } => {
-                let span = trace_span!("cassini.broker.prepare_for_shutdown");
-                let _g = span.enter();
-                
-                // Check if shutdown is enabled and token is valid
-                match &state.control_mgr {
-                    Some(control_mgr) => {
-                        // Forward to ControlManager for validation and orchestration
-                        if let Err(e) = control_mgr.send_message(
-                            BrokerMessage::PrepareForShutdown { auth_token }
-                        ) {
-                            error!(error = %e, "Failed to forward shutdown request to ControlManager");
-                        }
-                    }
-                    None => error!("ControlManager missing; cannot process shutdown"),
-                }
+                self.handle_prepare_for_shutdown(myself, state, auth_token).await?;
             }
-            
             BrokerMessage::InitiateShutdownPhase { phase } => {
-                let span = trace_span!("cassini.broker.initiate_shutdown_phase", phase = ?phase);
-                let _g = span.enter();
-                
-                info!("Initiating shutdown phase: {:?}", phase);
-                state.is_shutting_down = true;
-                
-                match phase {
-                    ShutdownPhase::StopAcceptingNewConnections => {
-                        if let Some(listener_mgr) = &state.listener_mgr {
-                            info!("Sending InitiateShutdownPhase to ListenerManager");
-                            listener_mgr.send_message(
-                                BrokerMessage::InitiateShutdownPhase { phase }
-                            )?;
-                        }
-                    }
-                    ShutdownPhase::DrainExistingSessions => {
-                        if let Some(session_mgr) = &state.session_mgr {
-                            session_mgr.send_message(
-                                BrokerMessage::InitiateShutdownPhase { phase }
-                            )?;
-                        }
-                        else {
-                            // Manager already gone — signal completion ourselves
-                            if let Some(control_mgr) = &state.control_mgr {
-                                control_mgr.send_message(BrokerMessage::ShutdownPhaseComplete { phase })?;
-                            }
-                        }
-                    }
-                    ShutdownPhase::FlushTopicQueues => {
-                        if let Some(topic_mgr) = &state.topic_mgr {
-                            topic_mgr.send_message(
-                                BrokerMessage::InitiateShutdownPhase { phase }
-                            )?;
-                        }
-                    }
-                    ShutdownPhase::TerminateSubscribers => {
-                        if let Some(subscriber_mgr) = &state.subscriber_mgr {
-                            subscriber_mgr.send_message(
-                                BrokerMessage::InitiateShutdownPhase { phase }
-                            )?;
-                        }
-                    }
-                    ShutdownPhase::TerminateListeners => {
-                        if let Some(listener_mgr) = &state.listener_mgr {
-                            info!("Sending InitiateShutdownPhase to ListenerManager for TerminateListeners");
-                            listener_mgr.send_message(
-                                BrokerMessage::InitiateShutdownPhase { phase }
-                            )?;
-                        }
-                    }
-                }
+                self.handle_initiate_shutdown_phase(myself, state, phase).await?;
             }
-
             BrokerMessage::ShutdownPhaseComplete { phase } => {
-                let span = trace_span!("cassini.broker.shutdown_phase_complete", phase = ?phase);
-                let _g = span.enter();
-                
-                info!("Shutdown phase completed: {:?}", phase);
-                
-                // Forward to ControlManager
-                if let Some(control_mgr) = &state.control_mgr {
-                    if let Err(e) = control_mgr.send_message(
-                        BrokerMessage::ShutdownPhaseComplete { phase }
-                    ) {
-                        error!(error = %e, "Failed to forward ShutdownPhaseComplete to ControlManager");
-                    }
-                } else {
-                    error!("ControlManager missing; cannot process phase completion");
-                }
+                self.handle_shutdown_phase_complete(myself, state, phase).await?;
             }
-
             BrokerMessage::CheckShutdownComplete => {
-                let span = trace_span!("cassini.broker.check_shutdown_complete");
-                let _g = span.enter();
-                if state.is_shutting_down {
-                    let _ = self.check_shutdown_completion(_myself.clone(), state).await;
-                }
+                self.handle_check_shutdown_complete(myself, state).await?;
             }
-    
-            BrokerMessage::RegistrationRequest {
-                registration_id,
-                client_id,
-                trace_ctx,
-            } => {
-                let span = trace_span!("cassini.broker.registration_request", %client_id, registration_id = ?registration_id);
-                try_set_parent_otel(&span, trace_ctx);
-                let _g = span.enter();
-                trace!("Broker received registration request");
-
-                // Reject new registrations during shutdown
-                if state.is_shutting_down {
-                    warn!("Rejecting registration request during shutdown");
-                    if let Some(session_mgr) = &state.session_mgr {
-                        session_mgr.send_message(BrokerMessage::RegistrationResponse {
-                            client_id,
-                            result: Err("Broker is shutting down".to_string()),
-                            trace_ctx: Some(span.context()),
-                        })?;
-                    }
-                    return Ok(());
-                }
-
-                if let Some(session_mgr) = &state.session_mgr {
-                    if let Err(e) = session_mgr.send_message(BrokerMessage::RegistrationRequest {
-                        registration_id: registration_id.clone(),
-                        client_id: client_id.clone(),
-                        trace_ctx: Some(span.context()),
-                    }) {
-                        error!(error = %e, "Failed to forward RegistrationRequest to SessionManager");
-                    }
-
-                    if let Some(sub_mgr) = &state.subscriber_mgr {
-                        if let Err(e) = sub_mgr.send_message(BrokerMessage::RegistrationRequest {
-                            registration_id,
-                            client_id,
-                            trace_ctx: Some(span.context()),
-                        }) {
-                            warn!(error = %e, "Failed to notify SubscriberManager about registration");
-                        }
-                    } else {
-                        error!("SubscriberManager ActorRef missing in broker state");
-                    }
-                } else {
-                    error!("SessionManager ActorRef missing in broker state; cannot process registration");
-                }
+            BrokerMessage::RegistrationRequest { registration_id, client_id, trace_ctx, } => {
+                self.handle_registration_request(myself, state, registration_id, client_id, trace_ctx).await?;
             }
-
-            BrokerMessage::SubscribeRequest {
-                registration_id,
-                topic,
-                trace_ctx,
-            } => {
-                let span = trace_span!("cassini.broker.subscribe_request", %registration_id, %topic);
-                try_set_parent_otel(&span, trace_ctx);
-                let _g = span.enter();
-                trace!("Broker received subscribe request");
-
-                // Reject new subscriptions during shutdown
-                if state.is_shutting_down {
-                    warn!("Rejecting subscribe request during shutdown");
-                    if let Some(session_mgr) = &state.session_mgr {
-                        session_mgr.send_message(BrokerMessage::SubscribeAcknowledgment {
-                            registration_id,
-                            topic,
-                            result: Err("Broker is shutting down".to_string()),
-                            trace_ctx: Some(span.context()),
-                        })?;
-                    }
-                    return Ok(());
-                }
-
-                if let Some(topic_mgr) = &state.topic_mgr {
-                    if let Err(e) = topic_mgr.send_message(BrokerMessage::SubscribeRequest {
-                        registration_id,
-                        topic,
-                        trace_ctx: Some(span.context()),
-                    }) {
-                        error!(error = %e, "Failed to forward SubscribeRequest to TopicManager");
-                    }
-                } else {
-                    error!("TopicManager ActorRef missing in broker state; cannot subscribe");
-                }
+            BrokerMessage::SubscribeRequest { registration_id, topic, trace_ctx, } => {
+                self.handle_subscribe_request(myself, state, registration_id, topic, trace_ctx).await?;
             }
-
-            BrokerMessage::UnsubscribeRequest {
-                registration_id,
-                topic,
-                trace_ctx,
-            } => {
-                let span = trace_span!("cassini.broker.unsubscribe_request", %registration_id, %topic);
-                try_set_parent_otel(&span, trace_ctx);
-                let _g = span.enter();
-                trace!("Broker received unsubscribe request");
-
-                // I thought for a long time about whether or not we should allow unsubscribe
-                // during shutdown. Ultimately, it's just one more work item we have to clear out.
-                // I doubt we would get many, if any of these during the shutdown sequence, but if
-                // we did, we're just deliberately allowing a client to be removed that is going to
-                // shut itself down anyway (probably). So we'll let this happen, just as we're
-                // going to allow disconnect requests below.
-
-                if let Some(topic_mgr) = &state.topic_mgr {
-                    if let Err(e) = topic_mgr.send_message(BrokerMessage::UnsubscribeRequest {
-                        registration_id: registration_id.clone(),
-                        topic: topic.clone(),
-                        trace_ctx: Some(span.context()),
-                    }) {
-                        warn!(error = %e, "Failed to forward UnsubscribeRequest to TopicManager");
-                    }
-                } else {
-                    warn!(%topic, "TopicManager missing while handling unsubscribe");
-                }
-
-                if let Some(subscriber_mgr) = &state.subscriber_mgr {
-                    if let Err(e) = subscriber_mgr.send_message(BrokerMessage::UnsubscribeRequest {
-                        registration_id,
-                        topic,
-                        trace_ctx: Some(span.context()),
-                    }) {
-                        warn!(error = %e, "Failed to forward UnsubscribeRequest to SubscriberManager");
-                    }
-                } else {
-                    warn!(%topic, "SubscriberManager missing while handling unsubscribe");
-                }
+            BrokerMessage::UnsubscribeRequest { registration_id, topic, trace_ctx, } => {
+                self.handle_unsubscribe_request(myself, state, registration_id, topic, trace_ctx).await?;
             }
-
-            BrokerMessage::PublishRequest {
-                registration_id,
-                topic,
-                payload,
-                trace_ctx,
-            } => {
-                let payload_len = payload.len();
-                let span = trace_span!("cassini.broker.publish_request", %registration_id, %topic, payload_bytes = payload_len);
-                try_set_parent_otel(&span, trace_ctx);
-                let _g = span.enter();
-                debug!("Processing publish request with span: {:?}", span.metadata().map(|m| m.name()));
-                trace!("Broker received publish request");
-
-                // Reject new publishes during shutdown
-                if state.is_shutting_down {
-                    warn!("Rejecting publish request during shutdown");
-                    if let Some(session_mgr) = &state.session_mgr {
-                        if let Err(e2) =
-                            session_mgr.send_message(BrokerMessage::PublishResponse {
-                                topic,
-                                payload: Vec::new().into(),
-                                result: Err("Broker is shutting down".to_string()),
-                                trace_ctx: Some(span.context()),
-                            })
-                        {
-                            warn!(error = %e2, "Failed to notify SessionManager of publish failure");
-                        }
-                    }
-                    return Ok(());
-                }
-
-                if let Some(topic_mgr) = &state.topic_mgr {
-                    // Low-hanging fruit: don't clone payload unless we have to.
-                    // Move it into the forward message; only clone in the failure path.
-                    let forward = topic_mgr.send_message(BrokerMessage::PublishRequest {
-                        registration_id: registration_id.clone(),
-                        topic: topic.clone(),
-                        payload,
-                        trace_ctx: Some(span.context()),
-                    });
-
-                    if let Err(e) = forward {
-                        warn!(error = %e, "Failed to forward PublishRequest to TopicManager");
-
-                        // If forwarding fails, we need a payload for the failure response.
-                        // We only have the length now; best we can do is return an error without echoing bytes.
-                        if let Some(session_mgr) = &state.session_mgr {
-                            if let Err(e2) =
-                                session_mgr.send_message(BrokerMessage::PublishResponse {
-                                    topic,
-                                    payload: Vec::new().into(),
-                                    result: Err(format!("forward failed: {e}")),
-                                    trace_ctx: Some(span.context()),
-                                })
-                            {
-                                warn!(error = %e2, "Failed to notify SessionManager of publish failure");
-                            }
-                        } else {
-                            error!(
-                                payload_bytes = payload_len,
-                                "SessionManager missing; publish failure can't be reported"
-                            );
-                        }
-                    }
-                } else {
-                    error!("TopicManager missing; cannot publish");
-                    if let Some(session_mgr) = &state.session_mgr {
-                        let _ = session_mgr.send_message(BrokerMessage::PublishResponse {
-                            topic,
-                            payload: Vec::new().into(),
-                            result: Err("topic manager unavailable".to_string()),
-                            trace_ctx: Some(span.context()),
-                        });
-                    }
-                }
+            BrokerMessage::PublishRequest { registration_id, topic, payload, reply_to, trace_ctx, } => {
+                self.handle_publish_request(myself, state, registration_id, topic, payload, reply_to, trace_ctx).await?;
             }
-
-            BrokerMessage::PublishResponse {
-                topic,
-                payload,
-                result,
-                trace_ctx,
-            } => {
-                let payload_len = payload.len();
-                let span = trace_span!("cassini.broker.publish_response", %topic, ok = result.is_ok(), payload_bytes = payload_len);
-                try_set_parent_otel(&span, trace_ctx);
-                let _g = span.enter();
-
-                if let Some(sub_mgr) = &state.subscriber_mgr {
-                    if let Err(e) = sub_mgr.send_message(BrokerMessage::PublishResponse {
-                        topic,
-                        payload,
-                        result,
-                        trace_ctx: Some(span.context()),
-                    }) {
-                        error!(error = %e, "Failed to forward PublishResponse to SubscriberManager");
-                    }
-                } else {
-                    error!("SubscriberManager missing; cannot forward PublishResponse");
-                }
+            BrokerMessage::PublishResponse { topic, payload, result, trace_ctx, } => {
+                self.handle_publish_response(myself, state, topic, payload, result, trace_ctx).await?;
             }
-
             BrokerMessage::ErrorMessage { error, .. } => {
-                warn!(%error, "Broker received error message");
+                self.handle_error_message(myself, state, error).await?;
             }
-
-            BrokerMessage::DisconnectRequest {
-                reason,
-                client_id,
-                registration_id,
-                trace_ctx,
-            } => {
-                let span = trace_span!("cassini.broker.disconnect_request", %client_id, registration_id = ?registration_id, reason = ?reason);
-                try_set_parent_otel(&span, trace_ctx);
-                let _g = span.enter();
-                debug!("Broker cleaning up disconnect");
-
-                // See not on UnsubscribeRequest above, RE: shutdown
-
-                if let Some(subscriber_mgr) = &state.subscriber_mgr {
-                    if let Err(e) = subscriber_mgr.send_message(BrokerMessage::DisconnectRequest {
-                        reason: reason.clone(),
-                        client_id: client_id.clone(),
-                        registration_id: registration_id.clone(),
-                        trace_ctx: Some(span.context()),
-                    }) {
-                        error!(error = %e, "Failed to forward DisconnectRequest to SubscriberManager");
-                    }
-                } else {
-                    error!(%client_id, "SubscriberManager missing while processing disconnect");
-                }
-
-                if let Some(listener_mgr) = &state.listener_mgr {
-                    if let Err(e) = listener_mgr.send_message(BrokerMessage::DisconnectRequest {
-                        reason,
-                        client_id,
-                        registration_id,
-                        trace_ctx: Some(span.context()),
-                    }) {
-                        error!(error = %e, "Failed to forward DisconnectRequest to ListenerManager");
-                    }
-                } else {
-                    error!(%client_id, "ListenerManager missing while processing disconnect");
-                }
+            BrokerMessage::DisconnectRequest { reason, client_id, registration_id, trace_ctx, } => {
+                self.handle_disconnect_request(myself, state, reason, client_id, registration_id, trace_ctx).await?;
             }
-
-            BrokerMessage::TimeoutMessage {
-                client_id,
-                registration_id,
-                error,
-            } => {
-                // No trace_ctx in this message variant. Still give it a searchable span.
-                let span = trace_span!(
-                    "cassini.broker.timeout",
-                    client_id = %client_id,
-                    registration_id = %registration_id,
-                    error = ?error
-                );
-                let _g = span.enter();
-
-                if let Some(sub_mgr) = &state.subscriber_mgr {
-                    if let Err(e) = sub_mgr.send_message(BrokerMessage::TimeoutMessage {
-                        client_id,
-                        registration_id,
-                        error,
-                    }) {
-                        error!(error = %e, "Failed to forward TimeoutMessage to SubscriberManager");
-                    }
-                } else {
-                    error!("SubscriberManager missing while handling timeout");
-                }
+            BrokerMessage::TimeoutMessage { client_id, registration_id, error, } => {
+                self.handle_timeout_message(myself, state, client_id, registration_id, error).await?;
             }
-
-            BrokerMessage::ControlRequest {
-                registration_id,
-                op,
-                reply_to,
-                trace_ctx,
-            } => {
-                let span = trace_span!("cassini.broker.control_request", %registration_id, op = ?op);
-                try_set_parent_otel(&span, trace_ctx);
-                let _g = span.enter();
-
-                if let Some(control_mgr) = &state.control_mgr {
-                    if let Err(e) = control_mgr.send_message(BrokerMessage::ControlRequest {
-                        registration_id,
-                        op,
-                        reply_to,
-                        trace_ctx: Some(span.context()),
-                    }) {
-                        warn!(error = %e, "Failed to forward ControlRequest to ControlManager");
-                    }
-                } else {
-                    error!("ControlManager missing; dropping control request");
-                }
+            BrokerMessage::ControlRequest { registration_id, op, reply_to, trace_ctx, } => {
+                self.handle_control_request(myself, state, registration_id, op, reply_to, trace_ctx).await?;
             }
-
             other => {
                 warn!(?other, "{UNEXPECTED_MESSAGE_STR}");
             }
         }
-
         Ok(())
     }
 }
 
 impl Broker {
+    // ===== Handler methods =====
+    async fn handle_prepare_for_shutdown(
+        &self,
+        _myself: ActorRef<BrokerMessage>,
+        state: &mut BrokerState,
+        auth_token: Option<String>,
+    ) -> Result<(), ActorProcessingErr> {
+        let span = trace_span!("cassini.broker.prepare_for_shutdown");
+        let _g = span.enter();
+
+        match &state.control_mgr {
+            Some(control_mgr) => {
+                if let Err(e) = control_mgr.send_message(
+                    BrokerMessage::PrepareForShutdown { auth_token }
+                ) {
+                    error!(error = %e, "Failed to forward shutdown request to ControlManager");
+                }
+            }
+            None => error!("ControlManager missing; cannot process shutdown"),
+        }
+        Ok(())
+    }
+
+    async fn handle_initiate_shutdown_phase(
+        &self,
+        _myself: ActorRef<BrokerMessage>,
+        state: &mut BrokerState,
+        phase: ShutdownPhase,
+    ) -> Result<(), ActorProcessingErr> {
+        let span = trace_span!("cassini.broker.initiate_shutdown_phase", phase = ?phase);
+        let _g = span.enter();
+
+        info!("Initiating shutdown phase: {:?}", phase);
+        state.is_shutting_down = true;
+
+        match phase {
+            ShutdownPhase::StopAcceptingNewConnections => {
+                if let Some(listener_mgr) = &state.listener_mgr {
+                    info!("Sending InitiateShutdownPhase to ListenerManager");
+                    listener_mgr.send_message(
+                        BrokerMessage::InitiateShutdownPhase { phase }
+                    )?;
+                }
+            }
+            ShutdownPhase::DrainExistingSessions => {
+                if let Some(session_mgr) = &state.session_mgr {
+                    session_mgr.send_message(
+                        BrokerMessage::InitiateShutdownPhase { phase }
+                    )?;
+                } else {
+                    // Manager already gone — signal completion ourselves
+                    if let Some(control_mgr) = &state.control_mgr {
+                        control_mgr.send_message(BrokerMessage::ShutdownPhaseComplete { phase })?;
+                    }
+                }
+            }
+            ShutdownPhase::FlushTopicQueues => {
+                if let Some(topic_mgr) = &state.topic_mgr {
+                    topic_mgr.send_message(
+                        BrokerMessage::InitiateShutdownPhase { phase }
+                    )?;
+                }
+            }
+            ShutdownPhase::TerminateSubscribers => {
+                if let Some(subscriber_mgr) = &state.subscriber_mgr {
+                    subscriber_mgr.send_message(
+                        BrokerMessage::InitiateShutdownPhase { phase }
+                    )?;
+                }
+            }
+            ShutdownPhase::TerminateListeners => {
+                if let Some(listener_mgr) = &state.listener_mgr {
+                    info!("Sending InitiateShutdownPhase to ListenerManager for TerminateListeners");
+                    listener_mgr.send_message(
+                        BrokerMessage::InitiateShutdownPhase { phase }
+                    )?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn handle_shutdown_phase_complete(
+        &self,
+        _myself: ActorRef<BrokerMessage>,
+        state: &mut BrokerState,
+        phase: ShutdownPhase,
+    ) -> Result<(), ActorProcessingErr> {
+        let span = trace_span!("cassini.broker.shutdown_phase_complete", phase = ?phase);
+        let _g = span.enter();
+
+        info!("Shutdown phase completed: {:?}", phase);
+
+        // Forward to ControlManager
+        if let Some(control_mgr) = &state.control_mgr {
+            if let Err(e) = control_mgr.send_message(
+                BrokerMessage::ShutdownPhaseComplete { phase }
+            ) {
+                error!(error = %e, "Failed to forward ShutdownPhaseComplete to ControlManager");
+            }
+        } else {
+            error!("ControlManager missing; cannot process phase completion");
+        }
+        Ok(())
+    }
+
+    async fn handle_check_shutdown_complete(
+        &self,
+        myself: ActorRef<BrokerMessage>,
+        state: &mut BrokerState,
+    ) -> Result<(), ActorProcessingErr> {
+        let span = trace_span!("cassini.broker.check_shutdown_complete");
+        let _g = span.enter();
+        if state.is_shutting_down {
+            self.check_shutdown_completion(myself.clone(), state).await?;
+        }
+        Ok(())
+    }
+
+    async fn handle_registration_request(
+        &self,
+        _myself: ActorRef<BrokerMessage>,
+        state: &mut BrokerState,
+        registration_id: Option<String>,
+        client_id: String,
+        trace_ctx: Option<opentelemetry::Context>,
+    ) -> Result<(), ActorProcessingErr> {
+        let span = trace_span!("cassini.broker.registration_request", %client_id, registration_id = ?registration_id);
+        try_set_parent_otel(&span, trace_ctx);
+        let _g = span.enter();
+        trace!("Broker received registration request");
+
+        // Reject new registrations during shutdown
+        if state.is_shutting_down {
+            warn!("Rejecting registration request during shutdown");
+            if let Some(session_mgr) = &state.session_mgr {
+                session_mgr.send_message(BrokerMessage::RegistrationResponse {
+                    client_id,
+                    result: Err("Broker is shutting down".to_string()),
+                    trace_ctx: Some(span.context()),
+                })?;
+            }
+            return Ok(());
+        }
+
+        if let Some(session_mgr) = &state.session_mgr {
+            if let Err(e) = session_mgr.send_message(BrokerMessage::RegistrationRequest {
+                registration_id: registration_id.clone(),
+                client_id: client_id.clone(),
+                trace_ctx: Some(span.context()),
+            }) {
+                error!(error = %e, "Failed to forward RegistrationRequest to SessionManager");
+            }
+
+            if let Some(sub_mgr) = &state.subscriber_mgr {
+                if let Err(e) = sub_mgr.send_message(BrokerMessage::RegistrationRequest {
+                    registration_id,
+                    client_id,
+                    trace_ctx: Some(span.context()),
+                }) {
+                    warn!(error = %e, "Failed to notify SubscriberManager about registration");
+                }
+            } else {
+                error!("SubscriberManager ActorRef missing in broker state");
+            }
+        } else {
+            error!("SessionManager ActorRef missing in broker state; cannot process registration");
+        }
+        Ok(())
+    }
+
+    async fn handle_subscribe_request(
+        &self,
+        _myself: ActorRef<BrokerMessage>,
+        state: &mut BrokerState,
+        registration_id: String,
+        topic: String,
+        trace_ctx: Option<opentelemetry::Context>,
+    ) -> Result<(), ActorProcessingErr> {
+        let span = trace_span!("cassini.broker.subscribe_request", %registration_id, %topic);
+        try_set_parent_otel(&span, trace_ctx);
+        let _g = span.enter();
+        trace!("Broker received subscribe request");
+
+        // Reject new subscriptions during shutdown
+        if state.is_shutting_down {
+            warn!("Rejecting subscribe request during shutdown");
+            if let Some(session_mgr) = &state.session_mgr {
+                session_mgr.send_message(BrokerMessage::SubscribeAcknowledgment {
+                    registration_id,
+                    topic,
+                    result: Err("Broker is shutting down".to_string()),
+                    trace_ctx: Some(span.context()),
+                })?;
+            }
+            return Ok(());
+        }
+
+        if let Some(topic_mgr) = &state.topic_mgr {
+            if let Err(e) = topic_mgr.send_message(BrokerMessage::SubscribeRequest {
+                registration_id,
+                topic,
+                trace_ctx: Some(span.context()),
+            }) {
+                error!(error = %e, "Failed to forward SubscribeRequest to TopicManager");
+            }
+        } else {
+            error!("TopicManager ActorRef missing in broker state; cannot subscribe");
+        }
+        Ok(())
+    }
+
+    async fn handle_unsubscribe_request(
+        &self,
+        _myself: ActorRef<BrokerMessage>,
+        state: &mut BrokerState,
+        registration_id: String,
+        topic: String,
+        trace_ctx: Option<opentelemetry::Context>,
+    ) -> Result<(), ActorProcessingErr> {
+        let span = trace_span!("cassini.broker.unsubscribe_request", %registration_id, %topic);
+        try_set_parent_otel(&span, trace_ctx);
+        let _g = span.enter();
+        trace!("Broker received unsubscribe request");
+
+        if let Some(topic_mgr) = &state.topic_mgr {
+            if let Err(e) = topic_mgr.send_message(BrokerMessage::UnsubscribeRequest {
+                registration_id: registration_id.clone(),
+                topic: topic.clone(),
+                trace_ctx: Some(span.context()),
+            }) {
+                warn!(error = %e, "Failed to forward UnsubscribeRequest to TopicManager");
+            }
+        } else {
+            warn!(%topic, "TopicManager missing while handling unsubscribe");
+        }
+
+        if let Some(subscriber_mgr) = &state.subscriber_mgr {
+            if let Err(e) = subscriber_mgr.send_message(BrokerMessage::UnsubscribeRequest {
+                registration_id,
+                topic,
+                trace_ctx: Some(span.context()),
+            }) {
+                warn!(error = %e, "Failed to forward UnsubscribeRequest to SubscriberManager");
+            }
+        } else {
+            warn!(%topic, "SubscriberManager missing while handling unsubscribe");
+        }
+        Ok(())
+    }
+
+    async fn handle_publish_request(
+        &self,
+        _myself: ActorRef<BrokerMessage>,
+        state: &mut BrokerState,
+        registration_id: String,
+        topic: String,
+        payload: Arc<Vec<u8>>,
+        reply_to: Option<ActorRef<BrokerMessage>>,
+        trace_ctx: Option<opentelemetry::Context>,
+    ) -> Result<(), ActorProcessingErr> {
+        let payload_len = payload.len();
+        let span = trace_span!("cassini.broker.publish_request", %registration_id, %topic, payload_bytes = payload_len);
+        try_set_parent_otel(&span, trace_ctx);
+        let _g = span.enter();
+        debug!("Processing publish request with span: {:?}", span.metadata().map(|m| m.name()));
+        trace!("Broker received publish request");
+
+        // Reject new publishes during shutdown
+        if state.is_shutting_down {
+            warn!("Rejecting publish request during shutdown");
+            if let Some(session_mgr) = &state.session_mgr {
+                if let Err(e2) =
+                    session_mgr.send_message(BrokerMessage::PublishResponse {
+                        topic,
+                        payload: Vec::new().into(),
+                        result: Err("Broker is shutting down".to_string()),
+                        trace_ctx: Some(span.context()),
+                    })
+                {
+                    warn!(error = %e2, "Failed to notify SessionManager of publish failure");
+                }
+            }
+            return Ok(());
+        }
+
+        if let Some(topic_mgr) = &state.topic_mgr {
+            // Low-hanging fruit: don't clone payload unless we have to.
+            // Move it into the forward message; only clone in the failure path.
+            let forward = topic_mgr.send_message(BrokerMessage::PublishRequest {
+                registration_id: registration_id.clone(),
+                topic: topic.clone(),
+                payload,
+                reply_to, // pass through the reply_to from the incoming message
+                trace_ctx: Some(span.context()),
+            });
+
+            if let Err(e) = forward {
+                warn!(error = %e, "Failed to forward PublishRequest to TopicManager");
+
+                // If forwarding fails, we need a payload for the failure response.
+                // We only have the length now; best we can do is return an error without echoing bytes.
+                if let Some(session_mgr) = &state.session_mgr {
+                    if let Err(e2) =
+                        session_mgr.send_message(BrokerMessage::PublishResponse {
+                            topic,
+                            payload: Vec::new().into(),
+                            result: Err(format!("forward failed: {e}")),
+                            trace_ctx: Some(span.context()),
+                        })
+                    {
+                        warn!(error = %e2, "Failed to notify SessionManager of publish failure");
+                    }
+                } else {
+                    error!(
+                        payload_bytes = payload_len,
+                        "SessionManager missing; publish failure can't be reported"
+                    );
+                }
+            }
+        } else {
+            error!("TopicManager missing; cannot publish");
+            if let Some(session_mgr) = &state.session_mgr {
+                let _ = session_mgr.send_message(BrokerMessage::PublishResponse {
+                    topic,
+                    payload: Vec::new().into(),
+                    result: Err("topic manager unavailable".to_string()),
+                    trace_ctx: Some(span.context()),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    async fn handle_publish_response(
+        &self,
+        _myself: ActorRef<BrokerMessage>,
+        state: &mut BrokerState,
+        topic: String,
+        payload: Arc<Vec<u8>>,
+        result: Result<(), String>,
+        trace_ctx: Option<opentelemetry::Context>,
+    ) -> Result<(), ActorProcessingErr> {
+        let payload_len = payload.len();
+        let span = trace_span!("cassini.broker.publish_response", %topic, ok = result.is_ok(), payload_bytes = payload_len);
+        try_set_parent_otel(&span, trace_ctx);
+        let _g = span.enter();
+
+        if let Some(sub_mgr) = &state.subscriber_mgr {
+            if let Err(e) = sub_mgr.send_message(BrokerMessage::PublishResponse {
+                topic,
+                payload,
+                result,
+                trace_ctx: Some(span.context()),
+            }) {
+                error!(error = %e, "Failed to forward PublishResponse to SubscriberManager");
+            }
+        } else {
+            error!("SubscriberManager missing; cannot forward PublishResponse");
+        }
+        Ok(())
+    }
+
+    async fn handle_error_message(
+        &self,
+        _myself: ActorRef<BrokerMessage>,
+        _state: &mut BrokerState,
+        error: String,
+    ) -> Result<(), ActorProcessingErr> {
+        warn!(%error, "Broker received error message");
+        Ok(())
+    }
+
+    async fn handle_disconnect_request(
+        &self,
+        _myself: ActorRef<BrokerMessage>,
+        state: &mut BrokerState,
+        reason: DisconnectReason,
+        client_id: String,
+        registration_id: Option<String>,
+        trace_ctx: Option<opentelemetry::Context>,
+    ) -> Result<(), ActorProcessingErr> {
+        let span = trace_span!("cassini.broker.disconnect_request", %client_id, registration_id = ?registration_id, reason = ?reason);
+        try_set_parent_otel(&span, trace_ctx);
+        let _g = span.enter();
+        debug!("Broker cleaning up disconnect");
+
+        if let Some(subscriber_mgr) = &state.subscriber_mgr {
+            if let Err(e) = subscriber_mgr.send_message(BrokerMessage::DisconnectRequest {
+                reason: reason.clone(),
+                client_id: client_id.clone(),
+                registration_id: registration_id.clone(),
+                trace_ctx: Some(span.context()),
+            }) {
+                error!(error = %e, "Failed to forward DisconnectRequest to SubscriberManager");
+            }
+        } else {
+            error!(%client_id, "SubscriberManager missing while processing disconnect");
+        }
+
+        if let Some(listener_mgr) = &state.listener_mgr {
+            if let Err(e) = listener_mgr.send_message(BrokerMessage::DisconnectRequest {
+                reason,
+                client_id,
+                registration_id,
+                trace_ctx: Some(span.context()),
+            }) {
+                error!(error = %e, "Failed to forward DisconnectRequest to ListenerManager");
+            }
+        } else {
+            error!(%client_id, "ListenerManager missing while processing disconnect");
+        }
+        Ok(())
+    }
+
+    async fn handle_timeout_message(
+        &self,
+        _myself: ActorRef<BrokerMessage>,
+        state: &mut BrokerState,
+        client_id: String,
+        registration_id: String,
+        error: Option<String>,
+    ) -> Result<(), ActorProcessingErr> {
+        let span = trace_span!(
+            "cassini.broker.timeout",
+            client_id = %client_id,
+            registration_id = %registration_id,
+            error = ?error
+        );
+        let _g = span.enter();
+
+        if let Some(sub_mgr) = &state.subscriber_mgr {
+            if let Err(e) = sub_mgr.send_message(BrokerMessage::TimeoutMessage {
+                client_id,
+                registration_id,
+                error,
+            }) {
+                error!(error = %e, "Failed to forward TimeoutMessage to SubscriberManager");
+            }
+        } else {
+            error!("SubscriberManager missing while handling timeout");
+        }
+        Ok(())
+    }
+
+    async fn handle_control_request(
+        &self,
+        _myself: ActorRef<BrokerMessage>,
+        state: &mut BrokerState,
+        registration_id: String,
+        op: ControlOp,
+        reply_to: Option<ActorRef<BrokerMessage>>,
+        trace_ctx: Option<opentelemetry::Context>,
+    ) -> Result<(), ActorProcessingErr> {
+        let span = trace_span!("cassini.broker.control_request", %registration_id, op = ?op);
+        try_set_parent_otel(&span, trace_ctx);
+        let _g = span.enter();
+
+        if let Some(control_mgr) = &state.control_mgr {
+            if let Err(e) = control_mgr.send_message(BrokerMessage::ControlRequest {
+                registration_id,
+                op,
+                reply_to,
+                trace_ctx: Some(span.context()),
+            }) {
+                warn!(error = %e, "Failed to forward ControlRequest to ControlManager");
+            }
+        } else {
+            error!("ControlManager missing; dropping control request");
+        }
+        Ok(())
+    }
+
     async fn check_shutdown_completion(
         &self,
         myself: ActorRef<<Broker as ractor::Actor>::Msg>,

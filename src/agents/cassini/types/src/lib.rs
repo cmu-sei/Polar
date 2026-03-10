@@ -106,6 +106,7 @@ pub enum BrokerMessage {
         registration_id: String,
         topic: String,
         payload: Arc<Vec<u8>>,
+        reply_to: Option<ActorRef<BrokerMessage>>,
         trace_ctx: Option<opentelemetry::Context>,
     },
     /// Publish response to the client.
@@ -216,6 +217,29 @@ pub enum BrokerMessage {
         result: Result<ControlResult, ControlError>,
         trace_ctx: Option<opentelemetry::Context>,
     },
+
+    /// Internal message for ListenerManager to register a newly spawned listener.
+    RegisterListener {
+        client_id: String,
+        listener_ref: ActorRef<BrokerMessage>,
+    },
+    /// Internal message for SessionAgent to receive the broker reference.
+    SetBrokerRef {
+        broker: ActorRef<BrokerMessage>,
+    },
+    /// Internal message for SubscriberManager to get a session actor ref.
+    GetSessionRef {
+        registration_id: String,
+        reply_to: RpcReplyPort<Option<ActorRef<BrokerMessage>>>,
+    },
+    /// Internal message for Listener to receive its session actor ref.
+    SetListenerSessionRef {
+        session_ref: ActorRef<BrokerMessage>,
+    },
+    /// Internal message for SessionManager to receive its listener manager ref.
+    SetListenerManager {
+        listener_mgr: ActorRef<BrokerMessage>,
+    },
 }
 
 impl BrokerMessage {
@@ -237,7 +261,9 @@ impl BrokerMessage {
                 registration_id,
                 topic,
                 payload,
-                trace_ctx: trace_ctx.map(|w| w.to_opentelemetry_context()),
+                // Client doesn't know the session actor, so reply_to is None
+                reply_to: None,
+                trace_ctx: trace_ctx.map(|w| w.to_opentelemetry_context() ),
             },
             ClientMessage::SubscribeRequest {
                 topic,
