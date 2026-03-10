@@ -9,15 +9,13 @@ myNeovimOverlay,
 
 let
 
-    # packages for use in the images
     packageSets = import ./packages.nix { inherit system pkgs rust-overlay staticanalysis dotacat; };
 
     # ---------------------------------------------------------------------
     #  Files required by dev-containers.
-    #  sets up users and permissions
+    #  Sets up users and permissions.
     # ---------------------------------------------------------------------
 
-    # Join user entries into each file format
     passwdEntries = builtins.concatStringsSep "\n" (
       ["root:x:0:0::/root:${pkgs.runtimeShell}"]
     ) + "\n";
@@ -61,31 +59,6 @@ let
     ];
 
     # ---------------------------------------------------------------------
-    # Dev/CI envs
-    # ---------------------------------------------------------------------
-    devEnv = pkgs.buildEnv {
-        name = "dev-env";
-        paths = packageSets.devPkgs;
-        pathsToLink = [
-        "/bin"
-        "/lib"
-        "/inc"
-        "/etc/ssl/certs"
-        ];
-    };
-
-    ciEnv = pkgs.buildEnv {
-        name = "ci-env";
-        paths = packageSets.ciPkgs;
-        pathsToLink = [
-        "/bin"
-        "/lib"
-        "/inc"
-        "/etc/ssl/certs"
-        ];
-    };
-
-    # ---------------------------------------------------------------------
     # Misc config blobs copied verbatim
     # ---------------------------------------------------------------------
     nixConfig = pkgs.writeTextFile {
@@ -101,7 +74,7 @@ let
     };
 
     # ---------------------------------------------------------------------
-    # Fish vendor functions (system-wide) – this is what was missing.
+    # Fish vendor functions (system-wide)
     # ---------------------------------------------------------------------
     staticFuncPaths = pkgs.lib.mapAttrsToList
       (fileName: _: ./container-files/shell/fish/functions/static/${fileName})
@@ -123,7 +96,7 @@ let
        in ''
          mkdir -p $out/etc/fish/vendor_functions.d
          for f in ${list}; do
-           clean=$(basename "$f" | sed -E 's/^[0-9a-z]{32,}-//')   # drop Nix hash
+           clean=$(basename "$f" | sed -E 's/^[0-9a-z]{32,}-//')
            ln -s "$f" "$out/etc/fish/vendor_functions.d/$clean"
          done
        '');
@@ -141,7 +114,6 @@ let
     editor      = myNeovimOverlay;
     fishShell   = pkgs.fish;
 
-    # skeleton file for start.sh to copy
     fishConfig = pkgs.writeTextFile {
       name        = "fish-config";
       destination = "/etc/container-skel/config.fish";
@@ -159,12 +131,18 @@ let
     interactiveShellInitFile = pkgs.writeTextFile {
       name        = "interactiveShellInit.fish";
       destination = "/etc/fish/interactiveShellInit.fish";
+      # PORTABILITY: interactiveShellInit is a derivation evaluated in the
+      # target-arch context, so embedding store paths here via string
+      # interpolation is safe — the hashes will be correct for the arch being
+      # built. This is intentionally different from config.Env, which is
+      # evaluated once on the host and must never contain store paths.
       text        = import ./container-files/shell/fish/interactiveShellInit.nix {
         inherit fisheyGrc bass bobthefish starshipBin atuinBin editor fishShell;
       } + ''
 
-        # Set LD_LIBRARY_PATH only in interactive shells so Nix commands
-        # (which have correct rpaths) are not broken by library overrides.
+        # LD_LIBRARY_PATH is set only in interactive shells so that Nix
+        # commands (which carry correct rpaths) are not broken by library
+        # overrides in non-interactive contexts.
         set -gx LD_LIBRARY_PATH "${ldLibraryPath}"
       '';
     };
@@ -172,6 +150,12 @@ let
     # ---------------------------------------------------------------------
     # Portable derivations replacing extraCommands / runAsRoot
     # ---------------------------------------------------------------------
+
+    # PORTABILITY FIX: previously symlinked to pkgs.stdenv.cc.cc (the GCC
+    # compiler runtime), which does not contain the glibc dynamic linker.
+    # The correct source is pkgs.glibc, which owns ld-linux-*.so. On x86
+    # the old target happened to resolve because of how the host stdenv was
+    # assembled, masking the bug on aarch64.
     ldLinker = let
       linkerName = if system == "x86_64-linux"
         then "ld-linux-x86-64.so.2"
@@ -181,7 +165,7 @@ let
       linkerDir = if system == "x86_64-linux" then "lib64" else "lib";
     in pkgs.runCommand "ld-linker" {} ''
       mkdir -p $out/${linkerDir}
-      ln -sf ${pkgs.stdenv.cc.cc}/lib/${linkerName} $out/${linkerDir}/${linkerName}
+      ln -sf ${pkgs.glibc}/lib/${linkerName} $out/${linkerDir}/${linkerName}
     '';
 
     usrBinEnv = pkgs.runCommand "usr-bin-env" {} ''
@@ -194,8 +178,95 @@ let
       mkdir -p $out/tmp
     '';
 
+    # PORTABILITY FIX: startScript and polarHelpScript are now included in
+    # devEnv via buildEnv so that /bin/start.sh and /bin/polar-help are
+    # stable FHS-rooted paths. Previously, startScript was added to image
+    # contents as a bare derivation and referenced via its store path in
+    # config.Cmd — that store path is evaluated once on the build host and
+    # does not match the arch-specific hash produced when building the arm64
+    # image, causing Cmd to point to a path that does not exist in the
+    # arm64 image layers.
+    polarHelpScript = pkgs.writeShellScriptBin "polar-help" (
+      builtins.readFile ./container-files/polar-help
+    );
+
+    # PORTABILITY FIX: runtime env vars that require store paths (fish plugin
+    # paths, LIBCLANG_PATH, LOCALE_ARCHIVE, COREUTILS, etc.) have been moved
+    # here from config.Env into the start script body. start.sh is a
+    # derivation evaluated in the target-arch context, so its interpolated
+    # store paths are always correct for the arch being built. config.Env is
+    # evaluated once on the host and its interpolated store paths would be
+    # wrong on any architecture other than the build host.
+    startScript = pkgs.writeShellScriptBin "start.sh" (
+      # Prepend arch-correct store-path exports, then append the static body.
+      ''
+        export BOB_THE_FISH="${pkgs.fishPlugins.bobthefish}"
+        export FISH_BASS="${pkgs.fishPlugins.bass}"
+        export FISH_GRC="${pkgs.fishPlugins.grc}"
+        export LIBCLANG_PATH="${pkgs.llvmPackages_19.libclang.lib}/lib"
+        export LOCALE_ARCHIVE="${pkgs.glibcLocalesUtf8}/lib/locale/locale-archive"
+        export COREUTILS="${pkgs.uutils-coreutils-noprefix}"
+      ''
+      + builtins.readFile ./container-files/start.sh
+    );
+
+    # ---------------------------------------------------------------------
+    # Dev/CI envs
+    # PORTABILITY FIX: startScript and polarHelpScript are now part of
+    # devEnv so their binaries land at /bin/start.sh and /bin/polar-help
+    # via buildEnv's symlink tree. config.Cmd and config.Env can then
+    # reference these as stable /bin/* paths with no store-path dependency.
+    # ---------------------------------------------------------------------
+    devEnv = pkgs.buildEnv {
+        name = "dev-env";
+        paths = packageSets.devPkgs ++ [ startScript polarHelpScript ];
+        pathsToLink = [
+          "/bin"
+          "/lib"
+          "/inc"
+          "/etc/ssl/certs"
+        ];
+    };
+
+    ciEnv = pkgs.buildEnv {
+        name = "ci-env";
+        paths = packageSets.ciPkgs;
+        pathsToLink = [
+          "/bin"
+          "/lib"
+          "/inc"
+          "/etc/ssl/certs"
+        ];
+    };
+
+    # PORTABILITY FIX: closureInfo previously only listed devEnv as a root,
+    # leaving all other image contents (scripts, config files, vendor funcs,
+    # etc.) unregistered in the Nix DB. Any in-container nix-store query or
+    # GC operation would treat those paths as invalid. All derivations that
+    # appear in image contents are now listed as roots so the registration
+    # is complete.
+    #
+    # NOTE: nixDbRegistration is intentionally excluded from this list.
+    # nixDbRegistration depends on closureInfo (it reads closureInfo/registration
+    # at build time), so including it here would create a cycle:
+    #   closureInfo -> nixDbRegistration -> closureInfo
+    # nixDbRegistration itself has no store paths that need to be registered
+    # inside the container — it is a build-time tool, not a runtime artifact.
     closureInfo = pkgs.closureInfo {
-      rootPaths = [ devEnv ];
+      rootPaths = [
+        devEnv
+        fishConfig
+        gitconfig
+        interactiveShellInitFile
+        license
+        nixConfig
+        shellInitFile
+        containerPolicyConfig
+        vendorFuncs
+        ldLinker
+        usrBinEnv
+        fhsDirs
+      ];
     };
 
     nixDbRegistration = pkgs.runCommand "nix-db-registration" {} ''
@@ -216,14 +287,6 @@ let
       text        = builtins.readFile ./container-files/.gitconfig;
     };
 
-    polarHelpScript = pkgs.writeShellScriptBin "polar-help" (
-      builtins.readFile ./container-files/polar-help
-    );
-
-    startScript = pkgs.writeShellScriptBin "start.sh" (
-      builtins.readFile ./container-files/start.sh
-    );
-
     # ---------------------------------------------------------------------
     # Dev container image (layered)
     # ---------------------------------------------------------------------
@@ -232,9 +295,12 @@ let
       tag  = "latest";
       maxLayers = 100;
 
+      # PORTABILITY: startScript and polarHelpScript have been removed from
+      # contents. They now live inside devEnv (see above). Adding them here
+      # as bare derivations previously caused their store paths to be
+      # referenced directly in config.Cmd, which is evaluated on the build
+      # host and produces arch-incorrect hashes for cross-arch builds.
       contents = baseInfo ++ [
-        polarHelpScript
-        startScript
         devEnv
         fishConfig
         gitconfig
@@ -253,35 +319,48 @@ let
       config = {
         WorkingDir = "/workspace";
         Env = [
-          "CARGO_HTTP_CAINFO=/etc/ssl/certs/ca-bundle.crt"
+          # PORTABILITY FIX: All store-path-bearing env vars (BOB_THE_FISH,
+          # FISH_BASS, FISH_GRC, LIBCLANG_PATH, LOCALE_ARCHIVE, COREUTILS)
+          # have been removed from here and moved into start.sh (see
+          # startScript above). config.Env is evaluated once on the build
+          # host; any store path interpolated here will be an x86 hash even
+          # when building the arm64 image. start.sh is a derivation and is
+          # evaluated in the target-arch context, so it is the correct place
+          # for arch-sensitive store path exports.
 
-          # Fish plugins
-          "BOB_THE_FISH=${pkgs.fishPlugins.bobthefish}"
-          "FISH_BASS=${pkgs.fishPlugins.bass}"
-          "FISH_GRC=${pkgs.fishPlugins.grc}"
+          # PORTABILITY FIX: PATH no longer contains ${devEnv}/bin (a store
+          # path) and no longer expands $PATH from the host environment.
+          # buildEnv symlinks all binaries into /bin, so /bin is sufficient.
+          # $PATH in config.Env is NOT expanded from a prior ENV layer the
+          # way a Dockerfile ENV instruction would be — it is taken from the
+          # host shell at image-build time, which is both arch-incorrect and
+          # non-deterministic.
+          "PATH=/bin:/usr/bin:/root/.cargo/bin"
 
           "CC=clang"
           "CXX=clang++"
           "CMAKE=/bin/cmake"
           "CMAKE_MAKE_PROGRAM=/bin/make"
-          "COREUTILS=${pkgs.uutils-coreutils-noprefix}"
-          "LIBCLANG_PATH=${pkgs.llvmPackages_19.libclang.lib}/lib"
           "LANG=en_US.UTF-8"
           "TZ=UTC"
           "MANPAGER=sh -c 'col -bx | bat --language man --style plain'"
-          "MANPATH=${pkgs.man-db}/share/man:$MANPATH"
-          "LOCALE_ARCHIVE=${pkgs.glibcLocalesUtf8}/lib/locale/locale-archive"
+          "MANPATH=/share/man"
           "RUSTFLAGS=-Clinker=clang-lld-wrapper"
-          "PATH=$PATH:/bin:/usr/bin:${devEnv}/bin:/root/.cargo/bin"
-          "PKG_CONFIG_PATH=${pkgs.openssl.dev}/lib/pkgconfig"
+          "PKG_CONFIG_PATH=/lib/pkgconfig"
           "SHELL=/bin/fish"
           "SSL_CERT_DIR=/etc/ssl/certs"
           "SSL_CERT_FILE=/etc/ssl/certs/ca-bundle.crt"
-
+          "CARGO_HTTP_CAINFO=/etc/ssl/certs/ca-bundle.crt"
           "USER=root"
         ];
         Volumes = {};
-        Cmd = [ "${startScript}/bin/start.sh" ];
+        # PORTABILITY FIX: previously "${startScript}/bin/start.sh", which
+        # is a store path baked in at flake-evaluation time on the build
+        # host. On aarch64 the store hash for startScript differs from the
+        # x86 hash captured here, so the Cmd pointed to a path absent from
+        # the arm64 image layers. /bin/start.sh is stable because buildEnv
+        # symlinks startScript's bin/ into /bin.
+        Cmd = [ "/bin/start.sh" ];
       };
     };
 
@@ -304,10 +383,20 @@ in {
       export LD_LIBRARY_PATH="${pkgs.lib.makeLibraryPath [ pkgs.glibc pkgs.llvmPackages_19.clang ]}"
       export LIBCLANG_PATH="${pkgs.llvmPackages_19.libclang.lib}/lib"
 
+      # NOTE: store-path exports above (OPENSSL_DIR, LIBCLANG_PATH, etc.)
+      # are safe here because mkShell.shellHook is evaluated in the
+      # target-arch nix develop context, not at flake-evaluation time on
+      # the build host. These are dev-shell-only and never flow into image
+      # config.
+
       # -------------------------------------------------------------------
       # Polar TLS auto-setup (direnv/nix develop)
+      # PORTABILITY NOTE: set -euo pipefail is intentionally NOT used here.
+      # shellHook runs in the user's interactive shell; set -e will cause
+      # the entire shell session to exit on any non-zero return, including
+      # innocuous operations (e.g. grep with no matches, missing optionals).
+      # Errors are handled explicitly below instead.
       # -------------------------------------------------------------------
-      set -euo pipefail
 
       PROJECT_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd -P)"
       CERTS_LINK="$PROJECT_ROOT/result-tlsCerts"
@@ -322,7 +411,12 @@ in {
 
       if need_certs; then
         echo "[polar] TLS certs missing -> building .#tlsCerts"
-        nix build -L .#tlsCerts -o "$CERTS_LINK"
+        # Explicit error message rather than relying on set -e to surface
+        # failure, so the developer gets a clear actionable message.
+        nix build -L .#tlsCerts -o "$CERTS_LINK" || {
+          echo "[polar] ERROR: failed to build TLS certs. Check nix build output above."
+          return 1
+        }
       fi
 
       CA_CERT="$CERTS_LINK/ca_certificates/ca_certificate.pem"
@@ -337,7 +431,6 @@ in {
       SERVER_CHAIN="$SSL_DIR/server_cert_chain.pem"
       cat "$SERVER_CERT" "$CA_CERT" > "$SERVER_CHAIN"
 
-      # Cassini / Polar mTLS vars (app-specific; safe)
       : "''${TLS_CA_CERT:=$CA_CERT}"
       : "''${TLS_SERVER_CERT_CHAIN:=$SERVER_CHAIN}"
       : "''${TLS_SERVER_KEY:=$SERVER_KEY}"
@@ -379,23 +472,18 @@ in {
       export POLAR_SCHEDULER_GIT_USERNAME=""
       export POLAR_SCHEDULER_GIT_PASSWORD=""
 
-
-      # -------------------------------------------------------------------
-      # IMPORTANT: do NOT override SSL_CERT_FILE with the dev CA.
-      # Keep system CA bundle for GitHub/Cargo/etc.
-      # -------------------------------------------------------------------
-      # Prefer what Nix/direnv already provides, else fall back to pkgs.cacert.
       : "''${SSL_CERT_FILE:=''${NIX_SSL_CERT_FILE:-''${SYSTEM_CERTIFICATE_PATH:-${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt}}}"
       export SSL_CERT_FILE
 
-      # Make Cargo + git happy even if they ignore SSL_CERT_FILE in some paths
       export CARGO_HTTP_CAINFO="$SSL_CERT_FILE"
       export GIT_SSL_CAINFO="$SSL_CERT_FILE"
-
-      # If cargo is using libgit2 and your environment/proxy/ssl gets weird,
-      # force git CLI fetching (matches the error suggestion you saw).
       export CARGO_NET_GIT_FETCH_WITH_CLI=true
 
+      # PORTABILITY NOTE: pick_dns_name is informational only. The || true
+      # guard is intentional — cert may not exist yet on first run, and a
+      # missing SAN is not a fatal condition for shell init. The explicit
+      # error handling on nix build above is where we actually gate on
+      # cert presence.
       pick_dns_name() {
         ${pkgs.openssl}/bin/openssl x509 -in "$SERVER_CERT" -noout -text 2>/dev/null \
           | sed -n 's/.*DNS:\([^,]*\).*/\1/p' \

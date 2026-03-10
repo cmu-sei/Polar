@@ -8,7 +8,7 @@ die() { echo >&2 "error: $*"; exit 1; }
 need() { command -v "$1" >/dev/null || die "missing binary: $1"; }
 
 ##############################################################################
-# 1. create the normal dev user  (original logic, trimmed a little)
+# 1. create the normal dev user
 ##############################################################################
 create_user() {
     local user=$1 uid=$2 gid=$3
@@ -25,7 +25,7 @@ create_user() {
     chmod -R 755 /home/$user
     chown -R "$uid:$gid" /home/$user
 
-    #   XDG dirs **before** fish starts so it can write history, etc.
+    # XDG dirs before fish starts so it can write history, etc.
     install -d -m 700  \
         /home/$user/.config \
         /home/$user/.local/share \
@@ -45,17 +45,12 @@ create_user() {
 
     chmod 1777 /tmp                          # sticky-bit temp
 
-    #  after the XDG-dir block, before the EOF heredoc
     install -Dm644 /etc/container-skel/config.fish \
                    /home/$user/.config/fish/config.fish
     touch /home/$user/.config/fish/fish_variables
     chown -R "$uid:$gid" /home/$user
     chmod -R 755 /home/$user
     chmod u+w /home/$user
-
-    # set environment variable explicitly
-    export $USER=$user
-
 }
 
 ##############################################################################
@@ -63,7 +58,6 @@ create_user() {
 ##############################################################################
 (( EUID == 0 )) || die "please run as root"
 
-# If all three env vars are set, create the user
 if [[ -n "${CREATE_USER:-}" && -n "${CREATE_UID:-}" && -n "${CREATE_GID:-}" ]]; then
     create_user "$CREATE_USER" "$CREATE_UID" "$CREATE_GID"
     DEV_USER=$CREATE_USER
@@ -85,19 +79,20 @@ export CARGO_TARGET_DIR
 ##############################################################################
 # 3. build users
 ##############################################################################
-# set current user as trusted
-# append newline so we don't add onto the last one
-printf "\n" >> /etc/nix/nix.conf
-printf "extra-trusted-users = $USER" >> /etc/nix/nix.conf
-# still as root inside the container, create a group for the build users
+# Append the dev user as a trusted nix user. Uses $DEV_USER directly rather
+# than $USER to avoid depending on the environment variable being set correctly.
+printf "\nextra-trusted-users = %s\n" "$DEV_USER" >> /etc/nix/nix.conf
+
+# Create a group for the nix build users
 echo "nixbld:x:30000:" >> /etc/group
 echo "nixbld:x::"      >> /etc/gshadow
-# Detect CPU count (see table above)
+
+# Detect CPU count
 cpus=$(command -v nproc >/dev/null 2>&1 && nproc || getconf _NPROCESSORS_ONLN)
 
 # Ensure the dummy home & shell exist
 mkdir -p /var/empty
-DUMMY_SHELL=/bin/nologin         # use whatever exists in the image
+DUMMY_SHELL=/bin/nologin
 [ -x "$DUMMY_SHELL" ] || DUMMY_SHELL=/bin/false
 
 members=()
@@ -106,7 +101,6 @@ for i in $(seq 1 "$cpus"); do
   muid=$((30000 + i))
   mname="nixbld$i"
 
-  # Skip if we already created the user (makes the script idempotent)
   if ! getent passwd "$mname" >/dev/null; then
     printf '%s:x:%d:30000:Nix build user %d:/var/empty:%s\n' \
            "$mname" "$muid" "$i" "$DUMMY_SHELL" >> /etc/passwd
@@ -115,10 +109,8 @@ for i in $(seq 1 "$cpus"); do
   members+=("$mname")
 done
 
-# Create or overwrite the group + gshadow line with the member list
-member_list=$(IFS=, ; echo "${members[*]}")   # join array with commas
+member_list=$(IFS=, ; echo "${members[*]}")
 
-# Remove a possibly-existing (empty) nixbld line first (safe to re-run)
 grep -v '^nixbld:' /etc/group   > /etc/group.new
 grep -v '^nixbld:' /etc/gshadow > /etc/gshadow.new 2>/dev/null || true
 
@@ -166,7 +158,6 @@ if [[ "${DROPBEAR_ENABLE:-0}" == "1" ]]; then
     dropbearkey -t ed25519 -f "$ED25519_KEY" > /dev/null
   fi
 
-  # Run dropbear detached and set up clean flags
   if [[ -f "$AUTH_KEYS" ]]; then
     dropbear -E -a \
       -r "$RSA_KEY" \
@@ -174,7 +165,7 @@ if [[ "${DROPBEAR_ENABLE:-0}" == "1" ]]; then
       -p "0.0.0.0:$DROPBEAR_PORT" \
       -P "$SSH_DIR/dropbear.pid" &
 
-    sleep 1  # give it a moment
+    sleep 1
     if pgrep -x dropbear >/dev/null 2>&1; then
       DROPBEAR_STATUS="running on port $DROPBEAR_PORT"
     else
@@ -204,9 +195,8 @@ echo " 🆘  Type 'polar-help' for container usage instructions"
 echo "───────────────────────────────────────────────────────────────────────────────"
 
 ##############################################################################
-# 5.  hand control to the user shell
+# 5. hand control to the user shell
 ##############################################################################
-
 HOME=/home/$DEV_USER \
   LOGNAME=$DEV_USER \
   SHELL=/bin/fish \
