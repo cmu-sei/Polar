@@ -83,6 +83,34 @@ export CARGO_TARGET_DIR
 # than $USER to avoid depending on the environment variable being set correctly.
 printf "\nextra-trusted-users = %s\n" "$DEV_USER" >> /etc/nix/nix.conf
 
+# Configure Nix for the container's architecture at runtime. This is done
+# here rather than at image build time so that the same start.sh ships in
+# both the x86 and arm64 images and self-configures correctly on first run.
+#
+# On aarch64: tell Nix its system, and advertise x86_64-linux as an
+# extra platform so arm64 developers can build and push x86 container
+# images from within the arm64 dev container (e.g. on Apple Silicon).
+# Docker Desktop on Apple Silicon provides x86_64 emulation via Rosetta 2,
+# which satisfies these builds transparently.
+#
+# On x86: no extra configuration needed — x86 is the native platform and
+# arm64 builds are handled by the host's binfmt/qemu registration.
+CONTAINER_ARCH="$(uname -m)"
+if [[ "$CONTAINER_ARCH" == "aarch64" ]]; then
+    printf "\nsystem = aarch64-linux\n"          >> /etc/nix/nix.conf
+    printf "\nextra-platforms = x86_64-linux\n"  >> /etc/nix/nix.conf
+
+    # Disable the Nix sandbox when running under qemu-user emulation.
+    # qemu-user executes aarch64 binaries on a foreign kernel; seccomp BPF
+    # programs are arch-specific and fail to load in this context. The sandbox
+    # is safe to disable here because the container itself provides isolation.
+    # On native aarch64 (Apple Silicon + Docker Desktop) this block is skipped
+    # and the sandbox operates normally.
+    if [[ -n "${QEMU_EMULATOR:-}" ]]; then
+        printf "\nsandbox = false\n" >> /etc/nix/nix.conf
+    fi
+fi
+
 # Create a group for the nix build users
 echo "nixbld:x:30000:" >> /etc/group
 echo "nixbld:x::"      >> /etc/gshadow
