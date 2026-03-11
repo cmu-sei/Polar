@@ -49,13 +49,20 @@ let
       BUG_REPORT_URL="https://github.com/NixOS/nixpkgs/issues"
     '';
 
-    baseInfo = with pkgs; [
-      (writeTextDir "etc/shadow" shadowEntries)
-      (writeTextDir "etc/passwd" passwdEntries)
-      (writeTextDir "etc/group" groupEntries)
-      (writeTextDir "etc/gshadow" gshadowEntries)
-      (writeTextDir "etc/shells" shellsFile)
-      (writeTextDir "etc/os-release" osRelease)
+    etcShadow    = pkgs.writeTextDir "etc/shadow"     shadowEntries;
+    etcPasswd    = pkgs.writeTextDir "etc/passwd"     passwdEntries;
+    etcGroup     = pkgs.writeTextDir "etc/group"      groupEntries;
+    etcGshadow   = pkgs.writeTextDir "etc/gshadow"    gshadowEntries;
+    etcShells    = pkgs.writeTextDir "etc/shells"     shellsFile;
+    etcOsRelease = pkgs.writeTextDir "etc/os-release" osRelease;
+
+    baseInfo = [
+      etcShadow
+      etcPasswd
+      etcGroup
+      etcGshadow
+      etcShells
+      etcOsRelease
     ];
 
     # ---------------------------------------------------------------------
@@ -260,12 +267,19 @@ let
         interactiveShellInitFile
         license
         nixConfig
+        nixRegistry
         shellInitFile
         containerPolicyConfig
         vendorFuncs
         ldLinker
         usrBinEnv
         fhsDirs
+        etcShadow
+        etcPasswd
+        etcGroup
+        etcGshadow
+        etcShells
+        etcOsRelease
       ];
     };
 
@@ -274,6 +288,70 @@ let
       export NIX_REMOTE=local?root=$out
       ${pkgs.nix}/bin/nix-store --load-db < ${closureInfo}/registration
     '';
+
+    # Create GC roots baked into the image that protect the entire container
+    # closure from nix-collect-garbage. Without this, running nix-collect-garbage
+    # inside the container destroys the container's own environment — the Nix
+    # daemon sees no live roots pointing at the image's store paths and deletes
+    # them all.
+    #
+    # Each symlink points directly at a top-level derivation output. Nix follows
+    # the reference graph from each root and protects the full transitive closure.
+    #
+    # IMPORTANT: GC root symlinks must point at store paths directly — NOT at
+    # closureInfo or nixDbRegistration. Those are themselves store paths, so a
+    # symlink pointing at them is "invalid" from Nix's perspective (a root inside
+    # the store pointing at another path inside the store provides no anchor).
+    # Only symlinks that originate from outside the store (e.g. /nix/var/nix/gcroots/)
+    # and point at store paths are treated as live roots.
+    #
+    # NOTE: gcRoots itself is intentionally excluded from closureInfo's rootPaths
+    # to avoid a cycle. Its own store path is protected by being listed in image
+    # contents, which the Nix DB registration covers.
+    gcRoots = pkgs.runCommand "gc-roots" {} ''
+      mkdir -p $out/nix/var/nix/gcroots
+      ln -s ${devEnv}                   $out/nix/var/nix/gcroots/polar-dev-env
+      ln -s ${fishConfig}               $out/nix/var/nix/gcroots/polar-fish-config
+      ln -s ${interactiveShellInitFile} $out/nix/var/nix/gcroots/polar-interactive-init
+      ln -s ${vendorFuncs}              $out/nix/var/nix/gcroots/polar-vendor-funcs
+      ln -s ${nixConfig}                $out/nix/var/nix/gcroots/polar-nix-config
+      ln -s ${nixRegistry}              $out/nix/var/nix/gcroots/polar-nix-registry
+      ln -s ${shellInitFile}            $out/nix/var/nix/gcroots/polar-shell-init
+      ln -s ${containerPolicyConfig}    $out/nix/var/nix/gcroots/polar-policy
+      ln -s ${ldLinker}                 $out/nix/var/nix/gcroots/polar-ld-linker
+      ln -s ${usrBinEnv}                $out/nix/var/nix/gcroots/polar-usr-bin-env
+      ln -s ${fhsDirs}                  $out/nix/var/nix/gcroots/polar-fhs-dirs
+      ln -s ${gitconfig}                $out/nix/var/nix/gcroots/polar-gitconfig
+      ln -s ${license}                  $out/nix/var/nix/gcroots/polar-license
+      ln -s ${etcShadow}                $out/nix/var/nix/gcroots/polar-etc-shadow
+      ln -s ${etcPasswd}                $out/nix/var/nix/gcroots/polar-etc-passwd
+      ln -s ${etcGroup}                 $out/nix/var/nix/gcroots/polar-etc-group
+      ln -s ${etcGshadow}               $out/nix/var/nix/gcroots/polar-etc-gshadow
+      ln -s ${etcShells}                $out/nix/var/nix/gcroots/polar-etc-shells
+      ln -s ${etcOsRelease}             $out/nix/var/nix/gcroots/polar-etc-os-release
+    '';
+
+    # Nix flake registry pointing at the exact nixpkgs revision the container
+    # was built against. This allows users to run 'nix search nixpkgs',
+    # 'nix shell nixpkgs#foo', and 'nix run nixpkgs#foo' without network
+    # access and without drift — they get the same nixpkgs tree that produced
+    # the container, already present in the store.
+    #
+    # pkgs.path is the store path of the nixpkgs input as resolved by the
+    # flake.lock at build time. Using a path reference rather than a github
+    # reference means the registry resolves locally with no fetch required,
+    # and is consistent with everything else in the image.
+    nixRegistry = pkgs.writeTextFile {
+      name        = "registry.json";
+      destination = "/etc/nix/registry.json";
+      text        = builtins.toJSON {
+        version = 2;
+        flakes  = [{
+          from = { type = "indirect"; id = "nixpkgs"; };
+          to   = { type = "path"; path = "${pkgs.path}"; };
+        }];
+      };
+    };
 
     license = pkgs.writeTextFile {
       name        = "license.txt";
@@ -307,12 +385,14 @@ let
         interactiveShellInitFile
         license
         nixConfig
+        nixRegistry
         shellInitFile
         containerPolicyConfig
         vendorFuncs
         ldLinker
         usrBinEnv
         nixDbRegistration
+        gcRoots
         fhsDirs
       ];
 

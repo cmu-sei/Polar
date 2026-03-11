@@ -83,6 +83,7 @@ in
       ripgrep
       rsync
       # rustlings <- not cross-compiler safe
+      sqlite
       strace
       tree
       tree-sitter

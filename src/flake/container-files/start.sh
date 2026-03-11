@@ -100,14 +100,31 @@ if [[ "$CONTAINER_ARCH" == "aarch64" ]]; then
     printf "\nsystem = aarch64-linux\n"          >> /etc/nix/nix.conf
     printf "\nextra-platforms = x86_64-linux\n"  >> /etc/nix/nix.conf
 
-    # Disable the Nix sandbox when running under qemu-user emulation.
-    # qemu-user executes aarch64 binaries on a foreign kernel; seccomp BPF
-    # programs are arch-specific and fail to load in this context. The sandbox
-    # is safe to disable here because the container itself provides isolation.
-    # On native aarch64 (Apple Silicon + Docker Desktop) this block is skipped
-    # and the sandbox operates normally.
-    if [[ -n "${QEMU_EMULATOR:-}" ]]; then
-        printf "\nsandbox = false\n" >> /etc/nix/nix.conf
+    # Detect qemu-user emulation via the CPU implementer field in /proc/cpuinfo.
+    # Real aarch64 hardware never reports implementer 0x00 — this is qemu's
+    # synthetic ARM CPU signature. Known real implementer codes:
+    #   0x41 = ARM Ltd (Graviton, most server ARM)
+    #   0x51 = Qualcomm (Snapdragon)
+    #   0x61 = Apple (Apple Silicon)
+    #   0x00 = qemu-user synthetic CPU — only possible value here
+    #
+    # When running under qemu-user, seccomp BPF programs fail to load because
+    # they are arch-specific and the host kernel is x86. Disabling the sandbox
+    # is safe in this context because the container itself provides isolation.
+    # On native aarch64 (Apple Silicon, Graviton, etc.) this block is skipped
+    # and the Nix sandbox operates normally.
+    CPU_IMPLEMENTER=$(grep "CPU implementer" /proc/cpuinfo | head -1 | awk '{print $NF}')
+    if [[ "$CPU_IMPLEMENTER" == "0x00" ]]; then
+        printf "\nsandbox = false\n"        >> /etc/nix/nix.conf
+
+        # The OCI container runtime (podman/runc) already applies a seccomp profile
+        # to the container. Nix's own syscall filtering is redundant in any container
+        # context, and actively broken under qemu-user where Nix generates an aarch64
+        # BPF program that the x86 host kernel refuses to load. Disable it for
+        # all aarch64 container environments — the runtime's filter is
+        # sufficient. For x86_64 systems, it's redundant but harmless and also
+        # the default behavior, so we leave it alone.
+        printf "\nfilter-syscalls = false\n" >> /etc/nix/nix.conf
     fi
 fi
 
@@ -147,6 +164,40 @@ echo "nixbld:!:${member_list}:"      >> /etc/gshadow.new 2>/dev/null || true
 
 mv -f /etc/group.new   /etc/group
 mv -f /etc/gshadow.new /etc/gshadow 2>/dev/null || true
+
+# The Nix DB is pre-populated inside the store by the nixDbRegistration
+# derivation at image build time. However, the store is read-only, and the
+# Nix daemon requires a writable DB to acquire big-lock and register new
+# paths during builds. Any operation that triggers a real build (e.g.
+# 'direnv allow', 'nix build', 'nix shell') will fail or corrupt the DB
+# state if it tries to write through the store symlinks.
+#
+# Solution: copy the pre-populated DB out of the store into real writable
+# files on the container's upper overlay layer before the daemon starts.
+# This is the correct runtime/buildtime split — the store provides the
+# seed data, the upper layer provides the mutable runtime state, exactly
+# as NixOS itself does (the DB on a real NixOS system lives at
+# /nix/var/nix/db/ as real files, not store symlinks).
+#
+# The symlink check ensures this only runs on first startup. If the DB has
+# already been materialized (e.g. on a subsequent exec into a running
+# container) we leave it alone.
+if [[ -L /nix/var/nix/db/db.sqlite ]]; then
+    db_src="$(dirname "$(readlink -f /nix/var/nix/db/db.sqlite)")"
+    tmp="$(mktemp -d)"
+    cp -r "$db_src/." "$tmp/"
+    rm -f   /nix/var/nix/db/db.sqlite \
+            /nix/var/nix/db/db.sqlite-shm \
+            /nix/var/nix/db/db.sqlite-wal \
+            /nix/var/nix/db/big-lock \
+            /nix/var/nix/db/reserved \
+            /nix/var/nix/db/schema
+    cp -r "$tmp/." /nix/var/nix/db/
+    rm -rf "$tmp"
+    chmod 644 /nix/var/nix/db/db.sqlite
+    chmod 600 /nix/var/nix/db/big-lock
+    chmod 600 /nix/var/nix/db/reserved
+fi
 
 # Start the nix-daemon if not running
 if ! pgrep -x nix-daemon >/dev/null ; then
