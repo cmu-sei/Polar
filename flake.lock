@@ -264,6 +264,29 @@
         "type": "github"
       }
     },
+    "nix-container-lib": {
+      "inputs": {
+        "flake-utils": [
+          "flake-utils"
+        ],
+        "nixpkgs": [
+          "nixpkgs"
+        ]
+      },
+      "locked": {
+        "lastModified": 1773681795,
+        "narHash": "sha256-uKzElqbbLBVK6ZfGiPLIvuLFVry0kbXfj2rRCRTS3P0=",
+        "owner": "daveman1010221",
+        "repo": "nix-container-lib",
+        "rev": "b8498b9ad0205fc42b46de8403d421291f4fedf0",
+        "type": "github"
+      },
+      "original": {
+        "owner": "daveman1010221",
+        "repo": "nix-container-lib",
+        "type": "github"
+      }
+    },
     "nixpkgs": {
       "locked": {
         "lastModified": 1718714799,
@@ -349,6 +372,7 @@
         "dotacat": "dotacat",
         "flake-utils": "flake-utils_2",
         "myNeovimOverlay": "myNeovimOverlay",
+        "nix-container-lib": "nix-container-lib",
         "nixpkgs": "nixpkgs_2",
         "rust-overlay": "rust-overlay",
         "staticanalysis": "staticanalysis"
