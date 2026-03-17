@@ -331,7 +331,7 @@ pub async fn handle_op<K>(graph: &Graph, op: &GraphOp<K>) -> Result<(), ActorPro
 where
     K: GraphNodeKey + Debug + Clone,
 {
-    let q = compile_graph_op(&op);
+    let q = compile_graph_op(op);
 
     let mut txn = graph.start_txn().await?;
     debug!("{}", q.query());

@@ -21,15 +21,16 @@
    DM24-0470
 */
 use crate::{
-    graphql_endpoint, handle_backoff, init_observer_state, send_to_broker, BackoffReason, Command,
-    GitlabObserverArgs, GitlabObserverMessage, GitlabObserverState, GITLAB_JOBS_OBSERVER,
-    GITLAB_PIPELINE_OBSERVER, GITLAB_REPOSITORY_OBSERVER, MESSAGE_FORWARDING_FAILED,
+    BackoffReason, Command, GITLAB_JOBS_OBSERVER, GITLAB_PIPELINE_OBSERVER,
+    GITLAB_REPOSITORY_OBSERVER, GitlabObserverArgs, GitlabObserverMessage, GitlabObserverState,
+    MESSAGE_FORWARDING_FAILED, graphql_endpoint, handle_backoff, init_observer_state,
+    send_to_broker,
 };
-use common::types::GitlabData;
 use common::PROJECTS_CONSUMER_TOPIC;
+use common::types::GitlabData;
 use cynic::{GraphQlResponse, QueryBuilder};
 use gitlab_queries::projects::{MultiProjectQuery, MultiProjectQueryArguments};
-use ractor::{async_trait, registry::where_is, Actor, ActorProcessingErr, ActorRef};
+use ractor::{Actor, ActorProcessingErr, ActorRef, async_trait, registry::where_is};
 use std::time::Duration;
 use tracing::{debug, error, info};
 

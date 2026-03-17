@@ -1,8 +1,8 @@
 use crate::projects::ProjectCoreConnection;
 use crate::users::UserCoreFragment;
-use gitlab_schema::gitlab::{self as schema};
 use gitlab_schema::DateTimeString;
 use gitlab_schema::IdString;
+use gitlab_schema::gitlab::{self as schema};
 
 use rkyv::Archive;
 use rkyv::Deserialize;

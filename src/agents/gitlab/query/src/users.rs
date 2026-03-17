@@ -1,7 +1,7 @@
 #![allow(non_camel_case_types)]
 
-use crate::projects::ProjectMemberConnection;
 use crate::PageInfo;
+use crate::projects::ProjectMemberConnection;
 use cynic::Id;
 use gitlab_schema::gitlab::{self as schema};
 use gitlab_schema::{DateString, DateTimeString};

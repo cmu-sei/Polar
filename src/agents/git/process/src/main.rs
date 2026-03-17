@@ -1,13 +1,13 @@
 use cassini_client::TcpClient;
 use cassini_types::ClientEvent;
 use chrono::Utc;
-use git_agent_common::{GitRepositoryMessage, RepoId, GIT_REPO_PROCESSING_TOPIC};
+use git_agent_common::{GIT_REPO_PROCESSING_TOPIC, GitRepositoryMessage, RepoId};
 use neo4rs::BoltType;
 use polar::get_neo_config;
 use polar::graph::{
-    rel, GraphController, GraphControllerMsg, GraphNodeKey, GraphOp, GraphValue, Property,
+    GraphController, GraphControllerMsg, GraphNodeKey, GraphOp, GraphValue, Property, rel,
 };
-use polar::{impl_graph_controller, SupervisorMessage};
+use polar::{SupervisorMessage, impl_graph_controller};
 use ractor::async_trait;
 use ractor::{Actor, ActorProcessingErr, ActorRef, SupervisionEvent};
 use rkyv::rancor;
@@ -243,12 +243,11 @@ impl Actor for GitRepoProcessingManager {
         myself: ActorRef<Self::Msg>,
         _: (),
     ) -> Result<Self::State, ActorProcessingErr> {
-        let tcp_client = polar::spawn_tcp_client(
-            &format!("{GIT_REPO_PROCESSING_TOPIC}.tcp"),
-            myself.into(),
-            |ev| Some(SupervisorMessage::ClientEvent { event: ev }),
-        )
-        .await?;
+        let tcp_client =
+            polar::spawn_tcp_client(&format!("{GIT_REPO_PROCESSING_TOPIC}.tcp"), myself, |ev| {
+                Some(SupervisorMessage::ClientEvent { event: ev })
+            })
+            .await?;
 
         let s = GitRepoProcessingManagerState {
             tcp_client,

@@ -21,18 +21,18 @@
    DM24-0470
 */
 use crate::{
-    handle_backoff, Command, JiraObserverArgs, JiraObserverMessage, JiraObserverState,
-    BROKER_CLIENT_NAME,
+    BROKER_CLIENT_NAME, Command, JiraObserverArgs, JiraObserverMessage, JiraObserverState,
+    handle_backoff,
 };
 use cassini_client::TcpClientMessage;
 use cassini_types::ClientMessage;
-use jira_common::types::{JiraData, JiraProject};
+use cassini_types::WireTraceCtx;
 use jira_common::JIRA_PROJECTS_CONSUMER_TOPIC;
-use ractor::{async_trait, registry::where_is, Actor, ActorProcessingErr, ActorRef};
+use jira_common::types::{JiraData, JiraProject};
+use ractor::{Actor, ActorProcessingErr, ActorRef, async_trait, registry::where_is};
 use rkyv::rancor::Error;
 use std::time::Duration;
 use tracing::{debug, info};
-use cassini_types::WireTraceCtx;
 
 pub struct JiraProjectObserver;
 
@@ -100,45 +100,41 @@ impl Actor for JiraProjectObserver {
     ) -> Result<(), ActorProcessingErr> {
         match message {
             JiraObserverMessage::Tick(command) => {
-                match command {
-                    Command::GetProjects(op) => {
-                        debug!("{}", op.to_string());
+                if let Command::GetProjects(op) = command {
+                    debug!("{}", op.to_string());
 
-                        let res = state
-                            .web_client
-                            .get(format!("{}{}", state.jira_url, op))
-                            .bearer_auth(format!("{}", state.token.clone().expect("TOKEN")))
-                            .send()
-                            .await?
-                            .json::<Vec<JiraProject>>()
-                            .await?;
+                    let res = state
+                        .web_client
+                        .get(format!("{}{}", state.jira_url, op))
+                        .bearer_auth(state.token.clone().expect("TOKEN").to_string())
+                        .send()
+                        .await?
+                        .json::<Vec<JiraProject>>()
+                        .await?;
 
-                        let tcp_client = where_is(BROKER_CLIENT_NAME.to_string())
-                            .expect("Expected to find client");
+                    let tcp_client =
+                        where_is(BROKER_CLIENT_NAME.to_string()).expect("Expected to find client");
 
-                        let data = JiraData::Projects(res.clone());
-                        println!("{:#?}", data);
-                        let bytes = rkyv::to_bytes::<Error>(&data).unwrap();
+                    let data = JiraData::Projects(res.clone());
+                    println!("{:#?}", data);
+                    let bytes = rkyv::to_bytes::<Error>(&data).unwrap();
 
-                        let msg = ClientMessage::PublishRequest {
-                            topic: JIRA_PROJECTS_CONSUMER_TOPIC.to_string(),
-                            payload: bytes.to_vec().into(),
-                            registration_id: state.registration_id.clone(),
-                            trace_ctx: None,
-                        };
+                    let msg = ClientMessage::PublishRequest {
+                        topic: JIRA_PROJECTS_CONSUMER_TOPIC.to_string(),
+                        payload: bytes.to_vec().into(),
+                        registration_id: state.registration_id.clone(),
+                        trace_ctx: None,
+                    };
 
-                        // Serialize the inner client message before sending
-                        let payload = rkyv::to_bytes::<rkyv::rancor::Error>(&msg)
-                            .expect("Failed to serialize ClientMessage::PublishRequest");
+                    // Serialize the inner client message before sending
+                    let payload = rkyv::to_bytes::<rkyv::rancor::Error>(&msg)
+                        .expect("Failed to serialize ClientMessage::PublishRequest");
 
-                        tcp_client
-                            .send_message(TcpClientMessage::Publish {
-                                topic: JIRA_PROJECTS_CONSUMER_TOPIC.to_string(),
-                                payload: payload.into_vec(),
-                                trace_ctx: WireTraceCtx::from_current_span(),
-                            })?
-                    }
-                    _ => (),
+                    tcp_client.send_message(TcpClientMessage::Publish {
+                        topic: JIRA_PROJECTS_CONSUMER_TOPIC.to_string(),
+                        payload: payload.into_vec(),
+                        trace_ctx: WireTraceCtx::from_current_span(),
+                    })?
                 }
             }
             JiraObserverMessage::Backoff(reason) => {

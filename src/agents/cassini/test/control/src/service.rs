@@ -1,21 +1,21 @@
 use crate::{Test, TestPlan};
 
 use cassini_client::{
-    ClientEventForwarder, ClientEventForwarderArgs, TCPClientConfig, TcpClientActor,
-    TcpClientArgs, TcpClientMessage,
+    ClientEventForwarder, ClientEventForwarderArgs, TCPClientConfig, TcpClientActor, TcpClientArgs,
+    TcpClientMessage,
 };
 use cassini_types::{ClientEvent, ControlResult};
 use harness_common::{AgentRole, ControllerCommand, MessagePattern};
 use ractor::{
-    async_trait, concurrency::JoinHandle, Actor, ActorProcessingErr, ActorRef, OutputPort,
-    SupervisionEvent,
+    Actor, ActorProcessingErr, ActorRef, OutputPort, SupervisionEvent, async_trait,
+    concurrency::JoinHandle,
 };
 use rkyv::rancor::Error;
 use rkyv::rancor::Source;
 use rustls::{
-    pki_types::{pem::PemObject, CertificateDer, PrivateKeyDer},
-    server::WebPkiClientVerifier,
     RootCertStore, ServerConfig,
+    pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject},
+    server::WebPkiClientVerifier,
 };
 use std::sync::Arc;
 use std::{collections::HashMap, env, process::Stdio, time::Duration};
@@ -23,12 +23,12 @@ use tokio::process::Command;
 use tokio::sync::oneshot;
 use tokio::time::Instant;
 use tokio::{
-    io::{split, AsyncReadExt, AsyncWriteExt, BufWriter, ReadHalf, WriteHalf},
+    io::{AsyncReadExt, AsyncWriteExt, BufWriter, ReadHalf, WriteHalf, split},
     net::{TcpListener, TcpStream},
     sync::Mutex,
     task::AbortHandle,
 };
-use tokio_rustls::{server::TlsStream, TlsAcceptor};
+use tokio_rustls::{TlsAcceptor, server::TlsStream};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
@@ -75,8 +75,8 @@ impl HarnessController {
         use tokio::net::TcpStream;
         use tokio_rustls::TlsConnector;
 
-        let ca_cert_path = env::var("TLS_CA_CERT")
-            .map_err(|_| ActorProcessingErr::from("TLS_CA_CERT not set"))?;
+        let ca_cert_path =
+            env::var("TLS_CA_CERT").map_err(|_| ActorProcessingErr::from("TLS_CA_CERT not set"))?;
         let client_cert_path = env::var("TLS_CLIENT_CERT")
             .map_err(|_| ActorProcessingErr::from("TLS_CLIENT_CERT not set"))?;
         let client_key_path = env::var("TLS_CLIENT_KEY")
@@ -104,7 +104,9 @@ impl HarnessController {
         let client_config = ClientConfig::builder()
             .with_webpki_verifier(verifier)
             .with_client_auth_cert(certs, private_key)
-            .map_err(|e| ActorProcessingErr::from(format!("Failed to build client config: {}", e)))?;
+            .map_err(|e| {
+                ActorProcessingErr::from(format!("Failed to build client config: {}", e))
+            })?;
 
         let connector = TlsConnector::from(Arc::new(client_config));
         let server_name = ServerName::try_from(server_name.to_string())
@@ -112,10 +114,10 @@ impl HarnessController {
 
         let start = Instant::now();
         while start.elapsed() < timeout {
-            if let Ok(tcp) = TcpStream::connect(broker_addr).await {
-                if connector.connect(server_name.clone(), tcp).await.is_ok() {
-                    return Ok(());
-                }
+            if let Ok(tcp) = TcpStream::connect(broker_addr).await
+                && connector.connect(server_name.clone(), tcp).await.is_ok()
+            {
+                return Ok(());
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
@@ -145,7 +147,7 @@ impl HarnessController {
             config,
             registration_id: None,
             events_output: None,
-            event_handler: Some(forwarder.into()),
+            event_handler: Some(forwarder),
         };
 
         match Actor::spawn_linked(
@@ -196,13 +198,16 @@ impl HarnessController {
                         let topic = test.producer.topic.clone();
                         let expected = match &test.producer.pattern {
                             MessagePattern::Drip { idle_time_seconds } => {
-                                (test.producer.duration as f64 * *idle_time_seconds as f64).ceil() as usize
+                                (test.producer.duration as f64 * *idle_time_seconds as f64).ceil()
+                                    as usize
                             }
                             MessagePattern::Burst {
                                 burst_size,
                                 idle_time_seconds,
                             } => {
-                                (test.producer.duration as f64 * *idle_time_seconds as f64).ceil() as usize * burst_size
+                                (test.producer.duration as f64 * *idle_time_seconds as f64).ceil()
+                                    as usize
+                                    * burst_size
                             }
                         };
                         let reply = ControllerCommand::SinkConfig {
@@ -241,7 +246,10 @@ impl HarnessController {
                 op: shutdown_op,
                 trace_ctx: None,
             }) {
-                warn!("Failed to send shutdown command via control channel ({}), will kill process directly", e);
+                warn!(
+                    "Failed to send shutdown command via control channel ({}), will kill process directly",
+                    e
+                );
                 // Kill the process via kill channel
                 if let Some(kill_tx) = state.broker_kill.take() {
                     let _ = kill_tx.send(());
@@ -285,7 +293,7 @@ pub struct HarnessControllerState {
     test_state: Option<TestState>,
     server_handle: Option<AbortHandle>,
     // Broker process handling
-    broker_task: Option<JoinHandle<()>>,      // task waiting for broker exit
+    broker_task: Option<JoinHandle<()>>, // task waiting for broker exit
     broker_kill: Option<oneshot::Sender<()>>, // channel to kill broker
     producer: Option<JoinHandle<()>>,
     sink: Option<JoinHandle<()>>,
@@ -323,7 +331,7 @@ impl Actor for HarnessController {
         info!("HarnessController: Starting {myself:?}");
 
         let provider = rustls::crypto::aws_lc_rs::default_provider().install_default();
-        if let Err(_) = provider {
+        if provider.is_err() {
             debug!("Crypto provider configured");
         }
 
@@ -334,10 +342,13 @@ impl Actor for HarnessController {
             .collect();
 
         let mut root_store = RootCertStore::empty();
-        let root_cert = CertificateDer::from_pem_file(args.ca_cert_file.clone()).expect(&format!(
-            "Expected to read CA cert as a PEM file from {}",
-            args.ca_cert_file
-        ));
+        let root_cert =
+            CertificateDer::from_pem_file(args.ca_cert_file.clone()).unwrap_or_else(|_| {
+                panic!(
+                    "Expected to read CA cert as a PEM file from {}",
+                    args.ca_cert_file
+                )
+            });
         root_store
             .add(root_cert)
             .expect("Expected to add root cert to server store");
@@ -346,12 +357,13 @@ impl Actor for HarnessController {
             .build()
             .expect("Expected to build server verifier");
 
-        let private_key = PrivateKeyDer::from_pem_file(args.private_key_file.clone()).expect(
-            &format!(
-                "Expected to load private key as a PEM file from {}",
-                args.private_key_file
-            ),
-        );
+        let private_key = PrivateKeyDer::from_pem_file(args.private_key_file.clone())
+            .unwrap_or_else(|_| {
+                panic!(
+                    "Expected to load private key as a PEM file from {}",
+                    args.private_key_file
+                )
+            });
 
         tracing::debug!("HarnessController: Building configuration for mTLS ");
 
@@ -471,10 +483,15 @@ impl Actor for HarnessController {
         state.broker_kill = Some(kill_tx);
 
         let broker_addr = env::var("BROKER_ADDR").unwrap_or_else(|_| "127.0.0.1:8080".to_string());
-        let server_name = env::var("CASSINI_SERVER_NAME").unwrap_or_else(|_| "localhost".to_string());
-        info!("Waiting for broker mTLS at {} (SNI={})...", broker_addr, server_name);
+        let server_name =
+            env::var("CASSINI_SERVER_NAME").unwrap_or_else(|_| "localhost".to_string());
+        info!(
+            "Waiting for broker mTLS at {} (SNI={})...",
+            broker_addr, server_name
+        );
 
-        match Self::wait_for_broker_ready(&broker_addr, &server_name, Duration::from_secs(10)).await {
+        match Self::wait_for_broker_ready(&broker_addr, &server_name, Duration::from_secs(10)).await
+        {
             Ok(()) => info!("Broker is ready."),
             Err(e) => {
                 error!("Broker failed to become ready: {}", e);
@@ -524,9 +541,15 @@ impl Actor for HarnessController {
             }
         }
 
-        state.producer.as_ref().map(|handle| handle.abort());
-        state.sink.as_ref().map(|handle| handle.abort());
-        state.server_handle.as_ref().map(|handle| handle.abort());
+        if let Some(handle) = state.producer.as_ref() {
+            handle.abort()
+        }
+        if let Some(handle) = state.sink.as_ref() {
+            handle.abort()
+        }
+        if let Some(handle) = state.server_handle.as_ref() {
+            handle.abort()
+        }
 
         // Kill broker if still alive
         if let Some(kill_tx) = state.broker_kill.take() {
@@ -558,19 +581,23 @@ impl Actor for HarnessController {
                 let client_id = actor_cell.get_name().unwrap_or_default();
                 info!(
                     "Client listener: {0}:{1:?} stopped. {reason:?}",
-                    client_id, actor_cell.get_id()
+                    client_id,
+                    actor_cell.get_id()
                 );
-                if let Some(ref client) = state.client_ref {
-                    if client.get_id() == actor_cell.get_id() {
-                        debug!("Controller's own TCP client terminated, clearing reference");
-                        state.client_ref = None;
-                    }
+                if let Some(ref client) = state.client_ref
+                    && client.get_id() == actor_cell.get_id()
+                {
+                    debug!("Controller's own TCP client terminated, clearing reference");
+                    state.client_ref = None;
                 }
             }
             SupervisionEvent::ActorFailed(actor_cell, error) => {
                 if let Some(client_ref) = &state.client_ref {
                     if client_ref.get_id() == actor_cell.get_id() {
-                        warn!("Controller's own TCP client failed (will continue): {}", error);
+                        warn!(
+                            "Controller's own TCP client failed (will continue): {}",
+                            error
+                        );
                         state.client_ref = None;
                     } else {
                         warn!(
@@ -644,9 +671,8 @@ impl Actor for HarnessController {
                                 handle.abort();
                             }
                             if let Some(client_ref) = &state.client_ref {
-                                let _ = client_ref.send_message(TcpClientMessage::Disconnect {
-                                    trace_ctx: None,
-                                });
+                                let _ = client_ref
+                                    .send_message(TcpClientMessage::Disconnect { trace_ctx: None });
                                 state.client_ref = None;
                             }
                             // Wait for broker process to exit
@@ -658,11 +684,14 @@ impl Actor for HarnessController {
                                         error!("Broker task failed: {}", e);
                                     }
                                     info!("Broker process exited, controller may now stop.");
-                                    let _ = myself.send_message(HarnessControllerMessage::BrokerShutdownComplete);
+                                    let _ = myself.send_message(
+                                        HarnessControllerMessage::BrokerShutdownComplete,
+                                    );
                                 });
                             } else {
                                 // Already gone? signal completion directly
-                                let _ = myself.send_message(HarnessControllerMessage::BrokerShutdownComplete);
+                                let _ = myself
+                                    .send_message(HarnessControllerMessage::BrokerShutdownComplete);
                             }
                         }
                     }
@@ -704,27 +733,36 @@ impl Actor for HarnessController {
                     ControllerCommand::Hello { role } => match role {
                         AgentRole::Producer => {
                             debug!("Received hello from producer");
-                            if let Some(test) = state.test_plan.tests.get(state.current_test_index) {
-                                state.test_state.as_mut().map(|s| s.producer = Some(reply_to.clone()));
+                            if let Some(test) = state.test_plan.tests.get(state.current_test_index)
+                            {
+                                state
+                                    .test_state
+                                    .as_mut()
+                                    .map(|s| s.producer = Some(reply_to.clone()));
                                 let reply = ControllerCommand::ProducerConfig {
                                     producer: test.producer.clone(),
                                 };
                                 reply_to.cast(ClientSessionMessage::Send(reply)).ok();
                             } else {
                                 error!("No test found for current index!");
-                                return Err(ActorProcessingErr::from("No test configured.".to_string()));
+                                return Err(ActorProcessingErr::from(
+                                    "No test configured.".to_string(),
+                                ));
                             }
                         }
                         AgentRole::Sink => {
                             debug!("Received hello from sink");
-                            if let Some(_test) = state.test_plan.tests.get(state.current_test_index) {
+                            if let Some(_test) = state.test_plan.tests.get(state.current_test_index)
+                            {
                                 if let Some(test_state) = state.test_state.as_mut() {
                                     test_state.sink = Some(reply_to.clone());
                                 }
                                 HarnessController::issue_sink_configuration(state)?;
                             } else {
                                 error!("No test found for current index!");
-                                return Err(ActorProcessingErr::from("No test configured.".to_string()));
+                                return Err(ActorProcessingErr::from(
+                                    "No test configured.".to_string(),
+                                ));
                             }
                         }
                     },
@@ -735,11 +773,16 @@ impl Actor for HarnessController {
                             // If the producer hasn't been started yet, start it now
                             if test_state.producer.is_none() {
                                 // Spawn producer process (same as existing code)
-                                state.producer = Some(HarnessController::start_client_process(state.producer_path.clone()).await);
+                                state.producer = Some(
+                                    HarnessController::start_client_process(
+                                        state.producer_path.clone(),
+                                    )
+                                    .await,
+                                );
                                 // The producer will connect and send Hello; we'll handle that separately.
                             }
                         }
-                    },
+                    }
                     ControllerCommand::TestComplete { role, .. } => {
                         if let Some(test_state) = state.test_state.as_mut() {
                             match role {
@@ -751,8 +794,12 @@ impl Actor for HarnessController {
                                             ControllerCommand::ProducerFinished,
                                         ))?;
                                     } else {
-                                        error!("Producer completed but no sink session exists – cannot proceed");
-                                        myself.stop(Some("Producer completed but sink missing".to_string()));
+                                        error!(
+                                            "Producer completed but no sink session exists – cannot proceed"
+                                        );
+                                        myself.stop(Some(
+                                            "Producer completed but sink missing".to_string(),
+                                        ));
                                         return Ok(());
                                     }
                                 }
@@ -762,7 +809,9 @@ impl Actor for HarnessController {
                                 debug!("Test {} completed!", state.current_test_index);
                                 info!("Stopping all client sessions after test completion");
                                 for (client_id, client_actor) in state.clients.drain() {
-                                    if let Err(e) = client_actor.send_message(ClientSessionMessage::Stop) {
+                                    if let Err(e) =
+                                        client_actor.send_message(ClientSessionMessage::Stop)
+                                    {
                                         warn!("Failed to send Stop to client {}: {}", client_id, e);
                                     } else {
                                         debug!("Stop sent to client {}", client_id);
@@ -785,14 +834,14 @@ impl Actor for HarnessController {
                     _ => warn!("Unexpected command! {command:?}"),
                 },
                 TestEvent::TransportError { client_id, reason } => {
-                    if let Some(test_state) = &state.test_state {
-                        if test_state.producer_complete || test_state.sink_complete {
-                            info!(
-                                "Transport error after one agent completed ({}): {} – ignoring",
-                                client_id, reason
-                            );
-                            return Ok(());
-                        }
+                    if let Some(test_state) = &state.test_state
+                        && (test_state.producer_complete || test_state.sink_complete)
+                    {
+                        info!(
+                            "Transport error after one agent completed ({}): {} – ignoring",
+                            client_id, reason
+                        );
+                        return Ok(());
                     }
                     let test_complete = state.current_test_index >= state.test_plan.tests.len();
                     if test_complete {
@@ -805,7 +854,10 @@ impl Actor for HarnessController {
                         }
                         return Ok(());
                     }
-                    error!("Transport error before test completion: {} for client {}", reason, client_id);
+                    error!(
+                        "Transport error before test completion: {} for client {}",
+                        reason, client_id
+                    );
                     myself.stop(Some(reason));
                 }
             },
@@ -813,7 +865,9 @@ impl Actor for HarnessController {
             HarnessControllerMessage::StartTest => {
                 if !state.started {
                     state.started = true;
-                    state.sink = Some(HarnessController::start_client_process(state.sink_path.clone()).await);
+                    state.sink = Some(
+                        HarnessController::start_client_process(state.sink_path.clone()).await,
+                    );
                     // tokio::time::sleep(Duration::from_millis(500)).await;
                     // state.producer = Some(HarnessController::start_client_process(state.producer_path.clone()).await);
                     state.test_state = Some(TestState {
@@ -850,14 +904,16 @@ impl Actor for HarnessController {
                         if let Some(last_test) = state.test_plan.tests.get(last_index) {
                             let expected = match &last_test.producer.pattern {
                                 MessagePattern::Drip { idle_time_seconds } => {
-                                    (last_test.producer.duration as f64 * (1.0 / *idle_time_seconds as f64))
+                                    (last_test.producer.duration as f64
+                                        * (1.0 / *idle_time_seconds as f64))
                                         .ceil() as usize
                                 }
                                 MessagePattern::Burst {
                                     burst_size,
                                     idle_time_seconds,
                                 } => {
-                                    (last_test.producer.duration as f64 * (1.0 / *idle_time_seconds as f64))
+                                    (last_test.producer.duration as f64
+                                        * (1.0 / *idle_time_seconds as f64))
                                         .ceil() as usize
                                         * burst_size
                                 }
@@ -879,7 +935,9 @@ impl Actor for HarnessController {
                 }
             }
 
-            HarnessControllerMessage::ClientConnected { client_id, client, .. } => {
+            HarnessControllerMessage::ClientConnected {
+                client_id, client, ..
+            } => {
                 if state.clients.insert(client_id.clone(), client).is_some() {
                     warn!("Client {} already existed, replacing", client_id);
                 } else {
@@ -1045,7 +1103,7 @@ impl Actor for ClientSession {
                             Ok(incoming_msg_length) => {
                                 if incoming_msg_length > 0 {
                                     let mut buffer = vec![0u8; incoming_msg_length as usize];
-                                    if let Ok(_) = buf_reader.read_exact(&mut buffer).await {
+                                    if buf_reader.read_exact(&mut buffer).await.is_ok() {
                                         match rkyv::access::<harness_common::ArchivedControllerCommand, rkyv::rancor::Error>(&buffer[..]) {
                                             Ok(archived) => {
                                                 if let Ok(command) = rkyv::deserialize::<ControllerCommand, rkyv::rancor::Error>(archived) {
@@ -1100,7 +1158,10 @@ impl Actor for ClientSession {
                     .expect("expected to write message to client.");
             }
             ClientSessionMessage::Stop => {
-                debug!("ClientSession {} stopping due to connection close", state.client_id);
+                debug!(
+                    "ClientSession {} stopping due to connection close",
+                    state.client_id
+                );
                 myself.stop(Some("CONNECTION_CLOSED".to_string()));
             }
         }

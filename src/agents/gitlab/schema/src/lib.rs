@@ -93,9 +93,9 @@ impl fmt::Display for CiJobArtifactID {
         write!(f, "{}", self.0)
     }
 }
-// 
+//
 // Represents non-fractional signed whole numeric values. Since the value may exceed the size of a 32-bit integer, it's encoded as a string.
-// 
+//
 #[derive(
     Debug, Serialize, Deserialize, serde::Deserialize, serde::Serialize, Archive, Clone, Default,
 )]
@@ -112,7 +112,6 @@ impl fmt::Display for BigInt {
         write!(f, "{}", self.0)
     }
 }
-
 
 /// Represents a GitLab global ID for a container repository.
 /// Example: "gid://gitlab/ContainerRepository/1"
@@ -135,4 +134,3 @@ impl_scalar!(PackageIDString, gitlab::PackagesPackageID);
 // represent timestamps
 impl_scalar!(DateString, gitlab::Date);
 impl_scalar!(DateTimeString, gitlab::Time);
-

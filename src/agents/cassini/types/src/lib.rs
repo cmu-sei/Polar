@@ -37,12 +37,12 @@ pub enum BrokerMessage {
     PrepareForShutdown {
         auth_token: Option<String>,
     },
-    
+
     /// Control message to initiate a specific shutdown phase
     InitiateShutdownPhase {
         phase: ShutdownPhase,
     },
-  
+
     /// Signal that a shutdown phase has been completed by a manager
     ShutdownPhaseComplete {
         phase: ShutdownPhase,
@@ -245,13 +245,14 @@ pub enum BrokerMessage {
 impl BrokerMessage {
     pub fn from_client_message(msg: ClientMessage, client_id: String) -> Self {
         match msg {
-            ClientMessage::RegistrationRequest { registration_id, trace_ctx } => {
-                BrokerMessage::RegistrationRequest {
-                    registration_id,
-                    client_id,
-                    trace_ctx: trace_ctx.map(|w| w.to_opentelemetry_context()),
-                }
-            }
+            ClientMessage::RegistrationRequest {
+                registration_id,
+                trace_ctx,
+            } => BrokerMessage::RegistrationRequest {
+                registration_id,
+                client_id,
+                trace_ctx: trace_ctx.map(|w| w.to_opentelemetry_context()),
+            },
             ClientMessage::PublishRequest {
                 topic,
                 payload,
@@ -263,7 +264,7 @@ impl BrokerMessage {
                 payload,
                 // Client doesn't know the session actor, so reply_to is None
                 reply_to: None,
-                trace_ctx: trace_ctx.map(|w| w.to_opentelemetry_context() ),
+                trace_ctx: trace_ctx.map(|w| w.to_opentelemetry_context()),
             },
             ClientMessage::SubscribeRequest {
                 topic,
@@ -283,14 +284,15 @@ impl BrokerMessage {
                 topic,
                 trace_ctx: trace_ctx.map(|w| w.to_opentelemetry_context()),
             },
-            ClientMessage::DisconnectRequest { registration_id, trace_ctx } => {
-                BrokerMessage::DisconnectRequest {
-                    client_id,
-                    registration_id,
-                    trace_ctx: trace_ctx.map(|w| w.to_opentelemetry_context()),
-                    reason: DisconnectReason::RemoteClosed,
-                }
-            }
+            ClientMessage::DisconnectRequest {
+                registration_id,
+                trace_ctx,
+            } => BrokerMessage::DisconnectRequest {
+                client_id,
+                registration_id,
+                trace_ctx: trace_ctx.map(|w| w.to_opentelemetry_context()),
+                reason: DisconnectReason::RemoteClosed,
+            },
             ClientMessage::ControlRequest {
                 registration_id,
                 op,
@@ -380,13 +382,17 @@ pub struct SessionSummary {
 /// Events emitted by the client.
 #[derive(Clone, Debug)]
 pub enum ClientEvent {
-    Registered { registration_id: String },
+    Registered {
+        registration_id: String,
+    },
     MessagePublished {
         topic: String,
         payload: Vec<u8>,
         trace_ctx: Option<WireTraceCtx>,
     },
-    TransportError { reason: String },
+    TransportError {
+        reason: String,
+    },
     ControlResponse {
         registration_id: String,
         result: Result<ControlResult, ControlError>,

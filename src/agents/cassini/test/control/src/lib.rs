@@ -39,5 +39,5 @@ pub fn read_test_config(path: &str) -> TestPlan {
 
     let config: TestPlan = serde_dhall::from_str(&dhall_str).parse().unwrap();
 
-    return config;
+    config
 }

@@ -8,10 +8,10 @@ use harness_common::{
 use harness_sink::sink::SinkAgentMsg;
 use ractor::{Actor, ActorProcessingErr, ActorRef, OutputPort, SupervisionEvent, async_trait};
 
-use tracing::{debug, error, info, warn};
 use cassini_client::{init_tracing, shutdown_tracing};
-use std::time::Duration;
 use std::panic;
+use std::time::Duration;
+use tracing::{debug, error, info, warn};
 
 // ============================== Sink Service ============================== //
 
@@ -93,7 +93,11 @@ impl Actor for SinkService {
         Ok(())
     }
 
-    async fn post_stop(&self, _myself: ActorRef<Self::Msg>, _state: &mut Self::State) -> Result<(), ActorProcessingErr> {
+    async fn post_stop(
+        &self,
+        _myself: ActorRef<Self::Msg>,
+        _state: &mut Self::State,
+    ) -> Result<(), ActorProcessingErr> {
         info!("Sink supervisor stopped");
         Ok(())
     }
@@ -126,47 +130,55 @@ impl Actor for SinkService {
                     info!("Sink ref is None at termination time");
                 }
 
-                if let Some(sink_ref) = &state.sink {
-                    if sink_ref.get_id() == actor_id {
-                        state.work_completed = true;
-                        state.sink = None;
+                if let Some(sink_ref) = &state.sink
+                    && sink_ref.get_id() == actor_id
+                {
+                    state.work_completed = true;
+                    state.sink = None;
 
-                        // Check if termination was graceful
-                        let is_graceful = match reason.as_deref() {
-                            Some("GRACEFUL_SHUTDOWN") | Some("ALL_MESSAGES_RECEIVED") => true,
-                            _ => false,
-                        };
+                    // Check if termination was graceful
+                    let is_graceful = match reason.as_deref() {
+                        Some("GRACEFUL_SHUTDOWN") | Some("ALL_MESSAGES_RECEIVED") => true,
+                        _ => false,
+                    };
 
-                        if is_graceful {
-                            // Normal completion – notify controller
-                            info!("Sending TestComplete to controller for sink");
-                            if let Err(e) = state.harness_client.send_message(ControlClientMsg::SendCommand(
-                                ControllerCommand::TestComplete {
-                                    client_id: String::default(),
-                                    role: AgentRole::Sink,
-                                },
-                            )) {
-                                error!("Failed to send TestComplete to controller: {}", e);
-                            }
-                            info!("Sink agent finished, delaying stop to allow message delivery");
-                            // Small delay to let the harness_client process the message
-                            tokio::time::sleep(Duration::from_millis(100)).await;
-
-                            info!("Stopping supervisor now");
-                            myself.stop(Some("Sink finished".to_string()));
-                            return Ok(());
-                        } else {
-                            // Abnormal termination – report error
-                            let error_msg = format!("Sink agent terminated unexpectedly: {:?}", reason);
-                            error!("{}", error_msg);
-                            if let Err(e) = state.harness_client.send_message(ControlClientMsg::SendCommand(
-                                ControllerCommand::TestError { error: error_msg },
-                            )) {
-                                error!("Failed to send TestError to controller: {}", e);
-                            }
-                            myself.stop(Some("Sink agent failed".to_string()));
-                            return Ok(());
+                    if is_graceful {
+                        // Normal completion – notify controller
+                        info!("Sending TestComplete to controller for sink");
+                        if let Err(e) =
+                            state
+                                .harness_client
+                                .send_message(ControlClientMsg::SendCommand(
+                                    ControllerCommand::TestComplete {
+                                        client_id: String::default(),
+                                        role: AgentRole::Sink,
+                                    },
+                                ))
+                        {
+                            error!("Failed to send TestComplete to controller: {}", e);
                         }
+                        info!("Sink agent finished, delaying stop to allow message delivery");
+                        // Small delay to let the harness_client process the message
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+
+                        info!("Stopping supervisor now");
+                        myself.stop(Some("Sink finished".to_string()));
+                        return Ok(());
+                    } else {
+                        // Abnormal termination – report error
+                        let error_msg = format!("Sink agent terminated unexpectedly: {:?}", reason);
+                        error!("{}", error_msg);
+                        if let Err(e) =
+                            state
+                                .harness_client
+                                .send_message(ControlClientMsg::SendCommand(
+                                    ControllerCommand::TestError { error: error_msg },
+                                ))
+                        {
+                            error!("Failed to send TestError to controller: {}", e);
+                        }
+                        myself.stop(Some("Sink agent failed".to_string()));
+                        return Ok(());
                     }
                 }
 
@@ -186,11 +198,14 @@ impl Actor for SinkService {
                 );
                 error!("{}", error_msg);
                 // Notify controller
-                if let Err(e) = state.harness_client.send_message(ControlClientMsg::SendCommand(
-                    ControllerCommand::TestError {
-                        error: error_msg.clone(),
-                    },
-                )) {
+                if let Err(e) = state
+                    .harness_client
+                    .send_message(ControlClientMsg::SendCommand(
+                        ControllerCommand::TestError {
+                            error: error_msg.clone(),
+                        },
+                    ))
+                {
                     error!("Failed to send TestError to controller: {}", e);
                 }
                 // Stop supervisor
@@ -211,8 +226,13 @@ impl Actor for SinkService {
         match message {
             SupervisorMessage::ControllerConnected => {
                 debug!("Controller connected, saying hello.");
-                let cmd = ControllerCommand::Hello { role: AgentRole::Sink };
-                if let Err(e) = state.harness_client.send_message(ControlClientMsg::SendCommand(cmd)) {
+                let cmd = ControllerCommand::Hello {
+                    role: AgentRole::Sink,
+                };
+                if let Err(e) = state
+                    .harness_client
+                    .send_message(ControlClientMsg::SendCommand(cmd))
+                {
                     error!("Failed to send Hello to controller: {}", e);
                     // This is critical; stop supervisor
                     myself.stop(Some(format!("Failed to send Hello: {}", e)));
@@ -221,12 +241,18 @@ impl Actor for SinkService {
             SupervisorMessage::SinkReady => {
                 debug!("Sink ready, notifying controller");
                 let cmd = ControllerCommand::SinkReady;
-                if let Err(e) = state.harness_client.send_message(ControlClientMsg::SendCommand(cmd)) {
+                if let Err(e) = state
+                    .harness_client
+                    .send_message(ControlClientMsg::SendCommand(cmd))
+                {
                     error!("Failed to send SinkReady to controller: {}", e);
                 }
             }
             SupervisorMessage::CommandReceived { command } => match command {
-                ControllerCommand::SinkConfig { topic, expected_count } => {
+                ControllerCommand::SinkConfig {
+                    topic,
+                    expected_count,
+                } => {
                     // Stop existing sink actor if any
                     if let Some(old_sink) = state.sink.take() {
                         info!("Stopping previous sink actor (ID: {:?})", old_sink.get_id());
@@ -235,13 +261,16 @@ impl Actor for SinkService {
                         match old_sink.wait(Some(Duration::from_secs(10))).await {
                             Ok(()) => info!("Previous sink stopped cleanly"),
                             Err(e) => {
-                                error!("Previous sink did not stop within timeout: {:?}. Aborting test.", e);
+                                error!(
+                                    "Previous sink did not stop within timeout: {:?}. Aborting test.",
+                                    e
+                                );
                                 // Notify controller of fatal error
-                                if let Err(send_err) = state.harness_client.send_message(ControlClientMsg::SendCommand(
-                                    ControllerCommand::TestError {
+                                if let Err(send_err) = state.harness_client.send_message(
+                                    ControlClientMsg::SendCommand(ControllerCommand::TestError {
                                         error: format!("Previous sink did not stop: {:?}", e),
-                                    },
-                                )) {
+                                    }),
+                                ) {
                                     error!("Failed to send TestError to controller: {}", send_err);
                                 }
                                 // Stop supervisor – cannot proceed
@@ -251,7 +280,10 @@ impl Actor for SinkService {
                         }
                     }
 
-                    info!("Starting new sink actor for topic {} (expected: {:?})", topic, expected_count);
+                    info!(
+                        "Starting new sink actor for topic {} (expected: {:?})",
+                        topic, expected_count
+                    );
                     let args = harness_sink::sink::SinkConfig {
                         topic: topic.clone(),
                         expected_count,
@@ -274,11 +306,15 @@ impl Actor for SinkService {
                         }
                         Err(e) => {
                             error!("Failed to spawn sink actor: {}", e);
-                            if let Err(send_err) = state.harness_client.send_message(ControlClientMsg::SendCommand(
-                                ControllerCommand::TestError {
-                                    error: format!("Failed to spawn sink actor: {}", e),
-                                },
-                            )) {
+                            if let Err(send_err) =
+                                state
+                                    .harness_client
+                                    .send_message(ControlClientMsg::SendCommand(
+                                        ControllerCommand::TestError {
+                                            error: format!("Failed to spawn sink actor: {}", e),
+                                        },
+                                    ))
+                            {
                                 error!("Failed to send TestError to controller: {}", send_err);
                             }
                             myself.stop(Some("Sink spawn failed".to_string()));
@@ -288,7 +324,9 @@ impl Actor for SinkService {
                 ControllerCommand::ProducerFinished => {
                     debug!("Producer finished, sending graceful stop to sink...");
                     if let Some(sink) = state.sink.as_ref() {
-                        if let Err(e) = sink.send_message(harness_sink::sink::SinkAgentMsg::GracefulStop) {
+                        if let Err(e) =
+                            sink.send_message(harness_sink::sink::SinkAgentMsg::GracefulStop)
+                        {
                             error!("Failed to send GracefulStop to sink: {}", e);
                         }
                     } else {
@@ -296,7 +334,9 @@ impl Actor for SinkService {
                     }
                 }
                 ControllerCommand::Shutdown => {
-                    debug!("Received shutdown command. stopping sink client and commencing validation.");
+                    debug!(
+                        "Received shutdown command. stopping sink client and commencing validation."
+                    );
                     myself.stop(Some("SHUTDOWN".to_string()));
                 }
                 _ => {
@@ -305,7 +345,10 @@ impl Actor for SinkService {
             },
             SupervisorMessage::TransportError { reason } => {
                 if state.sink.is_none() || state.work_completed {
-                    info!("Controller disconnected after work completed (shutdown): {}", reason);
+                    info!(
+                        "Controller disconnected after work completed (shutdown): {}",
+                        reason
+                    );
                 } else {
                     error!("Lost connection to controller: {}", reason);
                     myself.stop(Some(reason));

@@ -24,15 +24,15 @@
 use std::time::Duration;
 
 use crate::graphql_endpoint;
-use common::{types::GitlabData, RUNNERS_CONSUMER_TOPIC};
+use common::{RUNNERS_CONSUMER_TOPIC, types::GitlabData};
 use cynic::{GraphQlResponse, QueryBuilder};
 use gitlab_queries::runners::*;
 
 use crate::{
-    handle_backoff, init_observer_state, send_to_broker, BackoffReason, Command,
-    GitlabObserverArgs, GitlabObserverMessage, GitlabObserverState,
+    BackoffReason, Command, GitlabObserverArgs, GitlabObserverMessage, GitlabObserverState,
+    handle_backoff, init_observer_state, send_to_broker,
 };
-use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef};
+use ractor::{Actor, ActorProcessingErr, ActorRef, async_trait};
 use tracing::{debug, error, info, warn};
 
 pub struct GitlabRunnerObserver;

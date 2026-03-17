@@ -21,21 +21,21 @@
    DM24-0470
 */
 use crate::{
-    handle_backoff, Command, JiraObserverArgs, JiraObserverMessage, JiraObserverState,
-    BROKER_CLIENT_NAME,
+    BROKER_CLIENT_NAME, Command, JiraObserverArgs, JiraObserverMessage, JiraObserverState,
+    handle_backoff,
 };
 use cassini_client::TcpClientMessage;
 use cassini_types::ClientMessage;
-use jira_common::types::{JiraData, JiraField, JsonString};
 use jira_common::JIRA_ISSUES_CONSUMER_TOPIC;
-use ractor::{async_trait, registry::where_is, Actor, ActorProcessingErr, ActorRef};
+use jira_common::types::{JiraData, JiraField, JsonString};
+use ractor::{Actor, ActorProcessingErr, ActorRef, async_trait, registry::where_is};
 use rkyv::rancor::Error;
 use std::time::Duration;
 use tracing::{debug, info};
 
+use cassini_types::WireTraceCtx;
 use serde_json::Value;
 use std::collections::HashMap;
-use cassini_types::WireTraceCtx;
 
 pub struct JiraIssueObserver;
 
@@ -103,106 +103,100 @@ impl Actor for JiraIssueObserver {
     ) -> Result<(), ActorProcessingErr> {
         match message {
             JiraObserverMessage::Tick(command) => {
-                match command {
-                    Command::GetIssues(op) => {
-                        let mut start_at = 0;
-                        let max_results = 50;
-                        let query_string = "''";
-                        debug!("Staring to query for issues...");
-                        // Load up the fields
-                        let field_url = format!("{}/rest/api/2/field", state.jira_url);
-                        let field_result = state
+                if let Command::GetIssues(op) = command {
+                    let mut start_at = 0;
+                    let max_results = 50;
+                    let query_string = "''";
+                    debug!("Staring to query for issues...");
+                    // Load up the fields
+                    let field_url = format!("{}/rest/api/2/field", state.jira_url);
+                    let field_result = state
+                        .web_client
+                        .get(&field_url)
+                        .bearer_auth(state.token.clone().expect("TOKEN").to_string())
+                        .send()
+                        .await?
+                        .json::<Vec<JiraField>>()
+                        .await?;
+                    let mut field_map: HashMap<String, JiraField> = HashMap::new();
+                    for field in field_result {
+                        field_map.insert(field.id.to_string(), field);
+                    }
+
+                    loop {
+                        let url = format!(
+                            "{}{}?query={}&startAt={}&maxResults={}&expand=changelog",
+                            state.jira_url, op, query_string, start_at, max_results
+                        );
+                        debug!("{}", url.to_string());
+                        let res = state
                             .web_client
-                            .get(&field_url)
-                            .bearer_auth(format!("{}", state.token.clone().expect("TOKEN")))
+                            .get(&url)
+                            .bearer_auth(state.token.clone().expect("TOKEN").to_string())
                             .send()
                             .await?
-                            .json::<Vec<JiraField>>()
+                            .json::<serde_json::Value>()
                             .await?;
-                        let mut field_map: HashMap<String, JiraField> = HashMap::new();
-                        for field in field_result {
-                            field_map.insert(field.id.to_string(), field);
-                        }
 
-                        loop {
-                            let url = format!(
-                                "{}{}?query={}&startAt={}&maxResults={}&expand=changelog",
-                                state.jira_url, op, query_string, start_at, max_results
-                            );
-                            debug!("{}", url.to_string());
-                            let res = state
-                                .web_client
-                                .get(&url)
-                                .bearer_auth(format!("{}", state.token.clone().expect("TOKEN")))
-                                .send()
-                                .await?
-                                .json::<serde_json::Value>()
-                                .await?;
+                        let json_data = res["issues"].to_string();
+                        let value: Value = serde_json::from_str(&json_data).unwrap();
 
-                            let json_data = res["issues"].to_string();
-                            let value: Value = serde_json::from_str(&json_data).unwrap();
+                        if let Some(items) = value.as_array() {
+                            for issue in items {
+                                let mut cloned_issue = issue.clone();
 
-                            if let Some(items) = value.as_array() {
-                                for issue in items {
-                                    let mut cloned_issue = issue.clone();
+                                // Replace the "customfield_*" with the name
+                                let fields = cloned_issue.get_mut("fields").expect("FIELDS");
 
-                                    // Replace the "customfield_*" with the name
-                                    let fields = cloned_issue.get_mut("fields").expect("FIELDS");
-
-                                    let mut replacements = vec![];
-                                    for (key, value) in fields.as_object().unwrap() {
-                                        if let Some(found_field) = field_map.get(key.as_str()) {
-                                            let new_key = found_field.name.clone();
-                                            replacements.push((new_key.to_string(), value.clone()));
-                                        }
+                                let mut replacements = vec![];
+                                for (key, value) in fields.as_object().unwrap() {
+                                    if let Some(found_field) = field_map.get(key.as_str()) {
+                                        let new_key = found_field.name.clone();
+                                        replacements.push((new_key.to_string(), value.clone()));
                                     }
-                                    for (new_key, value) in replacements {
-                                        fields[new_key] = value;
-                                    }
-                                    for key in field_map.keys() {
-                                        fields.as_object_mut().unwrap().remove(key);
-                                    }
-
-                                    let tcp_client = where_is(BROKER_CLIENT_NAME.to_string())
-                                        .expect("Expected to find client");
-                                    let wrap = JiraData::Issues(JsonString {
-                                        json: cloned_issue.to_string(),
-                                    });
-                                    let bytes = rkyv::to_bytes::<Error>(&wrap).unwrap();
-
-                                    let msg = ClientMessage::PublishRequest {
-                                        topic: JIRA_ISSUES_CONSUMER_TOPIC.to_string(),
-                                        payload: bytes.to_vec().into(),
-                                        registration_id: state.registration_id.clone(),
-                                        trace_ctx: None,
-                                    };
-
-                                    // Serialize the inner client message before sending
-                                    let payload = rkyv::to_bytes::<rkyv::rancor::Error>(&msg)
-                                        .expect(
-                                            "Failed to serialize ClientMessage::PublishRequest",
-                                        );
-
-                                    tcp_client
-                                        .send_message(TcpClientMessage::Publish {
-                                            topic: JIRA_ISSUES_CONSUMER_TOPIC.to_string(),
-                                            payload: payload.into_vec(),
-                                            trace_ctx: WireTraceCtx::from_current_span(),
-                                        })?;
                                 }
-                            }
-                            let fetched = max_results;
-                            let total = res["total"].as_u64().unwrap_or(0);
+                                for (new_key, value) in replacements {
+                                    fields[new_key] = value;
+                                }
+                                for key in field_map.keys() {
+                                    fields.as_object_mut().unwrap().remove(key);
+                                }
 
-                            if (start_at as usize + fetched) >= total as usize {
-                                break;
-                            }
+                                let tcp_client = where_is(BROKER_CLIENT_NAME.to_string())
+                                    .expect("Expected to find client");
+                                let wrap = JiraData::Issues(JsonString {
+                                    json: cloned_issue.to_string(),
+                                });
+                                let bytes = rkyv::to_bytes::<Error>(&wrap).unwrap();
 
-                            start_at += fetched;
-                            debug!("Loaded {}...", start_at);
+                                let msg = ClientMessage::PublishRequest {
+                                    topic: JIRA_ISSUES_CONSUMER_TOPIC.to_string(),
+                                    payload: bytes.to_vec().into(),
+                                    registration_id: state.registration_id.clone(),
+                                    trace_ctx: None,
+                                };
+
+                                // Serialize the inner client message before sending
+                                let payload = rkyv::to_bytes::<rkyv::rancor::Error>(&msg)
+                                    .expect("Failed to serialize ClientMessage::PublishRequest");
+
+                                tcp_client.send_message(TcpClientMessage::Publish {
+                                    topic: JIRA_ISSUES_CONSUMER_TOPIC.to_string(),
+                                    payload: payload.into_vec(),
+                                    trace_ctx: WireTraceCtx::from_current_span(),
+                                })?;
+                            }
                         }
+                        let fetched = max_results;
+                        let total = res["total"].as_u64().unwrap_or(0);
+
+                        if (start_at + fetched) >= total as usize {
+                            break;
+                        }
+
+                        start_at += fetched;
+                        debug!("Loaded {}...", start_at);
                     }
-                    _ => (),
                 }
             }
             JiraObserverMessage::Backoff(reason) => {

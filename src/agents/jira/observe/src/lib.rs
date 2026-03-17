@@ -21,23 +21,23 @@
    DM24-0470
 */
 
-pub mod projects;
 pub mod groups;
-pub mod users;
 pub mod issues;
+pub mod projects;
 pub mod supervisor;
+pub mod users;
 
 use parse_link_header::parse_with_rel;
 use ractor::concurrency::Duration;
-use reqwest::header::LINK;
+use rand::RngExt;
 use reqwest::Client;
 use reqwest::Error;
 use reqwest::Method;
 use reqwest::Response;
+use reqwest::header::LINK;
 use serde::Deserialize;
 use tokio::task::AbortHandle;
 use tracing::{debug, error};
-use rand::RngExt;
 
 const JIRA_PROJECT_OBSERVER: &str = "jira.observer.projects";
 const JIRA_GROUP_OBSERVER: &str = "jira.observer.groups";
@@ -52,23 +52,23 @@ pub const MESSAGE_FORWARDING_FAILED: &str = "Expected to forward a message to se
 /// General state for all jira observers
 pub struct JiraObserverState {
     /// Endpoint of Jira instance
-    pub jira_url: String, 
+    pub jira_url: String,
     /// Token for authentication
-    pub token: Option<String>,   
+    pub token: Option<String>,
     /// HTTP client
-    pub web_client: Client,      
+    pub web_client: Client,
     /// ID of the agent's session with the broker
-    pub registration_id: String, 
+    pub registration_id: String,
     /// amount of time in seconds the observer will wait before next tick, updated internally by backoff
-    backoff_interval: Duration, 
+    backoff_interval: Duration,
     /// Max amount of time the observer will wait before ticking
-    max_backoff: Duration, 
+    max_backoff: Duration,
     /// Times we failed to query jira for one reason or another
-    failed_attempts: u64, 
+    failed_attempts: u64,
     /// minimum amount of time an observer will wait between queries
     base_interval: Duration,
-    /// thread handle containing the observer loop 
-    task_handle: Option<AbortHandle>
+    /// thread handle containing the observer loop
+    task_handle: Option<AbortHandle>,
 }
 
 impl JiraObserverState {
@@ -81,7 +81,6 @@ impl JiraObserverState {
         base_interval: Duration,
         max_backoff: Duration,
     ) -> Self {
-
         // state
         JiraObserverState {
             jira_url,
@@ -106,7 +105,7 @@ impl JiraObserverState {
         let jitter = Duration::from_secs(rand::rng().random_range(0..30));
         let new_interval = self.backoff_interval * 2 + jitter;
         self.backoff_interval = std::cmp::min(new_interval, self.max_backoff);
-        self.failed_attempts +=1;
+        self.failed_attempts += 1;
     }
 
     /// Reset backoff interval to base
@@ -140,24 +139,26 @@ pub enum BackoffReason {
     JiraUnreachable(String),
     TokenInvalid(String),
 }
-pub enum JiraObserverMessage  {
+pub enum JiraObserverMessage {
     Tick(Command),
     Backoff(BackoffReason),
 }
 
 /// helper function for our observers to respond to backoff messages
-/// either returns a new duration, or 
-pub fn handle_backoff(state: &mut JiraObserverState, reason: BackoffReason) -> Result<Duration, String> {
+/// either returns a new duration, or
+pub fn handle_backoff(
+    state: &mut JiraObserverState,
+    reason: BackoffReason,
+) -> Result<Duration, String> {
     match reason {
-        BackoffReason::JiraUnreachable(_) =>  {
+        BackoffReason::JiraUnreachable(_) => {
             // If jira is unreachable, it *could* come back, but we should only hang around so much before giving up
             if state.failed_attempts < 5 {
                 state.apply_backoff();
                 Ok(state.backoff_interval())
-
             } else {
                 let error = "Backoff limit reached! Stopping".to_string();
-                error!(error); 
+                error!(error);
                 Err(error)
             }
         }
@@ -165,7 +166,7 @@ pub fn handle_backoff(state: &mut JiraObserverState, reason: BackoffReason) -> R
             error!("Encountered a fatal error message! {error}");
             Err(error)
         }
-        _ => todo!()
+        _ => todo!(),
     }
 }
 
@@ -245,6 +246,5 @@ pub async fn get_all_elements<T: for<'a> Deserialize<'a>>(
         link_map = parse_with_rel(headers.get(LINK).unwrap().to_str().unwrap()).unwrap();
     }
 
-    return Some(elements);
+    Some(elements)
 }
-

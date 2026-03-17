@@ -25,12 +25,13 @@ use ractor::concurrency::Duration;
 use serde_json::from_str;
 
 use crate::{
-    graphql_endpoint, handle_backoff, init_observer_state, send_to_broker, BackoffReason, Command,
-    GitlabObserverArgs, GitlabObserverMessage, GitlabObserverState, MESSAGE_FORWARDING_FAILED,
+    BackoffReason, Command, GitlabObserverArgs, GitlabObserverMessage, GitlabObserverState,
+    MESSAGE_FORWARDING_FAILED, graphql_endpoint, handle_backoff, init_observer_state,
+    send_to_broker,
 };
 use common::{
-    types::{GitlabData, ResourceLink},
     GROUPS_CONSUMER_TOPIC,
+    types::{GitlabData, ResourceLink},
 };
 use cynic::{GraphQlResponse, Operation, QueryBuilder};
 use gitlab_queries::groups::{
@@ -38,7 +39,7 @@ use gitlab_queries::groups::{
     MultiGroupQueryArguments,
 };
 use polar::UNEXPECTED_MESSAGE_STR;
-use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef};
+use ractor::{Actor, ActorProcessingErr, ActorRef, async_trait};
 
 use tracing::{debug, error, info, warn};
 

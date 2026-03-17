@@ -1,10 +1,10 @@
-use cassini_types::{BrokerMessage, ControlError, ControlOp, ControlResult, ShutdownPhase};
-use ractor::{concurrency::Duration, rpc::CallResult, Actor, ActorProcessingErr, ActorRef};
-use std::time::Instant;
-use tracing::{debug, error, trace_span, warn, info};
-use tracing_opentelemetry::OpenTelemetrySpanExt;
-use tokio_util::sync::CancellationToken;
 use cassini_tracing::try_set_parent_otel;
+use cassini_types::{BrokerMessage, ControlError, ControlOp, ControlResult, ShutdownPhase};
+use ractor::{Actor, ActorProcessingErr, ActorRef, concurrency::Duration, rpc::CallResult};
+use std::time::Instant;
+use tokio_util::sync::CancellationToken;
+use tracing::{debug, error, info, trace_span, warn};
+use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 use crate::UNEXPECTED_MESSAGE_STR;
 
@@ -68,16 +68,32 @@ impl Actor for ControlManager {
     ) -> Result<(), ActorProcessingErr> {
         match msg {
             BrokerMessage::PrepareForShutdown { auth_token } => {
-                self.handle_prepare_for_shutdown(myself, state, auth_token).await?;
+                self.handle_prepare_for_shutdown(myself, state, auth_token)
+                    .await?;
             }
             BrokerMessage::ShutdownPhaseComplete { phase } => {
-                self.handle_shutdown_phase_complete(myself, state, phase).await?;
+                self.handle_shutdown_phase_complete(myself, state, phase)
+                    .await?;
             }
             BrokerMessage::InitiateShutdownPhase { phase } => {
-                self.handle_initiate_shutdown_phase(myself, state, phase).await?;
+                self.handle_initiate_shutdown_phase(myself, state, phase)
+                    .await?;
             }
-            BrokerMessage::ControlRequest { registration_id, op, trace_ctx, reply_to, } => {
-                self.handle_control_request(myself, state, registration_id, op, reply_to, trace_ctx).await?;
+            BrokerMessage::ControlRequest {
+                registration_id,
+                op,
+                trace_ctx,
+                reply_to,
+            } => {
+                self.handle_control_request(
+                    myself,
+                    state,
+                    registration_id,
+                    op,
+                    reply_to,
+                    trace_ctx,
+                )
+                .await?;
             }
             other => {
                 warn!(?other, "{}", UNEXPECTED_MESSAGE_STR);
@@ -100,11 +116,11 @@ impl ControlManager {
         let _g = span.enter();
 
         // Validate shutdown token if required
-        if let Some(expected_token) = &state.shutdown_auth_token {
-            if auth_token.as_ref() != Some(expected_token) {
-                error!("Invalid shutdown token provided");
-                return Ok(());
-            }
+        if let Some(expected_token) = &state.shutdown_auth_token
+            && auth_token.as_ref() != Some(expected_token)
+        {
+            error!("Invalid shutdown token provided");
+            return Ok(());
         }
 
         if state.is_shutting_down {
@@ -128,8 +144,12 @@ impl ControlManager {
                 phase: ShutdownPhase::StopAcceptingNewConnections,
             })?;
             // Start the global timeout for this phase
-            self.start_phase_timeout(myself.clone(), state, ShutdownPhase::StopAcceptingNewConnections)
-                .await?;
+            self.start_phase_timeout(
+                myself.clone(),
+                state,
+                ShutdownPhase::StopAcceptingNewConnections,
+            )
+            .await?;
         }
         Ok(())
     }
@@ -165,7 +185,8 @@ impl ControlManager {
         state.phase_completed = true;
 
         // Proceed to next phase
-        self.advance_to_next_phase(myself.clone(), state, phase).await?;
+        self.advance_to_next_phase(myself.clone(), state, phase)
+            .await?;
         Ok(())
     }
 
@@ -230,7 +251,11 @@ impl ControlManager {
                 {
                     Ok(result) => match result {
                         CallResult::Success(sessions) => {
-                            debug!(elapsed_ms = t0.elapsed().as_millis(), sessions = sessions.len(), "list_sessions ok");
+                            debug!(
+                                elapsed_ms = t0.elapsed().as_millis(),
+                                sessions = sessions.len(),
+                                "list_sessions ok"
+                            );
                             BrokerMessage::ControlResponse {
                                 registration_id,
                                 result: Ok(ControlResult::SessionList(sessions)),
@@ -238,7 +263,10 @@ impl ControlManager {
                             }
                         }
                         CallResult::SenderError => {
-                            warn!(elapsed_ms = t0.elapsed().as_millis(), "list_sessions sender_error");
+                            warn!(
+                                elapsed_ms = t0.elapsed().as_millis(),
+                                "list_sessions sender_error"
+                            );
                             BrokerMessage::ControlResponse {
                                 registration_id,
                                 result: Err(ControlError::InternalError(
@@ -248,7 +276,10 @@ impl ControlManager {
                             }
                         }
                         CallResult::Timeout => {
-                            warn!(elapsed_ms = t0.elapsed().as_millis(), "list_sessions timeout");
+                            warn!(
+                                elapsed_ms = t0.elapsed().as_millis(),
+                                "list_sessions timeout"
+                            );
                             BrokerMessage::ControlResponse {
                                 registration_id,
                                 result: Err(ControlError::InternalError(
@@ -294,7 +325,11 @@ impl ControlManager {
                 {
                     Ok(result) => match result {
                         CallResult::Success(topics) => {
-                            debug!(elapsed_ms = t0.elapsed().as_millis(), topics = topics.len(), "list_topics ok");
+                            debug!(
+                                elapsed_ms = t0.elapsed().as_millis(),
+                                topics = topics.len(),
+                                "list_topics ok"
+                            );
                             BrokerMessage::ControlResponse {
                                 registration_id,
                                 result: Ok(ControlResult::TopicList(topics)),
@@ -302,7 +337,10 @@ impl ControlManager {
                             }
                         }
                         CallResult::SenderError => {
-                            warn!(elapsed_ms = t0.elapsed().as_millis(), "list_topics sender_error");
+                            warn!(
+                                elapsed_ms = t0.elapsed().as_millis(),
+                                "list_topics sender_error"
+                            );
                             BrokerMessage::ControlResponse {
                                 registration_id,
                                 result: Err(ControlError::InternalError(
@@ -336,9 +374,11 @@ impl ControlManager {
             }
             ControlOp::PrepareForShutdown { auth_token } => {
                 // Forward to ControlManager's own shutdown handler
-                myself.send_message(BrokerMessage::PrepareForShutdown {
-                    auth_token: Some(auth_token)
-                }).ok();
+                myself
+                    .send_message(BrokerMessage::PrepareForShutdown {
+                        auth_token: Some(auth_token),
+                    })
+                    .ok();
 
                 BrokerMessage::ControlResponse {
                     registration_id,
@@ -382,7 +422,9 @@ impl ControlManager {
                 error!("ControlOp::ShutdownBroker not implemented; use PrepareForShutdown instead");
                 BrokerMessage::ControlResponse {
                     registration_id,
-                    result: Err(ControlError::InternalError("use PrepareForShutdown".to_string())),
+                    result: Err(ControlError::InternalError(
+                        "use PrepareForShutdown".to_string(),
+                    )),
                     trace_ctx: Some(span.context()),
                 }
             }
@@ -410,7 +452,9 @@ impl ControlManager {
         completed_phase: ShutdownPhase,
     ) -> Result<(), ActorProcessingErr> {
         let next_phase = match completed_phase {
-            ShutdownPhase::StopAcceptingNewConnections => Some(ShutdownPhase::DrainExistingSessions),
+            ShutdownPhase::StopAcceptingNewConnections => {
+                Some(ShutdownPhase::DrainExistingSessions)
+            }
             ShutdownPhase::DrainExistingSessions => Some(ShutdownPhase::FlushTopicQueues),
             ShutdownPhase::FlushTopicQueues => Some(ShutdownPhase::TerminateSubscribers),
             ShutdownPhase::TerminateSubscribers => Some(ShutdownPhase::TerminateListeners),
@@ -453,7 +497,8 @@ impl ControlManager {
             }
 
             // Start a timeout for this next phase
-            self.start_phase_timeout(myself.clone(), state, next).await?;
+            self.start_phase_timeout(myself.clone(), state, next)
+                .await?;
         }
         Ok(())
     }

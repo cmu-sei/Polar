@@ -3,7 +3,7 @@ use cassini_types::ClientEvent;
 use polar_scheduler_common::ScheduleNotification;
 use ractor::{Actor, ActorProcessingErr, ActorRef, OutputPort};
 use std::sync::Arc;
-use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
+use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
 use tracing::{error, info};
 
 const AGENT_ID: &str = "jenkins-observer-1";
@@ -44,16 +44,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (tx, mut rx) = unbounded_channel();
 
     // Spawn the event forwarder actor
-    let (forwarder, _) = Actor::spawn(
-        Some("event-forwarder".to_string()),
-        EventForwarder,
-        tx,
-    )
-    .await?;
+    let (forwarder, _) =
+        Actor::spawn(Some("event-forwarder".to_string()), EventForwarder, tx).await?;
 
     // OutputPort that will receive ClientEvents from the TcpClient
     let events_output: Arc<OutputPort<ClientEvent>> = Arc::new(OutputPort::default());
-    events_output.subscribe(forwarder, |event| Some(event));
+    events_output.subscribe(forwarder, Some);
 
     let config = TCPClientConfig::new().expect("Failed to create TCP client config");
     let (tcp_client, _handle) = Actor::spawn(
@@ -73,17 +69,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Wait for registration complete
     let mut registered = false;
     while let Some(event) = rx.recv().await {
-        match event {
-            ClientEvent::Registered { .. } => {
-                info!("Client registered, now subscribing to schedule topic");
-                tcp_client.cast(TcpClientMessage::Subscribe {
-                    topic: format!("agent.{}.schedule", AGENT_ID),
-                    trace_ctx: None,
-                })?;
-                registered = true;
-                break;
-            }
-            _ => {}
+        if let ClientEvent::Registered { .. } = event {
+            info!("Client registered, now subscribing to schedule topic");
+            tcp_client.cast(TcpClientMessage::Subscribe {
+                topic: format!("agent.{}.schedule", AGENT_ID),
+                trace_ctx: None,
+            })?;
+            registered = true;
+            break;
         }
     }
 
@@ -112,37 +105,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("Mock agent ready, waiting for notifications...");
 
     while let Some(event) = rx.recv().await {
-        match event {
-            ClientEvent::MessagePublished { topic, payload, .. } => {
-                info!("Received message on topic: {}", topic);
-                if topic == format!("agent.{}.schedule", AGENT_ID) {
-                    match rkyv::from_bytes::<ScheduleNotification, rkyv::rancor::Error>(&payload) {
-                        Ok(notif) => {
-                            info!("Received notification: {:?}", notif);
-                            if let ScheduleNotification::PermanentUpdate { schedule_json, .. } = notif {
-                                // // Fetch full schedule from graph
-                                // let mut result = graph
-                                //     .execute(
-                                //         neo4rs::query(
-                                //             "MATCH (s:Schedule:Permanent {agent_id: $agent_id}) RETURN s.schedule as schedule"
-                                //         )
-                                //         .param("agent_id", agent_id.clone()),
-                                //     )
-                                //     .await?;
-                                // if let Some(row) = result.next().await? {
-                                //   let schedule_json: String = row.get("schedule")?;
-                                //    info!("Full schedule: {}", schedule_json);
-                                // } else {
-                                //     warn!("No schedule found for agent {}", agent_id);
-                                // }
-                                let _schedule: serde_json::Value = serde_json::from_str(&schedule_json)?;
-                            }
+        if let ClientEvent::MessagePublished { topic, payload, .. } = event {
+            info!("Received message on topic: {}", topic);
+            if topic == format!("agent.{}.schedule", AGENT_ID) {
+                match rkyv::from_bytes::<ScheduleNotification, rkyv::rancor::Error>(&payload) {
+                    Ok(notif) => {
+                        info!("Received notification: {:?}", notif);
+                        if let ScheduleNotification::PermanentUpdate { schedule_json, .. } = notif {
+                            // // Fetch full schedule from graph
+                            // let mut result = graph
+                            //     .execute(
+                            //         neo4rs::query(
+                            //             "MATCH (s:Schedule:Permanent {agent_id: $agent_id}) RETURN s.schedule as schedule"
+                            //         )
+                            //         .param("agent_id", agent_id.clone()),
+                            //     )
+                            //     .await?;
+                            // if let Some(row) = result.next().await? {
+                            //   let schedule_json: String = row.get("schedule")?;
+                            //    info!("Full schedule: {}", schedule_json);
+                            // } else {
+                            //     warn!("No schedule found for agent {}", agent_id);
+                            // }
+                            let _schedule: serde_json::Value =
+                                serde_json::from_str(&schedule_json)?;
                         }
-                        Err(e) => error!("Failed to deserialize notification: {:?}", e),
                     }
+                    Err(e) => error!("Failed to deserialize notification: {:?}", e),
                 }
             }
-            _ => {}
         }
     }
 

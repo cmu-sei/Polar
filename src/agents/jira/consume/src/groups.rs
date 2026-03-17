@@ -21,13 +21,13 @@
    DM24-0470
 */
 
-use crate::{subscribe_to_topic, JiraConsumerArgs, JiraConsumerState};
+use crate::{JiraConsumerArgs, JiraConsumerState, subscribe_to_topic};
 use polar::{QUERY_COMMIT_FAILED, QUERY_RUN_FAILED, TRANSACTION_FAILED_ERROR};
 
-use jira_common::types::JiraData;
 use jira_common::JIRA_GROUPS_CONSUMER_TOPIC;
+use jira_common::types::JiraData;
 use neo4rs::Query;
-use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef};
+use ractor::{Actor, ActorProcessingErr, ActorRef, async_trait};
 use tracing::{debug, info};
 
 pub struct JiraGroupConsumer;
@@ -77,41 +77,43 @@ impl Actor for JiraGroupConsumer {
     ) -> Result<(), ActorProcessingErr> {
         match state.graph.start_txn().await {
             Ok(mut transaction) => {
-                match message {
-                    JiraData::Groups(groups) => {
-                        // Create list of groups
-                        let group_array = groups.iter()
-                            .map(|group| {
-                                format!(
-                                    r#"{{ html: {:?}, name: {:?}, labels:{:?} }}"#,
-                                    <Option<std::string::String> as Clone>::clone(&group.html).unwrap_or("".to_string()).clone(),
-                                    group.name.to_string().clone(),
-                                    <Option<std::string::String> as Clone>::clone(&group.label).unwrap_or("".to_string()).clone(),
-                                )
-                            })
-                            .collect::<Vec<_>>()
-                            .join(",\n");
+                if let JiraData::Groups(groups) = message {
+                    // Create list of groups
+                    let group_array = groups
+                        .iter()
+                        .map(|group| {
+                            format!(
+                                r#"{{ html: {:?}, name: {:?}, labels:{:?} }}"#,
+                                <Option<std::string::String> as Clone>::clone(&group.html)
+                                    .unwrap_or("".to_string())
+                                    .clone(),
+                                group.name.to_string().clone(),
+                                <Option<std::string::String> as Clone>::clone(&group.label)
+                                    .unwrap_or("".to_string())
+                                    .clone(),
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join(",\n");
 
-                        // Here, we write a query that creates additional nodes for the group and namespace of the group
-                        let cypher_query = format!(
-                            "
-                            UNWIND [{group_array}] AS group_data
-                            MERGE (group:JiraGroup {{ name: group_data.name }})
-                            SET group.html = group_data.html, group.label = group_data.label
-                            "
-                        );
+                    // Here, we write a query that creates additional nodes for the group and namespace of the group
+                    let cypher_query = format!(
+                        "
+                        UNWIND [{group_array}] AS group_data
+                        MERGE (group:JiraGroup {{ name: group_data.name }})
+                        SET group.html = group_data.html, group.label = group_data.label
+                        "
+                    );
 
-                        debug!(cypher_query);
-                        if let Err(_e) = transaction.run(Query::new(cypher_query)).await {
-                            myself.stop(Some(QUERY_RUN_FAILED.to_string()));
-                        }
-
-                        if let Err(_e) = transaction.commit().await {
-                            myself.stop(Some(QUERY_COMMIT_FAILED.to_string()));
-                        }
-                        info!("Transaction committed.");
+                    debug!(cypher_query);
+                    if let Err(_e) = transaction.run(Query::new(cypher_query)).await {
+                        myself.stop(Some(QUERY_RUN_FAILED.to_string()));
                     }
-                    _ => (),
+
+                    if let Err(_e) = transaction.commit().await {
+                        myself.stop(Some(QUERY_COMMIT_FAILED.to_string()));
+                    }
+                    info!("Transaction committed.");
                 }
             }
             Err(e) => myself.stop(Some(format!("{TRANSACTION_FAILED_ERROR}. {e}"))),

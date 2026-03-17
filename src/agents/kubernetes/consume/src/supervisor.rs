@@ -265,7 +265,7 @@ impl Actor for ClusterConsumerSupervisor {
                                 topic,
                                 payload,
                                 &mut state.projection_cache,
-                                &controller,
+                                controller,
                                 &state.broker_client,
                             )?;
                         } else {

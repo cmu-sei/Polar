@@ -1,4 +1,4 @@
-use cassini_client::{TCPClientConfig, TcpClientActor, TcpClientArgs, TcpClientMessage};
+use cassini_client::TcpClientMessage;
 use cassini_types::ClientEvent;
 use classifier::*;
 use oci_client::{
@@ -376,7 +376,7 @@ impl ResolverAgent {
     ) -> Result<Option<(OciManifest, String)>, ActorProcessingErr> {
         debug!("attempting to resolve image: {image_ref}");
         // Parse the image reference, e.g., "ghcr.io/myorg/myimage:latest"
-        let reference = Reference::from_str(&image_ref)?;
+        let reference = Reference::from_str(image_ref)?;
         // TODO: Consider adding a "strict" mode to allow reading from unconfigured registriesq?
         // if !Self::registry_allowed(&state.config, &reference) {
         //     debug!("Skipping image from unconfigured registry: {}", image_ref);
@@ -437,7 +437,7 @@ impl ResolverAgent {
             // emit OCIArtifactResolved event
             let event = ProvenanceEvent::OCIArtifactResolved {
                 uri: uri.clone(),
-                digest: digest,
+                digest,
                 manifest_data,
                 registry: hostname,
             };
@@ -477,7 +477,7 @@ impl Actor for ResolverAgent {
 
     async fn post_start(
         &self,
-        myself: ActorRef<Self::Msg>,
+        _myself: ActorRef<Self::Msg>,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         info!("Subscribing to topic {PROVENANCE_DISCOVERY_TOPIC}");

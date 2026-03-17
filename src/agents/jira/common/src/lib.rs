@@ -27,7 +27,7 @@ DM24-0470
 //};
 use std::process;
 use std::{
-//    env,
+    //    env,
     fs::{self, File},
     io::{Read, Write},
 };
@@ -101,16 +101,16 @@ pub fn create_lock(filepath: &str) -> Result<bool, std::io::Error> {
             Ok(true)
         }
         Err(e) => {
-            panic!("[*] Problem creating lock file: {}", e.to_string());
+            panic!("[*] Problem creating lock file: {}", e);
         }
     }
 }
 
 /// Helper function to parse a file at a given path and return the raw bytes as a vector
 pub fn get_file_as_byte_vec(filename: &String) -> Result<Vec<u8>, std::io::Error> {
-    let mut f = File::open(&filename)?;
+    let mut f = File::open(filename)?;
 
-    let metadata = std::fs::metadata(&filename)?;
+    let metadata = std::fs::metadata(filename)?;
 
     let mut buffer = vec![0; metadata.len() as usize];
     f.read(&mut buffer).expect("buffer overflow");

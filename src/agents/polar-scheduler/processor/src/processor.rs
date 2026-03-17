@@ -1,9 +1,9 @@
-use polar_scheduler_common::{
-    AdhocAgentAnnouncement, GitScheduleChange, ScheduleNode, ScheduleNotification, ScheduleKind,
-};
 use cassini_client::TcpClientMessage;
 use neo4rs::Graph;
 use polar::graph::{GraphControllerMsg, GraphOp, GraphValue, Property};
+use polar_scheduler_common::{
+    AdhocAgentAnnouncement, GitScheduleChange, ScheduleKind, ScheduleNode, ScheduleNotification,
+};
 use ractor::{Actor, ActorProcessingErr, ActorRef};
 use std::collections::HashMap;
 use tracing::{error, info};
@@ -38,55 +38,87 @@ impl ScheduleInfoProcessor {
                     }
                 };
                 let node_key = match schedule_node.kind {
-                    ScheduleKind::Permanent => ScheduleKey::Permanent { agent_id: schedule_node.agent_id.clone().unwrap() },
-                    ScheduleKind::Adhoc => ScheduleKey::Adhoc { agent_type: schedule_node.agent_type.clone().unwrap() },
-                    ScheduleKind::Ephemeral => ScheduleKey::Ephemeral { agent_type: schedule_node.agent_type.clone().unwrap() },
+                    ScheduleKind::Permanent => ScheduleKey::Permanent {
+                        agent_id: schedule_node.agent_id.clone().unwrap(),
+                    },
+                    ScheduleKind::Adhoc => ScheduleKey::Adhoc {
+                        agent_type: schedule_node.agent_type.clone().unwrap(),
+                    },
+                    ScheduleKind::Ephemeral => ScheduleKey::Ephemeral {
+                        agent_type: schedule_node.agent_type.clone().unwrap(),
+                    },
                 };
 
                 // Use the original JSON string for storage
                 let schedule_json = json;
 
-                state.graph_controller.cast(GraphControllerMsg::Op(GraphOp::UpsertNode {
-                    key: node_key.clone(),
-                    props: vec![Property("schedule".to_string(), GraphValue::String(schedule_json.clone()))],
-                }))?;
+                state
+                    .graph_controller
+                    .cast(GraphControllerMsg::Op(GraphOp::UpsertNode {
+                        key: node_key.clone(),
+                        props: vec![Property(
+                            "schedule".to_string(),
+                            GraphValue::String(schedule_json.clone()),
+                        )],
+                    }))?;
 
                 match schedule_node.kind {
                     ScheduleKind::Permanent => {
                         let agent_id = schedule_node.agent_id.as_ref().unwrap();
                         let prev = state.permanent_versions.get(agent_id).copied();
                         if prev != Some(schedule_node.version) {
-                            state.permanent_versions.insert(agent_id.clone(), schedule_node.version);
+                            state
+                                .permanent_versions
+                                .insert(agent_id.clone(), schedule_node.version);
                             let notif = ScheduleNotification::PermanentUpdate {
                                 agent_id: agent_id.clone(),
                                 schedule_json: schedule_json.clone(),
                             };
-                            publish_notification(state, &format!("agent.{}.schedule", agent_id), &notif).await?;
+                            publish_notification(
+                                state,
+                                &format!("agent.{}.schedule", agent_id),
+                                &notif,
+                            )
+                            .await?;
                         }
                     }
                     ScheduleKind::Adhoc => {
                         let agent_type = schedule_node.agent_type.as_ref().unwrap();
                         let prev = state.adhoc_versions.get(agent_type).copied();
                         if prev != Some(schedule_node.version) {
-                            state.adhoc_versions.insert(agent_type.clone(), schedule_node.version);
+                            state
+                                .adhoc_versions
+                                .insert(agent_type.clone(), schedule_node.version);
                             let notif = ScheduleNotification::AdhocUpdate {
                                 agent_type: agent_type.clone(),
                                 schedule_json: schedule_json.clone(),
                             };
-                            publish_notification(state, &format!("agent.type.{}.schedule", agent_type), &notif).await?;
+                            publish_notification(
+                                state,
+                                &format!("agent.type.{}.schedule", agent_type),
+                                &notif,
+                            )
+                            .await?;
                         }
                     }
                     ScheduleKind::Ephemeral => {
                         let agent_type = schedule_node.agent_type.as_ref().unwrap();
                         let pattern = schedule_node.config["eventPattern"].as_str().unwrap_or("");
                         if !pattern.is_empty() {
-                            state.ephemeral_patterns.insert(pattern.to_string(), agent_type.clone());
+                            state
+                                .ephemeral_patterns
+                                .insert(pattern.to_string(), agent_type.clone());
                         }
                         let notif = ScheduleNotification::EphemeralUpdate {
                             agent_type: agent_type.clone(),
                             schedule_json: schedule_json.clone(),
                         };
-                        publish_notification(state, &format!("agent.type.{}.schedule", agent_type), &notif).await?;
+                        publish_notification(
+                            state,
+                            &format!("agent.type.{}.schedule", agent_type),
+                            &notif,
+                        )
+                        .await?;
                     }
                 }
             }
@@ -103,22 +135,36 @@ impl ScheduleInfoProcessor {
         ann: AdhocAgentAnnouncement,
     ) -> Result<(), ActorProcessingErr> {
         let agent_type = ann.agent_type;
-        let node_key = ScheduleKey::Adhoc { agent_type: agent_type.clone() };
+        let node_key = ScheduleKey::Adhoc {
+            agent_type: agent_type.clone(),
+        };
 
         let schedule_node: ScheduleNode = serde_json::from_str(&ann.default_schedule_json)?;
         let schedule_json = ann.default_schedule_json;
 
-        state.graph_controller.cast(GraphControllerMsg::Op(GraphOp::UpsertNode {
-            key: node_key.clone(),
-            props: vec![Property("schedule".to_string(), GraphValue::String(schedule_json.clone()))],
-        }))?;
+        state
+            .graph_controller
+            .cast(GraphControllerMsg::Op(GraphOp::UpsertNode {
+                key: node_key.clone(),
+                props: vec![Property(
+                    "schedule".to_string(),
+                    GraphValue::String(schedule_json.clone()),
+                )],
+            }))?;
 
-        state.adhoc_versions.insert(agent_type.clone(), schedule_node.version);
+        state
+            .adhoc_versions
+            .insert(agent_type.clone(), schedule_node.version);
         let notif = ScheduleNotification::AdhocUpdate {
             agent_type: agent_type.clone(),
             schedule_json,
         };
-        publish_notification(state, &format!("agent.type.{}.schedule", agent_type), &notif).await?;
+        publish_notification(
+            state,
+            &format!("agent.type.{}.schedule", agent_type),
+            &notif,
+        )
+        .await?;
         Ok(())
     }
 

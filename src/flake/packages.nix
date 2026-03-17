@@ -77,7 +77,6 @@ in
       man-pages-posix
       ncurses
       nix
-      nvim-pkg
       procps
       ps
       ripgrep

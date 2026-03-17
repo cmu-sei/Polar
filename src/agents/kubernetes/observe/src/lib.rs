@@ -1,19 +1,19 @@
 use cassini_client::{TcpClient, TcpClientMessage};
 use futures::{StreamExt, TryStreamExt};
+use k8s_openapi::NamespaceResourceScope;
 use k8s_openapi::api::core::v1::Node;
 use k8s_openapi::api::rbac::v1::{ClusterRole, ClusterRoleBinding};
 use k8s_openapi::apiextensions_apiserver::pkg::apis::apiextensions::v1::CustomResourceDefinition;
-use k8s_openapi::NamespaceResourceScope;
 use kube::runtime::watcher::Event;
-use kube::{api::ListParams, runtime::watcher};
 use kube::{Api, Client, Resource};
+use kube::{api::ListParams, runtime::watcher};
 use kube_common::{
-    RawKubeEvent, BATCH_PROCESS_ACTION, KUBERNETES_CONSUMER, RESOURCE_APPLIED_ACTION,
-    RESOURCE_DELETED_ACTION,
+    BATCH_PROCESS_ACTION, KUBERNETES_CONSUMER, RESOURCE_APPLIED_ACTION, RESOURCE_DELETED_ACTION,
+    RawKubeEvent,
 };
 use ractor::ActorProcessingErr;
-use serde::de::DeserializeOwned;
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 use serde_json::{to_value, to_vec};
 use std::fmt::Debug;
 use tracing::{debug, error, instrument, trace};
@@ -198,7 +198,7 @@ where
 {
     debug!("Observing {} resources in namespace {namespace}", kind);
     // get all deployed pods in our given namespace
-    let api: Api<T> = Api::namespaced(kube_client, &namespace);
+    let api: Api<T> = Api::namespaced(kube_client, namespace);
 
     // ---- LIST ----
     let list = api.list(&ListParams::default()).await?;
@@ -339,8 +339,8 @@ macro_rules! impl_namespaced_watcher {
         #[ractor::async_trait]
         impl ractor::Actor for $actor_name {
             type Msg = WatcherMsg;
-            type State = crate::NamespacedWatcherState;
-            type Arguments = crate::NamespacedWatcherState;
+            type State = $crate::NamespacedWatcherState;
+            type Arguments = $crate::NamespacedWatcherState;
 
             async fn pre_start(
                 &self,

@@ -1,4 +1,4 @@
-use rkyv::{Archive, Serialize as RkyvSerialize, Deserialize as RkyvDeserialize};
+use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use sha2::{Digest, Sha256};
 
 pub use cassini_types::trace::WireTraceCtx;
@@ -16,13 +16,17 @@ pub enum ConnectionState {
     Connected,
     NotContacted,
 }
-#[derive(Clone, Debug, RkyvSerialize, RkyvDeserialize, Archive, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, Debug, RkyvSerialize, RkyvDeserialize, Archive, serde::Serialize, serde::Deserialize,
+)]
 pub enum AgentRole {
     Producer,
     Sink,
 }
 
-#[derive(Clone, Debug, RkyvSerialize, RkyvDeserialize, Archive, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, Debug, RkyvSerialize, RkyvDeserialize, Archive, serde::Serialize, serde::Deserialize,
+)]
 pub enum ControllerCommand {
     Hello {
         role: AgentRole,
@@ -51,7 +55,9 @@ pub enum ControllerCommand {
 }
 
 /// Messaging pattern that mimics user behavior over the network.
-#[derive(Clone, Debug, RkyvSerialize, RkyvDeserialize, Archive, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, Debug, RkyvSerialize, RkyvDeserialize, Archive, serde::Serialize, serde::Deserialize,
+)]
 pub enum MessagePattern {
     Drip {
         idle_time_seconds: u64,
@@ -61,7 +67,9 @@ pub enum MessagePattern {
         idle_time_seconds: u64,
     },
 }
-#[derive(Clone, Debug, RkyvSerialize, RkyvDeserialize, Archive, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, Debug, RkyvSerialize, RkyvDeserialize, Archive, serde::Serialize, serde::Deserialize,
+)]
 pub enum PayloadSpec {
     Fixed(String),
     Random { seed: u64 },
@@ -69,7 +77,9 @@ pub enum PayloadSpec {
     Template { template: String },
 }
 // Config for the supervisor
-#[derive(Clone, Debug, RkyvSerialize, RkyvDeserialize, Archive, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, Debug, RkyvSerialize, RkyvDeserialize, Archive, serde::Serialize, serde::Deserialize,
+)]
 pub struct ProducerConfig {
     pub topic: String,
     pub message_size: u64,
@@ -79,7 +89,9 @@ pub struct ProducerConfig {
 
 /// Expectations are evaluated locally by sinks.
 /// The controller only aggregates failures.
-#[derive(Clone, Debug, RkyvSerialize, RkyvDeserialize, Archive, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, Debug, RkyvSerialize, RkyvDeserialize, Archive, serde::Serialize, serde::Deserialize,
+)]
 pub enum Expectation {
     /// At least N messages observed within a window.
     AtLeast { messages: u64, within_seconds: u64 },
@@ -92,7 +104,9 @@ pub enum Expectation {
 /// Dhall already has strong typing, so testers can describe structured values with guaranteed shape.
 /// We can import their Dhall config in Rust and convert it to JSON.
 /// That JSON can then be wrapped in this envelope (metadata: topic, seqno, checksum if needed, etc).
-#[derive(Debug, Clone, RkyvSerialize, RkyvDeserialize, Archive, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, RkyvSerialize, RkyvDeserialize, Archive, serde::Serialize, serde::Deserialize,
+)]
 pub struct Envelope {
     pub seqno: u64,
     pub data: String,

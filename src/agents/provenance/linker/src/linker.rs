@@ -172,7 +172,7 @@ impl Actor for ProvenanceLinker {
                                     "media_type".to_string(),
                                     GraphValue::String(layer.media_type.clone()),
                                 ),
-                                Property("size".to_string(), GraphValue::I64(layer.size.clone())),
+                                Property("size".to_string(), GraphValue::I64(layer.size)),
                                 Property("urls".to_string(), GraphValue::List(urls)), // TODO: What to do with these? these should give us an opportunity to chase downthe rest of the supply chain
                             ];
 

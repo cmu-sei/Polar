@@ -1,24 +1,24 @@
 use crate::{
+    BrokerConfigError, LISTENER_MANAGER_NAME, SESSION_MANAGER_NAME, SUBSCRIBER_MANAGER_NAME,
+    TOPIC_MANAGER_NAME, UNEXPECTED_MESSAGE_STR,
     control::{ControlManager, ControlManagerState},
     listener::{ListenerManager, ListenerManagerArgs},
     session::{SessionManager, SessionManagerArgs},
-    subscriber::{SubscriberManager,SubscriberManagerArgs},
+    subscriber::{SubscriberManager, SubscriberManagerArgs},
     topic::{TopicManager, TopicManagerArgs},
-    BrokerConfigError, LISTENER_MANAGER_NAME, SESSION_MANAGER_NAME, SUBSCRIBER_MANAGER_NAME,
-    TOPIC_MANAGER_NAME, UNEXPECTED_MESSAGE_STR
 };
 use cassini_types::{BrokerMessage, ShutdownPhase};
-use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef, SupervisionEvent};
 use ractor::concurrency::Duration;
+use ractor::{Actor, ActorProcessingErr, ActorRef, SupervisionEvent, async_trait};
 use tracing::{debug, error, info, trace, trace_span, warn};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
-use std::env;
-use tokio_util::sync::CancellationToken;
 use cassini_tracing::try_set_parent_otel;
-use std::sync::Arc;
-use cassini_types::DisconnectReason;
 use cassini_types::ControlOp;
+use cassini_types::DisconnectReason;
+use std::env;
+use std::sync::Arc;
+use tokio_util::sync::CancellationToken;
 
 // ============================== Broker Supervisor Actor Definition ============================== //
 
@@ -133,14 +133,15 @@ impl Actor for Broker {
                         crate::CONTROL_MANAGER_NAME => {
                             state.control_mgr = None;
                             debug!("ControlManager removed from broker state");
-                         }
+                        }
                         _ => {}
                     }
                 }
 
                 // Check if all managers have terminated during shutdown
                 if state.is_shutting_down {
-                    self.check_shutdown_completion(myself.clone(), state).await?;
+                    self.check_shutdown_completion(myself.clone(), state)
+                        .await?;
                 }
             }
 
@@ -211,12 +212,16 @@ impl Actor for Broker {
         })?;
 
         // Send listener manager ref to the existing session manager
-        let _ = session_mgr.send_message(BrokerMessage::SetListenerManager { listener_mgr: listener_mgr.clone() });
+        let _ = session_mgr.send_message(BrokerMessage::SetListenerManager {
+            listener_mgr: listener_mgr.clone(),
+        });
 
         let (subscriber_mgr, _sub_handle) = Actor::spawn_linked(
             Some(SUBSCRIBER_MANAGER_NAME.to_string()),
             SubscriberManager,
-            SubscriberManagerArgs { session_mgr: session_mgr.clone() },
+            SubscriberManagerArgs {
+                session_mgr: session_mgr.clone(),
+            },
             myself.clone().into(),
         )
         .await
@@ -292,7 +297,10 @@ impl Actor for Broker {
             let mut interval = tokio::time::interval(Duration::from_secs(1));
             loop {
                 interval.tick().await;
-                if myself.send_message(BrokerMessage::CheckShutdownComplete).is_err() {
+                if myself
+                    .send_message(BrokerMessage::CheckShutdownComplete)
+                    .is_err()
+                {
                     // Broker is gone, exit loop
                     break;
                 }
@@ -320,43 +328,119 @@ impl Actor for Broker {
         match message {
             // Order definitely matters here. We must check for shutdown messages first and handle those.
             BrokerMessage::PrepareForShutdown { auth_token } => {
-                self.handle_prepare_for_shutdown(myself, state, auth_token).await?;
+                self.handle_prepare_for_shutdown(myself, state, auth_token)
+                    .await?;
             }
             BrokerMessage::InitiateShutdownPhase { phase } => {
-                self.handle_initiate_shutdown_phase(myself, state, phase).await?;
+                self.handle_initiate_shutdown_phase(myself, state, phase)
+                    .await?;
             }
             BrokerMessage::ShutdownPhaseComplete { phase } => {
-                self.handle_shutdown_phase_complete(myself, state, phase).await?;
+                self.handle_shutdown_phase_complete(myself, state, phase)
+                    .await?;
             }
             BrokerMessage::CheckShutdownComplete => {
                 self.handle_check_shutdown_complete(myself, state).await?;
             }
-            BrokerMessage::RegistrationRequest { registration_id, client_id, trace_ctx, } => {
-                self.handle_registration_request(myself, state, registration_id, client_id, trace_ctx).await?;
+            BrokerMessage::RegistrationRequest {
+                registration_id,
+                client_id,
+                trace_ctx,
+            } => {
+                self.handle_registration_request(
+                    myself,
+                    state,
+                    registration_id,
+                    client_id,
+                    trace_ctx,
+                )
+                .await?;
             }
-            BrokerMessage::SubscribeRequest { registration_id, topic, trace_ctx, } => {
-                self.handle_subscribe_request(myself, state, registration_id, topic, trace_ctx).await?;
+            BrokerMessage::SubscribeRequest {
+                registration_id,
+                topic,
+                trace_ctx,
+            } => {
+                self.handle_subscribe_request(myself, state, registration_id, topic, trace_ctx)
+                    .await?;
             }
-            BrokerMessage::UnsubscribeRequest { registration_id, topic, trace_ctx, } => {
-                self.handle_unsubscribe_request(myself, state, registration_id, topic, trace_ctx).await?;
+            BrokerMessage::UnsubscribeRequest {
+                registration_id,
+                topic,
+                trace_ctx,
+            } => {
+                self.handle_unsubscribe_request(myself, state, registration_id, topic, trace_ctx)
+                    .await?;
             }
-            BrokerMessage::PublishRequest { registration_id, topic, payload, reply_to, trace_ctx, } => {
-                self.handle_publish_request(myself, state, registration_id, topic, payload, reply_to, trace_ctx).await?;
+            BrokerMessage::PublishRequest {
+                registration_id,
+                topic,
+                payload,
+                reply_to,
+                trace_ctx,
+            } => {
+                self.handle_publish_request(
+                    myself,
+                    state,
+                    registration_id,
+                    topic,
+                    payload,
+                    reply_to,
+                    trace_ctx,
+                )
+                .await?;
             }
-            BrokerMessage::PublishResponse { topic, payload, result, trace_ctx, } => {
-                self.handle_publish_response(myself, state, topic, payload, result, trace_ctx).await?;
+            BrokerMessage::PublishResponse {
+                topic,
+                payload,
+                result,
+                trace_ctx,
+            } => {
+                self.handle_publish_response(myself, state, topic, payload, result, trace_ctx)
+                    .await?;
             }
             BrokerMessage::ErrorMessage { error, .. } => {
                 self.handle_error_message(myself, state, error).await?;
             }
-            BrokerMessage::DisconnectRequest { reason, client_id, registration_id, trace_ctx, } => {
-                self.handle_disconnect_request(myself, state, reason, client_id, registration_id, trace_ctx).await?;
+            BrokerMessage::DisconnectRequest {
+                reason,
+                client_id,
+                registration_id,
+                trace_ctx,
+            } => {
+                self.handle_disconnect_request(
+                    myself,
+                    state,
+                    reason,
+                    client_id,
+                    registration_id,
+                    trace_ctx,
+                )
+                .await?;
             }
-            BrokerMessage::TimeoutMessage { client_id, registration_id, error, } => {
-                self.handle_timeout_message(myself, state, client_id, registration_id, error).await?;
+            BrokerMessage::TimeoutMessage {
+                client_id,
+                registration_id,
+                error,
+            } => {
+                self.handle_timeout_message(myself, state, client_id, registration_id, error)
+                    .await?;
             }
-            BrokerMessage::ControlRequest { registration_id, op, reply_to, trace_ctx, } => {
-                self.handle_control_request(myself, state, registration_id, op, reply_to, trace_ctx).await?;
+            BrokerMessage::ControlRequest {
+                registration_id,
+                op,
+                reply_to,
+                trace_ctx,
+            } => {
+                self.handle_control_request(
+                    myself,
+                    state,
+                    registration_id,
+                    op,
+                    reply_to,
+                    trace_ctx,
+                )
+                .await?;
             }
             other => {
                 warn!(?other, "{UNEXPECTED_MESSAGE_STR}");
@@ -379,9 +463,9 @@ impl Broker {
 
         match &state.control_mgr {
             Some(control_mgr) => {
-                if let Err(e) = control_mgr.send_message(
-                    BrokerMessage::PrepareForShutdown { auth_token }
-                ) {
+                if let Err(e) =
+                    control_mgr.send_message(BrokerMessage::PrepareForShutdown { auth_token })
+                {
                     error!(error = %e, "Failed to forward shutdown request to ControlManager");
                 }
             }
@@ -406,16 +490,12 @@ impl Broker {
             ShutdownPhase::StopAcceptingNewConnections => {
                 if let Some(listener_mgr) = &state.listener_mgr {
                     info!("Sending InitiateShutdownPhase to ListenerManager");
-                    listener_mgr.send_message(
-                        BrokerMessage::InitiateShutdownPhase { phase }
-                    )?;
+                    listener_mgr.send_message(BrokerMessage::InitiateShutdownPhase { phase })?;
                 }
             }
             ShutdownPhase::DrainExistingSessions => {
                 if let Some(session_mgr) = &state.session_mgr {
-                    session_mgr.send_message(
-                        BrokerMessage::InitiateShutdownPhase { phase }
-                    )?;
+                    session_mgr.send_message(BrokerMessage::InitiateShutdownPhase { phase })?;
                 } else {
                     // Manager already gone — signal completion ourselves
                     if let Some(control_mgr) = &state.control_mgr {
@@ -425,24 +505,20 @@ impl Broker {
             }
             ShutdownPhase::FlushTopicQueues => {
                 if let Some(topic_mgr) = &state.topic_mgr {
-                    topic_mgr.send_message(
-                        BrokerMessage::InitiateShutdownPhase { phase }
-                    )?;
+                    topic_mgr.send_message(BrokerMessage::InitiateShutdownPhase { phase })?;
                 }
             }
             ShutdownPhase::TerminateSubscribers => {
                 if let Some(subscriber_mgr) = &state.subscriber_mgr {
-                    subscriber_mgr.send_message(
-                        BrokerMessage::InitiateShutdownPhase { phase }
-                    )?;
+                    subscriber_mgr.send_message(BrokerMessage::InitiateShutdownPhase { phase })?;
                 }
             }
             ShutdownPhase::TerminateListeners => {
                 if let Some(listener_mgr) = &state.listener_mgr {
-                    info!("Sending InitiateShutdownPhase to ListenerManager for TerminateListeners");
-                    listener_mgr.send_message(
-                        BrokerMessage::InitiateShutdownPhase { phase }
-                    )?;
+                    info!(
+                        "Sending InitiateShutdownPhase to ListenerManager for TerminateListeners"
+                    );
+                    listener_mgr.send_message(BrokerMessage::InitiateShutdownPhase { phase })?;
                 }
             }
         }
@@ -462,9 +538,8 @@ impl Broker {
 
         // Forward to ControlManager
         if let Some(control_mgr) = &state.control_mgr {
-            if let Err(e) = control_mgr.send_message(
-                BrokerMessage::ShutdownPhaseComplete { phase }
-            ) {
+            if let Err(e) = control_mgr.send_message(BrokerMessage::ShutdownPhaseComplete { phase })
+            {
                 error!(error = %e, "Failed to forward ShutdownPhaseComplete to ControlManager");
             }
         } else {
@@ -481,7 +556,8 @@ impl Broker {
         let span = trace_span!("cassini.broker.check_shutdown_complete");
         let _g = span.enter();
         if state.is_shutting_down {
-            self.check_shutdown_completion(myself.clone(), state).await?;
+            self.check_shutdown_completion(myself.clone(), state)
+                .await?;
         }
         Ok(())
     }
@@ -632,23 +708,24 @@ impl Broker {
         let span = trace_span!("cassini.broker.publish_request", %registration_id, %topic, payload_bytes = payload_len);
         try_set_parent_otel(&span, trace_ctx);
         let _g = span.enter();
-        debug!("Processing publish request with span: {:?}", span.metadata().map(|m| m.name()));
+        debug!(
+            "Processing publish request with span: {:?}",
+            span.metadata().map(|m| m.name())
+        );
         trace!("Broker received publish request");
 
         // Reject new publishes during shutdown
         if state.is_shutting_down {
             warn!("Rejecting publish request during shutdown");
-            if let Some(session_mgr) = &state.session_mgr {
-                if let Err(e2) =
-                    session_mgr.send_message(BrokerMessage::PublishResponse {
-                        topic,
-                        payload: Vec::new().into(),
-                        result: Err("Broker is shutting down".to_string()),
-                        trace_ctx: Some(span.context()),
-                    })
-                {
-                    warn!(error = %e2, "Failed to notify SessionManager of publish failure");
-                }
+            if let Some(session_mgr) = &state.session_mgr
+                && let Err(e2) = session_mgr.send_message(BrokerMessage::PublishResponse {
+                    topic,
+                    payload: Vec::new().into(),
+                    result: Err("Broker is shutting down".to_string()),
+                    trace_ctx: Some(span.context()),
+                })
+            {
+                warn!(error = %e2, "Failed to notify SessionManager of publish failure");
             }
             return Ok(());
         }
@@ -670,14 +747,12 @@ impl Broker {
                 // If forwarding fails, we need a payload for the failure response.
                 // We only have the length now; best we can do is return an error without echoing bytes.
                 if let Some(session_mgr) = &state.session_mgr {
-                    if let Err(e2) =
-                        session_mgr.send_message(BrokerMessage::PublishResponse {
-                            topic,
-                            payload: Vec::new().into(),
-                            result: Err(format!("forward failed: {e}")),
-                            trace_ctx: Some(span.context()),
-                        })
-                    {
+                    if let Err(e2) = session_mgr.send_message(BrokerMessage::PublishResponse {
+                        topic,
+                        payload: Vec::new().into(),
+                        result: Err(format!("forward failed: {e}")),
+                        trace_ctx: Some(span.context()),
+                    }) {
                         warn!(error = %e2, "Failed to notify SessionManager of publish failure");
                     }
                 } else {
@@ -846,17 +921,17 @@ impl Broker {
         state: &mut BrokerState,
     ) -> Result<(), ActorProcessingErr> {
         // Check if all managers have terminated
-        let all_terminated = state.listener_mgr.is_none() &&
-                            state.session_mgr.is_none() &&
-                            state.topic_mgr.is_none() &&
-                            state.subscriber_mgr.is_none() &&
-                            state.control_mgr.is_none();
-        
+        let all_terminated = state.listener_mgr.is_none()
+            && state.session_mgr.is_none()
+            && state.topic_mgr.is_none()
+            && state.subscriber_mgr.is_none()
+            && state.control_mgr.is_none();
+
         if all_terminated {
             info!("All managers have terminated. Broker shutdown complete.");
             myself.stop(Some("GRACEFUL_SHUTDOWN_COMPLETE".to_string()));
         }
-        
+
         Ok(())
     }
 }

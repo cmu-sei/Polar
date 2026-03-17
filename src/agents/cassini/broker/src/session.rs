@@ -1,25 +1,21 @@
-use crate::{get_subscriber_name, UNEXPECTED_MESSAGE_STR};
-use crate::{
-    CLIENT_NOT_FOUND_TXT, PUBLISH_REQ_FAILED_TXT,
-    REGISTRATION_REQ_FAILED_TXT, SUBSCRIBE_REQUEST_FAILED_TXT,
-};
 use crate::BROKER_NOT_FOUND_TXT;
-use cassini_types::{BrokerMessage, ControlError, ShutdownPhase, DisconnectReason, ControlOp, ControlResult};
+use crate::{
+    CLIENT_NOT_FOUND_TXT, PUBLISH_REQ_FAILED_TXT, REGISTRATION_REQ_FAILED_TXT,
+    SUBSCRIBE_REQUEST_FAILED_TXT,
+};
+use crate::{UNEXPECTED_MESSAGE_STR, get_subscriber_name};
+use cassini_tracing::try_set_parent_otel;
+use cassini_types::{
+    BrokerMessage, ControlError, ControlOp, ControlResult, DisconnectReason, ShutdownPhase,
+};
 use ractor::{
-    async_trait,
-    registry::where_is,
-    Actor,
-    ActorProcessingErr,
-    ActorRef,
-    SupervisionEvent,
+    Actor, ActorProcessingErr, ActorRef, SupervisionEvent, async_trait, registry::where_is,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::{debug, error, info, trace, trace_span, warn};
-use uuid::Uuid;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
-use cassini_tracing::try_set_parent_otel;
-
+use uuid::Uuid;
 
 /// The manager process for our concept of client sessions.
 /// When the broker receives word of a new connection from the ListenerManager, it requests
@@ -100,19 +96,44 @@ impl Actor for SessionManager {
     ) -> Result<(), ActorProcessingErr> {
         match message {
             BrokerMessage::PrepareForShutdown { .. } => {
-                self.handle_prepare_for_shutdown(myself.clone(), state).await?;
+                self.handle_prepare_for_shutdown(myself.clone(), state)
+                    .await?;
             }
-            BrokerMessage::InitiateShutdownPhase { phase } if phase == ShutdownPhase::DrainExistingSessions => {
-                self.handle_initiate_drain_phase(myself.clone(), state).await?;
+            BrokerMessage::InitiateShutdownPhase { phase }
+                if phase == ShutdownPhase::DrainExistingSessions =>
+            {
+                self.handle_initiate_drain_phase(myself.clone(), state)
+                    .await?;
             }
-            BrokerMessage::SessionPendingUpdate { registration_id, delta } => {
-                self.handle_session_pending_update(myself.clone(), state, registration_id, delta).await?;
+            BrokerMessage::SessionPendingUpdate {
+                registration_id,
+                delta,
+            } => {
+                self.handle_session_pending_update(myself.clone(), state, registration_id, delta)
+                    .await?;
             }
-            BrokerMessage::RegistrationRequest { registration_id, client_id, trace_ctx } => {
-                self.handle_registration_request(myself.clone(), state, registration_id, client_id, trace_ctx).await?;
+            BrokerMessage::RegistrationRequest {
+                registration_id,
+                client_id,
+                trace_ctx,
+            } => {
+                self.handle_registration_request(
+                    myself.clone(),
+                    state,
+                    registration_id,
+                    client_id,
+                    trace_ctx,
+                )
+                .await?;
             }
-            BrokerMessage::GetSessionRef { registration_id, reply_to } => {
-                let session_ref = state.sessions.get(&registration_id).map(|s| s.agent_ref.clone());
+            BrokerMessage::GetSessionRef {
+                registration_id,
+                reply_to,
+            } => {
+                let session_ref = state
+                    .sessions
+                    .get(&registration_id)
+                    .map(|s| s.agent_ref.clone());
                 reply_to.send(session_ref).ok();
             }
             BrokerMessage::SetListenerManager { listener_mgr } => {
@@ -142,10 +163,11 @@ impl Actor for SessionManager {
                     actor_cell.get_id()
                 );
 
-                if let Some(name) = actor_cell.get_name() {
-                    if let Some(session) = state.sessions.remove(&name) {
-                        self.handle_actor_terminated(myself.clone(), state, session.pending_publishes).await?;
-                    }
+                if let Some(name) = actor_cell.get_name()
+                    && let Some(session) = state.sessions.remove(&name)
+                {
+                    self.handle_actor_terminated(myself.clone(), state, session.pending_publishes)
+                        .await?;
                 }
             }
 
@@ -169,13 +191,17 @@ impl SessionManager {
     ) -> Result<(), ActorProcessingErr> {
         info!("SessionManager preparing for shutdown");
         state.is_shutting_down = true;
-        
+
         // Notify all sessions to prepare for shutdown and stop accepting new work
         for (registration_id, session) in &mut state.sessions {
-            if let Err(e) = session.agent_ref.send_message(
-                BrokerMessage::PrepareForShutdown { auth_token: None }
-            ) {
-                warn!("Failed to notify session {} of shutdown: {}", registration_id, e);
+            if let Err(e) = session
+                .agent_ref
+                .send_message(BrokerMessage::PrepareForShutdown { auth_token: None })
+            {
+                warn!(
+                    "Failed to notify session {} of shutdown: {}",
+                    registration_id, e
+                );
             }
         }
         Ok(())
@@ -196,9 +222,9 @@ impl SessionManager {
 
         for reg_id in &pending {
             if let Some(session) = state.sessions.get(reg_id) {
-                let _ = session.agent_ref.send_message(
-                    BrokerMessage::PrepareForShutdown { auth_token: None }
-                );
+                let _ = session
+                    .agent_ref
+                    .send_message(BrokerMessage::PrepareForShutdown { auth_token: None });
                 state.total_pending_publishes += session.pending_publishes;
             }
         }
@@ -231,9 +257,9 @@ impl SessionManager {
             session.pending_publishes = new_pending;
             // Update global total
             state.total_pending_publishes = (state.total_pending_publishes as i32 + delta) as usize;
-  
+
             debug!(%registration_id, pending = session.pending_publishes, "Pending publish count updated");
-            
+
             // If we're in drain phase, check if we can complete
             if state.drain_phase_active && !state.drain_completion_notified {
                 self.check_drain_complete(myself.clone(), state).await?;
@@ -250,7 +276,8 @@ impl SessionManager {
         client_id: String,
         trace_ctx: Option<opentelemetry::Context>,
     ) -> Result<(), ActorProcessingErr> {
-        let span = trace_span!("session_manager.registration_request", %client_id, ?registration_id);
+        let span =
+            trace_span!("session_manager.registration_request", %client_id, ?registration_id);
         try_set_parent_otel(&span, trace_ctx);
         let _g = span.enter();
         trace!("received registration request");
@@ -280,14 +307,19 @@ impl SessionManager {
         if let Some(existing_id) = &registration_id {
             if let Some(session) = state.sessions.get_mut(existing_id) {
                 info!(registration_id = %existing_id, "reusing existing session");
-                if let Err(e) = session.agent_ref.send_message(BrokerMessage::ReassignClient {
-                    client_ref: listener_ref.clone().into(),
-                    trace_ctx: Some(span.context()),
-                }) {
+                if let Err(e) = session
+                    .agent_ref
+                    .send_message(BrokerMessage::ReassignClient {
+                        client_ref: listener_ref.clone().into(),
+                        trace_ctx: Some(span.context()),
+                    })
+                {
                     error!("Failed to reassign client to existing session: {}", e);
                 } else {
                     let Some(_listener_mgr) = &state.listener_mgr else {
-                        error!("SessionManager: listener_mgr not set, cannot send registration response");
+                        error!(
+                            "SessionManager: listener_mgr not set, cannot send registration response"
+                        );
                         return Ok(());
                     };
                     listener_ref.send_message(BrokerMessage::RegistrationResponse {
@@ -325,7 +357,9 @@ impl SessionManager {
                     },
                 );
                 // Pass broker ref to the session agent
-                let _ = session_agent.send_message(BrokerMessage::SetBrokerRef { broker: state.broker.clone() });
+                let _ = session_agent.send_message(BrokerMessage::SetBrokerRef {
+                    broker: state.broker.clone(),
+                });
                 session_agent
                     .cast(BrokerMessage::InitSession {
                         client_id,
@@ -333,7 +367,9 @@ impl SessionManager {
                     })
                     .ok();
                 let Some(_listener_mgr) = &state.listener_mgr else {
-                    error!("SessionManager: listener_mgr not set, cannot send registration response for new session");
+                    error!(
+                        "SessionManager: listener_mgr not set, cannot send registration response for new session"
+                    );
                     return Ok(());
                 };
             }
@@ -352,7 +388,7 @@ impl SessionManager {
     ) -> Result<(), ActorProcessingErr> {
         // Subtract pending publishes from the global total
         state.total_pending_publishes -= pending_publishes;
-        
+
         // If we are in drain phase, check if we can complete
         if state.drain_phase_active && !state.drain_completion_notified {
             self.check_drain_complete(myself.clone(), state).await?;
@@ -368,21 +404,25 @@ impl SessionManager {
         if !state.drain_phase_active || state.drain_completion_notified {
             return Ok(());
         }
-        
+
         // Calculate total pending publishes
         let total_pending = state.total_pending_publishes;
         let sessions_empty = state.sessions.is_empty();
-        
+
         if total_pending == 0 && sessions_empty {
             info!("All sessions drained and terminated");
             self.signal_drain_complete(myself.clone(), state).await?;
         } else {
-            debug!(total_pending, session_count = state.sessions.len(), "Still draining");
+            debug!(
+                total_pending,
+                session_count = state.sessions.len(),
+                "Still draining"
+            );
         }
-        
+
         Ok(())
     }
-    
+
     async fn signal_drain_complete(
         &self,
         myself: ActorRef<BrokerMessage>,
@@ -462,47 +502,156 @@ impl Actor for SessionAgent {
             BrokerMessage::PrepareForShutdown { .. } => {
                 self.handle_prepare_for_shutdown(state).await?;
             }
-            BrokerMessage::InitSession { trace_ctx, client_id } => {
-                self.handle_init_session(myself.clone(), state, client_id, trace_ctx).await?;
+            BrokerMessage::InitSession {
+                trace_ctx,
+                client_id,
+            } => {
+                self.handle_init_session(myself.clone(), state, client_id, trace_ctx)
+                    .await?;
             }
-            BrokerMessage::RegistrationRequest { client_id, trace_ctx, .. } => {
-                self.handle_re_registration_request(myself.clone(), state, client_id, trace_ctx).await?;
+            BrokerMessage::RegistrationRequest {
+                client_id,
+                trace_ctx,
+                ..
+            } => {
+                self.handle_re_registration_request(myself.clone(), state, client_id, trace_ctx)
+                    .await?;
             }
-            BrokerMessage::ReassignClient { client_ref, trace_ctx } => {
-                self.handle_reassign_client(state, client_ref, trace_ctx).await?;
+            BrokerMessage::ReassignClient {
+                client_ref,
+                trace_ctx,
+            } => {
+                self.handle_reassign_client(state, client_ref, trace_ctx)
+                    .await?;
             }
-            BrokerMessage::PublishRequest { registration_id, topic, payload, reply_to, trace_ctx } => {
-                self.handle_publish_request(myself.clone(), state, registration_id, topic, payload, reply_to, trace_ctx).await?;
+            BrokerMessage::PublishRequest {
+                registration_id,
+                topic,
+                payload,
+                reply_to,
+                trace_ctx,
+            } => {
+                self.handle_publish_request(
+                    myself.clone(),
+                    state,
+                    registration_id,
+                    topic,
+                    payload,
+                    reply_to,
+                    trace_ctx,
+                )
+                .await?;
             }
-            BrokerMessage::PushMessage { payload, topic, trace_ctx } => {
-                self.handle_push_message(myself.clone(), state, payload, topic, trace_ctx).await?;
+            BrokerMessage::PushMessage {
+                payload,
+                topic,
+                trace_ctx,
+            } => {
+                self.handle_push_message(myself.clone(), state, payload, topic, trace_ctx)
+                    .await?;
             }
             BrokerMessage::PublishRequestAck { topic, trace_ctx } => {
-                self.handle_publish_ack(myself.clone(), state, topic, trace_ctx).await?;
+                self.handle_publish_ack(myself.clone(), state, topic, trace_ctx)
+                    .await?;
             }
-            BrokerMessage::SubscribeRequest { registration_id, topic, trace_ctx } => {
-                self.handle_subscribe_request(myself.clone(), state, registration_id, topic, trace_ctx).await?;
+            BrokerMessage::SubscribeRequest {
+                registration_id,
+                topic,
+                trace_ctx,
+            } => {
+                self.handle_subscribe_request(
+                    myself.clone(),
+                    state,
+                    registration_id,
+                    topic,
+                    trace_ctx,
+                )
+                .await?;
             }
-            BrokerMessage::UnsubscribeRequest { registration_id, topic, trace_ctx } => {
-                self.handle_unsubscribe_request(myself.clone(), state, registration_id, topic, trace_ctx).await?;
+            BrokerMessage::UnsubscribeRequest {
+                registration_id,
+                topic,
+                trace_ctx,
+            } => {
+                self.handle_unsubscribe_request(
+                    myself.clone(),
+                    state,
+                    registration_id,
+                    topic,
+                    trace_ctx,
+                )
+                .await?;
             }
-            BrokerMessage::UnsubscribeAcknowledgment { registration_id, topic, result } => {
-                self.handle_unsubscribe_ack(myself.clone(), state, registration_id, topic, result).await?;
+            BrokerMessage::UnsubscribeAcknowledgment {
+                registration_id,
+                topic,
+                result,
+            } => {
+                self.handle_unsubscribe_ack(myself.clone(), state, registration_id, topic, result)
+                    .await?;
             }
-            BrokerMessage::SubscribeAcknowledgment { registration_id, topic, result, trace_ctx } => {
-                self.handle_subscribe_ack(myself.clone(), state, registration_id, topic, result, trace_ctx).await?;
+            BrokerMessage::SubscribeAcknowledgment {
+                registration_id,
+                topic,
+                result,
+                trace_ctx,
+            } => {
+                self.handle_subscribe_ack(
+                    myself.clone(),
+                    state,
+                    registration_id,
+                    topic,
+                    result,
+                    trace_ctx,
+                )
+                .await?;
             }
-            BrokerMessage::DisconnectRequest { reason, client_id, registration_id, trace_ctx } => {
-                self.handle_disconnect_request(myself.clone(), state, reason, client_id, registration_id, trace_ctx).await?;
+            BrokerMessage::DisconnectRequest {
+                reason,
+                client_id,
+                registration_id,
+                trace_ctx,
+            } => {
+                self.handle_disconnect_request(
+                    myself.clone(),
+                    state,
+                    reason,
+                    client_id,
+                    registration_id,
+                    trace_ctx,
+                )
+                .await?;
             }
-            BrokerMessage::TimeoutMessage { client_id, registration_id, error } => {
-                self.handle_timeout_message(myself.clone(), state, client_id, registration_id, error).await?;
+            BrokerMessage::TimeoutMessage {
+                client_id,
+                registration_id,
+                error,
+            } => {
+                self.handle_timeout_message(
+                    myself.clone(),
+                    state,
+                    client_id,
+                    registration_id,
+                    error,
+                )
+                .await?;
             }
-            BrokerMessage::ControlRequest { registration_id, op, trace_ctx, .. } => {
-                self.handle_control_request(myself.clone(), state, registration_id, op, trace_ctx).await?;
+            BrokerMessage::ControlRequest {
+                registration_id,
+                op,
+                trace_ctx,
+                ..
+            } => {
+                self.handle_control_request(myself.clone(), state, registration_id, op, trace_ctx)
+                    .await?;
             }
-            BrokerMessage::ControlResponse { registration_id, result, trace_ctx } => {
-                self.handle_control_response(state, registration_id, result, trace_ctx).await?;
+            BrokerMessage::ControlResponse {
+                registration_id,
+                result,
+                trace_ctx,
+            } => {
+                self.handle_control_response(state, registration_id, result, trace_ctx)
+                    .await?;
             }
             _ => {
                 warn!("{}", format!("{UNEXPECTED_MESSAGE_STR}: {message:?}"));
@@ -567,11 +716,14 @@ impl SessionAgent {
                 state.client_ref = ActorRef::from(listener);
 
                 info!("re-established comms with client");
-                if let Err(e) = state.client_ref.send_message(BrokerMessage::RegistrationResponse {
-                    client_id: client_id.clone(),
-                    result: Ok(registration_id.clone()),
-                    trace_ctx: Some(span.context()),
-                }) {
+                if let Err(e) = state
+                    .client_ref
+                    .send_message(BrokerMessage::RegistrationResponse {
+                        client_id: client_id.clone(),
+                        result: Ok(registration_id.clone()),
+                        trace_ctx: Some(span.context()),
+                    })
+                {
                     error!("failed to send registration ack to listener: {e}");
                 }
 
@@ -584,11 +736,13 @@ impl SessionAgent {
                         }) {
                             let err_msg = format!("{REGISTRATION_REQ_FAILED_TXT} {e}!");
                             error!("{err_msg}");
-                            let _ = state.client_ref.send_message(BrokerMessage::RegistrationResponse {
-                                client_id: state.client_ref.get_name().unwrap_or_default(),
-                                result: Err(err_msg),
-                                trace_ctx: Some(span.context()),
-                            });
+                            let _ = state.client_ref.send_message(
+                                BrokerMessage::RegistrationResponse {
+                                    client_id: state.client_ref.get_name().unwrap_or_default(),
+                                    result: Err(err_msg),
+                                    trace_ctx: Some(span.context()),
+                                },
+                            );
                             myself.stop(Some(e.to_string()));
                         }
                     }
@@ -644,10 +798,12 @@ impl SessionAgent {
 
         // Notify session manager that we're about to send a publish request
         if let Some(manager) = myself.try_get_supervisor() {
-            manager.send_message(BrokerMessage::SessionPendingUpdate {
-                registration_id: reg_id_clone.clone(),
-                delta: 1,
-            }).ok();
+            manager
+                .send_message(BrokerMessage::SessionPendingUpdate {
+                    registration_id: reg_id_clone.clone(),
+                    delta: 1,
+                })
+                .ok();
         }
 
         let broker = match &state.broker {
@@ -655,12 +811,14 @@ impl SessionAgent {
             None => {
                 let err_msg = format!("{PUBLISH_REQ_FAILED_TXT} {BROKER_NOT_FOUND_TXT}");
                 error!("{err_msg}");
-                let _ = state.client_ref.send_message(BrokerMessage::PublishResponse {
-                    topic,
-                    payload,
-                    result: Err(err_msg),
-                    trace_ctx: Some(span.context()),
-                });
+                let _ = state
+                    .client_ref
+                    .send_message(BrokerMessage::PublishResponse {
+                        topic,
+                        payload,
+                        result: Err(err_msg),
+                        trace_ctx: Some(span.context()),
+                    });
                 // no broker -> timeout path (client may be fine; broker is not)
                 let _ = myself.send_message(BrokerMessage::TimeoutMessage {
                     client_id: state.client_ref.get_name().unwrap_or_default(),
@@ -670,10 +828,12 @@ impl SessionAgent {
 
                 // Notify manager that this publish failed immediately (delta -1)
                 if let Some(manager) = myself.try_get_supervisor() {
-                    manager.send_message(BrokerMessage::SessionPendingUpdate {
-                        registration_id: reg_id_clone.clone(),
-                        delta: -1,
-                    }).ok();
+                    manager
+                        .send_message(BrokerMessage::SessionPendingUpdate {
+                            registration_id: reg_id_clone.clone(),
+                            delta: -1,
+                        })
+                        .ok();
                 }
                 return Ok(());
             }
@@ -690,10 +850,12 @@ impl SessionAgent {
             error!("failed to forward publish to broker: {e}");
             // Notify manager that publish failed (delta -1)
             if let Some(manager) = myself.try_get_supervisor() {
-                manager.send_message(BrokerMessage::SessionPendingUpdate {
-                    registration_id: reg_id_clone.clone(),
-                    delta: -1,
-                }).ok();
+                manager
+                    .send_message(BrokerMessage::SessionPendingUpdate {
+                        registration_id: reg_id_clone.clone(),
+                        delta: -1,
+                    })
+                    .ok();
             }
         }
         Ok(())
@@ -721,13 +883,10 @@ impl SessionAgent {
         }) {
             warn!("{PUBLISH_REQ_FAILED_TXT}: {CLIENT_NOT_FOUND_TXT}: {e}");
 
-            if let Some(subscriber) = where_is(get_subscriber_name(
-                &registration_id,
-                &topic,
-            )) {
+            if let Some(subscriber) = where_is(get_subscriber_name(&registration_id, &topic)) {
                 subscriber
-                    .send_message(BrokerMessage::PushMessageFailed { 
-                        payload: payload.clone()
+                    .send_message(BrokerMessage::PushMessageFailed {
+                        payload: payload.clone(),
                     })
                     .inspect_err(|_| warn!("failed to DLQ message on topic {topic}"))
                     .ok();
@@ -750,10 +909,13 @@ impl SessionAgent {
         let _g = span.enter();
         trace!("received publish request ack");
 
-        if let Err(e) = state.client_ref.send_message(BrokerMessage::PublishRequestAck {
-            topic,
-            trace_ctx: Some(span.context()),
-        }) {
+        if let Err(e) = state
+            .client_ref
+            .send_message(BrokerMessage::PublishRequestAck {
+                topic,
+                trace_ctx: Some(span.context()),
+            })
+        {
             error!("failed to forward publish ack to client: {e}");
             let _ = myself.send_message(BrokerMessage::TimeoutMessage {
                 client_id: state.client_ref.get_name().unwrap_or_default(),
@@ -859,11 +1021,14 @@ impl SessionAgent {
         topic: String,
         result: Result<(), String>,
     ) -> Result<(), ActorProcessingErr> {
-        if let Err(e) = state.client_ref.send_message(BrokerMessage::UnsubscribeAcknowledgment {
-            registration_id,
-            topic,
-            result,
-        }) {
+        if let Err(e) = state
+            .client_ref
+            .send_message(BrokerMessage::UnsubscribeAcknowledgment {
+                registration_id,
+                topic,
+                result,
+            })
+        {
             error!("failed to forward unsubscribe ack to client: {e}");
             let _ = myself.send_message(BrokerMessage::TimeoutMessage {
                 client_id: state.client_ref.get_name().unwrap_or_default(),
@@ -897,12 +1062,16 @@ impl SessionAgent {
                     trace_ctx: Some(span.context()),
                 });
 
-                if let Err(e) = state.client_ref.send_message(BrokerMessage::SubscribeAcknowledgment {
-                    registration_id,
-                    topic,
-                    result,
-                    trace_ctx: Some(span.context()),
-                }) {
+                if let Err(e) =
+                    state
+                        .client_ref
+                        .send_message(BrokerMessage::SubscribeAcknowledgment {
+                            registration_id,
+                            topic,
+                            result,
+                            trace_ctx: Some(span.context()),
+                        })
+                {
                     error!("failed to forward subscribe ack to client: {e}");
                     let _ = myself.send_message(BrokerMessage::TimeoutMessage {
                         client_id: state.client_ref.get_name().unwrap_or_default(),
@@ -989,13 +1158,13 @@ impl SessionAgent {
             Some(b) => b.clone(),
             None => {
                 error!("{BROKER_NOT_FOUND_TXT}");
-                let _ = state.client_ref.send_message(BrokerMessage::ControlResponse {
-                    registration_id,
-                    result: Err(ControlError::InternalError(
-                        "broker not found".to_string()
-                    )),
-                    trace_ctx: Some(span.context()),
-                });
+                let _ = state
+                    .client_ref
+                    .send_message(BrokerMessage::ControlResponse {
+                        registration_id,
+                        result: Err(ControlError::InternalError("broker not found".to_string())),
+                        trace_ctx: Some(span.context()),
+                    });
                 return Ok(());
             }
         };
@@ -1007,11 +1176,13 @@ impl SessionAgent {
             trace_ctx: Some(span.context()),
         }) {
             error!("failed to forward control request to broker: {e}");
-            let _ = state.client_ref.send_message(BrokerMessage::ControlResponse {
-                registration_id,
-                result: Err(ControlError::InternalError(format!(
-                    "Failed to process message. {e}"
-                ))),
+            let _ = state
+                .client_ref
+                .send_message(BrokerMessage::ControlResponse {
+                    registration_id,
+                    result: Err(ControlError::InternalError(format!(
+                        "Failed to process message. {e}"
+                    ))),
                     trace_ctx: Some(span.context()),
                 });
         }
@@ -1030,11 +1201,13 @@ impl SessionAgent {
         let _g = span.enter();
         trace!("received control response");
 
-        let _ = _state.client_ref.send_message(BrokerMessage::ControlResponse {
-            registration_id,
-            result,
-            trace_ctx: Some(span.context()),
-        });
+        let _ = _state
+            .client_ref
+            .send_message(BrokerMessage::ControlResponse {
+                registration_id,
+                result,
+                trace_ctx: Some(span.context()),
+            });
         Ok(())
     }
 }

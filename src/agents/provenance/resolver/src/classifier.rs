@@ -58,14 +58,14 @@ impl ArtifactClassifier {
                     components,
                 })
             } else {
-                return Err(ActorProcessingErr::from(
+                Err(ActorProcessingErr::from(
                     "cyclonedx SBOM contained zero components",
-                ));
+                ))
             }
         } else {
-            return Err(ActorProcessingErr::from(
+            Err(ActorProcessingErr::from(
                 "Failed to validate data as an SBOM",
-            ));
+            ))
         }
     }
 }

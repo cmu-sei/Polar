@@ -72,12 +72,14 @@ impl RepoId {
         Self(url.replace("://", "_").replace('/', "_"))
     }
 
-    pub fn to_string(&self) -> String {
-        self.0.clone()
-    }
-
     pub fn new(url: String) -> Self {
         RepoId(url)
+    }
+}
+
+impl std::fmt::Display for RepoId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
     }
 }
 

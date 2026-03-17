@@ -111,7 +111,7 @@ impl Actor for MetaConsumer {
                     props: vec![
                         Property(
                             "enterprise".into(),
-                            GraphValue::Bool(instance.metadata.enterprise.clone()),
+                            GraphValue::Bool(instance.metadata.enterprise),
                         ),
                         Property(
                             "version".into(),

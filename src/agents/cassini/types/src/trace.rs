@@ -1,10 +1,10 @@
-use opentelemetry::trace::{SpanContext, SpanId, TraceContextExt, TraceFlags, TraceId, TraceState};
 use opentelemetry::Context;
+use opentelemetry::trace::{SpanContext, SpanId, TraceContextExt, TraceFlags, TraceId, TraceState};
+use rand::prelude::*;
+use rkyv::{Archive, Deserialize, Serialize};
+use serde::{Deserialize as SerdeDeserialize, Serialize as SerdeSerialize};
 use tracing::Span;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
-use rkyv::{Archive, Deserialize, Serialize};
-use rand::prelude::*;
-use serde::{Deserialize as SerdeDeserialize, Serialize as SerdeSerialize};
 
 #[derive(Debug, Clone, Copy, Archive, Serialize, Deserialize, SerdeSerialize, SerdeDeserialize)]
 #[repr(C)]
@@ -19,11 +19,10 @@ pub struct WireTraceCtx {
 impl WireTraceCtx {
     // Add a method to generate a new trace for a message
     pub fn new_for_message() -> Self {
-        
         let mut rng = rand::rng();
         let trace_id: [u8; 16] = rng.random();
         let span_id: [u8; 8] = rng.random();
-        
+
         Self {
             trace_id,
             span_id,
@@ -43,11 +42,11 @@ impl WireTraceCtx {
     pub fn from_current_span() -> Option<Self> {
         let span = Span::current();
         let otel_context = span.context();
-        
+
         // Get the span reference
         let span_ref = otel_context.span();
         let span_context = span_ref.span_context();
-        
+
         // Check if valid before creating WireTraceCtx
         if !span_context.is_valid() {
             // No active span – generate a new random trace ID for this message.
@@ -68,7 +67,7 @@ impl WireTraceCtx {
             // fallback: create a new random trace
             return Some(Self::new_for_message());
         }
-        
+
         Some(Self {
             trace_id: span_context.trace_id().to_bytes(),
             span_id: span_context.span_id().to_bytes(),

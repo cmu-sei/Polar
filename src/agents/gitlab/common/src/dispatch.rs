@@ -1,6 +1,6 @@
 use crate::types::GitlabEnvelope;
 use polar::DispatcherMessage;
-use ractor::{async_trait, registry::where_is, Actor, ActorProcessingErr, ActorRef};
+use ractor::{Actor, ActorProcessingErr, ActorRef, async_trait, registry::where_is};
 use rkyv::rancor::Error;
 use tracing::{info, warn};
 
@@ -19,10 +19,10 @@ impl MessageDispatcher {
     fn deserialize_and_dispatch(message: Vec<u8>, topic: String) {
         match rkyv::from_bytes::<GitlabEnvelope, Error>(&message) {
             Ok(message) => {
-                if let Some(consumer) = where_is(topic.clone()) {
-                    if let Err(e) = consumer.send_message(message) {
-                        tracing::warn!("Error forwarding message. {e}");
-                    }
+                if let Some(consumer) = where_is(topic.clone())
+                    && let Err(e) = consumer.send_message(message)
+                {
+                    tracing::warn!("Error forwarding message. {e}");
                 }
             }
             Err(err) => warn!("Failed to deserialize message: {:?}", err),

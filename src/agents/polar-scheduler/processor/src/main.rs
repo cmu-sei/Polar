@@ -1,5 +1,5 @@
-use ractor::Actor;
 use polar_scheduler::supervisor::{RootSupervisor, SERVICE_NAME};
+use ractor::Actor;
 
 #[tokio::main]
 async fn main() {

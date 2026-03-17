@@ -22,17 +22,17 @@
 */
 
 use cassini_client::TcpClientMessage;
+use cassini_types::WireTraceCtx;
 use neo4rs::{Config, ConfigBuilder};
 use ractor::registry::where_is;
 use std::error::Error;
 use tracing::info;
-use cassini_types::WireTraceCtx;
 
-pub mod projects;
 pub mod groups;
-pub mod users;
 pub mod issues;
+pub mod projects;
 pub mod supervisor;
+pub mod users;
 
 pub const BROKER_CLIENT_NAME: &str = "JIRA_CONSUMER_CLIENT";
 pub const JIRA_USER_CONSUMER: &str = "users";
@@ -81,7 +81,7 @@ pub fn get_neo_config() -> Config {
     let neo4j_endpoint = std::env::var("GRAPH_ENDPOINT").expect("No GRAPH_ENDPOINT provided.");
     info!("Using Neo4j database at {neo4j_endpoint}");
 
-    let config = match std::env::var("GRAPH_CA_CERT") {
+    match std::env::var("GRAPH_CA_CERT") {
         Ok(client_certificate) => {
             info!("Found GRAPH_CA_CERT at {client_certificate}. Configuring graph client.");
             ConfigBuilder::default()
@@ -104,9 +104,7 @@ pub fn get_neo_config() -> Config {
             .max_connections(10)
             .build()
             .expect("Expected to build neo4rs configuration"),
-    };
-
-    config
+    }
 }
 
 #[derive(Debug)]

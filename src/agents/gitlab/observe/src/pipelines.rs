@@ -22,17 +22,17 @@
 */
 
 use crate::MESSAGE_FORWARDING_FAILED;
-use crate::{graphql_endpoint, init_observer_state, send_to_broker};
 use crate::{
-    BackoffReason, Command, GitlabObserverArgs, GitlabObserverMessage, GitlabObserverState,
-    GITLAB_PROJECT_OBSERVER,
+    BackoffReason, Command, GITLAB_PROJECT_OBSERVER, GitlabObserverArgs, GitlabObserverMessage,
+    GitlabObserverState,
 };
-use common::types::GitlabData;
+use crate::{graphql_endpoint, init_observer_state, send_to_broker};
 use common::PIPELINE_CONSUMER_TOPIC;
+use common::types::GitlabData;
 use cynic::GraphQlResponse;
 use cynic::QueryBuilder;
 use gitlab_queries::projects::*;
-use ractor::{async_trait, registry::where_is, Actor, ActorProcessingErr, ActorRef};
+use ractor::{Actor, ActorProcessingErr, ActorRef, async_trait, registry::where_is};
 use tracing::{debug, error, info, warn};
 
 pub struct GitlabPipelineObserver;
@@ -122,7 +122,11 @@ impl Actor for GitlabPipelineObserver {
                                                                     ),
                                                                 );
 
-                                                                debug!("Found {0} pipeline run(s) for project {1}", read_pipelines.len(), full_path);
+                                                                debug!(
+                                                                    "Found {0} pipeline run(s) for project {1}",
+                                                                    read_pipelines.len(),
+                                                                    full_path
+                                                                );
 
                                                                 let data = GitlabData::Pipelines {
                                                                     project_id: project

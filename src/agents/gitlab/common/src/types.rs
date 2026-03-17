@@ -22,6 +22,7 @@
 */
 
 use gitlab_queries::{
+    LicenseHistoryEntry, Metadata,
     groups::{GroupData, GroupMemberConnection},
     projects::{
         ContainerRepository, ContainerRepositoryTag, GitlabCiJob, Package, Pipeline, Project,
@@ -29,7 +30,6 @@ use gitlab_queries::{
     },
     runners::{CiRunner, CiRunnerConnection, CiRunnerIdConnection},
     users::UserCoreFragment,
-    LicenseHistoryEntry, Metadata,
 };
 use gitlab_schema::IdString;
 use rkyv::{Archive, Deserialize, Serialize};

@@ -1,22 +1,22 @@
 use crate::BROKER_CLIENT_NAME;
 use crate::{
-    linker::{ProvenanceLinker, ProvenanceLinkerArgs},
     PROVENANCE_LIKER_NAME,
+    linker::{ProvenanceLinker, ProvenanceLinkerArgs},
 };
 use cassini_client::{TCPClientConfig, TcpClientArgs};
 use cassini_types::ClientEvent;
+use cassini_types::WireTraceCtx;
 use neo4rs::Graph;
 use polar::{
-    get_neo_config, ProvenanceEvent, Supervisor, SupervisorMessage, PROVENANCE_LINKER_TOPIC,
+    PROVENANCE_LINKER_TOPIC, ProvenanceEvent, Supervisor, SupervisorMessage, get_neo_config,
 };
 use ractor::{
-    async_trait, registry::where_is, Actor, ActorProcessingErr, ActorRef, OutputPort,
-    SupervisionEvent,
+    Actor, ActorProcessingErr, ActorRef, OutputPort, SupervisionEvent, async_trait,
+    registry::where_is,
 };
 use std::sync::Arc;
 use tracing::{debug, warn};
 use tracing::{error, instrument, trace};
-use cassini_types::WireTraceCtx;
 
 // === Supervisor state ===
 pub struct ProvenanceSupervisorState {
@@ -69,7 +69,7 @@ impl Actor for ProvenanceSupervisor {
             debug!("Received event: {event:?}");
             Some(SupervisorMessage::ClientEvent { event })
         });
-        let config = TCPClientConfig::new()?;  // create config (adjust error handling as needed)
+        let config = TCPClientConfig::new()?; // create config (adjust error handling as needed)
         let client_args = TcpClientArgs {
             config,
             registration_id: None,

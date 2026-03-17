@@ -117,7 +117,7 @@ impl GraphNodeKey for ArtifactNodeKey {
                     ),
                     (
                         format!("{prefix}_format"),
-                        BoltType::String(format!("{}", sbom.format.as_str()).into()),
+                        BoltType::String(sbom.format.as_str().to_string().into()),
                     ),
                     (
                         format!("{prefix}_spec_version"),

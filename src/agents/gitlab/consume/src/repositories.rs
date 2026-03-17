@@ -241,21 +241,21 @@ impl GitlabRepositoryConsumer {
             }))?;
 
             // pipelines
-            if let Some(conn) = &pkg.pipelines {
-                if let Some(nodes) = &conn.nodes {
-                    for pipeline in nodes.iter().flatten() {
-                        let pipeline_key = GitlabNodeKey::Pipeline {
-                            instance_id: instance_id.to_string(),
-                            pipeline_id: pipeline.id.to_string(),
-                        };
+            if let Some(conn) = &pkg.pipelines
+                && let Some(nodes) = &conn.nodes
+            {
+                for pipeline in nodes.iter().flatten() {
+                    let pipeline_key = GitlabNodeKey::Pipeline {
+                        instance_id: instance_id.to_string(),
+                        pipeline_id: pipeline.id.to_string(),
+                    };
 
-                        graph.cast(GraphControllerMsg::Op(GraphOp::EnsureEdge {
-                            from: pipeline_key,
-                            to: pkg_key.clone(),
-                            rel_type: "PRODUCED".into(),
-                            props: vec![],
-                        }))?;
-                    }
+                    graph.cast(GraphControllerMsg::Op(GraphOp::EnsureEdge {
+                        from: pipeline_key,
+                        to: pkg_key.clone(),
+                        rel_type: "PRODUCED".into(),
+                        props: vec![],
+                    }))?;
                 }
             }
         }

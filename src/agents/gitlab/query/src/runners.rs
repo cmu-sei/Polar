@@ -1,6 +1,6 @@
 use gitlab_schema::{
-    gitlab::{self as schema},
     DateTimeString, IdString,
+    gitlab::{self as schema},
 };
 use rkyv::Archive;
 use rkyv::Deserialize;

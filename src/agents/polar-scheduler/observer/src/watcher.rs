@@ -1,6 +1,6 @@
 use cassini_client::TcpClientMessage;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
-use polar_scheduler_common::{GitScheduleChange};
+use polar_scheduler_common::GitScheduleChange;
 use ractor::{Actor, ActorProcessingErr, ActorRef};
 use std::path::Path;
 use tokio::sync::mpsc;
@@ -125,33 +125,32 @@ impl GitWatcherActor {
             });
         for entry in walker {
             let entry = entry?;
-            if entry.file_type().is_file() {
-                if let Some(ext) = entry.path().extension() {
-                    if ext == "dhall" {
-                        let path = entry.path().to_path_buf();
-                        if !Self::is_schedule_file(&path, &state.repo_path) {
-                            continue;
-                        }
-                        let path_str = path.to_string_lossy().to_string();
-                        let path_clone = path.clone();
-                        let result = tokio::task::spawn_blocking(move || {
-                            Self::evaluate_dhall_file_to_json(&path_clone)
-                        })
-                        .await;
-                        match result {
-                            Ok(Ok(json)) => {
-                                let change = GitScheduleChange::Create {
-                                    path: path_str,
-                                    json,
-                                };
-                                myself.cast(GitWatcherMsg::PublishChange(change))?;
-                            }
-                            Ok(Err(e)) => {
-                                error!("Failed to evaluate Dhall file {}: {:?}", path_str, e)
-                            }
-                            Err(e) => error!("Task join error for {}: {}", path_str, e),
-                        }
+            if entry.file_type().is_file()
+                && let Some(ext) = entry.path().extension()
+                && ext == "dhall"
+            {
+                let path = entry.path().to_path_buf();
+                if !Self::is_schedule_file(&path, &state.repo_path) {
+                    continue;
+                }
+                let path_str = path.to_string_lossy().to_string();
+                let path_clone = path.clone();
+                let result = tokio::task::spawn_blocking(move || {
+                    Self::evaluate_dhall_file_to_json(&path_clone)
+                })
+                .await;
+                match result {
+                    Ok(Ok(json)) => {
+                        let change = GitScheduleChange::Create {
+                            path: path_str,
+                            json,
+                        };
+                        myself.cast(GitWatcherMsg::PublishChange(change))?;
                     }
+                    Ok(Err(e)) => {
+                        error!("Failed to evaluate Dhall file {}: {:?}", path_str, e)
+                    }
+                    Err(e) => error!("Task join error for {}: {}", path_str, e),
                 }
             }
         }

@@ -59,7 +59,7 @@
         # ---------------------------------------------------------------------------
         container = nix-container-lib.lib.${system}.mkContainer {
           inherit system pkgs;
-          inputs     = { inherit staticanalysis dotacat myNeovimOverlay rust-overlay; };
+          inputs     = { inherit staticanalysis dotacat rust-overlay; };
           configPath = pkgs.writeText "polar-container.dhall" (
             builtins.replaceStrings
               [ "PRELUDE_PATH" ]
@@ -85,6 +85,8 @@
           devContainer = container.image;
           default      = polarPkgs.workspacePackages;
         };
-        devShells.default = container.devShell;
+        devShells.default = (import ./src/flake/containers.nix {
+          inherit system pkgs rust-overlay staticanalysis dotacat myNeovimOverlay;
+        }).devShells.default;
       });
 }

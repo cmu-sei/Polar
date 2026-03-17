@@ -1,14 +1,14 @@
 use crate::{
-    graphql_endpoint, handle_backoff, handle_graphql_errors, init_observer_state, send_to_broker,
-    BackoffReason, Command, GitlabObserverMessage,
+    BackoffReason, Command, GitlabObserverMessage, graphql_endpoint, handle_backoff,
+    handle_graphql_errors, init_observer_state, send_to_broker,
 };
 use crate::{GitlabObserverArgs, GitlabObserverState, MESSAGE_FORWARDING_FAILED};
-use common::types::{GitlabData, GitlabInstance};
 use common::METADATA_CONSUMER_TOPIC;
+use common::types::{GitlabData, GitlabInstance};
 use cynic::GraphQlResponse;
 use cynic::QueryBuilder;
 use gitlab_queries::{LicenseHistoryEntry, LicenseHistoryQuery, MetadataQuery};
-use ractor::{concurrency::Duration, Actor, ActorProcessingErr, ActorRef};
+use ractor::{Actor, ActorProcessingErr, ActorRef, concurrency::Duration};
 
 use tracing::{debug, error, info};
 

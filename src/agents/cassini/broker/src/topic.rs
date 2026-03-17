@@ -1,14 +1,14 @@
-use crate::{PUBLISH_REQ_FAILED_TXT};
+use crate::PUBLISH_REQ_FAILED_TXT;
 use crate::UNEXPECTED_MESSAGE_STR;
+use cassini_tracing::try_set_parent_otel;
 use cassini_types::{BrokerMessage, ShutdownPhase};
 use ractor::rpc::CallResult;
-use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef, SupervisionEvent};
+use ractor::{Actor, ActorProcessingErr, ActorRef, SupervisionEvent, async_trait};
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::time::Duration;
 use std::sync::Arc;
+use std::time::Duration;
 use tracing::{debug, error, info, trace, trace_span, warn};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
-use cassini_tracing::try_set_parent_otel;
 
 pub const TOPIC_ADD_FAILED_TXT: &str = "Failed to add topic \"{topic}!\"";
 
@@ -241,23 +241,63 @@ impl Actor for TopicManager {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
-            BrokerMessage::InitiateShutdownPhase { phase } if phase == ShutdownPhase::FlushTopicQueues => {
-                self.handle_initiate_shutdown_phase(myself.clone(), state).await?;
+            BrokerMessage::InitiateShutdownPhase { phase }
+                if phase == ShutdownPhase::FlushTopicQueues =>
+            {
+                self.handle_initiate_shutdown_phase(myself.clone(), state)
+                    .await?;
             }
             BrokerMessage::PrepareForShutdown { .. } => {
                 self.handle_prepare_for_shutdown(state).await?;
             }
-            BrokerMessage::PublishRequest { registration_id, topic, payload, reply_to, trace_ctx } => {
-                self.handle_publish_request(myself.clone(), state, registration_id, topic, payload, reply_to, trace_ctx).await?;
+            BrokerMessage::PublishRequest {
+                registration_id,
+                topic,
+                payload,
+                reply_to,
+                trace_ctx,
+            } => {
+                self.handle_publish_request(
+                    myself.clone(),
+                    state,
+                    registration_id,
+                    topic,
+                    payload,
+                    reply_to,
+                    trace_ctx,
+                )
+                .await?;
             }
-            BrokerMessage::PublishResponse { topic, payload, trace_ctx, .. } => {
-                self.handle_publish_response(myself.clone(), state, topic, payload, trace_ctx).await?;
+            BrokerMessage::PublishResponse {
+                topic,
+                payload,
+                trace_ctx,
+                ..
+            } => {
+                self.handle_publish_response(myself.clone(), state, topic, payload, trace_ctx)
+                    .await?;
             }
-            BrokerMessage::SubscribeRequest { registration_id, topic, trace_ctx } => {
-                self.handle_subscribe_request(myself.clone(), state, registration_id, topic, trace_ctx).await?;
+            BrokerMessage::SubscribeRequest {
+                registration_id,
+                topic,
+                trace_ctx,
+            } => {
+                self.handle_subscribe_request(
+                    myself.clone(),
+                    state,
+                    registration_id,
+                    topic,
+                    trace_ctx,
+                )
+                .await?;
             }
-            BrokerMessage::GetTopics { registration_id, reply_to, trace_ctx } => {
-                self.handle_get_topics(myself.clone(), state, registration_id, reply_to, trace_ctx).await?;
+            BrokerMessage::GetTopics {
+                registration_id,
+                reply_to,
+                trace_ctx,
+            } => {
+                self.handle_get_topics(myself.clone(), state, registration_id, reply_to, trace_ctx)
+                    .await?;
             }
             _ => warn!(UNEXPECTED_MESSAGE_STR),
         }
@@ -270,18 +310,15 @@ impl Actor for TopicManager {
         msg: SupervisionEvent,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        match msg {
-            SupervisionEvent::ActorTerminated(actor_cell, _, _) => {
-                if let Some(name) = actor_cell.get_name() {
-                    // Remove from topics map if it exists
-                    state.topics.remove(&name);
-                    // If we are in shutdown (flush phase) and no topics remain, complete
-                    if state.is_shutting_down && state.topics.is_empty() {
-                        self.signal_flush_complete(myself.clone(), state).await?;
-                    }
-                }
+        if let SupervisionEvent::ActorTerminated(actor_cell, _, _) = msg
+            && let Some(name) = actor_cell.get_name()
+        {
+            // Remove from topics map if it exists
+            state.topics.remove(&name);
+            // If we are in shutdown (flush phase) and no topics remain, complete
+            if state.is_shutting_down && state.topics.is_empty() {
+                self.signal_flush_complete(myself.clone(), state).await?;
             }
-            _ => {}
         }
         Ok(())
     }
@@ -298,11 +335,12 @@ impl TopicManager {
         state.is_shutting_down = true;
 
         // Ask each topic agent to flush its queue and then shut down
-        for (_topic_name, topic_actor) in &state.topics {
+        for topic_actor in state.topics.values() {
             let _ = topic_actor.send_message(BrokerMessage::FlushQueue {
-                reply_to: myself.clone().into(),
+                reply_to: myself.clone(),
             });
-            let _ = topic_actor.send_message(BrokerMessage::PrepareForShutdown { auth_token: None });
+            let _ =
+                topic_actor.send_message(BrokerMessage::PrepareForShutdown { auth_token: None });
         }
 
         if state.topics.is_empty() {
@@ -451,8 +489,7 @@ impl TopicManager {
 
         trace!("Topic Manager retrieving topics.");
 
-        let topics: HashSet<String> =
-            state.topics.keys().map(|topic| topic.to_owned()).collect();
+        let topics: HashSet<String> = state.topics.keys().map(|topic| topic.to_owned()).collect();
 
         reply_to
             .send(topics)
@@ -487,8 +524,8 @@ struct TopicAgent;
 
 struct TopicAgentState {
     subscribers: Vec<ActorRef<BrokerMessage>>,
-    queue: VecDeque<Arc<Vec<u8>>>,  // Changed from VecDeque<Vec<u8>>
-    flushing: bool, // whether we are in flush phase
+    queue: VecDeque<Arc<Vec<u8>>>, // Changed from VecDeque<Vec<u8>>
+    flushing: bool,                // whether we are in flush phase
 }
 
 #[async_trait]
@@ -526,19 +563,51 @@ impl Actor for TopicAgent {
     ) -> Result<(), ActorProcessingErr> {
         match message {
             BrokerMessage::FlushQueue { reply_to } => {
-                self.handle_flush_queue(myself.clone(), state, reply_to).await?;
+                self.handle_flush_queue(myself.clone(), state, reply_to)
+                    .await?;
             }
             BrokerMessage::PrepareForShutdown { .. } => {
-                self.handle_prepare_for_shutdown(myself.clone(), state).await?;
+                self.handle_prepare_for_shutdown(myself.clone(), state)
+                    .await?;
             }
-            BrokerMessage::PublishRequest { registration_id, topic, payload, reply_to, trace_ctx } => {
-                self.handle_publish_request(myself.clone(), state, registration_id, topic, payload, reply_to, trace_ctx).await?;
+            BrokerMessage::PublishRequest {
+                registration_id,
+                topic,
+                payload,
+                reply_to,
+                trace_ctx,
+            } => {
+                self.handle_publish_request(
+                    myself.clone(),
+                    state,
+                    registration_id,
+                    topic,
+                    payload,
+                    reply_to,
+                    trace_ctx,
+                )
+                .await?;
             }
-            BrokerMessage::AddSubscriber { subscriber_ref, trace_ctx } => {
-                self.handle_add_subscriber(myself.clone(), state, subscriber_ref, trace_ctx).await?;
+            BrokerMessage::AddSubscriber {
+                subscriber_ref,
+                trace_ctx,
+            } => {
+                self.handle_add_subscriber(myself.clone(), state, subscriber_ref, trace_ctx)
+                    .await?;
             }
-            BrokerMessage::UnsubscribeRequest { registration_id, topic, trace_ctx } => {
-                self.handle_unsubscribe_request(myself.clone(), state, registration_id, topic, trace_ctx).await?;
+            BrokerMessage::UnsubscribeRequest {
+                registration_id,
+                topic,
+                trace_ctx,
+            } => {
+                self.handle_unsubscribe_request(
+                    myself.clone(),
+                    state,
+                    registration_id,
+                    topic,
+                    trace_ctx,
+                )
+                .await?;
             }
             _ => (),
         }
@@ -573,7 +642,10 @@ impl TopicAgent {
         while let Some(msg) = state.queue.pop_front() {
             if state.subscribers.is_empty() {
                 // No one to deliver to; we discard the message (but log it).
-                warn!("Discarding queued message on topic {} during flush: no subscribers", myself.get_name().unwrap_or_default());
+                warn!(
+                    "Discarding queued message on topic {} during flush: no subscribers",
+                    myself.get_name().unwrap_or_default()
+                );
                 continue;
             }
             for subscriber in &state.subscribers {

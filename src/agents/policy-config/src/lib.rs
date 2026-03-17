@@ -98,7 +98,9 @@ pub fn get_latest_commit(
         let repo = Repository::open(repo_path)?;
 
         if has_local_changes(&repo)? || has_diverged_commits(&repo)? {
-            println!("Repository is dirty (uncommitted changes, untracked files, or committed but unpushed changes). Re-cloning...");
+            println!(
+                "Repository is dirty (uncommitted changes, untracked files, or committed but unpushed changes). Re-cloning..."
+            );
             fs::remove_dir_all(repo_path).map_err(|e| Error::from_str(&e.to_string()))?;
             clone_repo(repo_url, repo_path, username, token)?;
         }

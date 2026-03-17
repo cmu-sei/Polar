@@ -25,12 +25,12 @@ use crate::GitlabConsumerState;
 use crate::GitlabNodeKey;
 use cassini_client::TcpClientMessage;
 use common::{
-    types::{GitlabData, GitlabEnvelope},
     USER_CONSUMER_TOPIC,
+    types::{GitlabData, GitlabEnvelope},
 };
 use gitlab_queries::{projects::ProjectMember, users::UserCoreFragment};
 use polar::graph::{GraphControllerMsg, GraphOp, GraphValue, Property};
-use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef};
+use ractor::{Actor, ActorProcessingErr, ActorRef, async_trait};
 use tracing::{debug, info};
 
 pub struct GitlabUserConsumer;
@@ -172,13 +172,13 @@ impl GitlabUserConsumer {
 
             let mut rel_props = Vec::new();
 
-            if let Some(access) = &membership.access_level {
-                if let Some(level) = access.integer_value {
-                    rel_props.push(Property(
-                        "access_level".into(),
-                        GraphValue::I64(level as i64),
-                    ));
-                }
+            if let Some(access) = &membership.access_level
+                && let Some(level) = access.integer_value
+            {
+                rel_props.push(Property(
+                    "access_level".into(),
+                    GraphValue::I64(level as i64),
+                ));
             }
 
             if let Some(created_at) = &membership.created_at {
@@ -219,12 +219,10 @@ impl Actor for GitlabUserConsumer {
         state: Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
         // fire off subscribe message
-        state
-            .tcp_client
-            .cast(TcpClientMessage::Subscribe {
-                topic: USER_CONSUMER_TOPIC.to_string(),
-                trace_ctx: None,
-            })?;
+        state.tcp_client.cast(TcpClientMessage::Subscribe {
+            topic: USER_CONSUMER_TOPIC.to_string(),
+            trace_ctx: None,
+        })?;
 
         debug!("{myself:?} starting");
         Ok(state)

@@ -25,7 +25,6 @@ pub const UNEXPECTED_DISCONNECT: &str = "UNEXPECTED_DISCONNECT";
 /// Wire is length-prefixed JSON for easy debugging:
 /// [u32 BE length][ JSON bytes ]
 /// ----------------------------
-
 /// ----------------------------
 /// ControlClient actor
 /// Connects to controller, does handshake, receives JSON ControllerCommand,
@@ -45,11 +44,14 @@ pub enum ClientEvent {
     Connected,
     CommandReceived { command: ControllerCommand },
 }
+
+type TlsWriter = Option<Arc<Mutex<BufWriter<WriteHalf<TlsStream<TcpStream>>>>>>;
+
 /// Actor state for the TCP client
 pub struct ControlClientState {
     bind_addr: String,
     server_name: String,
-    writer: Option<Arc<Mutex<BufWriter<WriteHalf<TlsStream<TcpStream>>>>>>,
+    writer: TlsWriter,
     reader: Option<ReadHalf<TlsStream<TcpStream>>>, // Use Option to allow taking ownership
     client_config: Arc<ClientConfig>,
     /// Output port where message payloads and the topic it came from is piped to a dispatcher
@@ -141,20 +143,20 @@ impl ControlClient {
         state: &mut ControlClientState,
         command: ControllerCommand,
     ) -> Result<(), ActorProcessingErr> {
-
         // NOTE: Must use u32 length prefix, not u64
         match rkyv::to_bytes::<Error>(&command) {
             Ok(bytes) => {
                 // Validate frame size fits in u32
-                let len_u32: u32 = bytes.len().try_into().map_err(|_| {
-                    ActorProcessingErr::from("Frame too large (>4GB)")
-                })?;
+                let len_u32: u32 = bytes
+                    .len()
+                    .try_into()
+                    .map_err(|_| ActorProcessingErr::from("Frame too large (>4GB)"))?;
 
                 // Create new buffer
                 let mut buffer = Vec::new();
 
                 // Get message length as header
-                let len = len_u32.to_be_bytes();  // 4 bytes, not 8
+                let len = len_u32.to_be_bytes(); // 4 bytes, not 8
 
                 buffer.extend_from_slice(&len);
 
@@ -169,7 +171,7 @@ impl ControlClient {
                     Ok(())
                 } else {
                     let reason = "No writer assigned to client!".to_string();
-                    return Err(ActorProcessingErr::from(reason));
+                    Err(ActorProcessingErr::from(reason))
                 }
             }
             Err(e) => {
@@ -188,53 +190,61 @@ impl ControlClient {
 
         let queue_out = state.events_output.clone();
 
-        let abort = tokio::spawn(async move {
-            let mut buf_reader = tokio::io::BufReader::new(reader);
+        let abort =
+            tokio::spawn(async move {
+                let mut buf_reader = tokio::io::BufReader::new(reader);
 
-            loop {
-                match buf_reader.read_u32().await {
-                    Ok(incoming_msg_length) => {
-                        if incoming_msg_length > 0 {
-                            let mut buffer = vec![0; incoming_msg_length as usize];
+                loop {
+                    match buf_reader.read_u32().await {
+                        Ok(incoming_msg_length) => {
+                            if incoming_msg_length > 0 {
+                                let mut buffer = vec![0; incoming_msg_length as usize];
 
-                            trace!("Reading {incoming_msg_length} byte(s).");
-                            if let Ok(_) = buf_reader.read_exact(&mut buffer).await {
-                                trace!(
-                                    len = incoming_msg_length,
-                                    first_16 = ?&buffer[..buffer.len().min(16)],
-                                    "Received frame"
-                                );
-
-                                match rkyv::from_bytes::<ControllerCommand, rkyv::rancor::Error>(
-                                    &buffer,
-                                ) {
-                                    Ok(command) => {
-                                        // pipe up to supervisor
-                                        queue_out.send(ClientEvent::CommandReceived { command });
+                                trace!("Reading {incoming_msg_length} byte(s).");
+                                match buf_reader.read_exact(&mut buffer).await {
+                                    Ok(_) => {
+                                        trace!(
+                                            len = incoming_msg_length,
+                                            first_16 = ?&buffer[..buffer.len().min(16)],
+                                            "Received frame"
+                                        );
+                                        match rkyv::from_bytes::<
+                                            ControllerCommand,
+                                            rkyv::rancor::Error,
+                                        >(&buffer)
+                                        {
+                                            Ok(command) => {
+                                                queue_out
+                                                    .send(ClientEvent::CommandReceived { command });
+                                            }
+                                            Err(e) => {
+                                                error!(
+                                                    len = buffer.len(),
+                                                    first_8 = ?&buffer[..buffer.len().min(8)],
+                                                    "{e} Received raw frame"
+                                                );
+                                                continue;
+                                            }
+                                        }
                                     }
                                     Err(e) => {
-                                        error!(
-                                            len = buffer.len(),
-                                            first_8 = ?&buffer[..buffer.len().min(8)],
-                                            "{e} Received raw frame"
-                                        );
-                                        continue;
+                                        error!("Failed to read frame: {e}");
+                                        break;
                                     }
                                 }
                             }
                         }
-                    }
-                    Err(e) => {
-                        info!("TCP reader terminating: {e}");
-                        queue_out.send(ClientEvent::TransportError {
-                            reason: format!("{UNEXPECTED_DISCONNECT} {e}"),
-                        });
-                        break;
+                        Err(e) => {
+                            info!("TCP reader terminating: {e}");
+                            queue_out.send(ClientEvent::TransportError {
+                                reason: format!("{UNEXPECTED_DISCONNECT} {e}"),
+                            });
+                            break;
+                        }
                     }
                 }
-            }
-        })
-        .abort_handle();
+            })
+            .abort_handle();
 
         state.abort_handle = Some(abort);
         Ok(())

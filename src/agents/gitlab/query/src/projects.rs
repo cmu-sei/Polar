@@ -1,11 +1,11 @@
-use crate::runners::CiRunnerIdFragment;
 use crate::Namespace;
 use crate::PageInfo;
-use gitlab_schema::gitlab::{self as schema};
+use crate::runners::CiRunnerIdFragment;
 use gitlab_schema::BigInt;
 use gitlab_schema::ContainerRepositoryID;
 use gitlab_schema::IdString;
 use gitlab_schema::JobIdString;
+use gitlab_schema::gitlab::{self as schema};
 use gitlab_schema::{CiJobArtifactID, DateTimeString};
 use std::fmt;
 

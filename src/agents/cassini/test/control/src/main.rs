@@ -1,10 +1,10 @@
+use cassini_client::{init_tracing, shutdown_tracing};
 use clap::Parser;
 use harness_controller::service::*;
-use harness_controller::{read_test_config, Arguments};
+use harness_controller::{Arguments, read_test_config};
 use ractor::Actor;
 use std::env;
 use tracing::info;
-use cassini_client::{init_tracing, shutdown_tracing};
 
 #[tokio::main]
 async fn main() {
@@ -22,20 +22,15 @@ async fn main() {
 
     // --- Step 2: Start C and C server ---
     let server_cert_file = env::var("TLS_SERVER_CERT_CHAIN")
-        .expect(
-            "Expected a value for the TLS_SERVER_CERT_CHAIN environment variable.");
+        .expect("Expected a value for the TLS_SERVER_CERT_CHAIN environment variable.");
 
     let private_key_file = env::var("TLS_SERVER_KEY")
-        .expect(
-            "Expected a value for the TLS_SERVER_KEY environment variable.");
+        .expect("Expected a value for the TLS_SERVER_KEY environment variable.");
 
     let ca_cert_file = env::var("TLS_CA_CERT")
-        .expect(
-            "Expected a value for the TLS_CA_CERT environment variable.");
+        .expect("Expected a value for the TLS_CA_CERT environment variable.");
 
-    let bind_addr = env::var("CONTROLLER_BIND_ADDR").
-        unwrap_or(
-            String::from("0.0.0.0:3000"));
+    let bind_addr = env::var("CONTROLLER_BIND_ADDR").unwrap_or(String::from("0.0.0.0:3000"));
 
     let args = harness_controller::service::HarnessControllerArgs {
         bind_addr,
@@ -52,7 +47,9 @@ async fn main() {
         Some("HARNESS_CONTROLLER".to_string()),
         HarnessController,
         args,
-    ).await.unwrap();
+    )
+    .await
+    .unwrap();
 
     handle.await.ok();
 

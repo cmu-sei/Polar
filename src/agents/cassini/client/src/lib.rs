@@ -37,6 +37,12 @@ pub const CLIENT_DISCONNECTED: &str = "CLIENT_DISCONNECTED";
 /// messages under load. See: https://github.com/slawlor/ractor/issues/225
 pub struct ClientEventForwarder<M: Message + Sync>(PhantomData<M>);
 
+impl<M: Message + Sync> Default for ClientEventForwarder<M> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<M: Message + Sync> ClientEventForwarder<M> {
     pub fn new() -> Self {
         ClientEventForwarder(PhantomData)
@@ -76,10 +82,10 @@ impl<M: Message + Sync> Actor for ClientEventForwarder<M> {
         msg: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        if let Some(mapped) = (state.mapper)(msg) {
-            if let Err(e) = state.target.send_message(mapped) {
-                warn!("ClientEventForwarder: target actor unreachable: {e}");
-            }
+        if let Some(mapped) = (state.mapper)(msg)
+            && let Err(e) = state.target.send_message(mapped)
+        {
+            warn!("ClientEventForwarder: target actor unreachable: {e}");
         }
         Ok(())
     }
@@ -175,11 +181,13 @@ pub enum TcpClientMessage {
     },
 }
 
+type TlsWriter = Option<Arc<Mutex<BufWriter<WriteHalf<TlsStream<TcpStream>>>>>>;
+
 /// Actor state for the TCP client
 pub struct TcpClientState {
     bind_addr: String,
     server_name: String,
-    writer: Option<Arc<Mutex<BufWriter<WriteHalf<TlsStream<TcpStream>>>>>>,
+    writer: TlsWriter,
     reader: Option<ReadHalf<TlsStream<TcpStream>>>, // Use Option to allow taking ownership
     registration: RegistrationState,
     client_config: Arc<ClientConfig>,
@@ -297,7 +305,7 @@ impl TcpClientActor {
                             let mut buffer = vec![0; incoming_msg_length as usize];
 
                             trace!("Reading {incoming_msg_length} byte(s).");
-                            if let Ok(_) = buf_reader.read_exact(&mut buffer).await {
+                            if buf_reader.read_exact(&mut buffer).await.is_ok() {
                                 let _fg = trace_span!(
                                     "tcp_client.read_frame",
                                     len = incoming_msg_length,
@@ -358,11 +366,10 @@ impl TcpClientActor {
                                                     queue_out.send(event.clone());
                                                     trace!("TCP client sent MessagePublished to output port for topic {}", topic);
                                                     // Send to direct handler if present
-                                                    if let Some(ref handler) = handler {
-                                                        if let Err(e) = handler.send_message(event) {
+                                                    if let Some(ref handler) = handler
+                                                        && let Err(e) = handler.send_message(event) {
                                                             error!("Failed to send MessagePublished to direct handler: {}", e);
                                                         }
-                                                    }
                                                 } else {
                                                     warn!("Failed to publish message to topic: {topic}");
                                                 }
@@ -418,11 +425,10 @@ impl TcpClientActor {
                                                 // Send to output port
                                                 queue_out.send(event.clone());
                                                 // Send to direct handler if present
-                                                if let Some(ref handler) = handler {
-                                                    if let Err(e) = handler.send_message(event) {
+                                                if let Some(ref handler) = handler
+                                                    && let Err(e) = handler.send_message(event) {
                                                         error!("Failed to send ControlResponse to direct handler: {}", e);
                                                     }
-                                                }
                                             }
                                             _ => {
                                                 let _g = trace_span!("client.handle_unknown_message").entered();
@@ -448,11 +454,10 @@ impl TcpClientActor {
                             reason: format!("{UNEXPECTED_DISCONNECT} {e}")
                         };
                         queue_out.send(event.clone());
-                        if let Some(ref handler) = handler {
-                            if let Err(e) = handler.send_message(event) {
+                        if let Some(ref handler) = handler
+                            && let Err(e) = handler.send_message(event) {
                                 error!("Failed to send TransportError to direct handler: {}", e);
                             }
-                        }
                         // Instead of breaking, send Reconnect to self
                         let _ = myself.send_message(TcpClientMessage::Reconnect);
                         break;
@@ -506,7 +511,7 @@ impl TcpClientActor {
                 } else {
                     error!("No writer available in TcpClientState");
                     let reason = "No writer assigned to client!".to_string();
-                    return Err(ActorProcessingErr::from(reason));
+                    Err(ActorProcessingErr::from(reason))
                 }
             }
             Err(e) => {
@@ -617,10 +622,10 @@ impl TcpClientActor {
         };
         let event = ClientEvent::Registered { registration_id };
         state.events_output.send(event.clone());
-        if let Some(handler) = &state.event_handler {
-            if let Err(e) = handler.send_message(event) {
-                error!("Failed to send Registered to direct handler: {}", e);
-            }
+        if let Some(handler) = &state.event_handler
+            && let Err(e) = handler.send_message(event)
+        {
+            error!("Failed to send Registered to direct handler: {}", e);
         }
         Ok(())
     }
@@ -1001,18 +1006,37 @@ impl Actor for TcpClientActor {
     ) -> Result<(), ActorProcessingErr> {
         match (&mut state.registration, message) {
             // ---- SetEventHandler (always handled) ----
-            (_, TcpClientMessage::SetEventHandler(handler)) => self.handle_set_event_handler(myself, state, handler).await?,
+            (_, TcpClientMessage::SetEventHandler(handler)) => {
+                self.handle_set_event_handler(myself, state, handler)
+                    .await?
+            }
 
             // ---- Reconnected (always handled) ----
-            (_, TcpClientMessage::Reconnected { reader, writer }) => self.handle_reconnected(myself, state, reader, writer).await?,
+            (_, TcpClientMessage::Reconnected { reader, writer }) => {
+                self.handle_reconnected(myself, state, reader, writer)
+                    .await?
+            }
 
             // ---- Reconnect (only when registered) ----
-            (RegistrationState::Registered { .. }, TcpClientMessage::Reconnect) => self.handle_reconnect_registered(myself, state).await?,
+            (RegistrationState::Registered { .. }, TcpClientMessage::Reconnect) => {
+                self.handle_reconnect_registered(myself, state).await?
+            }
 
             // ---- Unregistered state ----
-            (RegistrationState::Unregistered, TcpClientMessage::Register) => self.handle_register_unregistered(myself, state).await?,
-            (RegistrationState::Unregistered, TcpClientMessage::RegistrationResponse(registration_id)) => self.handle_registration_response_unregistered(myself, state, registration_id).await?,
-            (RegistrationState::Unregistered, msg) => self.handle_unregistered_fallback(myself, state, msg).await?,
+            (RegistrationState::Unregistered, TcpClientMessage::Register) => {
+                self.handle_register_unregistered(myself, state).await?
+            }
+            (
+                RegistrationState::Unregistered,
+                TcpClientMessage::RegistrationResponse(registration_id),
+            ) => {
+                self.handle_registration_response_unregistered(myself, state, registration_id)
+                    .await?
+            }
+            (RegistrationState::Unregistered, msg) => {
+                self.handle_unregistered_fallback(myself, state, msg)
+                    .await?
+            }
 
             // ---- Registered state ----
             (RegistrationState::Registered { registration_id }, msg) => {
@@ -1020,38 +1044,52 @@ impl Actor for TcpClientActor {
                 let reg_id = registration_id.clone();
                 match msg {
                     TcpClientMessage::Register => {
-                        self.handle_register_registered(myself, state, &reg_id).await?;
+                        self.handle_register_registered(myself, state, &reg_id)
+                            .await?;
                     }
                     TcpClientMessage::GetRegistrationId(reply) => {
-                        self.handle_get_registration_id(myself, state, &reg_id, reply).await?;
+                        self.handle_get_registration_id(myself, state, &reg_id, reply)
+                            .await?;
                     }
-                    TcpClientMessage::Publish { topic, payload, trace_ctx } => {
-                        self.handle_publish(myself, state, &reg_id, topic, payload, trace_ctx).await?;
+                    TcpClientMessage::Publish {
+                        topic,
+                        payload,
+                        trace_ctx,
+                    } => {
+                        self.handle_publish(myself, state, &reg_id, topic, payload, trace_ctx)
+                            .await?;
                     }
                     TcpClientMessage::Subscribe { topic, trace_ctx } => {
-                        self.handle_subscribe(myself, state, &reg_id, topic, trace_ctx).await?;
+                        self.handle_subscribe(myself, state, &reg_id, topic, trace_ctx)
+                            .await?;
                     }
                     TcpClientMessage::UnsubscribeRequest { topic, trace_ctx } => {
-                        self.handle_unsubscribe_request(myself, state, &reg_id, topic, trace_ctx).await?;
+                        self.handle_unsubscribe_request(myself, state, &reg_id, topic, trace_ctx)
+                            .await?;
                     }
                     TcpClientMessage::Disconnect { trace_ctx } => {
-                        self.handle_disconnect(myself, state, &reg_id, trace_ctx).await?;
+                        self.handle_disconnect(myself, state, &reg_id, trace_ctx)
+                            .await?;
                     }
                     TcpClientMessage::ErrorMessage(error) => {
                         warn!("Received error from broker: {error}");
                     }
                     TcpClientMessage::ControlRequest { op, trace_ctx } => {
-                        self.handle_control_request(myself, state, &reg_id, op, trace_ctx).await?;
+                        self.handle_control_request(myself, state, &reg_id, op, trace_ctx)
+                            .await?;
                     }
                     TcpClientMessage::ListSessions { trace_ctx } => {
-                        self.handle_list_sessions(myself, state, &reg_id, trace_ctx).await?;
+                        self.handle_list_sessions(myself, state, &reg_id, trace_ctx)
+                            .await?;
                     }
                     TcpClientMessage::ListTopics { trace_ctx } => {
-                        self.handle_list_topics(myself, state, &reg_id, trace_ctx).await?;
+                        self.handle_list_topics(myself, state, &reg_id, trace_ctx)
+                            .await?;
                     }
                     // Ignore other messages like Reconnect (already handled at top level)
                     _ => {
-                        self.handle_registered_fallback(myself, state, &reg_id, msg).await?;
+                        self.handle_registered_fallback(myself, state, &reg_id, msg)
+                            .await?;
                     }
                 }
             }

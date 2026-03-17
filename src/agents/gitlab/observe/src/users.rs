@@ -25,14 +25,13 @@ use crate::graphql_endpoint;
 use std::time::Duration;
 
 use crate::{
-    handle_backoff, init_observer_state, send_to_broker, BackoffReason, Command,
-    GitlabObserverArgs, GitlabObserverMessage, GitlabObserverState,
-    MESSAGE_FORWARDING_FAILED,
+    BackoffReason, Command, GitlabObserverArgs, GitlabObserverMessage, GitlabObserverState,
+    MESSAGE_FORWARDING_FAILED, handle_backoff, init_observer_state, send_to_broker,
 };
 use common::USER_CONSUMER_TOPIC;
 use cynic::GraphQlResponse;
 
-use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef};
+use ractor::{Actor, ActorProcessingErr, ActorRef, async_trait};
 
 use common::types::{GitlabData, ResourceLink};
 use cynic::QueryBuilder;

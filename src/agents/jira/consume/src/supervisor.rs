@@ -1,31 +1,31 @@
 use std::time::Duration;
 
+use crate::BROKER_CLIENT_NAME;
+use crate::JiraConsumerArgs;
 use crate::get_neo_config;
 use crate::groups::JiraGroupConsumer;
 use crate::issues::JiraIssueConsumer;
 use crate::projects::JiraProjectConsumer;
 use crate::users::JiraUserConsumer;
-use crate::JiraConsumerArgs;
-use crate::BROKER_CLIENT_NAME;
 use cassini_backoff::{Backoff, ExponentialBackoff};
 use cassini_client::TCPClientConfig;
 use cassini_client::{TcpClientActor, TcpClientArgs, TcpClientMessage};
 use cassini_types::ClientEvent;
-use jira_common::types::JiraData;
 use jira_common::JIRA_GROUPS_CONSUMER_TOPIC;
 use jira_common::JIRA_ISSUES_CONSUMER_TOPIC;
 use jira_common::JIRA_PROJECTS_CONSUMER_TOPIC;
 use jira_common::JIRA_USERS_CONSUMER_TOPIC;
+use jira_common::types::JiraData;
 use polar::{Supervisor, SupervisorMessage};
-use ractor::async_trait;
-use ractor::registry::where_is;
-use ractor::rpc::call;
-use ractor::rpc::CallResult;
 use ractor::Actor;
 use ractor::ActorProcessingErr;
 use ractor::ActorRef;
 use ractor::OutputPort;
 use ractor::SupervisionEvent;
+use ractor::async_trait;
+use ractor::registry::where_is;
+use ractor::rpc::CallResult;
+use ractor::rpc::call;
 use tokio::task::JoinHandle;
 use tracing::debug;
 use tracing::error;
@@ -41,10 +41,10 @@ impl Supervisor for ConsumerSupervisor {
     fn deserialize_and_dispatch(topic: String, payload: Vec<u8>) {
         match rkyv::from_bytes::<JiraData, rkyv::rancor::Error>(&payload) {
             Ok(message) => {
-                if let Some(consumer) = where_is(topic.clone()) {
-                    if let Err(e) = consumer.send_message(message) {
-                        tracing::warn!("Error forwarding message. {e}");
-                    }
+                if let Some(consumer) = where_is(topic.clone())
+                    && let Err(e) = consumer.send_message(message)
+                {
+                    tracing::warn!("Error forwarding message. {e}");
                 }
             }
             Err(err) => warn!("Failed to deserialize message: {:?}", err),
@@ -118,13 +118,9 @@ impl ConsumerSupervisor {
         let client =
             where_is(BROKER_CLIENT_NAME.to_string()).expect("Expected to find TCP Client.");
 
-        match call(
-            &client,
-            |reply| TcpClientMessage::GetRegistrationId(reply),
-            None,
-        )
-        .await
-        .expect("Expected to call TCP Client")
+        match call(&client, TcpClientMessage::GetRegistrationId, None)
+            .await
+            .expect("Expected to call TCP Client")
         {
             CallResult::Success(registration_id) => registration_id,
             _ => panic!("Couldn't contact TCP Client"),
@@ -238,7 +234,7 @@ impl Actor for ConsumerSupervisor {
                 ClientEvent::TransportError { reason: _ } => todo!(),
                 ClientEvent::ControlResponse { .. } => {
                     // ignore
-                },
+                }
             },
         }
         Ok(())

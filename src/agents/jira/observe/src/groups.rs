@@ -21,18 +21,18 @@
    DM24-0470
 */
 use crate::{
-    handle_backoff, Command, JiraObserverArgs, JiraObserverMessage, JiraObserverState,
-    BROKER_CLIENT_NAME,
+    BROKER_CLIENT_NAME, Command, JiraObserverArgs, JiraObserverMessage, JiraObserverState,
+    handle_backoff,
 };
 use cassini_client::TcpClientMessage;
 use cassini_types::ClientMessage;
-use jira_common::types::{JiraData, JiraGroup};
+use cassini_types::WireTraceCtx;
 use jira_common::JIRA_GROUPS_CONSUMER_TOPIC;
-use ractor::{async_trait, registry::where_is, Actor, ActorProcessingErr, ActorRef};
+use jira_common::types::{JiraData, JiraGroup};
+use ractor::{Actor, ActorProcessingErr, ActorRef, async_trait, registry::where_is};
 use rkyv::rancor::Error;
 use std::time::Duration;
 use tracing::{debug, info};
-use cassini_types::WireTraceCtx;
 
 pub struct JiraGroupObserver;
 
@@ -100,70 +100,65 @@ impl Actor for JiraGroupObserver {
     ) -> Result<(), ActorProcessingErr> {
         match message {
             JiraObserverMessage::Tick(command) => {
-                match command {
-                    Command::GetGroups(op) => {
-                        debug!("{}", op.to_string());
+                if let Command::GetGroups(op) = command {
+                    debug!("{}", op.to_string());
 
-                        let mut all_groups = Vec::new();
-                        let mut start_at = 0;
-                        let max_results = 50;
-                        let query_string = "";
+                    let mut all_groups = Vec::new();
+                    let mut start_at = 0;
+                    let max_results = 50;
+                    let query_string = "";
 
-                        loop {
-                            let url = format!(
-                                "{}{}?query={}&startAt={}&maxResults={}",
-                                state.jira_url, op, query_string, start_at, max_results
-                            );
+                    loop {
+                        let url = format!(
+                            "{}{}?query={}&startAt={}&maxResults={}",
+                            state.jira_url, op, query_string, start_at, max_results
+                        );
 
-                            let res = state
-                                .web_client
-                                .get(&url)
-                                .bearer_auth(format!("{}", state.token.clone().expect("TOKEN")))
-                                .send()
-                                .await?
-                                .json::<serde_json::Value>()
-                                .await?;
+                        let res = state
+                            .web_client
+                            .get(&url)
+                            .bearer_auth(state.token.clone().expect("TOKEN").to_string())
+                            .send()
+                            .await?
+                            .json::<serde_json::Value>()
+                            .await?;
 
-                            let groups: Vec<JiraGroup> =
-                                serde_json::from_value(res["groups"].clone())?;
-                            let total = res["total"].as_u64().unwrap_or(0);
-                            let fetched = groups.len();
+                        let groups: Vec<JiraGroup> = serde_json::from_value(res["groups"].clone())?;
+                        let total = res["total"].as_u64().unwrap_or(0);
+                        let fetched = groups.len();
 
-                            all_groups.extend(groups);
+                        all_groups.extend(groups);
 
-                            if (start_at as usize + fetched) >= total as usize {
-                                break;
-                            }
-
-                            start_at += fetched;
+                        if (start_at + fetched) >= total as usize {
+                            break;
                         }
 
-                        let tcp_client = where_is(BROKER_CLIENT_NAME.to_string())
-                            .expect("Expected to find client");
-
-                        let data = JiraData::Groups(all_groups.clone());
-
-                        let bytes = rkyv::to_bytes::<Error>(&data).unwrap();
-
-                        let msg = ClientMessage::PublishRequest {
-                            topic: JIRA_GROUPS_CONSUMER_TOPIC.to_string(),
-                            payload: bytes.to_vec().into(),
-                            registration_id: state.registration_id.clone(),
-                            trace_ctx: None,
-                        };
-
-                        // Serialize the inner client message before sending
-                        let payload = rkyv::to_bytes::<rkyv::rancor::Error>(&msg)
-                            .expect("Failed to serialize ClientMessage::PublishRequest");
-
-                        tcp_client
-                            .send_message(TcpClientMessage::Publish {
-                                topic: JIRA_GROUPS_CONSUMER_TOPIC.to_string(),
-                                payload: payload.into_vec(),
-                                trace_ctx: WireTraceCtx::from_current_span(),
-                            })?
+                        start_at += fetched;
                     }
-                    _ => (),
+
+                    let tcp_client =
+                        where_is(BROKER_CLIENT_NAME.to_string()).expect("Expected to find client");
+
+                    let data = JiraData::Groups(all_groups.clone());
+
+                    let bytes = rkyv::to_bytes::<Error>(&data).unwrap();
+
+                    let msg = ClientMessage::PublishRequest {
+                        topic: JIRA_GROUPS_CONSUMER_TOPIC.to_string(),
+                        payload: bytes.to_vec().into(),
+                        registration_id: state.registration_id.clone(),
+                        trace_ctx: None,
+                    };
+
+                    // Serialize the inner client message before sending
+                    let payload = rkyv::to_bytes::<rkyv::rancor::Error>(&msg)
+                        .expect("Failed to serialize ClientMessage::PublishRequest");
+
+                    tcp_client.send_message(TcpClientMessage::Publish {
+                        topic: JIRA_GROUPS_CONSUMER_TOPIC.to_string(),
+                        payload: payload.into_vec(),
+                        trace_ctx: WireTraceCtx::from_current_span(),
+                    })?
                 }
             }
             JiraObserverMessage::Backoff(reason) => {

@@ -21,13 +21,13 @@
    DM24-0470
 */
 use crate::{GitlabConsumerState, GitlabNodeKey};
-use common::types::{GitlabData, GitlabEnvelope};
 use common::GROUPS_CONSUMER_TOPIC;
+use common::types::{GitlabData, GitlabEnvelope};
 use gitlab_queries::groups::{GroupData, GroupMember};
 use gitlab_queries::projects::ProjectCoreFragment;
 use gitlab_queries::runners::CiRunnerIdFragment;
 use polar::graph::{GraphController, GraphControllerMsg, GraphOp, GraphValue, Property};
-use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef};
+use ractor::{Actor, ActorProcessingErr, ActorRef, async_trait};
 use tracing::debug;
 
 pub struct GitlabGroupConsumer;

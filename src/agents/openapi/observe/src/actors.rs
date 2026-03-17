@@ -2,20 +2,20 @@ use crate::BROKER_CLIENT_NAME;
 use cassini_client::TCPClientConfig;
 use cassini_client::*;
 use cassini_types::ClientEvent;
+use cassini_types::WireTraceCtx;
 use polar::SupervisorMessage;
-use ractor::async_trait;
-use ractor::registry::where_is;
 use ractor::Actor;
 use ractor::ActorProcessingErr;
 use ractor::ActorRef;
 use ractor::OutputPort;
 use ractor::SupervisionEvent;
+use ractor::async_trait;
+use ractor::registry::where_is;
 use reqwest::Client;
 use tracing::debug;
 use tracing::info;
 use tracing::warn;
 use web_agent_common::AppData;
-use cassini_types::WireTraceCtx;
 
 pub struct ObserverSupervisor;
 
@@ -62,8 +62,8 @@ impl Actor for ObserverSupervisor {
             TcpClientArgs {
                 config,
                 registration_id: None,
-                events_output: Some(events_output),   // wrap in Some
-                event_handler: None,                   // add missing field
+                events_output: Some(events_output), // wrap in Some
+                event_handler: None,                // add missing field
             },
             myself.clone().into(),
         )

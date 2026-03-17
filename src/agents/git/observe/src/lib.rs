@@ -1,10 +1,10 @@
 use cassini_client::TcpClientMessage;
-use git2::{FetchOptions, Oid, RemoteCallbacks, Repository};
 use git_agent_common::{
-    GitRepositoryMessage, RepoId, RepoObservationConfig, GIT_REPO_PROCESSING_TOPIC,
+    GIT_REPO_PROCESSING_TOPIC, GitRepositoryMessage, RepoId, RepoObservationConfig,
 };
-use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef, SupervisionEvent};
-use rkyv::{rancor, to_bytes, Archive, Deserialize, Serialize};
+use git2::{FetchOptions, Oid, RemoteCallbacks, Repository};
+use ractor::{Actor, ActorProcessingErr, ActorRef, SupervisionEvent, async_trait};
+use rkyv::{Archive, Deserialize, Serialize, rancor, to_bytes};
 use serde::Deserialize as SerdeDeserialize;
 use std::collections::HashMap;
 use std::fs;
@@ -214,7 +214,7 @@ pub fn send_event(
     let message = TcpClientMessage::Publish {
         topic,
         payload,
-        trace_ctx: None,  // or WireTraceCtx::from_current_span() if you want context
+        trace_ctx: None, // or WireTraceCtx::from_current_span() if you want context
     };
     Ok(client.send_message(message)?)
 }
@@ -314,14 +314,14 @@ impl Actor for GitRepoSupervisor {
                 let args = GitRepoWorkerArgs {
                     config,
                     credential_provider,
-                    repo_path: state.cache_root.join(&repo_id.to_string()),
+                    repo_path: state.cache_root.join(repo_id.to_string()),
                     tcp_client: state.tcp_client.clone(),
                 };
 
                 debug!("Starting worker for repo {}", repo_id.to_string());
 
                 let (worker, _) = Actor::spawn_linked(
-                    Some(format!("{SERVICE_NAME}.{}.worker", repo_id.to_string())),
+                    Some(format!("{SERVICE_NAME}.{}.worker", repo_id)),
                     GitRepoWorker,
                     args,
                     myself.clone().into(),

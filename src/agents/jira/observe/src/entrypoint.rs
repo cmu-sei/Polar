@@ -37,10 +37,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let jira_url = env::var("JIRA_URL").expect("Expected to find a value for JIRA_URL. Please provide a valid url to a jira server, ex 'http://hostname/jira'.");
     let jira_token = env::var("JIRA_TOKEN").expect("Expected to find a value for JIRA_TOKEN.");
     // Helpful for looking at services behind a proxy
-    let proxy_ca_cert_file = match env::var("PROXY_CA_CERT") {
-        Ok(path) => Some(path),
-        Err(_) => None,
-    };
+    let proxy_ca_cert_file = env::var("PROXY_CA_CERT").ok();
 
     let args = supervisor::ObserverSupervisorArgs {
         jira_url,

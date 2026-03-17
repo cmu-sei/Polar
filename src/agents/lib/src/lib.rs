@@ -71,12 +71,12 @@ where
 /// Helper function to parse a file at a given path and return the raw bytes as a vector
 #[deprecated = "Use async_get_file_as_byte_vec instead to avoid blocking."]
 pub fn get_file_as_byte_vec(filename: &String) -> Result<Vec<u8>, std::io::Error> {
-    let mut f = std::fs::File::open(&filename)?;
+    let mut f = std::fs::File::open(filename)?;
 
-    let metadata = std::fs::metadata(&filename)?;
+    let metadata = std::fs::metadata(filename)?;
 
     let mut buffer = vec![0; metadata.len() as usize];
-    f.read(&mut buffer).expect("buffer overflow");
+    f.read_exact(&mut buffer)?;
 
     Ok(buffer)
 }
@@ -293,49 +293,48 @@ pub fn init_logging(service_name: String) {
         let endpoint = std::env::var("JAEGER_OTLP_ENDPOINT")
             .unwrap_or_else(|_| "http://localhost:4318/v1/traces".to_string());
 
-        if !endpoint.is_empty() {
-            if let Ok(exporter) = opentelemetry_otlp::SpanExporter::builder()
+        if !endpoint.is_empty()
+            && let Ok(exporter) = opentelemetry_otlp::SpanExporter::builder()
                 .with_http()
                 .with_protocol(Protocol::HttpBinary)
                 .with_endpoint(endpoint)
                 .build()
+        {
+            let tracer_provider = trace::SdkTracerProvider::builder()
+                .with_batch_exporter(exporter)
+                .with_sampler(trace::Sampler::AlwaysOn)
+                .with_id_generator(RandomIdGenerator::default())
+                .with_resource(
+                    Resource::builder()
+                        // FIX: Pass service_name directly, not a reference
+                        .with_service_name(service_name.clone())
+                        .with_attributes([
+                            KeyValue::new("service.name", service_name.clone()),
+                            KeyValue::new("service.version", env!("CARGO_PKG_VERSION")),
+                        ])
+                        .build(),
+                )
+                .build();
+
+            global::set_tracer_provider(tracer_provider);
+
+            // CRITICAL: Use the SAME tracer name as the broker
+            let tracer = global::tracer("cassini-tracing");
+
+            let telemetry_layer = tracing_opentelemetry::layer().with_tracer(tracer);
+
+            // Apply the filter separately
+            let filtered_telemetry_layer =
+                telemetry_layer.with_filter(EnvFilter::from_default_env());
+
+            if tracing_subscriber::registry()
+                .with(filter)
+                .with(tracing_subscriber::fmt::layer())
+                .with(filtered_telemetry_layer)
+                .try_init()
+                .is_err()
             {
-                let tracer_provider = trace::SdkTracerProvider::builder()
-                    .with_batch_exporter(exporter)
-                    .with_sampler(trace::Sampler::AlwaysOn)
-                    .with_id_generator(RandomIdGenerator::default())
-                    .with_resource(
-                        Resource::builder()
-                            // FIX: Pass service_name directly, not a reference
-                            .with_service_name(service_name.clone())
-                            .with_attributes([
-                                KeyValue::new("service.name", service_name.clone()),
-                                KeyValue::new("service.version", env!("CARGO_PKG_VERSION")),
-                            ])
-                            .build(),
-                    )
-                    .build();
-
-                global::set_tracer_provider(tracer_provider);
-
-                // CRITICAL: Use the SAME tracer name as the broker
-                let tracer = global::tracer("cassini-tracing");
-
-                let telemetry_layer = tracing_opentelemetry::layer().with_tracer(tracer);
-
-                // Apply the filter separately
-                let filtered_telemetry_layer =
-                    telemetry_layer.with_filter(EnvFilter::from_default_env());
-
-                if tracing_subscriber::registry()
-                    .with(filter)
-                    .with(tracing_subscriber::fmt::layer())
-                    .with(filtered_telemetry_layer)
-                    .try_init()
-                    .is_err()
-                {
-                    eprintln!("Logging registry already initialized");
-                }
+                eprintln!("Logging registry already initialized");
             }
         }
     } else {
@@ -351,13 +350,13 @@ pub fn init_logging(service_name: String) {
 }
 
 pub async fn try_get_proxy_ca_cert() -> Option<Vec<u8>> {
-    return match std::env::var("PROXY_CA_CERT") {
+    match std::env::var("PROXY_CA_CERT") {
         Ok(path) => {
             info!("Attempting to load a ca certificate at {path}");
             async_get_file_as_byte_vec(&path).await.ok()
         }
         Err(_e) => None,
-    };
+    }
 }
 
 /// Helper function to get a web client with optional proxy CA certificate
@@ -369,7 +368,10 @@ pub fn get_web_client() -> Result<Client, ActorProcessingErr> {
             let cert_data = std::fs::read(&path)?;
             let root_cert = Certificate::from_pem(&cert_data)?;
 
-            debug!("Found PROXY_CA_CERT at: {}. Configuring web client...", path);
+            debug!(
+                "Found PROXY_CA_CERT at: {}. Configuring web client...",
+                path
+            );
 
             Ok(ClientBuilder::new()
                 .add_root_certificate(root_cert)
@@ -377,7 +379,9 @@ pub fn get_web_client() -> Result<Client, ActorProcessingErr> {
                 .build()?)
         }
         Err(_) => {
-            debug!("Failed to find PROXY_CA_CERT. Configuring web client without proxy CA certificate...");
+            debug!(
+                "Failed to find PROXY_CA_CERT. Configuring web client without proxy CA certificate..."
+            );
             Ok(ClientBuilder::new().build()?)
         }
     }
@@ -417,7 +421,7 @@ pub fn get_neo_config() -> Result<neo4rs::Config, ractor::ActorProcessingErr> {
             .db(database_name)
             .fetch_size(500)
             .max_connections(10)
-            .build()?
+            .build()?,
     };
 
     Ok(config)

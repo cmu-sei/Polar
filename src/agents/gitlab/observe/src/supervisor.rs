@@ -1,3 +1,13 @@
+use crate::BROKER_CLIENT_NAME;
+use crate::GITLAB_GROUPS_OBSERVER;
+use crate::GITLAB_JOBS_OBSERVER;
+use crate::GITLAB_PIPELINE_OBSERVER;
+use crate::GITLAB_PROJECT_OBSERVER;
+use crate::GITLAB_REPOSITORY_OBSERVER;
+use crate::GITLAB_RUNNER_OBSERVER;
+use crate::GITLAB_USERS_OBSERVER;
+use crate::GitlabObserverArgs;
+use crate::META_OBSERVER;
 use crate::derive_instance_id;
 use crate::groups::GitlabGroupObserver;
 use crate::meta::MetaObserver;
@@ -7,25 +17,15 @@ use crate::projects::GitlabProjectObserver;
 use crate::repositories::GitlabRepositoryObserver;
 use crate::runners::GitlabRunnerObserver;
 use crate::users::GitlabUserObserver;
-use crate::GitlabObserverArgs;
-use crate::BROKER_CLIENT_NAME;
-use crate::GITLAB_GROUPS_OBSERVER;
-use crate::GITLAB_JOBS_OBSERVER;
-use crate::GITLAB_PIPELINE_OBSERVER;
-use crate::GITLAB_PROJECT_OBSERVER;
-use crate::GITLAB_REPOSITORY_OBSERVER;
-use crate::GITLAB_RUNNER_OBSERVER;
-use crate::GITLAB_USERS_OBSERVER;
-use crate::META_OBSERVER;
 use cassini_client::*;
 use cassini_types::ClientEvent;
 use polar::SupervisorMessage;
-use ractor::async_trait;
 use ractor::Actor;
 use ractor::ActorProcessingErr;
 use ractor::ActorRef;
 use ractor::OutputPort;
 use ractor::SupervisionEvent;
+use ractor::async_trait;
 use std::env;
 use tracing::debug;
 use tracing::error;
@@ -198,8 +198,7 @@ impl Actor for ObserverSupervisor {
                     ClientEvent::TransportError { .. } => {
                         todo!("Handle client transport error")
                     }
-                    ClientEvent::ControlResponse { .. } => {
-                    }
+                    ClientEvent::ControlResponse { .. } => {}
                 }
             }
         }

@@ -17,11 +17,12 @@ let defaults = Lib.defaults
 let polarPipeline : Lib.PipelineConfig =
   { name        = "polar-devsecops"
   , artifactDir = "/workspace/pipeline-out"
+  , workingDir  = "/workspace/src/agents"
   , stages      =
 
       -- Fast gates: fail immediately so the developer gets signal quickly
-      [ Lib.simpleStage "fmt"  "cargo fmt --check"           Lib.FailureMode.FailFast
-      , Lib.simpleStage "lint" "cargo clippy -- -D warnings" Lib.FailureMode.FailFast
+      [ Lib.simpleStage "fmt"  "cargo fmt --check"           Lib.FailureMode.Collect
+      , Lib.simpleStage "lint" "cargo clippy -- -D warnings" Lib.FailureMode.Collect
 
       -- Static analysis: collect all findings before reporting
       ,   { name        = "static-analysis"
@@ -63,7 +64,7 @@ let polarExtras =
   Lib.customLayer "polar-extras"
     [ Lib.flakePackage "staticanalysis"  "default"
       , Lib.flakePackage "dotacat"       "default"
-      , Lib.flakePackage "myNeovimOverlay" "default"
+      , Lib.nixpkgs "nvim-pkg"
     ]
 
 -- ---------------------------------------------------------------------------

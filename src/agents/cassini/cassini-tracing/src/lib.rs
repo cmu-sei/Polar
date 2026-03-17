@@ -2,23 +2,27 @@
 //! Call `init_tracing(service_name)` early in `main()` to set up
 //! console logging and (optionally) OpenTelemetry export to Jaeger.
 
-use opentelemetry::{global, KeyValue};
+use cassini_types::WireTraceCtx;
+use opentelemetry::{KeyValue, global};
 use opentelemetry_otlp::{Protocol, WithExportConfig};
-use opentelemetry_sdk::{trace::{self, RandomIdGenerator}, Resource};
-use tracing_subscriber::filter::EnvFilter;
-use tracing_subscriber::{Layer, layer::SubscriberExt, util::SubscriberInitExt};
+use opentelemetry_sdk::{
+    Resource,
+    trace::{self, RandomIdGenerator},
+};
+use std::io::{IsTerminal, stderr};
+use std::sync::Mutex;
+use tracing::Span;
 use tracing_glog::Glog;
 use tracing_glog::GlogFields;
-use std::io::{stderr, IsTerminal};
-use std::sync::Mutex;
-use cassini_types::WireTraceCtx;
-use tracing::Span;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
+use tracing_subscriber::filter::EnvFilter;
+use tracing_subscriber::{Layer, layer::SubscriberExt, util::SubscriberInitExt};
 
 use opentelemetry::Context;
-use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 
-static TRACER_PROVIDER: Mutex<Option<opentelemetry_sdk::trace::SdkTracerProvider>> = Mutex::new(None);
+static TRACER_PROVIDER: Mutex<Option<opentelemetry_sdk::trace::SdkTracerProvider>> =
+    Mutex::new(None);
 
 /// Initialises logging and tracing.
 ///
@@ -27,11 +31,11 @@ static TRACER_PROVIDER: Mutex<Option<opentelemetry_sdk::trace::SdkTracerProvider
 ///   also exports spans via OTLP HTTP to the given endpoint.
 /// - The `service.name` attribute in traces is set to the provided `service_name`.
 pub fn init_tracing(service_name: &str) {
-    let console_filter = EnvFilter::try_from_env("CASSINI_LOG")
-        .unwrap_or_else(|_| EnvFilter::new("warn"));
+    let console_filter =
+        EnvFilter::try_from_env("CASSINI_LOG").unwrap_or_else(|_| EnvFilter::new("warn"));
 
-    let jaeger_filter = EnvFilter::try_from_env("RUST_LOG")
-        .unwrap_or_else(|_| EnvFilter::new("debug"));
+    let jaeger_filter =
+        EnvFilter::try_from_env("RUST_LOG").unwrap_or_else(|_| EnvFilter::new("debug"));
 
     let endpoint = std::env::var("JAEGER_OTLP_ENDPOINT")
         .unwrap_or_else(|_| "http://localhost:4318/v1/traces".to_string());
@@ -49,14 +53,15 @@ pub fn init_tracing(service_name: &str) {
             .with_resource(
                 Resource::builder()
                     .with_service_name(service_name.to_string())
-                    .with_attributes([
-                        KeyValue::new("service.version", env!("CARGO_PKG_VERSION")),
-                    ])
+                    .with_attributes([KeyValue::new("service.version", env!("CARGO_PKG_VERSION"))])
                     .build(),
             )
             .build();
 
-        let _ = TRACER_PROVIDER.lock().unwrap().replace(tracer_provider.clone());
+        let _ = TRACER_PROVIDER
+            .lock()
+            .unwrap()
+            .replace(tracer_provider.clone());
         global::set_tracer_provider(tracer_provider);
         let tracer = global::tracer("cassini-tracing");
         let telemetry_layer = tracing_opentelemetry::layer()
@@ -82,8 +87,8 @@ pub fn init_tracing(service_name: &str) {
     }
 
     // Fallback: console only
-    let console_filter = EnvFilter::try_from_env("CASSINI_LOG")
-        .unwrap_or_else(|_| EnvFilter::new("warn"));
+    let console_filter =
+        EnvFilter::try_from_env("CASSINI_LOG").unwrap_or_else(|_| EnvFilter::new("warn"));
 
     let fmt = tracing_subscriber::fmt::layer()
         .with_ansi(stderr().is_terminal())
@@ -92,23 +97,19 @@ pub fn init_tracing(service_name: &str) {
         .fmt_fields(GlogFields::default().compact())
         .with_filter(console_filter);
 
-    if tracing_subscriber::registry()
-        .with(fmt)
-        .try_init()
-        .is_err()
-    {
+    if tracing_subscriber::registry().with(fmt).try_init().is_err() {
         eprintln!("Logging registry already initialized");
     }
 }
 
 /// Shuts down the tracing provider, flushing any pending spans.
 /// Should be called before the process exits.
-pub fn shutdown_tracing () {
-     if let Some(provider) = TRACER_PROVIDER.lock().unwrap().take() {
-         if let Err(e) = provider.shutdown() {
-             eprintln!("Error shutting down tracer provider: {:?}", e);
-         }
-     }
+pub fn shutdown_tracing() {
+    if let Some(provider) = TRACER_PROVIDER.lock().unwrap().take()
+        && let Err(e) = provider.shutdown()
+    {
+        eprintln!("Error shutting down tracer provider: {:?}", e);
+    }
 }
 
 /// Attempts to set a parent span from an OpenTelemetry context, catching any panic
@@ -121,7 +122,9 @@ pub fn try_set_parent_otel(span: &Span, otel_ctx: Option<Context>) {
         let _ = span.set_parent(ctx);
     }));
     if result.is_err() {
-        tracing::error!("Failed to set parent span (likely race condition), continuing without parent");
+        tracing::error!(
+            "Failed to set parent span (likely race condition), continuing without parent"
+        );
     }
 }
 

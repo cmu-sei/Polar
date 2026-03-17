@@ -38,7 +38,7 @@ fn handle_owner_refs(
     graph: &GraphController<KubeNodeKey>,
 ) -> Result<(), ActorProcessingErr> {
     for owner in owners {
-        if let Some(owner_key) = KubeNodeKey::from_owner_reference(&owner) {
+        if let Some(owner_key) = KubeNodeKey::from_owner_reference(owner) {
             graph.cast(GraphControllerMsg::Op(GraphOp::EnsureEdge {
                 from: owner_key,
                 rel_type: "OWNS".into(),
@@ -206,25 +206,25 @@ impl GraphOperable for Pod {
                     }))?;
                 }
 
-                if let Some(secret) = volume.secret {
-                    if let Some(secret_name) = secret.secret_name {
-                        let s_key = KubeNodeKey::Secret {
-                            name: secret_name,
-                            namespace: namespace.clone(),
-                        };
+                if let Some(secret) = volume.secret
+                    && let Some(secret_name) = secret.secret_name
+                {
+                    let s_key = KubeNodeKey::Secret {
+                        name: secret_name,
+                        namespace: namespace.clone(),
+                    };
 
-                        graph.cast(GraphControllerMsg::Op(GraphOp::UpsertNode {
-                            key: s_key.clone(),
-                            props: Vec::new(),
-                        }))?;
+                    graph.cast(GraphControllerMsg::Op(GraphOp::UpsertNode {
+                        key: s_key.clone(),
+                        props: Vec::new(),
+                    }))?;
 
-                        graph.cast(GraphControllerMsg::Op(GraphOp::EnsureEdge {
-                            from: vol_key.clone(),
-                            rel_type: "BACKED_BY".into(),
-                            to: s_key,
-                            props: Vec::new(),
-                        }))?;
-                    }
+                    graph.cast(GraphControllerMsg::Op(GraphOp::EnsureEdge {
+                        from: vol_key.clone(),
+                        rel_type: "BACKED_BY".into(),
+                        to: s_key,
+                        props: Vec::new(),
+                    }))?;
                 }
 
                 if let Some(pvc) = volume.persistent_volume_claim {
@@ -948,7 +948,7 @@ impl GraphNodeKey for KubeNodeKey {
                     vec![(uid_k, BoltType::String(uid.clone().into()))],
                 )
             }
-            KubeNodeKey::State => (format!("(:State)"), vec![]),
+            KubeNodeKey::State => ("(:State)".to_string(), vec![]),
 
             KubeNodeKey::Namespace { name, cluster_uid } => {
                 let name_k = format!("{prefix}_name");

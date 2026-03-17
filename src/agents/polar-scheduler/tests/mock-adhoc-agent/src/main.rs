@@ -17,11 +17,20 @@ impl Actor for EventForwarder {
     type State = UnboundedSender<ClientEvent>;
     type Arguments = UnboundedSender<ClientEvent>;
 
-    async fn pre_start(&self, _: ActorRef<Self::Msg>, tx: Self::Arguments) -> Result<Self::State, ActorProcessingErr> {
+    async fn pre_start(
+        &self,
+        _: ActorRef<Self::Msg>,
+        tx: Self::Arguments,
+    ) -> Result<Self::State, ActorProcessingErr> {
         Ok(tx)
     }
 
-    async fn handle(&self, _: ActorRef<Self::Msg>, msg: Self::Msg, state: &mut Self::State) -> Result<(), ActorProcessingErr> {
+    async fn handle(
+        &self,
+        _: ActorRef<Self::Msg>,
+        msg: Self::Msg,
+        state: &mut Self::State,
+    ) -> Result<(), ActorProcessingErr> {
         let _ = state.send(msg);
         Ok(())
     }
@@ -46,7 +55,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "owner": "test"
         },
         "version": 1
-    }).to_string();
+    })
+    .to_string();
 
     let announcement = AdhocAgentAnnouncement {
         agent_type: AGENT_TYPE.to_string(),
@@ -58,15 +68,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
 
     // Spawn event forwarder
-    let (forwarder, _) = Actor::spawn(
-        Some("event-forwarder".to_string()),
-        EventForwarder,
-        tx,
-    )
-    .await?;
+    let (forwarder, _) =
+        Actor::spawn(Some("event-forwarder".to_string()), EventForwarder, tx).await?;
 
     let events_output: Arc<OutputPort<ClientEvent>> = Arc::new(OutputPort::default());
-    events_output.subscribe(forwarder, |event| Some(event));
+    events_output.subscribe(forwarder, Some);
 
     let config = TCPClientConfig::new().expect("Failed to create TCP client config");
     let (tcp_client, _handle) = Actor::spawn(
@@ -117,8 +123,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 match rkyv::from_bytes::<ScheduleNotification, rkyv::rancor::Error>(&payload) {
                     Ok(notif) => {
                         info!("Received notification: {:?}", notif);
-                        if let ScheduleNotification::AdhocUpdate { agent_type, schedule_json } = notif {
-                            info!("Ad-hoc agent {} received schedule: {}", agent_type, schedule_json);
+                        if let ScheduleNotification::AdhocUpdate {
+                            agent_type,
+                            schedule_json,
+                        } = notif
+                        {
+                            info!(
+                                "Ad-hoc agent {} received schedule: {}",
+                                agent_type, schedule_json
+                            );
                         }
                     }
                     Err(e) => error!("Failed to deserialize notification: {:?}", e),

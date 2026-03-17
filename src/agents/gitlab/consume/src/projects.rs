@@ -24,17 +24,17 @@
 use crate::{GitlabConsumerState, GitlabNodeKey, UNKNOWN_FILED};
 use cassini_client::{TcpClient, TcpClientMessage};
 use polar::{
+    GIT_REPO_DISCOGERY_TOPIC, GitRepositoryDiscoveredEvent,
     graph::{GraphController, GraphControllerMsg, GraphOp, GraphValue, Property},
-    GitRepositoryDiscoveredEvent, GIT_REPO_DISCOGERY_TOPIC,
 };
 use tracing::trace;
 
 use common::{
-    types::{GitlabData, GitlabEnvelope},
     PROJECTS_CONSUMER_TOPIC,
+    types::{GitlabData, GitlabEnvelope},
 };
 use gitlab_queries::projects::Project;
-use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef};
+use ractor::{Actor, ActorProcessingErr, ActorRef, async_trait};
 use rkyv::to_bytes;
 use tracing::{debug, info};
 

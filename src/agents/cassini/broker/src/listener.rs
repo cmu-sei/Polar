@@ -1,37 +1,42 @@
 use crate::UNEXPECTED_MESSAGE_STR;
 use crate::{
-    PUBLISH_REQ_FAILED_TXT, REGISTRATION_REQ_FAILED_TXT,
-    SESSION_MISSING_REASON_STR, SESSION_NOT_FOUND_TXT, SUBSCRIBE_REQUEST_FAILED_TXT,
+    PUBLISH_REQ_FAILED_TXT, REGISTRATION_REQ_FAILED_TXT, SESSION_MISSING_REASON_STR,
+    SESSION_NOT_FOUND_TXT, SUBSCRIBE_REQUEST_FAILED_TXT,
 };
 use async_trait::async_trait;
-use cassini_types::{ArchivedClientMessage, BrokerMessage, ClientMessage, DisconnectReason, WireTraceCtx, ShutdownPhase, ControlOp, ControlResult, ControlError};
-use ractor::{registry::where_is, rpc::CallResult, Actor, ActorProcessingErr, ActorRef, SupervisionEvent};
+use cassini_types::{
+    ArchivedClientMessage, BrokerMessage, ClientMessage, ControlError, ControlOp, ControlResult,
+    DisconnectReason, ShutdownPhase, WireTraceCtx,
+};
+use ractor::{
+    Actor, ActorProcessingErr, ActorRef, SupervisionEvent, registry::where_is, rpc::CallResult,
+};
 use rkyv::{
     deserialize,
     rancor::{self, Error, Source},
 };
 use rustls::{
-    pki_types::{pem::PemObject, CertificateDer, PrivateKeyDer},
-    server::WebPkiClientVerifier,
     RootCertStore, ServerConfig,
+    pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject},
+    server::WebPkiClientVerifier,
 };
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::{
-    io::{split, AsyncReadExt, AsyncWriteExt, BufWriter, ReadHalf, WriteHalf},
+    io::{AsyncReadExt, AsyncWriteExt, BufWriter, ReadHalf, WriteHalf, split},
     net::{TcpListener, TcpStream},
     sync::Mutex,
     task::JoinHandle,
 };
-use tokio_rustls::{server::TlsStream, TlsAcceptor};
+use tokio_rustls::{TlsAcceptor, server::TlsStream};
 use tracing::{debug, debug_span, error, info, info_span, instrument, trace, trace_span, warn};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
+use cassini_tracing::try_set_parent_otel;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
-use std::collections::HashMap;
 use tokio_util::sync::CancellationToken;
-use cassini_tracing::try_set_parent_otel;
 use uuid::Uuid;
 
 static ZERO_LEN_LAST_LOG_MS: AtomicU64 = AtomicU64::new(0);
@@ -96,8 +101,8 @@ impl Actor for ListenerManager {
 
         debug!("Gathering certificates for mTLS");
         let certs: Vec<_> = CertificateDer::pem_file_iter(&args.server_cert_file)
-            .map_err(|e| ActorProcessingErr::from(e))?
-            .map(|cert| cert.map_err(|e| ActorProcessingErr::from(e)))
+            .map_err(ActorProcessingErr::from)?
+            .map(|cert| cert.map_err(ActorProcessingErr::from))
             .collect::<Result<Vec<_>, _>>()?;
 
         let mut root_store = RootCertStore::empty();
@@ -107,11 +112,11 @@ impl Actor for ListenerManager {
         })?;
         root_store
             .add(root_cert)
-            .map_err(|e| ActorProcessingErr::from(e))?;
+            .map_err(ActorProcessingErr::from)?;
 
         let verifier = WebPkiClientVerifier::builder(Arc::new(root_store))
             .build()
-            .map_err(|e| ActorProcessingErr::from(e))?;
+            .map_err(ActorProcessingErr::from)?;
 
         let private_key = PrivateKeyDer::from_pem_file(&args.private_key_file).map_err(|e| {
             error!(error = ?e, private_key_file = %args.private_key_file, "Failed reading server key PEM");
@@ -123,7 +128,7 @@ impl Actor for ListenerManager {
         let server_config = ServerConfig::builder()
             .with_client_cert_verifier(verifier)
             .with_single_cert(certs, private_key)
-            .map_err(|e| ActorProcessingErr::from(e))?;
+            .map_err(ActorProcessingErr::from)?;
 
         Ok(ListenerManagerState {
             bind_addr: args.bind_addr,
@@ -153,7 +158,7 @@ impl Actor for ListenerManager {
         let acceptor = TlsAcceptor::from(Arc::clone(&state.server_config));
         let server = TcpListener::bind(&bind_addr)
             .await
-            .map_err(|e| ActorProcessingErr::from(e))?;
+            .map_err(ActorProcessingErr::from)?;
 
         info!("Server running on {bind_addr}");
         let shutdown_token = state.shutdown_token.clone();
@@ -175,7 +180,9 @@ impl Actor for ListenerManager {
 
                     // Check if we're shutting down before accepting new connection
                     if shutdown_token.is_cancelled() {
-                        debug!("ListenerManager not accepting new connections, stopping accept loop");
+                        debug!(
+                            "ListenerManager not accepting new connections, stopping accept loop"
+                        );
                         break;
                     }
 
@@ -208,8 +215,11 @@ impl Actor for ListenerManager {
                             reader: Some(reader),
                             client_id: client_id.clone(),
                             registration_id: None,
-                            session_mgr: session_mgr,
-                            broker: myself.try_get_supervisor().expect("ListenerManager must have a supervisor (the broker)").into(),
+                            session_mgr,
+                            broker: myself
+                                .try_get_supervisor()
+                                .expect("ListenerManager must have a supervisor (the broker)")
+                                .into(),
                         };
 
                         let spawn_span = info_span!(
@@ -290,21 +300,54 @@ impl Actor for ListenerManager {
     ) -> Result<(), ActorProcessingErr> {
         match message {
             // Phase 1: stop accepting new connections, but keep existing listeners alive
-            BrokerMessage::InitiateShutdownPhase { phase } if phase == ShutdownPhase::StopAcceptingNewConnections => {
-                self.handle_initiate_shutdown_phase_stop_accepting(myself.clone(), state).await?;
+            BrokerMessage::InitiateShutdownPhase { phase }
+                if phase == ShutdownPhase::StopAcceptingNewConnections =>
+            {
+                self.handle_initiate_shutdown_phase_stop_accepting(myself.clone(), state)
+                    .await?;
             }
             // Final phase: terminate all listener actors and then stop
-            BrokerMessage::InitiateShutdownPhase { phase } if phase == ShutdownPhase::TerminateListeners => {
-                self.handle_initiate_shutdown_phase_terminate_listeners(myself.clone(), state).await?;
+            BrokerMessage::InitiateShutdownPhase { phase }
+                if phase == ShutdownPhase::TerminateListeners =>
+            {
+                self.handle_initiate_shutdown_phase_terminate_listeners(myself.clone(), state)
+                    .await?;
             }
-            BrokerMessage::RegisterListener { client_id, listener_ref } => {
+            BrokerMessage::RegisterListener {
+                client_id,
+                listener_ref,
+            } => {
                 state.listeners.insert(client_id, listener_ref);
             }
-            BrokerMessage::RegistrationResponse { client_id, result, trace_ctx, } => {
-                self.handle_registration_response(myself.clone(), state, client_id, result, trace_ctx).await?;
+            BrokerMessage::RegistrationResponse {
+                client_id,
+                result,
+                trace_ctx,
+            } => {
+                self.handle_registration_response(
+                    myself.clone(),
+                    state,
+                    client_id,
+                    result,
+                    trace_ctx,
+                )
+                .await?;
             }
-            BrokerMessage::DisconnectRequest { reason, client_id, registration_id, trace_ctx } => {
-                self.handle_disconnect_request(myself.clone(), state, reason, client_id, registration_id, trace_ctx).await?;
+            BrokerMessage::DisconnectRequest {
+                reason,
+                client_id,
+                registration_id,
+                trace_ctx,
+            } => {
+                self.handle_disconnect_request(
+                    myself.clone(),
+                    state,
+                    reason,
+                    client_id,
+                    registration_id,
+                    trace_ctx,
+                )
+                .await?;
             }
             _ => (),
         }
@@ -357,7 +400,7 @@ impl ListenerManager {
         // Stop all active listeners
         for (client_id, listener_ref) in &state.listeners {
             let listener = listener_ref.clone();
-                listener.stop(Some("SHUTDOWN_TERMINATE_LISTENER".to_string()));
+            listener.stop(Some("SHUTDOWN_TERMINATE_LISTENER".to_string()));
             debug!("Stopped listener {}", client_id);
         }
 
@@ -499,13 +542,12 @@ impl Listener {
     ) -> Result<(), Error> {
         let bytes = rkyv::to_bytes::<Error>(&message)?;
 
-        let len_u32: u32 = bytes
-            .len()
-            .try_into()
-            .map_err(|_| rancor::Error::new(std::io::Error::new(
+        let len_u32: u32 = bytes.len().try_into().map_err(|_| {
+            rancor::Error::new(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 "frame too large for u32 length",
-            )))?;
+            ))
+        })?;
 
         trace!(
             msg_ty = %std::any::type_name::<ClientMessage>(),
@@ -580,10 +622,7 @@ impl Actor for Listener {
 
         let client_id = state.client_id.clone();
         let reader = state.reader.take().ok_or_else(|| {
-            ActorProcessingErr::from(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "Reader already taken",
-            ))
+            ActorProcessingErr::from(std::io::Error::other("Reader already taken"))
         })?;
 
         // Read loop: NO long-lived span. We create per-frame spans instead.
@@ -684,45 +723,128 @@ impl Actor for Listener {
             BrokerMessage::SetListenerSessionRef { session_ref } => {
                 state.session_ref = Some(session_ref);
             }
-            BrokerMessage::RegistrationRequest { registration_id, client_id, trace_ctx, } => {
-                self.handle_registration_request(myself, state, registration_id, client_id, trace_ctx).await?;
+            BrokerMessage::RegistrationRequest {
+                registration_id,
+                client_id,
+                trace_ctx,
+            } => {
+                self.handle_registration_request(
+                    myself,
+                    state,
+                    registration_id,
+                    client_id,
+                    trace_ctx,
+                )
+                .await?;
             }
-            BrokerMessage::RegistrationResponse { client_id, result, trace_ctx, } => {
-                self.handle_registration_response(myself, state, client_id, result, trace_ctx).await?;
+            BrokerMessage::RegistrationResponse {
+                client_id,
+                result,
+                trace_ctx,
+            } => {
+                self.handle_registration_response(myself, state, client_id, result, trace_ctx)
+                    .await?;
             }
-            BrokerMessage::DisconnectRequest { reason, client_id, registration_id, trace_ctx } => {
-                self.handle_disconnect_request(myself, state, reason, client_id, registration_id, trace_ctx).await?;
+            BrokerMessage::DisconnectRequest {
+                reason,
+                client_id,
+                registration_id,
+                trace_ctx,
+            } => {
+                self.handle_disconnect_request(
+                    myself,
+                    state,
+                    reason,
+                    client_id,
+                    registration_id,
+                    trace_ctx,
+                )
+                .await?;
             }
             // When the manager tells us to stop (final phase), we just stop.
             BrokerMessage::PrepareForShutdown { .. } => {
                 self.handle_prepare_for_shutdown(myself, state).await?;
             }
-            BrokerMessage::PublishRequest { topic, payload, registration_id, reply_to, trace_ctx, } => {
-                self.handle_publish_request(myself, state, topic, payload, registration_id, reply_to, trace_ctx).await?;
+            BrokerMessage::PublishRequest {
+                topic,
+                payload,
+                registration_id,
+                reply_to,
+                trace_ctx,
+            } => {
+                self.handle_publish_request(
+                    myself,
+                    state,
+                    topic,
+                    payload,
+                    registration_id,
+                    reply_to,
+                    trace_ctx,
+                )
+                .await?;
             }
-            BrokerMessage::PublishResponse { topic, payload, trace_ctx, result, } => {
-                self.handle_publish_response(myself, state, topic, payload, trace_ctx, result).await?;
+            BrokerMessage::PublishResponse {
+                topic,
+                payload,
+                trace_ctx,
+                result,
+            } => {
+                self.handle_publish_response(myself, state, topic, payload, trace_ctx, result)
+                    .await?;
             }
             BrokerMessage::PublishRequestAck { topic, trace_ctx } => {
-                self.handle_publish_request_ack(myself, state, topic, trace_ctx).await?;
+                self.handle_publish_request_ack(myself, state, topic, trace_ctx)
+                    .await?;
             }
-            BrokerMessage::SubscribeAcknowledgment { registration_id, topic, trace_ctx, result, } => {
-                self.handle_subscribe_ack(myself, state, registration_id, topic, trace_ctx, result).await?;
+            BrokerMessage::SubscribeAcknowledgment {
+                registration_id,
+                topic,
+                trace_ctx,
+                result,
+            } => {
+                self.handle_subscribe_ack(myself, state, registration_id, topic, trace_ctx, result)
+                    .await?;
             }
-            BrokerMessage::SubscribeRequest { registration_id, topic, trace_ctx, } => {
-                self.handle_subscribe_request(myself, state, registration_id, topic, trace_ctx).await?;
+            BrokerMessage::SubscribeRequest {
+                registration_id,
+                topic,
+                trace_ctx,
+            } => {
+                self.handle_subscribe_request(myself, state, registration_id, topic, trace_ctx)
+                    .await?;
             }
-            BrokerMessage::UnsubscribeRequest { registration_id, topic, trace_ctx, } => {
-                self.handle_unsubscribe_request(myself, state, registration_id, topic, trace_ctx).await?;
+            BrokerMessage::UnsubscribeRequest {
+                registration_id,
+                topic,
+                trace_ctx,
+            } => {
+                self.handle_unsubscribe_request(myself, state, registration_id, topic, trace_ctx)
+                    .await?;
             }
-            BrokerMessage::UnsubscribeAcknowledgment { registration_id: _, topic, result, } => {
-                self.handle_unsubscribe_ack(myself, state, topic, result).await?;
+            BrokerMessage::UnsubscribeAcknowledgment {
+                registration_id: _,
+                topic,
+                result,
+            } => {
+                self.handle_unsubscribe_ack(myself, state, topic, result)
+                    .await?;
             }
-            BrokerMessage::ControlRequest { registration_id, op, trace_ctx, .. } => {
-                self.handle_control_request(myself, state, registration_id, op, trace_ctx).await?;
+            BrokerMessage::ControlRequest {
+                registration_id,
+                op,
+                trace_ctx,
+                ..
+            } => {
+                self.handle_control_request(myself, state, registration_id, op, trace_ctx)
+                    .await?;
             }
-            BrokerMessage::ControlResponse { registration_id, result, trace_ctx, } => {
-                self.handle_control_response(myself, state, registration_id, result, trace_ctx).await?;
+            BrokerMessage::ControlResponse {
+                registration_id,
+                result,
+                trace_ctx,
+            } => {
+                self.handle_control_response(myself, state, registration_id, result, trace_ctx)
+                    .await?;
             }
             other => {
                 warn!(?other, "{UNEXPECTED_MESSAGE_STR}");
@@ -762,7 +884,8 @@ impl Listener {
                 trace_ctx: WireTraceCtx::from_current_span(),
             };
 
-            if let Err(e) = Listener::write(client_id.clone(), msg, Arc::clone(&state.writer)).await {
+            if let Err(e) = Listener::write(client_id.clone(), msg, Arc::clone(&state.writer)).await
+            {
                 error!(error = ?e, "Failed to write RegistrationResponse");
             }
 
@@ -794,7 +917,9 @@ impl Listener {
                     trace_ctx: WireTraceCtx::from_current_span(),
                 };
 
-                if let Err(e) = Listener::write(client_id.clone(), msg, Arc::clone(&state.writer)).await {
+                if let Err(e) =
+                    Listener::write(client_id.clone(), msg, Arc::clone(&state.writer)).await
+                {
                     error!(error = ?e, "Failed to write RegistrationResponse");
                     let _ = myself.send_message(BrokerMessage::TimeoutMessage {
                         client_id: state.client_id.clone(),
@@ -817,11 +942,16 @@ impl Listener {
                             .await;
                         match result {
                             Ok(CallResult::Success(Some(session_ref))) => {
-                                let _ = myself_clone.send_message(BrokerMessage::SetListenerSessionRef { session_ref });
+                                let _ = myself_clone.send_message(
+                                    BrokerMessage::SetListenerSessionRef { session_ref },
+                                );
                                 debug!("Cached session ref for listener");
                             }
                             _ => {
-                                error!("Failed to get session ref for registration {}", reg_id_clone);
+                                error!(
+                                    "Failed to get session ref for registration {}",
+                                    reg_id_clone
+                                );
                             }
                         }
                     });
@@ -834,7 +964,9 @@ impl Listener {
                     trace_ctx: WireTraceCtx::from_current_span(),
                 };
 
-                if let Err(e) = Listener::write(client_id.clone(), msg, Arc::clone(&state.writer)).await {
+                if let Err(e) =
+                    Listener::write(client_id.clone(), msg, Arc::clone(&state.writer)).await
+                {
                     error!(error = ?e, "Failed to write RegistrationResponse");
                 }
             }
@@ -857,15 +989,15 @@ impl Listener {
 
         // Use the registration_id from the message if present, otherwise stored one
         let effective_reg = registration_id.or_else(|| state.registration_id.clone());
-        if let Some(reg) = effective_reg {
-            if let Some(manager) = myself.try_get_supervisor() {
-                let _ = manager.send_message(BrokerMessage::DisconnectRequest {
-                    reason: reason.clone(),
-                    client_id: client_id.clone(),
-                    registration_id: Some(reg),
-                    trace_ctx: Some(span.context()),
-                });
-            }
+        if let Some(reg) = effective_reg
+            && let Some(manager) = myself.try_get_supervisor()
+        {
+            let _ = manager.send_message(BrokerMessage::DisconnectRequest {
+                reason: reason.clone(),
+                client_id: client_id.clone(),
+                registration_id: Some(reg),
+                trace_ctx: Some(span.context()),
+            });
         }
 
         debug!("Listener received disconnect request, stopping");
@@ -903,9 +1035,9 @@ impl Listener {
             warn!("{err_msg}");
             let _ = Listener::write(
                 state.client_id.clone(),
-                ClientMessage::ErrorMessage { 
-                    error: err_msg, 
-                    trace_ctx: WireTraceCtx::from_current_span() 
+                ClientMessage::ErrorMessage {
+                    error: err_msg,
+                    trace_ctx: WireTraceCtx::from_current_span(),
                 },
                 Arc::clone(&state.writer),
             )
@@ -918,9 +1050,9 @@ impl Listener {
             warn!("{err_msg}");
             let _ = Listener::write(
                 state.client_id.clone(),
-                ClientMessage::ErrorMessage { 
-                    error: err_msg, 
-                    trace_ctx: WireTraceCtx::from_current_span() 
+                ClientMessage::ErrorMessage {
+                    error: err_msg,
+                    trace_ctx: WireTraceCtx::from_current_span(),
                 },
                 Arc::clone(&state.writer),
             )
@@ -931,7 +1063,10 @@ impl Listener {
         let session = match state.session_ref.as_ref() {
             Some(s) => s.clone(),
             None => {
-                error!("No session ref for listener {} – dropping publish", state.client_id);
+                error!(
+                    "No session ref for listener {} – dropping publish",
+                    state.client_id
+                );
                 return Ok(());
             }
         };
@@ -949,7 +1084,9 @@ impl Listener {
                 result: Err(format!("{PUBLISH_REQ_FAILED_TXT}: {e}")),
                 trace_ctx: WireTraceCtx::from_current_span(),
             };
-            if let Err(e) = Listener::write(state.client_id.clone(), msg, Arc::clone(&state.writer)).await {
+            if let Err(e) =
+                Listener::write(state.client_id.clone(), msg, Arc::clone(&state.writer)).await
+            {
                 error!(error = ?e, "Failed to write PublishResponse");
             }
         }
@@ -965,18 +1102,21 @@ impl Listener {
         trace_ctx: Option<opentelemetry::Context>,
         result: Result<(), String>,
     ) -> Result<(), ActorProcessingErr> {
-        let span = trace_span!("cassini.listener.publish_response", topic = ?topic, ok = result.is_ok());
+        let span =
+            trace_span!("cassini.listener.publish_response", topic = ?topic, ok = result.is_ok());
         try_set_parent_otel(&span, trace_ctx);
         let _g = span.enter();
         trace!("Listener received publish response");
 
-        let msg = ClientMessage::PublishResponse { 
-            topic, 
-            payload, 
+        let msg = ClientMessage::PublishResponse {
+            topic,
+            payload,
             result,
             trace_ctx: WireTraceCtx::from_current_span(),
         };
-        if let Err(e) = Listener::write(state.client_id.clone(), msg, Arc::clone(&state.writer)).await {
+        if let Err(e) =
+            Listener::write(state.client_id.clone(), msg, Arc::clone(&state.writer)).await
+        {
             error!(error = ?e, "Failed to write PublishResponse");
         }
         Ok(())
@@ -997,7 +1137,9 @@ impl Listener {
             topic,
             trace_ctx: WireTraceCtx::from_current_span(),
         };
-        if let Err(e) = Listener::write(state.client_id.clone(), msg, Arc::clone(&state.writer)).await {
+        if let Err(e) =
+            Listener::write(state.client_id.clone(), msg, Arc::clone(&state.writer)).await
+        {
             error!(error = ?e, "Failed to write PublishRequestAck");
         }
         Ok(())
@@ -1016,12 +1158,14 @@ impl Listener {
         try_set_parent_otel(&span, trace_ctx);
         let _g = span.enter();
 
-        let msg = ClientMessage::SubscribeAcknowledgment { 
-            topic, 
+        let msg = ClientMessage::SubscribeAcknowledgment {
+            topic,
             result,
             trace_ctx: WireTraceCtx::from_current_span(),
         };
-        if let Err(e) = Listener::write(state.client_id.clone(), msg, Arc::clone(&state.writer)).await {
+        if let Err(e) =
+            Listener::write(state.client_id.clone(), msg, Arc::clone(&state.writer)).await
+        {
             error!(error = ?e, "Failed to write SubscribeAcknowledgment");
         }
         Ok(())
@@ -1069,15 +1213,14 @@ impl Listener {
                     topic,
                     trace_ctx: Some(span.context()),
                 }) {
-                    let err_msg = format!(
-                        "{SUBSCRIBE_REQUEST_FAILED_TXT}: {SESSION_NOT_FOUND_TXT}: {e}"
-                    );
+                    let err_msg =
+                        format!("{SUBSCRIBE_REQUEST_FAILED_TXT}: {SESSION_NOT_FOUND_TXT}: {e}");
                     error!("{err_msg}");
                     let _ = Listener::write(
                         state.client_id.clone(),
-                        ClientMessage::ErrorMessage { 
-                            error: err_msg, 
-                            trace_ctx: WireTraceCtx::from_current_span() 
+                        ClientMessage::ErrorMessage {
+                            error: err_msg,
+                            trace_ctx: WireTraceCtx::from_current_span(),
                         },
                         Arc::clone(&state.writer),
                     )
@@ -1091,7 +1234,8 @@ impl Listener {
                     result: Err("Failed to complete request: session missing".to_string()),
                     trace_ctx: WireTraceCtx::from_current_span(),
                 };
-                let _ = Listener::write(state.client_id.clone(), msg, Arc::clone(&state.writer)).await;
+                let _ =
+                    Listener::write(state.client_id.clone(), msg, Arc::clone(&state.writer)).await;
                 myself.stop(Some(SESSION_MISSING_REASON_STR.to_string()));
             }
         }
@@ -1128,15 +1272,14 @@ impl Listener {
                     topic,
                     trace_ctx: Some(span.context()),
                 }) {
-                    let err_msg = format!(
-                        "{SUBSCRIBE_REQUEST_FAILED_TXT}: {SESSION_NOT_FOUND_TXT}: {e}"
-                    );
+                    let err_msg =
+                        format!("{SUBSCRIBE_REQUEST_FAILED_TXT}: {SESSION_NOT_FOUND_TXT}: {e}");
                     error!("{err_msg}");
                     let _ = Listener::write(
                         state.client_id.clone(),
-                        ClientMessage::ErrorMessage { 
-                            error: err_msg, 
-                            trace_ctx: WireTraceCtx::from_current_span() 
+                        ClientMessage::ErrorMessage {
+                            error: err_msg,
+                            trace_ctx: WireTraceCtx::from_current_span(),
                         },
                         Arc::clone(&state.writer),
                     )
@@ -1148,9 +1291,9 @@ impl Listener {
                 error!("{err_msg}");
                 let _ = Listener::write(
                     state.client_id.clone(),
-                    ClientMessage::ErrorMessage { 
-                        error: err_msg, 
-                        trace_ctx: WireTraceCtx::from_current_span() 
+                    ClientMessage::ErrorMessage {
+                        error: err_msg,
+                        trace_ctx: WireTraceCtx::from_current_span(),
                     },
                     Arc::clone(&state.writer),
                 )
@@ -1222,7 +1365,8 @@ impl Listener {
         result: Result<ControlResult, ControlError>,
         trace_ctx: Option<opentelemetry::Context>,
     ) -> Result<(), ActorProcessingErr> {
-        let span = trace_span!("cassini.listener.control_response", %registration_id, ok = result.is_ok());
+        let span =
+            trace_span!("cassini.listener.control_response", %registration_id, ok = result.is_ok());
         try_set_parent_otel(&span, trace_ctx);
         let _g = span.enter();
         trace!("Received ControlResponse");
@@ -1233,7 +1377,9 @@ impl Listener {
             trace_ctx: WireTraceCtx::from_current_span(),
         };
 
-        if let Err(e) = Listener::write(state.client_id.clone(), msg, Arc::clone(&state.writer)).await {
+        if let Err(e) =
+            Listener::write(state.client_id.clone(), msg, Arc::clone(&state.writer)).await
+        {
             error!(error = ?e, "Failed to write ControlResponse");
         }
         Ok(())

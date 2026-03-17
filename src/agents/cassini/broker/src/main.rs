@@ -1,11 +1,11 @@
 #![allow(clippy::incompatible_msrv)]
 use cassini_broker::{
-    broker::{Broker, BrokerArgs},
     BROKER_NAME,
+    broker::{Broker, BrokerArgs},
 };
+use cassini_tracing::init_tracing;
 use ractor::Actor;
 use tracing::error;
-use cassini_tracing::init_tracing;
 // ============================== Main ============================== //
 
 #[tokio::main]

@@ -91,7 +91,7 @@ impl ConsumerSupervisor {
             Some(GROUPS_CONSUMER_TOPIC.to_string()),
             GitlabGroupConsumer,
             c_state.clone(),
-            myself.clone().into(),
+            myself.clone(),
         )
         .await
         {
@@ -101,7 +101,7 @@ impl ConsumerSupervisor {
             Some(RUNNERS_CONSUMER_TOPIC.to_string()),
             GitlabRunnerConsumer,
             c_state.clone(),
-            myself.clone().into(),
+            myself.clone(),
         )
         .await
         {
@@ -111,7 +111,7 @@ impl ConsumerSupervisor {
             Some(PROJECTS_CONSUMER_TOPIC.to_string()),
             GitlabProjectConsumer,
             c_state.clone(),
-            myself.clone().into(),
+            myself.clone(),
         )
         .await
         {
@@ -121,7 +121,7 @@ impl ConsumerSupervisor {
             Some(PIPELINE_CONSUMER_TOPIC.to_string()),
             GitlabPipelineConsumer,
             c_state.clone(),
-            myself.clone().into(),
+            myself.clone(),
         )
         .await
         {
@@ -131,7 +131,7 @@ impl ConsumerSupervisor {
             Some(REPOSITORY_CONSUMER_TOPIC.to_string()),
             GitlabRepositoryConsumer,
             c_state.clone(),
-            myself.clone().into(),
+            myself.clone(),
         )
         .await
         {
@@ -178,7 +178,7 @@ impl Actor for ConsumerSupervisor {
         let graph_config = get_neo_config()?;
         let state = ConsumerSupervisorState {
             tcp_client,
-            graph_config: graph_config,
+            graph_config,
             u_consumer: None,
         };
 

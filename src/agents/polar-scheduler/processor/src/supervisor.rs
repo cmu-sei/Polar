@@ -1,10 +1,10 @@
 use crate::processor::ScheduleInfoProcessor;
 use crate::types::ProcessorMsg;
-use polar_scheduler_common::{AdhocAgentAnnouncement, GitScheduleChange};
 use cassini_client::{TCPClientConfig, TcpClientActor, TcpClientArgs, TcpClientMessage};
 use cassini_types::ClientEvent;
 use polar::SupervisorMessage;
-use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef, OutputPort, SupervisionEvent};
+use polar_scheduler_common::{AdhocAgentAnnouncement, GitScheduleChange};
+use ractor::{Actor, ActorProcessingErr, ActorRef, OutputPort, SupervisionEvent, async_trait};
 use tracing::{debug, error, info, warn};
 
 pub const SERVICE_NAME: &str = "polar.scheduler";
@@ -129,24 +129,34 @@ impl Actor for RootSupervisor {
                     if let Some(p) = &state.processor {
                         info!("Received message on topic: {}", topic);
                         if topic == "scheduler.in" {
-                            match rkyv::from_bytes::<GitScheduleChange, rkyv::rancor::Error>(&payload) {
+                            match rkyv::from_bytes::<GitScheduleChange, rkyv::rancor::Error>(
+                                &payload,
+                            ) {
                                 Ok(change) => {
-                                    info!("Deserialized GitScheduleChange, forwarding to processor");
+                                    info!(
+                                        "Deserialized GitScheduleChange, forwarding to processor"
+                                    );
                                     if let Err(e) = p.cast(ProcessorMsg::GitChange(change)) {
                                         error!("Failed to cast GitChange to processor: {:?}", e);
                                     }
                                 }
-                                Err(e) => error!("Failed to deserialize GitScheduleChange: {:?}", e),
+                                Err(e) => {
+                                    error!("Failed to deserialize GitScheduleChange: {:?}", e)
+                                }
                             }
                         } else if topic == "scheduler.adhoc" {
-                            match rkyv::from_bytes::<AdhocAgentAnnouncement, rkyv::rancor::Error>(&payload) {
+                            match rkyv::from_bytes::<AdhocAgentAnnouncement, rkyv::rancor::Error>(
+                                &payload,
+                            ) {
                                 Ok(ann) => {
                                     info!("Deserialized ad-hoc agent announcement, forwarding");
                                     if let Err(e) = p.cast(ProcessorMsg::Announcement(ann)) {
                                         error!("Failed to cast announcement: {:?}", e);
                                     }
                                 }
-                                Err(e) => error!("Failed to deserialize ad-hoc announcement: {:?}", e),
+                                Err(e) => {
+                                    error!("Failed to deserialize ad-hoc announcement: {:?}", e)
+                                }
                             }
                         } else if topic.starts_with("events.") {
                             info!("Received event on topic: {}", topic);
@@ -174,11 +184,15 @@ impl Actor for RootSupervisor {
     ) -> Result<(), ActorProcessingErr> {
         match event {
             SupervisionEvent::ActorFailed(actor_cell, err) => {
-                let name_str = actor_cell.get_name().unwrap_or_else(|| "unknown".to_string());
+                let name_str = actor_cell
+                    .get_name()
+                    .unwrap_or_else(|| "unknown".to_string());
                 error!("Actor {} failed: {:?}", name_str, err);
             }
             SupervisionEvent::ActorTerminated(actor_cell, _, reason) => {
-                let name_str = actor_cell.get_name().unwrap_or_else(|| "unknown".to_string());
+                let name_str = actor_cell
+                    .get_name()
+                    .unwrap_or_else(|| "unknown".to_string());
                 warn!("Actor {} terminated: {:?}", name_str, reason);
             }
             _ => {}

@@ -12,9 +12,13 @@ async fn main() {
         Some("cassini.harness.producer.supervisor".to_string()),
         RootActor,
         (),
-    ).await.expect("Expected harness supervisor to start.");
+    )
+    .await
+    .expect("Expected harness supervisor to start.");
 
-    handle.await.expect("Expected producer to successfully execute.");
+    handle
+        .await
+        .expect("Expected producer to successfully execute.");
 
     cassini_client::shutdown_tracing();
     std::process::exit(0);

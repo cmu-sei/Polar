@@ -1,12 +1,12 @@
 use crate::{
-    CredentialConfigError, GitRepoSupervisor, GitRepoSupervisorArgs,
-    RepoSupervisorMessage, StaticCredentialConfig, REPO_SUPERVISOR_NAME, SERVICE_NAME,
+    CredentialConfigError, GitRepoSupervisor, GitRepoSupervisorArgs, REPO_SUPERVISOR_NAME,
+    RepoSupervisorMessage, SERVICE_NAME, StaticCredentialConfig,
 };
 use cassini_client::TcpClientMessage;
 use cassini_types::ClientEvent;
 use git_agent_common::{ConfigurationEvent, GIT_REPO_CONFIG_EVENTS};
 use polar::SupervisorMessage;
-use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef, SupervisionEvent};
+use ractor::{Actor, ActorProcessingErr, ActorRef, SupervisionEvent, async_trait};
 use rkyv::from_bytes;
 use std::path::PathBuf;
 use tracing::{debug, error, instrument, warn};
@@ -27,13 +27,13 @@ impl RootSupervisor {
         debug!("Received message from topic {topic}");
         if let Ok(ev) = from_bytes::<ConfigurationEvent, rkyv::rancor::Error>(&payload) {
             if let Some(s) = &state.repo_supervisor {
-                return Ok(s.cast(RepoSupervisorMessage::SpawnWorker { config: ev.config })?);
+                Ok(s.cast(RepoSupervisorMessage::SpawnWorker { config: ev.config })?)
             } else {
-                return Err("Failed to find repo supervisor".into());
+                Err("Failed to find repo supervisor".into())
             }
         } else {
             warn!("Failed to deserialize event");
-            return Ok(());
+            Ok(())
         }
     }
 

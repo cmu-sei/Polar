@@ -1,25 +1,25 @@
 // use cassini_client::*;
 use cassini_client::{
-    ClientEventForwarder, ClientEventForwarderArgs, TCPClientConfig, TcpClientActor,
-    TcpClientArgs, TcpClientMessage,
+    ClientEventForwarder, ClientEventForwarderArgs, TCPClientConfig, TcpClientActor, TcpClientArgs,
+    TcpClientMessage,
 };
 use cassini_types::ClientEvent as CassiniEvent;
 use fake::Fake;
 use harness_common::{
+    ControllerCommand, Envelope, MessagePattern, ProducerConfig, SupervisorMessage, WireTraceCtx,
     client::{
         ClientEvent as HarnessClientEvent, ControlClient, ControlClientArgs, ControlClientConfig,
         ControlClientMsg,
     },
-    compute_checksum, ControllerCommand, Envelope, MessagePattern, ProducerConfig,
-    SupervisorMessage, WireTraceCtx,
+    compute_checksum,
 };
-use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef, OutputPort, SupervisionEvent};
+use ractor::{Actor, ActorProcessingErr, ActorRef, OutputPort, SupervisionEvent, async_trait};
 use serde::Serialize;
 use serde_json::to_string_pretty;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::time::{self, sleep};
-use tracing::{debug, error, info, warn, info_span};
+use tracing::{debug, error, info, info_span, warn};
 const PRODUCER_FINISHED_SUCCESSFULLY: &str = "PRODUCER_FINISHED_SUCCESSFULLY";
 // const PRODUCER_ENCOUNTERED_ERROR: &str = "PRODUCER_ENCOUNTERED_ERROR";
 
@@ -39,7 +39,7 @@ pub struct RootActor;
 pub struct RootActorState {
     harness_client: ActorRef<ControlClientMsg>,
     producer: Option<ActorRef<ProducerMessage>>,
-    work_completed: bool,  // true when the producer agent finished successfully
+    work_completed: bool, // true when the producer agent finished successfully
 }
 
 #[async_trait]
@@ -144,7 +144,10 @@ impl Actor for RootActor {
             },
             SupervisorMessage::TransportError { reason } => {
                 if state.work_completed {
-                    info!("Controller disconnected after work completed (shutdown): {}", reason);
+                    info!(
+                        "Controller disconnected after work completed (shutdown): {}",
+                        reason
+                    );
                 } else {
                     error!("Lost connection to the controller: {}", reason);
                 }
@@ -185,29 +188,35 @@ impl Actor for RootActor {
             SupervisionEvent::ActorTerminated(dead_actor, _, reason) => {
                 let actor_name = dead_actor.get_name().unwrap_or_default();
                 let actor_id = dead_actor.get_id();
-                tracing::info!("Worker agent: {0}:{1:?} stopped {reason:?}", actor_name, actor_id);
+                tracing::info!(
+                    "Worker agent: {0}:{1:?} stopped {reason:?}",
+                    actor_name,
+                    actor_id
+                );
 
                 // If this is the producer agent, mark work as completed and stop supervisor
-                if let Some(producer_ref) = &state.producer {
-                    if producer_ref.get_id() == actor_id {
-                        state.work_completed = true;
-                        state.producer = None;
+                if let Some(producer_ref) = &state.producer
+                    && producer_ref.get_id() == actor_id
+                {
+                    state.work_completed = true;
+                    state.producer = None;
 
-                        // Notify controller that the producer has finished its test
-                        state.harness_client.send_message(ControlClientMsg::SendCommand(
-                                ControllerCommand::TestComplete {
-                                    client_id: String::default(),
-                                    role: harness_common::AgentRole::Producer,
-                                },
-                            ))?;
+                    // Notify controller that the producer has finished its test
+                    state
+                        .harness_client
+                        .send_message(ControlClientMsg::SendCommand(
+                            ControllerCommand::TestComplete {
+                                client_id: String::default(),
+                                role: harness_common::AgentRole::Producer,
+                            },
+                        ))?;
 
-                        info!("Producer agent finished, delaying stop to allow message delivery");
-                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    info!("Producer agent finished, delaying stop to allow message delivery");
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
-                        info!("Stopping supervisor now");
-                        myself.stop(Some("Producer finished".to_string()));
-                        return Ok(());
-                    }
+                    info!("Stopping supervisor now");
+                    myself.stop(Some("Producer finished".to_string()));
+                    return Ok(());
                 }
 
                 // If no children remain, stop supervisor (failsafe)
@@ -269,14 +278,13 @@ impl Actor for ProducerAgent {
         )
         .await?;
 
-
         let config = TCPClientConfig::new()?;
         // Prepare TcpClientArgs and spawn the client actor
         let tcp_args = TcpClientArgs {
             config,
             registration_id: None,
             events_output: None,
-            event_handler: Some(forwarder.into()),
+            event_handler: Some(forwarder),
         };
 
         let (tcp_client, _) = TcpClientActor::spawn_linked(
@@ -351,10 +359,14 @@ impl Actor for ProducerAgent {
                     // Capture the trace context from the current span
                     let trace_ctx_opt = WireTraceCtx::from_current_span();
                     if let Some(ctx) = trace_ctx_opt {
-                        tracing::debug!("Producer sending message with trace_id: {:02x?}", ctx.trace_id);
+                        tracing::debug!(
+                            "Producer sending message with trace_id: {:02x?}",
+                            ctx.trace_id
+                        );
                     }
                     // Extract the inner value for the envelope (non‑optional)
-                    let trace_ctx_inner = trace_ctx_opt.expect("active span should have a valid context");
+                    let trace_ctx_inner =
+                        trace_ctx_opt.expect("active span should have a valid context");
 
                     let faked = (0..=size).fake::<String>();
                     let checksum = compute_checksum(faked.as_bytes());
@@ -363,7 +375,7 @@ impl Actor for ProducerAgent {
                         seqno,
                         data: faked,
                         checksum,
-                        trace_ctx: trace_ctx_inner,   // envelope expects WireTraceCtx (non‑optional)
+                        trace_ctx: trace_ctx_inner, // envelope expects WireTraceCtx (non‑optional)
                     };
 
                     let payload = rkyv::to_bytes::<rkyv::rancor::Error>(&envelope)
@@ -372,7 +384,7 @@ impl Actor for ProducerAgent {
                     let message = TcpClientMessage::Publish {
                         topic: topic.clone(),
                         payload: payload.into(),
-                        trace_ctx: Some(trace_ctx_inner),   // client message expects Option
+                        trace_ctx: Some(trace_ctx_inner), // client message expects Option
                     };
 
                     if let Err(e) = tcp_client.send_message(message) {
@@ -382,7 +394,8 @@ impl Actor for ProducerAgent {
                     state.metrics.sent += 1;
                 }
 
-                state.metrics.elapsed_ms = crate::get_timestamp_in_milliseconds()? - state.metrics.start_ms;
+                state.metrics.elapsed_ms =
+                    crate::get_timestamp_in_milliseconds()? - state.metrics.start_ms;
 
                 // Wait for any pending acknowledgments before disconnecting
                 debug!("Waiting for pending acknowledgments...");
@@ -430,9 +443,13 @@ impl Actor for ProducerAgent {
                     // Capture the trace context from the current span
                     let trace_ctx_opt = WireTraceCtx::from_current_span();
                     if let Some(ctx) = trace_ctx_opt {
-                        tracing::debug!("Producer sending message with trace_id: {:02x?}", ctx.trace_id);
+                        tracing::debug!(
+                            "Producer sending message with trace_id: {:02x?}",
+                            ctx.trace_id
+                        );
                     }
-                    let trace_ctx_inner = trace_ctx_opt.expect("active span should have a valid context");
+                    let trace_ctx_inner =
+                        trace_ctx_opt.expect("active span should have a valid context");
 
                     let faked = (0..=size).fake::<String>();
                     let checksum = compute_checksum(faked.as_bytes());
@@ -441,7 +458,7 @@ impl Actor for ProducerAgent {
                         seqno,
                         data: faked,
                         checksum,
-                        trace_ctx: trace_ctx_inner,   // envelope expects non‑optional
+                        trace_ctx: trace_ctx_inner, // envelope expects non‑optional
                     };
 
                     let payload = rkyv::to_bytes::<rkyv::rancor::Error>(&envelope)
@@ -452,7 +469,7 @@ impl Actor for ProducerAgent {
                         let message = TcpClientMessage::Publish {
                             topic: topic.clone(),
                             payload: payload.clone().into(),
-                            trace_ctx: Some(trace_ctx_inner),   // client message expects Option
+                            trace_ctx: Some(trace_ctx_inner), // client message expects Option
                         };
 
                         if let Err(e) = tcp_client.send_message(message) {

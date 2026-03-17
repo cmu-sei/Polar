@@ -44,7 +44,7 @@ impl ClusterObserverSupervisor {
             Ok(kube_client) => {
                 debug!("Kubernetes client initialized");
 
-                let tcp_client = spawn_tcp_client(TCP_CLIENT_NAME, myself.into(), |event| {
+                let tcp_client = spawn_tcp_client(TCP_CLIENT_NAME, myself, |event| {
                     Some(SupervisorMessage::ClientEvent { event })
                 })
                 .await?;
@@ -453,17 +453,14 @@ impl NamespaceSupervisor {
 
                     emit_event(tcp_client, ev).await?;
 
-                    match supervisors.get(&ns_name) {
-                        Some(_supervisor) => {
-                            debug!("removing namespace supervisor for {ns_name} ");
-                            if let Some((_ns, supervisor)) = supervisors.remove_entry(&ns_name) {
-                                supervisor
-                                    .stop_children_and_wait(None, Some(Duration::from_millis(500)))
-                                    .await;
-                                supervisor.stop(None);
-                            }
+                    if let Some(_supervisor) = supervisors.get(&ns_name) {
+                        debug!("removing namespace supervisor for {ns_name} ");
+                        if let Some((_ns, supervisor)) = supervisors.remove_entry(&ns_name) {
+                            supervisor
+                                .stop_children_and_wait(None, Some(Duration::from_millis(500)))
+                                .await;
+                            supervisor.stop(None);
                         }
-                        None => (),
                     }
                 }
                 _ => (),
@@ -519,7 +516,7 @@ impl Actor for NamespaceSupervisor {
                 .await
                 {
                     error!("Failed to watch namespaces {e}");
-                    return Err(e.into());
+                    return Err(e);
                 }
             }
         }

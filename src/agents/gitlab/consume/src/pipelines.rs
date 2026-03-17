@@ -26,15 +26,15 @@ use crate::GitlabNodeKey;
 use cassini_client::TcpClient;
 use cassini_client::TcpClientMessage;
 use chrono::Utc;
+use common::PIPELINE_CONSUMER_TOPIC;
 use common::types::GitlabData;
 use common::types::GitlabEnvelope;
-use common::PIPELINE_CONSUMER_TOPIC;
 use gitlab_queries::projects::CiJobArtifact;
 use gitlab_queries::projects::GitlabCiJob;
+use polar::ProvenanceEvent;
 use polar::graph::GraphController;
 use polar::graph::{GraphControllerMsg, GraphOp, GraphValue, Property};
-use polar::ProvenanceEvent;
-use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef};
+use ractor::{Actor, ActorProcessingErr, ActorRef, async_trait};
 use tracing::debug;
 
 fn fmt_download_path(base_url: &str, download_url: &str) -> String {
@@ -201,18 +201,18 @@ impl GitlabPipelineConsumer {
                 }))?;
             }
 
-            if let Some(conn) = &job.artifacts {
-                if let Some(nodes) = &conn.nodes {
-                    let artifacts = nodes.iter().flatten().collect::<Vec<_>>();
-                    Self::handle_artifacts(
-                        instance_id,
-                        base_url,
-                        &job_key,
-                        artifacts,
-                        graph,
-                        tcp_client,
-                    )?;
-                }
+            if let Some(conn) = &job.artifacts
+                && let Some(nodes) = &conn.nodes
+            {
+                let artifacts = nodes.iter().flatten().collect::<Vec<_>>();
+                Self::handle_artifacts(
+                    instance_id,
+                    base_url,
+                    &job_key,
+                    artifacts,
+                    graph,
+                    tcp_client,
+                )?;
             }
         }
 

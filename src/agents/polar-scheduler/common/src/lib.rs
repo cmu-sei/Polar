@@ -4,11 +4,30 @@ use serde::{Deserialize as SerdeDeserialize, Serialize as SerdeSerialize};
 // Time specification
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, SerdeSerialize, SerdeDeserialize)]
 pub enum TimeSpec {
-    Periodic { interval: u64, unit: TimeUnit },
-    Exact { timestamp: String },
-    Daily { hour: u8, minute: u8, timezone: Option<String> },
-    Weekly { day: Weekday, hour: u8, minute: u8, timezone: Option<String> },
-    Monthly { day: u8, hour: u8, minute: u8, timezone: Option<String> },
+    Periodic {
+        interval: u64,
+        unit: TimeUnit,
+    },
+    Exact {
+        timestamp: String,
+    },
+    Daily {
+        hour: u8,
+        minute: u8,
+        timezone: Option<String>,
+    },
+    Weekly {
+        day: Weekday,
+        hour: u8,
+        minute: u8,
+        timezone: Option<String>,
+    },
+    Monthly {
+        day: u8,
+        hour: u8,
+        minute: u8,
+        timezone: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, SerdeSerialize, SerdeDeserialize)]
@@ -20,7 +39,13 @@ pub enum TimeUnit {
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, SerdeSerialize, SerdeDeserialize)]
 pub enum Weekday {
-    Mon, Tue, Wed, Thu, Fri, Sat, Sun,
+    Mon,
+    Tue,
+    Wed,
+    Thu,
+    Fri,
+    Sat,
+    Sun,
 }
 
 #[derive(Debug, Clone, SerdeSerialize, SerdeDeserialize)]
@@ -65,7 +90,16 @@ pub struct AdhocAgentAnnouncement {
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize)]
 pub enum ScheduleNotification {
-    PermanentUpdate { agent_id: String, schedule_json: String },
-    AdhocUpdate { agent_type: String, schedule_json: String },
-    EphemeralUpdate { agent_type: String, schedule_json: String },
+    PermanentUpdate {
+        agent_id: String,
+        schedule_json: String,
+    },
+    AdhocUpdate {
+        agent_type: String,
+        schedule_json: String,
+    },
+    EphemeralUpdate {
+        agent_type: String,
+        schedule_json: String,
+    },
 }

@@ -1,6 +1,6 @@
 use cassini_client::{
-    ClientEventForwarder, ClientEventForwarderArgs, TCPClientConfig, TcpClientActor,
-    TcpClientArgs, TcpClientMessage,
+    ClientEventForwarder, ClientEventForwarderArgs, TCPClientConfig, TcpClientActor, TcpClientArgs,
+    TcpClientMessage,
 };
 use cassini_types::{ClientEvent, ControlOp, ControlResult};
 use ractor::{Actor, ActorProcessingErr, ActorRef};

@@ -1,23 +1,23 @@
-use crate::groups::JiraGroupObserver;
-use crate::issues::JiraIssueObserver;
-use crate::projects::JiraProjectObserver;
-use crate::users::JiraUserObserver;
-use crate::JiraObserverArgs;
 use crate::BROKER_CLIENT_NAME;
 use crate::JIRA_GROUP_OBSERVER;
 use crate::JIRA_ISSUE_OBSERVER;
 use crate::JIRA_PROJECT_OBSERVER;
 use crate::JIRA_USER_OBSERVER;
+use crate::JiraObserverArgs;
+use crate::groups::JiraGroupObserver;
+use crate::issues::JiraIssueObserver;
+use crate::projects::JiraProjectObserver;
+use crate::users::JiraUserObserver;
 use cassini_client::{TCPClientConfig, TcpClientActor, TcpClientArgs};
 use cassini_types::ClientEvent;
 use jira_common::get_file_as_byte_vec;
 use polar::SupervisorMessage;
-use ractor::async_trait;
 use ractor::Actor;
 use ractor::ActorProcessingErr;
 use ractor::ActorRef;
 use ractor::OutputPort;
 use ractor::SupervisionEvent;
+use ractor::async_trait;
 use reqwest::Certificate;
 use reqwest::Client;
 use reqwest::ClientBuilder;
@@ -181,13 +181,17 @@ impl Actor for ObserverSupervisor {
                         warn!("failed to start issue observer {e}")
                     }
                 }
-                ClientEvent::MessagePublished { topic: _, payload: _, .. } => {
+                ClientEvent::MessagePublished {
+                    topic: _,
+                    payload: _,
+                    ..
+                } => {
                     todo!()
                 }
                 ClientEvent::TransportError { reason: _ } => todo!(),
                 ClientEvent::ControlResponse { .. } => {
                     // ignore
-                },
+                }
             },
         }
         Ok(())

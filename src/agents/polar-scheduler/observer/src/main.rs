@@ -23,7 +23,11 @@ impl Actor for RegistrationWaiter {
     type State = ActorRef<GitWatcherMsg>;
     type Arguments = ActorRef<GitWatcherMsg>;
 
-    async fn pre_start(&self, _: ActorRef<Self::Msg>, watcher: Self::Arguments) -> Result<Self::State, ActorProcessingErr> {
+    async fn pre_start(
+        &self,
+        _: ActorRef<Self::Msg>,
+        watcher: Self::Arguments,
+    ) -> Result<Self::State, ActorProcessingErr> {
         Ok(watcher)
     }
 
@@ -33,12 +37,9 @@ impl Actor for RegistrationWaiter {
         msg: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        match msg {
-            ClientEvent::Registered { .. } => {
-                info!("Client registered, triggering initial scan");
-                state.cast(GitWatcherMsg::PerformInitialScan)?;
-            }
-            _ => {}
+        if let ClientEvent::Registered { .. } = msg {
+            info!("Client registered, triggering initial scan");
+            state.cast(GitWatcherMsg::PerformInitialScan)?;
         }
         Ok(())
     }
@@ -59,7 +60,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // Clone if needed (blocking, but only at startup)
         tokio::task::spawn_blocking(move || {
-            ensure_repo(&local_path, &remote_url, username.as_deref(), password.as_deref())
+            ensure_repo(
+                &local_path,
+                &remote_url,
+                username.as_deref(),
+                password.as_deref(),
+            )
         })
         .await
         .map_err(|e| format!("Failed to ensure repo: {}", e))??;
@@ -83,7 +89,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         info!("No remote URL configured; watching local directory only.");
     }
 
-    let repo_path = config.local_path.to_str().expect("Invalid path").to_string();
+    let repo_path = config
+        .local_path
+        .to_str()
+        .expect("Invalid path")
+        .to_string();
 
     // Create a channel for client events (optional, but we need an OutputPort)
     let events_output: Arc<OutputPort<ClientEvent>> = Arc::new(OutputPort::default());
@@ -117,7 +127,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         watcher.clone(),
     )
     .await?;
-    events_output.subscribe(waiter, |event| Some(event));
+    events_output.subscribe(waiter, Some);
 
     watcher_handle.await?;
     Ok(())

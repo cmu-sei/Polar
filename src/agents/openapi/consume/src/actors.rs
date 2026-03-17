@@ -3,23 +3,23 @@ use crate::WEB_CONSUMER_NAME;
 use cassini_client::TCPClientConfig;
 use cassini_client::*;
 use cassini_types::ClientEvent;
+use cassini_types::WireTraceCtx;
 use neo4rs::Graph;
 use neo4rs::Query;
 use polar::Supervisor;
 use polar::SupervisorMessage;
-use ractor::async_trait;
 use ractor::Actor;
 use ractor::ActorProcessingErr;
 use ractor::ActorRef;
 use ractor::OutputPort;
 use ractor::SupervisionEvent;
+use ractor::async_trait;
 use tracing::debug;
 use tracing::info;
 use tracing::warn;
 use utoipa::openapi::Deprecated;
 use utoipa::openapi::OpenApi;
 use web_agent_common::AppData;
-use cassini_types::WireTraceCtx;
 
 /// The supervisor for our consumer actors
 pub struct ConsumerSupervisor;
@@ -35,10 +35,10 @@ impl Supervisor for ConsumerSupervisor {
     fn deserialize_and_dispatch(topic: String, payload: Vec<u8>) {
         match rkyv::from_bytes::<AppData, rkyv::rancor::Error>(&payload) {
             Ok(message) => {
-                if let Some(consumer) = ractor::registry::where_is(topic.clone()) {
-                    if let Err(e) = consumer.send_message(message) {
-                        tracing::warn!("Error forwarding message. {e}");
-                    }
+                if let Some(consumer) = ractor::registry::where_is(topic.clone())
+                    && let Err(e) = consumer.send_message(message)
+                {
+                    tracing::warn!("Error forwarding message. {e}");
                 }
             }
             Err(err) => warn!("Failed to deserialize message: {:?}", err),
@@ -116,7 +116,9 @@ impl Actor for ConsumerSupervisor {
                                     trace_ctx: WireTraceCtx::from_current_span(),
                                 })
                                 .map_err(|e| {
-                                    tracing::error!("Failed to forward subscribe request to client. {e}")
+                                    tracing::error!(
+                                        "Failed to forward subscribe request to client. {e}"
+                                    )
                                 })
                                 .ok();
                         }
@@ -236,18 +238,18 @@ impl Actor for ApiConsumer {
                     debug!("found endpoint \"{endpoint}\"");
 
                     let mut operations = Vec::new();
-                    path.get
-                        .as_ref()
-                        .map(|op| operations.push(("GET", op.clone())));
-                    path.post
-                        .as_ref()
-                        .map(|op| operations.push(("POST", op.clone())));
-                    path.put
-                        .as_ref()
-                        .map(|op| operations.push(("PUT", op.clone())));
-                    path.delete
-                        .as_ref()
-                        .map(|op| operations.push(("DELETE", op.clone())));
+                    if let Some(op) = path.get.as_ref() {
+                        operations.push(("GET", op.clone()))
+                    }
+                    if let Some(op) = path.post.as_ref() {
+                        operations.push(("POST", op.clone()))
+                    }
+                    if let Some(op) = path.put.as_ref() {
+                        operations.push(("PUT", op.clone()))
+                    }
+                    if let Some(op) = path.delete.as_ref() {
+                        operations.push(("DELETE", op.clone()))
+                    }
                     // TODO: Add additional operation types. HEAD, Options, etc.
 
                     for (op_type, operation) in operations {
@@ -294,7 +296,11 @@ impl Actor for ApiConsumer {
                             .expect("Could not execute query on neo4j graph");
 
                         //draw relationship back to app node
-                        operation_query = format!("MATCH (a:Application) WHERE a.title = '{}' with a MATCH (e:Endpoint) WHERE e.operationId = '{}' WITH a,e MERGE (a)-[:hasEndpoint]->(e) ",spec.info.title ,op_id.clone());
+                        operation_query = format!(
+                            "MATCH (a:Application) WHERE a.title = '{}' with a MATCH (e:Endpoint) WHERE e.operationId = '{}' WITH a,e MERGE (a)-[:hasEndpoint]->(e) ",
+                            spec.info.title,
+                            op_id.clone()
+                        );
                         debug!("{}", operation_query);
                         transaction
                             .run(Query::new(operation_query))

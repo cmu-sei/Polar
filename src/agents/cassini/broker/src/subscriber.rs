@@ -1,18 +1,18 @@
 use crate::UNEXPECTED_MESSAGE_STR;
 use crate::{
-    get_subscriber_name, CLIENT_NOT_FOUND_TXT, DISCONNECTED_REASON, REGISTRATION_REQ_FAILED_TXT,
-    SESSION_NOT_FOUND_TXT, SUBSCRIBE_REQUEST_FAILED_TXT, TIMEOUT_REASON,
+    CLIENT_NOT_FOUND_TXT, DISCONNECTED_REASON, REGISTRATION_REQ_FAILED_TXT, SESSION_NOT_FOUND_TXT,
+    SUBSCRIBE_REQUEST_FAILED_TXT, TIMEOUT_REASON, get_subscriber_name,
 };
+use cassini_tracing::try_set_parent_otel;
 use cassini_types::{BrokerMessage, ShutdownPhase};
 use ractor::{
-    registry::where_is, Actor, ActorProcessingErr, ActorRef, RpcReplyPort, SupervisionEvent,
+    Actor, ActorProcessingErr, ActorRef, RpcReplyPort, SupervisionEvent, registry::where_is,
     rpc::CallResult,
 };
-use std::collections::{VecDeque, HashMap};
+use std::collections::{HashMap, VecDeque};
 use std::{sync::Arc, time::Duration};
-use tracing::{debug, error, info, trace, trace_span, warn, Instrument};
+use tracing::{Instrument, debug, error, info, trace, trace_span, warn};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
-use cassini_tracing::try_set_parent_otel;
 
 pub const SUBSCRIBER_NOT_FOUND_TXT: &str = "Subscriber not found!";
 
@@ -70,23 +70,76 @@ impl Actor for SubscriberManager {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
-            BrokerMessage::InitiateShutdownPhase { phase } if phase == ShutdownPhase::TerminateSubscribers => {
-                self.handle_initiate_shutdown_phase(myself.clone(), state).await?;
+            BrokerMessage::InitiateShutdownPhase { phase }
+                if phase == ShutdownPhase::TerminateSubscribers =>
+            {
+                self.handle_initiate_shutdown_phase(myself.clone(), state)
+                    .await?;
             }
-            BrokerMessage::RegistrationRequest { registration_id, client_id, trace_ctx } => {
-                self.handle_registration_request(myself.clone(), state, registration_id, client_id, trace_ctx).await?;
+            BrokerMessage::RegistrationRequest {
+                registration_id,
+                client_id,
+                trace_ctx,
+            } => {
+                self.handle_registration_request(
+                    myself.clone(),
+                    state,
+                    registration_id,
+                    client_id,
+                    trace_ctx,
+                )
+                .await?;
             }
-            BrokerMessage::CreateSubscriber { registration_id, topic, trace_ctx, reply } => {
-                self.handle_create_subscriber(myself.clone(), state, registration_id, topic, trace_ctx, reply).await?;
+            BrokerMessage::CreateSubscriber {
+                registration_id,
+                topic,
+                trace_ctx,
+                reply,
+            } => {
+                self.handle_create_subscriber(
+                    myself.clone(),
+                    state,
+                    registration_id,
+                    topic,
+                    trace_ctx,
+                    reply,
+                )
+                .await?;
             }
-            BrokerMessage::UnsubscribeRequest { registration_id, topic, trace_ctx } => {
-                self.handle_unsubscribe_request(myself.clone(), state, registration_id, topic, trace_ctx).await?;
+            BrokerMessage::UnsubscribeRequest {
+                registration_id,
+                topic,
+                trace_ctx,
+            } => {
+                self.handle_unsubscribe_request(
+                    myself.clone(),
+                    state,
+                    registration_id,
+                    topic,
+                    trace_ctx,
+                )
+                .await?;
             }
-            BrokerMessage::DisconnectRequest { client_id, registration_id, trace_ctx, .. } => {
-                self.handle_disconnect_request(myself.clone(), state, client_id, registration_id, trace_ctx).await?;
+            BrokerMessage::DisconnectRequest {
+                client_id,
+                registration_id,
+                trace_ctx,
+                ..
+            } => {
+                self.handle_disconnect_request(
+                    myself.clone(),
+                    state,
+                    client_id,
+                    registration_id,
+                    trace_ctx,
+                )
+                .await?;
             }
-            BrokerMessage::TimeoutMessage { registration_id, .. } => {
-                self.handle_timeout_message(myself.clone(), state, registration_id).await?;
+            BrokerMessage::TimeoutMessage {
+                registration_id, ..
+            } => {
+                self.handle_timeout_message(myself.clone(), state, registration_id)
+                    .await?;
             }
             other => warn!(?other, "{UNEXPECTED_MESSAGE_STR}"),
         }
@@ -157,7 +210,8 @@ impl SubscriberManager {
         }
 
         if children.is_empty() {
-            self.signal_terminate_complete(myself.clone(), state).await?;
+            self.signal_terminate_complete(myself.clone(), state)
+                .await?;
         }
         Ok(())
     }
@@ -186,19 +240,15 @@ impl SubscriberManager {
             if where_is(registration_id.clone()).is_some() {
                 let cloned_session_id = registration_id.clone();
 
-                for subscriber in myself
-                    .get_children()
-                    .into_iter()
-                    .filter(|cell| {
-                        let Some(sub_name) = cell.get_name() else {
-                            return false;
-                        };
-                        let Some((sub_id, _topic)) = sub_name.split_once(':') else {
-                            return false;
-                        };
-                        cloned_session_id == sub_id
-                    })
-                {
+                for subscriber in myself.get_children().into_iter().filter(|cell| {
+                    let Some(sub_name) = cell.get_name() else {
+                        return false;
+                    };
+                    let Some((sub_id, _topic)) = sub_name.split_once(':') else {
+                        return false;
+                    };
+                    cloned_session_id == sub_id
+                }) {
                     if let Err(e) = subscriber.send_message(BrokerMessage::RegistrationRequest {
                         registration_id: Some(registration_id.clone()),
                         client_id: client_id.clone(),
@@ -244,14 +294,16 @@ impl SubscriberManager {
             return Ok(());
         }
 
-        let span = trace_span!("cassini.subscriber_manager.create_subscriber", %registration_id, %topic);
+        let span =
+            trace_span!("cassini.subscriber_manager.create_subscriber", %registration_id, %topic);
         try_set_parent_otel(&span, trace_ctx);
         trace!("Subscriber manager received subscribe command");
 
         let subscriber_id = get_subscriber_name(&registration_id, &topic);
 
         // Get the session ref from the session manager
-        let session_ref = match state.session_mgr
+        let session_ref = match state
+            .session_mgr
             .call(
                 |reply_to| BrokerMessage::GetSessionRef {
                     registration_id: registration_id.clone(),
@@ -277,7 +329,9 @@ impl SubscriberManager {
         match Actor::spawn_linked(
             Some(subscriber_id.clone()),
             SubscriberAgent,
-            SubscriberAgentArgs { session: session_ref.clone() },
+            SubscriberAgentArgs {
+                session: session_ref.clone(),
+            },
             myself.clone().into(),
         )
         .instrument(span.clone())
@@ -303,7 +357,8 @@ impl SubscriberManager {
         topic: String,
         trace_ctx: Option<opentelemetry::Context>,
     ) -> Result<(), ActorProcessingErr> {
-        let span = trace_span!("cassini.subscriber_manager.unsubscribe_request", %registration_id, %topic);
+        let span =
+            trace_span!("cassini.subscriber_manager.unsubscribe_request", %registration_id, %topic);
         try_set_parent_otel(&span, trace_ctx);
         let _g = span.enter();
         trace!("subscriber manager received unsubscribe request");
@@ -312,11 +367,15 @@ impl SubscriberManager {
         if let Some(subscriber) = state.subscribers.get(&subscriber_name) {
             subscriber.stop(Some("UNSUBSCRIBED".to_string()));
             // Forward acknowledgment via session manager
-            if let Err(e) = state.session_mgr.send_message(BrokerMessage::UnsubscribeAcknowledgment {
-                    registration_id,
-                    topic,
-                    result: Ok(()),
-                }) {
+            if let Err(e) =
+                state
+                    .session_mgr
+                    .send_message(BrokerMessage::UnsubscribeAcknowledgment {
+                        registration_id,
+                        topic,
+                        result: Ok(()),
+                    })
+            {
                 warn!(error = %e, "Failed to send unsubscribe ack to session manager");
             }
         } else {
@@ -401,7 +460,8 @@ impl SubscriberManager {
         state: &mut SubscriberManagerState,
     ) -> Result<(), ActorProcessingErr> {
         if state.is_shutting_down && myself.get_children().is_empty() {
-            self.signal_terminate_complete(myself.clone(), state).await?;
+            self.signal_terminate_complete(myself.clone(), state)
+                .await?;
         }
         Ok(())
     }
@@ -491,14 +551,32 @@ impl Actor for SubscriberAgent {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
-            BrokerMessage::RegistrationRequest { registration_id, client_id, trace_ctx } => {
-                self.handle_registration_request(myself.clone(), state, registration_id, client_id, trace_ctx).await?;
+            BrokerMessage::RegistrationRequest {
+                registration_id,
+                client_id,
+                trace_ctx,
+            } => {
+                self.handle_registration_request(
+                    myself.clone(),
+                    state,
+                    registration_id,
+                    client_id,
+                    trace_ctx,
+                )
+                .await?;
             }
-            BrokerMessage::PublishResponse { topic, payload, trace_ctx, .. } => {
-                self.handle_publish_response(myself.clone(), state, topic, payload, trace_ctx).await?;
+            BrokerMessage::PublishResponse {
+                topic,
+                payload,
+                trace_ctx,
+                ..
+            } => {
+                self.handle_publish_response(myself.clone(), state, topic, payload, trace_ctx)
+                    .await?;
             }
             BrokerMessage::PushMessageFailed { payload } => {
-                self.handle_push_message_failed(myself.clone(), state, payload).await?;
+                self.handle_push_message_failed(myself.clone(), state, payload)
+                    .await?;
             }
             other => warn!(?other, "{UNEXPECTED_MESSAGE_STR}"),
         }
@@ -552,7 +630,10 @@ impl SubscriberAgent {
         try_set_parent_otel(&span, trace_ctx);
         let _enter = span.enter();
         trace!("Subscriber actor received publish response for topic \"{topic}\"");
-        debug!("New message on topic: \"{topic}\", forwarding to session: {}", state.registration_id);
+        debug!(
+            "New message on topic: \"{topic}\", forwarding to session: {}",
+            state.registration_id
+        );
 
         let session = state.session_ref.clone();
         if let Err(e) = session.send_message(BrokerMessage::PushMessage {

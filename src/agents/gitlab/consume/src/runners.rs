@@ -22,11 +22,11 @@
 */
 
 use crate::{GitlabConsumerState, GitlabNodeKey};
-use common::types::{GitlabData, GitlabEnvelope};
 use common::RUNNERS_CONSUMER_TOPIC;
+use common::types::{GitlabData, GitlabEnvelope};
 use gitlab_queries::runners::CiRunner;
 use polar::graph::{GraphControllerMsg, GraphOp, GraphValue, Property};
-use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef};
+use ractor::{Actor, ActorProcessingErr, ActorRef, async_trait};
 use tracing::{debug, info};
 
 use cassini_client::TcpClientMessage;
