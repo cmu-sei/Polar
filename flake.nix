@@ -78,12 +78,28 @@
         # TLS certificates — using polar's own gen-certs.nix
         tlsCerts = pkgs.callPackage ./src/flake/gen-certs.nix { inherit pkgs; };
 
+        agentContainer = nix-container-lib.lib.${system}.mkContainer {
+          inherit system pkgs;
+          inputs     = { inherit staticanalysis dotacat rust-overlay; };
+          configPath = pkgs.writeText "polar-agent-container.dhall" (
+            builtins.replaceStrings
+              [ "PRELUDE_PATH" ]
+              [ "${nix-container-lib}/dhall/prelude.dhall" ]
+              (builtins.readFile ./src/flake/agent-container.dhall)
+          );
+        };
+
       in
       {
         packages = {
           inherit tlsCerts;
-          devContainer = container.image;
-          default      = polarPkgs.workspacePackages;
+          devContainer   = container.image;
+          agentContainer = agentContainer.image;
+          piAgent        = pkgs.callPackage ./src/flake/pi-agent.nix {
+            inherit (pkgs) lib fetchFromGitHub;
+            rust-bin = pkgs.rust-bin;
+          };
+          default = polarPkgs.workspacePackages;
         };
         devShells.default = (import ./src/flake/containers.nix {
           inherit system pkgs rust-overlay staticanalysis dotacat myNeovimOverlay;
