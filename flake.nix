@@ -85,7 +85,7 @@
 
         agentContainer = nix-container-lib.lib.${system}.mkContainer {
           inherit system pkgs;
-          inputs = { inherit staticanalysis dotacat rust-overlay; 
+          inputs = { inherit staticanalysis dotacat rust-overlay;
                      piAgent = { packages.${system} = { default = piAgent; }; };
           };
           configPath = pkgs.writeText "polar-agent-container.dhall" (
@@ -99,7 +99,7 @@
       in
       {
         packages = {
-          inherit tlsCerts;
+          inherit polarPkgs tlsCerts;
           devContainer   = container.image;
           agentContainer = agentContainer.image;
           piAgent        = pkgs.callPackage ./src/flake/pi-agent.nix {
