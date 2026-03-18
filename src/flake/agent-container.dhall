@@ -40,8 +40,9 @@ let agentTools =
     , Lib.nixpkgs "sqlite"
       -- curl for pi-local health check and general HTTP work
     , Lib.nixpkgs "curl"
-
     , Lib.flakePackage "dotacat" "default"
+    , Lib.flakePackage "piAgent" "default"
+    , Lib.nixpkgs "sudo"
     ]
 
 -- ---------------------------------------------------------------------------

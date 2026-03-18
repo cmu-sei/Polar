@@ -3,11 +3,11 @@
     "advisory-db": {
       "flake": false,
       "locked": {
-        "lastModified": 1773763725,
-        "narHash": "sha256-+OvdQ4iqL0s8eq/LPBxqVG+A0f7pVScSsa7Oiu4udmk=",
+        "lastModified": 1773786698,
+        "narHash": "sha256-o/J7ZculgwSs1L4H4UFlFZENOXTJzq1X0n71x6oNNvY=",
         "owner": "rustsec",
         "repo": "advisory-db",
-        "rev": "f8f8d392a4e6adf54c1ba1e7449bbeba00703cdc",
+        "rev": "99e9de91bb8b61f06ef234ff84e11f758ecd5384",
         "type": "github"
       },
       "original": {
@@ -274,11 +274,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1773766008,
-        "narHash": "sha256-xHSz8myiZszLx1y+pysXUQWOqnY2P65XRdkSk1ASMIA=",
+        "lastModified": 1773801285,
+        "narHash": "sha256-ywvO+W6jY6lG1/wOnrA+vmKnxgiZAvfFtQuHWhegLRo=",
         "owner": "daveman1010221",
         "repo": "nix-container-lib",
-        "rev": "f0787ab24ce05162d7a725ca96dbb6783ef7aab7",
+        "rev": "a9c9959ac37915462fa85fcaad8553351da2d14b",
         "type": "github"
       },
       "original": {
@@ -365,6 +365,29 @@
         "type": "github"
       }
     },
+    "pi-agent-rust-nix": {
+      "inputs": {
+        "nixpkgs": [
+          "nixpkgs"
+        ],
+        "rust-overlay": [
+          "rust-overlay"
+        ]
+      },
+      "locked": {
+        "lastModified": 1773777152,
+        "narHash": "sha256-fNgkTnec8B80/1LGjaZ8NP5H36lMqzp4w3cGnHDHX6g=",
+        "owner": "daveman1010221",
+        "repo": "pi-agent-rust-nix",
+        "rev": "f991a4135f5ca6242680b8a713f21b5f1ab56967",
+        "type": "github"
+      },
+      "original": {
+        "owner": "daveman1010221",
+        "repo": "pi-agent-rust-nix",
+        "type": "github"
+      }
+    },
     "root": {
       "inputs": {
         "advisory-db": "advisory-db",
@@ -374,6 +397,7 @@
         "myNeovimOverlay": "myNeovimOverlay",
         "nix-container-lib": "nix-container-lib",
         "nixpkgs": "nixpkgs_2",
+        "pi-agent-rust-nix": "pi-agent-rust-nix",
         "rust-overlay": "rust-overlay",
         "staticanalysis": "staticanalysis"
       }

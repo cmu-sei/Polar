@@ -47,7 +47,7 @@ function start-llama --description "Start llama.cpp server with a model (ROCm GP
     echo ""
 
     if test -n "$model_path"
-        llama-server \
+        sudo llama-server \
             --model $model_path \
             --host $host \
             --port $port \
@@ -56,7 +56,7 @@ function start-llama --description "Start llama.cpp server with a model (ROCm GP
             --flash-attn \
             --alias "local-model"
     else
-        llama-server \
+        sudo llama-server \
             $hf_flag \
             --host $host \
             --port $port \
