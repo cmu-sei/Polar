@@ -11,7 +11,7 @@ pub type SessionMap = HashMap<String, SessionDetails>;
 /// Our representation of a connected session, and how close it is to timing out
 /// TODO: Eventually, we might want to add metadata to the session struct to track additional information.
 /// Consider stuff like last_activity_time, last_message_received_time, etc.
-#[derive(Debug, Clone, Serialize, Deserialize, Archive)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Serialize, Deserialize, Archive)]
 pub struct SessionDetails {
     pub registration_id: String,
     pub subscriptions: HashSet<String>,
@@ -303,7 +303,7 @@ impl BrokerMessage {
                 reply_to: None,
                 trace_ctx: trace_ctx.map(|w| w.to_opentelemetry_context()),
             },
-            // Handle unexpected messages
+
             _ => {
                 // For other message types, we don't have conversion yet
                 BrokerMessage::ErrorMessage {
@@ -355,7 +355,7 @@ pub enum ControlOp {
     Ping,
 }
 
-#[derive(Debug, Clone, Serialize, Archive, Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Serialize, Archive, Deserialize)]
 pub enum ControlResult {
     SessionInfo(SessionDetails),
     SessionList(SessionMap),
@@ -367,7 +367,7 @@ pub enum ControlResult {
     ShutdownInitiated,
 }
 
-#[derive(Debug, Clone, Serialize, Archive, Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Serialize, Archive, Deserialize)]
 pub enum ControlError {
     NotFound(String),
     PermissionDenied(String),
@@ -397,6 +397,12 @@ pub enum ClientEvent {
         registration_id: String,
         result: Result<ControlResult, ControlError>,
         trace_ctx: Option<WireTraceCtx>,
+    },
+    PublishAcknowledged {
+        topic: String,
+    },
+    ClientSubscribed {
+        topic: String,
     },
 }
 /// External Messages for client comms

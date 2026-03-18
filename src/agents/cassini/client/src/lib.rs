@@ -407,7 +407,19 @@ impl TcpClientActor {
                                                 let span = trace_span!("client.handle_publish_ack");
                                                 try_set_parent_wire(&span, trace_ctx);
                                                 let _g = span.enter();
-                                                trace!("Received publish ack for topic: {topic}");
+                                                debug!("Received publish ack for topic: {topic}");
+
+                                                let event = ClientEvent::PublishAcknowledged { topic };
+
+                                                // Send to output port
+                                                queue_out.send(event.clone());
+                                                // Send to direct handler if present
+                                                if let Some(ref handler) = handler
+                                                    && let Err(e) = handler.send_message(event) {
+                                                        error!("Failed to send ControlResponse to direct handler: {}", e);
+                                                    }
+
+
                                             }
                                             ClientMessage::ControlResponse { registration_id, result, trace_ctx } => {
                                                 let span = trace_span!("client.handle_control_response");

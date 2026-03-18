@@ -53,7 +53,7 @@ let
         ];
     };
 
-    cassiniImage = pkgs.dockerTools.buildImage {
+    cassiniImage = pkgs.dockerTools.buildLayeredImage {
     name = "cassini";
     tag = "latest";
     copyToRoot = commonPaths ++ [
@@ -72,7 +72,7 @@ let
     };
     };
 
-    producerImage = pkgs.dockerTools.buildImage {
+    producerImage = pkgs.dockerTools.buildLayeredImage {
     name = "harness-producer";
     tag = "latest";
     copyToRoot = commonPaths ++ [
@@ -89,7 +89,7 @@ let
     };
     };
 
-    sinkImage = pkgs.dockerTools.buildImage {
+    sinkImage = pkgs.dockerTools.buildLayeredImage {
     name = "harness-sink";
     tag = "latest";
     copyToRoot = commonPaths ++ [

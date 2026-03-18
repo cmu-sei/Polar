@@ -4,7 +4,13 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[[bin]]
+name = "cassini-client"
+path = "src/main.rs"
+
 [dependencies]
+serde_json.workspace = true
+clap.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true
 cassini-tracing.workspace = true
