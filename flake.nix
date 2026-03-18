@@ -16,21 +16,24 @@
       url = "github:rustsec/advisory-db";
       flake = false;
     };
-    myNeovimOverlay.url                         = "github:daveman1010221/nix-neovim";
-    myNeovimOverlay.inputs.nixpkgs.follows      = "nixpkgs";
-    myNeovimOverlay.inputs.flake-utils.follows  = "flake-utils";
-    staticanalysis.url                          = "github:daveman1010221/polar-static-analysis";
-    staticanalysis.inputs.nixpkgs.follows       = "nixpkgs";
-    staticanalysis.inputs.flake-utils.follows   = "flake-utils";
-    staticanalysis.inputs.rust-overlay.follows  = "rust-overlay";
-    dotacat.url                                 = "github:daveman1010221/dotacat-fast";
-    dotacat.inputs.nixpkgs.follows              = "nixpkgs";
-    nix-container-lib.url                       = "github:daveman1010221/nix-container-lib";
-    nix-container-lib.inputs.nixpkgs.follows    = "nixpkgs";
-    nix-container-lib.inputs.flake-utils.follows = "flake-utils";
+    myNeovimOverlay.url                           = "github:daveman1010221/nix-neovim";
+    myNeovimOverlay.inputs.nixpkgs.follows        = "nixpkgs";
+    myNeovimOverlay.inputs.flake-utils.follows    = "flake-utils";
+    staticanalysis.url                            = "github:daveman1010221/polar-static-analysis";
+    staticanalysis.inputs.nixpkgs.follows         = "nixpkgs";
+    staticanalysis.inputs.flake-utils.follows     = "flake-utils";
+    staticanalysis.inputs.rust-overlay.follows    = "rust-overlay";
+    dotacat.url                                   = "github:daveman1010221/dotacat-fast";
+    dotacat.inputs.nixpkgs.follows                = "nixpkgs";
+    nix-container-lib.url                         = "github:daveman1010221/nix-container-lib";
+    nix-container-lib.inputs.nixpkgs.follows      = "nixpkgs";
+    nix-container-lib.inputs.flake-utils.follows  = "flake-utils";
+    pi-agent-rust-nix.url                         = "github:daveman1010221/pi-agent-rust-nix";
+    pi-agent-rust-nix.inputs.nixpkgs.follows      = "nixpkgs";
+    pi-agent-rust-nix.inputs.rust-overlay.follows = "rust-overlay";
   };
   outputs = { self, nixpkgs, crane, rust-overlay, flake-utils, advisory-db,
-              myNeovimOverlay, staticanalysis, dotacat, nix-container-lib, ... }:
+              myNeovimOverlay, staticanalysis, dotacat, nix-container-lib, pi-agent-rust-nix, ... }:
     flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = import nixpkgs {
@@ -78,12 +81,32 @@
         # TLS certificates — using polar's own gen-certs.nix
         tlsCerts = pkgs.callPackage ./src/flake/gen-certs.nix { inherit pkgs; };
 
+        piAgent = pi-agent-rust-nix.packages.${system}.default;
+
+        agentContainer = nix-container-lib.lib.${system}.mkContainer {
+          inherit system pkgs;
+          inputs = { inherit staticanalysis dotacat rust-overlay; 
+                     piAgent = { packages.${system} = { default = piAgent; }; };
+          };
+          configPath = pkgs.writeText "polar-agent-container.dhall" (
+            builtins.replaceStrings
+              [ "PRELUDE_PATH" ]
+              [ "${nix-container-lib}/dhall/prelude.dhall" ]
+              (builtins.readFile ./src/flake/agent-container.dhall)
+          );
+        };
+
       in
       {
         packages = {
           inherit tlsCerts;
-          devContainer = container.image;
-          default      = polarPkgs.workspacePackages;
+          devContainer   = container.image;
+          agentContainer = agentContainer.image;
+          piAgent        = pkgs.callPackage ./src/flake/pi-agent.nix {
+            inherit (pkgs) lib fetchFromGitHub;
+            rust-bin = pkgs.rust-bin;
+          };
+          default = polarPkgs.workspacePackages;
         };
         devShells.default = (import ./src/flake/containers.nix {
           inherit system pkgs rust-overlay staticanalysis dotacat myNeovimOverlay;
