@@ -158,9 +158,7 @@ impl Actor for ClusterObserverSupervisor {
                     error!("Transport error occurred! {reason}");
                     myself.stop(Some(reason))
                 }
-                ClientEvent::ControlResponse { .. } => {
-                    // ignore
-                }
+                _ => (),
             },
         }
         Ok(())

@@ -189,9 +189,7 @@ impl Actor for ObserverSupervisor {
                     todo!()
                 }
                 ClientEvent::TransportError { reason: _ } => todo!(),
-                ClientEvent::ControlResponse { .. } => {
-                    // ignore
-                }
+                _ => (),
             },
         }
         Ok(())

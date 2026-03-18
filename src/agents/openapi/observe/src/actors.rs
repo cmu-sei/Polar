@@ -112,12 +112,7 @@ impl Actor for ObserverSupervisor {
                         // Optionally stop the supervisor
                         // myself.stop(Some(reason));
                     }
-                    ClientEvent::MessagePublished { .. } => {
-                        // Ignore – observer only publishes, doesn't subscribe
-                    }
-                    ClientEvent::ControlResponse { .. } => {
-                        // Ignore control responses
-                    }
+                    _ => (),
                 }
             }
         }
