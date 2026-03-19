@@ -1,0 +1,21 @@
+podman run --rm -it --privileged --name polar-agent \                                                                                                                                           06:39:21
+                                      --user 0 --userns=keep-id \
+                                      --device /dev/kfd \
+                                      --device /dev/dri/ \
+                                      --ulimit memlock=-1:-1 \
+                                      --security-opt=label=disable \
+                                      --cap-add=SYS_PTRACE \
+                                      --ipc=host \
+                                      --network=host \
+                                      -v /sys/class/kfd:/sys/class/kfd:ro \
+                                      -v /sys/bus/pci/devices:/sys/bus/pci/devices:ro \
+                                      -v ~/Documents/projects/ai_models:/home/djshepard/.cache/llama.cpp:ro \
+                                      -e CREATE_USER="$USER" \
+                                      -e CREATE_UID="$(id -u)" \
+                                      -e CREATE_GID="$(id -g)" \
+                                      -e ATUIN_SESSION_NAME=polar-dev \
+                                      -e HIP_VISIBLE_DEVICES=0 \
+                                      -v $PWD:/workspace \
+                                      -v $HOME/.config/atuin:/root/.config/atuin:ro \
+                                      -v $HOME/.local/share/atuin:/root/.local/share/atuin \
+                                      localhost/polar-agent:latest
