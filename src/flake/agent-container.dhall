@@ -35,7 +35,7 @@ let agentTools =
       -- and injected via the flake's packages, not via a flake input.
       -- It lands in the container via the devEnv buildEnv.
       -- llama.cpp with ROCm GPU support for AMD GPUs
-      Lib.nixpkgs "llama-cpp-rocm"
+      Lib.flakePackage "llamaCpp" "default"
       -- sqlite3 for pi's session storage
     , Lib.nixpkgs "sqlite"
       -- curl for pi-local health check and general HTTP work
@@ -118,4 +118,8 @@ in defaults.devContainer //
   , pipeline = None Lib.PipelineConfig
 
   , extraEnv = agentEnv
+    , ai = Some
+        ( defaults.defaultAi //
+          { enable = True }
+        )
   }

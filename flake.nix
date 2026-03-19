@@ -40,6 +40,8 @@
           inherit system;
           config = {
             cc = "clang";
+            allowUnfree = true;   # CUDA is unfree, needed alongside cudaSupport
+            cudaSupport = true;
           };
           documentation = {
             dev.enable = true;
@@ -86,7 +88,13 @@
         agentContainer = nix-container-lib.lib.${system}.mkContainer {
           inherit system pkgs;
           inputs = { inherit staticanalysis dotacat rust-overlay;
-                     piAgent = { packages.${system} = { default = piAgent; }; };
+            piAgent = { packages.${system} = { default = piAgent; }; };
+            llamaCpp = { packages.${system} = { default =
+                if pkgs.config.rocmSupport then pkgs.llama-cpp-rocm
+                else if pkgs.hostPlatform.isLinux then pkgs.llama-cpp-vulkan
+                else pkgs.llama-cpp;
+              };
+            };
           };
           configPath = pkgs.writeText "polar-agent-container.dhall" (
             builtins.replaceStrings
