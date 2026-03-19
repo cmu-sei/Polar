@@ -23,6 +23,8 @@ use tracing::{
     Instrument, debug, debug_span, error, info, info_span, trace, trace_span, warn, warn_span,
 };
 
+pub mod cli;
+
 pub type TcpClient = ActorRef<TcpClientMessage>;
 pub const UNEXPECTED_DISCONNECT: &str = "UNEXPECTED_DISCONNECT";
 pub const REGISTRATION_EXPECTED: &str =
@@ -92,6 +94,7 @@ impl<M: Message + Sync> Actor for ClientEventForwarder<M> {
 }
 
 /// A basse configuration for a TCP Client actor
+#[derive(Clone, Debug)]
 pub struct TCPClientConfig {
     pub broker_endpoint: String,
     pub server_name: String,
@@ -107,6 +110,24 @@ pub enum RegistrationState {
 }
 
 impl TCPClientConfig {
+    /// Construct directly from values — used in tests and anywhere the
+    /// caller already has the coordinates without needing env vars.
+    pub fn from_values(
+        broker_endpoint: String,
+        server_name: String,
+        ca_certificate_path: String,
+        client_certificate_path: String,
+        client_key_path: String,
+    ) -> Self {
+        TCPClientConfig {
+            broker_endpoint,
+            server_name,
+            ca_certificate_path,
+            client_certificate_path,
+            client_key_path,
+        }
+    }
+
     /// Read filepaths from the environment and return. If we can't read these, we can't start
     pub fn new() -> Result<Self, ActorProcessingErr> {
         let client_certificate_path = env::var("TLS_CLIENT_CERT")?;

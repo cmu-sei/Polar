@@ -4,11 +4,28 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+# Expose internal types and functions for the test binary.
+# Add pub(crate) visibility to: run_daemon, daemon_is_reachable, register,
+# Session, BridgeMode, CompletionEvent, IpcRequest, IpcResponse,
+# dispatch_to_daemon, OutputFormat
+[lib]
+name = "cassini_client"
+path = "src/lib.rs"
+
 [[bin]]
 name = "cassini-client"
 path = "src/main.rs"
 
+[dev-dependencies]
+rstest.workspace = true
+assert_matches.workspace = true
+tempfile.workspace = true
+tokio.workspace = true
+base64.workspace = true
+
 [dependencies]
+base64.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 clap.workspace = true
 anyhow.workspace = true
