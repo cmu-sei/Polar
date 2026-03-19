@@ -232,9 +232,8 @@ impl Actor for ConsumerSupervisor {
                     ConsumerSupervisor::deserialize_and_dispatch(topic, payload);
                 }
                 ClientEvent::TransportError { reason: _ } => todo!(),
-                ClientEvent::ControlResponse { .. } => {
-                    // ignore
-                }
+
+                _ => (),
             },
         }
         Ok(())

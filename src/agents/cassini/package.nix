@@ -19,8 +19,15 @@ let
     });
 
     # build the client
-    client = craneLib.buildPackage (crateArgs // {
+    clientLib = craneLib.buildPackage (crateArgs // {
     cargoExtraArgs = "--lib cassini-client --locked";
+    src = workspaceFileset ./client;
+    # Disable tests for now, We'll run them later with env vars and TlsCerts
+    doCheck = false;
+    });
+
+    clientBin = craneLib.buildPackage (crateArgs // {
+    cargoExtraArgs = "--bin cassini-client --locked";
     src = workspaceFileset ./client;
     # Disable tests for now, We'll run them later with env vars and TlsCerts
     doCheck = false;
@@ -53,7 +60,7 @@ let
         ];
     };
 
-    cassiniImage = pkgs.dockerTools.buildImage {
+    cassiniImage = pkgs.dockerTools.buildLayeredImage {
     name = "cassini";
     tag = "latest";
     copyToRoot = commonPaths ++ [
@@ -72,7 +79,7 @@ let
     };
     };
 
-    producerImage = pkgs.dockerTools.buildImage {
+    producerImage = pkgs.dockerTools.buildLayeredImage {
     name = "harness-producer";
     tag = "latest";
     copyToRoot = commonPaths ++ [
@@ -89,7 +96,7 @@ let
     };
     };
 
-    sinkImage = pkgs.dockerTools.buildImage {
+    sinkImage = pkgs.dockerTools.buildLayeredImage {
     name = "harness-sink";
     tag = "latest";
     copyToRoot = commonPaths ++ [
@@ -107,5 +114,5 @@ let
     };
 in
 {
-  inherit cassini cassiniImage client harnessProducer harnessSink producerImage sinkImage;
+  inherit cassini cassiniImage clientLib clientBin harnessProducer harnessSink producerImage sinkImage;
 }

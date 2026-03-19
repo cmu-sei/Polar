@@ -4,7 +4,7 @@ use git_agent_common::{ConfigurationEvent, GIT_REPO_CONFIG_EVENTS, RepoId, RepoO
 use neo4rs::{Graph, query};
 use polar::{
     GIT_REPO_DISCOGERY_TOPIC, GitRepositoryDiscoveredEvent, RkyvError, SupervisorMessage,
-    get_neo_config,
+    UNEXPECTED_MESSAGE_STR, get_neo_config,
 };
 use ractor::{Actor, ActorProcessingErr, ActorRef, OutputPort, SupervisionEvent, async_trait};
 use rkyv::{from_bytes, rancor, to_bytes};
@@ -230,6 +230,7 @@ impl Actor for RootSupervisor {
                     error!("Transport error occurred! {reason}");
                     myself.stop(Some(reason))
                 }
+                _ => warn!("{UNEXPECTED_MESSAGE_STR}"),
             },
         }
         Ok(())

@@ -149,10 +149,8 @@ impl Actor for ProvenanceSupervisor {
                     error!("Transport error: {reason}");
                     myself.stop(Some(reason))
                 }
-                ClientEvent::ControlResponse { .. } => {
-                    // ignore or log
-                    debug!("Ignoring ControlResponse in linker");
-                }
+
+                _ => (),
             },
         }
         Ok(())

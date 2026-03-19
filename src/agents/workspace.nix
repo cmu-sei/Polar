@@ -101,7 +101,10 @@ let
     ];
     cassini = import (workspaceRoot + /cassini/package.nix) {
       inherit pkgs commonPaths craneLib  workspaceFileset commonUser;
-      crateArgs = individualCrateArgs;
+      crateArgs = commonArgs // {
+              inherit (craneLib.crateNameFromCargoToml { inherit src; }) version;
+              doCheck = false;
+          };
     };
 
     gitlabAgent = import (workspaceRoot + /gitlab/package.nix) {

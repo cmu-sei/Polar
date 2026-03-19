@@ -173,6 +173,7 @@ impl Actor for RootSupervisor {
                 ClientEvent::ControlResponse { .. } => {
                     error!("ControlResponse not implemented!");
                 }
+                _ => warn!("UNEXPECTED_MESSAGE_STR"),
             },
         }
         Ok(())

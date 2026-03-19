@@ -277,10 +277,7 @@ impl Actor for ClusterConsumerSupervisor {
                         error!("Transport error occurred! {reason}");
                         myself.stop(Some(reason))
                     }
-                    ClientEvent::ControlResponse { .. } => {
-                        // ignore or log
-                        debug!("Ignoring ControlResponse in consumer supervisor");
-                    }
+                    _ => (),
                 }
             }
         }

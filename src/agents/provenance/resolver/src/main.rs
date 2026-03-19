@@ -236,9 +236,7 @@ impl Actor for ResolverSupervisor {
                     // Ideally we
                     myself.stop(Some(reason))
                 }
-                ClientEvent::ControlResponse { .. } => {
-                    // ignore
-                }
+                _ => (),
             },
         }
         Ok(())

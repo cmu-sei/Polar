@@ -232,6 +232,7 @@ impl Actor for ConsumerSupervisor {
                 ClientEvent::ControlResponse { .. } => {
                     // ignore
                 }
+                _ => (),
             },
         }
         Ok(())

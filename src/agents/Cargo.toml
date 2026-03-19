@@ -76,6 +76,8 @@ name = "polar"
 
 [workspace.dependencies]
 # External crates – common across many members
+rstest = "0.21"
+assert_matches = "1"
 ahash = "0.8.12"
 anyhow = "1.0.102"
 async-global-executor-trait = "3.1.0"

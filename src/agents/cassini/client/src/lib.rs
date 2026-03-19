@@ -23,6 +23,8 @@ use tracing::{
     Instrument, debug, debug_span, error, info, info_span, trace, trace_span, warn, warn_span,
 };
 
+pub mod cli;
+
 pub type TcpClient = ActorRef<TcpClientMessage>;
 pub const UNEXPECTED_DISCONNECT: &str = "UNEXPECTED_DISCONNECT";
 pub const REGISTRATION_EXPECTED: &str =
@@ -92,6 +94,7 @@ impl<M: Message + Sync> Actor for ClientEventForwarder<M> {
 }
 
 /// A basse configuration for a TCP Client actor
+#[derive(Clone, Debug)]
 pub struct TCPClientConfig {
     pub broker_endpoint: String,
     pub server_name: String,
@@ -107,6 +110,24 @@ pub enum RegistrationState {
 }
 
 impl TCPClientConfig {
+    /// Construct directly from values — used in tests and anywhere the
+    /// caller already has the coordinates without needing env vars.
+    pub fn from_values(
+        broker_endpoint: String,
+        server_name: String,
+        ca_certificate_path: String,
+        client_certificate_path: String,
+        client_key_path: String,
+    ) -> Self {
+        TCPClientConfig {
+            broker_endpoint,
+            server_name,
+            ca_certificate_path,
+            client_certificate_path,
+            client_key_path,
+        }
+    }
+
     /// Read filepaths from the environment and return. If we can't read these, we can't start
     pub fn new() -> Result<Self, ActorProcessingErr> {
         let client_certificate_path = env::var("TLS_CLIENT_CERT")?;
@@ -407,7 +428,19 @@ impl TcpClientActor {
                                                 let span = trace_span!("client.handle_publish_ack");
                                                 try_set_parent_wire(&span, trace_ctx);
                                                 let _g = span.enter();
-                                                trace!("Received publish ack for topic: {topic}");
+                                                debug!("Received publish ack for topic: {topic}");
+
+                                                let event = ClientEvent::PublishAcknowledged { topic };
+
+                                                // Send to output port
+                                                queue_out.send(event.clone());
+                                                // Send to direct handler if present
+                                                if let Some(ref handler) = handler
+                                                    && let Err(e) = handler.send_message(event) {
+                                                        error!("Failed to send ControlResponse to direct handler: {}", e);
+                                                    }
+
+
                                             }
                                             ClientMessage::ControlResponse { registration_id, result, trace_ctx } => {
                                                 let span = trace_span!("client.handle_control_response");

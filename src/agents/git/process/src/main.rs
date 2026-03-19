@@ -309,6 +309,7 @@ impl Actor for GitRepoProcessingManager {
                 ClientEvent::ControlResponse { .. } => {
                     error!("ControlResponse not implemented here!");
                 }
+                _ => warn!("UNEXPECTED_MESSAGE_STR"),
             },
         }
         Ok(())

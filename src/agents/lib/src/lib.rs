@@ -25,6 +25,7 @@ pub const QUERY_COMMIT_FAILED: &str = "Error committing transaction to graph";
 pub const QUERY_RUN_FAILED: &str = "Error running query on the graph.";
 pub const UNEXPECTED_MESSAGE_STR: &str = "Received unexpected message!";
 pub const GIT_REPO_DISCOGERY_TOPIC: &str = "polar.git.repositories";
+
 pub trait Supervisor {
     /// Helper function to dispatch messages off of message queues to the associated actors within an agent supervision tree.
     /// Payload : a series of raw bytes containing an expected data structure/enum for the agent.

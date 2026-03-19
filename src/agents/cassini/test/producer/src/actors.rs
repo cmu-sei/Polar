@@ -13,6 +13,7 @@ use harness_common::{
     },
     compute_checksum,
 };
+use polar::UNEXPECTED_MESSAGE_STR;
 use ractor::{Actor, ActorProcessingErr, ActorRef, OutputPort, SupervisionEvent, async_trait};
 use serde::Serialize;
 use serde_json::to_string_pretty;
@@ -272,6 +273,9 @@ impl Actor for ProducerAgent {
                     CassiniEvent::TransportError { reason } => {
                         Some(ProducerMessage::AgentError { reason })
                     }
+                    _ => Some(ProducerMessage::AgentError {
+                        reason: UNEXPECTED_MESSAGE_STR.to_string(),
+                    }),
                 }),
             },
             myself.clone().into(),

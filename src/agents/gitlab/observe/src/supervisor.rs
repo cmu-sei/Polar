@@ -199,6 +199,7 @@ impl Actor for ObserverSupervisor {
                         todo!("Handle client transport error")
                     }
                     ClientEvent::ControlResponse { .. } => {}
+                    _ => (),
                 }
             }
         }
