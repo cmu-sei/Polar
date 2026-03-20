@@ -43,6 +43,7 @@ let agentTools =
     , Lib.flakePackage "dotacat" "default"
     , Lib.flakePackage "piAgent" "default"
     , Lib.nixpkgs "sudo"
+    , Lib.flakePackage "cudaLibs" "default"
     ]
 
 -- ---------------------------------------------------------------------------
@@ -66,10 +67,8 @@ let agentEnv : List Lib.EnvVar =
   , Lib.buildEnv "LLAMA_CTX_SIZE"   "32768"
   , Lib.buildEnv "LLAMA_GPU_LAYERS" "99"
   , Lib.buildEnv "LLAMA_BASE_URL"   "http://localhost:8080/v1"
-    -- shell_path for pi's bash tool — pi defaults to /bin/bash
   , Lib.buildEnv "PI_SHELL_PATH"    "/bin/bash"
-    -- Sessions stored in the workspace so they persist across container runs
-  , Lib.buildEnv "PI_SESSIONS_DIR"  "/workspace/.pi/sessions"
+  , Lib.startEnv "OLLAMA_HOST"      "0.0.0.0:8080"
     -- API keys — set at runtime, not baked in
   , Lib.runtimeEnv "ANTHROPIC_API_KEY"  ""
   , Lib.runtimeEnv "OPENAI_API_KEY"     ""

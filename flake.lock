@@ -274,11 +274,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1773977258,
-        "narHash": "sha256-ggDqjZT7/mcpb8tIHkjRD/dvz9svnEh1HA+2UVjg/Fs=",
+        "lastModified": 1774018481,
+        "narHash": "sha256-+6FszBCX3VoatHk9G/aFF8Q+JR+RgjkNZko1gOv9MDY=",
         "owner": "daveman1010221",
         "repo": "nix-container-lib",
-        "rev": "de65feb635f2d7e031c10d4accb1a5aacb042eaa",
+        "rev": "58f68d11ad5ffa1d9e569d4a4ccc79f7bb7c2d95",
         "type": "github"
       },
       "original": {
@@ -375,11 +375,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1773961032,
-        "narHash": "sha256-/w5jomDDnHcIE0VOon9NWTDUaIsjNQKbXowzMGxN504=",
+        "lastModified": 1774011098,
+        "narHash": "sha256-F1fbP5XRJF6LSQLuRgWJsW7HIDBs+z0FpRdFd6kqztw=",
         "owner": "daveman1010221",
         "repo": "pi-agent-rust-nix",
-        "rev": "8b62b41c0b3aaa1598443495ebaffd7517172b44",
+        "rev": "8e035fa34ee42f81028208d124b1aeb952648325",
         "type": "github"
       },
       "original": {

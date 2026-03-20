@@ -97,11 +97,12 @@
           ];
         };
 
-        mkAgentContainer = llamaCppPkg: nix-container-lib.lib.${system}.mkContainer {
+        mkAgentContainer = llamaCppPkg: extraPkgs: nix-container-lib.lib.${system}.mkContainer {
           inherit system pkgs;
           inputs = { inherit staticanalysis dotacat rust-overlay;
-            piAgent = { packages.${system} = { default = piAgent; }; };
+            piAgent  = { packages.${system} = { default = piAgent; }; };
             llamaCpp = { packages.${system} = { default = llamaCppPkg; }; };
+            cudaLibs = { packages.${system} = { default = extraPkgs; }; };
           };
           configPath = pkgs.writeText "polar-agent-container.dhall" (
             builtins.replaceStrings
@@ -115,10 +116,10 @@
         packages = {
           inherit polarPkgs tlsCerts;
           devContainer          = container.image;
-          agentContainer        = (mkAgentContainer pkgs.llama-cpp).image;
-          agentContainerRocm    = (mkAgentContainer pkgs.llama-cpp-rocm).image;
-          agentContainerVulkan  = (mkAgentContainer pkgs.llama-cpp-vulkan).image;
-          agentContainerNvidia  = (mkAgentContainer pkgsCuda.ollama).image;
+          agentContainer        = (mkAgentContainer pkgs.llama-cpp pkgs.stdenv.cc).image;
+          agentContainerRocm    = (mkAgentContainer pkgs.llama-cpp-rocm pkgs.stdenv.cc).image;
+          agentContainerVulkan  = (mkAgentContainer pkgs.llama-cpp-vulkan pkgs.stdenv.cc).image;
+          agentContainerNvidia  = (mkAgentContainer pkgsCuda.ollama pkgsCuda.cudaPackages.cuda_cudart).image;
           piAgent        = pkgs.callPackage ./src/flake/pi-agent.nix {
             inherit (pkgs) lib fetchFromGitHub;
             rust-bin = pkgs.rust-bin;
