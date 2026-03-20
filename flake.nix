@@ -41,7 +41,6 @@
           config = {
             cc = "clang";
             allowUnfree = true;   # CUDA is unfree, needed alongside cudaSupport
-            cudaSupport = true;
           };
           documentation = {
             dev.enable = true;
@@ -85,16 +84,24 @@
 
         piAgent = pi-agent-rust-nix.packages.${system}.default;
 
-        agentContainer = nix-container-lib.lib.${system}.mkContainer {
+        pkgsCuda = import nixpkgs {
+          inherit system;
+          config = {
+            cc = "clang";
+            allowUnfree = true;
+            cudaSupport = true;
+          };
+          overlays = [
+            rust-overlay.overlays.default
+            myNeovimOverlay.overlays.default
+          ];
+        };
+
+        mkAgentContainer = llamaCppPkg: nix-container-lib.lib.${system}.mkContainer {
           inherit system pkgs;
           inputs = { inherit staticanalysis dotacat rust-overlay;
             piAgent = { packages.${system} = { default = piAgent; }; };
-            llamaCpp = { packages.${system} = { default =
-                if pkgs.config.rocmSupport then pkgs.llama-cpp-rocm
-                else if pkgs.hostPlatform.isLinux then pkgs.llama-cpp-vulkan
-                else pkgs.llama-cpp;
-              };
-            };
+            llamaCpp = { packages.${system} = { default = llamaCppPkg; }; };
           };
           configPath = pkgs.writeText "polar-agent-container.dhall" (
             builtins.replaceStrings
@@ -103,13 +110,15 @@
               (builtins.readFile ./src/flake/agent-container.dhall)
           );
         };
-
       in
       {
         packages = {
           inherit polarPkgs tlsCerts;
-          devContainer   = container.image;
-          agentContainer = agentContainer.image;
+          devContainer          = container.image;
+          agentContainer        = (mkAgentContainer pkgs.llama-cpp).image;
+          agentContainerRocm    = (mkAgentContainer pkgs.llama-cpp-rocm).image;
+          agentContainerVulkan  = (mkAgentContainer pkgs.llama-cpp-vulkan).image;
+          agentContainerNvidia  = (mkAgentContainer pkgsCuda.ollama).image;
           piAgent        = pkgs.callPackage ./src/flake/pi-agent.nix {
             inherit (pkgs) lib fetchFromGitHub;
             rust-bin = pkgs.rust-bin;
