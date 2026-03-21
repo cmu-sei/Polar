@@ -43,7 +43,6 @@ let agentTools =
     , Lib.flakePackage "dotacat" "default"
     , Lib.flakePackage "piAgent" "default"
     , Lib.nixpkgs "sudo"
-    , Lib.flakePackage "cudaLibs" "default"
     ]
 
 -- ---------------------------------------------------------------------------

@@ -3,11 +3,11 @@
     "advisory-db": {
       "flake": false,
       "locked": {
-        "lastModified": 1773958512,
-        "narHash": "sha256-DcuIFBlDhdo0RX3qK2bieqcm14hal3ZCtXJUuOUVUDY=",
+        "lastModified": 1774045619,
+        "narHash": "sha256-FpE3Yub3RpVQR/WkMD2v4hJFNWT78Mz4zME4pV1LCYY=",
         "owner": "rustsec",
         "repo": "advisory-db",
-        "rev": "4ca563022331b3cad6a8baa5fcf923f07ac57761",
+        "rev": "c2e52ad43ff40b8bf30b5b7b5f1f7892bf529628",
         "type": "github"
       },
       "original": {
@@ -375,11 +375,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1774011098,
-        "narHash": "sha256-F1fbP5XRJF6LSQLuRgWJsW7HIDBs+z0FpRdFd6kqztw=",
+        "lastModified": 1774060175,
+        "narHash": "sha256-lcDn3wPhDPWha3q5ASdqlvieg8QBRloPdgIPmTKuxJ0=",
         "owner": "daveman1010221",
         "repo": "pi-agent-rust-nix",
-        "rev": "8e035fa34ee42f81028208d124b1aeb952648325",
+        "rev": "7994c84f1b9c80ac66df5fc90f735a0c27d89e78",
         "type": "github"
       },
       "original": {
