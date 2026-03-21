@@ -70,16 +70,19 @@ podman run --rm -it --privileged --name polar-agent \
 Inside the container, start llama-server:
 ```bash
 llama-server \
-  --hf-repo unsloth/Qwen3-Coder-Next-GGUF \
-  --hf-file Qwen3-Coder-Next-UD-IQ2_XXS.gguf \
-  --cpu-moe \
-  --ctx-size 131072 \
+  --hf-repo Tesslate/OmniCoder-9B-GGUF \
+  --hf-file omnicoder-9b-q4_k_m.gguf \
+  --ctx-size 262144 \
   --n-gpu-layers 99 \
   --flash-attn on \
   --alias "local-model" \
   --port 8080 \
   --host 0.0.0.0 \
-  --main-gpu 0 &
+  --temperature 0.3 \
+  --jinja \
+  -ub 4096 \
+  -ctk q8_0 \
+  -ctv q8_0 &
 ```
 
 ### NVIDIA (CUDA) — e.g. RTX 4000 Ada Generation
@@ -122,14 +125,19 @@ podman run --rm -it --privileged --name polar-agent \
 Inside the container, start llama-server:
 ```bash
 llama-server \
-  --hf-repo unsloth/Qwen3-Coder-Next-GGUF \
-  --hf-file Qwen3-Coder-Next-UD-IQ2_XXS.gguf \
-  --ctx-size 131072 \
+  --hf-repo Tesslate/OmniCoder-9B-GGUF \
+  --hf-file omnicoder-9b-q4_k_m.gguf \
+  --ctx-size 65536 \
   --n-gpu-layers 99 \
   --flash-attn on \
   --alias "local-model" \
   --port 8080 \
-  --host 0.0.0.0 &
+  --host 0.0.0.0 \
+  --temperature 0.3 \
+  --jinja \
+  -ub 2048 \
+  -ctk q8_0 \
+  -ctv q8_0 &
 ```
 
 ---
