@@ -3,57 +3,25 @@
 ## One-Time Host Setup
 
 ### Directory Structure
-
 ```bash
 # AI models — separate directories for llama.cpp and ollama
 mkdir -p ~/Documents/projects/ai_models/llama
-mkdir -p ~/Documents/projects/ai_models/ollama/models
+mkdir -p ~/Documents/projects/ai_models/ollama
 
-# Persistent pi agent state (sessions, models.json, skills, etc.)
-mkdir -p ~/Documents/projects/ai_state/pi/agent/sessions
+# Pi agent state (sessions, models.json, skills, etc.)
+# This is a separate git repo: github.com/daveman1010221/ai_state
+git clone https://github.com/daveman1010221/ai_state.git ~/Documents/projects/ai_state
 ```
 
 ### Pi Agent Configuration
 
-Create `models.json` in the persistent pi state directory:
-
-```bash
-cat > ~/Documents/projects/ai_state/pi/agent/models.json << 'EOF'
-{
-  "providers": {
-    "ollama": {
-      "baseUrl": "http://localhost:8080/v1",
-      "api": "openai-completions",
-      "apiKey": "dummy",
-      "compat": {
-        "supportsDeveloperRole": false,
-        "supportsReasoningEffort": false
-      },
-      "models": [
-        { "id": "local-model" },
-        { "id": "llama3.2" }
-      ]
-    }
-  }
-}
-EOF
-```
-
-Create `settings.json` for default provider/model:
-
-```bash
-cat > ~/Documents/projects/ai_state/pi/agent/settings.json << 'EOF'
-{
-  "default_provider": "ollama",
-  "default_model": "llama3.2"
-}
-EOF
-```
+`ai_state` already contains `models.json`, `settings.json`, and `tool_instructions.md`
+under `pi/agent/`. Edit those directly — they persist across container restarts via
+the volume mount.
 
 ---
 
 ## Building the Container
-
 ```bash
 # AMD ROCm (RX 9070 XT, etc.)
 nix build -L .#agentContainerRocm -o result-agent-container-rocm
@@ -73,7 +41,6 @@ podman load -i result-agent-container
 ## Running the Container
 
 ### AMD (ROCm) — e.g. RX 9070 XT
-
 ```bash
 podman run --rm -it --privileged --name polar-agent \
   --user 0 --userns=keep-id \
@@ -101,7 +68,6 @@ podman run --rm -it --privileged --name polar-agent \
 ```
 
 Inside the container, start llama-server:
-
 ```bash
 llama-server \
   --hf-repo unsloth/Qwen3-Coder-Next-GGUF \
@@ -122,7 +88,6 @@ llama-server \
 > because `libcuda.so.1` is driver-version-specific and cannot be packaged
 > in the container. The `$(readlink -f ...)` calls resolve symlinks in
 > `/run/opengl-driver/lib` to the actual Nix store paths on the host.
-
 ```bash
 podman run --rm -it --privileged --name polar-agent \
   --user 0 --userns=keep-id \
@@ -142,8 +107,8 @@ podman run --rm -it --privileged --name polar-agent \
   -e CREATE_GID="$(id -g)" \
   -e ATUIN_SESSION_NAME=polar-dev \
   -e LD_LIBRARY_PATH=/run/opengl-driver/lib \
-  -v ~/Documents/projects/ai_models/ollama:/opt/ollama:rw \
   -v ~/Documents/projects/ai_models/llama:/opt/llama-models:rw \
+  -v ~/Documents/projects/ai_models/ollama:/opt/ollama:rw \
   -v ~/Documents/projects/ai_state/pi:/opt/pi:rw \
   -v $PWD:/workspace \
   -v $HOME/.config/atuin:/root/.config/atuin:ro \
@@ -154,22 +119,24 @@ podman run --rm -it --privileged --name polar-agent \
   localhost/polar-agent:latest
 ```
 
-Inside the container, start ollama:
-
+Inside the container, start llama-server:
 ```bash
-ollama serve &
-
-# Pull a model if needed (persists to ~/Documents/projects/ai_models/ollama)
-ollama pull llama3.2
-ollama pull qwen2.5-coder:7b
+llama-server \
+  --hf-repo unsloth/Qwen3-Coder-Next-GGUF \
+  --hf-file Qwen3-Coder-Next-UD-IQ2_XXS.gguf \
+  --ctx-size 131072 \
+  --n-gpu-layers 99 \
+  --flash-attn on \
+  --alias "local-model" \
+  --port 8080 \
+  --host 0.0.0.0 &
 ```
 
 ---
 
 ## Using Pi Agent
 
-After starting the LLM server (`llama-server` or `ollama serve`), just run:
-
+After starting `llama-server`, run:
 ```bash
 pi "Your prompt here"
 pi -c   # continue previous session
