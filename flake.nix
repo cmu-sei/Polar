@@ -119,7 +119,8 @@
           agentContainer        = (mkAgentContainer pkgs.llama-cpp pkgs.stdenv.cc).image;
           agentContainerRocm    = (mkAgentContainer pkgs.llama-cpp-rocm pkgs.stdenv.cc).image;
           agentContainerVulkan  = (mkAgentContainer pkgs.llama-cpp-vulkan pkgs.stdenv.cc).image;
-          agentContainerNvidia  = (mkAgentContainer pkgsCuda.ollama pkgsCuda.cudaPackages.cuda_cudart).image;
+         #agentContainerNvidia  = (mkAgentContainer pkgsCuda.ollama pkgsCuda.cudaPackages.cuda_cudart).image;
+          agentContainerNvidia  = (mkAgentContainer pkgsCuda.llama-cpp pkgsCuda.cudaPackages.cuda_cudart).image;
           piAgent        = pkgs.callPackage ./src/flake/pi-agent.nix {
             inherit (pkgs) lib fetchFromGitHub;
             rust-bin = pkgs.rust-bin;
