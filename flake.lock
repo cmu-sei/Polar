@@ -375,11 +375,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1774123000,
-        "narHash": "sha256-b6LGd53bDOAM/XT0c/pQGMpkXzr2RyZQEW75RjDO/bs=",
+        "lastModified": 1774127740,
+        "narHash": "sha256-eQYuoxKhsJ4MEY+YuCs7qlv6Q/PRafPaXgS/zdG2OmU=",
         "owner": "daveman1010221",
         "repo": "pi_agent_rust",
-        "rev": "dc8d38a159f6330ea672f2fe289eebd2a47dc58b",
+        "rev": "8c33da0fa9c6d3913bc906ed81efc7250b77dd0f",
         "type": "github"
       },
       "original": {
