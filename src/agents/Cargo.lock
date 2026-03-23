@@ -1316,10 +1316,12 @@ name = "cassini-types"
 version = "1.0.0"
 dependencies = [
  "opentelemetry",
+ "proptest",
  "ractor",
  "rand 0.10.0",
  "rkyv 0.8.15",
  "serde",
+ "serde_json",
  "tracing",
  "tracing-opentelemetry",
 ]

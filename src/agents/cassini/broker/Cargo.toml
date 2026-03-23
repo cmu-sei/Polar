@@ -29,3 +29,6 @@ opentelemetry-otlp.workspace = true
 [[bin]]
 name = "cassini-server"
 path = "src/main.rs"
+
+[dev-dependencies]
+proptest = { workspace = true }
