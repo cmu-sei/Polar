@@ -73,7 +73,7 @@
         };
 
         polarPkgs = import ./src/agents/workspace.nix {
-          inherit pkgs lib crane rust-overlay;
+          inherit pkgs lib crane rust-overlay nix-container-lib system;
         };
         commitMsgHooksPkg = import ./src/git-hooks/package.nix {
           inherit pkgs crane;
@@ -120,10 +120,6 @@
           agentContainerRocm    = (mkAgentContainer pkgs.llama-cpp-rocm pkgs.stdenv.cc).image;
           agentContainerVulkan  = (mkAgentContainer pkgs.llama-cpp-vulkan pkgs.stdenv.cc).image;
           agentContainerNvidia  = (mkAgentContainer pkgsCuda.llama-cpp pkgsCuda.cudaPackages.cuda_cudart).image;
-          piAgent        = pkgs.callPackage ./src/flake/pi-agent.nix {
-            inherit (pkgs) lib fetchFromGitHub;
-            rust-bin = pkgs.rust-bin;
-          };
           default = polarPkgs.workspacePackages;
         };
         devShells.default = (import ./src/flake/containers.nix {

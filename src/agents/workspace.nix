@@ -1,6 +1,6 @@
 # TODO: A nix module that packages tests and contaienrizes the cargo workspace
 
-{ pkgs, lib, crane, rust-overlay, ... }:
+{ pkgs, lib, crane, rust-overlay, nix-container-lib, system, ... }:
 
 let
 
@@ -131,7 +131,26 @@ let
       inherit pkgs commonPaths craneLib workspaceFileset cargoArtifacts commonUser;
       crateArgs = individualCrateArgs;
     };
+
+    # Add these imports alongside the existing ones
+    jiraAgent = import ./jira/package.nix {
+      inherit pkgs commonPaths craneLib workspaceFileset cargoArtifacts commonUser;
+      crateArgs = individualCrateArgs;
+    };
+
+    gitAgent = import ./git/package.nix {
+      inherit pkgs commonPaths craneLib workspaceFileset cargoArtifacts commonUser;
+      crateArgs = individualCrateArgs;
+    };
+
+    buildOrchestrator = import ./build-orchestrator/package.nix {
+      inherit pkgs commonPaths craneLib workspaceFileset commonUser nix-container-lib system;
+      crateArgs = commonArgs // {
+        inherit (craneLib.crateNameFromCargoToml { inherit src; }) version;
+        doCheck = false;
+      };
+    };
 in
 {
-  inherit workspacePackages gitlabAgent cassini kubeAgent webAgent provenance scheduler;
+  inherit workspacePackages gitlabAgent cassini kubeAgent webAgent provenance scheduler jiraAgent gitAgent buildOrchestrator;
 }

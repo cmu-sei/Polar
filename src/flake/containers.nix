@@ -449,7 +449,7 @@ in {
 
   devShells.default = pkgs.mkShell {
     name = "polar-devshell";
-    packages = packageSets.devPkgs ++ [ pkgs.pkg-config pkgs.openssl ];
+    packages = packageSets.devPkgs ++ [ pkgs.pkg-config pkgs.openssl pkgs.just ];
 
     shellHook = ''
       export OPENSSL_DIR="${pkgs.openssl.dev}"
