@@ -46,4 +46,5 @@ tracing-opentelemetry.workspace = true
 tracing-subscriber.workspace = true
 tracing.workspace = true
 url.workspace = true
+thiserror.workspace = true
 uuid = { workspace = true, features = ["v4"] }

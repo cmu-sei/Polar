@@ -5,10 +5,13 @@ use ractor::{Actor, ActorProcessingErr, ActorRef};
 use reqwest::{Certificate, Client, ClientBuilder};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::fmt::Debug;
 use std::io::Read;
 use std::sync::Arc;
 use tracing::{debug, info};
+pub mod cassini;
 pub mod graph;
+
 /// wrapper definition for a ractor outputport where a raw message payload and a topic can be piped to a necessary dispatcher
 pub type QueueOutput = Arc<OutputPort<(Vec<u8>, String)>>;
 
@@ -38,6 +41,11 @@ pub enum SupervisorMessage {
 }
 
 /// Helper to spawn a TCP client to connect to the message broker, Cassini.
+/// CAUTION! There is a known bug in the ractor framework that makes output ports drop messages and freeze under high load.
+/// REFERENCE: https://github.com/slawlor/ractor/issues/225
+/// Until this is resolved, a workaround is to spawn another actor to serve as a subscriber/forwarder to push messages where they need to go.
+/// It's also possible to just have the client attempt to forward any mesages that come from the broker straight to its supervisor, as that's where they
+/// always go anyway. For now, we can leave this up to our future selves to decide what's best
 pub async fn spawn_tcp_client<M, F>(
     service_name: &str,
     supervisor: ActorRef<M>,
@@ -267,6 +275,73 @@ pub enum ProvenanceEvent {
     },
 }
 
+/// Emitted by Polar when it observes a change to a git repository —
+/// specifically when a new commit is detected on a tracked branch or ref.
+///
+/// This is the primary trigger for Cyclops build jobs. The orchestrator
+/// consumes this event off the Cassini broker, maps the repository URL
+/// to a pipeline image via its repo_mappings config, and submits a
+/// build job for the given commit.
+///
+/// The event is produced by Polar's VCS observation agents and reflects
+/// what Polar *observed*, not what was directly reported by a webhook.
+/// `observed_at` may therefore lag the actual commit timestamp by the
+/// agent's polling interval.
+#[derive(Debug, Default, rkyv::Serialize, rkyv::Deserialize, rkyv::Archive)]
+pub struct GitRepositoryUpdatedEvent {
+    /// Unique identifier for this event. Used for idempotency — if the
+    /// orchestrator receives the same event_id twice (e.g. due to broker
+    /// redelivery), it should deduplicate rather than submit two builds.
+    pub event_id: String,
+
+    /// HTTPS clone URL of the repository.
+    /// e.g. "https://github.com/cmu-sei/Polar.git"
+    /// At least one of http_url or ssh_url must be Some.
+    pub http_url: Option<String>,
+
+    /// SSH clone URL of the repository.
+    /// e.g. "git@github.com:cmu-sei/Polar.git"
+    /// Preferred when the identity root agent can issue per-job SSH credentials.
+    /// At least one of http_url or ssh_url must be Some.
+    pub ssh_url: Option<String>,
+
+    /// Full 40-character SHA of the commit that triggered this event.
+    /// Never a branch name or short SHA — those are mutable and ambiguous.
+    /// The orchestrator passes this directly to the build job and the
+    /// git clone init container.
+    pub commit_sha: String,
+
+    /// The ref (branch or tag) on which this commit was observed.
+    /// e.g. "refs/heads/main", "refs/tags/v1.2.3"
+    /// Informational — the orchestrator builds the commit, not the ref.
+    /// Useful for Polar to correlate builds with branch activity in the
+    /// knowledge graph.
+    pub git_ref: Option<String>,
+
+    /// The repository's default branch name, if known.
+    /// e.g. "main", "master"
+    /// Allows consumers to distinguish commits on the default branch
+    /// from feature branch activity without parsing git_ref.
+    pub default_branch: Option<String>,
+
+    /// Display name of the repository, without the host prefix.
+    /// e.g. "cmu-sei/Polar"
+    /// Used for log messages and as a human-readable identifier in the
+    /// knowledge graph. Not used for cloning — use http_url or ssh_url.
+    pub repository_name: Option<String>,
+
+    /// Identity of the actor who authored the commit, if available.
+    /// Typically the git author email. Polar correlates this with user
+    /// identity records in the knowledge graph.
+    pub author: Option<String>,
+
+    /// Unix timestamp (seconds since epoch) when Polar's agent observed
+    /// this commit. May lag the actual commit time by the agent's polling
+    /// interval. Not the git commit timestamp — use commit_sha to retrieve
+    /// that from the repository if needed.
+    pub observed_at: i64,
+}
+
 #[derive(Debug)]
 pub enum DispatcherMessage {
     Dispatch { message: Vec<u8>, topic: String }, // Serialize()
@@ -339,9 +414,16 @@ pub fn init_logging(service_name: String) {
             }
         }
     } else {
+        let fmt_layer = tracing_subscriber::fmt::layer()
+            .pretty() // <-- this is the missing piece
+            .with_thread_ids(true)
+            .with_target(true)
+            .with_file(true)
+            .with_line_number(true);
+
         if tracing_subscriber::registry()
             .with(filter)
-            .with(tracing_subscriber::fmt::layer())
+            .with(fmt_layer)
             .try_init()
             .is_err()
         {

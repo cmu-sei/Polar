@@ -2,21 +2,23 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use build_orchestrator::{
-    actors::supervisor::{OrchestratorSupervisor, SupervisorArguments, SupervisorMessage},
-    cassini::LoggingPublisher,
+    actors::supervisor::{OrchestratorSupervisor, SupervisorArguments},
     config::OrchestratorConfig,
 };
+use cassini_types::ClientEvent;
 use orchestrator_backend_k8s::backend::KubernetesBackend;
+use polar::{GitRepositoryUpdatedEvent, RkyvError, SupervisorMessage};
 use ractor::Actor;
-
+use rkyv::to_bytes;
+use uuid::Uuid;
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // Config is loaded first so log format/level is known before the subscriber
     // is initialized. Falls back to sensible defaults if no config is present.
     let config = OrchestratorConfig::load().context("failed to load orchestrator configuration")?;
     polar::init_logging("polar.build.orchestrator".to_string());
-    // init_tracing(&config.log.format, &config.log.level);
 
+    // TODO: Make configurable, we might eventually need FIPS compliance
     match rustls::crypto::aws_lc_rs::default_provider().install_default() {
         Ok(_) => tracing::warn!("Default crypto provider installed (this should only happen once)"),
         Err(_) => tracing::debug!("Crypto provider already configured"),
@@ -25,7 +27,7 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!(
         backend = %config.backend.driver,
         broker = %config.cassini.broker_url,
-        "cyclops orchestrator starting"
+        "build orchestrator starting"
     );
 
     // Build the backend.
@@ -48,16 +50,10 @@ async fn main() -> anyhow::Result<()> {
             other => anyhow::bail!("unsupported backend driver: {other}"),
         };
 
-    // In v1 we use the logging publisher stub.
-    // This is replaced by a real Cassini client actor ref once the integration
-    // layer is wired in.
-    let publisher = Arc::new(LoggingPublisher);
-
     let config = Arc::new(config);
 
     let args = SupervisorArguments {
         backend,
-        publisher,
         config: Arc::clone(&config),
     };
 
@@ -113,17 +109,23 @@ async fn inject_test_build_if_dev(supervisor: &ractor::ActorRef<SupervisorMessag
 
     tracing::warn!("CYCLOPS_DEV_MODE is set — injecting synthetic build request");
 
-    let request = orchestrator_core::types::BuildRequest {
-        build_id: uuid::Uuid::new_v4(),
-        repo_url: "https://github.com/cmu-sei/Polar.git".to_string(),
+    let event = GitRepositoryUpdatedEvent {
+        event_id: Uuid::new_v4().to_string(),
+        http_url: Some("https://github.com/cmu-sei/Polar.git".to_string()),
         commit_sha: "8b0214f218abb26cdfe2ade8f117abb0cf4b13e6".to_string(),
-        requested_by: "dev-mode-injection".to_string(),
-        requested_at: chrono::Utc::now(),
-        target_registry: "registry.internal.example.com/builds".to_string(),
-        metadata: std::collections::HashMap::new(),
+        observed_at: chrono::Utc::now().timestamp(),
+        ..Default::default()
     };
 
-    if let Err(e) = supervisor.send_message(SupervisorMessage::BuildRequested(request)) {
+    let payload = to_bytes::<RkyvError>(&event).unwrap().to_vec();
+
+    let c_event = ClientEvent::MessagePublished {
+        topic: String::default(),
+        payload,
+        trace_ctx: None,
+    };
+
+    if let Err(e) = supervisor.send_message(SupervisorMessage::ClientEvent { event: c_event }) {
         tracing::error!(error = %e, "failed to inject synthetic build request");
     }
 }

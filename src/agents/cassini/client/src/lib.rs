@@ -25,7 +25,9 @@ use tracing::{
 
 pub mod cli;
 
+// TODO: REMOVE ASAP, we have a proper abstraction in the standard library, so we no longer need a type alias
 pub type TcpClient = ActorRef<TcpClientMessage>;
+
 pub const UNEXPECTED_DISCONNECT: &str = "UNEXPECTED_DISCONNECT";
 pub const REGISTRATION_EXPECTED: &str =
     "Expected client to be registered to conduct this operation.";
@@ -1130,39 +1132,3 @@ impl Actor for TcpClientActor {
         Ok(())
     }
 }
-
-// TODO: I really hate that I can't figure out this helper.
-// Starting and intgrating a client requires
-// Creating an output port
-// subscribing to its events and creating a callback handler.
-// There's an issue with passing the callback handler to the outputport across threads that makes this difficult
-// And then there's subscribing to it. We need to pass in a generic enough ActorRef
-// pub async fn spawn_client<F, M>(
-//     name: Option<String>,
-//     registration_id: Option<String>,
-//     events_output: OutputPort<ClientEvent>,
-//     supervisor: ActorRef<TcpClientMessage>,
-//     handler: F,
-// ) -> Result<ActorRef<TcpClientMessage>, ReuniteError>
-// where
-//     F: Fn(ClientEvent) -> Result<(), ReuniteError>,
-// {
-//     //subscribe to registration event
-//     events_output.subscribe(myself.clone(), handler);
-
-//     let config = TCPClientConfig::new()?;
-
-//     let (tcp_client, _) = Actor::spawn_linked(
-//         name,
-//         TcpClientActor,
-//         TcpClientArgs {
-//             config,
-//             registration_id,
-//             events_output,
-//         },
-//         myself.clone().into(),
-//     )
-//     .await?;
-
-//     Ok(())
-// }

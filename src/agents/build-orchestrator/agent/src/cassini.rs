@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use orchestrator_core::events::CyclopsEvent;
+use orchestrator_core::events::BuildEvent;
 
 /// Abstraction over the Cassini client publish operation.
 ///
@@ -9,7 +9,7 @@ use orchestrator_core::events::CyclopsEvent;
 /// for tests.
 #[async_trait]
 pub trait CassiniPublisher: Send + Sync {
-    async fn publish(&self, event: CyclopsEvent) -> Result<(), PublishError>;
+    async fn publish(&self, event: BuildEvent) -> Result<(), PublishError>;
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -30,7 +30,7 @@ pub struct LoggingPublisher;
 
 #[async_trait]
 impl CassiniPublisher for LoggingPublisher {
-    async fn publish(&self, event: CyclopsEvent) -> Result<(), PublishError> {
+    async fn publish(&self, event: BuildEvent) -> Result<(), PublishError> {
         let json = serde_json::to_string_pretty(&event)
             .map_err(|e| PublishError::Serialization(e.to_string()))?;
         tracing::info!(
@@ -48,7 +48,7 @@ pub struct NoopPublisher;
 
 #[async_trait]
 impl CassiniPublisher for NoopPublisher {
-    async fn publish(&self, _event: CyclopsEvent) -> Result<(), PublishError> {
+    async fn publish(&self, _event: BuildEvent) -> Result<(), PublishError> {
         Ok(())
     }
 }

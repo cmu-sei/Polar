@@ -21,11 +21,13 @@ aws-config.workspace = true
 aws-sdk-s3.workspace = true
 aws-credential-types.workspace = true
 rustls.workspace = true
-
+rkyv.workspace = true
 config.workspace = true
 orchestrator-core.workspace = true
 orchestrator-backend-k8s.workspace = true
 polar.workspace = true
+cassini-client.workspace = true
+cassini-types.workspace = true
 [[bin]]
 name = "build-orchestrator"
 path = "src/main.rs"

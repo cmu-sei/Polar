@@ -1,4 +1,3 @@
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -26,22 +25,26 @@ pub mod subjects {
 
 /// Envelope wrapping all Cyclops outbound events.
 /// Polar ingests this off the broker and uses it to populate the knowledge graph.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CyclopsEvent {
+#[derive(
+    Debug, Clone, rkyv::Serialize, rkyv::Deserialize, rkyv::Archive, Serialize, Deserialize,
+)]
+pub struct BuildEvent {
     /// Matches the Cassini subject this event was published on.
     pub subject: String,
 
     /// Stable identifier correlating all events for a single build.
-    pub build_id: Uuid,
+    pub build_id: String,
 
     /// Wall-clock time the event was emitted by Cyclops.
-    pub emitted_at: DateTime<Utc>,
+    pub emitted_at: i64,
 
     /// Subject-specific payload.
     pub payload: EventPayload,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, rkyv::Serialize, rkyv::Deserialize, rkyv::Archive, Serialize, Deserialize,
+)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum EventPayload {
     BuildStarted {
@@ -67,7 +70,9 @@ pub enum EventPayload {
     },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, rkyv::Serialize, rkyv::Deserialize, rkyv::Archive, Serialize, Deserialize,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum FailureStage {
     Scheduling,
@@ -76,12 +81,17 @@ pub enum FailureStage {
     ProvenanceEmission,
 }
 
-impl CyclopsEvent {
-    pub fn build_started(build_id: Uuid, repo_url: String, commit_sha: String, requested_by: String) -> Self {
+impl BuildEvent {
+    pub fn build_started(
+        build_id: Uuid,
+        repo_url: String,
+        commit_sha: String,
+        requested_by: String,
+    ) -> Self {
         Self {
             subject: subjects::BUILD_STARTED.to_string(),
-            build_id,
-            emitted_at: chrono::Utc::now(),
+            build_id: build_id.into(),
+            emitted_at: chrono::Utc::now().timestamp(),
             payload: EventPayload::BuildStarted {
                 repo_url,
                 commit_sha,
@@ -93,8 +103,8 @@ impl CyclopsEvent {
     pub fn build_running(build_id: Uuid, backend: String, backend_handle: String) -> Self {
         Self {
             subject: subjects::BUILD_RUNNING.to_string(),
-            build_id,
-            emitted_at: chrono::Utc::now(),
+            build_id: build_id.into(),
+            emitted_at: chrono::Utc::now().timestamp(),
             payload: EventPayload::BuildRunning {
                 backend,
                 backend_handle,
@@ -110,8 +120,8 @@ impl CyclopsEvent {
     ) -> Self {
         Self {
             subject: subjects::BUILD_COMPLETED.to_string(),
-            build_id,
-            emitted_at: chrono::Utc::now(),
+            build_id: build_id.into(),
+            emitted_at: chrono::Utc::now().timestamp(),
             payload: EventPayload::BuildCompleted {
                 artifact_digest,
                 target_registry,
@@ -123,8 +133,8 @@ impl CyclopsEvent {
     pub fn build_failed(build_id: Uuid, reason: String, stage: FailureStage) -> Self {
         Self {
             subject: subjects::BUILD_FAILED.to_string(),
-            build_id,
-            emitted_at: chrono::Utc::now(),
+            build_id: build_id.into(),
+            emitted_at: chrono::Utc::now().timestamp(),
             payload: EventPayload::BuildFailed { reason, stage },
         }
     }
@@ -132,8 +142,8 @@ impl CyclopsEvent {
     pub fn build_cancelled(build_id: Uuid, reason: Option<String>) -> Self {
         Self {
             subject: subjects::BUILD_CANCELLED.to_string(),
-            build_id,
-            emitted_at: chrono::Utc::now(),
+            build_id: build_id.into(),
+            emitted_at: chrono::Utc::now().timestamp(),
             payload: EventPayload::BuildCancelled { reason },
         }
     }

@@ -42,19 +42,22 @@
 use std::sync::Arc;
 use std::time::Instant;
 
+use crate::BUILD_EVENTS_TOPIC;
+use crate::actors::build_registry::RegistryMessage;
 use crate::client::{LogContainer, StorageClient};
+use crate::config::OrchestratorConfig;
 use orchestrator_core::{
     backend::{BackendJobHandle, BuildBackend, JobStatus},
-    events::{CyclopsEvent, FailureStage},
+    events::{BuildEvent, FailureStage},
     types::{
         BootstrapSpec, BuildRequest, BuildSpec, BuildState, GitCredentials, RegistryCredentials,
     },
 };
+use polar::RkyvError;
+use polar::cassini::{CassiniClient, PublishRequest};
 use ractor::{Actor, ActorProcessingErr, ActorRef};
-
-use crate::actors::build_registry::RegistryMessage;
-use crate::cassini::CassiniPublisher;
-use crate::config::OrchestratorConfig;
+use rkyv::to_bytes;
+use tracing::instrument;
 
 const POLL_INTERVAL_MS: u64 = 5_000;
 
@@ -94,7 +97,7 @@ pub struct BuildJobArguments {
     pub request: BuildRequest,
     pub backend: Arc<dyn BuildBackend>,
     pub registry: ActorRef<RegistryMessage>,
-    pub publisher: Arc<dyn CassiniPublisher>,
+    pub publisher: Arc<dyn CassiniClient>,
     /// Snapshot of config at actor spawn time. Used for image resolution and
     /// credential lookup. Not updated if config changes after spawn.
     pub config: Arc<OrchestratorConfig>,
@@ -106,7 +109,7 @@ pub struct BuildJobState {
     request: BuildRequest,
     backend: Arc<dyn BuildBackend>,
     registry: ActorRef<RegistryMessage>,
-    publisher: Arc<dyn CassiniPublisher>,
+    publisher: Arc<dyn CassiniClient>,
     config: Arc<OrchestratorConfig>,
     storage: Arc<StorageClient>,
 
@@ -182,6 +185,22 @@ impl Actor for BuildJobActor {
 // ── Phase handlers ────────────────────────────────────────────────────────────
 
 impl BuildJobActor {
+    pub fn publish_event(
+        publisher: &Arc<dyn CassiniClient>,
+        event: BuildEvent,
+    ) -> Result<(), ActorProcessingErr> {
+        let req = PublishRequest {
+            topic: BUILD_EVENTS_TOPIC.to_string(),
+            payload: to_bytes::<RkyvError>(&event)?.to_vec(),
+            trace_ctx: None,
+        };
+
+        if let Err(e) = publisher.publish(req) {
+            Err(ActorProcessingErr::from(e.to_string()))
+        } else {
+            Ok(())
+        }
+    }
     /// Entry point. Transitions to ResolvingImage and checks whether the
     /// pipeline image is already known for this repo.
     async fn handle_start(
@@ -286,6 +305,7 @@ impl BuildJobActor {
     /// Submits the pipeline job using a known image digest.
     /// Called either directly from handle_start (image was in config) or
     /// from handle_poll after a bootstrap job succeeds.
+    #[instrument(skip(self, myself, state))]
     async fn submit_pipeline(
         &self,
         myself: ActorRef<BuildJobMessage>,
@@ -329,13 +349,14 @@ impl BuildJobActor {
                 )?;
 
                 // Emit the started event now that we have a concrete image and handle.
-                let event = CyclopsEvent::build_started(
+                let event = BuildEvent::build_started(
                     build_id,
                     state.request.repo_url.clone(),
                     state.request.commit_sha.clone(),
                     state.request.requested_by.clone(),
                 );
-                if let Err(e) = state.publisher.publish(event).await {
+
+                if let Err(e) = Self::publish_event(&state.publisher, event) {
                     // Non-fatal — the build proceeds regardless of event publish failures.
                     tracing::error!(
                         build_id = %build_id,
@@ -411,12 +432,13 @@ impl BuildJobActor {
                             // Bootstrap running is an internal implementation detail
                             // that Polar does not need to track as a separate state.
                             self.transition(state, BuildState::Running, None, None, None)?;
-                            let event = CyclopsEvent::build_running(
+                            let event = BuildEvent::build_running(
                                 build_id,
                                 state.backend.name().to_string(),
                                 handle.to_string(),
                             );
-                            let _ = state.publisher.publish(event).await;
+
+                            Self::publish_event(&state.publisher, event)?;
                         }
                         myself
                             .send_after(std::time::Duration::from_millis(POLL_INTERVAL_MS), || {
@@ -468,13 +490,14 @@ impl BuildJobActor {
                             // prominently so the operator knows artifacts are missing.
                             self.upload_artifacts(state, &handle).await;
 
-                            let event = CyclopsEvent::build_completed(
+                            let event = BuildEvent::build_completed(
                                 build_id,
                                 state.resolved_image.clone(),
                                 state.config.bootstrap.target_registry.clone(),
                                 duration,
                             );
-                            let _ = state.publisher.publish(event).await;
+
+                            Self::publish_event(&state.publisher, event)?;
 
                             myself.stop(Some("BUILD_SUCCEEDED".to_string()));
                         }
@@ -559,8 +582,8 @@ impl BuildJobActor {
 
         self.transition(state, BuildState::Cancelled, None, None, reason.clone())?;
 
-        let event = CyclopsEvent::build_cancelled(build_id, reason);
-        let _ = state.publisher.publish(event).await;
+        let event = BuildEvent::build_cancelled(build_id, reason);
+        Self::publish_event(&state.publisher, event)?;
 
         myself.stop(Some("cancelled".to_string()));
         Ok(())
@@ -597,8 +620,9 @@ impl BuildJobActor {
     ) -> Result<(), ActorProcessingErr> {
         self.transition(state, BuildState::Failed, None, None, Some(reason.clone()))?;
 
-        let event = CyclopsEvent::build_failed(state.request.build_id, reason, stage);
-        let _ = state.publisher.publish(event).await;
+        let event = BuildEvent::build_failed(state.request.build_id, reason, stage);
+        Self::publish_event(&state.publisher, event)?;
+
         Ok(())
     }
 
