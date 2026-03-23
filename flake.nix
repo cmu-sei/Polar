@@ -28,12 +28,12 @@
     nix-container-lib.url                         = "github:daveman1010221/nix-container-lib";
     nix-container-lib.inputs.nixpkgs.follows      = "nixpkgs";
     nix-container-lib.inputs.flake-utils.follows  = "flake-utils";
-    pi-agent-rust-nix.url                         = "github:daveman1010221/pi-agent-rust-nix";
-    pi-agent-rust-nix.inputs.nixpkgs.follows      = "nixpkgs";
-    pi-agent-rust-nix.inputs.rust-overlay.follows = "rust-overlay";
+    pi-agent-rust.url                         = "github:daveman1010221/pi_agent_rust";
+    pi-agent-rust.inputs.nixpkgs.follows      = "nixpkgs";
+    pi-agent-rust.inputs.rust-overlay.follows = "rust-overlay";
   };
   outputs = { self, nixpkgs, crane, rust-overlay, flake-utils, advisory-db,
-              myNeovimOverlay, staticanalysis, dotacat, nix-container-lib, pi-agent-rust-nix, ... }:
+              myNeovimOverlay, staticanalysis, dotacat, nix-container-lib, pi-agent-rust, ... }:
     flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = import nixpkgs {
@@ -82,7 +82,7 @@
         # TLS certificates — using polar's own gen-certs.nix
         tlsCerts = pkgs.callPackage ./src/flake/gen-certs.nix { inherit pkgs; };
 
-        piAgent = pi-agent-rust-nix.packages.${system}.default;
+        piAgent = pi-agent-rust.packages.${system}.default;
 
         pkgsCuda = import nixpkgs {
           inherit system;
@@ -119,7 +119,7 @@
           agentContainer        = (mkAgentContainer pkgs.llama-cpp pkgs.stdenv.cc).image;
           agentContainerRocm    = (mkAgentContainer pkgs.llama-cpp-rocm pkgs.stdenv.cc).image;
           agentContainerVulkan  = (mkAgentContainer pkgs.llama-cpp-vulkan pkgs.stdenv.cc).image;
-          agentContainerNvidia  = (mkAgentContainer pkgsCuda.ollama pkgsCuda.cudaPackages.cuda_cudart).image;
+          agentContainerNvidia  = (mkAgentContainer pkgsCuda.llama-cpp pkgsCuda.cudaPackages.cuda_cudart).image;
           piAgent        = pkgs.callPackage ./src/flake/pi-agent.nix {
             inherit (pkgs) lib fetchFromGitHub;
             rust-bin = pkgs.rust-bin;
