@@ -1,0 +1,31 @@
+[package]
+name = "build-orchestrator"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+tokio.workspace = true
+chrono.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+ractor.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+async-trait.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+bytes.workspace = true
+aws-config.workspace = true
+aws-sdk-s3.workspace = true
+aws-credential-types.workspace = true
+rustls.workspace = true
+
+config.workspace = true
+orchestrator-core.workspace = true
+orchestrator-backend-k8s.workspace = true
+polar.workspace = true
+[[bin]]
+name = "build-orchestrator"
+path = "src/main.rs"

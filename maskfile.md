@@ -13,11 +13,7 @@ Our team primarily uses `podman` as a container runtime. So feel free to `alias`
   > Builds the Polar Dev image. A contaienrized Rust development environment in case you don't want to do local development.
   ~~~sh
   echo "Building the Polar development environment. This may take a moment."
-
-export def greet [] {
-    print "Current Weather"
-    print $env.WEATHER_INFO
-}  nix build .#containers.devContainer --show-trace
+  nix build .#containers.devContainer
   echo "Loading the development image."
   podman load < result
   ~~~
@@ -54,7 +50,7 @@ export def greet [] {
   podman load < kube-consumer
   ~~~
 
-## start-dev (public_key)
+## start-dev
   > Enters the Polar Dev container.
 
   This command mounts your project directory into the
@@ -63,16 +59,11 @@ export def greet [] {
 
 
   ~~~sh 
-    podman run --it \
-    --user 0 --userns=keep-id \
+    podman run -it \
     -v ./:/workspace:rw \
-    -p 2222:2223 \
     -e CREATE_USER="$USER" \
     -e CREATE_UID="$(id -u)" \
     -e CREATE_GID="$(id -g)" \
-    -e DROPBEAR_ENABLE=1 \
-    -e DROPBEAR_PORT=2223 \
-    -e AUTHORIZED_KEYS_B64="$(base64 -w0 $public_key)" \
     polar-dev:latest
     
   ~~~

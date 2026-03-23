@@ -10,7 +10,7 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::oneshot;
-use tracing::{error, info, warn};
+use tracing::{error, info};
 // ===== CLI definition =====
 
 /// Default socket path if XDG_RUNTIME_DIR is not set.

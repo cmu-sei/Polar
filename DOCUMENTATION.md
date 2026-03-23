@@ -32,7 +32,6 @@ Polar is a knowledge graph framework that collects infrastructure data and loads
 ├── docs/                        # Project documentation
 ├── scripts/                     # Utility scripts
 ├── var/                         # Runtime variable data (certs, volumes)
-├── chart/                       # Helm charts for Kubernetes deployment
 ├── examples/                    # Example applications
 ├── .devcontainer/              # VSCode Dev Container configuration
 ├── .direnv/                    # direnv configuration
@@ -139,13 +138,6 @@ Runtime data including:
 - `neo4j_volumes/` - Neo4j database volumes
 - `ssl/` - SSL/TLS certificates (CA, client, server)
 - `tls-gen/` - TLS certificate generation data
-
-### `chart/` - Helm Charts
-
-Helm chart configurations for Kubernetes deployments:
-- `Chart.yaml` - Chart metadata
-- `charts/` - Sub-charts
-- `values.yaml` - Default values
 
 ### `examples/` - Example Applications
 
@@ -283,7 +275,7 @@ Environment variables are used for configuration. See `example.env` for required
 
 ### Kubernetes
 
-Deployments use Dhall configurations rendered to Kubernetes manifests via Helm:
+Deployments use Dhall configurations rendered to Kubernetes manifests :
 
 ```bash
 # Generate manifests
