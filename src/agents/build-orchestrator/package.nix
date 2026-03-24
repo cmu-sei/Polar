@@ -45,6 +45,31 @@ let
     };
   };
 
+  buildProcessor = craneLib.buildPackage (crateArgs // {
+    cargoExtraArgs = "--bin build-processor";
+    src            = workspaceFileset ./processor;
+    doCheck        = false;
+  });
+
+  buildProcessorEnv = pkgs.buildEnv {
+    name         = "processor-env";
+    paths        = commonPaths ++ [ orchestrator ];
+    pathsToLink  = [ "/bin" "/etc/ssl/certs" ];
+  };
+
+  buildProcessorImage = pkgs.dockerTools.buildLayeredImage {
+    name      = "build-processor";
+    tag       = "latest";
+    contents  = commonPaths ++ [ buildProcessorEnv ];  # was copyToRoot
+    config = {
+      User       = "${commonUser.uid}:${commonUser.gid}";
+      Cmd        = [ "build-orchestrator" ];
+      WorkingDir = "/";
+      Env        = [];
+    };
+  };
+
+
   # ---------------------------------------------------------------------------
   # Cyclops git-clone init container
   #

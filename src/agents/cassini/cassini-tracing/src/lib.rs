@@ -91,6 +91,7 @@ pub fn init_tracing(service_name: &str) {
         EnvFilter::try_from_env("CASSINI_LOG").unwrap_or_else(|_| EnvFilter::new("warn"));
 
     let fmt = tracing_subscriber::fmt::layer()
+        .pretty()
         .with_ansi(stderr().is_terminal())
         .with_writer(std::io::stderr)
         .event_format(Glog::default().with_timer(tracing_glog::LocalTime::default()))

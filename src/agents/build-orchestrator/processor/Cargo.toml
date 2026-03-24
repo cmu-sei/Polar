@@ -1,0 +1,25 @@
+[package]
+name = "build-processor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+cassini-client.workspace = true
+cassini-types.workspace = true
+chrono.workspace = true
+k8s-openapi = { workspace = true, features = ["v1_32"] }
+kube-common.workspace = true
+neo4rs.workspace = true
+polar.workspace = true
+ractor.workspace = true
+rkyv.workspace = true
+serde_json.workspace = true
+serde.workspace = true
+tokio.workspace = true
+tracing-glog.workspace = true
+tracing-subscriber.workspace = true
+tracing.workspace = true
+orchestrator-core.workspace = true
+uuid = { workspace = true, features = ["v4"] }

@@ -1142,6 +1142,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "build-processor"
+version = "1.0.0"
+dependencies = [
+ "cassini-client",
+ "cassini-types",
+ "chrono",
+ "k8s-openapi",
+ "kube-common",
+ "neo4rs",
+ "orchestrator-core",
+ "polar",
+ "ractor",
+ "rkyv 0.8.15",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-glog",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
 name = "bumpalo"
 version = "3.20.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1232,6 +1255,7 @@ dependencies = [
  "opentelemetry-otlp",
  "opentelemetry_sdk",
  "polar",
+ "proptest",
  "ractor",
  "ring",
  "rkyv 0.8.15",

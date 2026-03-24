@@ -42,7 +42,6 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use crate::BUILD_EVENTS_TOPIC;
 use crate::actors::build_registry::RegistryMessage;
 use crate::client::{LogContainer, StorageClient};
 use crate::config::OrchestratorConfig;
@@ -51,6 +50,7 @@ use orchestrator_core::{
     events::{BuildEvent, FailureStage},
     types::{
         BootstrapSpec, BuildRequest, BuildSpec, BuildState, GitCredentials, RegistryCredentials,
+        subjects::BUILD_EVENTS_TOPIC,
     },
 };
 use polar::RkyvError;

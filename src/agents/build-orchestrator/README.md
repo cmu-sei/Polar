@@ -69,16 +69,16 @@ OrchestratorSupervisor
 └── BuildJobActor per build     (spawned on demand, stops on terminal state)
 ```
 
-## Cassini Subject Convention
+## Cassini Topic Convention
 
-| Subject                    | Direction | Description                              |
-|---------------------------|-----------|------------------------------------------|
-| `cyclops.build.requested`  | inbound   | Polar scheduler → Cyclops                |
-| `cyclops.build.started`    | outbound  | Cyclops → Polar (build scheduled)        |
-| `cyclops.build.running`    | outbound  | Cyclops → Polar (executor is active)     |
-| `cyclops.build.completed`  | outbound  | Cyclops → Polar (artifact produced)      |
-| `cyclops.build.failed`     | outbound  | Cyclops → Polar (any failure stage)      |
-| `cyclops.build.cancelled`  | outbound  | Cyclops → Polar                          |
+```
+
+polar.git.repositories.events    | Git Commit Processor → Build Orchestrator
+
+polar.builds.orchestrator.events | Build Orchestrator -> Build Processor
+
+```
+
 
 ## State Machine
 
