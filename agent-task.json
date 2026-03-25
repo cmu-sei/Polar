@@ -1,9 +1,10 @@
 {
-  "schema_version": "1.0",
+  "schema_version": "1.1",
   "session_id": "2026-03-25",
   "workspace_root": "/workspace/src/agents",
   "taskfile": "/workspace/agent-task.json",
   "last_updated": "2026-03-25T10:00:00Z",
+  "schema_notes": "pending tasks are real work queue — mark_done auto-advances. review:true means stop after completing and summarize; wait for human to run just agent-task before continuing.",
   "rules": {
     "never": [
       "Never create test files in src/. All test files go in tests/ only.",
@@ -19,10 +20,18 @@
       "Run cargo check after writing each test file. Fix all errors before moving on.",
       "Test through the mailbox. The Msg enum IS the public API of an Actor.",
       "Spawn mock actors with None as the name to avoid ActorAlreadyRegistered errors in parallel tests.",
-      "Prefer proptests for any function that handles strings, byte payloads, or user-supplied input."
+      "Prefer proptests for any function that handles strings, byte payloads, or user-supplied input.",
+      "After mark_done, check the next current_task. If it has review:true, write a summary of what you completed and stop. Do not begin the next task."
     ]
   },
-  "current_task": null,
+  "current_task": {
+    "crate": "polar-scheduler-common",
+    "crate_path": "polar-scheduler/common",
+    "op": "write-tests",
+    "scope": "all",
+    "review": true,
+    "notes": "Pure types crate — no actors, no I/O. Three categories: (1) serde_json roundtrips for ScheduleNode, ScheduleKind, ScheduleMetadata, TimeSpec, TimeUnit, Weekday. (2) rkyv roundtrips for GitScheduleChange, AdhocAgentAnnouncement, ScheduleNotification. (3) proptests on string fields (agent_id, agent_type, topic strings). Crate has no tests/ dir yet — create it. Must add proptest and serde_json to [dev-dependencies] in common/Cargo.toml before writing any test. No TcpClientActor, no MockActor needed."
+  },
   "tools": {
     "locate": {
       "description": "Fast symbol location. Use FIRST before reading or writing anything.",
@@ -39,16 +48,16 @@
     },
     "cargo": {
       "check": "cd $WORKSPACE_ROOT && cargo check --package {crate} 2>&1 | head -80",
-      "test_unit": "cd $WORKSPACE_ROOT && cargo test --package cassini-client --test unit -- --nocapture 2>&1 | tail -30",
-      "test_props": "cd $WORKSPACE_ROOT && cargo test --package cassini-client --test props -- --nocapture 2>&1 | tail -30",
-      "test_all_no_integration": "cd $WORKSPACE_ROOT && cargo test --package cassini-client --test unit --test props -- --nocapture 2>&1 | tail -30",
+      "test_unit": "cd $WORKSPACE_ROOT && cargo test --package {crate} --test unit -- --nocapture 2>&1 | tail -30",
+      "test_props": "cd $WORKSPACE_ROOT && cargo test --package {crate} --test props -- --nocapture 2>&1 | tail -30",
+      "test_all_no_integration": "cd $WORKSPACE_ROOT && cargo test --package {crate} --test unit --test props -- --nocapture 2>&1 | tail -30",
       "fmt": "cd $WORKSPACE_ROOT && cargo fmt --package {crate}"
     },
     "taskfile": {
       "read": "jq '.' $TASKFILE",
       "read_current": "jq '.current_task' $TASKFILE",
       "update_file": "jq --arg v '{value}' '.current_task.current_file = $v' $TASKFILE > $TASKFILE.tmp && mv $TASKFILE.tmp $TASKFILE",
-      "mark_done": "jq '.completed += [{\"crate\": .current_task.crate, \"op\": .current_task.op, \"scope\": .current_task.scope, \"status\": \"done\"}] | .current_task = .pending[0] | .pending = .pending[1:]' $TASKFILE > $TASKFILE.tmp && mv $TASKFILE.tmp $TASKFILE",
+      "mark_done": "jq '.completed += [{\"crate\": .current_task.crate, \"op\": .current_task.op, \"scope\": .current_task.scope, \"status\": \"done\"}] | .current_task = (if (.pending | length) > 0 then .pending[0] else null end) | .pending = (if (.pending | length) > 0 then .pending[1:] else []) end' $TASKFILE > $TASKFILE.tmp && mv $TASKFILE.tmp $TASKFILE",
       "add_blocked": "jq --arg crate '{crate}' --arg op '{op}' --arg reason '{reason}' '.blocked += [{\"crate\": $crate, \"op\": $op, \"reason\": $reason}]' $TASKFILE > $TASKFILE.tmp && mv $TASKFILE.tmp $TASKFILE"
     }
   },
@@ -109,6 +118,7 @@
     },
     {
       "crate": "cassini-client",
+      "crate_path": "cassini/client",
       "op": "write-tests",
       "scope": "unit tests and proptests",
       "status": "done",
@@ -116,10 +126,17 @@
     },
     {
       "crate": "cassini-tracing",
+      "crate_path": "cassini/tracing",
       "op": "write-tests",
       "scope": "all",
       "status": "done",
       "test_count": 17
+    },
+    {
+      "crate": null,
+      "op": null,
+      "scope": "all",
+      "status": "done"
     }
   ],
   "blocked": [
