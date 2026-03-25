@@ -14,9 +14,6 @@ in  orchestrator.OrchestratorConfig::{
           }
         }
       }
-    , bootstrap =
-      { builder_image = "docker.io/nixos/nix:2.24.1"
-      }
     , storage = orchestrator.StorageConfig::{
       , endpoint_url = "http://localhost:9000"
       , access_key = "minio"

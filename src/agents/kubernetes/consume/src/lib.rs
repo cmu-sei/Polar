@@ -1,6 +1,7 @@
 use cassini_client::{TcpClient, TcpClientMessage};
 use chrono::Utc;
 use k8s_openapi::api::apps::v1::Deployment;
+use k8s_openapi::api::batch::v1::Job;
 use k8s_openapi::{api::core::v1::Pod, apimachinery::pkg::apis::meta::v1::OwnerReference};
 use polar::graph::controller::IntoGraphKey;
 use polar::{
@@ -79,6 +80,138 @@ fn opt_json<T: serde::Serialize>(v: &Option<T>) -> GraphValue {
     }
 }
 
+impl GraphOperable for Job {
+    fn project_into_graph(
+        self,
+        graph: &GraphController,
+        _tcp_client: &TcpClient,
+    ) -> Result<(), ActorProcessingErr> {
+        let uid = self.metadata.uid.clone().unwrap_or_default();
+        let name = self.metadata.name.clone().unwrap_or_default();
+        let namespace = self
+            .metadata
+            .namespace
+            .clone()
+            .unwrap_or_else(|| "default".into());
+
+        // Surface the cyclops.build/id label so the Cyclops graph processor
+        // can write EXECUTED_IN edges by uid without knowing it came from k8s.
+        // Other labels are not individually surfaced — they're noise at this level.
+        let cyclops_build_id = self
+            .metadata
+            .labels
+            .as_ref()
+            .and_then(|l| l.get("cyclops.build/id"))
+            .cloned()
+            .unwrap_or_default();
+
+        let job_key = KubeNodeKey::Job { uid: uid.clone() };
+
+        // ---- Anchor node ----
+
+        graph.cast(GraphControllerMsg::Op(GraphOp::UpsertNode {
+            key: job_key.clone().into_key(),
+            props: vec![
+                Property("name".into(), GraphValue::String(name.clone())),
+                Property("namespace".into(), GraphValue::String(namespace.clone())),
+                Property(
+                    "cyclops_build_id".into(),
+                    GraphValue::String(cyclops_build_id),
+                ),
+                Property(
+                    "observed_at".into(),
+                    GraphValue::String(Utc::now().to_rfc3339()),
+                ),
+            ],
+        }))?;
+
+        // ---- Owner refs (e.g. CronJob owns Job) ----
+
+        if let Some(owners) = self.metadata.owner_references {
+            handle_owner_refs(&owners, job_key.clone(), graph)?;
+        }
+
+        // ---- State ----
+
+        let status = self.status.as_ref();
+
+        let active = status.and_then(|s| s.active).unwrap_or(0);
+        let succeeded = status.and_then(|s| s.succeeded).unwrap_or(0);
+        let failed = status.and_then(|s| s.failed).unwrap_or(0);
+
+        // Derive a human-readable phase from the same conditions the
+        // orchestrator's interpret_job_status uses, for consistency.
+        let phase = if succeeded > 0 {
+            "Succeeded"
+        } else if failed > 0 && active == 0 {
+            "Failed"
+        } else if active > 0 {
+            "Running"
+        } else {
+            "Pending"
+        };
+
+        let failure_reason = status
+            .and_then(|s| s.conditions.as_ref())
+            .and_then(|conds| conds.iter().find(|c| c.type_ == "Failed"))
+            .and_then(|c| c.message.clone())
+            .unwrap_or_default();
+
+        let transition_time = status
+            .and_then(|s| s.completion_time.as_ref())
+            .map(|t| t.0.to_rfc3339())
+            .unwrap_or_else(|| Utc::now().to_rfc3339());
+
+        let state_key = KubeNodeKey::JobState {
+            uid: uid.clone(),
+            valid_from: transition_time.clone(),
+        };
+
+        graph.cast(GraphControllerMsg::Op(GraphOp::UpdateState {
+            resource_key: job_key.clone().into_key(),
+            state_type_key: KubeNodeKey::State.into_key(),
+            state_instance_key: state_key.into_key(),
+            state_instance_props: vec![
+                Property("phase".into(), GraphValue::String(phase.into())),
+                Property("active".into(), GraphValue::I64(active as i64)),
+                Property("succeeded".into(), GraphValue::I64(succeeded as i64)),
+                Property("failed".into(), GraphValue::I64(failed as i64)),
+                Property("failure_reason".into(), GraphValue::String(failure_reason)),
+                Property("valid_from".into(), GraphValue::String(transition_time)),
+                Property(
+                    "observed_at".into(),
+                    GraphValue::String(Utc::now().to_rfc3339()),
+                ),
+            ],
+        }))?;
+
+        Ok(())
+    }
+
+    fn project_delete(self, graph: &GraphController) -> Result<(), ActorProcessingErr> {
+        let uid = self.metadata.uid.clone().unwrap_or_default();
+        let job_key = KubeNodeKey::Job { uid: uid.clone() };
+        let now = Utc::now().to_rfc3339();
+
+        let state_key = KubeNodeKey::JobState {
+            uid: uid.clone(),
+            valid_from: now.clone(),
+        };
+
+        graph.cast(GraphControllerMsg::Op(GraphOp::UpdateState {
+            resource_key: job_key.into_key(),
+            state_type_key: KubeNodeKey::State.into_key(),
+            state_instance_key: state_key.into_key(),
+            state_instance_props: vec![
+                Property("phase".into(), GraphValue::String("Deleted".into())),
+                Property("valid_from".into(), GraphValue::String(now.clone())),
+                Property("observed_at".into(), GraphValue::String(now.clone())),
+            ],
+        }))?;
+
+        Ok(())
+    }
+}
 impl GraphOperable for Pod {
     fn project_into_graph(
         self,

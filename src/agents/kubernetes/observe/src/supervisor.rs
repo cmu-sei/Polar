@@ -1,6 +1,7 @@
 use cassini_client::{TcpClient, TcpClientMessage};
 use cassini_types::ClientEvent;
 use k8s_openapi::api::apps::v1::{Deployment, ReplicaSet};
+use k8s_openapi::api::batch::v1::Job;
 use k8s_openapi::api::core::v1::{ConfigMap, Namespace, Pod, Secret};
 use kube::Config;
 use kube::ResourceExt;
@@ -178,6 +179,7 @@ impl_namespaced_watcher!(
 impl_namespaced_watcher!(PodWatcher, resource = Pod, kind = "Pod");
 impl_namespaced_watcher!(SecretWatcher, resource = Secret, kind = "Secret");
 impl_namespaced_watcher!(ConfigMapWatcher, resource = ConfigMap, kind = "ConfigMap");
+impl_namespaced_watcher!(JobWatcher, resource = Job, kind = "Job");
 // impl_namespaced_watcher!(ContainerWatcher, resource = Container, kind = "Container");
 
 pub struct NamespaceWatcherSupervisor;
@@ -208,6 +210,8 @@ impl Actor for NamespaceWatcherSupervisor {
     ) -> Result<Self::State, ActorProcessingErr> {
         debug!("{myself:?} starting");
 
+        // TODO: This is getting ugly fast, various calls to the impl_watcher! macro, not very DRY init flow, it works, but I do hate it.
+        // We could benefit from a function that instantiates the namesapce watcher, and that doesn't eat so much memory doing all the cloning.
         let d_watcher = NamespacedWatcherState {
             tcp_client: args.tcp_client.clone(),
             kube_client: args.kube_client.clone(),
@@ -251,6 +255,22 @@ impl Actor for NamespaceWatcherSupervisor {
             Some(format!("cluster.{ns}.pods", ns = args.namespace)),
             PodWatcher,
             p_watcher,
+            myself.clone().into(),
+        )
+        .await?
+        .0;
+
+        let j_watcher = NamespacedWatcherState {
+            tcp_client: args.tcp_client.clone(),
+            kube_client: args.kube_client.clone(),
+            kind: "Job",
+            namespace: args.namespace.clone(),
+        };
+
+        let _job_watcher = Actor::spawn_linked(
+            Some(format!("cluster.{ns}.jobs", ns = args.namespace)),
+            JobWatcher,
+            j_watcher,
             myself.clone().into(),
         )
         .await?

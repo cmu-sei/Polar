@@ -48,6 +48,7 @@ pub fn project_event(
                 repo_url,
                 commit_sha,
                 requested_by,
+                job_identity,
             } => {
                 // ── Upsert the BuildJob anchor node ────────────────────────────────
                 // This is the first event in the lifecycle — create the node.
@@ -98,6 +99,20 @@ pub fn project_event(
                     .into_key(),
                     rel_type: BUILT_BY.to_string(),
                     to: job_key.into_key(),
+                    props: vec![Property("at".into(), GraphValue::String(now.clone()))],
+                }))?;
+
+                graph.cast(GraphControllerMsg::Op(GraphOp::EnsureEdge {
+                    from: BuildNodeKey::BuildJob {
+                        build_id: build_id.clone(),
+                    }
+                    .into_key(),
+                    rel_type: "EXECUTED_IN".into(),
+                    to: BuildNodeKey::BackendJob {
+                        node_label: job_identity.node_label.clone(),
+                        identity_props: job_identity.identity_props.clone(),
+                    }
+                    .into_key(),
                     props: vec![Property("at".into(), GraphValue::String(now.clone()))],
                 }))?;
             }

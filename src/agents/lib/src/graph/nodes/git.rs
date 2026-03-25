@@ -78,5 +78,3 @@ impl GraphNodeKey for GitNodeKey {
         }
     }
 }
-
-// === Supervisor state ===

@@ -67,6 +67,13 @@ pub enum KubeNodeKey {
         kind: String,
         namespace: String,
     },
+    Job {
+        uid: String,
+    },
+    JobState {
+        uid: String,
+        valid_from: String,
+    },
 }
 impl GraphNodeKey for KubeNodeKey {
     fn cypher_match(&self, prefix: &str) -> (String, Vec<(String, BoltType)>) {
@@ -141,6 +148,27 @@ impl GraphNodeKey for KubeNodeKey {
                 (
                     format!("({prefix}:Pod {{ uid: ${uid_k} }})"),
                     vec![(uid_k, BoltType::String(uid.to_string().into()))],
+                )
+            }
+            KubeNodeKey::Job { uid } => {
+                let uid_k = format!("{prefix}_uid");
+                (
+                    format!("({prefix}:KubernetesJob {{ uid: ${uid_k} }})"),
+                    vec![(uid_k, BoltType::String(uid.clone().into()))],
+                )
+            }
+
+            KubeNodeKey::JobState { uid, valid_from } => {
+                let uid_k = format!("{prefix}_uid");
+                let vf_k = format!("{prefix}_valid_from");
+                (
+                    format!(
+                        "({prefix}:KubernetesJobState {{ uid: ${uid_k}, valid_from: ${vf_k} }})"
+                    ),
+                    vec![
+                        (uid_k, BoltType::String(uid.clone().into())),
+                        (vf_k, BoltType::String(valid_from.clone().into())),
+                    ],
                 )
             }
             KubeNodeKey::PodState {

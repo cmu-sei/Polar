@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::backend::JobGraphIdentity;
+
 /// Cassini subject namespace for all Cyclops-emitted events.
 /// These are the subjects Polar and other consumers subscribe to.
 pub mod subjects {
@@ -51,6 +53,7 @@ pub enum EventPayload {
         repo_url: String,
         commit_sha: String,
         requested_by: String,
+        job_identity: JobGraphIdentity,
     },
     BuildRunning {
         backend: String,
@@ -85,6 +88,7 @@ impl BuildEvent {
         repo_url: String,
         commit_sha: String,
         requested_by: String,
+        job_identity: JobGraphIdentity,
     ) -> Self {
         Self {
             subject: subjects::BUILD_STARTED.to_string(),
@@ -94,6 +98,7 @@ impl BuildEvent {
                 repo_url,
                 commit_sha,
                 requested_by,
+                job_identity,
             },
         }
     }

@@ -245,61 +245,63 @@ impl BuildJobActor {
     /// Submits the bootstrap job that will build the missing pipeline image.
     async fn submit_bootstrap(
         &self,
-        myself: ActorRef<BuildJobMessage>,
+        orchestrator_backend_k8smyself: ActorRef<BuildJobMessage>,
         state: &mut BuildJobState,
     ) -> Result<(), ActorProcessingErr> {
-        let build_id = state.request.build_id;
+        // TODO: I'm not entirely sure implementing this is the right call at all.
+        // Yes, the build environment is needed, but it can be left to operators to decide how it gets there for now.
+        todo!("Implement bootstrap job submission.");
+        // let build_id = state.request.build_id;
 
-        // Credentials are taken from config. These are the same secrets for
-        // every build — credential selection per-repo comes later when the
-        // scheduler owns repo mappings and can carry per-repo credential refs.
-        let git_credentials = git_credentials_from_config(&state.config);
-        let registry_credentials = registry_credentials_from_config(&state.config);
+        // // Credentials are taken from config. These are the same secrets for
+        // // every build — credential selection per-repo comes later when the
+        // // scheduler owns repo mappings and can carry per-repo credential refs.
+        // let git_credentials = git_credentials_from_config(&state.config);
+        // let registry_credentials = registry_credentials_from_config(&state.config);
 
-        let spec = BootstrapSpec {
-            build_id,
-            repo_url: state.request.repo_url.clone(),
-            commit_sha: state.request.commit_sha.clone(),
-            bootstrap_image: state.config.bootstrap.builder_image.clone(),
-            container_config_ref: state.config.bootstrap.container_config_ref.clone(),
-            target_registry: state.config.bootstrap.target_registry.clone(),
-            git_credentials,
-            registry_credentials,
-        };
+        // let spec = BootstrapSpec {
+        //     build_id,
+        //     repo_url: state.request.repo_url.clone(),
+        //     commit_sha: state.request.commit_sha.clone(),
+        //     bootstrap_image: state.config.bootstrap.builder_image.clone(),
+        //     container_config_ref: state.config.bootstrap.container_config_ref.clone(),
+        //     target_registry: state.config.bootstrap.target_registry.clone(),
+        //     git_credentials,
+        //     registry_credentials,
+        // };
 
-        match state.backend.submit_bootstrap(&spec).await {
-            Ok(handle) => {
-                tracing::info!(
-                    build_id = %build_id,
-                    handle = %handle,
-                    "bootstrap Job submitted"
-                );
+        // match state.backend.submit_bootstrap(&spec).await {
+        //     Ok(handle) => {
+        //         tracing::info!(
+        //             build_id = %build_id,
+        //             handle = %handle,
+        //             "bootstrap Job submitted"
+        //         );
 
-                state.backend_handle = Some(handle.clone());
-                state.phase = Some(BuildPhase::Bootstrap);
+        //         state.backend_handle = Some(handle.clone());
+        //         state.phase = Some(BuildPhase::Bootstrap);
 
-                self.transition(
-                    state,
-                    BuildState::Bootstrapping,
-                    Some(handle.to_string()),
-                    None,
-                    None,
-                )?;
+        //         self.transition(
+        //             state,
+        //             BuildState::Bootstrapping,
+        //             Some(handle.to_string()),
+        //             None,
+        //             None,
+        //         )?;
 
-                myself.send_after(std::time::Duration::from_millis(POLL_INTERVAL_MS), || {
-                    BuildJobMessage::PollStatus
-                });
-            }
+        //         myself.send_after(std::time::Duration::from_millis(POLL_INTERVAL_MS), || {
+        //             BuildJobMessage::PollStatus
+        //         });
+        //     }
 
-            Err(e) => {
-                tracing::error!(build_id = %build_id, error = %e, "bootstrap Job submission failed");
-                self.fail(state, e.to_string(), FailureStage::Scheduling)
-                    .await?;
-                myself.stop(Some("bootstrap submission failed".to_string()));
-            }
-        }
-
-        Ok(())
+        //     Err(e) => {
+        //         tracing::error!(build_id = %build_id, error = %e, "bootstrap Job submission failed");
+        //         self.fail(state, e.to_string(), FailureStage::Scheduling)
+        //             .await?;
+        //         myself.stop(Some("bootstrap submission failed".to_string()));
+        //     }
+        // }
+        // Ok(())
     }
 
     /// Submits the pipeline job using a known image digest.
@@ -327,22 +329,22 @@ impl BuildJobActor {
         );
 
         match state.backend.submit(&spec).await {
-            Ok(handle) => {
+            Ok(job) => {
                 tracing::info!(
                     build_id = %build_id,
-                    handle = %handle,
+                    handle = %job.handle.name,
                     image = %pipeline_image,
                     "pipeline Job submitted"
                 );
 
-                state.backend_handle = Some(handle.clone());
+                state.backend_handle = Some(job.handle.clone());
                 state.resolved_image = Some(pipeline_image.clone());
                 state.phase = Some(BuildPhase::Pipeline);
 
                 self.transition(
                     state,
                     BuildState::Scheduled,
-                    Some(handle.to_string()),
+                    Some(job.handle.name.clone()),
                     Some(pipeline_image.clone()),
                     None,
                 )?;
@@ -353,6 +355,7 @@ impl BuildJobActor {
                     state.request.repo_url.clone(),
                     state.request.commit_sha.clone(),
                     state.request.requested_by.clone(),
+                    job.graph_identity.clone(),
                 );
 
                 if let Err(e) = Self::publish_event(&state.publisher, event) {

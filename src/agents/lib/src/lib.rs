@@ -193,6 +193,36 @@ pub enum ProvenanceEvent {
         name: String,
         sbom: NormalizedSbom,
     },
+    /// The OCIArtifactCreated event is the bridge.
+    /// When Cyclops completes a build, it's the only component in the system that simultaneously knows the commit SHA, the project,
+    /// the pipeline context from the BuildRequest metadata, and the digest of what was pushed to the registry.
+    /// It can emit an event that carries all of that context, and the processor can use it to write edges
+    /// that neither the GitLab agent nor the k8s agent could write on their own.
+    OCIArtifactCreated {
+        /// The content-addressed digest of the artifact.
+        /// This is the join key to everything else.
+        digest: String,
+
+        /// Full registry URI including digest.
+        /// e.g. "registry.internal.example.com/builds/myapp@sha256:abc..."
+        uri: String,
+
+        /// The build that produced this artifact, if known.
+        /// None if the artifact was pushed outside of Cyclops.
+        build_id: Option<String>,
+
+        /// Source commit this artifact was built from.
+        commit_sha: Option<String>,
+
+        /// Repository the source came from.
+        repo_url: Option<String>,
+
+        /// Media type from the OCI manifest.
+        /// Tells consumers what kind of artifact this is.
+        media_type: Option<String>,
+
+        observed_at: i64,
+    },
     /// Emitted when a new OCI registry is discovered
     /// (e.g., observed in a Gitlab, Gitea, Artifactory or registry listing).
     ///

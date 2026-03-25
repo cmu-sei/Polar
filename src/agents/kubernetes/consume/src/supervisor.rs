@@ -3,6 +3,7 @@ use crate::GraphOperable;
 use cassini_client::*;
 use cassini_types::ClientEvent;
 use k8s_openapi::api::apps::v1::{Deployment, ReplicaSet};
+use k8s_openapi::api::batch::v1::Job;
 use k8s_openapi::api::core::v1::Pod;
 use kube_common::{KUBERNETES_CONSUMER, RawKubeEvent};
 use kube_common::{RESOURCE_APPLIED_ACTION, RESOURCE_DELETED_ACTION};
@@ -167,6 +168,7 @@ impl ClusterConsumerSupervisor {
             "ReplicaSet" => {
                 Self::handle_event::<ReplicaSet>(ev, cache, graph_controller, tcp_client)?
             }
+            "Job" => Self::handle_event::<Job>(ev, cache, graph_controller, tcp_client)?,
             "Node" => todo!("Nodes"),
             _ => warn!("Unexpected resource type {}", ev.kind),
         }

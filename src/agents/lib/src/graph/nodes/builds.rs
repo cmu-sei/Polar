@@ -31,13 +31,38 @@ pub enum BuildNodeKey {
         build_id: String,
         valid_from: String,
     },
+
+    /// A job on a backend execution system.
+    /// Self-describing — the label and merge properties come from
+    /// JobGraphIdentity, so this variant works for any backend
+    /// without the processor knowing which one it is.
+    BackendJob {
+        node_label: String,
+        identity_props: Vec<(String, String)>,
+    },
 }
 
 impl GraphNodeKey for BuildNodeKey {
     fn cypher_match(&self, prefix: &str) -> (String, Vec<(String, BoltType)>) {
         match self {
             BuildNodeKey::State => ("(:State)".to_string(), vec![]),
+            BuildNodeKey::BackendJob {
+                node_label,
+                identity_props,
+            } => {
+                let mut params = vec![];
+                let prop_str = identity_props
+                    .iter()
+                    .map(|(k, v)| {
+                        let param_key = format!("{prefix}_{k}");
+                        params.push((param_key.clone(), BoltType::String(v.clone().into())));
+                        format!("{k}: ${param_key}")
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
 
+                (format!("({prefix}:{node_label} {{ {prop_str} }})"), params)
+            }
             BuildNodeKey::BuildJob { build_id } => {
                 let id_k = format!("{prefix}_build_id");
                 (

@@ -1,4 +1,6 @@
 use async_trait::async_trait;
+use rkyv::Archive;
+use serde::{Deserialize, Serialize};
 use tokio::io::AsyncRead;
 
 use crate::error::BackendError;
@@ -8,24 +10,47 @@ use crate::types::{BootstrapSpec, BuildSpec};
 /// The backend is responsible for interpreting it in poll/cancel/log calls.
 /// Stored as a plain string in BuildRecord so it survives serialization.
 #[derive(Debug, Clone)]
-pub struct BackendJobHandle(pub String);
-
-impl BackendJobHandle {
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
+pub struct BackendJobHandle {
+    pub name: String,
+    pub uid: String,
 }
 
 impl std::fmt::Display for BackendJobHandle {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
+        write!(f, "{}", self.name)
     }
 }
+/// Returned by the backend after successful job submission.
+/// Contains everything the orchestrator needs to track the job
+/// and everything the graph processor needs to write provenance edges.
+pub struct SubmittedJob {
+    /// Opaque handle for poll/cancel/logs operations.
+    pub handle: BackendJobHandle,
 
-impl From<String> for BackendJobHandle {
-    fn from(s: String) -> Self {
-        Self(s)
-    }
+    /// Backend-specific identity fields for graph correlation.
+    /// The orchestrator treats this as opaque and forwards it
+    /// into the build_started event without interpreting it.
+    pub graph_identity: JobGraphIdentity,
+}
+
+/// The minimum identity needed to write a graph edge between
+/// a BuildJob and the backend job that executed it.
+/// Defined in cyclops-core so the processor can consume it
+/// without depending on cyclops-backend-k8s.
+#[derive(Debug, Clone, rkyv::Serialize, rkyv::Deserialize, Archive, Serialize, Deserialize)]
+pub struct JobGraphIdentity {
+    /// The graph node label for this backend job.
+    /// e.g. "KubernetesJob", "PodmanJob", "SshBuildJob"
+    /// Must match what the backend's own observation agent writes.
+    pub node_label: String,
+
+    /// The properties that uniquely identify this node —
+    /// the same key/value pairs the observation agent uses in its MERGE.
+    /// e.g. [("uid", "abc-123"), ("namespace", "cyclops-builds")]
+    pub identity_props: Vec<(String, String)>,
+
+    /// Human-readable display name for log messages.
+    pub display_name: String,
 }
 
 /// The status of a submitted backend job as reported by a poll call.
@@ -59,15 +84,12 @@ pub type LogStream = Box<dyn AsyncRead + Send + Unpin>;
 pub trait BuildBackend: Send + Sync {
     /// Submit a pipeline job. The pipeline image must already exist in the
     /// registry — call submit_bootstrap first if it does not.
-    async fn submit(&self, spec: &BuildSpec) -> Result<BackendJobHandle, BackendError>;
+    async fn submit(&self, spec: &BuildSpec) -> Result<SubmittedJob, BackendError>;
 
     /// Submit a bootstrap job to build a missing pipeline image.
     /// The bootstrap job clones source, evaluates container.dhall via Nix,
     /// and pushes the resulting image to the target registry.
-    async fn submit_bootstrap(
-        &self,
-        spec: &BootstrapSpec,
-    ) -> Result<BackendJobHandle, BackendError>;
+    // async fn submit_bootstrap(&self, spec: &BootstrapSpec) -> Result<SubmittedJob, BackendError>;
 
     /// Poll the current status of any submitted job (pipeline or bootstrap).
     async fn poll(&self, handle: &BackendJobHandle) -> Result<JobStatus, BackendError>;

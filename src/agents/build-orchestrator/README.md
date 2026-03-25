@@ -29,37 +29,33 @@ build-orchestrator/
           └── job.rs                # Job manifest builder + status interpreter
 ```
 
-## Building
-
-```bash
-cargo build
-```
-
 ## Running Locally (dev mode)
 
-Set `CYCLOPS_DEV_MODE=1` to inject a synthetic BuildRequest without a live Cassini
-broker. The LoggingPublisher stub will print events to stdout instead of publishing.
+**NOTE** This assumes you've done the workspace wide setup of configuring environment variables, and standing up the necessary infrastructure, including Cassini, Neo4j, and a Kubernetes cluster.
 
-```bash
-CYCLOPS_DEV_MODE=1 cargo run -p cyclops-orchestrator
+Startup the build processor, it will attempt to connect to Cassini and ready itself to connect to a neo4j database, much like other graph clients and processors.
+
+```sh
+cargo run -p build-processor
+
 ```
 
-You'll need a kubeconfig pointing at a cluster. It should be bootstrapped with the desired namespace. Jobs will be submitted to the default namespace if one is not specified.
+Set `CYCLOPS_DEV_MODE=1` to inject a synthetic BuildRequest and emit build events to Cassini.
 
 ```bash
-kubectl create namespace cyclops-builds
-CYCLOPS_DEV_MODE=1 cargo run -p cyclops-orchestrator
+CYCLOPS_DEV_MODE=1 cargo run -p build-orchestrator
 ```
 
-## Configuration
+**NOTE**: Config is loaded from `cyclops.yaml` in the working directory by default. set `CYCLOPS_CONFIG= path/to/cyclops.yaml` to use a specific configuration
 
-Config is loaded from `cyclops.yaml` in the working directory, with environment
-variable overrides using the `CYCLOPS__` prefix and `__` as the separator:
+You'll need a kubeconfig pointing at a cluster. It should be bootstrapped with the desired namespace. Jobs will be submitted to the default namespace if one is not specified in cyclops.yaml
 
 ```bash
-CYCLOPS__BACKEND__KUBERNETES__NAMESPACE=my-namespace
-CYCLOPS__LOG__LEVEL=debug
+# optionally , create a namespace
+# kubectl create namespace polar-builds
+CYCLOPS_DEV_MODE=1 cargo run -p build-orchestrator
 ```
+
 
 ## Actor Supervision Tree
 

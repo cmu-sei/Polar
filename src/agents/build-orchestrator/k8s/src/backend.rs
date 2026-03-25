@@ -1,6 +1,8 @@
 use async_trait::async_trait;
 use kube::{Client, Config};
-use orchestrator_core::backend::{BackendJobHandle, BuildBackend, JobStatus, LogStream};
+use orchestrator_core::backend::{
+    BackendJobHandle, BuildBackend, JobGraphIdentity, JobStatus, LogStream, SubmittedJob,
+};
 use orchestrator_core::error::BackendError;
 use orchestrator_core::types::{BootstrapSpec, BuildSpec};
 use tokio_util::compat::FuturesAsyncReadCompatExt;
@@ -50,7 +52,7 @@ impl KubernetesBackend {
 #[async_trait]
 impl BuildBackend for KubernetesBackend {
     #[instrument(skip(self, spec), fields(build_id = %spec.build_id))]
-    async fn submit(&self, spec: &BuildSpec) -> Result<BackendJobHandle, BackendError> {
+    async fn submit(&self, spec: &BuildSpec) -> Result<SubmittedJob, BackendError> {
         use k8s_openapi::api::batch::v1::Job;
         use kube::api::{Api, PostParams};
 
@@ -65,9 +67,19 @@ impl BuildBackend for KubernetesBackend {
         // TODO: We might want to use the final job manifest later, so maybe we Write manifest back to the supervisor ?
         let jobs: Api<Job> = Api::namespaced(self.client.clone(), &self.namespace);
 
-        jobs.create(&PostParams::default(), &manifest)
+        let job = jobs
+            .create(&PostParams::default(), &manifest)
             .await
             .map_err(|e| BackendError::SubmissionFailed(e.to_string()))?;
+
+        let uid = job
+            .metadata
+            .uid
+            .ok_or_else(|| BackendError::SubmissionFailed("created job has no uid".into()))?;
+        let name = job
+            .metadata
+            .name
+            .ok_or_else(|| BackendError::SubmissionFailed("created job has no name".into()))?;
 
         tracing::info!(
             build_id = %spec.build_id,
@@ -76,35 +88,71 @@ impl BuildBackend for KubernetesBackend {
             "pipeline Job created"
         );
 
-        Ok(BackendJobHandle(job_name))
+        let handle = BackendJobHandle {
+            name: name.clone(),
+            uid,
+        };
+
+        let graph_identity = JobGraphIdentity {
+            node_label: "KubernetesJob".into(),
+            display_name: name,
+            identity_props: vec![("uid".into(), handle.uid.clone())],
+        };
+
+        Ok(SubmittedJob {
+            handle,
+            graph_identity,
+        })
     }
 
-    #[instrument(skip(self, spec), fields(build_id = %spec.build_id))]
-    async fn submit_bootstrap(
-        &self,
-        spec: &BootstrapSpec,
-    ) -> Result<BackendJobHandle, BackendError> {
-        use k8s_openapi::api::batch::v1::Job;
-        use kube::api::{Api, PostParams};
+    // TODO: implement
+    // #[instrument(skip(self, spec), fields(build_id = %spec.build_id))]
+    // async fn submit_bootstrap(
+    //     &self,
+    //     spec: &BootstrapSpec,
+    // ) -> Result<BackendJobHandle, BackendError> {
+    //     use k8s_openapi::api::batch::v1::Job;
+    //     use kube::api::{Api, PostParams};
 
-        let job_name = job_name_for_bootstrap(spec.build_id);
-        let manifest = bootstrap_job_manifest(spec, &self.namespace);
+    //     let job_name = job_name_for_bootstrap(spec.build_id);
+    //     let manifest = bootstrap_job_manifest(spec, &self.namespace);
 
-        let jobs: Api<Job> = Api::namespaced(self.client.clone(), &self.namespace);
+    //     let jobs: Api<Job> = Api::namespaced(self.client.clone(), &self.namespace);
 
-        jobs.create(&PostParams::default(), &manifest)
-            .await
-            .map_err(|e| BackendError::SubmissionFailed(e.to_string()))?;
+    //     let job = jobs
+    //         .create(&PostParams::default(), &manifest)
+    //         .await
+    //         .map_err(|e| BackendError::SubmissionFailed(e.to_string()))?;
 
-        tracing::info!(
-            build_id = %spec.build_id,
-            job_name = %job_name,
-            namespace = %self.namespace,
-            "bootstrap Job created"
-        );
+    //     let uid = job
+    //         .metadata
+    //         .uid
+    //         .ok_or_else(|| BackendError::SubmissionFailed("created job has no uid".into()))?;
+    //     let name = job
+    //         .metadata
+    //         .name
+    //         .ok_or_else(|| BackendError::SubmissionFailed("created job has no name".into()))?;
 
-        Ok(BackendJobHandle(job_name))
-    }
+    //     tracing::info!(
+    //         build_id = %spec.build_id,
+    //         job_name = %job_name,
+    //         namespace = %self.namespace,
+    //         "pipeline Job created"
+    //     );
+
+    //     let handle = BackendJobHandle { name, uid };
+
+    //     let graph_identity = JobGraphIdentity {
+    //         node_label: "KubernetesJob".into(),
+    //         display_name: name.clone(),
+    //         identity_props: vec![],
+    //     };
+
+    //     Ok(SubmittedJob {
+    //         handle,
+    //         graph_identity,
+    //     })
+    // }
 
     #[instrument(skip(self), fields(handle = %handle))]
     async fn poll(&self, handle: &BackendJobHandle) -> Result<JobStatus, BackendError> {
@@ -113,7 +161,7 @@ impl BuildBackend for KubernetesBackend {
 
         let jobs: Api<Job> = Api::namespaced(self.client.clone(), &self.namespace);
 
-        let job = match jobs.get_opt(&handle.0).await {
+        let job = match jobs.get_opt(&handle.name).await {
             Ok(Some(j)) => j,
             Ok(None) => return Ok(JobStatus::Unknown),
             Err(e) => return Err(BackendError::PollFailed(e.to_string())),
@@ -134,7 +182,7 @@ impl BuildBackend for KubernetesBackend {
             ..Default::default()
         };
 
-        jobs.delete(&handle.0, &dp)
+        jobs.delete(&handle.name, &dp)
             .await
             .map_err(|e| BackendError::CancellationFailed(e.to_string()))?;
 
@@ -150,7 +198,7 @@ impl BuildBackend for KubernetesBackend {
         // created and stream from it. The Job controller sets job-name label on
         // pods it owns.
         let pods: Api<Pod> = Api::namespaced(self.client.clone(), &self.namespace);
-        let lp = ListParams::default().labels(&format!("job-name={}", handle.0));
+        let lp = ListParams::default().labels(&format!("job-name={}", handle.name));
 
         let pod_list = pods
             .list(&lp)
@@ -158,7 +206,7 @@ impl BuildBackend for KubernetesBackend {
             .map_err(|e| BackendError::LogStreamUnavailable(e.to_string()))?;
 
         let pod = pod_list.items.into_iter().next().ok_or_else(|| {
-            BackendError::LogStreamUnavailable(format!("no pod found for job {}", handle.0))
+            BackendError::LogStreamUnavailable(format!("no pod found for job {}", handle.name))
         })?;
 
         let pod_name = pod
