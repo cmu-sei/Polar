@@ -468,17 +468,24 @@ llm-omnicoder-nvidia-12GB:
 
 # ── Inside container: Pi agent ────────────────────────────────────────────────
 
-pi_version := `curl -fsSL https://api.github.com/repos/badlogic/pi-mono/releases/latest | grep '"tag_name"' | sed 's/.*"v\([^"]*\)".*/\1/'`pi_version := `curl -fsSL https://api.github.com/repos/badlogic/pi-mono/releases/latest | grep '"tag_name"' | sed 's/.*"v\([^"]*\)".*/\1/'`
+pi_version := `curl -fsSL https://api.github.com/repos/badlogic/pi-mono/releases/latest | grep '"tag_name"' | sed 's/.*"v\([^"]*\)".*/\1/'`
 
 # Download/update pi to latest version
 pi-install:
     #!/usr/bin/env bash
     set -euo pipefail
     VERSION="{{pi_version}}"
+    INSTALLED=""
+    if [ -f ~/pi/pi ]; then
+        INSTALLED=$(~/pi/pi --version 2>/dev/null | grep -oP '\d+\.\d+\.\d+' || echo "")
+    fi
+    if [ "$INSTALLED" = "$VERSION" ]; then
+        echo "pi v${VERSION} already installed, skipping."
+        exit 0
+    fi
     echo "Installing pi v${VERSION}..."
-    mkdir -p ~/pi
     curl -fsSL "https://github.com/badlogic/pi-mono/releases/download/v${VERSION}/pi-linux-x64.tar.gz" \
-        | tar -xz -C ~/pi
+        | tar -xz -C ~
     echo "pi v${VERSION} installed."
 
 # Launch pi (installs/updates first)

@@ -2,7 +2,7 @@ use rkyv::{Archive, Deserialize, Serialize};
 use serde::{Deserialize as SerdeDeserialize, Serialize as SerdeSerialize};
 
 // Time specification
-#[derive(Debug, Clone, Archive, Serialize, Deserialize, SerdeSerialize, SerdeDeserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Archive, Serialize, Deserialize, SerdeSerialize, SerdeDeserialize)]
 pub enum TimeSpec {
     Periodic {
         interval: u64,
@@ -30,14 +30,14 @@ pub enum TimeSpec {
     },
 }
 
-#[derive(Debug, Clone, Archive, Serialize, Deserialize, SerdeSerialize, SerdeDeserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Archive, Serialize, Deserialize, SerdeSerialize, SerdeDeserialize)]
 pub enum TimeUnit {
     Minutes,
     Hours,
     Days,
 }
 
-#[derive(Debug, Clone, Archive, Serialize, Deserialize, SerdeSerialize, SerdeDeserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Archive, Serialize, Deserialize, SerdeSerialize, SerdeDeserialize)]
 pub enum Weekday {
     Mon,
     Tue,
@@ -48,20 +48,20 @@ pub enum Weekday {
     Sun,
 }
 
-#[derive(Debug, Clone, SerdeSerialize, SerdeDeserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Archive, Serialize, Deserialize, SerdeSerialize, SerdeDeserialize)]
 pub enum ScheduleKind {
     Permanent,
     Adhoc,
     Ephemeral,
 }
 
-#[derive(Debug, Clone, SerdeSerialize, SerdeDeserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Archive, Serialize, Deserialize, SerdeSerialize, SerdeDeserialize)]
 pub struct ScheduleMetadata {
     pub description: Option<String>,
     pub owner: Option<String>,
 }
 
-#[derive(Debug, Clone, SerdeSerialize, SerdeDeserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, SerdeSerialize, SerdeDeserialize)]
 pub struct ScheduleNode {
     pub id: String,
     pub kind: ScheduleKind,
@@ -74,21 +74,21 @@ pub struct ScheduleNode {
 }
 
 // Keep existing messages
-#[derive(Debug, Clone, Archive, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Archive, Serialize, Deserialize, SerdeSerialize, SerdeDeserialize)]
 pub enum GitScheduleChange {
     Create { path: String, json: String },
     Update { path: String, json: String },
     Delete { path: String },
 }
 
-#[derive(Debug, Clone, Archive, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Archive, Serialize, Deserialize, SerdeSerialize, SerdeDeserialize)]
 pub struct AdhocAgentAnnouncement {
     pub agent_type: String,
     pub version: u64,
     pub default_schedule_json: String,
 }
 
-#[derive(Debug, Clone, Archive, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Archive, Serialize, Deserialize, SerdeSerialize, SerdeDeserialize)]
 pub enum ScheduleNotification {
     PermanentUpdate {
         agent_id: String,

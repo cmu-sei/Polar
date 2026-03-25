@@ -24,14 +24,7 @@
       "After mark_done, check the next current_task. If it has review:true, write a summary of what you completed and stop. Do not begin the next task."
     ]
   },
-  "current_task": {
-    "crate": "polar-scheduler-common",
-    "crate_path": "polar-scheduler/common",
-    "op": "write-tests",
-    "scope": "all",
-    "review": true,
-    "notes": "Pure types crate — no actors, no I/O. Three categories: (1) serde_json roundtrips for ScheduleNode, ScheduleKind, ScheduleMetadata, TimeSpec, TimeUnit, Weekday. (2) rkyv roundtrips for GitScheduleChange, AdhocAgentAnnouncement, ScheduleNotification. (3) proptests on string fields (agent_id, agent_type, topic strings). Crate has no tests/ dir yet — create it. Must add proptest and serde_json to [dev-dependencies] in common/Cargo.toml before writing any test. No TcpClientActor, no MockActor needed."
-  },
+  "current_task": null,
   "tools": {
     "locate": {
       "description": "Fast symbol location. Use FIRST before reading or writing anything.",
@@ -135,6 +128,18 @@
     {
       "crate": null,
       "op": null,
+      "scope": "all",
+      "status": "done"
+    },
+    {
+      "crate": "polar-scheduler-common",
+      "op": "add-rkyv-tests",
+      "scope": "rkyv roundtrips only",
+      "status": "done"
+    },
+    {
+      "crate": "polar-scheduler-observer",
+      "op": "write-tests",
       "scope": "all",
       "status": "done"
     }
