@@ -1300,6 +1300,7 @@ dependencies = [
  "cassini-types",
  "clap",
  "opentelemetry",
+ "proptest",
  "ractor",
  "ring",
  "rkyv 0.8.15",

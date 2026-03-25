@@ -430,19 +430,41 @@ llm-qwen:
         -ctk q4_0 -ctv q4_0 > /tmp/llama-server.log 2>&1
 
 # Start OmniCoder-9B (AMD ROCm) — fallback for lighter tasks
-llm-omnicoder:
+llm-omnicoder-rocm-16GB:
     llama-server \
         --hf-repo Tesslate/OmniCoder-9B-GGUF \
         --hf-file omnicoder-9b-q4_k_m.gguf \
-        --ctx-size 98304 \
+        --ctx-size 131072 \
         --n-gpu-layers 99 \
         --flash-attn on \
         --alias "local-model" \
         --port 8080 --host 0.0.0.0 \
         --temperature 0.3 \
+        --top-p 0.95 \
+        --top-k 20 \
+        --min-p 0.0 \
+        --repeat-penalty 1.0 \
         --jinja \
-        -ub 4096 \
-        -ctk q8_0 -ctv q8_0 > /tmp/llama-server.log 2>&1
+        -ub 512 \
+        -ctk q4_0 -ctv q4_0 > /tmp/llama-server.log 2>&1
+
+llm-omnicoder-nvidia-12GB:
+    llama-server \
+        --hf-repo Tesslate/OmniCoder-9B-GGUF \
+        --hf-file omnicoder-9b-q4_k_m.gguf \
+        --ctx-size 65536 \
+        --n-gpu-layers 99 \
+        --flash-attn on \
+        --alias "local-model" \
+        --port 8080 --host 0.0.0.0 \
+        --temperature 0.3 \
+        --top-p 0.95 \
+        --top-k 20 \
+        --min-p 0.0 \
+        --repeat-penalty 1.0 \
+        --jinja \
+        -ub 512 \
+        -ctk q4_0 -ctv q4_0 > /tmp/llama-server.log 2>&1
 
 # ── Inside container: Pi agent ────────────────────────────────────────────────
 
@@ -555,3 +577,4 @@ ci:
         -p 2222:2223 \
         polar-dev:0.1.0 \
         bash -c "start.sh; chmod +x scripts/gitlab-ci.sh; chmod +x scripts/static-tools.sh; scripts/gitlab-ci.sh"
+
