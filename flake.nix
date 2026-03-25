@@ -28,12 +28,13 @@
     nix-container-lib.url                         = "github:daveman1010221/nix-container-lib";
     nix-container-lib.inputs.nixpkgs.follows      = "nixpkgs";
     nix-container-lib.inputs.flake-utils.follows  = "flake-utils";
-    pi-agent-rust.url                         = "github:daveman1010221/pi_agent_rust";
-    pi-agent-rust.inputs.nixpkgs.follows      = "nixpkgs";
-    pi-agent-rust.inputs.rust-overlay.follows = "rust-overlay";
+    # pi-agent-rust.url                         = "github:daveman1010221/pi_agent_rust";
+    # pi-agent-rust.inputs.nixpkgs.follows      = "nixpkgs";
+    # pi-agent-rust.inputs.rust-overlay.follows = "rust-overlay";
   };
   outputs = { self, nixpkgs, crane, rust-overlay, flake-utils, advisory-db,
-              myNeovimOverlay, staticanalysis, dotacat, nix-container-lib, pi-agent-rust, ... }:
+              myNeovimOverlay, staticanalysis, dotacat, nix-container-lib, ... }:
+              # myNeovimOverlay, staticanalysis, dotacat, nix-container-lib, pi-agent-rust, ... }:
     flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = import nixpkgs {
@@ -82,7 +83,7 @@
         # TLS certificates — using polar's own gen-certs.nix
         tlsCerts = pkgs.callPackage ./src/flake/gen-certs.nix { inherit pkgs; };
 
-        piAgent = pi-agent-rust.packages.${system}.default;
+        # piAgent = pi-agent-rust.packages.${system}.default;
 
         pkgsCuda = import nixpkgs {
           inherit system;
@@ -100,7 +101,7 @@
         mkAgentContainer = llamaCppPkg: extraPkgs: nix-container-lib.lib.${system}.mkContainer {
           inherit system pkgs;
           inputs = { inherit staticanalysis dotacat rust-overlay;
-            piAgent  = { packages.${system} = { default = piAgent; }; };
+            # piAgent  = { packages.${system} = { default = piAgent; }; };
             llamaCpp = { packages.${system} = { default = llamaCppPkg; }; };
             cudaLibs = { packages.${system} = { default = extraPkgs; }; };
           };

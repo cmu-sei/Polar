@@ -1232,6 +1232,7 @@ dependencies = [
  "opentelemetry-otlp",
  "opentelemetry_sdk",
  "polar",
+ "proptest",
  "ractor",
  "ring",
  "rkyv 0.8.15",
