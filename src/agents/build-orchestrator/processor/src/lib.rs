@@ -10,7 +10,7 @@ use polar::{
     graph::{
         controller::{
             GraphController, GraphControllerActor, GraphControllerMsg, GraphOp, GraphValue,
-            IntoGraphKey, Property,
+            IntoGraphKey, Property, rel::BUILT_BY,
         },
         nodes::{builds::BuildNodeKey, git::GitNodeKey},
     },
@@ -96,7 +96,7 @@ pub fn project_event(
                         oid: commit_sha.clone(),
                     }
                     .into_key(),
-                    rel_type: "BUILT_BY".into(),
+                    rel_type: BUILT_BY.to_string(),
                     to: job_key.into_key(),
                     props: vec![Property("at".into(), GraphValue::String(now.clone()))],
                 }))?;

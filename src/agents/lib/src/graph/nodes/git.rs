@@ -52,24 +52,24 @@ impl GraphNodeKey for GitNodeKey {
     fn cypher_match(&self, prefix: &str) -> (String, Vec<(String, BoltType)>) {
         match self {
             GitNodeKey::Repository { repo_id } => (
-                format!("(:GitRepository {{ id: ${prefix}_repo_id }})"),
+                format!("({prefix}:GitRepository {{ id: ${prefix}_repo_id }})"),
                 vec![(format!("{prefix}_repo_id"), repo_id.to_string().into())],
             ),
 
             GitNodeKey::Commit { oid } => (
-                format!("(:GitCommit {{ oid: ${prefix}_oid }})"),
+                format!("({prefix}:GitCommit {{ oid: ${prefix}_oid }})"),
                 vec![(format!("{prefix}_oid"), oid.clone().into())],
             ),
 
             GitNodeKey::Ref { repo_id, name } => (
-                format!("(:GitRef {{ repo_id: ${prefix}_repo_id, name: ${prefix}_name }})"),
+                format!("({prefix}:GitRef {{ repo_id: ${prefix}_repo_id, name: ${prefix}_name }})"),
                 vec![
                     (format!("{prefix}_repo_id"), repo_id.to_string().into()),
                     (format!("{prefix}_name"), name.clone().into()),
                 ],
             ),
             GitNodeKey::Author { email } => (
-                format!("(:GitAuthor {{ email: ${prefix}_email }})"),
+                format!("({prefix}:GitAuthor {{ email: ${prefix}_email }})"),
                 vec![
                     (format!("{prefix}_email"), email.clone().into()),
                     // name should be SET, not matched on

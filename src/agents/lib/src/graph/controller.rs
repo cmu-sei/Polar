@@ -219,13 +219,17 @@ pub enum GraphControllerMsg {
 /// Pure and deterministic — same input always produces the same query.
 /// The resulting `Query` carries all parameters internally; callers do not
 /// need to bind them separately.
+
 pub fn compile_graph_op(op: &GraphOp) -> Query {
     let (cypher, params) = match op {
         GraphOp::UpsertNode { key, props } => {
-            trace!("UpsertNode {key:?}");
+            trace!("Received UpsertNode directive. {key:?}, {props:?}");
+
+            // set a default prefix for the node's variable
             let prefix = "n";
+
             let (node_pattern, mut params) = key.cypher_match(prefix);
-            let mut cypher = format!("MERGE {node_pattern}");
+            let mut cypher = format!("MERGE {}", node_pattern);
 
             if !props.is_empty() {
                 let sets = props
@@ -233,6 +237,7 @@ pub fn compile_graph_op(op: &GraphOp) -> Query {
                     .map(|Property(k, _)| format!("{prefix}.{k} = ${k}"))
                     .collect::<Vec<_>>()
                     .join(", ");
+
                 cypher.push_str(&format!("\nSET {sets}"));
             }
 
@@ -249,16 +254,20 @@ pub fn compile_graph_op(op: &GraphOp) -> Query {
             rel_type,
             props,
         } => {
-            trace!("EnsureEdge {from:?} -[{rel_type}]-> {to:?}");
+            trace!("Received EnsureEdge directive {to:?} {rel_type} {props:?}");
 
-            // Use "from" and "to" as prefixes — they are guaranteed distinct
-            // and readable in query logs.
-            let (from_pat, mut params) = from.cypher_match("from");
-            let (to_pat, mut to_params) = to.cypher_match("to");
+            let from_node = "n";
+            let to_node = "m";
+            let (from_pat, mut params) = from.cypher_match(from_node);
+            let (to_pat, mut to_params) = to.cypher_match(to_node);
             params.append(&mut to_params);
 
-            let mut cypher =
-                format!("MERGE {from_pat}\nMERGE {to_pat}\nMERGE (from)-[r:{rel_type}]->(to)");
+            let mut cypher = format!(
+                "MERGE ({})\nMERGE ({})\nMERGE ({from_node})-[r:{}]->({to_node})",
+                from_pat.trim_start_matches('(').trim_end_matches(')'),
+                to_pat.trim_start_matches('(').trim_end_matches(')'),
+                rel_type
+            );
 
             if !props.is_empty() {
                 let sets = props
@@ -266,6 +275,7 @@ pub fn compile_graph_op(op: &GraphOp) -> Query {
                     .map(|Property(k, _)| format!("r.{k} = ${k}"))
                     .collect::<Vec<_>>()
                     .join(", ");
+
                 cypher.push_str(&format!("\nSET {sets}"));
             }
 
@@ -275,48 +285,57 @@ pub fn compile_graph_op(op: &GraphOp) -> Query {
 
             (cypher, params)
         }
-
         GraphOp::ReplaceEdge { from, rel_type, to } => {
-            trace!("ReplaceEdge {from:?} -[{rel_type}]-> {to:?}");
+            trace!("Received ReplaceEdge directive {from:?} -[{rel_type}]-> {to:?}");
 
             let (from_pat, mut params) = from.cypher_match("from");
             let (to_pat, mut to_params) = to.cypher_match("to");
             params.append(&mut to_params);
 
             let cypher = format!(
-                "MERGE {from_pat}
-WITH from
-OPTIONAL MATCH (from)-[r:{rel_type}]->()
-DELETE r
-WITH from
-MERGE {to_pat}
-MERGE (from)-[:{rel_type}]->(to)"
+                "
+                MERGE (a {from})
+                WITH a
+                OPTIONAL MATCH (a)-[r:{rel_type}]->()
+                DELETE r
+                WITH a
+                MERGE (b {to})
+                MERGE (a)-[:{rel_type}]->(b)
+                ",
+                from = from_pat.trim_start_matches('(').trim_end_matches(')'),
+                to = to_pat.trim_start_matches('(').trim_end_matches(')'),
             );
 
             (cypher, params)
         }
 
         GraphOp::RemoveEdges { from, rel_type } => {
-            trace!("RemoveEdges {from:?} -[{rel_type}]-> *");
+            trace!("Received RemoveEdges directive {from:?} -[{rel_type}]-> *");
 
             let (from_pat, params) = from.cypher_match("from");
+
             let cypher = format!(
-                "MATCH {from_pat}
-OPTIONAL MATCH (from)-[r:{rel_type}]->()
-DELETE r"
+                "
+                MATCH (a {from})
+                OPTIONAL MATCH (a)-[r:{rel_type}]->()
+                DELETE r
+                ",
+                from = from_pat.trim_start_matches('(').trim_end_matches(')'),
             );
 
             (cypher, params)
         }
-
         GraphOp::UpdateState {
             resource_key,
             state_type_key,
             state_instance_key,
             state_instance_props,
         } => {
-            trace!("UpdateState {resource_key:?} -> {state_type_key:?}");
+            trace!(
+                "Received UpdateState directive {resource_key:?} -> {state_type_key:?} via {state_instance_key:?}"
+            );
 
+            // Generate node match patterns
             let (res_pat, mut params) = resource_key.cypher_match("res");
             let (stype_pat, mut stype_params) = state_type_key.cypher_match("stype");
             let (sinst_pat, mut sinst_params) = state_instance_key.cypher_match("sinst");
@@ -324,31 +343,47 @@ DELETE r"
             params.append(&mut stype_params);
             params.append(&mut sinst_params);
 
-            let state_set = if !state_instance_props.is_empty() {
+            // Add state instance property SETs if provided
+            let mut state_instance_set_clause = String::new();
+
+            if !state_instance_props.is_empty() {
                 let sets = state_instance_props
                     .iter()
                     .map(|Property(k, _)| format!("sinst.{k} = ${k}"))
                     .collect::<Vec<_>>()
                     .join(", ");
-                format!("\nSET {sets}")
-            } else {
-                String::new()
-            };
 
-            for Property(k, v) in state_instance_props {
-                params.push((k.clone(), v.clone().into()));
+                state_instance_set_clause = format!("\nSET {sets}");
+
+                for Property(k, v) in state_instance_props {
+                    params.push((k.clone(), v.clone().into()));
+                }
             }
 
             let cypher = format!(
-                "MERGE {res_pat}
-MERGE {stype_pat}
-MERGE {sinst_pat}{state_set}
-MERGE (res)-[:TRANSITIONED_TO]->(sinst)
-MERGE (sinst)-[:OF_TYPE]->(stype)
-WITH res, stype
-OPTIONAL MATCH (res)-[r:HAS_STATE]->()
-DELETE r
-MERGE (res)-[:HAS_STATE]->(stype)"
+                "
+                // Upsert resource, state type, and state instance
+                MERGE ({res})
+                MERGE (stype {stype})
+                MERGE ({sinst})
+                {state_instance_set}
+
+                // Record transition
+                MERGE (res)-[:TRANSITIONED_TO]->(sinst)
+
+                // Bind instance to its type
+                MERGE (sinst)-[:OF_TYPE]->(stype)
+
+                // Replace current state pointer
+                WITH res, stype
+                OPTIONAL MATCH (res)-[r:HAS_STATE]->()
+                DELETE r
+                MERGE (res)-[:HAS_STATE]->(stype)
+                ",
+                res = res_pat.trim_start_matches('(').trim_end_matches(')'),
+                stype = stype_pat.trim_start_matches('(').trim_end_matches(')'),
+                sinst = sinst_pat.trim_start_matches('(').trim_end_matches(')'),
+                state_instance_set = state_instance_set_clause,
             );
 
             (cypher, params)
@@ -359,9 +394,26 @@ MERGE (res)-[:HAS_STATE]->(stype)"
     for (k, v) in params {
         q = q.param(&k, v);
     }
+
     q
 }
 
+/// helper fn intedned for handling generic graph operations.
+/// Should be typed with some sort of Nodekey.
+#[instrument(level = "trace", skip(graph))]
+pub async fn handle_op(graph: &Graph, op: &GraphOp) -> Result<(), ActorProcessingErr> {
+    let q = compile_graph_op(op);
+
+    let mut txn = graph.start_txn().await?;
+    debug!("{}", q.query());
+    debug!("{:?}", q.get_params());
+    txn.run(q)
+        .await
+        .map_err(|e| ActorProcessingErr::from(format!("neo4j execution failed: {:?}", e)))?;
+    txn.commit().await?;
+    trace!("transaction committed");
+    Ok(())
+}
 // ── GraphController actor ──────────────────────────────────────────────────────
 
 /// The unified graph controller actor.
@@ -412,22 +464,4 @@ impl Actor for GraphControllerActor {
         }
         Ok(())
     }
-}
-
-/// Execute a compiled `GraphOp` against a live Neo4j connection.
-///
-/// Each call runs in its own transaction. Errors from Neo4j are surfaced
-/// as `ActorProcessingErr` so the caller's actor can handle or propagate them.
-#[instrument(level = "trace", skip(graph))]
-pub async fn handle_op(graph: &Graph, op: &GraphOp) -> Result<(), ActorProcessingErr> {
-    let q = compile_graph_op(op);
-    let mut txn = graph.start_txn().await?;
-    debug!("{}", q.query());
-    debug!("{:?}", q.get_params());
-    txn.run(q)
-        .await
-        .map_err(|e| ActorProcessingErr::from(format!("neo4j execution failed: {e:?}")))?;
-    txn.commit().await?;
-    trace!("transaction committed");
-    Ok(())
 }
