@@ -1,5 +1,3 @@
-# TODO: A nix module that will package and containerize cassini
-
 { pkgs,
   commonPaths,
   craneLib,

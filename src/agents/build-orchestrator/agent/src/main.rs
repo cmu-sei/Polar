@@ -80,26 +80,6 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-// fn init_tracing(format: &str, level: &str) {
-//     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(level));
-
-//     match format {
-//         "json" => {
-//             tracing_subscriber::fmt()
-//                 .json()
-//                 .with_env_filter(filter)
-//                 .with_current_span(true)
-//                 .init();
-//         }
-//         _ => {
-//             tracing_subscriber::fmt()
-//                 .pretty()
-//                 .with_env_filter(filter)
-//                 .init();
-//         }
-//     }
-// }
-
 /// Injects a synthetic BuildRequest when the CYCLOPS_DEV_MODE env var is set.
 /// Lets you exercise the full actor path without a live Cassini broker.
 async fn inject_test_build_if_dev(supervisor: &ractor::ActorRef<SupervisorMessage>) {

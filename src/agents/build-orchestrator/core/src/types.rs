@@ -4,6 +4,13 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+/// Cassini subjects the orchestrator agents are interested in
+/// Mirrors the subject constants defined in cyclops-core.
+pub mod subjects {
+    pub const BUILD_EVENTS_TOPIC: &str = "polar.orchestrator.builds..events";
+    pub const BUILD_REQUESTS_TOPIC: &str = "polar.orchestrator.builds.requests";
+}
+
 /// The inbound payload published by Polar's scheduler onto the Cassini broker.
 /// This is the authoritative wire format — do not add fields without versioning.
 /// Image resolution is the orchestrator's responsibility, not the scheduler's.
