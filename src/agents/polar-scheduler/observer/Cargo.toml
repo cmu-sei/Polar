@@ -3,6 +3,13 @@ name = "polar-scheduler-observer"
 version.workspace = true
 edition.workspace = true
 
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "polar-scheduler-observer"
+path = "src/main.rs"
+
 [dependencies]
 anyhow.workspace = true
 cassini-client.workspace = true
@@ -18,3 +25,24 @@ serde_json.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 walkdir = "2"
+
+[dev-dependencies]
+tempfile = { workspace = true }
+proptest = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+
+[[test]]
+name = "config_tests"
+path = "tests/config_tests.rs"
+
+[[test]]
+name = "git_ops_tests"
+path = "tests/git_ops_tests.rs"
+
+[[test]]
+name = "sync_actor_tests"
+path = "tests/sync_actor_tests.rs"
+
+[[test]]
+name = "watcher_tests"
+path = "tests/watcher_tests.rs"

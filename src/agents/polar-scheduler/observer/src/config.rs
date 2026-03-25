@@ -10,25 +10,26 @@ pub struct ObserverConfig {
 }
 
 impl ObserverConfig {
-    // POLAR_SCHEDULER_LOCAL_PATH
-    // POLAR_SCHEDULER_REMOTE_URL
-    // POLAR_SCHEDULER_SYNC_INTERVAL
-    // POLAR_SCHEDULER_GIT_USERNAME
-    // POLAR_SCHEDULER_GIT_PASSWORD
     pub fn from_env() -> Self {
-        let local_path = std::env::var("POLAR_SCHEDULER_LOCAL_PATH")
+        Self::from_lookup(|key| std::env::var(key).ok())
+    }
+
+    pub fn from_lookup<F>(lookup: F) -> Self
+    where
+        F: Fn(&str) -> Option<String>,
+    {
+        let local_path = lookup("POLAR_SCHEDULER_LOCAL_PATH")
             .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from("/tmp/polar-schedules")); // default
+            .unwrap_or_else(|| PathBuf::from("/tmp/polar-schedules"));
 
-        let remote_url = std::env::var("POLAR_SCHEDULER_REMOTE_URL").ok();
+        let remote_url = lookup("POLAR_SCHEDULER_REMOTE_URL");
 
-        let sync_interval = std::env::var("POLAR_SCHEDULER_SYNC_INTERVAL")
-            .ok()
+        let sync_interval = lookup("POLAR_SCHEDULER_SYNC_INTERVAL")
             .and_then(|s| s.parse::<u64>().ok())
             .map(Duration::from_secs);
 
-        let git_username = std::env::var("POLAR_SCHEDULER_GIT_USERNAME").ok();
-        let git_password = std::env::var("POLAR_SCHEDULER_GIT_PASSWORD").ok();
+        let git_username = lookup("POLAR_SCHEDULER_GIT_USERNAME");
+        let git_password = lookup("POLAR_SCHEDULER_GIT_PASSWORD");
 
         Self {
             remote_url,

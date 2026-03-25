@@ -430,30 +430,65 @@ llm-qwen:
         -ctk q4_0 -ctv q4_0 > /tmp/llama-server.log 2>&1
 
 # Start OmniCoder-9B (AMD ROCm) — fallback for lighter tasks
-llm-omnicoder:
+llm-omnicoder-rocm-16GB:
     llama-server \
         --hf-repo Tesslate/OmniCoder-9B-GGUF \
         --hf-file omnicoder-9b-q4_k_m.gguf \
-        --ctx-size 98304 \
+        --ctx-size 131072 \
         --n-gpu-layers 99 \
         --flash-attn on \
         --alias "local-model" \
         --port 8080 --host 0.0.0.0 \
         --temperature 0.3 \
+        --top-p 0.95 \
+        --top-k 20 \
+        --min-p 0.0 \
+        --repeat-penalty 1.0 \
         --jinja \
-        -ub 4096 \
-        -ctk q8_0 -ctv q8_0 > /tmp/llama-server.log 2>&1
+        -ub 512 \
+        -ctk q4_0 -ctv q4_0 > /tmp/llama-server.log 2>&1
+
+llm-omnicoder-nvidia-12GB:
+    llama-server \
+        --hf-repo Tesslate/OmniCoder-9B-GGUF \
+        --hf-file omnicoder-9b-q4_k_m.gguf \
+        --ctx-size 65536 \
+        --n-gpu-layers 99 \
+        --flash-attn on \
+        --alias "local-model" \
+        --port 8080 --host 0.0.0.0 \
+        --temperature 0.3 \
+        --top-p 0.95 \
+        --top-k 20 \
+        --min-p 0.0 \
+        --repeat-penalty 1.0 \
+        --jinja \
+        -ub 512 \
+        -ctk q4_0 -ctv q4_0 > /tmp/llama-server.log 2>&1
 
 # ── Inside container: Pi agent ────────────────────────────────────────────────
 
-# Download pi if not already present
+pi_version := `curl -fsSL https://api.github.com/repos/badlogic/pi-mono/releases/latest | grep '"tag_name"' | sed 's/.*"v\([^"]*\)".*/\1/'`
+
+# Download/update pi to latest version
 pi-install:
     #!/usr/bin/env bash
-    if [ ! -f ~/pi/pi ]; then
-        curl -L https://github.com/badlogic/pi-mono/releases/download/v0.61.1/pi-linux-x64.tar.gz | tar -xz -C ~
+    set -euo pipefail
+    VERSION="{{pi_version}}"
+    INSTALLED=""
+    if [ -f ~/pi/pi ]; then
+        INSTALLED=$(~/pi/pi --version 2>/dev/null | grep -oP '\d+\.\d+\.\d+' || echo "")
     fi
+    if [ "$INSTALLED" = "$VERSION" ]; then
+        echo "pi v${VERSION} already installed, skipping."
+        exit 0
+    fi
+    echo "Installing pi v${VERSION}..."
+    curl -fsSL "https://github.com/badlogic/pi-mono/releases/download/v${VERSION}/pi-linux-x64.tar.gz" \
+        | tar -xz -C ~
+    echo "pi v${VERSION} installed."
 
-# Launch pi (installs first if needed)
+# Launch pi (installs/updates first)
 pi: pi-install
     ~/pi/pi @/workspace/agent-task.json
 
@@ -470,7 +505,7 @@ agent-status:
     jq '.current_task' {{_taskfile}}
     echo ""
     echo "=== Pending ($(jq '.pending | length' {{_taskfile}}) tasks) ==="
-    jq '.pending[] | {crate, op}' {{_taskfile}}
+    jq '.pending[] | {crate, op, review}' {{_taskfile}}
     echo ""
     echo "=== Completed ($(jq '.completed | length' {{_taskfile}}) tasks) ==="
     jq '.completed[] | {crate, op, status}' {{_taskfile}}
@@ -495,22 +530,50 @@ agent-resume:
     printf "Follow .current_task.next_action. Update .current_task.current_file as you move between files. When .current_task.success_condition is met run the taskfile.mark_done tool to advance to the next pending task. Do not ask for clarification. Start working.\n"
     echo "────────────────────────────────────────────────────────────────"
 
-# Set agent to work on a specific crate and op — updates task file and prints start prompt
-# Usage: just agent-task cassini-client write-tests
-agent-task crate op:
+# Set agent to work on a specific crate and op, or pop next pending task
+# Usage: just agent-task                        # pop next pending, launch pi
+#        just agent-task cassini-client write-tests  # queue explicit task, launch pi
+agent-task crate='' op='':
     #!/usr/bin/env bash
     set -euo pipefail
     if [ ! -f {{_taskfile}} ]; then
-        echo "No task file found at {{_taskfile}} — copy agent-task.json to /workspace first"
+        echo "No task file found at {{_taskfile}}"
         exit 1
     fi
-    jq --arg crate "{{crate}}" --arg op "{{op}}" \
-        '.current_task.crate = $crate | .current_task.op = $op | .current_task.status = "in-progress"' \
-        {{_taskfile}} > {{_taskfile}}.tmp && mv {{_taskfile}}.tmp {{_taskfile}}
-    echo "Task updated:"
+
+    if [ -z "{{crate}}" ]; then
+        # No args — pop first pending task into current_task
+        PENDING_LEN=$(jq '.pending | length' {{_taskfile}})
+        if [ "$PENDING_LEN" -eq 0 ]; then
+            echo "No pending tasks. Add tasks to pending in {{_taskfile}} first."
+            exit 1
+        fi
+        jq '
+            .current_task = .pending[0] |
+            .pending = .pending[1:]
+        ' {{_taskfile}} > {{_taskfile}}.tmp && mv {{_taskfile}}.tmp {{_taskfile}}
+    else
+        # Explicit crate/op — push current_task to back of pending if one exists
+        jq --arg crate "{{crate}}" --arg op "{{op}}" '
+            if .current_task != null then
+                .pending = .pending + [.current_task]
+            else
+                .
+            end |
+            .current_task = {
+                "crate": $crate,
+                "op": $op,
+                "status": "in-progress"
+            }
+        ' {{_taskfile}} > {{_taskfile}}.tmp && mv {{_taskfile}}.tmp {{_taskfile}}
+    fi
+
+    echo "=== Current Task ==="
     jq '.current_task' {{_taskfile}}
     echo ""
-    echo "Run: just agent-resume   to get the pi prompt"
+
+    # Launch pi
+    just pi
 
 # ── Dev workflow ──────────────────────────────────────────────────────────────
 
@@ -555,3 +618,4 @@ ci:
         -p 2222:2223 \
         polar-dev:0.1.0 \
         bash -c "start.sh; chmod +x scripts/gitlab-ci.sh; chmod +x scripts/static-tools.sh; scripts/gitlab-ci.sh"
+

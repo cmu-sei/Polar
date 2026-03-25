@@ -1300,6 +1300,7 @@ dependencies = [
  "cassini-types",
  "clap",
  "opentelemetry",
+ "proptest",
  "ractor",
  "ring",
  "rkyv 0.8.15",
@@ -1329,6 +1330,7 @@ dependencies = [
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry_sdk",
+ "proptest",
  "tracing",
  "tracing-glog",
  "tracing-opentelemetry",
@@ -5188,6 +5190,7 @@ dependencies = [
 name = "polar-scheduler-common"
 version = "1.0.0"
 dependencies = [
+ "proptest",
  "rkyv 0.8.15",
  "serde",
  "serde_json",
@@ -5204,10 +5207,12 @@ dependencies = [
  "notify",
  "polar",
  "polar-scheduler-common",
+ "proptest",
  "ractor",
  "rkyv 0.8.15",
  "serde_dhall",
  "serde_json",
+ "tempfile",
  "tokio",
  "tracing",
  "walkdir",

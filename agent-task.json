@@ -1,56 +1,56 @@
 {
-  "schema_version": "1.0",
-  "session_id": "2026-03-24",
+  "schema_version": "1.1",
+  "session_id": "2026-03-25",
   "workspace_root": "/workspace/src/agents",
   "taskfile": "/workspace/agent-task.json",
-  "last_updated": "2026-03-24T15:00:00Z",
+  "last_updated": "2026-03-25T10:00:00Z",
+  "schema_notes": "pending tasks are real work queue — mark_done auto-advances. review:true means stop after completing and summarize; wait for human to run just agent-task before continuing.",
   "rules": {
     "never": [
-      "Never create files inside src/. All test files go in tests/ only.",
-      "Never write assert!(true) or assert!(false) as the only assertion in a test. Every test must assert on a real observable value.",
-      "Never instantiate State structs directly. State is private. Use Actor::spawn to create actors.",
-      "Never call taskfile.mark_done unless cargo test reports N > 0 tests passing with zero failures.",
-      "Never skip a test with a comment saying setup is complex. Either write the test or mark it #[ignore] with a specific reason."
+      "Never create test files in src/. All test files go in tests/ only.",
+      "Never write assert!(true) or assert!(false) as the only assertion. Every test must assert a real observable value.",
+      "Never instantiate State structs directly. Use Actor::spawn.",
+      "Never call taskfile.mark_done unless cargo test reports N > 0 passing tests with zero failures.",
+      "Never skip a test with a comment saying setup is complex. Either write it or mark #[ignore] with a specific reason.",
+      "Never touch tests/integration_tests.rs — it already exists and is correct.",
+      "Never attempt to spawn TcpClientActor in unit tests — it requires TLS certs and a live broker. Use MockActor instead."
     ],
     "always": [
       "Read the source file completely before writing any test for it.",
       "Run cargo check after writing each test file. Fix all errors before moving on.",
-      "Test through the mailbox. The Msg enum IS the public API of an Actor."
+      "Test through the mailbox. The Msg enum IS the public API of an Actor.",
+      "Spawn mock actors with None as the name to avoid ActorAlreadyRegistered errors in parallel tests.",
+      "Prefer proptests for any function that handles strings, byte payloads, or user-supplied input.",
+      "After mark_done, check the next current_task. If it has review:true, write a summary of what you completed and stop. Do not begin the next task."
     ]
   },
-  "current_task": {
-    "crate": "cassini-client",
-    "crate_path": "cassini/client",
-    "op": "write-tests",
-    "scope": "all",
-    "notes": "Same actor model approach. See cassini/types/tests/ for proptest style reference."
-  },
+  "current_task": null,
   "tools": {
     "locate": {
-      "description": "Fast symbol location — returns file paths and line numbers. Use FIRST to find WHERE something is.",
+      "description": "Fast symbol location. Use FIRST before reading or writing anything.",
       "find_files": "fd '\\.rs$' $WORKSPACE_ROOT/{crate_path}",
-      "find_actors": "rg -n 'impl Actor for|pub struct.*Msg|pub struct.*Args|pub enum.*Msg' $WORKSPACE_ROOT/{crate_path}/src --type rust",
-      "find_symbol": "rg -n 'pub fn |pub struct |pub enum |pub trait ' $WORKSPACE_ROOT/{crate_path}/src --type rust",
+      "find_actors": "rg -n 'impl Actor for|type Msg =|type Arguments =|pub struct.*Args' $WORKSPACE_ROOT/{crate_path}/src --type rust",
+      "find_symbol": "rg -n 'pub fn|pub struct|pub enum|pub trait' $WORKSPACE_ROOT/{crate_path}/src --type rust",
       "grep_pattern": "rg -n '{pattern}' $WORKSPACE_ROOT/{crate_path} --type rust | head -30"
     },
     "extract": {
-      "description": "Precise content extraction. Read partial files with line ranges to avoid loading large files entirely.",
+      "description": "Precise content extraction with line numbers. Use after locate.",
       "read_file": "bat $WORKSPACE_ROOT/{file} --style=numbers",
       "read_lines": "bat $WORKSPACE_ROOT/{file} --style=numbers --line-range {start}:{end}",
-      "read_fn": "rg -n 'fn {name}' $WORKSPACE_ROOT/{file} --type rust",
-      "read_struct": "rg -n 'struct {name}\\|enum {name}' $WORKSPACE_ROOT/{file} --type rust"
+      "read_fn": "rg -n 'fn {name}' $WORKSPACE_ROOT/{file} --type rust"
     },
     "cargo": {
       "check": "cd $WORKSPACE_ROOT && cargo check --package {crate} 2>&1 | head -80",
-      "test": "cd $WORKSPACE_ROOT && cargo test --package {crate} -- --nocapture 2>&1 | tail -50",
-      "test_count": "cd $WORKSPACE_ROOT && cargo test --package {crate} -- --nocapture 2>&1 | grep 'test result'",
+      "test_unit": "cd $WORKSPACE_ROOT && cargo test --package {crate} --test unit -- --nocapture 2>&1 | tail -30",
+      "test_props": "cd $WORKSPACE_ROOT && cargo test --package {crate} --test props -- --nocapture 2>&1 | tail -30",
+      "test_all_no_integration": "cd $WORKSPACE_ROOT && cargo test --package {crate} --test unit --test props -- --nocapture 2>&1 | tail -30",
       "fmt": "cd $WORKSPACE_ROOT && cargo fmt --package {crate}"
     },
     "taskfile": {
       "read": "jq '.' $TASKFILE",
       "read_current": "jq '.current_task' $TASKFILE",
       "update_file": "jq --arg v '{value}' '.current_task.current_file = $v' $TASKFILE > $TASKFILE.tmp && mv $TASKFILE.tmp $TASKFILE",
-      "mark_done": "jq '.completed += [{\"crate\": .current_task.crate, \"op\": .current_task.op, \"scope\": .current_task.scope, \"status\": \"done\"}] | .current_task = .pending[0] | .pending = .pending[1:]' $TASKFILE > $TASKFILE.tmp && mv $TASKFILE.tmp $TASKFILE",
+      "mark_done": "jq '.completed += [{\"crate\": .current_task.crate, \"op\": .current_task.op, \"scope\": .current_task.scope, \"status\": \"done\"}] | .current_task = (if (.pending | length) > 0 then .pending[0] else null end) | .pending = (if (.pending | length) > 0 then .pending[1:] else []) end' $TASKFILE > $TASKFILE.tmp && mv $TASKFILE.tmp $TASKFILE",
       "add_blocked": "jq --arg crate '{crate}' --arg op '{op}' --arg reason '{reason}' '.blocked += [{\"crate\": $crate, \"op\": $op, \"reason\": $reason}]' $TASKFILE > $TASKFILE.tmp && mv $TASKFILE.tmp $TASKFILE"
     }
   },
@@ -66,48 +66,90 @@
     },
     {
       "crate": "cassini-broker",
+      "crate_path": "cassini/broker",
       "op": "write-tests",
       "scope": "TopicManager",
       "status": "done",
-      "test_count": 5
+      "test_count": 3,
+      "notes": "Actor::spawn pattern, send_message, real assertions"
     },
     {
       "crate": "cassini-broker",
+      "crate_path": "cassini/broker",
       "op": "write-tests",
       "scope": "SubscriberManager",
       "status": "done",
-      "test_count": 7
+      "test_count": 7,
+      "notes": "MockActor pattern for session manager dependency"
     },
     {
       "crate": "cassini-broker",
+      "crate_path": "cassini/broker",
       "op": "write-tests",
       "scope": "SessionManager",
       "status": "done",
-      "test_count": 7
+      "test_count": 7,
+      "notes": "MockActor pattern for broker dependency"
     },
     {
       "crate": "cassini-broker",
+      "crate_path": "cassini/broker",
       "op": "write-tests",
       "scope": "ControlManager",
       "status": "done",
-      "test_count": 8
-    }
-  ],
-  "blocked": [],
-  "pending": [
+      "test_count": 8,
+      "notes": "MockActor pattern for all four managed actor dependencies"
+    },
     {
-      "crate": "cassini-c2",
-      "crate_path": "cassini/cassini-c2",
+      "crate": "cassini-broker",
+      "crate_path": "cassini/broker",
       "op": "write-tests",
-      "scope": "all",
-      "notes": "Same actor model approach."
+      "scope": "props",
+      "status": "done",
+      "test_count": 2,
+      "notes": "payload_survives_arc_wrap, empty_payload_arc"
+    },
+    {
+      "crate": "cassini-client",
+      "crate_path": "cassini/client",
+      "op": "write-tests",
+      "scope": "unit tests and proptests",
+      "status": "done",
+      "test_count": 39
     },
     {
       "crate": "cassini-tracing",
-      "crate_path": "cassini/cassini-tracing",
+      "crate_path": "cassini/tracing",
       "op": "write-tests",
       "scope": "all",
-      "notes": "Same actor model approach."
+      "status": "done",
+      "test_count": 17
+    },
+    {
+      "crate": null,
+      "op": null,
+      "scope": "all",
+      "status": "done"
+    },
+    {
+      "crate": "polar-scheduler-common",
+      "op": "add-rkyv-tests",
+      "scope": "rkyv roundtrips only",
+      "status": "done"
+    },
+    {
+      "crate": "polar-scheduler-observer",
+      "op": "write-tests",
+      "scope": "all",
+      "status": "done"
     }
-  ]
+  ],
+  "blocked": [
+    {
+      "crate": "cassini-c2",
+      "op": "write-tests",
+      "reason": "binary-only crate with no lib target, all logic requires live broker connection and TLS env vars, incomplete feature work"
+    }
+  ],
+  "pending": []
 }
