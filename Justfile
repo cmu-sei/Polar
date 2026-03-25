@@ -1,7 +1,7 @@
 # Polar Justfile
 #
 # Host-side recipes: build images, run containers, dev workflow
-# Container-side recipes: start llama-server, start pi
+# Container-side recipes: start llama-server, start pi, agent task management
 #
 # Usage:
 #   just <recipe>                         # run with defaults
@@ -15,6 +15,8 @@ platform := `uname -m | sed 's/x86_64/x86_64-linux/;s/aarch64/aarch64-linux/'`
 verbose   := "true"
 
 _nix_flags := if verbose == "true" { "-L" } else { "--log-format bar-with-logs" }
+
+_taskfile := "/workspace/agent-task.json"
 
 # ── Help ──────────────────────────────────────────────────────────────────────
 
@@ -413,7 +415,7 @@ llm-qwen:
         --hf-repo unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF \
         --hf-file Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf \
         --ctx-size 65536 \
-        --n-gpu-layers 35 \
+        --n-gpu-layers 32 \
         --flash-attn on \
         --alias "local-model" \
         --port 8080 --host 0.0.0.0 \
@@ -444,13 +446,71 @@ llm-omnicoder:
 
 # ── Inside container: Pi agent ────────────────────────────────────────────────
 
-# Download pi (if not already present)
+# Download pi if not already present
 pi-install:
-    cd ~ && curl -L https://github.com/badlogic/pi-mono/releases/download/v0.61.1/pi-linux-x64.tar.gz | tar -xz
+    #!/usr/bin/env bash
+    if [ ! -f ~/pi/pi ]; then
+        curl -L https://github.com/badlogic/pi-mono/releases/download/v0.61.1/pi-linux-x64.tar.gz | tar -xz -C ~
+    fi
 
 # Launch pi (installs first if needed)
 pi: pi-install
-    ~/pi/pi
+    ~/pi/pi @/workspace/agent-task.json
+
+# ── Agent task management (container-side) ────────────────────────────────────
+
+# Show current agent task status
+agent-status:
+    #!/usr/bin/env bash
+    if [ ! -f {{_taskfile}} ]; then
+        echo "No task file found at {{_taskfile}}"
+        exit 1
+    fi
+    echo "=== Current Task ==="
+    jq '.current_task' {{_taskfile}}
+    echo ""
+    echo "=== Pending ($(jq '.pending | length' {{_taskfile}}) tasks) ==="
+    jq '.pending[] | {crate, op}' {{_taskfile}}
+    echo ""
+    echo "=== Completed ($(jq '.completed | length' {{_taskfile}}) tasks) ==="
+    jq '.completed[] | {crate, op, status}' {{_taskfile}}
+
+# Resume agent from existing task file — prints the resume prompt to paste into pi
+agent-resume:
+    #!/usr/bin/env bash
+    if [ ! -f {{_taskfile}} ]; then
+        echo "No task file found at {{_taskfile}}"
+        exit 1
+    fi
+    WORKSPACE_ROOT=$(jq -r '.workspace_root' {{_taskfile}})
+    CRATE=$(jq -r '.current_task.crate' {{_taskfile}})
+    OP=$(jq -r '.current_task.op' {{_taskfile}})
+    echo "Paste this into pi to resume:"
+    echo "────────────────────────────────────────────────────────────────"
+    printf "export TASKFILE=%s WORKSPACE_ROOT=%s\n" "{{_taskfile}}" "$WORKSPACE_ROOT"
+    printf "Read your task file: jq '.' \$TASKFILE\n"
+    printf "Your current task is .current_task — crate=%s op=%s\n" "$CRATE" "$OP"
+    printf "Your tools are in .tools — substitute {placeholders} as needed. Use locate tools first to find symbols, then extract tools to read exact definitions.\n"
+    printf "Begin: cd \$WORKSPACE_ROOT && cargo check --package %s 2>&1 | head -80\n" "$CRATE"
+    printf "Follow .current_task.next_action. Update .current_task.current_file as you move between files. When .current_task.success_condition is met run the taskfile.mark_done tool to advance to the next pending task. Do not ask for clarification. Start working.\n"
+    echo "────────────────────────────────────────────────────────────────"
+
+# Set agent to work on a specific crate and op — updates task file and prints start prompt
+# Usage: just agent-task cassini-client write-tests
+agent-task crate op:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ ! -f {{_taskfile}} ]; then
+        echo "No task file found at {{_taskfile}} — copy agent-task.json to /workspace first"
+        exit 1
+    fi
+    jq --arg crate "{{crate}}" --arg op "{{op}}" \
+        '.current_task.crate = $crate | .current_task.op = $op | .current_task.status = "in-progress"' \
+        {{_taskfile}} > {{_taskfile}}.tmp && mv {{_taskfile}}.tmp {{_taskfile}}
+    echo "Task updated:"
+    jq '.current_task' {{_taskfile}}
+    echo ""
+    echo "Run: just agent-resume   to get the pi prompt"
 
 # ── Dev workflow ──────────────────────────────────────────────────────────────
 

@@ -113,23 +113,23 @@ MoE model: 30.5B total params, 3.3B active at inference. Fits comfortably on 16G
 at Q4_K_M with KV cache quantization. Use Unsloth's Dynamic 2.0 quant for best quality.
 
 ```bash
-llama-server \
-  --hf-repo unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF \
-  --hf-file Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf \
-  --ctx-size 65536 \
-  --n-gpu-layers 35 \
-  --flash-attn on \
-  --alias "local-model" \
-  --port 8080 --host 0.0.0.0 \
-  --temperature 0.7 \
-  --top-p 0.8 \
-  --top-k 20 \
-  --repeat-penalty 1.05 \
-  --jinja \
-  -ub 512 \
-  --threads 20 \
-  --threads-batch 20 \
-  -ctk q4_0 -ctv q4_0 > /tmp/llama-server.log 2>&1 &
+    llama-server \
+        --hf-repo unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF \
+        --hf-file Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf \
+        --ctx-size 65536 \
+        --n-gpu-layers 32 \
+        --flash-attn on \
+        --alias "local-model" \
+        --port 8080 --host 0.0.0.0 \
+        --temperature 0.7 \
+        --top-p 0.8 \
+        --top-k 20 \
+        --repeat-penalty 1.05 \
+        --jinja \
+        -ub 512 \
+        --threads 20 \
+        --threads-batch 20 \
+        -ctk q4_0 -ctv q4_0 > /tmp/llama-server.log 2>&1
 ```
 
 If Q4_K_M OOMs, drop to IQ4_XS (16.4GB):

@@ -365,29 +365,6 @@
         "type": "github"
       }
     },
-    "pi-agent-rust": {
-      "inputs": {
-        "nixpkgs": [
-          "nixpkgs"
-        ],
-        "rust-overlay": [
-          "rust-overlay"
-        ]
-      },
-      "locked": {
-        "lastModified": 1774145045,
-        "narHash": "sha256-t90msirMpiwd74jCmGrgT0Km2woj5MMfrcNv3HaJ478=",
-        "owner": "daveman1010221",
-        "repo": "pi_agent_rust",
-        "rev": "1e9f96db80ef10b5676d844e591b094d8ae8518c",
-        "type": "github"
-      },
-      "original": {
-        "owner": "daveman1010221",
-        "repo": "pi_agent_rust",
-        "type": "github"
-      }
-    },
     "root": {
       "inputs": {
         "advisory-db": "advisory-db",
@@ -397,7 +374,6 @@
         "myNeovimOverlay": "myNeovimOverlay",
         "nix-container-lib": "nix-container-lib",
         "nixpkgs": "nixpkgs_2",
-        "pi-agent-rust": "pi-agent-rust",
         "rust-overlay": "rust-overlay",
         "staticanalysis": "staticanalysis"
       }
