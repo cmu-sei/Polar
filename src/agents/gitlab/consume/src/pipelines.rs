@@ -22,7 +22,6 @@
 */
 
 use crate::GitlabConsumerState;
-use crate::GitlabNodeKey;
 use cassini_client::TcpClient;
 use cassini_client::TcpClientMessage;
 use chrono::Utc;
@@ -32,8 +31,11 @@ use common::types::GitlabEnvelope;
 use gitlab_queries::projects::CiJobArtifact;
 use gitlab_queries::projects::GitlabCiJob;
 use polar::ProvenanceEvent;
-use polar::graph::GraphController;
-use polar::graph::{GraphControllerMsg, GraphOp, GraphValue, Property};
+use polar::graph::controller::GraphController;
+use polar::graph::{
+    controller::{GraphControllerMsg, GraphOp, GraphValue, IntoGraphKey, Property},
+    nodes::gitlab::GitlabNodeKey,
+};
 use ractor::{Actor, ActorProcessingErr, ActorRef, async_trait};
 use tracing::debug;
 
@@ -49,7 +51,7 @@ impl GitlabPipelineConsumer {
         base_url: &str,
         job_key: &GitlabNodeKey,
         artifacts: Vec<&CiJobArtifact>,
-        graph: &ActorRef<GraphControllerMsg<GitlabNodeKey>>,
+        graph: &ActorRef<GraphControllerMsg>,
         tcp_client: &TcpClient,
     ) -> Result<(), ActorProcessingErr> {
         debug!("Handling artifacts for job {job_key:?}");
@@ -99,13 +101,13 @@ impl GitlabPipelineConsumer {
                 ];
 
                 graph.cast(GraphControllerMsg::Op(GraphOp::UpsertNode {
-                    key: artifact_key.clone(),
+                    key: artifact_key.clone().into_key(),
                     props,
                 }))?;
 
                 graph.cast(GraphControllerMsg::Op(GraphOp::EnsureEdge {
-                    from: job_key.clone(),
-                    to: artifact_key,
+                    from: job_key.clone().into_key(),
+                    to: artifact_key.into_key(),
                     rel_type: "PRODUCED".into(),
                     props: vec![],
                 }))?;
@@ -120,7 +122,7 @@ impl GitlabPipelineConsumer {
         instance_id: &str,
         pipeline_id: &str,
         jobs: &[GitlabCiJob],
-        graph: &GraphController<GitlabNodeKey>,
+        graph: &GraphController,
         tcp_client: &TcpClient,
     ) -> Result<(), ActorProcessingErr> {
         debug!("Handling jobs for pipeline {pipeline_id}");
@@ -176,13 +178,13 @@ impl GitlabPipelineConsumer {
             ];
 
             graph.cast(GraphControllerMsg::Op(GraphOp::UpsertNode {
-                key: job_key.clone(),
+                key: job_key.clone().into_key(),
                 props,
             }))?;
 
             graph.cast(GraphControllerMsg::Op(GraphOp::EnsureEdge {
-                from: pipeline_key.clone(),
-                to: job_key.clone(),
+                from: pipeline_key.clone().into_key(),
+                to: job_key.clone().into_key(),
                 rel_type: "HAS_JOB".into(),
                 props: vec![],
             }))?;
@@ -194,8 +196,8 @@ impl GitlabPipelineConsumer {
                 };
 
                 graph.cast(GraphControllerMsg::Op(GraphOp::EnsureEdge {
-                    from: job_key.clone(),
-                    to: runner_key,
+                    from: job_key.clone().into_key(),
+                    to: runner_key.into_key(),
                     rel_type: "EXECUTED_BY".into(),
                     props: vec![],
                 }))?;
@@ -223,7 +225,7 @@ impl GitlabPipelineConsumer {
         instance_id: String,
         project_id: String,
         pipelines: &[gitlab_queries::projects::Pipeline],
-        graph: &GraphController<GitlabNodeKey>,
+        graph: &GraphController,
     ) -> Result<(), ActorProcessingErr> {
         debug!("Handling pipeline runs for project {project_id}");
         let project_key = GitlabNodeKey::Project {
@@ -232,7 +234,7 @@ impl GitlabPipelineConsumer {
         };
 
         graph.cast(GraphControllerMsg::Op(GraphOp::UpsertNode {
-            key: project_key.clone(),
+            key: project_key.clone().into_key(),
             props: vec![],
         }))?;
 
@@ -287,13 +289,13 @@ impl GitlabPipelineConsumer {
             ];
 
             graph.cast(GraphControllerMsg::Op(GraphOp::UpsertNode {
-                key: pipeline_key.clone(),
+                key: pipeline_key.clone().into_key(),
                 props,
             }))?;
 
             graph.cast(GraphControllerMsg::Op(GraphOp::EnsureEdge {
-                from: project_key.clone(),
-                to: pipeline_key.clone(),
+                from: project_key.clone().into_key(),
+                to: pipeline_key.clone().into_key(),
                 rel_type: "HAS_PIPELINE".into(),
                 props: vec![],
             }))?;

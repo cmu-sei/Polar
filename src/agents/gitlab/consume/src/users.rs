@@ -22,14 +22,16 @@
 */
 
 use crate::GitlabConsumerState;
-use crate::GitlabNodeKey;
 use cassini_client::TcpClientMessage;
 use common::{
     USER_CONSUMER_TOPIC,
     types::{GitlabData, GitlabEnvelope},
 };
 use gitlab_queries::{projects::ProjectMember, users::UserCoreFragment};
-use polar::graph::{GraphControllerMsg, GraphOp, GraphValue, Property};
+use polar::graph::{
+    controller::{GraphControllerMsg, GraphOp, GraphValue, IntoGraphKey, Property},
+    nodes::gitlab::GitlabNodeKey,
+};
 use ractor::{Actor, ActorProcessingErr, ActorRef, async_trait};
 use tracing::{debug, info};
 
@@ -46,14 +48,14 @@ impl GitlabUserConsumer {
     pub fn handle_gitlab_users(
         instance_id: String,
         users: &[UserCoreFragment],
-        graph: &ActorRef<GraphControllerMsg<GitlabNodeKey>>,
+        graph: &ActorRef<GraphControllerMsg>,
     ) -> Result<(), ActorProcessingErr> {
         let instance_key = GitlabNodeKey::GitlabInstance {
             instance_id: instance_id.clone(),
         };
 
         graph.cast(GraphControllerMsg::Op(GraphOp::UpsertNode {
-            key: instance_key.clone(),
+            key: instance_key.clone().into_key(),
             props: vec![],
         }))?;
 
@@ -118,13 +120,13 @@ impl GitlabUserConsumer {
             ));
 
             graph.cast(GraphControllerMsg::Op(GraphOp::UpsertNode {
-                key: user_key.clone(),
+                key: user_key.clone().into_key(),
                 props,
             }))?;
 
             graph.cast(GraphControllerMsg::Op(GraphOp::EnsureEdge {
-                from: instance_key.clone(),
-                to: user_key,
+                from: instance_key.clone().into_key(),
+                to: user_key.into_key(),
                 rel_type: "OBSERVED_USER".into(),
                 props: vec![],
             }))?;
@@ -143,7 +145,7 @@ impl GitlabUserConsumer {
         instance_id: String,
         user_id: String,
         memberships: &[ProjectMember],
-        graph: &ActorRef<GraphControllerMsg<GitlabNodeKey>>,
+        graph: &ActorRef<GraphControllerMsg>,
     ) -> Result<(), ActorProcessingErr> {
         let user_key = GitlabNodeKey::User {
             instance_id: instance_id.clone(),
@@ -151,7 +153,7 @@ impl GitlabUserConsumer {
         };
 
         graph.cast(GraphControllerMsg::Op(GraphOp::UpsertNode {
-            key: user_key.clone(),
+            key: user_key.clone().into_key(),
             props: vec![],
         }))?;
 
@@ -166,7 +168,7 @@ impl GitlabUserConsumer {
             };
 
             graph.cast(GraphControllerMsg::Op(GraphOp::UpsertNode {
-                key: project_key.clone(),
+                key: project_key.clone().into_key(),
                 props: vec![],
             }))?;
 
@@ -196,8 +198,8 @@ impl GitlabUserConsumer {
             }
 
             graph.cast(GraphControllerMsg::Op(GraphOp::EnsureEdge {
-                from: user_key.clone(),
-                to: project_key,
+                from: user_key.clone().into_key(),
+                to: project_key.into_key(),
                 rel_type: "MEMBER_OF".into(),
                 props: rel_props,
             }))?;

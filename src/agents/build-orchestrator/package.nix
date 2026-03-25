@@ -69,7 +69,6 @@ let
     };
   };
 
-
   # ---------------------------------------------------------------------------
   # Cyclops git-clone init container
   #
@@ -226,5 +225,5 @@ let
 
 in
 {
-  inherit orchestrator orchestratorImage cloneImage gitCloneEntrypoint;
+  inherit orchestrator orchestratorImage cloneImage gitCloneEntrypoint buildProcessor buildProcessorImage;
 }

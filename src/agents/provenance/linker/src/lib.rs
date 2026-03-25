@@ -1,6 +1,5 @@
 use neo4rs::BoltType;
-use polar::graph::{GraphControllerMsg, GraphNodeKey};
-use polar::{NormalizedSbom, impl_graph_controller};
+use polar::{NormalizedSbom, graph::controller::GraphNodeKey};
 use serde::{Deserialize, Serialize};
 use std::fmt::Debug;
 
@@ -23,11 +22,7 @@ pub enum ArtifactNodeKey {
     /// This particular nodekey represents the datatype, not an instance of an artifact.
     /// Other typed artifacts are related to it using an :IS
     Artifact,
-    // TOOD: Get rid of this, it's cross contamination of vocabulary.
-    PodContainer {
-        pod_uid: String,
-        container_name: String,
-    },
+
     OCIRegistry {
         hostname: String,
     },
@@ -82,21 +77,6 @@ impl GraphNodeKey for ArtifactNodeKey {
                 format!("({prefix}:OCIArtifact {{ digest: ${prefix}_digest }})"),
                 vec![(format!("{prefix}_digest"), digest.clone().into())],
             ),
-            Self::PodContainer {
-                pod_uid,
-                container_name,
-            } => (
-                format!(
-                    "({prefix}:PodContainer {{ container_name: ${prefix}_container_name, pod_uid: ${prefix}_pod_uid }})"
-                ),
-                vec![
-                    (
-                        format!("{prefix}_container_name"),
-                        container_name.clone().into(),
-                    ),
-                    (format!("{prefix}_pod_uid"), pod_uid.clone().into()),
-                ],
-            ),
 
             Self::OCILayer { digest } => (
                 format!("({prefix}:OCILayer {{ digest: ${prefix}_digest }})"),
@@ -142,6 +122,3 @@ impl GraphNodeKey for ArtifactNodeKey {
         }
     }
 }
-
-// A concrete instance of a GraphController for the artifact linker.
-impl_graph_controller!(LinkerGraphController, node_key = ArtifactNodeKey);

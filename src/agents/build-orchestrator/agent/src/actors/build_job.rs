@@ -322,7 +322,6 @@ impl BuildJobActor {
             state.request.repo_url.clone(),
             state.request.commit_sha.clone(),
             pipeline_image.clone(),
-            state.config.bootstrap.target_registry.clone(),
             git_credentials,
             registry_credentials,
         );
@@ -490,12 +489,7 @@ impl BuildJobActor {
                             // prominently so the operator knows artifacts are missing.
                             self.upload_artifacts(state, &handle).await;
 
-                            let event = BuildEvent::build_completed(
-                                build_id,
-                                state.resolved_image.clone(),
-                                state.config.bootstrap.target_registry.clone(),
-                                duration,
-                            );
+                            let event = BuildEvent::build_completed(build_id, duration);
 
                             Self::publish_event(&state.publisher, event)?;
 

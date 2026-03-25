@@ -2,19 +2,18 @@ use cassini_client::{TcpClient, TcpClientMessage};
 use chrono::Utc;
 use k8s_openapi::api::apps::v1::Deployment;
 use k8s_openapi::{api::core::v1::Pod, apimachinery::pkg::apis::meta::v1::OwnerReference};
-use neo4rs::BoltType;
+use polar::graph::controller::IntoGraphKey;
 use polar::{
     PROVENANCE_DISCOVERY_TOPIC, ProvenanceEvent, RkyvError,
     graph::{
-        GraphController, GraphControllerMsg, GraphNodeKey, GraphOp, GraphValue, NULL_FIELD,
-        Property,
+        controller::{
+            GraphController, GraphControllerMsg, GraphOp, GraphValue, NULL_FIELD, Property,
+        },
+        nodes::kube::KubeNodeKey,
     },
-    impl_graph_controller,
 };
 use ractor::{ActorProcessingErr, ActorRef};
 use rkyv::to_bytes;
-use std::fmt::Debug;
-use tracing::warn;
 
 pub mod supervisor;
 
@@ -24,25 +23,24 @@ pub const BROKER_CLIENT_NAME: &str = "kubernetes.cluster.cassini.client";
 pub trait GraphOperable {
     fn project_into_graph(
         self,
-        graph: &GraphController<KubeNodeKey>,
+        graph: &GraphController,
         tcp_client: &TcpClient,
     ) -> Result<(), ActorProcessingErr>;
 
-    fn project_delete(self, graph: &GraphController<KubeNodeKey>)
-    -> Result<(), ActorProcessingErr>;
+    fn project_delete(self, graph: &GraphController) -> Result<(), ActorProcessingErr>;
 }
 
 fn handle_owner_refs(
     owners: &Vec<OwnerReference>,
     node_key: KubeNodeKey,
-    graph: &GraphController<KubeNodeKey>,
+    graph: &GraphController,
 ) -> Result<(), ActorProcessingErr> {
     for owner in owners {
         if let Some(owner_key) = KubeNodeKey::from_owner_reference(owner) {
             graph.cast(GraphControllerMsg::Op(GraphOp::EnsureEdge {
-                from: owner_key,
+                from: owner_key.into_key(),
                 rel_type: "OWNS".into(),
-                to: node_key.clone(),
+                to: node_key.clone().into_key(),
                 props: Vec::new(),
             }))?;
         }
@@ -84,7 +82,7 @@ fn opt_json<T: serde::Serialize>(v: &Option<T>) -> GraphValue {
 impl GraphOperable for Pod {
     fn project_into_graph(
         self,
-        graph: &GraphController<KubeNodeKey>,
+        graph: &GraphController,
         tcp_client: &TcpClient,
     ) -> Result<(), ActorProcessingErr> {
         let uid = self.metadata.uid.unwrap_or_default();
@@ -127,9 +125,9 @@ impl GraphOperable for Pod {
         };
 
         let op = GraphOp::UpdateState {
-            resource_key: pod_key.clone(),
-            state_type_key: KubeNodeKey::State,
-            state_instance_key: new_state_key,
+            resource_key: pod_key.clone().into_key(),
+            state_type_key: KubeNodeKey::State.into_key(),
+            state_instance_key: new_state_key.into_key(),
             state_instance_props: vec![
                 Property("phase".into(), GraphValue::String(phase)),
                 Property("ready".into(), GraphValue::Bool(ready)),
@@ -145,7 +143,7 @@ impl GraphOperable for Pod {
         // ---- Node ----
 
         graph.cast(GraphControllerMsg::Op(GraphOp::UpsertNode {
-            key: pod_key.clone(),
+            key: pod_key.clone().into_key(),
             props: vec![
                 Property("name".into(), GraphValue::String(pod_name)),
                 Property("namespace".into(), GraphValue::String(namespace.clone())),
@@ -176,14 +174,14 @@ impl GraphOperable for Pod {
                 // // We don't want to just blast the yaml structure in the graph, but we're gonna have to keep this in mind
 
                 graph.cast(GraphControllerMsg::Op(GraphOp::UpsertNode {
-                    key: vol_key.clone(),
+                    key: vol_key.clone().into_key(),
                     props: Vec::new(),
                 }))?;
 
                 graph.cast(GraphControllerMsg::Op(GraphOp::EnsureEdge {
-                    from: pod_key.clone(),
+                    from: pod_key.clone().into_key(),
                     rel_type: "USES_VOLUME".into(),
-                    to: vol_key.clone(),
+                    to: vol_key.clone().into_key(),
                     props: Vec::new(),
                 }))?;
 
@@ -194,14 +192,14 @@ impl GraphOperable for Pod {
                     };
 
                     graph.cast(GraphControllerMsg::Op(GraphOp::UpsertNode {
-                        key: cm_key.clone(),
+                        key: cm_key.clone().into_key(),
                         props: Vec::new(),
                     }))?;
 
                     graph.cast(GraphControllerMsg::Op(GraphOp::EnsureEdge {
-                        from: vol_key.clone(),
+                        from: vol_key.clone().into_key(),
                         rel_type: "BACKED_BY".into(),
-                        to: cm_key,
+                        to: cm_key.into_key(),
                         props: Vec::new(),
                     }))?;
                 }
@@ -215,14 +213,14 @@ impl GraphOperable for Pod {
                     };
 
                     graph.cast(GraphControllerMsg::Op(GraphOp::UpsertNode {
-                        key: s_key.clone(),
+                        key: s_key.clone().into_key(),
                         props: Vec::new(),
                     }))?;
 
                     graph.cast(GraphControllerMsg::Op(GraphOp::EnsureEdge {
-                        from: vol_key.clone(),
+                        from: vol_key.clone().into_key(),
                         rel_type: "BACKED_BY".into(),
-                        to: s_key,
+                        to: s_key.into_key(),
                         props: Vec::new(),
                     }))?;
                 }
@@ -234,14 +232,14 @@ impl GraphOperable for Pod {
                     };
 
                     graph.cast(GraphControllerMsg::Op(GraphOp::UpsertNode {
-                        key: pvc_key.clone(),
+                        key: pvc_key.clone().into_key(),
                         props: Vec::new(),
                     }))?;
 
                     graph.cast(GraphControllerMsg::Op(GraphOp::EnsureEdge {
-                        from: vol_key,
+                        from: vol_key.into_key(),
                         rel_type: "BACKED_BY".into(),
-                        to: pvc_key,
+                        to: pvc_key.into_key(),
                         props: Vec::new(),
                     }))?;
                 }
@@ -312,7 +310,7 @@ impl GraphOperable for Pod {
             ];
 
             graph.cast(GraphControllerMsg::Op(GraphOp::UpsertNode {
-                key: container_key.clone(),
+                key: container_key.clone().into_key(),
                 props,
             }))?;
 
@@ -326,8 +324,8 @@ impl GraphOperable for Pod {
                     };
 
                     let op = GraphOp::EnsureEdge {
-                        from: container_key.clone(),
-                        to: volume_key,
+                        from: container_key.clone().into_key(),
+                        to: volume_key.into_key(),
                         rel_type: "USES_VOLUME".into(),
                         props: vec![
                             // Mount-specific metadata belongs on the edge.
@@ -354,9 +352,9 @@ impl GraphOperable for Pod {
             }
 
             graph.cast(GraphControllerMsg::Op(GraphOp::EnsureEdge {
-                from: pod_key.clone(),
+                from: pod_key.clone().into_key(),
                 rel_type: "HAS_CONTAINER".into(),
-                to: container_key.clone(),
+                to: container_key.clone().into_key(),
                 props: Vec::new(),
             }))?;
 
@@ -466,11 +464,12 @@ impl GraphOperable for Pod {
                         pod_uid: uid.clone(),
                         name: container.name.clone(),
                         valid_from: valid_from.clone(),
-                    };
+                    }
+                    .into_key();
 
                     let op = GraphOp::UpdateState {
-                        resource_key: container_key.clone(),
-                        state_type_key: KubeNodeKey::State, // abstract taxonomy
+                        resource_key: container_key.clone().into_key(),
+                        state_type_key: KubeNodeKey::State.into_key(), // abstract taxonomy
                         state_instance_key,
                         state_instance_props: {
                             state_props.push(Property(
@@ -495,9 +494,9 @@ impl GraphOperable for Pod {
                             };
 
                             graph.cast(GraphControllerMsg::Op(GraphOp::EnsureEdge {
-                                from: pod_key.clone(),
+                                from: pod_key.clone().into_key(),
                                 rel_type: "USES_CONFIGMAP".into(),
-                                to: cm_key,
+                                to: cm_key.into_key(),
                                 props: Vec::new(),
                             }))?;
                         }
@@ -509,9 +508,9 @@ impl GraphOperable for Pod {
                             };
 
                             graph.cast(GraphControllerMsg::Op(GraphOp::EnsureEdge {
-                                from: pod_key.clone(),
+                                from: pod_key.clone().into_key(),
                                 rel_type: "USES_SECRET".into(),
-                                to: s_key,
+                                to: s_key.into_key(),
                                 props: Vec::new(),
                             }))?;
                         }
@@ -527,7 +526,7 @@ impl GraphOperable for Pod {
 
     fn project_delete(
         self,
-        graph: &ActorRef<GraphControllerMsg<KubeNodeKey>>,
+        graph: &ActorRef<GraphControllerMsg>,
     ) -> Result<(), ActorProcessingErr> {
         let uid = self.metadata.uid.clone().unwrap();
         let pod_key = KubeNodeKey::Pod { uid: uid.clone() };
@@ -540,7 +539,7 @@ impl GraphOperable for Pod {
         };
 
         graph.cast(GraphControllerMsg::Op(GraphOp::UpsertNode {
-            key: state_key.clone(),
+            key: state_key.clone().into_key(),
             props: vec![
                 Property("phase".into(), GraphValue::String("Deleted".into())),
                 Property("valid_from".into(), GraphValue::String(now.clone())),
@@ -549,8 +548,8 @@ impl GraphOperable for Pod {
         }))?;
 
         graph.cast(GraphControllerMsg::Op(GraphOp::EnsureEdge {
-            from: pod_key,
-            to: state_key,
+            from: pod_key.into_key(),
+            to: state_key.into_key(),
             rel_type: "TRANSITIONED_TO".into(),
             props: vec![Property("at".into(), GraphValue::String(now))],
         }))?;
@@ -567,7 +566,7 @@ impl GraphOperable for Pod {
 impl GraphOperable for Deployment {
     fn project_into_graph(
         self,
-        graph: &GraphController<KubeNodeKey>,
+        graph: &GraphController,
         _tcp_client: &TcpClient,
     ) -> Result<(), ActorProcessingErr> {
         let _kind = "Deployment";
@@ -608,7 +607,7 @@ impl GraphOperable for Deployment {
         // ---- Upsert anchor node ----
 
         graph.cast(GraphControllerMsg::Op(GraphOp::UpsertNode {
-            key: deployment_key.clone(),
+            key: deployment_key.clone().into_key(),
             props: vec![
                 Property("name".into(), GraphValue::String(name)),
                 Property("namespace".into(), GraphValue::String(namespace)),
@@ -628,9 +627,9 @@ impl GraphOperable for Deployment {
         };
 
         let op = GraphOp::UpdateState {
-            resource_key: deployment_key.clone(),
-            state_type_key: KubeNodeKey::State,
-            state_instance_key: state_key,
+            resource_key: deployment_key.clone().into_key(),
+            state_type_key: KubeNodeKey::State.into_key(),
+            state_instance_key: state_key.into_key(),
             state_instance_props: vec![
                 Property(
                     "available_replicas".into(),
@@ -667,7 +666,7 @@ impl GraphOperable for Deployment {
 
     fn project_delete(
         self,
-        graph: &ActorRef<GraphControllerMsg<KubeNodeKey>>,
+        graph: &ActorRef<GraphControllerMsg>,
     ) -> Result<(), ActorProcessingErr> {
         let _uid = self.metadata.uid.clone().unwrap();
         let uid = self.metadata.uid.clone().unwrap_or_default();
@@ -711,9 +710,9 @@ impl GraphOperable for Deployment {
 
         let transition_time = Utc::now().to_rfc3339();
         let op = GraphOp::UpdateState {
-            resource_key: deployment_key.clone(),
-            state_type_key: KubeNodeKey::State,
-            state_instance_key: state_key,
+            resource_key: deployment_key.clone().into_key(),
+            state_type_key: KubeNodeKey::State.into_key(),
+            state_instance_key: state_key.into_key(),
             state_instance_props: vec![
                 Property(
                     "available_replicas".into(),
@@ -753,7 +752,7 @@ use k8s_openapi::api::apps::v1::ReplicaSet;
 impl GraphOperable for ReplicaSet {
     fn project_into_graph(
         self,
-        graph: &GraphController<KubeNodeKey>,
+        graph: &GraphController,
         _tcp_client: &TcpClient,
     ) -> Result<(), ActorProcessingErr> {
         let uid = self.metadata.uid.clone().unwrap_or_default();
@@ -776,7 +775,7 @@ impl GraphOperable for ReplicaSet {
         // ---- Anchor node ----
 
         graph.cast(GraphControllerMsg::Op(GraphOp::UpsertNode {
-            key: rs_key.clone(),
+            key: rs_key.clone().into_key(),
             props: vec![
                 Property("name".into(), GraphValue::String(name)),
                 Property("namespace".into(), GraphValue::String(namespace)),
@@ -795,9 +794,9 @@ impl GraphOperable for ReplicaSet {
         };
 
         graph.cast(GraphControllerMsg::Op(GraphOp::UpdateState {
-            resource_key: rs_key.clone(),
-            state_type_key: KubeNodeKey::State,
-            state_instance_key: state_key.clone(),
+            resource_key: rs_key.clone().into_key(),
+            state_type_key: KubeNodeKey::State.into_key(),
+            state_instance_key: state_key.clone().into_key(),
             state_instance_props: vec![
                 Property("replicas".into(), GraphValue::I64(replicas as i64)),
                 Property("ready_replicas".into(), GraphValue::I64(ready as i64)),
@@ -817,8 +816,8 @@ impl GraphOperable for ReplicaSet {
         }))?;
 
         graph.cast(GraphControllerMsg::Op(GraphOp::EnsureEdge {
-            from: rs_key,
-            to: state_key,
+            from: rs_key.into_key(),
+            to: state_key.into_key(),
             rel_type: "TRANSITIONED_TO".into(),
             props: vec![Property("at".into(), GraphValue::String(transition_time))],
         }))?;
@@ -828,7 +827,7 @@ impl GraphOperable for ReplicaSet {
 
     fn project_delete(
         self,
-        graph: &ActorRef<GraphControllerMsg<KubeNodeKey>>,
+        graph: &ActorRef<GraphControllerMsg>,
     ) -> Result<(), ActorProcessingErr> {
         let uid = self.metadata.uid.clone().unwrap();
         let rs_key = KubeNodeKey::ReplicaSet { uid: uid.clone() };
@@ -841,7 +840,7 @@ impl GraphOperable for ReplicaSet {
         };
 
         graph.cast(GraphControllerMsg::Op(GraphOp::UpsertNode {
-            key: state_key.clone(),
+            key: state_key.clone().into_key(),
             props: vec![
                 Property("replicas".into(), GraphValue::I64(0)),
                 Property("ready_replicas".into(), GraphValue::I64(0)),
@@ -852,8 +851,8 @@ impl GraphOperable for ReplicaSet {
         }))?;
 
         graph.cast(GraphControllerMsg::Op(GraphOp::EnsureEdge {
-            from: rs_key,
-            to: state_key,
+            from: rs_key.into_key(),
+            to: state_key.into_key(),
             rel_type: "TRANSITIONED_TO".into(),
             props: vec![Property("at".into(), GraphValue::String(now))],
         }))?;
@@ -863,405 +862,16 @@ impl GraphOperable for ReplicaSet {
 }
 
 pub struct KubeConsumerState {
-    pub graph_controller: ActorRef<GraphOp<KubeNodeKey>>,
+    pub graph_controller: ActorRef<GraphOp>,
     pub broker_client: ActorRef<TcpClientMessage>,
 }
 
 pub struct KubeConsumerArgs {
-    pub graph_controller: ActorRef<GraphOp<KubeNodeKey>>,
+    pub graph_controller: ActorRef<GraphOp>,
     pub broker_client: ActorRef<TcpClientMessage>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum KubeNodeKey {
-    /// Kubernetes does not have a built-in, first-class API object specifically for a cluster-wide unique ID
-    /// Instead, the universally unique identifier (UID) of the kube-system namespace is commonly used as a reliable proxy for a cluster ID,
-    /// as this namespace is a permanent fixture in the cluster and its UID is unique across all clusters
-    State,
-    Cluster {
-        uid: String,
-    },
-    Namespace {
-        name: String,
-        cluster_uid: String,
-    },
-    Deployment {
-        uid: String,
-    },
-    DeploymentState {
-        uid: String,
-        valid_from: String,
-    },
-    ReplicaSet {
-        uid: String,
-    },
-    ReplicaSetState {
-        uid: String,
-        valid_from: String,
-    },
-    Pod {
-        uid: String,
-    },
-    PodState {
-        pod_uid: String,
-        valid_from: String,
-    },
-
-    PodContainer {
-        pod_uid: String,
-        name: String,
-    },
-    PodContainerState {
-        pod_uid: String,
-        name: String,
-        valid_from: String,
-    },
-    Volume {
-        name: String,
-        namespace: String,
-    },
-    PersistentVolumeClaim {
-        name: String,
-        namespace: String,
-    },
-    Secret {
-        name: String,
-        namespace: String,
-    },
-    ConfigMap {
-        name: String,
-        namespace: String,
-    },
-    GenericOwner {
-        uid: String,
-        kind: String,
-        namespace: String,
-    },
-}
-impl GraphNodeKey for KubeNodeKey {
-    fn cypher_match(&self, prefix: &str) -> (String, Vec<(String, BoltType)>) {
-        match self {
-            KubeNodeKey::Cluster { uid } => {
-                let uid_k = format!("{prefix}_uid");
-                (
-                    format!("({prefix}:KubernetesCluster {{ uid: ${uid_k} }})"),
-                    vec![(uid_k, BoltType::String(uid.clone().into()))],
-                )
-            }
-            KubeNodeKey::State => ("(:State)".to_string(), vec![]),
-
-            KubeNodeKey::Namespace { name, cluster_uid } => {
-                let name_k = format!("{prefix}_name");
-                let cluster_uid_k = format!("{prefix}_cluster_uid");
-                (
-                    format!(
-                        "({prefix}:Namespace {{ name: ${name_k}, cluster_uid: ${cluster_uid_k} }})"
-                    ),
-                    vec![
-                        (name_k, BoltType::String(name.clone().into())),
-                        (
-                            cluster_uid_k,
-                            BoltType::String(cluster_uid.to_string().into()),
-                        ),
-                    ],
-                )
-            }
-            KubeNodeKey::Deployment { uid } => {
-                let uid_k = format!("{prefix}_uid");
-                (
-                    format!("({prefix}:KubernetesDeployment {{ uid: ${uid_k} }})"),
-                    vec![(uid_k, BoltType::String(uid.to_string().into()))],
-                )
-            }
-            KubeNodeKey::DeploymentState { uid, valid_from } => {
-                let uid_k = format!("{prefix}_uid");
-                let valid_k = format!("{prefix}_valid_from");
-                (
-                    format!(
-                        "({prefix}:DeploymentState {{ deployment_uid: ${uid_k}, valid_from: ${valid_k} }}"
-                    ),
-                    vec![
-                        (uid_k, BoltType::String(uid.to_string().into())),
-                        (valid_k, BoltType::String(valid_from.to_string().into())),
-                    ],
-                )
-            }
-            KubeNodeKey::ReplicaSet { uid } => {
-                let uid_k = format!("{prefix}_uid");
-                (
-                    format!("({prefix}:ReplicaSet {{ uid: ${uid_k} }})"),
-                    vec![(uid_k, BoltType::String(uid.to_string().into()))],
-                )
-            }
-            KubeNodeKey::ReplicaSetState { uid, valid_from } => {
-                let uid_k = format!("{prefix}_uid");
-                let valid_k = format!("{prefix}_valid_from");
-                (
-                    format!(
-                        "({prefix}:ReplicaSetState {{ deployment_uid: ${uid_k}, valid_from: ${valid_k} }}"
-                    ),
-                    vec![
-                        (uid_k, BoltType::String(uid.to_string().into())),
-                        (valid_k, BoltType::String(valid_from.to_string().into())),
-                    ],
-                )
-            }
-            KubeNodeKey::Pod { uid } => {
-                let uid_k = format!("{prefix}_uid");
-                (
-                    format!("({prefix}:Pod {{ uid: ${uid_k} }})"),
-                    vec![(uid_k, BoltType::String(uid.to_string().into()))],
-                )
-            }
-            KubeNodeKey::PodState {
-                pod_uid,
-                valid_from,
-            } => {
-                let pod_uid_k = format!("{prefix}_pod_uid");
-                let valid_from_k = format!("{prefix}_valid_from");
-                (
-                    format!(
-                        "({prefix}:PodState {{ {prefix}_uid: ${pod_uid_k}, {prefix}_valid_from: ${valid_from_k} }}"
-                    ),
-                    vec![
-                        (pod_uid_k, BoltType::String(pod_uid.to_string().into())),
-                        (
-                            valid_from_k,
-                            BoltType::String(valid_from.to_string().into()),
-                        ),
-                    ],
-                )
-            }
-            KubeNodeKey::PodContainer { pod_uid, name } => {
-                let pod_uid_k = format!("{prefix}_pod_uid");
-                let name_k = format!("{prefix}_name");
-                (
-                    format!("({prefix}:PodContainer {{ pod_uid: ${pod_uid_k}, name: ${name_k} }})"),
-                    vec![
-                        (pod_uid_k, BoltType::String(pod_uid.to_string().into())),
-                        (name_k, BoltType::String(name.clone().into())),
-                    ],
-                )
-            }
-            KubeNodeKey::PodContainerState {
-                pod_uid,
-                name,
-                valid_from,
-            } => {
-                let pod_uid_k = format!("{prefix}_pod_uid");
-                let name_k = format!("{prefix}_name");
-                let valid_from_k = format!("{prefix}_valid_from");
-                (
-                    format!(
-                        "({prefix}:PodContainerState {{ pod_uid: ${pod_uid_k}, name: ${name_k}, valid_from: ${valid_from_k} }})"
-                    ),
-                    vec![
-                        (pod_uid_k, BoltType::String(pod_uid.to_string().into())),
-                        (name_k, BoltType::String(name.clone().into())),
-                        (
-                            valid_from_k,
-                            BoltType::String(valid_from.to_string().into()),
-                        ),
-                    ],
-                )
-            }
-            KubeNodeKey::Volume { name, namespace } => {
-                let name_k = format!("{prefix}_name");
-                let namespace_k = format!("{prefix}_namespace");
-                (
-                    format!("({prefix}:Volume {{ name: ${name_k}, namespace: ${namespace_k} }})"),
-                    vec![
-                        (name_k, BoltType::String(name.clone().into())),
-                        (namespace_k, BoltType::String(namespace.clone().into())),
-                    ],
-                )
-            }
-
-            KubeNodeKey::PersistentVolumeClaim { name, namespace } => {
-                let name_k = format!("{prefix}_name");
-                let namespace_k = format!("{prefix}_namespace");
-                (
-                    format!(
-                        "({prefix}:PersistentVolumeClaim {{ name: ${name_k}, namespace: ${namespace_k} }})"
-                    ),
-                    vec![
-                        (name_k, BoltType::String(name.clone().into())),
-                        (namespace_k, BoltType::String(namespace.clone().into())),
-                    ],
-                )
-            }
-            KubeNodeKey::Secret { name, namespace } => {
-                let name_k = format!("{prefix}_name");
-                let namespace_k = format!("{prefix}_namespace");
-                (
-                    format!("({prefix}:Secret {{ name: ${name_k}, namespace: ${namespace_k} }})"),
-                    vec![
-                        (name_k, BoltType::String(name.clone().into())),
-                        (namespace_k, BoltType::String(namespace.clone().into())),
-                    ],
-                )
-            }
-
-            KubeNodeKey::ConfigMap { name, namespace } => {
-                let name_k = format!("{prefix}_name");
-                let namespace_k = format!("{prefix}_namespace");
-                (
-                    format!(
-                        "({prefix}:ConfigMap {{ name: ${name_k}, namespace: ${namespace_k} }})"
-                    ),
-                    vec![
-                        (name_k, BoltType::String(name.clone().into())),
-                        (namespace_k, BoltType::String(namespace.clone().into())),
-                    ],
-                )
-            }
-            _ => todo!("Implement queries for {self:?}"),
-        }
-    }
-}
-impl KubeNodeKey {
-    fn from_owner_reference(owner: &OwnerReference) -> Option<KubeNodeKey> {
-        match owner.kind.as_str() {
-            "ReplicaSet" => KubeNodeKey::ReplicaSet {
-                uid: owner.uid.clone(),
-            }
-            .into(),
-            "Deployment" => KubeNodeKey::Deployment {
-                uid: owner.uid.clone(),
-            }
-            .into(),
-            _ => {
-                warn!("Unknown owner key");
-                None
-            }
-        }
-    }
-}
-
-impl_graph_controller!(ClusterGraphController, node_key = KubeNodeKey);
-
 pub struct ResourceConsumerState {
-    pub graph_controller: GraphController<KubeNodeKey>,
+    pub graph_controller: GraphController,
     pub kind: &'static str,
-}
-
-#[cfg(test)]
-mod graph_node_key_tests {
-    use super::*;
-
-    fn assert_param_keys_prefixed(params: &[(String, BoltType)], prefix: &str) {
-        for (k, _) in params {
-            assert!(
-                k.starts_with(prefix),
-                "param key `{k}` is not prefixed with `{prefix}`"
-            );
-        }
-    }
-
-    #[test]
-    fn pod_key_cypher_match_is_prefixed_and_stable() {
-        let key = KubeNodeKey::Pod {
-            uid: "pod-123".into(),
-        };
-
-        let (query, params) = key.cypher_match("p1");
-
-        assert!(query.contains("p1_p:Pod"));
-        assert!(query.contains("$p1_uid"));
-        assert_param_keys_prefixed(&params, "p1");
-
-        assert_eq!(params.len(), 1);
-        assert_eq!(
-            params[0],
-            ("p1_uid".into(), BoltType::String("pod-123".into()))
-        );
-    }
-
-    #[test]
-    fn pod_container_key_uses_composite_identity() {
-        let key = KubeNodeKey::PodContainer {
-            pod_uid: "pod-1".into(),
-            name: "nginx".into(),
-        };
-
-        let (query, params) = key.cypher_match("pc");
-
-        assert!(query.contains("pc_c:PodContainer"));
-        assert!(query.contains("$pc_pod_uid"));
-        assert!(query.contains("$pc_name"));
-        assert_param_keys_prefixed(&params, "pc");
-
-        assert_eq!(params.len(), 2);
-    }
-
-    #[test]
-    fn namespace_key_includes_cluster_uid() {
-        let key = KubeNodeKey::Namespace {
-            name: "default".into(),
-            cluster_uid: "cluster-1".into(),
-        };
-
-        let (query, params) = key.cypher_match("ns");
-
-        assert!(query.contains("Namespace"));
-        assert!(query.contains("$ns_name"));
-        assert!(query.contains("$ns_cluster_uid"));
-        assert_param_keys_prefixed(&params, "ns");
-    }
-}
-
-#[cfg(test)]
-mod compile_graph_op_tests {
-    use super::*;
-    use polar::graph::{GraphValue, Property, compile_graph_op};
-
-    #[test]
-    fn upsert_node_compiles_with_set_clause() {
-        let key = KubeNodeKey::Pod {
-            uid: "pod-1".into(),
-        };
-
-        let op = GraphOp::UpsertNode {
-            key,
-            props: vec![
-                Property("name".into(), GraphValue::String("api".into())),
-                Property("namespace".into(), GraphValue::String("default".into())),
-            ],
-        };
-
-        let q = compile_graph_op(&op);
-        let query = q.query();
-
-        assert!(query.contains("MERGE (n"));
-        assert!(query.contains("SET n.name = $name"));
-        assert!(query.contains("n.namespace = $namespace"));
-    }
-
-    #[test]
-    fn ensure_edge_compiles_distinct_from_and_to_nodes() {
-        let from = KubeNodeKey::Pod { uid: "p1".into() };
-        let to = KubeNodeKey::ConfigMap {
-            name: "cfg".into(),
-            namespace: "default".into(),
-        };
-
-        let op = GraphOp::EnsureEdge {
-            from,
-            to,
-            rel_type: "USES_CONFIGMAP".into(),
-            props: vec![],
-        };
-
-        let q = compile_graph_op(&op);
-        let query = q.query();
-
-        assert!(query.contains("MERGE (a"));
-        assert!(query.contains("MERGE (b"));
-        assert!(query.contains("MERGE (a)-[r:USES_CONFIGMAP]->(b)"));
-
-        // critical: param namespaces must not collide
-        assert!(query.contains("$from_uid"));
-        assert!(query.contains("$to_name"));
-        assert!(query.contains("$to_namespace"));
-    }
 }

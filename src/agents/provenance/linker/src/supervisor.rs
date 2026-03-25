@@ -7,6 +7,7 @@ use cassini_client::{TCPClientConfig, TcpClientArgs};
 use cassini_types::ClientEvent;
 use cassini_types::WireTraceCtx;
 use neo4rs::Graph;
+use polar::graph::controller::GraphControllerActor;
 use polar::{
     PROVENANCE_LINKER_TOPIC, ProvenanceEvent, Supervisor, SupervisorMessage, get_neo_config,
 };
@@ -126,7 +127,7 @@ impl Actor for ProvenanceSupervisor {
 
                     let (compiler, _) = Actor::spawn_linked(
                         Some("linker.graph.controller".to_string()),
-                        crate::LinkerGraphController,
+                        GraphControllerActor,
                         graph,
                         myself.clone().into(),
                     )

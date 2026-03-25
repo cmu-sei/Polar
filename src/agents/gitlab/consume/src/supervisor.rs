@@ -1,7 +1,6 @@
 use crate::BROKER_CLIENT_NAME;
 use crate::GitlabConsumer;
 use crate::GitlabConsumerState;
-use crate::GitlabGraphController;
 use crate::groups::GitlabGroupConsumer;
 use crate::meta::MetaConsumer;
 use crate::pipelines::GitlabPipelineConsumer;
@@ -22,6 +21,7 @@ use common::types::GitlabEnvelope;
 use polar::Supervisor;
 use polar::SupervisorMessage;
 use polar::get_neo_config;
+use polar::graph::controller::GraphControllerActor;
 use ractor::Actor;
 use ractor::ActorCell;
 use ractor::ActorProcessingErr;
@@ -198,7 +198,7 @@ impl Actor for ConsumerSupervisor {
                     if let Ok(graph) = neo4rs::Graph::connect(state.graph_config.clone()) {
                         match Actor::spawn_linked(
                             Some("polar.gitlab.consumer.graph".to_string()),
-                            GitlabGraphController,
+                            GraphControllerActor,
                             graph,
                             myself.clone().into(),
                         )

@@ -1,116 +1,24 @@
-use cassini_client::TcpClientMessage;
 use cassini_types::ClientEvent;
-use neo4rs::BoltType;
 use orchestrator_core::{
     events::{BuildEvent, EventPayload},
     types::subjects::BUILD_EVENTS_TOPIC,
 };
 use polar::{
     RkyvError, SupervisorMessage,
-    cassini::{CassiniClient, SubscribeRequest, TcpClient},
+    cassini::{CassiniClient, SubscribeRequest},
     get_neo_config,
-    graph::{GraphController, GraphControllerMsg, GraphNodeKey, GraphOp, GraphValue, Property},
-    impl_graph_controller,
+    graph::{
+        controller::{
+            GraphController, GraphControllerActor, GraphControllerMsg, GraphOp, GraphValue,
+            IntoGraphKey, Property,
+        },
+        nodes::{builds::BuildNodeKey, git::GitNodeKey},
+    },
 };
 use ractor::{Actor, ActorProcessingErr, ActorRef, SupervisionEvent, async_trait};
 use rkyv::from_bytes;
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
-
-// ── Node key vocabulary ────────────────────────────────────────────────────────
-
-/// Node key enum for the Cyclops provenance processor.
-///
-/// Only two node types are *owned* by this processor — `BuildJob` and
-/// `BuildJobState`. All other node types (`GitCommit`, `Image`,
-/// `PodContainer`) are owned by other agents. This processor only creates
-/// edges to them — never upserts their properties — to avoid clobbering
-/// data that the authoritative agent manages.
-///
-/// The `cypher_match` implementation generates parameterized MERGE clauses
-/// for each node type, following the same prefix convention as `KubeNodeKey`
-/// so that `compile_graph_op` can compose multi-node queries without
-/// parameter name collisions.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum BuildNodeKey {
-    /// Cannonical state node
-    State,
-    /// A single Cyclops build execution. This is the linchpin node — it
-    /// connects a git commit to the image that was built from it.
-    /// Identified by the UUID assigned at build request time.
-    BuildJob { build_id: String },
-
-    /// An immutable state snapshot of a BuildJob at a point in time.
-    /// Follows the same temporal state pattern as KubeNodeKey::PodState —
-    /// one state node per transition, linked via TRANSITIONED_TO edges.
-    BuildJobState {
-        build_id: String,
-        valid_from: String,
-    },
-
-    /// A git commit. Owned by the GitLab/VCS agent — we MATCH, never MERGE.
-    /// Identified by the full 40-character SHA.
-    GitCommit { sha: String },
-
-    /// An OCI image reference. Owned by the provenance agent — we MATCH,
-    /// never MERGE. Identified by the full URI including digest.
-    /// e.g. "registry.internal.example.com/builds/myapp@sha256:abc..."
-    Image { uri: String },
-}
-
-impl GraphNodeKey for BuildNodeKey {
-    fn cypher_match(&self, prefix: &str) -> (String, Vec<(String, BoltType)>) {
-        match self {
-            BuildNodeKey::State => ("(:State)".to_string(), vec![]),
-
-            BuildNodeKey::BuildJob { build_id } => {
-                let id_k = format!("{prefix}_build_id");
-                (
-                    format!("({prefix}:BuildJob {{ build_id: ${id_k} }})"),
-                    vec![(id_k, BoltType::String(build_id.clone().into()))],
-                )
-            }
-
-            BuildNodeKey::BuildJobState {
-                build_id,
-                valid_from,
-            } => {
-                let id_k = format!("{prefix}_build_id");
-                let vf_k = format!("{prefix}_valid_from");
-                (
-                    format!(
-                        "({prefix}:BuildJobState {{ build_id: ${id_k}, valid_from: ${vf_k} }})"
-                    ),
-                    vec![
-                        (id_k, BoltType::String(build_id.clone().into())),
-                        (vf_k, BoltType::String(valid_from.clone().into())),
-                    ],
-                )
-            }
-
-            // GitCommit is owned by the VCS agent. We match on sha only —
-            // never set any properties on this node from the Cyclops processor.
-            BuildNodeKey::GitCommit { sha } => {
-                let sha_k = format!("{prefix}_sha");
-                (
-                    format!("({prefix}:GitCommit {{ sha: ${sha_k} }})"),
-                    vec![(sha_k, BoltType::String(sha.clone().into()))],
-                )
-            }
-
-            // Image is owned by the provenance agent. We match on uri only.
-            BuildNodeKey::Image { uri } => {
-                let uri_k = format!("{prefix}_uri");
-                (
-                    format!("({prefix}:Image {{ uri: ${uri_k} }})"),
-                    vec![(uri_k, BoltType::String(uri.clone().into()))],
-                )
-            }
-        }
-    }
-}
-
-impl_graph_controller!(CyclopsGraphController, node_key = BuildNodeKey);
 
 // ── Event projection ───────────────────────────────────────────────────────────
 
@@ -127,13 +35,12 @@ impl_graph_controller!(CyclopsGraphController, node_key = BuildNodeKey);
 ///   We do not call UpsertNode on these — the authoritative agent owns them.
 pub fn project_event(
     event: &BuildEvent,
-    graph: &GraphController<BuildNodeKey>,
+    graph: &GraphController,
 ) -> Result<(), ActorProcessingErr> {
-    use chrono::{DateTime, TimeZone, Utc};
     let build_id = event.build_id.to_string();
     // 1. Create a DateTime<Utc> from the i64 seconds
     // from_timestamp_secs returns an Option<Self>, so we use unwrap() for simplicity
-    if let Some(d) = DateTime::from_timestamp_secs(event.emitted_at) {
+    if let Some(d) = chrono::DateTime::from_timestamp_secs(event.emitted_at) {
         let now = d.to_rfc3339();
 
         match &event.payload {
@@ -150,7 +57,7 @@ pub fn project_event(
                 };
 
                 graph.cast(GraphControllerMsg::Op(GraphOp::UpsertNode {
-                    key: job_key.clone(),
+                    key: job_key.clone().into_key(),
                     props: vec![
                         Property("build_id".into(), GraphValue::String(build_id.clone())),
                         Property("repo_url".into(), GraphValue::String(repo_url.clone())),
@@ -171,9 +78,9 @@ pub fn project_event(
                 };
 
                 graph.cast(GraphControllerMsg::Op(GraphOp::UpdateState {
-                    resource_key: job_key.clone(),
-                    state_type_key: BuildNodeKey::State,
-                    state_instance_key: state_key,
+                    resource_key: job_key.clone().into_key(),
+                    state_type_key: BuildNodeKey::State.into_key(),
+                    state_instance_key: state_key.into_key(),
                     state_instance_props: vec![
                         Property("phase".into(), GraphValue::String("scheduled".into())),
                         Property("valid_from".into(), GraphValue::String(now.clone())),
@@ -185,11 +92,12 @@ pub fn project_event(
                 // if it doesn't exist yet the edge will be created when it appears.
                 // EnsureEdge uses MERGE semantics so this is safe to call speculatively.
                 graph.cast(GraphControllerMsg::Op(GraphOp::EnsureEdge {
-                    from: BuildNodeKey::GitCommit {
-                        sha: commit_sha.clone(),
-                    },
+                    from: GitNodeKey::Commit {
+                        oid: commit_sha.clone(),
+                    }
+                    .into_key(),
                     rel_type: "BUILT_BY".into(),
-                    to: job_key,
+                    to: job_key.into_key(),
                     props: vec![Property("at".into(), GraphValue::String(now.clone()))],
                 }))?;
             }
@@ -210,9 +118,9 @@ pub fn project_event(
                 };
 
                 graph.cast(GraphControllerMsg::Op(GraphOp::UpdateState {
-                    resource_key: job_key,
-                    state_type_key: BuildNodeKey::State,
-                    state_instance_key: state_key,
+                    resource_key: job_key.into_key(),
+                    state_type_key: BuildNodeKey::State.into_key(),
+                    state_instance_key: state_key.into_key(),
                     state_instance_props: vec![
                         Property("phase".into(), GraphValue::String("running".into())),
                         Property("backend".into(), GraphValue::String(backend.clone())),
@@ -225,27 +133,19 @@ pub fn project_event(
                 }))?;
             }
 
-            EventPayload::BuildCompleted {
-                artifact_digest,
-                target_registry,
-                duration_secs,
-            } => {
+            EventPayload::BuildCompleted { duration_secs } => {
                 let job_key = BuildNodeKey::BuildJob {
                     build_id: build_id.clone(),
                 };
 
                 // ── Update anchor node with completion metadata ─────────────────────
                 graph.cast(GraphControllerMsg::Op(GraphOp::UpsertNode {
-                    key: job_key.clone(),
+                    key: job_key.clone().into_key(),
                     props: vec![
                         Property("completed_at".into(), GraphValue::String(now.clone())),
                         Property(
                             "duration_secs".into(),
                             GraphValue::I64(*duration_secs as i64),
-                        ),
-                        Property(
-                            "target_registry".into(),
-                            GraphValue::String(target_registry.clone()),
                         ),
                         Property("observed_at".into(), GraphValue::String(now.clone())),
                     ],
@@ -258,9 +158,9 @@ pub fn project_event(
                 };
 
                 graph.cast(GraphControllerMsg::Op(GraphOp::UpdateState {
-                    resource_key: job_key.clone(),
-                    state_type_key: BuildNodeKey::State,
-                    state_instance_key: state_key,
+                    resource_key: job_key.clone().into_key(),
+                    state_type_key: BuildNodeKey::State.into_key(),
+                    state_instance_key: state_key.into_key(),
                     state_instance_props: vec![
                         Property("phase".into(), GraphValue::String("succeeded".into())),
                         Property("valid_from".into(), GraphValue::String(now.clone())),
@@ -270,35 +170,6 @@ pub fn project_event(
                         ),
                     ],
                 }))?;
-
-                // ── Edge: BuildJob -[:PRODUCED]-> Image ────────────────────────────
-                // Only draw this edge if we have a digest. Without a digest we
-                // can't identify the specific image node in the graph — a tag
-                // reference is mutable and could point to a different image later.
-                if let Some(digest) = artifact_digest {
-                    graph.cast(GraphControllerMsg::Op(GraphOp::EnsureEdge {
-                        from: job_key,
-                        rel_type: "PRODUCED".into(),
-                        to: BuildNodeKey::Image {
-                            uri: digest.clone(),
-                        },
-                        props: vec![
-                            Property("at".into(), GraphValue::String(now.clone())),
-                            Property(
-                                "registry".into(),
-                                GraphValue::String(target_registry.clone()),
-                            ),
-                        ],
-                    }))?;
-                } else {
-                    // Artifact digest not yet collected. This is expected in the
-                    // current implementation — see the TODO in build_job.rs.
-                    // The edge will be absent until digest collection is implemented.
-                    warn!(
-                        build_id = %build_id,
-                        "build_completed event has no artifact_digest — PRODUCED edge not created"
-                    );
-                }
             }
 
             EventPayload::BuildFailed { reason, stage } => {
@@ -307,7 +178,7 @@ pub fn project_event(
                 };
 
                 graph.cast(GraphControllerMsg::Op(GraphOp::UpsertNode {
-                    key: job_key.clone(),
+                    key: job_key.clone().into_key(),
                     props: vec![
                         Property("completed_at".into(), GraphValue::String(now.clone())),
                         Property("failure_reason".into(), GraphValue::String(reason.clone())),
@@ -325,9 +196,9 @@ pub fn project_event(
                 };
 
                 graph.cast(GraphControllerMsg::Op(GraphOp::UpdateState {
-                    resource_key: job_key,
-                    state_type_key: BuildNodeKey::State,
-                    state_instance_key: state_key,
+                    resource_key: job_key.into_key(),
+                    state_type_key: BuildNodeKey::State.into_key(),
+                    state_instance_key: state_key.into_key(),
                     state_instance_props: vec![
                         Property("phase".into(), GraphValue::String("failed".into())),
                         Property("reason".into(), GraphValue::String(reason.clone())),
@@ -343,7 +214,7 @@ pub fn project_event(
                 };
 
                 graph.cast(GraphControllerMsg::Op(GraphOp::UpsertNode {
-                    key: job_key.clone(),
+                    key: job_key.clone().into_key(),
                     props: vec![
                         Property("completed_at".into(), GraphValue::String(now.clone())),
                         Property("observed_at".into(), GraphValue::String(now.clone())),
@@ -356,9 +227,9 @@ pub fn project_event(
                 };
 
                 graph.cast(GraphControllerMsg::Op(GraphOp::UpdateState {
-                    resource_key: job_key,
-                    state_type_key: BuildNodeKey::State,
-                    state_instance_key: state_key,
+                    resource_key: job_key.into_key(),
+                    state_type_key: BuildNodeKey::State.into_key(),
+                    state_instance_key: state_key.into_key(),
                     state_instance_props: vec![
                         Property("phase".into(), GraphValue::String("cancelled".into())),
                         Property(
@@ -394,7 +265,7 @@ pub struct BuildProcessorSupervisor;
 pub struct BuildProcessorState {
     graph_config: neo4rs::Config,
     tcp_client: Arc<dyn CassiniClient>,
-    graph_controller: Option<GraphController<BuildNodeKey>>,
+    graph_controller: Option<GraphController>,
 }
 
 #[async_trait]
@@ -441,7 +312,7 @@ impl Actor for BuildProcessorSupervisor {
 
                     state.graph_controller = Actor::spawn_linked(
                         Some("cyclops.processor.graph.controller".to_string()),
-                        CyclopsGraphController,
+                        GraphControllerActor,
                         graph,
                         myself.clone().into(),
                     )

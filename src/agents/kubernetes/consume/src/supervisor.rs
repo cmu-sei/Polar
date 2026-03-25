@@ -1,3 +1,5 @@
+use crate::BROKER_CLIENT_NAME;
+use crate::GraphOperable;
 use cassini_client::*;
 use cassini_types::ClientEvent;
 use k8s_openapi::api::apps::v1::{Deployment, ReplicaSet};
@@ -7,6 +9,7 @@ use kube_common::{RESOURCE_APPLIED_ACTION, RESOURCE_DELETED_ACTION};
 use neo4rs::{Config, Graph};
 use polar::SupervisorMessage;
 use polar::get_neo_config;
+use polar::graph::controller::{GraphController, GraphControllerActor};
 use ractor::Actor;
 use ractor::ActorProcessingErr;
 use ractor::ActorRef;
@@ -14,18 +17,11 @@ use ractor::SupervisionEvent;
 use ractor::async_trait;
 use serde::de::DeserializeOwned;
 use serde_json::from_value;
+use std::collections::HashMap;
 use tracing::debug;
 use tracing::error;
 use tracing::info;
 use tracing::warn;
-
-use polar::graph::GraphController;
-// use crate::pods::PodConsumer;
-use crate::ClusterGraphController;
-use crate::GraphOperable;
-use crate::{BROKER_CLIENT_NAME, KubeNodeKey};
-
-use std::collections::HashMap;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StateFingerprint {
@@ -122,7 +118,7 @@ pub struct ClusterConsumerSupervisor;
 pub struct ClusterConsumerSupervisorState {
     graph_config: Config,
     broker_client: ActorRef<TcpClientMessage>,
-    graph_controller: Option<GraphController<KubeNodeKey>>,
+    graph_controller: Option<GraphController>,
     projection_cache: ProjectionCache,
 }
 
@@ -130,7 +126,7 @@ impl ClusterConsumerSupervisor {
     pub fn handle_event<T>(
         ev: RawKubeEvent,
         _cache: &mut ProjectionCache,
-        graph_controller: &GraphController<KubeNodeKey>,
+        graph_controller: &GraphController,
         tcp_client: &TcpClient,
     ) -> Result<(), ActorProcessingErr>
     where
@@ -157,7 +153,7 @@ impl ClusterConsumerSupervisor {
         _topic: String,
         payload: Vec<u8>,
         cache: &mut ProjectionCache,
-        graph_controller: &GraphController<KubeNodeKey>,
+        graph_controller: &GraphController,
         tcp_client: &TcpClient,
     ) -> Result<(), ActorProcessingErr> {
         // 1) Parse the raw message into your RawKubeEvent
@@ -241,7 +237,7 @@ impl Actor for ClusterConsumerSupervisor {
 
                         state.graph_controller = Actor::spawn_linked(
                             Some("kubernetes.cluster.graph.controller".to_string()),
-                            ClusterGraphController,
+                            GraphControllerActor,
                             graph,
                             myself.clone().into(),
                         )

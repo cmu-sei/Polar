@@ -1,73 +1,23 @@
 use cassini_client::TcpClient;
 use cassini_types::ClientEvent;
 use chrono::Utc;
-use git_agent_common::{GIT_REPO_PROCESSING_TOPIC, GitRepositoryMessage, RepoId};
-use neo4rs::BoltType;
+use git_agent_common::{GIT_REPO_PROCESSING_TOPIC, GitRepositoryMessage};
+use polar::SupervisorMessage;
 use polar::get_neo_config;
+use polar::graph::controller::GraphControllerActor;
+use polar::graph::controller::IntoGraphKey;
 use polar::graph::{
-    GraphController, GraphControllerMsg, GraphNodeKey, GraphOp, GraphValue, Property, rel,
+    controller::{GraphController, GraphControllerMsg, GraphOp, GraphValue, Property, rel},
+    nodes::git::GitNodeKey,
 };
-use polar::{SupervisorMessage, impl_graph_controller};
 use ractor::async_trait;
 use ractor::{Actor, ActorProcessingErr, ActorRef, SupervisionEvent};
 use rkyv::rancor;
 use tracing::{debug, error, trace, warn};
 
-#[derive(Debug, Clone)]
-pub enum GitNodeKey {
-    Repository {
-        repo_id: RepoId, // your canonical UUID / v5
-    },
-
-    Commit {
-        oid: String, // full hex
-    },
-
-    Ref {
-        repo_id: RepoId,
-        name: String, // refs/heads/main, refs/tags/v1.2.3
-    },
-
-    Author {
-        email: String,
-    },
-}
-
-impl GraphNodeKey for GitNodeKey {
-    fn cypher_match(&self, prefix: &str) -> (String, Vec<(String, BoltType)>) {
-        match self {
-            GitNodeKey::Repository { repo_id } => (
-                format!("(:GitRepository {{ id: ${prefix}_repo_id }})"),
-                vec![(format!("{prefix}_repo_id"), repo_id.to_string().into())],
-            ),
-
-            GitNodeKey::Commit { oid } => (
-                format!("(:GitCommit {{ oid: ${prefix}_oid }})"),
-                vec![(format!("{prefix}_oid"), oid.clone().into())],
-            ),
-
-            GitNodeKey::Ref { repo_id, name } => (
-                format!("(:GitRef {{ repo_id: ${prefix}_repo_id, name: ${prefix}_name }})"),
-                vec![
-                    (format!("{prefix}_repo_id"), repo_id.to_string().into()),
-                    (format!("{prefix}_name"), name.clone().into()),
-                ],
-            ),
-            GitNodeKey::Author { email } => (
-                format!("(:GitAuthor {{ email: ${prefix}_email }})"),
-                vec![
-                    (format!("{prefix}_email"), email.clone().into()),
-                    // name should be SET, not matched on
-                ],
-            ),
-        }
-    }
-}
-
-// === Supervisor state ===
 pub struct GitRepoProcessingManagerState {
     pub tcp_client: TcpClient,
-    pub graph_controller: Option<ActorRef<GraphControllerMsg<GitNodeKey>>>,
+    pub graph_controller: Option<ActorRef<GraphControllerMsg>>,
 }
 
 // === Supervisor definition ===
@@ -78,7 +28,7 @@ impl GitRepoProcessingManager {
     /// Generate canonical graph operations for a discovered commit.
     /// Does NOT touch refs; strictly immutable commit data and topology.
     fn ops_for_commit_discovered(
-        graph_controller: &GraphController<GitNodeKey>,
+        graph_controller: &GraphController,
         ev: GitRepositoryMessage,
     ) -> Result<(), ActorProcessingErr> {
         match ev {
@@ -98,12 +48,12 @@ impl GitRepoProcessingManager {
 
                 // Ensure repo exists
                 graph_controller.cast(GraphControllerMsg::Op(GraphOp::UpsertNode {
-                    key: repo_key.clone(),
+                    key: repo_key.clone().into_key(),
                     props: vec![],
                 }))?;
                 // Ensure commit exists with metadata
                 graph_controller.cast(GraphControllerMsg::Op(GraphOp::UpsertNode {
-                    key: commit_key.clone(),
+                    key: commit_key.clone().into_key(),
                     props: vec![
                         Property("message".into(), GraphValue::String(message)),
                         Property("authored_time".into(), GraphValue::I64(time)),
@@ -116,8 +66,8 @@ impl GitRepoProcessingManager {
                 }))?;
                 // Repository contains commit
                 graph_controller.cast(GraphControllerMsg::Op(GraphOp::EnsureEdge {
-                    from: repo_key.clone(),
-                    to: commit_key.clone(),
+                    from: repo_key.clone().into_key(),
+                    to: commit_key.clone().into_key(),
                     rel_type: rel::CONTAINS.into(),
                     props: vec![],
                 }))?;
@@ -130,8 +80,8 @@ impl GitRepoProcessingManager {
                     }
 
                     graph_controller.cast(GraphControllerMsg::Op(GraphOp::EnsureEdge {
-                        from: commit_key.clone(),
-                        to: GitNodeKey::Commit { oid: parent_oid },
+                        from: commit_key.clone().into_key(),
+                        to: GitNodeKey::Commit { oid: parent_oid }.into_key(),
                         rel_type: "PARENT".into(),
                         props: vec![],
                     }))?;
@@ -148,7 +98,7 @@ impl GitRepoProcessingManager {
     /// Generate graph operations for a ref update.
     /// This is the *authoritative* source for ref → commit relationships.
     fn ops_for_ref_updated(
-        graph_controller: &GraphController<GitNodeKey>,
+        graph_controller: &GraphController,
         ev: GitRepositoryMessage,
     ) -> Result<(), ActorProcessingErr> {
         match ev {
@@ -170,26 +120,26 @@ impl GitRepoProcessingManager {
 
                 // Ensure repo exists
                 graph_controller.cast(GraphControllerMsg::Op(GraphOp::UpsertNode {
-                    key: repo_key,
+                    key: repo_key.into_key(),
                     props: vec![],
                 }))?;
 
                 // Ensure ref exists
                 graph_controller.cast(GraphControllerMsg::Op(GraphOp::UpsertNode {
-                    key: ref_key.clone(),
+                    key: ref_key.clone().into_key(),
                     props: vec![],
                 }))?;
 
                 // Ensure commit exists (it may not have been observed yet)
                 graph_controller.cast(GraphControllerMsg::Op(GraphOp::UpsertNode {
-                    key: commit_key.clone(),
+                    key: commit_key.clone().into_key(),
                     props: vec![],
                 }))?;
 
                 // Connect ref to commit with timestamp
                 graph_controller.cast(GraphControllerMsg::Op(GraphOp::EnsureEdge {
-                    from: ref_key,
-                    to: commit_key,
+                    from: ref_key.into_key(),
+                    to: commit_key.into_key(),
                     rel_type: rel::POINTS_TO.into(),
                     props: vec![Property(
                         "observed_at".into(),
@@ -281,7 +231,7 @@ impl Actor for GitRepoProcessingManager {
 
                     let (controller, _) = Actor::spawn_linked(
                         Some("linker.graph.controller".to_string()),
-                        crate::GitRepoGraphController,
+                        GraphControllerActor,
                         graph,
                         myself.clone().into(),
                     )
@@ -339,9 +289,6 @@ impl Actor for GitRepoProcessingManager {
         Ok(())
     }
 }
-
-// A concrete instance of a GraphController for the artifact linker.
-impl_graph_controller!(GitRepoGraphController, node_key = GitNodeKey);
 
 #[tokio::main]
 async fn main() {

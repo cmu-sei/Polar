@@ -21,14 +21,18 @@
    DM24-0470
 */
 
-use crate::{GitlabConsumerState, GitlabNodeKey};
+use crate::GitlabConsumerState;
 use cassini_client::{TcpClient, TcpClientMessage};
 use cassini_types::WireTraceCtx;
 use common::REPOSITORY_CONSUMER_TOPIC;
 use common::types::{GitlabData, GitlabEnvelope, GitlabPackageFile};
 use gitlab_queries::projects::{ContainerRepository, ContainerRepositoryTag, Package};
 
-use polar::graph::{GraphController, GraphControllerMsg, GraphOp, GraphValue, Property};
+use polar::graph::controller::GraphController;
+use polar::graph::{
+    controller::{GraphControllerMsg, GraphOp, GraphValue, IntoGraphKey, Property},
+    nodes::gitlab::GitlabNodeKey,
+};
 use polar::{PROVENANCE_LINKER_TOPIC, ProvenanceEvent, RkyvError};
 use ractor::{Actor, ActorProcessingErr, ActorRef, async_trait};
 use rkyv::to_bytes;
@@ -43,7 +47,7 @@ impl GitlabRepositoryConsumer {
         instance_id: &String,
         project_id: &String,
         repos: &[ContainerRepository],
-        graph: &ActorRef<GraphControllerMsg<GitlabNodeKey>>,
+        graph: &ActorRef<GraphControllerMsg>,
         tcp_client: &TcpClient,
     ) -> Result<(), ActorProcessingErr> {
         let project_key = GitlabNodeKey::Project {
@@ -52,7 +56,7 @@ impl GitlabRepositoryConsumer {
         };
 
         graph.cast(GraphControllerMsg::Op(GraphOp::UpsertNode {
-            key: project_key.clone(),
+            key: project_key.clone().into_key(),
             props: vec![],
         }))?;
 
@@ -86,13 +90,13 @@ impl GitlabRepositoryConsumer {
             ];
 
             graph.cast(GraphControllerMsg::Op(GraphOp::UpsertNode {
-                key: repo_key.clone(),
+                key: repo_key.clone().into_key(),
                 props,
             }))?;
 
             graph.cast(GraphControllerMsg::Op(GraphOp::EnsureEdge {
-                from: repo_key.clone(),
-                to: project_key.clone(),
+                from: repo_key.clone().into_key(),
+                to: project_key.clone().into_key(),
                 rel_type: "BELONGS_TO".into(),
                 props: vec![],
             }))?;
@@ -126,7 +130,7 @@ impl GitlabRepositoryConsumer {
         project_id: String,
         repository_id: String,
         tags: &[ContainerRepositoryTag],
-        graph: &GraphController<GitlabNodeKey>,
+        graph: &GraphController,
         tcp_client: &TcpClient,
     ) -> Result<(), ActorProcessingErr> {
         for tag in tags {
@@ -175,7 +179,7 @@ impl GitlabRepositoryConsumer {
             ];
 
             graph.cast(GraphControllerMsg::Op(GraphOp::UpsertNode {
-                key: tag_key.clone(),
+                key: tag_key.clone().into_key(),
                 props,
             }))?;
 
@@ -185,8 +189,8 @@ impl GitlabRepositoryConsumer {
             };
 
             graph.cast(GraphControllerMsg::Op(GraphOp::EnsureEdge {
-                from: repo_key,
-                to: tag_key,
+                from: repo_key.into_key(),
+                to: tag_key.into_key(),
                 rel_type: "CONTAINS_TAG".into(),
                 props: vec![],
             }))?;
@@ -199,7 +203,7 @@ impl GitlabRepositoryConsumer {
         instance_id: String,
         project_id: String,
         packages: &[Package],
-        graph: &ActorRef<GraphControllerMsg<GitlabNodeKey>>,
+        graph: &ActorRef<GraphControllerMsg>,
     ) -> Result<(), ActorProcessingErr> {
         let project_key = GitlabNodeKey::Project {
             instance_id: instance_id.to_string(),
@@ -229,13 +233,13 @@ impl GitlabRepositoryConsumer {
             ];
 
             graph.cast(GraphControllerMsg::Op(GraphOp::UpsertNode {
-                key: pkg_key.clone(),
+                key: pkg_key.clone().into_key(),
                 props,
             }))?;
 
             graph.cast(GraphControllerMsg::Op(GraphOp::EnsureEdge {
-                from: project_key.clone(),
-                to: pkg_key.clone(),
+                from: project_key.clone().into_key(),
+                to: pkg_key.clone().into_key(),
                 rel_type: "HAS_PACKAGE".into(),
                 props: vec![],
             }))?;
@@ -251,8 +255,8 @@ impl GitlabRepositoryConsumer {
                     };
 
                     graph.cast(GraphControllerMsg::Op(GraphOp::EnsureEdge {
-                        from: pipeline_key,
-                        to: pkg_key.clone(),
+                        from: pipeline_key.into_key(),
+                        to: pkg_key.clone().into_key(),
                         rel_type: "PRODUCED".into(),
                         props: vec![],
                     }))?;
@@ -266,7 +270,7 @@ impl GitlabRepositoryConsumer {
     pub fn handle_package_files(
         package_id: String,
         files: &[GitlabPackageFile],
-        graph: &ActorRef<GraphControllerMsg<GitlabNodeKey>>,
+        graph: &ActorRef<GraphControllerMsg>,
     ) -> Result<(), ActorProcessingErr> {
         let pkg_key = GitlabNodeKey::Package {
             package_id: package_id.clone(),
@@ -284,13 +288,13 @@ impl GitlabRepositoryConsumer {
             )];
 
             graph.cast(GraphControllerMsg::Op(GraphOp::UpsertNode {
-                key: file_key.clone(),
+                key: file_key.clone().into_key(),
                 props,
             }))?;
 
             graph.cast(GraphControllerMsg::Op(GraphOp::EnsureEdge {
-                from: pkg_key.clone(),
-                to: file_key,
+                from: pkg_key.clone().into_key(),
+                to: file_key.into_key(),
                 rel_type: "CONTAINS_FILE".into(),
                 props: vec![],
             }))?;

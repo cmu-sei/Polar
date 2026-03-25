@@ -327,11 +327,6 @@ fn pipeline_env_vars(spec: &BuildSpec) -> Vec<EnvVar> {
             ..Default::default()
         },
         EnvVar {
-            name: "CYCLOPS_TARGET_REGISTRY".to_string(),
-            value: Some(spec.target_registry.clone()),
-            ..Default::default()
-        },
-        EnvVar {
             name: "CYCLOPS_WORKSPACE".to_string(),
             value: Some(WORKSPACE_PATH.to_string()),
             ..Default::default()

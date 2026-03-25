@@ -1,6 +1,11 @@
 use cassini_client::TcpClientMessage;
 use neo4rs::Graph;
-use polar::graph::{GraphControllerMsg, GraphOp, GraphValue, Property};
+use polar::graph::{
+    controller::{
+        GraphControllerActor, GraphControllerMsg, GraphOp, GraphValue, IntoGraphKey, Property,
+    },
+    nodes::schedule::ScheduleKey,
+};
 use polar_scheduler_common::{
     AdhocAgentAnnouncement, GitScheduleChange, ScheduleKind, ScheduleNode, ScheduleNotification,
 };
@@ -9,15 +14,13 @@ use std::collections::HashMap;
 use tracing::{error, info};
 
 // Import local types
-use crate::types::{ProcessorMsg, ScheduleKey};
-
-polar::impl_graph_controller!(ScheduleGraphController, node_key = ScheduleKey);
+use crate::types::ProcessorMsg;
 
 pub struct ScheduleInfoProcessor;
 
 pub struct ProcessorState {
     tcp_client: ActorRef<TcpClientMessage>,
-    graph_controller: ActorRef<GraphControllerMsg<ScheduleKey>>,
+    graph_controller: ActorRef<GraphControllerMsg>,
     permanent_versions: HashMap<String, u64>,
     adhoc_versions: HashMap<String, u64>,
     ephemeral_patterns: HashMap<String, String>, // pattern -> agent_type
@@ -55,7 +58,7 @@ impl ScheduleInfoProcessor {
                 state
                     .graph_controller
                     .cast(GraphControllerMsg::Op(GraphOp::UpsertNode {
-                        key: node_key.clone(),
+                        key: node_key.clone().into_key(),
                         props: vec![Property(
                             "schedule".to_string(),
                             GraphValue::String(schedule_json.clone()),
@@ -145,7 +148,7 @@ impl ScheduleInfoProcessor {
         state
             .graph_controller
             .cast(GraphControllerMsg::Op(GraphOp::UpsertNode {
-                key: node_key.clone(),
+                key: node_key.clone().into_key(),
                 props: vec![Property(
                     "schedule".to_string(),
                     GraphValue::String(schedule_json.clone()),
@@ -208,7 +211,7 @@ impl Actor for ScheduleInfoProcessor {
         info!("ScheduleInfoProcessor pre_start: spawning graph controller");
         let (graph_controller, _) = Actor::spawn(
             Some("scheduler.graph_controller".to_string()),
-            ScheduleGraphController,
+            GraphControllerActor,
             graph,
         )
         .await

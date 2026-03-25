@@ -21,11 +21,16 @@
    DM24-0470
 */
 
-use crate::{GitlabConsumerState, GitlabNodeKey, UNKNOWN_FILED};
+use crate::{GitlabConsumerState, UNKNOWN_FILED};
 use cassini_client::{TcpClient, TcpClientMessage};
 use polar::{
     GIT_REPO_DISCOGERY_TOPIC, GitRepositoryDiscoveredEvent,
-    graph::{GraphController, GraphControllerMsg, GraphOp, GraphValue, Property},
+    graph::{
+        controller::{
+            GraphController, GraphControllerMsg, GraphOp, GraphValue, IntoGraphKey, Property,
+        },
+        nodes::gitlab::GitlabNodeKey,
+    },
 };
 use tracing::trace;
 
@@ -43,7 +48,7 @@ pub struct GitlabProjectConsumer;
 impl GitlabProjectConsumer {
     fn handle_projects(
         tcp_client: &TcpClient,
-        graph_controller: &GraphController<GitlabNodeKey>,
+        graph_controller: &GraphController,
         instance_id: String,
         projects: &[Project],
     ) -> Result<(), ActorProcessingErr> {
@@ -73,7 +78,7 @@ impl GitlabProjectConsumer {
                 });
 
             graph_controller.cast(GraphControllerMsg::Op(GraphOp::UpsertNode {
-                key: project_k.clone(),
+                key: project_k.clone().into_key(),
                 props: vec![
                     Property("name".into(), GraphValue::String(project.name.clone())),
                     Property(
@@ -94,8 +99,8 @@ impl GitlabProjectConsumer {
             }))?;
 
             graph_controller.cast(GraphControllerMsg::Op(GraphOp::EnsureEdge {
-                from: instance_k.clone(),
-                to: project_k,
+                from: instance_k.clone().into_key(),
+                to: project_k.into_key(),
                 rel_type: "OBSERVED_PROJECT".into(),
                 props: Vec::default(),
             }))?;

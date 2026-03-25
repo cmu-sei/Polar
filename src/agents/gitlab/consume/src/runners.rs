@@ -21,11 +21,14 @@
    DM24-0470
 */
 
-use crate::{GitlabConsumerState, GitlabNodeKey};
+use crate::GitlabConsumerState;
 use common::RUNNERS_CONSUMER_TOPIC;
 use common::types::{GitlabData, GitlabEnvelope};
 use gitlab_queries::runners::CiRunner;
-use polar::graph::{GraphControllerMsg, GraphOp, GraphValue, Property};
+use polar::graph::{
+    controller::{GraphControllerMsg, GraphOp, GraphValue, IntoGraphKey, Property},
+    nodes::gitlab::GitlabNodeKey,
+};
 use ractor::{Actor, ActorProcessingErr, ActorRef, async_trait};
 use tracing::{debug, info};
 
@@ -47,7 +50,7 @@ impl GitlabRunnerConsumer {
     pub fn handle_runners(
         instance_id: String,
         runners: &[CiRunner],
-        graph: &ActorRef<GraphControllerMsg<GitlabNodeKey>>,
+        graph: &ActorRef<GraphControllerMsg>,
     ) -> Result<(), ActorProcessingErr> {
         let instance_key = GitlabNodeKey::GitlabInstance {
             instance_id: instance_id.clone(),
@@ -55,7 +58,7 @@ impl GitlabRunnerConsumer {
 
         // Ensure instance exists
         graph.cast(GraphControllerMsg::Op(GraphOp::UpsertNode {
-            key: instance_key.clone(),
+            key: instance_key.clone().into_key(),
             props: vec![],
         }))?;
 
@@ -88,14 +91,14 @@ impl GitlabRunnerConsumer {
 
             // Upsert runner node with properties
             graph.cast(GraphControllerMsg::Op(GraphOp::UpsertNode {
-                key: runner_key.clone(),
+                key: runner_key.clone().into_key(),
                 props,
             }))?;
 
             // Ensure relationship
             graph.cast(GraphControllerMsg::Op(GraphOp::EnsureEdge {
-                from: instance_key.clone(),
-                to: runner_key,
+                from: instance_key.clone().into_key(),
+                to: runner_key.into_key(),
                 rel_type: "OBSERVED_RUNNER".into(),
                 props: vec![],
             }))?;

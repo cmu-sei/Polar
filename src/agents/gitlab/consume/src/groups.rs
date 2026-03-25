@@ -20,13 +20,19 @@
 
    DM24-0470
 */
-use crate::{GitlabConsumerState, GitlabNodeKey};
+
+use crate::GitlabConsumerState;
 use common::GROUPS_CONSUMER_TOPIC;
 use common::types::{GitlabData, GitlabEnvelope};
 use gitlab_queries::groups::{GroupData, GroupMember};
 use gitlab_queries::projects::ProjectCoreFragment;
 use gitlab_queries::runners::CiRunnerIdFragment;
-use polar::graph::{GraphController, GraphControllerMsg, GraphOp, GraphValue, Property};
+use polar::graph::{
+    controller::{
+        GraphController, GraphControllerMsg, GraphOp, GraphValue, IntoGraphKey, Property,
+    },
+    nodes::gitlab::GitlabNodeKey,
+};
 use ractor::{Actor, ActorProcessingErr, ActorRef, async_trait};
 use tracing::debug;
 
@@ -36,14 +42,14 @@ impl GitlabGroupConsumer {
     pub fn handle_groups(
         instance_id: String,
         groups: &[GroupData],
-        graph: &GraphController<GitlabNodeKey>,
+        graph: &GraphController,
     ) -> Result<(), ActorProcessingErr> {
         let instance_key = GitlabNodeKey::GitlabInstance {
             instance_id: instance_id.clone(),
         };
 
         graph.cast(GraphControllerMsg::Op(GraphOp::UpsertNode {
-            key: instance_key.clone(),
+            key: instance_key.clone().into_key(),
             props: vec![],
         }))?;
 
@@ -72,13 +78,13 @@ impl GitlabGroupConsumer {
             }
 
             graph.cast(GraphControllerMsg::Op(GraphOp::UpsertNode {
-                key: group_key.clone(),
+                key: group_key.clone().into_key(),
                 props,
             }))?;
 
             graph.cast(GraphControllerMsg::Op(GraphOp::EnsureEdge {
-                from: instance_key.clone(),
-                to: group_key,
+                from: instance_key.clone().into_key(),
+                to: group_key.into_key(),
                 rel_type: "OBSERVED_GROUP".into(),
                 props: vec![],
             }))?;
@@ -91,7 +97,7 @@ impl GitlabGroupConsumer {
         instance_id: String,
         group_id: String,
         memberships: &[GroupMember],
-        graph: &GraphController<GitlabNodeKey>,
+        graph: &GraphController,
     ) -> Result<(), ActorProcessingErr> {
         let group_key = GitlabNodeKey::Group {
             instance_id: instance_id.clone(),
@@ -99,7 +105,7 @@ impl GitlabGroupConsumer {
         };
 
         graph.cast(GraphControllerMsg::Op(GraphOp::UpsertNode {
-            key: group_key.clone(),
+            key: group_key.clone().into_key(),
             props: vec![],
         }))?;
 
@@ -114,13 +120,13 @@ impl GitlabGroupConsumer {
             };
 
             graph.cast(GraphControllerMsg::Op(GraphOp::UpsertNode {
-                key: user_key.clone(),
+                key: user_key.clone().into_key(),
                 props: vec![],
             }))?;
 
             graph.cast(GraphControllerMsg::Op(GraphOp::EnsureEdge {
-                from: user_key,
-                to: group_key.clone(),
+                from: user_key.into_key(),
+                to: group_key.clone().into_key(),
                 rel_type: "IN_GROUP".into(),
                 props: vec![],
             }))?;
@@ -139,7 +145,7 @@ impl GitlabGroupConsumer {
         instance_id: String,
         group_id: String,
         projects: &[ProjectCoreFragment],
-        graph: &ActorRef<GraphControllerMsg<GitlabNodeKey>>,
+        graph: &ActorRef<GraphControllerMsg>,
     ) -> Result<(), ActorProcessingErr> {
         let group_key = GitlabNodeKey::Group {
             instance_id: instance_id.clone(),
@@ -148,7 +154,7 @@ impl GitlabGroupConsumer {
 
         // Ensure group exists
         graph.cast(GraphControllerMsg::Op(GraphOp::UpsertNode {
-            key: group_key.clone(),
+            key: group_key.clone().into_key(),
             props: vec![],
         }))?;
 
@@ -160,14 +166,14 @@ impl GitlabGroupConsumer {
 
             // Ensure project exists
             graph.cast(GraphControllerMsg::Op(GraphOp::UpsertNode {
-                key: project_key.clone(),
+                key: project_key.clone().into_key(),
                 props: vec![],
             }))?;
 
             // Ensure relationship
             graph.cast(GraphControllerMsg::Op(GraphOp::EnsureEdge {
-                from: project_key,
-                to: group_key.clone(),
+                from: project_key.into_key(),
+                to: group_key.clone().into_key(),
                 rel_type: "IN_GROUP".into(),
                 props: vec![],
             }))?;
@@ -186,7 +192,7 @@ impl GitlabGroupConsumer {
         instance_id: String,
         group_id: String,
         runners: &[CiRunnerIdFragment],
-        graph: &ActorRef<GraphControllerMsg<GitlabNodeKey>>,
+        graph: &ActorRef<GraphControllerMsg>,
     ) -> Result<(), ActorProcessingErr> {
         debug!("Handling runners for group {group_id}");
 
@@ -197,7 +203,7 @@ impl GitlabGroupConsumer {
 
         // Ensure group exists
         graph.cast(GraphControllerMsg::Op(GraphOp::UpsertNode {
-            key: group_key.clone(),
+            key: group_key.clone().into_key(),
             props: vec![],
         }))?;
 
@@ -209,13 +215,13 @@ impl GitlabGroupConsumer {
 
             // Runner properties
             graph.cast(GraphControllerMsg::Op(GraphOp::UpsertNode {
-                key: runner_key.clone(),
+                key: runner_key.clone().into_key(),
                 props: vec![],
             }))?;
 
             graph.cast(GraphControllerMsg::Op(GraphOp::EnsureEdge {
-                from: runner_key,
-                to: group_key.clone(),
+                from: runner_key.into_key(),
+                to: group_key.clone().into_key(),
                 rel_type: "IN_GROUP".into(),
                 props: vec![],
             }))?;

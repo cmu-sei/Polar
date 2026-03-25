@@ -57,8 +57,6 @@ pub enum EventPayload {
         backend_handle: String,
     },
     BuildCompleted {
-        artifact_digest: Option<String>,
-        target_registry: String,
         duration_secs: u64,
     },
     BuildFailed {
@@ -112,21 +110,12 @@ impl BuildEvent {
         }
     }
 
-    pub fn build_completed(
-        build_id: Uuid,
-        artifact_digest: Option<String>,
-        target_registry: String,
-        duration_secs: u64,
-    ) -> Self {
+    pub fn build_completed(build_id: Uuid, duration_secs: u64) -> Self {
         Self {
             subject: subjects::BUILD_COMPLETED.to_string(),
             build_id: build_id.into(),
             emitted_at: chrono::Utc::now().timestamp(),
-            payload: EventPayload::BuildCompleted {
-                artifact_digest,
-                target_registry,
-                duration_secs,
-            },
+            payload: EventPayload::BuildCompleted { duration_secs },
         }
     }
 

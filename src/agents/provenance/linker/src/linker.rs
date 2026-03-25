@@ -1,12 +1,11 @@
 use chrono::Utc;
 use oci_client::manifest::OciManifest;
 use polar::ProvenanceEvent;
-use polar::graph::{self, GraphValue, rel};
-use polar::graph::{GraphControllerMsg, GraphOp, Property};
-use ractor::Actor;
-use ractor::ActorProcessingErr;
+use polar::graph::controller::IntoGraphKey;
+use polar::graph::controller::{GraphControllerMsg, GraphOp, GraphValue, Property, rel};
 use ractor::ActorRef;
 use ractor::async_trait;
+use ractor::{Actor, ActorProcessingErr};
 use tracing::{debug, trace, warn};
 
 use crate::ArtifactNodeKey;
@@ -14,16 +13,16 @@ use crate::ArtifactNodeKey;
 pub struct ProvenanceLinker;
 
 pub struct ProvenanceLinkerState {
-    compiler: ActorRef<GraphControllerMsg<ArtifactNodeKey>>,
+    compiler: ActorRef<GraphControllerMsg>,
 }
 pub struct ProvenanceLinkerArgs {
-    pub compiler: ActorRef<GraphControllerMsg<ArtifactNodeKey>>,
+    pub compiler: ActorRef<GraphControllerMsg>,
 }
 
 impl ProvenanceLinker {
     fn send_op(
         state: &mut ProvenanceLinkerState,
-        op: GraphOp<ArtifactNodeKey>,
+        op: GraphOp,
         err_ctx: &'static str,
     ) -> Result<(), ActorProcessingErr> {
         state
@@ -38,7 +37,14 @@ impl ProvenanceLinker {
         props: Vec<Property>,
         err_ctx: &'static str,
     ) -> Result<(), ActorProcessingErr> {
-        Self::send_op(state, GraphOp::UpsertNode { key, props }, err_ctx)
+        Self::send_op(
+            state,
+            GraphOp::UpsertNode {
+                key: key.into_key(),
+                props,
+            },
+            err_ctx,
+        )
     }
 
     fn ensure_edge(
@@ -51,8 +57,8 @@ impl ProvenanceLinker {
         Self::send_op(
             state,
             GraphOp::EnsureEdge {
-                from,
-                to,
+                from: from.into_key(),
+                to: to.into_key(),
                 rel_type: rel_type.to_string(),
                 props,
             },
@@ -134,14 +140,14 @@ impl Actor for ProvenanceLinker {
                             state,
                             ArtifactNodeKey::Artifact,
                             artifact_key.clone(),
-                            graph::rel::IS,
+                            rel::IS,
                             vec![],
                         )?;
                         Self::ensure_edge(
                             state,
                             registry_key.clone(),
                             ArtifactNodeKey::Artifact,
-                            graph::rel::CONTAINS,
+                            rel::CONTAINS,
                             vec![],
                         )?;
 
@@ -149,7 +155,7 @@ impl Actor for ProvenanceLinker {
                             state,
                             artifact_key.clone(),
                             registry_key,
-                            graph::rel::HOSTED_BY,
+                            rel::HOSTED_BY,
                             vec![],
                         )?;
 
@@ -263,7 +269,7 @@ impl Actor for ProvenanceLinker {
                             state,
                             ArtifactNodeKey::Artifact,
                             artifact_key.clone(),
-                            graph::rel::IS,
+                            rel::IS,
                             vec![],
                         )?;
 
@@ -271,7 +277,7 @@ impl Actor for ProvenanceLinker {
                             state,
                             registry_key.clone(),
                             ArtifactNodeKey::Artifact,
-                            graph::rel::CONTAINS,
+                            rel::CONTAINS,
                             vec![],
                         )?;
 
@@ -279,7 +285,7 @@ impl Actor for ProvenanceLinker {
                             state,
                             artifact_key.clone(),
                             registry_key.clone(),
-                            graph::rel::HOSTED_BY,
+                            rel::HOSTED_BY,
                             vec![],
                         )?;
 
@@ -384,14 +390,14 @@ impl Actor for ProvenanceLinker {
                     state,
                     ArtifactNodeKey::Artifact,
                     artifact_key.clone(),
-                    graph::rel::IS,
+                    rel::IS,
                     vec![],
                 )?;
                 Self::ensure_edge(
                     state,
                     ref_key.clone(),
                     artifact_key.clone(),
-                    graph::rel::INSTANCE_OF,
+                    rel::INSTANCE_OF,
                     vec![],
                 )?;
             }
@@ -406,71 +412,6 @@ impl Actor for ProvenanceLinker {
                     vec![],
                     "failed to upsert OCIRegistry",
                 )?;
-            }
-            // TODO: This is cross containimation of the vocabulary, it might be better to just leave this logic with the kube processor
-            // all the linker has to do is just create the OCIArtifact node, then further processing can connect the two.
-            ProvenanceEvent::PodContainerUsesImage {
-                pod_uid,
-                container_name,
-                image_ref,
-            } => {
-                trace!(
-                    "PodContainer {} / {} observed image ref {}",
-                    pod_uid, container_name, image_ref
-                );
-                // 1. Upsert PodContainer (idempotent, no inference)
-                let pod_container_key = ArtifactNodeKey::PodContainer {
-                    pod_uid: pod_uid.clone(),
-                    container_name: container_name.clone(),
-                };
-                let props = vec![
-                    Property("pod_uid".into(), polar::graph::GraphValue::String(pod_uid)),
-                    Property(
-                        "name".into(),
-                        polar::graph::GraphValue::String(container_name),
-                    ),
-                ];
-
-                Self::upsert_node(
-                    state,
-                    pod_container_key.clone(),
-                    props,
-                    "Failed to upsert PodContainer",
-                )?;
-
-                // 2. Upsert ContainerImageReference (string-only claim)
-                let image_ref_key = ArtifactNodeKey::ContainerImageRef {
-                    normalized: image_ref.clone(),
-                };
-
-                let props = vec![Property(
-                    "normalized".into(),
-                    polar::graph::GraphValue::String(image_ref),
-                )];
-                Self::upsert_node(
-                    state,
-                    image_ref_key.clone(),
-                    props,
-                    "Failed to upsert ContainerImageReference",
-                )?;
-
-                // 3. Create PodContainer -> ImageRef edge
-                let edge_op = GraphOp::EnsureEdge {
-                    from: pod_container_key,
-                    to: image_ref_key.clone(),
-                    rel_type: "USES_IMAGE".to_string(),
-                    props: vec![],
-                };
-
-                state
-                    .compiler
-                    .send_message(GraphControllerMsg::Op(edge_op))
-                    .map_err(|e| {
-                        ActorProcessingErr::from(format!(
-                            "failed to create USES_IMAGE edge: {:?}",
-                            e
-                        ))
-                    })?;
             }
             ProvenanceEvent::SbomResolved { uid, sbom, name } => {
                 trace!("Received SBOMResolved directive");

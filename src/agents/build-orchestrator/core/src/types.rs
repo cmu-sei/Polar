@@ -206,8 +206,6 @@ pub struct BuildSpec {
     /// must be /bin/pipeline-runner. Only set this in tests.
     pub entrypoint: Option<Vec<String>>,
 
-    pub target_registry: String,
-
     /// Credentials for cloning the source repository.
     /// The referenced Secret must exist in the build namespace.
     pub git_credentials: GitCredentials,
@@ -228,7 +226,6 @@ impl BuildSpec {
         repo_url: String,
         commit_sha: String,
         pipeline_image: String,
-        target_registry: String,
         git_credentials: GitCredentials,
         registry_credentials: RegistryCredentials,
     ) -> Self {
@@ -238,7 +235,6 @@ impl BuildSpec {
             commit_sha,
             pipeline_image,
             entrypoint: None,
-            target_registry,
             git_credentials,
             registry_credentials,
             env: HashMap::new(),

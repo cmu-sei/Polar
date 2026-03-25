@@ -2662,6 +2662,7 @@ name = "git-agent-common"
 version = "1.0.0"
 dependencies = [
  "git2",
+ "polar",
  "rkyv 0.8.15",
 ]
 
@@ -5140,10 +5141,12 @@ dependencies = [
  "cassini-client",
  "cassini-types",
  "hex",
+ "k8s-openapi",
  "neo4rs",
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry_sdk",
+ "polar",
  "ractor",
  "reqwest",
  "rkyv 0.8.15",

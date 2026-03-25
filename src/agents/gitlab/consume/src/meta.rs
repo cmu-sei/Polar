@@ -6,18 +6,17 @@ use common::{
 };
 use gitlab_queries::LicenseHistoryEntry;
 
-use crate::GitlabNodeKey;
-use polar::graph::{GraphControllerMsg, GraphOp, GraphValue, Property};
+use polar::graph::{
+    controller::{GraphControllerMsg, GraphOp, GraphValue, IntoGraphKey, Property},
+    nodes::gitlab::GitlabNodeKey,
+};
 use ractor::{Actor, ActorProcessingErr, ActorRef};
 use tracing::debug;
 
 pub struct MetaConsumer;
 
 impl MetaConsumer {
-    pub fn ops_for_licenses(
-        instance_id: String,
-        licenses: &[LicenseHistoryEntry],
-    ) -> Vec<GraphOp<GitlabNodeKey>> {
+    pub fn ops_for_licenses(instance_id: String, licenses: &[LicenseHistoryEntry]) -> Vec<GraphOp> {
         let mut ops = vec![];
 
         let instance_k = GitlabNodeKey::GitlabInstance {
@@ -26,7 +25,7 @@ impl MetaConsumer {
 
         // ensure instance exists
         ops.push(GraphOp::UpsertNode {
-            key: instance_k.clone(),
+            key: instance_k.clone().into_key(),
             props: Vec::default(),
         });
 
@@ -54,7 +53,7 @@ impl MetaConsumer {
                 .map_or(GraphValue::I64(0), |u| GraphValue::I64(u as i64));
 
             ops.push(GraphOp::UpsertNode {
-                key: license_key.clone(),
+                key: license_key.clone().into_key(),
                 props: vec![
                     Property("created_at".into(), GraphValue::String(created_at)),
                     Property("starts_at".into(), GraphValue::String(starts_at)),
@@ -66,8 +65,8 @@ impl MetaConsumer {
             });
 
             ops.push(GraphOp::EnsureEdge {
-                from: instance_k.clone(),
-                to: license_key,
+                from: instance_k.clone().into_key(),
+                to: license_key.into_key(),
                 rel_type: "OBSERVED_LICENSE".into(),
                 props: Vec::default(),
             });
@@ -107,7 +106,8 @@ impl Actor for MetaConsumer {
                 let op = GraphOp::UpsertNode {
                     key: GitlabNodeKey::GitlabInstance {
                         instance_id: message.instance_id.clone(),
-                    },
+                    }
+                    .into_key(),
                     props: vec![
                         Property(
                             "enterprise".into(),

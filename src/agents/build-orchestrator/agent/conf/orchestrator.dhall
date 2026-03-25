@@ -41,15 +41,13 @@ let BackendConfig =
       }
 
 -- ── Bootstrap ─────────────────────────────────────────────────────────────────
-
+-- TODO: Decide how we want to handle bootsrapping.
+--Ideally, someone defines a standard "boostrap" environment capable of building their pipeline container and uploads it somewhere
+-- But this might not always be the case.
 let BootstrapConfig =
       { Type =
           { builder_image        : Text
-          , container_config_ref : Text
-          , target_registry      : Text
           }
-      , default =
-          { container_config_ref = "container.dhall" }
       }
 
 -- ── Credentials ───────────────────────────────────────────────────────────────

@@ -1,5 +1,5 @@
+use polar::graph::nodes::git::RepoId;
 use rkyv::{Archive, Deserialize, Serialize};
-
 pub const GIT_REPO_CONFIG_EVENTS: &str = "git.repo.config.events";
 pub const GIT_REPO_EVENTS: &str = "git.repo.events";
 pub const GIT_REPO_PROCESSING_TOPIC: &str = "polar.git.processor";
@@ -55,31 +55,6 @@ impl RepoObservationConfig {
             shallow_depth,
             frequency: 900,
         }
-    }
-}
-
-/// Canonical identifier for a repository.
-///
-/// This MUST be stable and collision-resistant.
-/// URL normalization or UUIDv5 are both acceptable.
-#[derive(Serialize, Deserialize, Archive, Debug, Clone, PartialEq, Eq, Hash)]
-pub struct RepoId(String);
-
-impl RepoId {
-    pub fn from_url(url: &str) -> Self {
-        // Opinionated but deterministic.
-        // Replace with UUIDv5 if you want cryptographic guarantees.
-        Self(url.replace("://", "_").replace('/', "_"))
-    }
-
-    pub fn new(url: String) -> Self {
-        RepoId(url)
-    }
-}
-
-impl std::fmt::Display for RepoId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
     }
 }
 

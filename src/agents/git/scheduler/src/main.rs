@@ -1,10 +1,10 @@
 use cassini_client::{TCPClientConfig, TcpClientActor, TcpClientArgs, TcpClientMessage};
 use cassini_types::{ClientEvent, WireTraceCtx};
-use git_agent_common::{ConfigurationEvent, GIT_REPO_CONFIG_EVENTS, RepoId, RepoObservationConfig};
+use git_agent_common::{ConfigurationEvent, GIT_REPO_CONFIG_EVENTS, RepoObservationConfig};
 use neo4rs::{Graph, query};
 use polar::{
     GIT_REPO_DISCOGERY_TOPIC, GitRepositoryDiscoveredEvent, RkyvError, SupervisorMessage,
-    UNEXPECTED_MESSAGE_STR, get_neo_config,
+    UNEXPECTED_MESSAGE_STR, get_neo_config, graph::nodes::git::RepoId,
 };
 use ractor::{Actor, ActorProcessingErr, ActorRef, OutputPort, SupervisionEvent, async_trait};
 use rkyv::{from_bytes, rancor, to_bytes};
@@ -116,7 +116,7 @@ impl RootSupervisor {
                 let response = ConfigurationEvent {
                     config: RepoObservationConfig::new(
                         repo_id,
-                        repo_url,
+                        repo_url.into(),
                         vec!["origin".to_string()],
                         Some(100),
                         vec!["refs/heads/main".to_string()],

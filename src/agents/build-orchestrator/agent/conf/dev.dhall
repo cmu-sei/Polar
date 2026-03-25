@@ -16,8 +16,6 @@ in  orchestrator.OrchestratorConfig::{
       }
     , bootstrap =
       { builder_image = "docker.io/nixos/nix:2.24.1"
-      , container_config_ref = "container.dhall"
-      , target_registry = "localhost:5000/cyclops/builds"
       }
     , storage = orchestrator.StorageConfig::{
       , endpoint_url = "http://localhost:9000"

@@ -1,8 +1,7 @@
 use cassini_client::TcpClientMessage;
-use git_agent_common::{
-    GIT_REPO_PROCESSING_TOPIC, GitRepositoryMessage, RepoId, RepoObservationConfig,
-};
+use git_agent_common::{GIT_REPO_PROCESSING_TOPIC, GitRepositoryMessage, RepoObservationConfig};
 use git2::{FetchOptions, Oid, RemoteCallbacks, Repository};
+use polar::graph::nodes::git::RepoId;
 use ractor::{Actor, ActorProcessingErr, ActorRef, SupervisionEvent, async_trait};
 use rkyv::{Archive, Deserialize, Serialize, rancor, to_bytes};
 use serde::Deserialize as SerdeDeserialize;
@@ -12,7 +11,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tracing::{debug, error, info, instrument, trace, warn};
 use url::Url;
-
 pub const SERVICE_NAME: &str = "polar.git.observer";
 pub const REPO_SUPERVISOR_NAME: &str = "polar.git.observer.repo.supervisor";
 
