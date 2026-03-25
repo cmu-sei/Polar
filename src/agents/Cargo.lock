@@ -1330,6 +1330,7 @@ dependencies = [
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry_sdk",
+ "proptest",
  "tracing",
  "tracing-glog",
  "tracing-opentelemetry",

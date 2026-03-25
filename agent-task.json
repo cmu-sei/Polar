@@ -22,13 +22,7 @@
       "Prefer proptests for any function that handles strings, byte payloads, or user-supplied input."
     ]
   },
-  "current_task": {
-    "crate": "cassini-c2",
-    "crate_path": "cassini/cassini-c2",
-    "op": "write-tests",
-    "scope": "all",
-    "notes": "Same actor model approach. Read source first."
-  },
+  "current_task": null,
   "tools": {
     "locate": {
       "description": "Fast symbol location. Use FIRST before reading or writing anything.",
@@ -119,16 +113,21 @@
       "scope": "unit tests and proptests",
       "status": "done",
       "test_count": 39
-    }
-  ],
-  "blocked": [],
-  "pending": [
+    },
     {
       "crate": "cassini-tracing",
-      "crate_path": "cassini/cassini-tracing",
       "op": "write-tests",
       "scope": "all",
-      "notes": "Likely pure functions — good proptest candidate."
+      "status": "done",
+      "test_count": 17
     }
-  ]
+  ],
+  "blocked": [
+    {
+      "crate": "cassini-c2",
+      "op": "write-tests",
+      "reason": "binary-only crate with no lib target, all logic requires live broker connection and TLS env vars, incomplete feature work"
+    }
+  ],
+  "pending": []
 }
