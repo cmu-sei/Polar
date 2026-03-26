@@ -142,6 +142,12 @@
       "op": "write-tests",
       "scope": "all",
       "status": "done"
+    },
+    {
+      "crate": "polar-scheduler",
+      "op": "write-tests",
+      "scope": "all",
+      "status": "done"
     }
   ],
   "blocked": [

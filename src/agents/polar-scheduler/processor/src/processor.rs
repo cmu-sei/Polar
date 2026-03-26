@@ -1,8 +1,7 @@
 use cassini_client::TcpClientMessage;
-use neo4rs::Graph;
 use polar::graph::{
     controller::{
-        GraphControllerActor, GraphControllerMsg, GraphOp, GraphValue, IntoGraphKey, Property,
+        GraphControllerMsg, GraphOp, GraphValue, IntoGraphKey, Property,
     },
     nodes::schedule::ScheduleKey,
 };
@@ -201,25 +200,14 @@ async fn publish_notification(
 impl Actor for ScheduleInfoProcessor {
     type Msg = ProcessorMsg;
     type State = ProcessorState;
-    type Arguments = (ActorRef<TcpClientMessage>, Graph);
+    type Arguments = (ActorRef<TcpClientMessage>, ActorRef<GraphControllerMsg>);
 
     async fn pre_start(
         &self,
         _myself: ActorRef<Self::Msg>,
-        (tcp_client, graph): Self::Arguments,
+        (tcp_client, graph_controller): Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
-        info!("ScheduleInfoProcessor pre_start: spawning graph controller");
-        let (graph_controller, _) = Actor::spawn(
-            Some("scheduler.graph_controller".to_string()),
-            GraphControllerActor,
-            graph,
-        )
-        .await
-        .map_err(|e| {
-            error!("Failed to spawn graph controller: {:?}", e);
-            e
-        })?;
-        info!("Graph controller spawned successfully");
+        info!("ScheduleInfoProcessor starting");
         Ok(ProcessorState {
             tcp_client,
             graph_controller,

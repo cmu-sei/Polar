@@ -5175,6 +5175,7 @@ dependencies = [
  "neo4rs",
  "polar",
  "polar-scheduler-common",
+ "proptest",
  "ractor",
  "reqwest",
  "rkyv 0.8.15",

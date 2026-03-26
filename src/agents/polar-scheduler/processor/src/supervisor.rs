@@ -3,6 +3,7 @@ use crate::types::ProcessorMsg;
 use cassini_client::{TCPClientConfig, TcpClientActor, TcpClientArgs, TcpClientMessage};
 use cassini_types::ClientEvent;
 use polar::SupervisorMessage;
+use polar::graph::controller::GraphControllerActor;
 use polar_scheduler_common::{AdhocAgentAnnouncement, GitScheduleChange};
 use ractor::{Actor, ActorProcessingErr, ActorRef, OutputPort, SupervisionEvent, async_trait};
 use tracing::{debug, error, info, warn};
@@ -97,10 +98,17 @@ impl Actor for RootSupervisor {
 
                     match neo4rs::Graph::connect(neo_config) {
                         Ok(graph) => {
+                            let (graph_controller, _) = Actor::spawn_linked(
+                                Some(format!("{}.graph_controller", SERVICE_NAME)),
+                                GraphControllerActor,
+                                graph,
+                                myself.clone().into(),
+                            )
+                            .await?;
                             let (processor, _) = Actor::spawn_linked(
                                 Some(format!("{}.processor", SERVICE_NAME)),
                                 ScheduleInfoProcessor,
-                                (state.tcp_client.clone(), graph),
+                                (state.tcp_client.clone(), graph_controller),
                                 myself.clone().into(),
                             )
                             .await?;
