@@ -34,20 +34,19 @@
   };
   outputs = { self, nixpkgs, crane, rust-overlay, flake-utils, advisory-db,
               myNeovimOverlay, staticanalysis, dotacat, nix-container-lib, ... }:
-              # myNeovimOverlay, staticanalysis, dotacat, nix-container-lib, pi-agent-rust, ... }:
     flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = import nixpkgs {
           inherit system;
           config = {
             cc = "clang";
-            allowUnfree = true;   # CUDA is unfree, needed alongside cudaSupport
+            allowUnfree = true;
           };
           documentation = {
             dev.enable = true;
             man = {
-              man-db.enable     = true;
-              generateCaches    = true;
+              man-db.enable  = true;
+              generateCaches = true;
             };
           };
           overlays = [
@@ -57,33 +56,45 @@
         };
         inherit (pkgs) lib;
 
-        # ---------------------------------------------------------------------------
-        # Dev container — built via nix-container-lib
-        # configPath uses builtins.path to copy the full source tree into one store
-        # path so that relative Dhall imports resolve correctly in the sandbox.
-        # ---------------------------------------------------------------------------
-        container = nix-container-lib.lib.${system}.mkContainer {
+        # ── Container lib helper ───────────────────────────────────────────────
+        mkPolarContainer = configNixPath: nix-container-lib.lib.${system}.mkContainer {
           inherit system pkgs;
-          inputs     = { inherit staticanalysis dotacat rust-overlay; };
-          configPath = pkgs.writeText "polar-container.dhall" (
-            builtins.replaceStrings
-              [ "PRELUDE_PATH" ]
-              [ "${nix-container-lib}/dhall/prelude.dhall" ]
-              (builtins.readFile ./src/flake/container.dhall)
-          );
+          inputs = { inherit staticanalysis dotacat myNeovimOverlay rust-overlay; };
+          inherit configNixPath;
         };
 
+        # ── Dev container ──────────────────────────────────────────────────────
+        # Regenerate with: cd src/flake && just render-dev
+        container = mkPolarContainer ./src/flake/container.nix;
+
+        # ── CI container ──────────────────────────────────────────────────────
+        # Regenerate with: cd src/flake && just render-ci
+        ciContainer = mkPolarContainer ./src/flake/ci-container.nix;
+
+        # ── Agent containers ───────────────────────────────────────────────────
+        # Regenerate with: cd src/flake && just render-agent
+        mkAgentContainer = llamaCppPkg: extraPkgs:
+          nix-container-lib.lib.${system}.mkContainer {
+            inherit system pkgs;
+            inputs = {
+              inherit staticanalysis dotacat myNeovimOverlay rust-overlay;
+              llamaCpp = { packages.${system} = { default = llamaCppPkg; }; };
+              cudaLibs = { packages.${system} = { default = extraPkgs; }; };
+            };
+            configNixPath = ./src/flake/agent-container.nix;
+          };
+
+        # ── Workspace binaries + agent images ─────────────────────────────────
         polarPkgs = import ./src/agents/workspace.nix {
           inherit pkgs lib crane rust-overlay nix-container-lib system;
         };
+
         commitMsgHooksPkg = import ./src/git-hooks/package.nix {
           inherit pkgs crane;
         };
 
-        # TLS certificates — using polar's own gen-certs.nix
+        # ── TLS certificates ───────────────────────────────────────────────────
         tlsCerts = pkgs.callPackage ./src/flake/gen-certs.nix { inherit pkgs; };
-
-        # piAgent = pi-agent-rust.packages.${system}.default;
 
         pkgsCuda = import nixpkgs {
           inherit system;
@@ -98,33 +109,60 @@
           ];
         };
 
-        mkAgentContainer = llamaCppPkg: extraPkgs: nix-container-lib.lib.${system}.mkContainer {
-          inherit system pkgs;
-          inputs = { inherit staticanalysis dotacat rust-overlay;
-            # piAgent  = { packages.${system} = { default = piAgent; }; };
-            llamaCpp = { packages.${system} = { default = llamaCppPkg; }; };
-            cudaLibs = { packages.${system} = { default = extraPkgs; }; };
-          };
-          configPath = pkgs.writeText "polar-agent-container.dhall" (
-            builtins.replaceStrings
-              [ "PRELUDE_PATH" ]
-              [ "${nix-container-lib}/dhall/prelude.dhall" ]
-              (builtins.readFile ./src/flake/agent-container.dhall)
-          );
-        };
       in
       {
         packages = {
+          # ── Workspace binaries ───────────────────────────────────────────────
+          default     = polarPkgs.workspacePackages;
           inherit polarPkgs tlsCerts;
-          devContainer          = container.image;
-          agentContainer        = (mkAgentContainer pkgs.llama-cpp pkgs.stdenv.cc).image;
-          agentContainerRocm    = (mkAgentContainer pkgs.llama-cpp-rocm pkgs.stdenv.cc).image;
-          agentContainerVulkan  = (mkAgentContainer pkgs.llama-cpp-vulkan pkgs.stdenv.cc).image;
-          agentContainerNvidia  = (mkAgentContainer pkgsCuda.llama-cpp pkgsCuda.cudaPackages.cuda_cudart).image;
-          default = polarPkgs.workspacePackages;
+
+          # ── Dev / CI / Agent containers ──────────────────────────────────────
+          devContainer         = container.image;
+          ciContainer          = ciContainer.image;
+          agentContainer       = (mkAgentContainer pkgs.llama-cpp pkgs.stdenv.cc).image;
+          agentContainerRocm   = (mkAgentContainer pkgs.llama-cpp-rocm pkgs.stdenv.cc).image;
+          agentContainerVulkan = (mkAgentContainer pkgs.llama-cpp-vulkan pkgs.stdenv.cc).image;
+          agentContainerNvidia = (mkAgentContainer pkgsCuda.llama-cpp pkgsCuda.cudaPackages.cuda_cudart).image;
+
+          # ── Cassini ──────────────────────────────────────────────────────────
+          cassiniImage         = polarPkgs.cassini.cassiniImage;
+          cassiniProducerImage = polarPkgs.cassini.producerImage;
+          cassiniSinkImage     = polarPkgs.cassini.sinkImage;
+
+          # ── GitLab agent ─────────────────────────────────────────────────────
+          gitlabObserverImage  = polarPkgs.gitlabAgent.observerImage;
+          gitlabConsumerImage  = polarPkgs.gitlabAgent.consumerImage;
+
+          # ── Kubernetes agent ─────────────────────────────────────────────────
+          kubeObserverImage    = polarPkgs.kubeAgent.observerImage;
+          kubeConsumerImage    = polarPkgs.kubeAgent.consumerImage;
+
+          # ── Web (OpenAPI) agent ───────────────────────────────────────────────
+          webObserverImage     = polarPkgs.webAgent.observerImage;
+          webConsumerImage     = polarPkgs.webAgent.consumerImage;
+
+          # ── Provenance agent ─────────────────────────────────────────────────
+          provenanceLinkerImage   = polarPkgs.provenance.linkerImage;
+          provenanceResolverImage = polarPkgs.provenance.resolverImage;
+
+          # ── Scheduler agent ──────────────────────────────────────────────────
+          schedulerProcessorImage = polarPkgs.scheduler.processorImage;
+          schedulerObserverImage  = polarPkgs.scheduler.observerImage;
+
+          # ── Jira agent ───────────────────────────────────────────────────────
+          jiraObserverImage    = polarPkgs.jiraAgent.observerImage;
+          jiraConsumerImage    = polarPkgs.jiraAgent.consumerImage;
+
+          # ── Git agent ────────────────────────────────────────────────────────
+          gitObserverImage     = polarPkgs.gitAgent.observerImage;
+          gitConsumerImage     = polarPkgs.gitAgent.consumerImage;
+          gitSchedulerImage    = polarPkgs.gitAgent.schedulerImage;
+
+          # ── Build orchestrator ───────────────────────────────────────────────
+          orchestratorImage    = polarPkgs.buildOrchestrator.orchestratorImage;
+          buildProcessorImage  = polarPkgs.buildOrchestrator.buildProcessorImage;
         };
-        devShells.default = (import ./src/flake/containers.nix {
-          inherit system pkgs rust-overlay staticanalysis dotacat myNeovimOverlay;
-        }).devShells.default;
+
+        devShells.default = container.devShell;
       });
 }

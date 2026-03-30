@@ -24,7 +24,7 @@ let
     observerImage = pkgs.dockerTools.buildImage {
       name = "polar-web-observer";
       tag = "latest";
-      contents = commonPaths ++ [ observer ];
+      copyToRoot = commonPaths ++ [ observer ];
       uid = commonUser.uid;
       gid = commonUser.gid;
 
@@ -39,7 +39,7 @@ let
     consumerImage = pkgs.dockerTools.buildImage {
       name = "polar-web-consumer";
       tag = "latest";
-      contents = commonPaths ++ [ consumer ];
+      copyToRoot = commonPaths ++ [ consumer ];
       uid = commonUser.uid;
       gid = commonUser.gid;
 

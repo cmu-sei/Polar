@@ -2,7 +2,6 @@
 --
 -- Polar agent container configuration.
 -- An interactive AI coding agent runtime with:
---   - pi_agent_rust: the coding agent binary
 --   - llama.cpp (ROCm): local LLM inference with AMD GPU acceleration
 --   - fish + bash shells available for debugging and interactive use
 --   - GPU device group membership (video, render) for ROCm access
@@ -18,30 +17,26 @@
 --     -v $PWD:/workspace \
 --     localhost/polar-agent:latest
 --
--- Or with local LLM:
---   start-llama /workspace/models/mymodel.gguf   # in the container
---   pi-local "Explain this codebase"              # in the container
+-- To update the pinned prelude after a nix-container-lib release:
+--   nix-prefetch-git https://github.com/daveman1010221/nix-container-lib
+--   dhall hash <<< "https://raw.githubusercontent.com/daveman1010221/nix-container-lib/<rev>/dhall/prelude.dhall"
 
-let Lib      = PRELUDE_PATH
+let Lib =
+      https://raw.githubusercontent.com/daveman1010221/nix-container-lib/bc1246f3372fbb825de2a85e6f3ca9d0779975d5/dhall/prelude.dhall
+        sha256:42b061b5cb6c7685afaf7e5bc6210640d2c245e67400b22c51e6bfdf85a89e06
+
 let defaults = Lib.defaults
 
 -- ---------------------------------------------------------------------------
 -- Agent-specific package layer
--- pi_agent_rust + llama.cpp ROCm + supporting tools
+-- llama.cpp ROCm + supporting tools
 -- ---------------------------------------------------------------------------
 let agentTools =
   Lib.customLayer "polar-agent-tools"
-    [ -- pi_agent_rust is built as a local derivation in polar's flake
-      -- and injected via the flake's packages, not via a flake input.
-      -- It lands in the container via the devEnv buildEnv.
-      -- llama.cpp with ROCm GPU support for AMD GPUs
-      Lib.flakePackage "llamaCpp" "default"
-      -- sqlite3 for pi's session storage
+    [ Lib.flakePackage "llamaCpp" "default"
     , Lib.nixpkgs "sqlite"
-      -- curl for pi-local health check and general HTTP work
     , Lib.nixpkgs "curl"
     , Lib.flakePackage "dotacat" "default"
-    -- , Lib.flakePackage "piAgent" "default"
     , Lib.nixpkgs "sudo"
     , Lib.nixpkgs "just"
     , Lib.nixpkgs "moreutils"
@@ -49,8 +44,6 @@ let agentTools =
 
 -- ---------------------------------------------------------------------------
 -- Supplemental groups for GPU access
--- The container user needs to be in the video and render groups to access
--- /dev/kfd and /dev/dri/renderD128 for ROCm GPU acceleration.
 -- GIDs 44 (video) and 110 (render) are conventional on Linux systems.
 -- ---------------------------------------------------------------------------
 let gpuGroups =
@@ -70,18 +63,15 @@ let agentEnv : List Lib.EnvVar =
   , Lib.buildEnv "LLAMA_BASE_URL"   "http://localhost:8080/v1"
   , Lib.buildEnv "PI_SHELL_PATH"    "/bin/bash"
   , Lib.startEnv "OLLAMA_HOST"      "0.0.0.0:8080"
-    -- API keys — set at runtime, not baked in
   , Lib.runtimeEnv "ANTHROPIC_API_KEY"  ""
   , Lib.runtimeEnv "OPENAI_API_KEY"     ""
   , Lib.runtimeEnv "OPENROUTER_API_KEY" ""
   ]
 
 -- ---------------------------------------------------------------------------
--- The agent container configuration
+-- The agent container configuration.
 -- Derived from defaults.devContainer (not agentContainer) because we want
 -- the full interactive shell experience for debugging and direct use.
--- The distinction from the dev container is: agent tools, GPU groups,
--- bash present alongside fish, and agent-specific env vars.
 -- ---------------------------------------------------------------------------
 in defaults.devContainer //
   { name = "polar-agent"
@@ -94,32 +84,27 @@ in defaults.devContainer //
       , agentTools
       ]
 
-  -- Shell: fish as default (because we prefer it) with bash available.
-  -- pi uses bash internally for its bash tool regardless of the login shell.
   , shell = Some
       ( defaults.defaultShell //
         { shell = "/bin/fish" }
       )
 
-  -- TLS: enabled for secure agent-to-service communication
   , tls = Some
       ( defaults.defaultTLS //
         { generateCerts = True }
       )
 
-  -- SSH: present but not auto-started
   , ssh = Some defaults.defaultSSH
 
-  -- User: add GPU groups for ROCm access
   , user = defaults.defaultUser //
       { supplementalGroups = gpuGroups }
 
-  -- No pipeline for the agent container — it's a runtime, not a CI runner
   , pipeline = None Lib.PipelineConfig
 
   , extraEnv = agentEnv
-    , ai = Some
-        ( defaults.defaultAi //
-          { enable = True }
-        )
+
+  , ai = Some
+      ( defaults.defaultAi //
+        { enable = True }
+      )
   }

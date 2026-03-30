@@ -1,10 +1,9 @@
--- src/flake/container.dhall
+-- src/flake/ci-container.dhall
 --
--- Polar dev container configuration.
--- This file is the single place where polar-specific container decisions live.
--- All the how is in nix-container-lib. This file is pure what.
---
--- Library reference: github:daveman1010221/nix-container-lib
+-- Polar CI container configuration.
+-- Headless pipeline runner — no interactive shell, minimal package set.
+-- The same pipeline definition as the dev container guarantees that what
+-- runs locally and what runs in CI are identical.
 --
 -- To update the pinned prelude after a nix-container-lib release:
 --   nix-prefetch-git https://github.com/daveman1010221/nix-container-lib
@@ -17,9 +16,8 @@ let Lib =
 let defaults = Lib.defaults
 
 -- ---------------------------------------------------------------------------
--- Pipeline definition
--- The same pipeline runs locally (developer) and in CI (server).
--- That identity is the guarantee. Do not create a separate CI pipeline.
+-- Pipeline definition — identical to the dev container's.
+-- Single source of truth. Do not diverge.
 -- ---------------------------------------------------------------------------
 let polarPipeline : Lib.PipelineConfig =
   { name        = "polar-devsecops"
@@ -27,12 +25,8 @@ let polarPipeline : Lib.PipelineConfig =
   , workingDir  = "/workspace/src/agents"
   , outputs     = None { artifacts : List { name : Text, fromStage : Text, artifact : Text, attestation : Optional Text, verifyMethod : Optional Text }, assertions : List { name : Text, fromStage : Text } }
   , stages      =
-
-      -- Fast gates: fail immediately so the developer gets signal quickly
       [ Lib.simpleStage "fmt"  "cargo fmt --check"           Lib.FailureMode.Collect
       , Lib.simpleStage "lint" "cargo clippy -- -D warnings" Lib.FailureMode.Collect
-
-      -- Static analysis: collect all findings before reporting
       , { name           = "static-analysis"
         , command        = "run-analysis --config ./analysis.toml"
         , failureMode    = Lib.FailureMode.Collect
@@ -42,8 +36,6 @@ let polarPipeline : Lib.PipelineConfig =
         , pure           = True
         , impurityReason = None Text
         }
-
-      -- Audit: produces both a report and a named artifact for downstream
       , { name           = "audit"
         , command        = "run-audit --sbom ./sbom.json"
         , failureMode    = Lib.FailureMode.Collect
@@ -56,9 +48,6 @@ let polarPipeline : Lib.PipelineConfig =
         , pure           = True
         , impurityReason = None Text
         }
-
-      -- Full test suite: gated on CI_FULL so developers run it explicitly
-      -- while CI always runs it. Same definition, different invocation scope.
       , Lib.conditionalStage
           "full-test"
           "cargo test --workspace"
@@ -67,56 +56,28 @@ let polarPipeline : Lib.PipelineConfig =
       ]
   }
 
--- ---------------------------------------------------------------------------
--- Polar-specific packages not covered by standard layers.
--- flakeInput names must match input names in flake.nix exactly.
--- ---------------------------------------------------------------------------
-let polarExtras =
-  Lib.customLayer "polar-extras"
+let polarCiExtras =
+  Lib.customLayer "polar-ci-extras"
     [ Lib.flakePackage "staticanalysis" "default"
-    , Lib.flakePackage "dotacat"        "default"
-    , Lib.flakePackage "myNeovimOverlay" "default"
     ]
 
--- ---------------------------------------------------------------------------
--- Project-specific environment variables.
--- BuildTime: arch-independent, no store paths — safe for config.Env.
--- ---------------------------------------------------------------------------
 let polarEnv : List Lib.EnvVar =
   [ Lib.buildEnv "GRAPH_DB"       "neo4j"
   , Lib.buildEnv "GRAPH_ENDPOINT" "bolt://127.0.0.1:7687"
   , Lib.buildEnv "GRAPH_USER"     "neo4j"
   ]
 
--- ---------------------------------------------------------------------------
--- The container configuration.
--- Derived from defaults.devContainer with polar-specific overrides.
--- ---------------------------------------------------------------------------
-in defaults.devContainer //
-  { name = "polar-dev"
+in defaults.pipelineContainer //
+  { name = "polar-ci"
 
   , packageLayers =
       [ Lib.PackageLayer.Core
       , Lib.PackageLayer.CI
-      , Lib.PackageLayer.Dev
-      , Lib.PackageLayer.Toolchain
       , Lib.PackageLayer.Pipeline
-      , polarExtras
+      , polarCiExtras
       ]
 
   , pipeline = Some polarPipeline
-
-  , tls = Some
-      ( defaults.defaultTLS //
-        { generateCerts = True }
-      )
-
-  , ssh = Some
-      ( defaults.defaultSSH //
-        { enable = False
-        , port   = 2223
-        }
-      )
 
   , extraEnv = polarEnv
   }

@@ -1,0 +1,54 @@
+# src/flake/Justfile
+#
+# Dhall rendering for Polar container configurations.
+#
+# WORKFLOW
+# --------
+# 1. Edit a .dhall file
+# 2. just render-<n>   → regenerates the companion .nix file
+# 3. git add <name>.dhall <name>.nix && git commit
+# 4. nix build         → uses the .nix file, sandbox-safe
+#
+# WHY RENDER SEPARATELY?
+# The Nix sandbox has no network access. Dhall imports (including the
+# nix-container-lib prelude) resolve over the network. Running dhall-to-nix
+# inside a nix build fails. Pre-rendering produces a pure .nix file that
+# Nix can import directly.
+#
+# UPDATING THE PINNED PRELUDE
+# After a nix-container-lib release:
+#   nix-prefetch-git https://github.com/daveman1010221/nix-container-lib
+#   dhall hash <<< "https://raw.githubusercontent.com/daveman1010221/nix-container-lib/<rev>/dhall/prelude.dhall"
+# Then update the URL and sha256 in all three .dhall files and re-render.
+
+# Render the dev container config
+render-dev:
+    @echo "Rendering container.dhall → container.nix..."
+    dhall-to-nix < container.dhall > container.nix
+    @echo "Done. Commit container.nix alongside container.dhall."
+
+# Render the agent container config
+render-agent:
+    @echo "Rendering agent-container.dhall → agent-container.nix..."
+    dhall-to-nix < agent-container.dhall > agent-container.nix
+    @echo "Done. Commit agent-container.nix alongside agent-container.dhall."
+
+# Render the CI container config
+render-ci:
+    @echo "Rendering ci-container.dhall → ci-container.nix..."
+    dhall-to-nix < ci-container.dhall > ci-container.nix
+    @echo "Done. Commit ci-container.nix alongside ci-container.dhall."
+
+# Render all three container configs
+render-all: render-dev render-agent render-ci
+    @echo "All container configs rendered."
+
+# Type-check all .dhall files without rendering
+check-dhall:
+    @echo "Type-checking container.dhall..."
+    dhall type < container.dhall
+    @echo "Type-checking agent-container.dhall..."
+    dhall type < agent-container.dhall
+    @echo "Type-checking ci-container.dhall..."
+    dhall type < ci-container.dhall
+    @echo "All Dhall files type-check OK."

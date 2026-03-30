@@ -6,44 +6,31 @@
   cargoArtifacts,
   commonUser,
 }:
-
-
 let
-
-  observerConfig = pkgs.writeTextFile {
-    name          = "git.json";
-    destination   = "/git.json";
-    text          = builtins.readFile ./observer/conf/git.json;
-  };
-
-  observer = craneLib.buildPackage (crateArgs  // {
-  pname = "git-repo-observer";
-  cargoExtraArgs = "--bin git-repo-observer --locked";
-  src = workspaceFileset ./git/observe;
+  observer = craneLib.buildPackage (crateArgs // {
+    pname = "git-repo-observer";
+    cargoExtraArgs = "--bin git-repo-observer --locked";
+    src = workspaceFileset ./git/observe;
   });
-
 
   consumer = craneLib.buildPackage (crateArgs // {
-  pname = "git-consumer";
-  cargoExtraArgs = "--bin git-repo-processor --locked";
-  src = workspaceFileset ./git/consume;
+    pname = "git-consumer";
+    cargoExtraArgs = "--bin git-repo-processor --locked";
+    src = workspaceFileset ./git/consume;
   });
 
-  scheduler = craneLib.buildPackage (crateArgs  // {
-  pname = "scheduler";
-  cargoExtraArgs = "--bin scheduler --locked";
-  src = workspaceFileset ./git/scheduler;
+  scheduler = craneLib.buildPackage (crateArgs // {
+    pname = "scheduler";
+    cargoExtraArgs = "--bin scheduler --locked";
+    src = workspaceFileset ./git/scheduler;
   });
-
-
 
   observerImage = pkgs.dockerTools.buildImage {
     name = "polar-git-repo-observer";
     tag = "latest";
-    contents = commonPaths ++ [ observer observerConfig ];
+    copyToRoot = commonPaths ++ [ observer ];
     uid = commonUser.uid;
     gid = commonUser.gid;
-
     config = {
       User = "${commonUser.uid}:${commonUser.gid}";
       Cmd = [ "git-repo-observer" ];
@@ -55,10 +42,9 @@ let
   consumerImage = pkgs.dockerTools.buildImage {
     name = "polar-git-consumer";
     tag = "latest";
-    contents = commonPaths ++ [ consumer ];
+    copyToRoot = commonPaths ++ [ consumer ];
     uid = commonUser.uid;
     gid = commonUser.gid;
-
     config = {
       User = "${commonUser.uid}:${commonUser.gid}";
       Cmd = [ "git-consumer" ];
@@ -70,10 +56,9 @@ let
   schedulerImage = pkgs.dockerTools.buildImage {
     name = "polar-git-scheduler";
     tag = "latest";
-    contents = commonPaths ++ [ scheduler ];
+    copyToRoot = commonPaths ++ [ scheduler ];
     uid = commonUser.uid;
     gid = commonUser.gid;
-
     config = {
       User = "${commonUser.uid}:${commonUser.gid}";
       Cmd = [ "scheduler" ];

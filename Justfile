@@ -45,6 +45,38 @@ agent-container gpu='rocm':
     nix build {{_nix_flags}} ".#packages.{{platform}}.$target" -o result-agent-container
     podman load -i result-agent-container
 
+# Build every package — binaries, all containers, TLS certs.
+# Use this to verify the full build after disruptive changes.
+build-all:
+    nix build {{_nix_flags}} \
+        ".#packages.{{platform}}.default" \
+        ".#packages.{{platform}}.devContainer" \
+        ".#packages.{{platform}}.ciContainer" \
+        ".#packages.{{platform}}.agentContainer" \
+        ".#packages.{{platform}}.agentContainerRocm" \
+        ".#packages.{{platform}}.agentContainerVulkan" \
+        ".#packages.{{platform}}.tlsCerts" \
+        ".#packages.{{platform}}.cassiniImage" \
+        ".#packages.{{platform}}.cassiniProducerImage" \
+        ".#packages.{{platform}}.cassiniSinkImage" \
+        ".#packages.{{platform}}.gitlabObserverImage" \
+        ".#packages.{{platform}}.gitlabConsumerImage" \
+        ".#packages.{{platform}}.kubeObserverImage" \
+        ".#packages.{{platform}}.kubeConsumerImage" \
+        #".#packages.{{platform}}.webObserverImage" \
+        ".#packages.{{platform}}.webConsumerImage" \
+        ".#packages.{{platform}}.provenanceLinkerImage" \
+        ".#packages.{{platform}}.provenanceResolverImage" \
+        ".#packages.{{platform}}.schedulerProcessorImage" \
+        ".#packages.{{platform}}.schedulerObserverImage" \
+        ".#packages.{{platform}}.jiraObserverImage" \
+        ".#packages.{{platform}}.jiraConsumerImage" \
+        ".#packages.{{platform}}.gitObserverImage" \
+        ".#packages.{{platform}}.gitConsumerImage" \
+        ".#packages.{{platform}}.gitSchedulerImage" \
+        ".#packages.{{platform}}.orchestratorImage" \
+        ".#packages.{{platform}}.buildProcessorImage"
+
 # ── Dev container ─────────────────────────────────────────────────────────────
 
 # Build and load the dev container

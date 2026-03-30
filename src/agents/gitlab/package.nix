@@ -26,7 +26,7 @@ let
     observerImage = pkgs.dockerTools.buildImage {
       name = "polar-gitlab-observer";
       tag = "latest";
-      contents = commonPaths ++ [ observer ];
+      copyToRoot = commonPaths ++ [ observer ];
       uid = commonUser.uid;
       gid = commonUser.gid;
 
@@ -41,7 +41,7 @@ let
     consumerImage = pkgs.dockerTools.buildImage {
       name = "polar-gitlab-consumer";
       tag = "latest";
-      contents = commonPaths ++ [ consumer ];
+      copyToRoot = commonPaths ++ [ consumer ];
       uid = commonUser.uid;
       gid = commonUser.gid;
 

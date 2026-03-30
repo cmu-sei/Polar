@@ -19,7 +19,7 @@ let
     linkerImage = pkgs.dockerTools.buildImage {
         name = "provenance-linker-agent";
         tag = "latest";
-        contents = commonPaths ++ [linkerBin];
+        copyToRoot = commonPaths ++ [linkerBin];
         uid = commonUser.uid;
         gid = commonUser.gid;
 
@@ -46,7 +46,7 @@ let
     resolverImage = pkgs.dockerTools.buildImage {
         name = "provenance-resolver-agent";
         tag = "latest";
-        contents = commonPaths ++ [
+        copyToRoot = commonPaths ++ [
           resolverBin
           pkgs.cacert # this one needs a default trust store, so we'll include one
           resolverConfig
