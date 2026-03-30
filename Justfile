@@ -394,13 +394,18 @@ run-nvidia:
         localhost/polar-agent:latest
 
 # Start the dev container
-run-dev:
-    podman run -it \
-        -v ./:/workspace:rw \
+run-dev-container:
+    podman run --rm --name polar-dev -it \
+        --user 0 --userns=keep-id \
         -e CREATE_USER="$USER" \
         -e CREATE_UID="$(id -u)" \
         -e CREATE_GID="$(id -g)" \
-        polar-dev:latest
+        -e ATUIN_SESSION_NAME=polar-dev \
+        -v $PWD:/workspace \
+        -v $HOME/.config/atuin:/root/.config/atuin:ro \
+        -v $HOME/.local/share/atuin:/root/.local/share/atuin \
+        -p 2222:2223 \
+        localhost/polar-dev:latest
 
 # Start the local docker-compose stack
 run-compose:
@@ -445,6 +450,7 @@ llm-omnicoder-rocm-16GB:
         --min-p 0.0 \
         --repeat-penalty 1.0 \
         --jinja \
+        --spec-type ngram-mod \
         -ub 512 \
         -ctk q4_0 -ctv q4_0 > /tmp/llama-server.log 2>&1
 
@@ -463,6 +469,7 @@ llm-omnicoder-nvidia-12GB:
         --min-p 0.0 \
         --repeat-penalty 1.0 \
         --jinja \
+        --spec-type ngram-mod \
         -ub 512 \
         -ctk q4_0 -ctv q4_0 > /tmp/llama-server.log 2>&1
 
@@ -619,3 +626,78 @@ ci:
         polar-dev:0.1.0 \
         bash -c "start.sh; chmod +x scripts/gitlab-ci.sh; chmod +x scripts/static-tools.sh; scripts/gitlab-ci.sh"
 
+# ── nix-usernetes (local cluster) ────────────────────────────────────────────
+
+_u7s_dir      := env_var('HOME') + "/Documents/projects/usernetes"
+_u7s_kubeconf := _u7s_dir + "/kubeconfig"
+
+# Start the local cluster
+cluster-up:
+    just -f {{_u7s_dir}}/Justfile up
+
+# Stop the local cluster
+cluster-down:
+    just -f {{_u7s_dir}}/Justfile down
+
+# Initialize the cluster (first time only)
+cluster-init:
+    just -f {{_u7s_dir}}/Justfile init
+
+# Wipe all cluster state
+cluster-reset:
+    just -f {{_u7s_dir}}/Justfile reset
+
+# Show cluster status
+cluster-status:
+    KUBECONFIG={{_u7s_kubeconf}} kubectl get nodes
+    KUBECONFIG={{_u7s_kubeconf}} kubectl get pods -A
+
+# Open a shell inside the cluster node
+cluster-shell:
+    podman exec -it u7s bash
+
+# Switch kubectl context to local cluster
+cluster-ctx:
+    @echo "Run: export KUBECONFIG={{_u7s_kubeconf}}"
+
+# Load a nix result or podman image into the cluster containerd
+# Usage: just cluster-load ./result-cassini-image
+#        just cluster-load cassini:latest
+cluster-load image:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ -e "{{image}}" ]; then
+        podman exec -i u7s ctr -n k8s.io images import - < "{{image}}"
+    else
+        podman save "{{image}}" | podman exec -i u7s ctr -n k8s.io images import -
+    fi
+
+neo4j_result := ''
+
+# Build and load all core Polar images into the cluster
+cluster-load-all neo4j_result='':
+    #!/usr/bin/env bash
+    set -euo pipefail
+    _load() {
+        if [ -e "$1" ]; then
+            podman exec -i u7s ctr -n k8s.io images import - < "$1"
+        else
+            podman save "$1" | podman exec -i u7s ctr -n k8s.io images import -
+        fi
+    }
+    if [ -n "{{neo4j_result}}" ]; then
+        _load "{{neo4j_result}}"
+    else
+        echo "Skipping neo4j — pass neo4j_result=<path> to include it."
+    fi
+    just cassini all
+    _load ./result-cassini-image
+    _load ./result-cassini-producer-image
+    _load ./result-cassini-sink-image
+    just scheduler all
+    _load ./result-scheduler-processor
+    _load ./result-scheduler-observer
+    just orchestrator all
+    _load ./result-orchestrator-image
+    _load ./result-clone-image
+    echo "Core images loaded."

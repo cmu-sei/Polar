@@ -40,7 +40,7 @@ let
   observerImage = pkgs.dockerTools.buildImage {
     name = "polar-git-repo-observer";
     tag = "latest";
-    copyToRoot = commonPaths ++ [ observer observerConfig ];
+    contents = commonPaths ++ [ observer observerConfig ];
     uid = commonUser.uid;
     gid = commonUser.gid;
 
@@ -55,7 +55,7 @@ let
   consumerImage = pkgs.dockerTools.buildImage {
     name = "polar-git-consumer";
     tag = "latest";
-    copyToRoot = commonPaths ++ [ consumer ];
+    contents = commonPaths ++ [ consumer ];
     uid = commonUser.uid;
     gid = commonUser.gid;
 
@@ -70,7 +70,7 @@ let
   schedulerImage = pkgs.dockerTools.buildImage {
     name = "polar-git-scheduler";
     tag = "latest";
-    copyToRoot = commonPaths ++ [ scheduler ];
+    contents = commonPaths ++ [ scheduler ];
     uid = commonUser.uid;
     gid = commonUser.gid;
 

@@ -61,7 +61,7 @@ let
     cassiniImage = pkgs.dockerTools.buildLayeredImage {
     name = "cassini";
     tag = "latest";
-    copyToRoot = commonPaths ++ [
+    contents = commonPaths ++ [
         cassiniEnv
     ];
     uid = commonUser.uid;
@@ -80,7 +80,7 @@ let
     producerImage = pkgs.dockerTools.buildLayeredImage {
     name = "harness-producer";
     tag = "latest";
-    copyToRoot = commonPaths ++ [
+    contents = commonPaths ++ [
         harnessProducer
     ];
     uid = commonUser.uid;
@@ -97,7 +97,7 @@ let
     sinkImage = pkgs.dockerTools.buildLayeredImage {
     name = "harness-sink";
     tag = "latest";
-    copyToRoot = commonPaths ++ [
+    contents = commonPaths ++ [
         harnessProducer
     ];
     uid = commonUser.uid;

@@ -25,7 +25,7 @@ let
     observerImage = pkgs.dockerTools.buildImage {
         name = "polar-kube-observer";
         tag = "latest";
-        copyToRoot = commonPaths ++ [observer];
+        contents = commonPaths ++ [observer];
         uid = commonUser.uid;
         gid = commonUser.gid;
 
@@ -40,7 +40,7 @@ let
     consumerImage = pkgs.dockerTools.buildImage {
         name = "polar-kube-consumer";
         tag = "latest";
-        copyToRoot = commonPaths ++ [consumer];
+        contents = commonPaths ++ [consumer];
         uid = commonUser.uid;
         gid = commonUser.gid;
 

@@ -36,7 +36,7 @@ let
   orchestratorImage = pkgs.dockerTools.buildLayeredImage {
     name      = "build-orchestrator";
     tag       = "latest";
-    contents  = commonPaths ++ [ orchestratorEnv ];  # was copyToRoot
+    contents  = commonPaths ++ [ orchestratorEnv ];  # was contents
     config = {
       User       = "${commonUser.uid}:${commonUser.gid}";
       Cmd        = [ "build-orchestrator" ];
@@ -60,7 +60,7 @@ let
   buildProcessorImage = pkgs.dockerTools.buildLayeredImage {
     name      = "build-processor";
     tag       = "latest";
-    contents  = commonPaths ++ [ buildProcessorEnv ];  # was copyToRoot
+    contents  = commonPaths ++ [ buildProcessorEnv ];  # was contents
     config = {
       User       = "${commonUser.uid}:${commonUser.gid}";
       Cmd        = [ "build-orchestrator" ];
