@@ -274,11 +274,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1775009684,
-        "narHash": "sha256-RbxXQdW9kJa9zDRB6V75AgScw5jI7YmFwtwjzkAwsOk=",
+        "lastModified": 1775011920,
+        "narHash": "sha256-TDTKAAIQQfW8lLwVZIm3ffwunr5FcOyfuqF8fDFTX+A=",
         "owner": "daveman1010221",
         "repo": "nix-container-lib",
-        "rev": "a4b2a4037b5b065599f60700a794fde0ede38a92",
+        "rev": "5c36efeab45d824fb7aa528f23285a0d3d952310",
         "type": "github"
       },
       "original": {

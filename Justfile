@@ -379,15 +379,15 @@ run-rocm:
         --cap-add=SYS_PTRACE \
         --ipc=host \
         --network=host \
-        -v /sys/class/kfd:/sys/class/kfd:ro \
-        -v /sys/bus/pci/devices:/sys/bus/pci/devices:ro \
         -e CREATE_USER="$USER" \
         -e CREATE_UID="$(id -u)" \
         -e CREATE_GID="$(id -g)" \
         -e ATUIN_SESSION_NAME=polar-dev \
         -e HIP_VISIBLE_DEVICES=0 \
+        -v /sys/class/kfd:/sys/class/kfd:ro \
+        -v /sys/bus/pci/devices:/sys/bus/pci/devices:ro \
         -v ~/Documents/projects/ai_models/llama:/opt/llama-models:rw \
-        -v ~/Documents/projects/ai_models/ollama:/opt/ollama:rw \
+        -v ~/Documents/projects/ai_models/llama:/opt/ollama:rw \
         -v ~/Documents/projects/ai_state/pi:/opt/pi:rw \
         -v $PWD:/workspace \
         -v $HOME/.config/atuin:/root/.config/atuin:ro \
