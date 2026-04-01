@@ -40,6 +40,9 @@
           { attrPath = "default"; flakeInput = "staticanalysis"; }
           { attrPath = "default"; flakeInput = "dotacat"; }
           { attrPath = "default"; flakeInput = "myNeovimOverlay"; }
+          { attrPath = "sops"; flakeInput = null; }
+          { attrPath = "oras"; flakeInput = null; }
+          { attrPath = "zed-editor"; flakeInput = null; }
         ];
       })
   ];
