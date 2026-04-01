@@ -76,6 +76,9 @@ let polarExtras =
     [ Lib.flakePackage "staticanalysis" "default"
     , Lib.flakePackage "dotacat"        "default"
     , Lib.flakePackage "myNeovimOverlay" "default"
+    , Lib.nixpkgs "sops"
+    , Lib.nixpkgs "oras"
+    , Lib.nixpkgs "zed-editor"
     ]
 
 -- ---------------------------------------------------------------------------

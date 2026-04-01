@@ -28,9 +28,6 @@
     nix-container-lib.url                         = "github:daveman1010221/nix-container-lib";
     nix-container-lib.inputs.nixpkgs.follows      = "nixpkgs";
     nix-container-lib.inputs.flake-utils.follows  = "flake-utils";
-    # pi-agent-rust.url                         = "github:daveman1010221/pi_agent_rust";
-    # pi-agent-rust.inputs.nixpkgs.follows      = "nixpkgs";
-    # pi-agent-rust.inputs.rust-overlay.follows = "rust-overlay";
   };
   outputs = { self, nixpkgs, crane, rust-overlay, flake-utils, advisory-db,
               myNeovimOverlay, staticanalysis, dotacat, nix-container-lib, ... }:
@@ -163,6 +160,36 @@
           buildProcessorImage  = polarPkgs.buildOrchestrator.buildProcessorImage;
         };
 
-        devShells.default = container.devShell;
+        devShells.default = container.devShell.overrideAttrs (old: {
+          shellHook = old.shellHook + ''
+            export GRAPH_DB="neo4j"
+            export GRAPH_ENDPOINT="bolt://127.0.0.1:7687"
+            export GRAPH_PASSWORD="somepassword"
+            export GRAPH_USER="neo4j"
+
+            export BIND_ADDR="127.0.0.1:8080"
+            export CASSINI_BIND_ADDR="$BIND_ADDR"
+            export BROKER_ADDR="$BIND_ADDR"
+            export CONTROLLER_BIND_ADDR="127.0.0.1:3030"
+            export CONTROLLER_ADDR="$CONTROLLER_BIND_ADDR"
+
+            export CASSINI_SERVER_NAME="localhost"
+            export CONTROLLER_SERVER_NAME="localhost"
+            export HARNESS_SERVER_NAME="localhost"
+            export CASSINI_SHUTDOWN_TOKEN="HEYTHERE"
+
+            export RUST_LOG=trace
+            export JAEGER_ENABLE_TRACING=1
+            export JAEGER_OTLP_ENDPOINT="http://localhost:4318/v1/traces"
+
+            export TMPDIR=$(mktemp -d)
+
+            export POLAR_SCHEDULER_LOCAL_PATH="~/Documents/projects/polar-sched-test"
+            export POLAR_SCHEDULER_REMOTE_URL="https://github.com/daveman1010221/polar-schedules.git"
+            export POLAR_SCHEDULER_SYNC_INTERVAL="120"
+            export POLAR_SCHEDULER_GIT_USERNAME=""
+            export POLAR_SCHEDULER_GIT_PASSWORD=""
+          '';
+        });
       });
 }
