@@ -59,6 +59,7 @@ let polarPipeline : Lib.PipelineConfig =
 let polarCiExtras =
   Lib.customLayer "polar-ci-extras"
     [ Lib.flakePackage "staticanalysis" "default"
+    , Lib.flakePackage "cassini-client" "default"
     ]
 
 let polarEnv : List Lib.EnvVar =

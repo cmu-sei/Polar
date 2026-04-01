@@ -56,7 +56,12 @@
         # ── Container lib helper ───────────────────────────────────────────────
         mkPolarContainer = configNixPath: nix-container-lib.lib.${system}.mkContainer {
           inherit system pkgs;
-          inputs = { inherit staticanalysis dotacat myNeovimOverlay rust-overlay; };
+          inputs = {
+            inherit staticanalysis dotacat myNeovimOverlay rust-overlay;
+            cassini-client = {
+              packages.${system}.default = polarPkgs.cassini.clientBin;
+            };
+          };
           inherit configNixPath;
         };
 

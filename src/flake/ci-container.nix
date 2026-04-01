@@ -32,7 +32,10 @@
     (u:
       u.Custom {
         name = "polar-ci-extras";
-        packages = [ { attrPath = "default"; flakeInput = "staticanalysis"; } ];
+        packages = [
+          { attrPath = "default"; flakeInput = "staticanalysis"; }
+          { attrPath = "default"; flakeInput = "cassini-client"; }
+        ];
       })
   ];
   pipeline = {
