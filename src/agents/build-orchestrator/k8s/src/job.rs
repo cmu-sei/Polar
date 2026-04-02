@@ -94,6 +94,14 @@ const WORKSPACE_VOLUME: &str = "workspace";
 /// as env vars into the init container only — never into the main container.
 const GIT_CREDS_VOLUME: &str = "git-credentials";
 
+const TLS_CLIENT_KEY: &str = "tls.key";
+const TLS_CLIENT_CERT: &str = "tls.crt";
+const TLS_CA_CERT: &str = "ca.crt";
+const TLS_CERT_DIR: &str = "/etc/tls";
+
+const CLIENT_TLS_SECRET_NAME: &str = "client-tls";
+const CLIENT_TLS_VOLUME_NAME: &str = CLIENT_TLS_SECRET_NAME;
+
 /// Derives a deterministic, DNS-safe Job name from a build ID.
 /// Kubernetes names must be <= 63 chars, lowercase alphanumeric and hyphens.
 /// A UUID is 36 chars; with the prefix "cyclops-build-" (14 chars) = 50 chars total.
@@ -146,7 +154,7 @@ pub fn build_job_manifest(spec: &BuildSpec, namespace: &str) -> Job {
         // TODO: add hardned security context back, or at least allow users to specify their own via config
         // security_context: Some(hardened_security_context()),
         resources: Some(default_resources()),
-        volume_mounts: Some(vec![workspace_volume_mount()]),
+        volume_mounts: Some(vec![client_tls_volume_mount(), workspace_volume_mount()]),
         ..Default::default()
     };
 
@@ -158,7 +166,7 @@ pub fn build_job_manifest(spec: &BuildSpec, namespace: &str) -> Job {
         containers: vec![pipeline_container],
         volumes: Some(vec![
             workspace_volume(),
-            // git_credentials_volume(&spec.git_credentials), TODO: Optionally insert git credentials via configuration
+            client_tls_voiume(), // git_credentials_volume(&spec.git_credentials), TODO: Optionally insert git credentials via configuration
         ]),
         // the clone image runs as non-root user, so we must make sure that the emptydir we clone into is owned by git
         security_context: Some(PodSecurityContext {
@@ -331,6 +339,21 @@ fn pipeline_env_vars(spec: &BuildSpec) -> Vec<EnvVar> {
             value: Some(WORKSPACE_PATH.to_string()),
             ..Default::default()
         },
+        EnvVar {
+            name: "TLS_CA_CERT".to_string(),
+            value: Some(format!("{TLS_CERT_DIR}/{TLS_CA_CERT}")),
+            ..Default::default()
+        },
+        EnvVar {
+            name: "TLS_CLIENT_CERT".to_string(),
+            value: Some(format!("{TLS_CERT_DIR}/{TLS_CLIENT_CERT}")),
+            ..Default::default()
+        },
+        EnvVar {
+            name: "TLS_CLIENT_KEY".to_string(),
+            value: Some(format!("{TLS_CERT_DIR}/{TLS_CLIENT_KEY}")),
+            ..Default::default()
+        },
         // Additional caller-supplied env vars. Injected last so they can
         // override the standard vars if absolutely necessary, though that
         // should be considered a code smell.
@@ -471,6 +494,20 @@ fn workspace_volume() -> Volume {
     }
 }
 
+/// The tls cert volume. Populated by a secret current provided by cert-manager.
+/// Must exist for jobs to use the cassini-client
+fn client_tls_voiume() -> Volume {
+    Volume {
+        name: CLIENT_TLS_VOLUME_NAME.to_string(),
+        secret: Some(SecretVolumeSource {
+            secret_name: Some(CLIENT_TLS_SECRET_NAME.to_string()),
+            optional: Some(false),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
 /// Volume mount for the workspace. Read-only in the main container.
 ///
 /// The pipeline runner should never need to write back to /workspace.
@@ -481,6 +518,16 @@ fn workspace_volume_mount() -> VolumeMount {
     VolumeMount {
         name: WORKSPACE_VOLUME.to_string(),
         mount_path: WORKSPACE_PATH.to_string(),
+        read_only: Some(true),
+        ..Default::default()
+    }
+}
+/// Volume mount for the client tls files. Read-only in the main container.
+///
+fn client_tls_volume_mount() -> VolumeMount {
+    VolumeMount {
+        name: CLIENT_TLS_VOLUME_NAME.to_string(),
+        mount_path: TLS_CERT_DIR.to_string(),
         read_only: Some(true),
         ..Default::default()
     }

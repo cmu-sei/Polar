@@ -16,15 +16,8 @@ let
     doCheck = false;
     });
 
-    # build the client
-    clientLib = craneLib.buildPackage (crateArgs // {
-    cargoExtraArgs = "--lib cassini-client --locked";
-    src = workspaceFileset ./client;
-    # Disable tests for now, We'll run them later with env vars and TlsCerts
-    doCheck = false;
-    });
 
-    clientBin = craneLib.buildPackage (crateArgs // {
+    client = craneLib.buildPackage (crateArgs // {
     cargoExtraArgs = "--bin cassini-client --locked";
     src = workspaceFileset ./client;
     # Disable tests for now, We'll run them later with env vars and TlsCerts
@@ -112,5 +105,5 @@ let
     };
 in
 {
-  inherit cassini cassiniImage clientLib clientBin harnessProducer harnessSink producerImage sinkImage;
+  inherit cassini cassiniImage client harnessProducer harnessSink producerImage sinkImage;
 }

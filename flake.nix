@@ -59,7 +59,7 @@
           inputs = {
             inherit staticanalysis dotacat myNeovimOverlay rust-overlay;
             cassini-client = {
-              packages.${system}.default = polarPkgs.cassini.clientBin;
+              packages.${system}.default = polarPkgs.cassini.client;
             };
           };
           inherit configNixPath;

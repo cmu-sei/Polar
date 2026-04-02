@@ -1,4 +1,3 @@
--- Some values specific to the environment
 let Constants = ../types/constants.dhall
 
 let kubernetes = ../types/kubernetes.dhall
@@ -7,19 +6,26 @@ let Cassini = ../types/cassini.dhall
 
 let Agents = ../types/agents.dhall
 
-let imagePullSecrets =
-      [ kubernetes.LocalObjectReference::{
-        , name = Some Constants.imagePullSecretName
-        }
-      ]
-
 let commitSha = env:CI_COMMIT_SHORT_SHA as Text ? "latest"
+
+let img = \(name : Text) -> "polar/${name}:${commitSha}"
+
+let tls = Constants.commonClientTls
+
+-- =============================================================================
+-- Infrastructure
+-- =============================================================================
+
+let imagePullSecrets =
+      [ kubernetes.LocalObjectReference::{ name = Some Constants.imagePullSecretName } ]
+
+let cassiniTlsVolumeMount =
+      kubernetes.VolumeMount::{ name = "client-tls", mountPath = Constants.tlsPath }
 
 let cassini
     : Cassini
     = { name = "cassini"
-      , image =
-          "registry.sandbox.labz.s-box.org/sei/polar-mirror/cassini:${commitSha}"
+      , image = img "cassini"
       , ports = { http = 3000, tcp = 8080 }
       , tls =
         { certificateRequestName = "cassini-certificate"
@@ -27,147 +33,12 @@ let cassini
           { commonName = Constants.mtls.commonName
           , dnsNames = [ "cassini-ip-svc.polar.svc.cluster.local" ]
           , duration = "2160h"
-          , issuerRef =
-            { kind = "Issuer", name = Constants.mtls.leafIssuerName }
+          , issuerRef = { kind = "Issuer", name = Constants.mtls.leafIssuerName }
           , renewBefore = "360h"
           , secretName = Constants.CassiniServerCertificateSecret
           }
         }
       }
-
-let cassiniTlsVolumeMount =
-      kubernetes.VolumeMount::{
-      , name = "client-tls"
-      , mountPath = Constants.tlsPath
-      }
-
-let gitlabObserver
-    : Agents.GitlabObserver
-    = { name = "polar-gitlab-observer"
-      , image =
-          "registry.sandbox.labz.s-box.org/sei/polar-mirror/polar-gitlab-observer:${commitSha}"
-      , endpoint = "https://gitlab.sandbox.labz.s-box.org"
-      , maxBackoffSecs = 300
-      , baseIntervalSecs = 30
-      , token = Some env:GITLAB_TOKEN as Text
-      , tls = Constants.commonClientTls
-      }
-
-let gitlabConsumer
-    : Agents.GitlabConsumer
-    = { name = "polar-gitlab-consumer"
-      , image =
-          "registry.sandbox.labz.s-box.org/sei/polar-mirror/polar-gitlab-consumer:${commitSha}"
-      , graph = Constants.graphConfig
-      , tls = Constants.commonClientTls
-      }
-
-let clientTlsConfig
-    : Agents.ClientTlsConfig
-    = { broker_endpoint = Constants.cassiniDNSName
-      , server_name = Constants.mtls.commonName
-      , client_certificate_path = Constants.mtls.certPath
-      , client_key_path = Constants.mtls.keyPath
-      , client_ca_cert_path = Constants.mtls.caCertPath
-      }
-
-let linker
-    : Agents.ProvenanceLinker
-    = { name = Constants.ProvenanceLinkerName
-      , image =
-          "registry.sandbox.labz.s-box.org/sei/polar-mirror/polar-linker-agent:2de42e85"
-      , graph = Constants.graphConfig
-      , tls = Constants.commonClientTls
-      }
-
-let resolver
-    : Agents.ProvenanceResolver
-    = { name = Constants.ProvenanceLinkerName
-      , image = "docker.io/library/provenance-resolver-agent:latest"
-      , tls = Constants.commonClientTls
-      }
-
-let kubeAgent =
-      { name = "kubernetes-agent"
-      , observer =
-        { name = "kube-observer"
-        , serviceAccountName = "kube-observer-sa"
-        , secretName = "kube-observer-sa-token"
-        , image =
-            "registry.sandbox.labz.s-box.org/sei/polar/polar-kube-observer:2de42e85"
-        }
-      , consumer =
-        { name = "kube-consumer"
-        , image =
-            "registry.sandbox.labz.s-box.org/sei/polar/polar-kube-consumer:2de42e85"
-        , graph =
-          { graphDB = "neo4j"
-          , graphUsername = "neo4j"
-          , graphPassword = kubernetes.SecretKeySelector::{
-            , name = Some "polar-graph-pw"
-            , key = "secret"
-            }
-          }
-        }
-      , containerSecurityContext = kubernetes.SecurityContext::{
-        , runAsGroup = Some 1000
-        , runAsNonRoot = Some True
-        , runAsUser = Some 1000
-        , capabilities = Some kubernetes.Capabilities::{ drop = Some [ "ALL" ] }
-        }
-      }
-
-let gitObserverConfig = ./conf/git.json as Text
-
-let gitObserver
-    : Agents.GitObserver
-    = { name = "git-repo-observer"
-      , image =
-          "registry.sandbox.labz.s-box.org/sei/polar-mirror/polar-git-observer:2de42e85"
-      , config = gitObserverConfig
-      , tls = Constants.commonClientTls
-      }
-
-let gitConsumer
-    : Agents.GitConsumer
-    = { name = "git-repo-consumer"
-      , image =
-          "registry.sandbox.labz.s-box.org/sei/polar-mirror/polar-git-processor:2de42e85"
-      , tls = Constants.commonClientTls
-      , graph = Constants.graphConfig
-      }
-
-let gitScheduler
-    : Agents.GitScheduler
-    = { name = "git-scheduler"
-      , image =
-          "registry.sandbox.labz.s-box.org/sei/polar-mirror/polar-git-processor:2de42e85"
-      , graph = Constants.graphConfig
-      , tls = Constants.commonClientTls
-      }
-
-let kubeObserver
-    : Agents.KubeObserver
-    = { name = "kube-observer"
-      , serviceAccountName = "kube-observer-sa"
-      , secretName = "kube-observer-sa-token"
-      , tls = Constants.commonClientTls
-      , image =
-          "registry.sandbox.labz.s-box.org/sei/polar-mirror/polar-kube-observer:2de42e85"
-      }
-
-let kubeConsumer
-    : Agents.KubeConsumer
-    = { name = "kube-consumer"
-      , tls = Constants.commonClientTls
-      , image =
-          "registry.sandbox.labz.s-box.org/sei/polar-mirror/polar-kube-consumer:2de42e85"
-      , graph = Constants.graphConfig
-      }
-
-let neo4jPorts = { http = 7474, bolt = 7687 }
-
-let neo4jHomePath = "/var/lib/neo4j"
 
 let neo4j =
       { name = "polar-neo4j"
@@ -209,8 +80,112 @@ let jaeger =
       }
 
 let jaegerDNSName =
-      "http://${jaeger.service.name}.${Constants.PolarNamespace}.svc.cluster.local:${Natural/show
-                                                                                       jaeger.ports.http}/v1/traces"
+      "http://${jaeger.service.name}.${Constants.PolarNamespace}.svc.cluster.local:${Natural/show jaeger.ports.http}/v1/traces"
+
+-- =============================================================================
+-- Agents
+-- =============================================================================
+
+let gitlabObserver
+    : Agents.GitlabObserver
+    = { name = "polar-gitlab-observer"
+      , image = img "polar-gitlab-observer"
+      , endpoint = "https://gitlab.sandbox.labz.s-box.org"
+      , maxBackoffSecs = 300
+      , baseIntervalSecs = 30
+      , token = Some env:GITLAB_TOKEN as Text
+      , tls
+      }
+
+let gitlabConsumer
+    : Agents.GitlabConsumer
+    = { name = "polar-gitlab-consumer"
+      , image = img "polar-gitlab-consumer"
+      , graph = Constants.graphConfig
+      , tls
+      }
+
+let linker
+    : Agents.ProvenanceLinker
+    = { name = Constants.ProvenanceLinkerName
+      , image = img "polar-linker-agent"
+      , graph = Constants.graphConfig
+      , tls
+      }
+
+let resolver
+    : Agents.ProvenanceResolver
+    = { name = Constants.ProvenanceResolverName
+      , image = img "provenance-resolver-agent"
+      , tls
+      }
+
+let gitObserver
+    : Agents.GitObserver
+    = { name = "git-repo-observer"
+      , image = img "polar-git-observer"
+      , config = ./conf/git.json as Text
+      , tls
+      }
+
+let gitConsumer
+    : Agents.GitConsumer
+    = { name = "git-repo-consumer"
+      , image = img "polar-git-processor"
+      , graph = Constants.graphConfig
+      , tls
+      }
+
+let gitScheduler
+    : Agents.GitScheduler
+    = { name = "git-scheduler"
+      , image = img "polar-git-processor"
+      , graph = Constants.graphConfig
+      , tls
+      }
+
+let kubeObserver
+    : Agents.KubeObserver
+    = { name = "kube-observer"
+      , serviceAccountName = "kube-observer-sa"
+      , secretName = "kube-observer-sa-token"
+      , image = img "polar-kube-observer"
+      , tls
+      }
+
+let kubeConsumer
+    : Agents.KubeConsumer
+    = { name = "kube-consumer"
+      , image = img "polar-kube-consumer"
+      , graph = Constants.graphConfig
+      , tls
+      }
+
+let buildOrchestrator: Agents.BuildOrchestrator = {
+    name = "build-orchestrator"
+    , image = img "polar-build-orchestrator"
+    , tls
+    , serviceAccountName = "build-processor-sa"
+    , secretName = "build-processor-sa-token"
+    , config = ./conf/cyclops.yaml as Text
+    }
+
+let buildProcessor
+    : Agents.BuildProcessor
+    = { name = "build-processor"
+        , image = img "polar-build-processor"
+        , graph = Constants.graphConfig
+        , tls
+        }
+
+let clientTlsConfig
+    : Agents.ClientTlsConfig
+    = { broker_endpoint = Constants.cassiniDNSName
+      , server_name = Constants.mtls.commonName
+      , client_certificate_path = Constants.mtls.certPath
+      , client_key_path = Constants.mtls.keyPath
+      , client_ca_cert_path = Constants.mtls.caCertPath
+      }
 
 in  { imagePullSecrets
     , cassini
@@ -229,4 +204,6 @@ in  { imagePullSecrets
     , neo4jDNSName
     , neo4jBoltAddr
     , jaegerDNSName
+    , buildProcessor
+    , buildOrchestrator
     }

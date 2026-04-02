@@ -1,12 +1,10 @@
 let kubernetes = ./kubernetes.dhall
 
-let SecretKeySelector =
-      { key : Text, name : Optional Text, optional : Optional Bool }
 
 let GraphConfig =
       { graphDB : Text
       , graphUsername : Text
-      , graphPassword : SecretKeySelector
+      , graphPassword : kubernetes.SecretKeySelector.Type
       }
 
 let ClientTlsConfig =
@@ -17,77 +15,67 @@ let ClientTlsConfig =
       , client_ca_cert_path : Text
       }
 
+-- Base type. Every agent in the system has at minimum these three fields.
+let PolarAgent =
+      { name : Text
+      , image : Text
+      , tls : ClientTlsConfig
+      }
+
+-- Structural extensions. Use these to build concrete agent types.
+let GraphProcessor = PolarAgent //\\ { graph : GraphConfig }
+
+let WithConfig = PolarAgent //\\ { config : Text }
+
+let WithServiceAccount =
+      { serviceAccountName : Text, secretName : Text }
+
+-- Concrete agent type aliases. These exist purely for documentation clarity
+-- at the call site; structurally they are identical to their base.
+let GitConsumer = GraphProcessor
+let GitScheduler = GraphProcessor
+let ProvenanceLinker = GraphProcessor
+let KubeConsumer = GraphProcessor
+let GitlabConsumer = GraphProcessor
+
+let GitObserver = WithConfig
+let BuildOrchestrator = WithConfig //\\ WithServiceAccount
+
+let BuildProcessor = GraphProcessor
+
+let KubeObserver = PolarAgent //\\ WithServiceAccount
+
+-- ProvenanceResolver doesn't need graph access, just the base agent + TLS.
+-- Keeping it as a named alias makes intent explicit at the values.dhall level.
+let ProvenanceResolver = PolarAgent
+
+-- GitlabObserver is the only genuine structural outlier.
+let GitlabObserver =
+      PolarAgent
+        //\\ { baseIntervalSecs : Natural
+             , maxBackoffSecs : Natural
+             , endpoint : Text
+             , token : Optional Text
+             }
+
 {- ============================================================================
-    Git Agent Static Credential Configuration Types
-    ----------------------------------------------------------------------------
+   Git Agent Static Credential Configuration Types
+   ----------------------------------------------------------------------------
 -}
+let HttpCredential = { username : Text, token : Text }
 
-let HttpCredential =
-    { username : Text
-    , token : Text
-    }
-
-let HostCredentialConfig =
-    { http : Optional HttpCredential
-    }
+let HostCredentialConfig = { http : Optional HttpCredential }
 
 let StaticCredentialConfig =
-    { hosts : List
-        { mapKey : Text
-        , mapValue : HostCredentialConfig
-        }
-    }
+      { hosts : List { mapKey : Text, mapValue : HostCredentialConfig } }
 
-let GitlabObserver =
-      { name : Text
-      , image : Text
-      , baseIntervalSecs : Natural
-      , maxBackoffSecs : Natural
-      , endpoint : Text
-      , token : Optional Text
-      , tls : ClientTlsConfig
-      }
-
-let GitlabConsumer = { name: Text, image: Text, graph : GraphConfig, tls : ClientTlsConfig }
-
-let KubeObserver =
-      { name : Text
-      , image : Text
-      , tls : ClientTlsConfig
-      , serviceAccountName : Text
-      , secretName : Text
-      }
-
-let KubeConsumer =
-      { name : Text, image : Text, graph : GraphConfig, tls : ClientTlsConfig }
-
-let ProvenanceLinker =
-      { name : Text, image : Text, tls : ClientTlsConfig, graph : GraphConfig }
-
-
-
--- simple data types to configure the resolver with.
-let Registry =
-    { name : Text
-    , url : Text
-    , clientCertPath : Optional Text
-    }
-
-let ResolverConfig =
-    { registries : List Registry }
-
--- TODO: Add resolver config as a field
-let ProvenanceResolver = { name : Text, image : Text, tls : ClientTlsConfig }
-
-let GitObserver = { name : Text, image : Text, tls: ClientTlsConfig, config: Text }
-
-let GitConsumer = { name : Text, image : Text, tls: ClientTlsConfig, graph : GraphConfig }
-
-let GitScheduler = { name : Text, image : Text, tls: ClientTlsConfig, graph : GraphConfig }
-
-in  { SecretKeySelector
-    , ClientTlsConfig
+in  {
+    ClientTlsConfig
     , GraphConfig
+    , PolarAgent
+    , GraphProcessor
+    , WithConfig
+    , WithServiceAccount
     , GitlabObserver
     , GitlabConsumer
     , KubeObserver
@@ -98,4 +86,6 @@ in  { SecretKeySelector
     , GitObserver
     , GitConsumer
     , GitScheduler
+    , BuildOrchestrator
+    , BuildProcessor
     }

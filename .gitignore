@@ -35,7 +35,7 @@ my.env
 .env.nuon
 ci.env
 docker.json
-
+.polar/
 ca_certificates/
 server/
 pipeline-out/

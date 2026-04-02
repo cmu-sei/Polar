@@ -25,8 +25,6 @@ fn resolve_socket_path(override_path: Option<&PathBuf>) -> PathBuf {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    cassini_tracing::init_tracing("cassini-cli");
-
     let cli = Cli::parse();
     let register_timeout = Duration::from_secs(cli.register_timeout);
     let format = &cli.format;
@@ -39,6 +37,9 @@ async fn main() -> Result<()> {
 
     // Daemon start path — no subcommand needed.
     if cli.daemon {
+        //only init_tracing and logs in daemon mode!!
+        cassini_tracing::init_tracing("cassini-cli");
+
         let result = run_daemon(
             socket_path,
             client_config.clone(),
