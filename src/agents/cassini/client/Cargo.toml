@@ -35,7 +35,6 @@ cassini-tracing.workspace = true
 cassini-types.workspace = true
 opentelemetry.workspace = true
 ractor.workspace = true
-ring.workspace = true
 rkyv = { workspace = true }
 rustls.workspace = true
 socket2.workspace = true

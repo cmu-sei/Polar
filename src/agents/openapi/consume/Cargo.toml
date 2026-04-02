@@ -12,10 +12,9 @@ neo4rs.workspace = true
 polar.workspace = true
 ractor.workspace = true
 reqwest = { workspace = true, features = ["json"] }
-ring.workspace = true
 rkyv.workspace = true
 rustls-webpki.workspace = true
-rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", "ring", "std"] }
+rustls.workspace = true
 serde_json.workspace = true
 serde.workspace = true
 tokio.workspace = true

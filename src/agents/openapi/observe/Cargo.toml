@@ -11,7 +11,6 @@ native-tls = "=0.2.14"
 polar.workspace = true
 ractor.workspace = true
 reqwest = { workspace = true, features = ["json"] }
-ring.workspace = true
 rkyv.workspace = true
 serde_json.workspace = true
 serde.workspace = true

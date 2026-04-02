@@ -108,7 +108,7 @@ git2 = "=0.20.2"
 hex = "0.4.3"
 indexmap = "2.13"                                        # used in jira/common
 k8s-openapi = { version = "0.26", features = ["v1_32"] }
-kube = { version = "2.0.1", default-features = false, features = ["client", "aws-lc-rs", "rustls-tls", "runtime", "derive"] }
+kube = { version = "2.0.1", default-features = false, features = ["client", "rustls-tls", "runtime", "derive"] }
 libloading = "0.8.9"
 log = "0.4.29"                                            # used in jira/observe
 notify = "7"
@@ -124,10 +124,9 @@ rand = "0.10.0"                                            # upgraded from 0.9
 rand_core = "0.10.0"
 reactor-trait = "3.1.1"
 reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
-ring = "=0.17.14"
 rkyv = "0.8.15"
-rustls = { version = "0.23", features = ["aws-lc-rs"] }
-rustls-webpki = "0.103"                                   # used in openapi/consume
+rustls = { version = "0.23.37", default-features = false, features = ["aws-lc-rs", "std", "tls12"] }
+rustls-webpki = { version = "0.103", default-features = false, features = ["aws-lc-rs"] }
 serde = { version = "1", features = ["derive"] }
 serde_dhall = { git = "https://github.com/daveman1010221/dhall-rust", branch = "modernize-rkyv" }
 serde_json = "1.0"

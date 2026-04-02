@@ -19,7 +19,6 @@ rustls.workspace = true
 tokio-rustls.workspace = true
 cassini-tracing.workspace = true
 cassini-types.workspace = true
-ring.workspace = true
 url.workspace = true
 opentelemetry.workspace = true
 tracing-opentelemetry.workspace = true
