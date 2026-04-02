@@ -104,7 +104,7 @@ features = "0.10.0"                                      # used in resolver
 futures = "0.3.32"                                       # used in kube-observer
 futures-lite = "2.6.1"
 getrandom = "0.3.4"
-git2 = "=0.20.2"
+git2 = "0.20"
 hex = "0.4.3"
 indexmap = "2.13"                                        # used in jira/common
 k8s-openapi = { version = "0.26", features = ["v1_32"] }
