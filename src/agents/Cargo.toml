@@ -137,6 +137,8 @@ socket2 = "0.5"                                            # used in cassini/cli
 sysinfo = "0.36"
 tcp-stream = "0.34"
 tempfile = "3.26.0"                                        # used in tests
+testcontainers = "0.27.2"
+testcontainers-modules = { version = "0.15.0", features = ["neo4j"] }
 tokio = { version = "1.49.0", features = ["full"] }       # full included for simplicity
 tokio-rustls = "0.26.4"
 tokio-util = {version = "0.7.18", features = ["compat"]}
