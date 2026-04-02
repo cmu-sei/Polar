@@ -1,0 +1,53 @@
+apiVersion: kind.x-k8s.io/v1alpha4
+kind: Cluster
+name: polar
+containerdConfigPatches:
+  - |-
+    [plugins."io.containerd.snapshotter.v1.overlayfs"]
+      root_path = "/tmp/containerd"
+preKubeadmCommands:
+  - |
+    set -e
+    # Unmount all /dev/mapper mounts except the root
+    for mnt in $(mount | grep /dev/mapper | grep -v "on / " | awk '{print $3}'); do
+      echo "Unmounting $mnt"
+      umount "$mnt" || true
+    done
+nodes:
+  - role: control-plane
+    extraMounts:
+      - hostPath: /dev/mapper
+        containerPath: /dev/mapper
+        readOnly: true
+      - hostPath: /proc/diskstats
+        containerPath: /proc/diskstats
+        readOnly: true
+      - hostPath: /tmp/kind-containerd
+        containerPath: /var/lib/containerd
+      - hostPath: /tmp/kind-kubelet
+        containerPath: /var/lib/kubelet
+    kubeadmConfigPatches:
+      - |
+        kind: KubeletConfiguration
+        apiVersion: kubelet.config.k8s.io/v1beta1
+        failSwapOn: false
+        evictionHard:
+          nodefs.available: "0%"
+          nodefs.inodesFree: "0%"
+          imagefs.available: "0%"
+    extraPortMappings:
+      - containerPort: 30474
+        hostPort: 7474
+        protocol: TCP
+      - containerPort: 30687
+        hostPort: 7687
+        protocol: TCP
+      - containerPort: 31686
+        hostPort: 16686
+        protocol: TCP
+      - containerPort: 31317
+        hostPort: 4317
+        protocol: TCP
+      - containerPort: 31318
+        hostPort: 4318
+        protocol: TCP
