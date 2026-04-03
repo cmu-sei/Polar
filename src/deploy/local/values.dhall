@@ -51,7 +51,7 @@ let neo4j =
       , certDir = "/var/lib/neo4j/certificates"
       , ports = { http = 7474, https = 7473, bolt = 7687 }
       , config = { name = "neo4j-config", path = "/var/lib/neo4j/conf" }
-      , enableTls = true   -- or false if you want HTTP mode
+      , enableTls = True   -- or false if you want HTTP mode
       , volumes =
         { data =
           { name = "polar-db-data"

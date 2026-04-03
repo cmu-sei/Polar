@@ -216,84 +216,86 @@ let tlsEnv =
 
 let podSpec =
       kubernetes.PodSpec::{
+      , containers =
+          [ kubernetes.Container::{
+            , name = values.neo4j.name
+            , image = Some values.neo4j.image
+            , securityContext = Some kubernetes.SecurityContext::{
+              , runAsGroup = Some 7474
+              , runAsNonRoot = Some True
+              , runAsUser = Some 7474
+              , capabilities = Some kubernetes.Capabilities::{
+                , drop = Some [ "ALL" ]
+                }
+              }
+            , env = Some (baseEnv # tlsEnv)
+            , ports = Some
+                (   [ kubernetes.ContainerPort::{ containerPort = values.neo4j.ports.http }
+                    , kubernetes.ContainerPort::{ containerPort = values.neo4j.ports.bolt }
+                    ]
+                  # ( if values.neo4j.enableTls
+                      then
+                        [ kubernetes.ContainerPort::{ containerPort = values.neo4j.ports.https } ]
+                      else
+                        [] : List kubernetes.ContainerPort.Type
+                    )
+                )
+            , volumeMounts = Some (baseVolumeMounts # tlsVolumeMounts)
+            }
+          ]
       , initContainers = Some
-        [ kubernetes.Container::{
-          , name = "neo4j-init"
-          , image = Some "docker.io/alpine:3.14.0"
-          , command = Some [ "/bin/sh", "-c" ]
-          , args = Some [ setupScript ]
-          , volumeMounts = Some initVolumeMounts
-          , env = Some (baseEnv # tlsEnv)   -- init may need TLS env vars if script uses them
-          }
-        ]
+          [ kubernetes.Container::{
+            , name = "neo4j-init"
+            , image = Some "docker.io/alpine:3.14.0"
+            , command = Some [ "/bin/sh", "-c" ]
+            , args = Some [ setupScript ]
+            , volumeMounts = Some initVolumeMounts
+            , env = Some (baseEnv # tlsEnv)
+            }
+          ]
       , securityContext = Some kubernetes.PodSecurityContext::{
         , fsGroup = Some 7474
         , fsGroupChangePolicy = Some "OnRootMismatch"
         }
-      , containers =
-        [ kubernetes.Container::{
-          , name = values.neo4j.name
-          , image = Some values.neo4j.image
-          , securityContext = Some kubernetes.SecurityContext::{
-            , runAsGroup = Some 7474
-            , runAsNonRoot = Some True
-            , runAsUser = Some 7474
-            , capabilities = Some kubernetes.Capabilities::{ drop = Some [ "ALL" ] }
-            }
-          , env = Some (baseEnv # tlsEnv)
-          , ports = Some
-            [ kubernetes.ContainerPort::{
-              , containerPort = values.neo4j.ports.http
-              }
-            , kubernetes.ContainerPort::{
-              , containerPort = values.neo4j.ports.bolt
-              }
-            ] # (if values.neo4j.enableTls then
-                 [ kubernetes.ContainerPort::{
-                   , containerPort = values.neo4j.ports.https
-                   }
-                 ] else [])
-          , volumeMounts = Some (baseVolumeMounts # tlsVolumeMounts)
-          }
-        ]
       , volumes = Some
-        ( [ kubernetes.Volume::{
-          , name = values.neo4j.volumes.data.name
-          , persistentVolumeClaim = Some kubernetes.PersistentVolumeClaimVolumeSource::{
-            , claimName = values.neo4j.volumes.data.name
-            }
-          }
-        , kubernetes.Volume::{
-          , name = values.neo4j.volumes.logs.name
-          , persistentVolumeClaim = Some kubernetes.PersistentVolumeClaimVolumeSource::{
-            , claimName = values.neo4j.volumes.logs.name
-            }
-          }
-        , kubernetes.Volume::{
-          , name = values.neo4j.config.name
-          , configMap = Some kubernetes.ConfigMapVolumeSource::{
-            , name = Some values.neo4j.config.name
-            , items = Some
-              [ kubernetes.KeyToPath::{
-                , key = "neo4j.conf"
-                , path = "neo4j.conf"
+          (   [ kubernetes.Volume::{
+                , name = values.neo4j.volumes.data.name
+                , persistentVolumeClaim = Some kubernetes.PersistentVolumeClaimVolumeSource::{
+                  , claimName = values.neo4j.volumes.data.name
+                  }
+                }
+              , kubernetes.Volume::{
+                , name = values.neo4j.volumes.logs.name
+                , persistentVolumeClaim = Some kubernetes.PersistentVolumeClaimVolumeSource::{
+                  , claimName = values.neo4j.volumes.logs.name
+                  }
+                }
+              , kubernetes.Volume::{
+                , name = values.neo4j.config.name
+                , configMap = Some kubernetes.ConfigMapVolumeSource::{
+                  , name = Some values.neo4j.config.name
+                  , items = Some
+                    [ kubernetes.KeyToPath::{ key = "neo4j.conf", path = "neo4j.conf" } ]
+                  }
+                }
+              , kubernetes.Volume::{
+                , name = values.neo4j.configVolume
+                , emptyDir = Some kubernetes.EmptyDirVolumeSource::{=}
                 }
               ]
-            }
-          }
-        , kubernetes.Volume::{
-          , name = values.neo4j.configVolume
-          , emptyDir = Some kubernetes.EmptyDirVolumeSource::{=}
-          }
-        ] # (if values.neo4j.enableTls then
-             [ kubernetes.Volume::{
-               , name = values.neo4j.volumes.certs.name
-               , persistentVolumeClaim = Some kubernetes.PersistentVolumeClaimVolumeSource::{
-                 , claimName = values.neo4j.volumes.certs.name
-                 }
-               }
-             ] else [])
-        )
+            # ( if values.neo4j.enableTls
+                then
+                  [ kubernetes.Volume::{
+                    , name = values.neo4j.volumes.certs.name
+                    , persistentVolumeClaim = Some kubernetes.PersistentVolumeClaimVolumeSource::{
+                      , claimName = values.neo4j.volumes.certs.name
+                      }
+                    }
+                  ]
+                else
+                  [] : List kubernetes.Volume.Type
+              )
+          )
       }
 
 let statefulSet =
@@ -335,6 +337,6 @@ let tlsResources =
       if values.neo4j.enableTls then
         [ kubernetes.Resource.PersistentVolumeClaim certVolumeClaim ]
       else
-        [] : List kubernetes.Resource.Type
+        [] : List kubernetes.Resource
 
 in  baseResources # tlsResources
