@@ -104,11 +104,11 @@ features = "0.10.0"                                      # used in resolver
 futures = "0.3.32"                                       # used in kube-observer
 futures-lite = "2.6.1"
 getrandom = "0.3.4"
-git2 = "=0.20.2"
+git2 = "0.20"
 hex = "0.4.3"
 indexmap = "2.13"                                        # used in jira/common
 k8s-openapi = { version = "0.26", features = ["v1_32"] }
-kube = { version = "2.0.1", default-features = false, features = ["client", "aws-lc-rs", "rustls-tls", "runtime", "derive"] }
+kube = { version = "2.0.1", default-features = false, features = ["client", "rustls-tls", "runtime", "derive"] }
 libloading = "0.8.9"
 log = "0.4.29"                                            # used in jira/observe
 notify = "7"
@@ -124,10 +124,9 @@ rand = "0.10.0"                                            # upgraded from 0.9
 rand_core = "0.10.0"
 reactor-trait = "3.1.1"
 reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
-ring = "=0.17.14"
 rkyv = "0.8.15"
-rustls = { version = "0.23", features = ["aws-lc-rs"] }
-rustls-webpki = "0.103"                                   # used in openapi/consume
+rustls = { version = "0.23.37", default-features = false, features = ["aws-lc-rs", "std", "tls12"] }
+rustls-webpki = { version = "0.103", default-features = false, features = ["aws-lc-rs"] }
 serde = { version = "1", features = ["derive"] }
 serde_dhall = { git = "https://github.com/daveman1010221/dhall-rust", branch = "modernize-rkyv" }
 serde_json = "1.0"
@@ -138,6 +137,8 @@ socket2 = "0.5"                                            # used in cassini/cli
 sysinfo = "0.36"
 tcp-stream = "0.34"
 tempfile = "3.26.0"                                        # used in tests
+testcontainers = "0.27.2"
+testcontainers-modules = { version = "0.15.0", features = ["neo4j"] }
 tokio = { version = "1.49.0", features = ["full"] }       # full included for simplicity
 tokio-rustls = "0.26.4"
 tokio-util = {version = "0.7.18", features = ["compat"]}

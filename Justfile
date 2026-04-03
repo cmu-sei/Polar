@@ -733,3 +733,187 @@ cluster-load-all neo4j_result='':
     _load ./result-orchestrator-image
     _load ./result-clone-image
     echo "Core images loaded."
+
+# ── kind (local cluster) ──────────────────────────────────────────────────────
+
+_kind_cluster  := "polar"
+_kind_config   := "src/conf/kind-cluster.yaml"
+_deploy_local  := "src/deploy/local"
+_manifests_out := "manifests-local"
+
+# Create the local kind cluster (idempotent)
+kind-up:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if kind get clusters 2>/dev/null | grep -qx "{{_kind_cluster}}"; then
+        echo "Cluster '{{_kind_cluster}}' already exists — skipping."
+    else
+        echo "Creating kind cluster '{{_kind_cluster}}'..."
+        kind create cluster --name {{_kind_cluster}} --config {{_kind_config}}
+    fi
+    kubectl cluster-info --context kind-{{_kind_cluster}}
+
+# Tear down the local kind cluster
+kind-down:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if kind get clusters 2>/dev/null | grep -qx "{{_kind_cluster}}"; then
+        kind delete cluster --name {{_kind_cluster}}
+    else
+        echo "No cluster '{{_kind_cluster}}' — nothing to do."
+    fi
+
+# Switch kubectl context to the local kind cluster
+kind-ctx:
+    kubectl config use-context kind-{{_kind_cluster}}
+
+# Show cluster health at a glance
+kind-status:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    echo "=== kind clusters ==="
+    kind get clusters
+    echo ""
+    echo "=== nodes ==="
+    kubectl get nodes --context kind-{{_kind_cluster}}
+    echo ""
+    echo "=== pods (all namespaces) ==="
+    kubectl get pods -A --context kind-{{_kind_cluster}}
+
+# Load an image into kind — accepts either a nix result path or a podman image name.
+# Usage: just kind-load ./result-cassini-image
+#        just kind-load cassini:latest
+kind-load image:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ -e "{{image}}" ]; then
+        echo "Loading nix result '{{image}}' into kind cluster '{{_kind_cluster}}'..."
+        kind load image-archive {{image}} --name {{_kind_cluster}}
+    else
+        echo "Loading podman image '{{image}}' into kind cluster '{{_kind_cluster}}'..."
+        podman save {{image}} | kind load image-archive /dev/stdin --name {{_kind_cluster}}
+    fi
+
+# Build and load all core Polar images into kind (skips podman entirely).
+# Requires: kind-up, and nix-neo4j result-neo4j-image available at NEO4J_IMAGE_PATH.
+# Usage: just kind-load-all
+#        just NEO4J_IMAGE_PATH=~/projects/nix-neo4j/result-neo4j-image kind-load-all
+kind-load-all neo4j_result='':
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    load() { just kind-load "$1"; }
+
+    # Infrastructure
+    if [ -n "{{neo4j_result}}" ]; then
+        load "{{neo4j_result}}"
+    else
+        echo "Skipping neo4j — pass neo4j_result=<path> to include it."
+        echo "  e.g. just kind-load-all neo4j_result=../nix-neo4j/result-neo4j-image"
+    fi
+
+    # Cassini
+    just cassini all
+    load ./result-cassini-image
+    load ./result-cassini-producer-image
+    load ./result-cassini-sink-image
+
+    # Scheduler
+    just scheduler all
+    load ./result-scheduler-processor
+    load ./result-scheduler-observer
+
+    # Build orchestrator
+    just orchestrator all
+    load ./result-orchestrator-image
+    load ./result-build-processor-image
+    load ./result-clone-image
+
+    echo "Core images loaded. Agent images (gitlab, kube, git, web, provenance) load on demand:"
+    echo "  just kind-load-agents gitlab"
+    echo "  just kind-load-agents kube"
+    echo "  etc."
+
+# Build and load a specific agent pair (or all agents) into kind.
+# Usage: just kind-load-agents gitlab
+#        just kind-load-agents kube
+#        just kind-load-agents git
+#        just kind-load-agents web
+#        just kind-load-agents provenance
+#        just kind-load-agents all
+kind-load-agents agent='all':
+    #!/usr/bin/env bash
+    set -euo pipefail
+    load() { just kind-load "$1"; }
+    case "{{agent}}" in
+        gitlab)
+            just gitlab all
+            load ./result-gitlab-observer
+            load ./result-gitlab-consumer
+            ;;
+        kube)
+            just kube all
+            load ./result-kube-observer
+            load ./result-kube-consumer
+            ;;
+        git)
+            just git-agents all
+            load ./result-git-observer
+            load ./result-git-consumer
+            load ./result-git-scheduler
+            ;;
+        web)
+            just web all
+            load ./result-web-observer
+            load ./result-web-consumer
+            ;;
+        provenance)
+            just provenance all
+            load ./result-provenance-linker
+            load ./result-provenance-resolver
+            ;;
+        all)
+            just kind-load-agents gitlab
+            just kind-load-agents kube
+            just kind-load-agents git
+            just kind-load-agents web
+            just kind-load-agents provenance
+            ;;
+        *) echo "Unknown agent: {{agent}}. Use gitlab, kube, git, web, provenance, or all." && exit 1 ;;
+    esac
+
+# Render Dhall manifests for local kind deployment.
+# Output goes to _manifests_out (gitignored, rebuilt on demand).
+kind-render:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    echo "Rendering manifests from {{_deploy_local}} -> {{_manifests_out}}..."
+    rm -rf {{_manifests_out}}
+    bash scripts/render-manifests.sh {{_deploy_local}} {{_manifests_out}}
+    echo "Rendered manifests in {{_manifests_out}}/"
+
+# Apply rendered manifests to the local kind cluster.
+kind-apply:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ ! -d "{{_manifests_out}}" ]; then
+        echo "No manifests found — run 'just kind-render' first."
+        exit 1
+    fi
+    kubectl apply -R -f {{_manifests_out}} --context kind-{{_kind_cluster}}
+
+# Render and apply in one step.
+kind-deploy: kind-render kind-apply
+
+# Port-forward core services to localhost (runs in foreground — use a separate pane).
+# Jaeger UI, Neo4j browser, and Cassini are forwarded.
+# Note: kind's extraPortMappings already handle these for NodePort services;
+# this target is for ClusterIP services or when you want explicit control.
+kind-forward:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    echo "Forwarding services (Ctrl-C to stop all)..."
+    kubectl port-forward -n polar     svc/cassini-ip-svc  8080:8080 --context kind-{{_kind_cluster}} &
+    kubectl port-forward -n polar     svc/jaeger-svc     16686:16686 4317:4317 4318:4318 --context kind-{{_kind_cluster}} &
+    kubectl port-forward -n polar-db  svc/polar-db-svc    7474:7474 7687:7687 --context kind-{{_kind_cluster}} &
+    wait
