@@ -24,9 +24,30 @@ let envVars =
       [ kubernetes.EnvVar::{ name = "RUST_LOG", value = Some "debug" } ]
       # Constants.commonClientEnv
 
--- Reusable graph env block built via makeGraphEnv
-let graphEnv =
-      functions.makeGraphEnv values.neo4jBoltAddr Constants.graphConfig Constants.graphSecretKeySelector
+let neo4jEnvVars =
+      [ kubernetes.EnvVar::{
+        , name = "GRAPH_ENDPOINT"
+        , value = Some values.neo4jBoltAddr
+        }
+      , kubernetes.EnvVar::{
+        , name = "GRAPH_DB"
+        , value = Some Constants.graphConfig.graphDB
+        }
+      , kubernetes.EnvVar::{
+        , name = "GRAPH_USER"
+        , value = Some Constants.graphConfig.graphUsername
+        }
+      , kubernetes.EnvVar::{
+        , name = "GRAPH_PASSWORD"
+        , valueFrom = Some kubernetes.EnvVarSource::{
+          , secretKeyRef = Some kubernetes.SecretKeySelector::{
+            , name = Some "polar-graph-pw"
+            , key = Constants.neo4jSecret.key
+            }
+          }
+        }
+      ]
+
 -- =============================================================================
 -- Secrets
 -- =============================================================================
@@ -380,7 +401,7 @@ let withRejectSidecar =
       \(d : kubernetes.Deployment.Type) ->
         d // { metadata = d.metadata // { annotations = Some [ Constants.RejectSidecarAnnotation ] } }
 
-let linkerEnv = envVars # graphEnv
+let linkerEnv = envVars # neo4jEnvVars
 
 let linkerDeployment =
       withRejectSidecar

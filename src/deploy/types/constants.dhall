@@ -13,8 +13,8 @@ let SandboxRegistry =
         [ kubernetes.LocalObjectReference::{ name = Some "sandbox-registry" } ]
       }
 
-let PolarNamespace = "polar"
-let GraphNamespace = "polar-db"
+let PolarNamespace = env:NAMESPACE as Text ? "polar"
+let GraphNamespace = env:GRAPH_NAMESPACE as Text ? "polar-db"
 
 let neo4jConfigmapName = "neo4j-config"
 let graphSecretName = "polar-graph-pw"
