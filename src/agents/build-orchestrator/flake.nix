@@ -22,8 +22,8 @@
         #
         # Contract (env vars injected by the Cyclops orchestrator):
         #   CYCLOPS_REPO_URL    — full HTTPS URL of the repository
-        #   CYCLOPS_COMMIT_SHA  — full 40-character commit SHA
-        #   CYCLOPS_WORKSPACE   — destination path (always /workspace)
+        #   BUILD_COMMIT_SHA  — full 40-character commit SHA
+        #   BUILD_WORKSPACE   — destination path (always /workspace)
         #   GIT_USERNAME        — sourced from k8s Secret at runtime
         #   GIT_PASSWORD        — sourced from k8s Secret at runtime
         #
@@ -52,9 +52,9 @@
 
             # ── Validate required env vars ─────────────────────────────────────
             required_vars=(
-              CYCLOPS_REPO_URL
-              CYCLOPS_COMMIT_SHA
-              CYCLOPS_WORKSPACE
+              BUILD_REPO_URL
+              BUILD_COMMIT_SHA
+              BUILD_WORKSPACE
               GIT_USERNAME
               GIT_PASSWORD
             )
@@ -68,14 +68,14 @@
             # Validate commit SHA is exactly 40 hex characters.
             # A short SHA or branch name is a programming error — the orchestrator
             # must always resolve to a full SHA before submitting the job.
-            if ! [[ "$CYCLOPS_COMMIT_SHA" =~ ^[0-9a-f]{40}$ ]]; then
-              echo "[clone] ERROR: CYCLOPS_COMMIT_SHA must be a full 40-character SHA, got: $CYCLOPS_COMMIT_SHA" >&2
+            if ! [[ "$BUILD_COMMIT_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+              echo "[clone] ERROR: BUILD_COMMIT_SHA must be a full 40-character SHA, got: $BUILD_COMMIT_SHA" >&2
               exit 1
             fi
 
-            echo "[clone] repo:   $CYCLOPS_REPO_URL"
-            echo "[clone] commit: $CYCLOPS_COMMIT_SHA"
-            echo "[clone] dest:   $CYCLOPS_WORKSPACE"
+            echo "[clone] repo:   $BUILD_REPO_URL"
+            echo "[clone] commit: $BUILD_COMMIT_SHA"
+            echo "[clone] dest:   $BUILD_WORKSPACE"
 
             # ── Credential helper ──────────────────────────────────────────────
             #
@@ -111,7 +111,7 @@
             # refuses to operate on directories not owned by the current user.
             # We register /workspace as safe before any git operation.
             # This is safe — /workspace is an isolated emptyDir, not a shared path.
-            git config --global --add safe.directory "$CYCLOPS_WORKSPACE"
+            git config --global --add safe.directory "$BUILD_WORKSPACE"
 
             # ── Clone ──────────────────────────────────────────────────────────
             #
@@ -123,25 +123,25 @@
             #
             # --filter=blob:none defers blob download until checkout, which
             # avoids transferring history blobs we will never use.
-            mkdir -p "$CYCLOPS_WORKSPACE"
+            mkdir -p "$BUILD_WORKSPACE"
 
             echo "[clone] cloning (partial)..."
             git clone \
               --no-checkout \
               --filter=blob:none \
               --depth=1 \
-              "$CYCLOPS_REPO_URL" \
-              "$CYCLOPS_WORKSPACE"
+              "$BUILD_REPO_URL" \
+              "$BUILD_WORKSPACE"
 
-            cd "$CYCLOPS_WORKSPACE"
+            cd "$BUILD_WORKSPACE"
 
             # Fetch the specific commit. --depth=1 gets just that commit
             # without any ancestor history.
-            echo "[clone] fetching commit $CYCLOPS_COMMIT_SHA..."
+            echo "[clone] fetching commit $BUILD_COMMIT_SHA..."
             git fetch \
               --depth=1 \
               origin \
-              "$CYCLOPS_COMMIT_SHA" \
+              "$BUILD_COMMIT_SHA" \
               || {
                 # Some git hosts (notably GitHub) do not allow fetching commits
                 # by SHA directly unless uploadpack.allowReachableSHA1InWant is
@@ -151,8 +151,8 @@
                 git fetch --unshallow origin
               }
 
-            echo "[clone] checking out $CYCLOPS_COMMIT_SHA..."
-            git checkout "$CYCLOPS_COMMIT_SHA"
+            echo "[clone] checking out $BUILD_COMMIT_SHA..."
+            git checkout "$BUILD_COMMIT_SHA"
 
             # ── Credential cleanup ─────────────────────────────────────────────
             #
@@ -167,9 +167,9 @@
             # The pipeline runner has no business running git commands and
             # the .git directory contains the remote URL with the host address.
             # Removing it also reduces workspace size for large repos.
-            rm -rf "$CYCLOPS_WORKSPACE/.git"
+            rm -rf "$BUILD_WORKSPACE/.git"
 
-            echo "[clone] done — workspace ready at $CYCLOPS_WORKSPACE"
+            echo "[clone] done — workspace ready at $BUILD_WORKSPACE"
           '';
         };
 

@@ -21,8 +21,6 @@ let binaries =
       , "cassini-server"
       , "config-ops"
       , "event-logger"
-      , "fmt.exit"
-      , "fmt.log"
       , "git-repo-observer"
       , "git-repo-processor"
       , "gitlab-consumer"
@@ -45,7 +43,6 @@ let binaries =
       , "provenance-linker"
       , "provenance-resolver"
       , "scheduler"
-      , "summary.txt"
       , "web-consumer"
       ]
 

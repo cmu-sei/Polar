@@ -1,3 +1,4 @@
+use ./pipeline/core.nu *
 
 #!/usr/bin/env nu
 # cargo-attested-build.nu
@@ -19,32 +20,7 @@
 #   - The compiled binary (wherever cargo puts it)
 #   - $artifact_dir/<binary_name>.attestation.json
 
-
-
-# Hash a file, returning sha256:<hex>.
-def content-hash [path: string]: nothing -> string {
-    if not ($path | path exists) {
-        error make { msg: $"file not found: ($path)" }
-    }
-    open $path --raw | hash sha256 | $"sha256:($in)"
-}
-
-# Hash a directory tree via git tree hash if available, else sorted file hashes.
-def tree-hash [dir: string]: nothing -> string {
-    let git_check = try { git -C $dir rev-parse --git-dir | complete } catch { { exit_code: 1 } }
-    if $git_check.exit_code == 0 {
-        let h = (git -C $dir rev-parse "HEAD^{tree}" | str trim)
-        $"sha256:($h)"
-    } else {
-        glob $"($dir)/**/*"
-        | where { $in | path type | $in == "file" }
-        | sort
-        | each { open $in --raw | hash sha256 }
-        | str join "\n"
-        | hash sha256
-        | $"sha256:($in)"
-    }
-}
+const COMPONENT = "[attested-build]"
 
 # Extract the workspace root from cargo metadata.
 def workspace-root []: nothing -> string {
@@ -83,7 +59,7 @@ def main [
     let build_start = (date now)
 
     if ($artifact_dir | path exists) != true {
-        print $"[attested-build] creating artifact directory at ($artifact_dir)"
+        log-info $"creating artifact directory at ($artifact_dir)" --component $COMPONENT
         mkdir $artifact_dir
     }
     # Determine the cargo build command.
@@ -116,7 +92,7 @@ def main [
         git_commit: (try { git -C $ws_root rev-parse HEAD | str trim } catch { "unknown" })
         git_tree: (try { git -C $ws_root rev-parse "HEAD^{tree}" | str trim } catch { "unknown" })
     }
-    print $"[attested-build] Running: ($cargo_cmd)"
+    log-info $"Running: ($cargo_cmd)" --component $COMPONENT
 
 
     # Run cargo build and stream JSON events.
@@ -136,7 +112,13 @@ def main [
             let name = ($exe | path basename)
             let dest = ($artifact_dir | path join $name)
 
-            print $"[attested-build] moving ($exe) -> ($dest)"
+            let artifact_id = content-hash-file $exe
+
+            log-debug $"Artifact created: ($exe)" --component $COMPONENT
+
+            emit-artifact-produced $artifact_id $ELF_BINARY_ARTIFACT
+
+            log-debug $"moving ($exe) -> ($dest)" --component $COMPONENT
             mv $exe $dest
 
             {
@@ -155,16 +137,16 @@ def main [
 
     if $cargo_exit != 0 {
         error make {
-            msg: $"[attested-build] cargo build failed (exit ($cargo_exit))"
+            msg: $"cargo build failed (exit ($cargo_exit))"
         }
     }
 
-    if ($binaries | is-empty) {
-        print "[attested-build] No binary artifacts produced"
+    if ($binaries | is-empty) {3
+        log-info "No binary artifacts produced" --component $COMPONENT
         exit 0
     }
 
-    print $"[attested-build] ($binaries | length) binary artifact\(s\) produced"
+    log-info $"($binaries | length) binary artifact\(s\) produced" --component $COMPONENT
 
     # At this point you can build attestations from $binaries.
     let attestations = ($binaries | each { |bin|
@@ -199,9 +181,9 @@ def main [
         let attestation_path = ($artifact_dir | path join $"($bin.name).attestation.json")
         $attestation | to json --indent 2 | save -f $attestation_path
 
-        print $"[attested-build] ($bin.name)"
-        print $"[attested-build]   binary:  ($bin.digest)"
-        print $"[attested-build]   wrote:   ($attestation_path)"
+        log-info $"($bin.name)" --component $COMPONENT
+        log-info $"  binary:  ($bin.digest)" --component $COMPONENT
+        log-info $"  wrote:   ($attestation_path)" --component $COMPONENT
 
         $attestation
     })
@@ -216,5 +198,5 @@ def main [
     }
     $manifest | to json --indent 2 | save -f ($artifact_dir | path join "build-manifest.json")
 
-    print $"[attested-build] ($attestations | length) attestation\(s\) written to ($artifact_dir)"
+    log-info $"($attestations | length) attestation\(s\) written to ($artifact_dir)" --component $COMPONENT
 }

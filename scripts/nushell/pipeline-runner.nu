@@ -15,68 +15,7 @@
 # Dependencies (baked into container by Nix / container.dhall):
 #   cassini-client, git, bash, coreutils
 
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
-
-const MANIFEST_PATH = "/etc/pipeline/pipeline.json"
-const TOOLCHAIN_PATH = "/etc/pipeline/toolchain.json"
-const SUBJECT_PREFIX = "polar.builds.provenance"
-
-# ---------------------------------------------------------------------------
-# Logging
-# ---------------------------------------------------------------------------
-
-def log [level: string, msg: string, --component: string = "runner"] {
-    let ts = (date now | format date "%Y-%m-%dT%H:%M:%S%.3fZ")
-    print $"($ts) [($level)] ($component) — ($msg)"
-}
-
-def log-info  [msg: string, --component: string = "runner"] { log "INFO"  $msg --component $component }
-def log-warn  [msg: string, --component: string = "runner"] { log "WARN"  $msg --component $component }
-def log-error [msg: string, --component: string = "runner"] { log "ERROR" $msg --component $component }
-def log-debug [msg: string, --component: string = "runner"] { log "DEBUG" $msg --component $component }
-
-# ---------------------------------------------------------------------------
-# Content hashing
-# ---------------------------------------------------------------------------
-
-def content-hash-file [path: string]: nothing -> string {
-    open $path --raw | hash sha256 | $"sha256:($in)"
-}
-
-def content-hash-dir [dir: string]: nothing -> string {
-    let git_check = try { git -C $dir rev-parse --git-dir | complete } catch { { exit_code: 1 } }
-    if $git_check.exit_code == 0 {
-        let h = (git -C $dir rev-parse "HEAD^{tree}" | str trim)
-        $"sha256:($h)"
-    } else {
-        glob $"($dir)/**/*"
-        | where { ($in | path type) == "file" }
-        | sort
-        | each { open $in --raw | hash sha256 }
-        | str join "\n"
-        | hash sha256
-        | $"sha256:($in)"
-    }
-}
-
-def content-hash [path: string]: nothing -> string {
-    if ($path | path type) == "dir" {
-        content-hash-dir $path
-    } else {
-        content-hash-file $path
-    }
-}
-
-def git-commit-sha [dir: string]: nothing -> record {
-    let result = try { git -C $dir rev-parse HEAD | complete } catch { { exit_code: 1 } }
-    if $result.exit_code == 0 {
-        { available: true, sha: ($result.stdout | str trim) }
-    } else {
-        { available: false, sha: "" }
-    }
-}
+use ./pipeline/core.nu *
 
 # ---------------------------------------------------------------------------
 # Input pinning
@@ -105,28 +44,6 @@ def pin-inputs [
                     git_commit: (if $commit.available { $commit.sha } else { null })
                 }
             }
-            "nix-closure" => {
-                # Read the toolchain manifest baked into the container by Nix.
-                let tc = if ($TOOLCHAIN_PATH | path exists) {
-                    open $TOOLCHAIN_PATH
-                } else {
-                    log-warn $"toolchain manifest not found at ($TOOLCHAIN_PATH) — using runtime probe" --component "pin"
-                    # Fallback: probe tool versions at runtime. Less precise than
-                    # Nix store paths but still captures what's actually present.
-                    {
-                        rustc: (try { rustc --version | str trim } catch { "unknown" })
-                        cargo: (try { cargo --version | str trim } catch { "unknown" })
-                        nix: (try { nix --version | str trim } catch { "unknown" })
-                        nushell: (try { version | get version } catch { "unknown" })
-                    }
-                }
-                let tc_hash = ($tc | to json --raw | hash sha256 | $"sha256:($in)")
-                log-info $"pinned input '($field)' -> ($tc_hash)" --component "pin"
-                {
-                    pin: $tc_hash
-                    toolchain: $tc
-                }
-            }
             "file" => {
                 let file_path = ($working_dir | path join ($input.path? | default ""))
                 if ($file_path | path exists) {
@@ -150,108 +67,6 @@ def pin-inputs [
     $pinned
 }
 
-# ---------------------------------------------------------------------------
-# Cassini provenance emission
-# ---------------------------------------------------------------------------
-
-def emit [subject_suffix: string, payload: record] {
-    let subject = $"($SUBJECT_PREFIX).($subject_suffix)"
-    let envelope = {
-        build_id: ($env.POLAR_BUILD_ID? | default "00000000-0000-0000-0000-000000000000")
-        timestamp: (date now | format date "%Y-%m-%dT%H:%M:%S%.fZ")
-        payload: ($payload | merge { type: $subject_suffix })
-    }
-
-    log-debug "no-op emit"
-    # try {
-    #     $envelope | to json --raw | cassini-client publish $subject $in
-    # } catch {|e|
-    #     log-warn $"failed to emit ($subject): ($e.msg)" --component "provenance"
-    # }
-}
-
-def emit-build-observed [
-    exec_id: string
-    parent_id: string
-    command: string
-    working_dir: string
-] {
-    let base = {
-        execution_id: $exec_id
-        command: $command
-        working_dir: $working_dir
-    }
-    let payload = if $parent_id != "" {
-        $base | merge { parent_execution_id: $parent_id }
-    } else {
-        $base
-    }
-    emit "build.observed" $payload
-}
-
-def emit-build-completed [
-    exec_id: string
-    exit_code: int
-    duration_ms: int
-] {
-    emit "build.completed" {
-        execution_id: $exec_id
-        exit_code: $exit_code
-        duration_ms: $duration_ms
-    }
-}
-
-def emit-artifact-produced [
-    exec_id: string
-    artifact_id: string
-    artifact_type: string
-    --name: string = ""
-    --content_type: string = ""
-] {
-    let base = {
-        execution_id: $exec_id
-        artifact_id: $artifact_id
-        artifact_type: $artifact_type
-    }
-    let opts = (
-        [[key value]; [name $name] [content_type $content_type]]
-        | where value != ""
-        | transpose --header-row --as-record
-    )
-    emit "artifact.produced" ($base | merge $opts)
-}
-
-def emit-dependency-resolved [
-    exec_id: string
-    artifact_id: string
-    --name: string = ""
-    --version: string = ""
-    --role: string = ""
-] {
-    let base = {
-        execution_id: $exec_id
-        artifact_id: $artifact_id
-        artifact_type: "dependency"
-    }
-    let opts = (
-        [[key value]; [name $name] [version $version] [role $role]]
-        | where value != ""
-        | transpose --header-row --as-record
-    )
-    emit "dependency.resolved" ($base | merge $opts)
-}
-
-def emit-source-identified [
-    exec_id: string
-    artifact_id: string
-    git_commit: string
-] {
-    emit "source.identified" {
-        execution_id: $exec_id
-        artifact_id: $artifact_id
-        git_commit: $git_commit
-    }
-}
 
 # ---------------------------------------------------------------------------
 # Input resolution (per-stage)
@@ -261,7 +76,6 @@ def emit-source-identified [
 # the artifact directory, and prior stage outputs. Emits provenance events.
 # Returns a record with the resolved artifact_id.
 def resolve-stage-input [
-    exec_id: string
     input_desc: record
     pinned_inputs: record
     working_dir: string
@@ -271,7 +85,7 @@ def resolve-stage-input [
     if ($input_desc.ref? | default "") != "" {
         # This is a reference to a top-level pinned input.
         let ref_name = $input_desc.ref
-        let input_data = ($pinned_inputs | get -i $ref_name)
+        let input_data = ($pinned_inputs | get -o $ref_name)
         if $input_data == null {
             log-warn $"input ref '($ref_name)' not found in pinned inputs" --component "resolve"
             return { artifact_id: "", type: "ref", ref: $ref_name }
@@ -286,17 +100,17 @@ def resolve-stage-input [
         # Emit appropriate provenance based on input type.
         match $input_data.type {
             "git-tree" => {
-                emit-dependency-resolved $exec_id $pin --name "source" --role "source"
+                emit-dependency-resolved $pin --name "source" --role "source"
                 let commit = ($input_data.git_commit? | default "")
                 if $commit != "" {
-                    emit-source-identified $exec_id $pin $commit
+                    emit-source-identified  $pin $commit
                 }
             }
             "file" => {
-                emit-dependency-resolved $exec_id $pin --name $ref_name --role "lockfile"
+                emit-dependency-resolved $pin --name $ref_name --role "lockfile"
             }
             "nix-closure" => {
-                emit-dependency-resolved $exec_id $pin --name "toolchain" --role "toolchain"
+                emit-dependency-resolved $pin --name "toolchain" --role "toolchain"
             }
         }
 
@@ -306,20 +120,20 @@ def resolve-stage-input [
         # Reference to a prior stage's output artifact.
         let src_stage = $input_desc.stage
         let src_artifact = $input_desc.artifact
-        let stage_data = ($stage_outputs | get -i $src_stage)
+        let stage_data = ($stage_outputs | get -o $src_stage)
 
         if $stage_data == null {
             log-warn $"stage-output ref: stage '($src_stage)' has no recorded outputs" --component "resolve"
             return { artifact_id: "", type: "stage-output", stage: $src_stage, artifact: $src_artifact }
         }
 
-        let artifact_data = ($stage_data | get -i $src_artifact)
+        let artifact_data = ($stage_data | get -o $src_artifact)
         if $artifact_data == null {
             log-warn $"stage-output ref: artifact '($src_artifact)' not found in stage '($src_stage)'" --component "resolve"
             return { artifact_id: "", type: "stage-output", stage: $src_stage, artifact: $src_artifact }
         }
 
-        emit-dependency-resolved $exec_id $artifact_data.hash --name $src_artifact --role "stage-output"
+        emit-dependency-resolved $artifact_data.hash --name $src_artifact --role "stage-output"
         { artifact_id: $artifact_data.hash, type: "stage-output", stage: $src_stage, artifact: $src_artifact }
 
     } else if ($input_desc.type? | default "") == "environment" {
@@ -340,7 +154,6 @@ def resolve-stage-input [
 # Resolve a stage's output descriptor. Hashes produced artifacts, emits
 # provenance events. Returns a record with the artifact_id and path.
 def resolve-stage-output [
-    exec_id: string
     output_desc: record
     artifact_dir: string
 ]: nothing -> record {
@@ -352,7 +165,7 @@ def resolve-stage-output [
                 log-debug $"located artifact at ($art_path)"
                 let art_hash = (content-hash $art_path)
                 let ct = ($output_desc.content_type? | default "")
-                emit-artifact-produced $exec_id $art_hash "artifact" --name $art_name --content_type $ct
+                emit-artifact-produced $art_hash "artifact" --name $art_name --content_type $ct
                 { artifact_id: $art_hash, type: "artifact", name: $art_name, path: $art_path }
             } else {
                 log-warn $"output artifact '($art_name)' not found at ($art_path)" --component "resolve"
@@ -430,11 +243,11 @@ def execute-stage [
     }
 
     let stage_exec_id = (random uuid)
-    emit-build-observed $stage_exec_id $pipeline_exec_id $stage_command $working_dir
+    emit-build-observed $stage_command $working_dir
 
     # Resolve inputs.
     let consumed = ($stage.inputs | each {|input|
-        resolve-stage-input $stage_exec_id $input $pinned_inputs $working_dir $artifact_dir $stage_outputs
+        resolve-stage-input  $input $pinned_inputs $working_dir $artifact_dir $stage_outputs
     })
 
     # Execute.
@@ -443,13 +256,16 @@ def execute-stage [
 
     #Execute stage command
     let result = try {
-        cd $working_dir
-        log-debug $"($stage_command)"
-        bash -c $"set -o pipefail; ($stage_command) 2>&1 | tee ($stage_log)" | complete
-    } catch {|e|
-        $"Execution error: ($e.msg)\n" | save -f $stage_log
-        { exit_code: 1, stdout: "", stderr: $"Execution error: ($e.msg)" }
-    }
+            with-env {
+                BUILD_STAGE_EXEC_ID: $stage_exec_id
+                POLAR_BUILD_ID: ($env.POLAR_BUILD_ID? | default "local")
+            } {
+                bash -c $"set -o pipefail; ($stage_command) 2>&1 | tee ($stage_log)" | complete
+            }
+        } catch {|e|
+            $"Execution error: ($e.msg)\n" | save -f $stage_log
+            { exit_code: 1, stdout: "" }
+        }
 
         let d = (((date now) - $start_time) / 1_000_000)
         let duration_ms = ($d | into int)
@@ -462,7 +278,7 @@ def execute-stage [
     mut produced = {}
     if $stage_exit == 0 {
         for output in $stage.outputs {
-            let resolved = (resolve-stage-output $stage_exec_id $output $artifact_dir)
+            let resolved = (resolve-stage-output $output $artifact_dir)
             if $resolved.artifact_id != "" {
                 let name = ($resolved.name? | default "")
                 if $name != "" {
@@ -472,7 +288,7 @@ def execute-stage [
         }
     }
 
-    emit-build-completed $stage_exec_id $stage_exit $duration_ms
+    emit-build-completed $stage_exit $duration_ms
 
     # Failure mode.
     let effective_exit = match $failure_mode {
@@ -545,7 +361,7 @@ def main [manifest_path?: string, target_stage?: string] {
     # ── Pipeline execution envelope ─────────────────────────────────────────
     let pipeline_exec_id = (random uuid)
     let pipeline_start = (date now)
-    emit-build-observed $pipeline_exec_id "" $"pipeline:($pipeline_name)" $working_dir
+    emit-build-observed $"pipeline:($pipeline_name)" $working_dir
 
     # ── Filter stages ───────────────────────────────────────────────────────
     let active_stages = if $target == "all" {
@@ -605,7 +421,7 @@ def main [manifest_path?: string, target_stage?: string] {
 
     let d = (((date now) - $pipeline_start) / 1_000_000)
     let pipeline_duration_ms = ($d | into int)
-    emit-build-completed $pipeline_exec_id $final_state.exit_code $pipeline_duration_ms
+    emit-build-completed $final_state.exit_code $pipeline_duration_ms
 
     # ── Write pinned manifest ───────────────────────────────────────────────
     # The pinned manifest is the build derivation: the original manifest with

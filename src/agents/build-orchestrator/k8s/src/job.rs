@@ -375,27 +375,22 @@ fn pipeline_env_vars(spec: &BuildSpec) -> Vec<EnvVar> {
 fn bootstrap_env_vars(spec: &BootstrapSpec) -> Vec<EnvVar> {
     let mut env = vec![
         EnvVar {
-            name: "CYCLOPS_BUILD_ID".to_string(),
+            name: "POLAR_BUILD_ID".to_string(),
             value: Some(spec.build_id.to_string()),
             ..Default::default()
         },
         EnvVar {
-            name: "CYCLOPS_REPO_URL".to_string(),
+            name: "POLAR_REPO_URL".to_string(),
             value: Some(spec.repo_url.clone()),
             ..Default::default()
         },
         EnvVar {
-            name: "CYCLOPS_COMMIT_SHA".to_string(),
+            name: "BUILD_COMMIT_SHA".to_string(),
             value: Some(spec.commit_sha.clone()),
             ..Default::default()
         },
         EnvVar {
-            name: "CYCLOPS_TARGET_REGISTRY".to_string(),
-            value: Some(spec.target_registry.clone()),
-            ..Default::default()
-        },
-        EnvVar {
-            name: "CYCLOPS_WORKSPACE".to_string(),
+            name: "BUILD_WORKSPACE".to_string(),
             value: Some(WORKSPACE_PATH.to_string()),
             ..Default::default()
         },
