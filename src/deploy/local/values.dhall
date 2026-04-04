@@ -55,19 +55,19 @@ let neo4j =
       , volumes =
         { data =
           { name = "polar-db-data"
-          , storageClassName = Some "standard"
+          , storageClassName = Some "managed-csi"
           , storageSize = "10Gi"
           , mountPath = "/var/lib/neo4j/data"
           }
         , logs =
           { name = "polar-db-logs"
-          , storageClassName = Some "standard"
+          , storageClassName = Some "managed-csi"
           , storageSize = "10Gi"
           , mountPath = "/var/lib/neo4j/logs"
           }
         , certs =
           { name = "polar-db-certs"
-          , storageClassName = Some "standard"
+          , storageClassName = Some "managed-csi"
           , storageSize = "1Gi"
           , mountPath = "/var/lib/neo4j/certificates"
           }

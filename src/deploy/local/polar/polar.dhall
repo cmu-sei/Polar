@@ -24,7 +24,7 @@ apiVersion = "v1"
 , type = Some "Opaque"
 }
 
-let ociSecret = env:DOCKER_CONFIG_STR as Text
+let ociSecret = env:DOCKER_AUTH_JSON as Text
 
 -- Secret used for image pulling
 let imagePullSecret = kubernetes.Secret::{
