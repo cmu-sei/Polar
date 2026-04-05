@@ -97,7 +97,6 @@ let
       bash # Basic bash to run bare essential code
       glibcLocalesUtf8
       uutils-coreutils-noprefix # Essential GNU utilities (ls, cat, etc.)
-      etc
     ];
     cassini = import (workspaceRoot + /cassini/package.nix) {
       inherit pkgs commonPaths craneLib  workspaceFileset commonUser;

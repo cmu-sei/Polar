@@ -8,6 +8,8 @@ let Agents = ../types/agents.dhall
 
 let commitSha = env:CI_COMMIT_SHORT_SHA as Text ? "latest"
 
+let imagePullPolicy = "IfNotPresent"
+
 let img = \(name : Text) -> "polar/${name}:${commitSha}"
 
 let tls = Constants.commonClientTls
@@ -195,6 +197,7 @@ let clientTlsConfig
       }
 
 in  { imagePullSecrets
+    , imagePullPolicy
     , cassini
     , cassiniTlsVolumeMount
     , gitlabObserver

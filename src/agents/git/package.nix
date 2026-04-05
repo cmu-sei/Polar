@@ -7,6 +7,13 @@
   commonUser,
 }:
 let
+  extraCommands = ''
+    mkdir -p etc
+    printf 'polar:x:1000:1000::/home/polar:/bin/bash\n' > etc/passwd
+    printf 'polar:x:1000:\n' > etc/group
+    printf 'polar:!x:::::::\n' > etc/shadow
+  '';
+
   observer = craneLib.buildPackage (crateArgs // {
     pname = "git-repo-observer";
     cargoExtraArgs = "--bin git-repo-observer --locked";
@@ -26,6 +33,7 @@ let
   });
 
   observerImage = pkgs.dockerTools.buildImage {
+    inherit extraCommands;
     name = "polar-git-repo-observer";
     tag = "latest";
     copyToRoot = commonPaths ++ [ observer ];
@@ -40,6 +48,7 @@ let
   };
 
   consumerImage = pkgs.dockerTools.buildImage {
+    inherit extraCommands;
     name = "polar-git-consumer";
     tag = "latest";
     copyToRoot = commonPaths ++ [ consumer ];
@@ -54,6 +63,7 @@ let
   };
 
   schedulerImage = pkgs.dockerTools.buildImage {
+    inherit extraCommands;
     name = "polar-git-scheduler";
     tag = "latest";
     copyToRoot = commonPaths ++ [ scheduler ];

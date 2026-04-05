@@ -8,6 +8,13 @@
 }:
 
 let
+    extraCommands = ''
+      mkdir -p etc
+      printf 'polar:x:1000:1000::/home/polar:/bin/bash\n' > etc/passwd
+      printf 'polar:x:1000:\n' > etc/group
+      printf 'polar:!x:::::::\n' > etc/shadow
+    '';
+
   # Build the processor binary (polar-scheduler)
   processor = craneLib.buildPackage (crateArgs // {
     pname = "polar-scheduler";
@@ -40,6 +47,7 @@ let
 
   # Layered container image for the processor
   processorImage = pkgs.dockerTools.buildLayeredImage {
+    inherit extraCommands;
     name = "polar-scheduler-processor";
     tag = "latest";
     contents = [ processorEnv ];
@@ -58,6 +66,7 @@ let
 
   # Layered container image for the observer
   observerImage = pkgs.dockerTools.buildLayeredImage {
+    inherit extraCommands;
     name = "polar-scheduler-observer";
     tag = "latest";
     contents = [ observerEnv ];

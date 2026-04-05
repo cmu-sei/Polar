@@ -33,10 +33,18 @@ let
     pathsToLink  = [ "/bin" "/etc/ssl/certs" ];
   };
 
+  extraCommands = ''
+    mkdir -p etc
+    printf 'polar:x:1000:1000::/home/polar:/bin/bash\n' > etc/passwd
+    printf 'polar:x:1000:\n' > etc/group
+    printf 'polar:!x:::::::\n' > etc/shadow
+  '';
+
   orchestratorImage = pkgs.dockerTools.buildLayeredImage {
     name      = "build-orchestrator";
     tag       = "latest";
     contents  = commonPaths ++ [ orchestratorEnv ];  # was contents
+    inherit extraCommands;
     config = {
       User       = "${commonUser.uid}:${commonUser.gid}";
       Cmd        = [ "build-orchestrator" ];
@@ -61,6 +69,7 @@ let
     name      = "build-processor";
     tag       = "latest";
     contents  = commonPaths ++ [ buildProcessorEnv ];  # was contents
+    inherit extraCommands;
     config = {
       User       = "${commonUser.uid}:${commonUser.gid}";
       Cmd        = [ "build-orchestrator" ];

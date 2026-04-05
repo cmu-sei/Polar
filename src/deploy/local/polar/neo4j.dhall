@@ -220,6 +220,7 @@ let podSpec =
           [ kubernetes.Container::{
             , name = values.neo4j.name
             , image = Some values.neo4j.image
+            , imagePullPolicy = Some values.imagePullPolicy
             , securityContext = Some kubernetes.SecurityContext::{
               , runAsGroup = Some 7474
               , runAsNonRoot = Some True
@@ -247,6 +248,7 @@ let podSpec =
           [ kubernetes.Container::{
             , name = "neo4j-init"
             , image = Some "docker.io/alpine:3.14.0"
+            , imagePullPolicy = Some values.imagePullPolicy
             , command = Some [ "/bin/sh", "-c" ]
             , args = Some [ setupScript ]
             , volumeMounts = Some initVolumeMounts

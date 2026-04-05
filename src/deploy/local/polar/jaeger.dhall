@@ -38,6 +38,7 @@ let containers =
     k8s.Container::{
     , name = JAEGER
     , image = Some "cr.jaegertracing.io/jaegertracing/jaeger:2.13.0"
+    , imagePullPolicy = Some "IfNotPresent"
     , env = Some [ k8s.EnvVar::{ name = "COLLECTOR_OTLP_ENABLED", value = Some "true" } ]
     , ports
     }

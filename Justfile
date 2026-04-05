@@ -712,27 +712,46 @@ cluster-load-all neo4j_result='':
     set -euo pipefail
     _load() {
         if [ -e "$1" ]; then
+            echo "Loading $1..."
             podman exec -i u7s ctr -n k8s.io images import - < "$1"
         else
-            podman save "$1" | podman exec -i u7s ctr -n k8s.io images import -
+            echo "Skipping $1 (not found)"
         fi
+    }
+    _tag() {
+        echo "Tagging $1 -> $2"
+        podman exec u7s ctr -n k8s.io images tag "$1" "$2" 2>/dev/null || true
     }
     if [ -n "{{neo4j_result}}" ]; then
         _load "{{neo4j_result}}"
-    else
-        echo "Skipping neo4j — pass neo4j_result=<path> to include it."
     fi
-    just cassini all
     _load ./result-cassini-image
     _load ./result-cassini-producer-image
     _load ./result-cassini-sink-image
-    just scheduler all
     _load ./result-scheduler-processor
     _load ./result-scheduler-observer
-    just orchestrator all
     _load ./result-orchestrator-image
-    _load ./result-clone-image
-    echo "Core images loaded."
+    for img in \
+        localhost/polar-gitlab-observer:latest \
+        localhost/polar-gitlab-consumer:latest \
+        localhost/polar-kube-observer:latest \
+        localhost/polar-kube-consumer:latest \
+        localhost/build-orchestrator:latest \
+        docker.io/daveman1010220/polar-dev-x86:latest; do
+        echo "Loading $img..."
+        podman save "$img" | podman exec -i u7s ctr -n k8s.io images import -
+    done
+    # Retag to match manifest references (polar/ prefix)
+    _tag docker.io/library/cassini:latest                  docker.io/polar/cassini:latest
+    _tag docker.io/library/harness-producer:latest         docker.io/polar/polar-build-processor:latest
+    _tag docker.io/library/polar-scheduler-observer:latest docker.io/polar/polar-scheduler-observer:latest
+    _tag docker.io/library/polar-scheduler-processor:latest docker.io/polar/polar-build-processor:latest
+    _tag localhost/polar-gitlab-observer:latest            docker.io/polar/polar-gitlab-observer:latest
+    _tag localhost/polar-gitlab-consumer:latest            docker.io/polar/polar-gitlab-consumer:latest
+    _tag localhost/polar-kube-observer:latest              docker.io/polar/polar-kube-observer:latest
+    _tag localhost/polar-kube-consumer:latest              docker.io/polar/polar-kube-consumer:latest
+    _tag localhost/build-orchestrator:latest               docker.io/polar/polar-build-orchestrator:latest
+    echo "Core images loaded and tagged."
 
 # ── kind (local cluster) ──────────────────────────────────────────────────────
 

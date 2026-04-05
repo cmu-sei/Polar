@@ -9,6 +9,12 @@
 }:
 
 let
+    extraCommands = ''
+      mkdir -p etc
+      printf 'polar:x:1000:1000::/home/polar:/bin/bash\n' > etc/passwd
+      printf 'polar:x:1000:\n' > etc/group
+      printf 'polar:!x:::::::\n' > etc/shadow
+    '';
 
     linkerBin = craneLib.buildPackage (crateArgs // {
         pname = "provenance-linker";
@@ -17,6 +23,7 @@ let
     });
 
     linkerImage = pkgs.dockerTools.buildImage {
+        inherit extraCommands;
         name = "provenance-linker-agent";
         tag = "latest";
         copyToRoot = commonPaths ++ [linkerBin];
@@ -44,6 +51,7 @@ let
     };
 
     resolverImage = pkgs.dockerTools.buildImage {
+        inherit extraCommands;
         name = "provenance-resolver-agent";
         tag = "latest";
         copyToRoot = commonPaths ++ [

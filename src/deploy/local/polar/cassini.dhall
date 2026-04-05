@@ -77,6 +77,7 @@ let containers =
       [ kubernetes.Container::{
         , name = "cassini"
         , image = Some values.cassini.image
+        , imagePullPolicy = Some values.imagePullPolicy
         , securityContext = Some kubernetes.SecurityContext::{
           , runAsGroup = Some 1000
           , runAsNonRoot = Some True

@@ -242,6 +242,7 @@ let gitlabAgentDeployment =
           [ kubernetes.Container::{
             , name = values.gitlabObserver.name
             , image = Some values.gitlabObserver.image
+            , imagePullPolicy = Some values.imagePullPolicy
             , securityContext = Some Constants.DropAllCapSecurityContext
             , env = Some gitlabObserverEnv
             , volumeMounts = Some volumeMounts
@@ -249,6 +250,7 @@ let gitlabAgentDeployment =
           , kubernetes.Container::{
             , name = values.gitlabConsumer.name
             , image = Some values.gitlabConsumer.image
+            , imagePullPolicy = Some values.imagePullPolicy
             , securityContext = Some Constants.DropAllCapSecurityContext
             , env = Some gitlabConsumerEnv
             , volumeMounts = Some volumeMounts
@@ -313,6 +315,7 @@ let kubeAgentDeployment =
           [ kubernetes.Container::{
             , name = values.kubeObserver.name
             , image = Some values.kubeObserver.image
+            , imagePullPolicy = Some values.imagePullPolicy
             , securityContext = Some Constants.DropAllCapSecurityContext
             , env = Some kubeObserverEnv
             , volumeMounts = Some kubeObserverVolumeMounts
@@ -320,6 +323,7 @@ let kubeAgentDeployment =
           , kubernetes.Container::{
             , name = values.kubeConsumer.name
             , image = Some values.kubeConsumer.image
+            , imagePullPolicy = Some values.imagePullPolicy
             , securityContext = Some Constants.DropAllCapSecurityContext
             , env = Some kubeConsumerEnv
             , volumeMounts = Some volumeMounts
@@ -378,6 +382,7 @@ let buildDeployment =
             [ kubernetes.Container::{
             , name = values.buildOrchestrator.name
             , image = Some values.buildOrchestrator.image
+            , imagePullPolicy = Some values.imagePullPolicy
             , securityContext = Some Constants.DropAllCapSecurityContext
             , env = Some buildOrchestratorEnv
             , volumeMounts = Some buildOrchestratorVolumeMounts
@@ -385,6 +390,7 @@ let buildDeployment =
             , kubernetes.Container::{
             , name = values.buildProcessor.name
             , image = Some values.buildProcessor.image
+            , imagePullPolicy = Some values.imagePullPolicy
             , securityContext = Some Constants.DropAllCapSecurityContext
             , env = Some buildProcessorEnv
             , volumeMounts = Some volumeMounts
@@ -413,6 +419,7 @@ let linkerDeployment =
               [ kubernetes.Container::{
                 , name = Constants.ProvenanceLinkerName
                 , image = Some linker.image
+            , imagePullPolicy = Some values.imagePullPolicy
                 , securityContext = Some Constants.DropAllCapSecurityContext
                 , env = Some linkerEnv
                 , volumeMounts = Some volumeMounts
@@ -454,6 +461,7 @@ let resolverDeployment =
               [ kubernetes.Container::{
                 , name = Constants.ProvenanceResolverName
                 , image = Some resolver.image
+            , imagePullPolicy = Some values.imagePullPolicy
                 , securityContext = Some Constants.DropAllCapSecurityContext
                 , env = Some resolverEnv
                 , volumeMounts = Some resolverVolumeMounts

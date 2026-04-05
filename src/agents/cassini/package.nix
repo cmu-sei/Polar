@@ -8,6 +8,12 @@
 
 
 let
+    extraCommands = ''
+      mkdir -p etc
+      printf 'polar:x:1000:1000::/home/polar:/bin/bash\n' > etc/passwd
+      printf 'polar:x:1000:\n' > etc/group
+      printf 'polar:!x:::::::\n' > etc/shadow
+    '';
 
     cassini = craneLib.buildPackage (crateArgs // {
     cargoExtraArgs = "--bin cassini-server --locked";
@@ -52,6 +58,7 @@ let
     };
 
     cassiniImage = pkgs.dockerTools.buildLayeredImage {
+    inherit extraCommands;
     name = "cassini";
     tag = "latest";
     contents = commonPaths ++ [
@@ -71,6 +78,7 @@ let
     };
 
     producerImage = pkgs.dockerTools.buildLayeredImage {
+    inherit extraCommands;
     name = "harness-producer";
     tag = "latest";
     contents = commonPaths ++ [
@@ -88,6 +96,7 @@ let
     };
 
     sinkImage = pkgs.dockerTools.buildLayeredImage {
+    inherit extraCommands;
     name = "harness-sink";
     tag = "latest";
     contents = commonPaths ++ [

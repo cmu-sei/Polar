@@ -10,6 +10,13 @@
 
 
 let
+    extraCommands = ''
+      mkdir -p etc
+      printf 'polar:x:1000:1000::/home/polar:/bin/bash\n' > etc/passwd
+      printf 'polar:x:1000:\n' > etc/group
+      printf 'polar:!x:::::::\n' > etc/shadow
+    '';
+
     observer = craneLib.buildPackage (crateArgs // {
         pname = "kube-observer";
         cargoExtraArgs= "--bin kube-observer --locked";
@@ -23,6 +30,7 @@ let
     });
 
     observerImage = pkgs.dockerTools.buildImage {
+        inherit extraCommands;
         name = "polar-kube-observer";
         tag = "latest";
         copyToRoot = commonPaths ++ [observer];
@@ -38,6 +46,7 @@ let
     };
 
     consumerImage = pkgs.dockerTools.buildImage {
+        inherit extraCommands;
         name = "polar-kube-consumer";
         tag = "latest";
         copyToRoot = commonPaths ++ [consumer];
