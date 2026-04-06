@@ -660,7 +660,7 @@ ci:
 
 # ── nix-usernetes (local cluster) ────────────────────────────────────────────
 
-_u7s_dir      := env_var('HOME') + "/Documents/projects/usernetes"
+_u7s_dir      := env_var('HOME') + "/Documents/projects/nix-usernetes"
 _u7s_kubeconf := _u7s_dir + "/kubeconfig"
 
 # Start the local cluster
@@ -706,6 +706,16 @@ cluster-load image:
 
 _neo4j_result := env_var('HOME') + "/Documents/projects/nix-neo4j/result-neo4j-image"
 
+# Build all images needed for cluster deployment with correct result symlink names
+cluster-build-all:
+    just cassini all
+    just gitlab all
+    just kube all
+    just scheduler all
+    just orchestrator all
+    just provenance all
+    just git-agents all
+
 # Build and load all core Polar images into the cluster.
 # All images are loaded directly from nix result symlinks.
 # Usage: just cluster-load-all
@@ -727,6 +737,10 @@ cluster-load-all neo4j_result=_neo4j_result:
     }
     _load_podman() {
         echo "Loading $1 from podman..."
+        if ! podman image exists "$1" 2>/dev/null; then
+            echo "Pulling $1..."
+            podman pull "$1"
+        fi
         podman save "$1" | podman exec -i u7s ctr -n k8s.io images import -
     }
     # Infrastructure
@@ -763,6 +777,12 @@ cluster-load-all neo4j_result=_neo4j_result:
 # Writes values-active.dhall to select the local values file before rendering.
 # See scripts/render-manifests.sh for the dhall-to-yaml invocation.
 cluster-render:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ ! -f src/deploy/local/conf/git.json ]; then
+        echo "ERROR: src/deploy/local/conf/git.json missing. Copy from git.json.example and fill in credentials."
+        exit 1
+    fi
     echo './values.local.dhall' > src/deploy/local/values-active.dhall
     bash scripts/render-manifests.sh src/deploy/local manifests
 

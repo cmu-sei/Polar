@@ -195,7 +195,7 @@ let
   cloneContainer = nix-container-lib.lib.${system}.mkContainer {
     inherit system pkgs;
     inputs = {};
-    configPath = pkgs.writeText "clone-init-container.dhall" (
+    configNixPath = pkgs.writeText "clone-init-container.dhall" (
       builtins.replaceStrings
         [ "PRELUDE_PATH" ]
         [ "${nix-container-lib}/dhall/prelude.dhall" ]
