@@ -67,16 +67,14 @@ mkdir -p "$OUTPUT_DIR"
 # Process child charts
 echo "🔍 Discovering and generating manifests..."
 for SERVICE_DIR in "$DHALL_ROOT"/*/; do
-
-    #TODO: It would probably be nice to exclude certain dirs
     [[ -d "$SERVICE_DIR" ]] || continue  # Skip non-directories
-
     SERVICE_NAME=$(basename "$SERVICE_DIR")
 
+    # Skip directories that contain supporting config, not k8s manifests
+    [[ "$SERVICE_NAME" == "conf" ]] && continue
+
     echo "[INFO] Processing service: $SERVICE_NAME"
-
     convert_dhall_to_yaml "$DHALL_ROOT/$SERVICE_NAME" "$OUTPUT_DIR/"
-
     echo "[SUCCESS] Finished processing $SERVICE_NAME."
 done
 

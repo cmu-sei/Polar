@@ -704,10 +704,13 @@ cluster-load image:
         podman save "{{image}}" | podman exec -i u7s ctr -n k8s.io images import -
     fi
 
-neo4j_result := ''
+_neo4j_result := env_var('HOME') + "/Documents/projects/nix-neo4j/result-neo4j-image"
 
-# Build and load all core Polar images into the cluster
-cluster-load-all neo4j_result='':
+# Build and load all core Polar images into the cluster.
+# All images are loaded directly from nix result symlinks.
+# Usage: just cluster-load-all
+#        just cluster-load-all neo4j_result=../nix-neo4j/result-neo4j-image
+cluster-load-all neo4j_result=_neo4j_result:
     #!/usr/bin/env bash
     set -euo pipefail
     _load() {
@@ -722,36 +725,86 @@ cluster-load-all neo4j_result='':
         echo "Tagging $1 -> $2"
         podman exec u7s ctr -n k8s.io images tag "$1" "$2" 2>/dev/null || true
     }
+    _load_podman() {
+        echo "Loading $1 from podman..."
+        podman save "$1" | podman exec -i u7s ctr -n k8s.io images import -
+    }
+    # Infrastructure
     if [ -n "{{neo4j_result}}" ]; then
         _load "{{neo4j_result}}"
     fi
+    _load_podman docker.io/library/alpine:3.14.0
+    # Polar images — all from nix result symlinks
     _load ./result-cassini-image
     _load ./result-cassini-producer-image
     _load ./result-cassini-sink-image
     _load ./result-scheduler-processor
     _load ./result-scheduler-observer
     _load ./result-orchestrator-image
-    for img in \
-        localhost/polar-gitlab-observer:latest \
-        localhost/polar-gitlab-consumer:latest \
-        localhost/polar-kube-observer:latest \
-        localhost/polar-kube-consumer:latest \
-        localhost/build-orchestrator:latest \
-        docker.io/daveman1010220/polar-dev-x86:latest; do
-        echo "Loading $img..."
-        podman save "$img" | podman exec -i u7s ctr -n k8s.io images import -
-    done
-    # Retag to match manifest references (polar/ prefix)
-    _tag docker.io/library/cassini:latest                  docker.io/polar/cassini:latest
-    _tag docker.io/library/harness-producer:latest         docker.io/polar/polar-build-processor:latest
-    _tag docker.io/library/polar-scheduler-observer:latest docker.io/polar/polar-scheduler-observer:latest
-    _tag docker.io/library/polar-scheduler-processor:latest docker.io/polar/polar-build-processor:latest
-    _tag localhost/polar-gitlab-observer:latest            docker.io/polar/polar-gitlab-observer:latest
-    _tag localhost/polar-gitlab-consumer:latest            docker.io/polar/polar-gitlab-consumer:latest
-    _tag localhost/polar-kube-observer:latest              docker.io/polar/polar-kube-observer:latest
-    _tag localhost/polar-kube-consumer:latest              docker.io/polar/polar-kube-consumer:latest
-    _tag localhost/build-orchestrator:latest               docker.io/polar/polar-build-orchestrator:latest
+    _load ./result-gitlab-observer
+    _load ./result-gitlab-consumer
+    _load ./result-kube-observer
+    _load ./result-kube-consumer
+    # Retag to match manifest image references
+    _tag docker.io/library/nix-neo4j:latest                      docker.io/library/neo4j:5.26.2
+    _tag docker.io/library/cassini:latest                        docker.io/library/cassini:latest
+    _tag docker.io/library/harness-producer:latest               docker.io/library/harness-producer:latest
+    _tag docker.io/library/harness-sink:latest                   docker.io/library/harness-sink:latest
+    _tag docker.io/library/polar-scheduler-observer:latest       docker.io/library/polar-scheduler-observer:latest
+    _tag docker.io/library/polar-scheduler-processor:latest      docker.io/library/polar-scheduler-processor:latest
+    _tag docker.io/library/polar-gitlab-observer:latest          docker.io/library/polar-gitlab-observer:latest
+    _tag docker.io/library/polar-gitlab-consumer:latest          docker.io/library/polar-gitlab-consumer:latest
+    _tag docker.io/library/polar-kube-observer:latest            docker.io/library/polar-kube-observer:latest
+    _tag docker.io/library/polar-kube-consumer:latest            docker.io/library/polar-kube-consumer:latest
+    _tag docker.io/library/build-orchestrator:latest             docker.io/library/build-orchestrator:latest
     echo "Core images loaded and tagged."
+
+# Render manifests for the local cluster.
+# Writes values-active.dhall to select the local values file before rendering.
+# See scripts/render-manifests.sh for the dhall-to-yaml invocation.
+cluster-render:
+    echo './values.local.dhall' > src/deploy/local/values-active.dhall
+    bash scripts/render-manifests.sh src/deploy/local manifests
+
+# Pull and load the local-path provisioner image into the cluster
+cluster-load-provisioner:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    img="docker.io/rancher/local-path-provisioner:v0.0.35"
+    if ! podman image exists "$img" 2>/dev/null; then
+        echo "Pulling $img..."
+        podman pull "$img"
+    fi
+    echo "Loading $img into cluster..."
+    podman save "$img" | podman exec -i u7s ctr -n k8s.io images import -
+    echo "Done."
+
+# Apply storage infrastructure (local-path provisioner + managed-csi StorageClass)
+cluster-apply-storage: cluster-load-provisioner
+    #!/usr/bin/env bash
+    set -euo pipefail
+    KUBECONFIG={{_u7s_kubeconf}} kubectl apply -f src/deploy/local/pki/local-path-provisioner.yaml
+    KUBECONFIG={{_u7s_kubeconf}} kubectl apply -f manifests/storage.yaml
+
+# Apply all rendered Polar manifests to the local cluster.
+# Order matters: namespaces and storage must exist before dependent resources.
+cluster-apply:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    kc="kubectl --kubeconfig {{_u7s_kubeconf}}"
+    # Namespaces, secrets, storage
+    $kc apply -f manifests/polar.yaml
+    $kc apply -f manifests/neo4j.yaml
+    # PKI bootstrap — cert-manager resources
+    $kc apply -f manifests/ca-issuer.yaml
+    $kc apply -f manifests/mtls-ca.yaml
+    $kc apply -f manifests/leaf-issuer.yaml
+    $kc apply -f manifests/cassini-server-cert.yaml
+    $kc apply -f manifests/cassini-client-certificate.yaml
+    # Application workloads
+    $kc apply -f manifests/cassini.yaml
+    $kc apply -f manifests/jaeger.yaml
+    $kc apply -f manifests/agents.yaml
 
 # ── kind (local cluster) ──────────────────────────────────────────────────────
 

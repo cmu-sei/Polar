@@ -216,4 +216,5 @@ in  { imagePullSecrets
     , jaegerDNSName
     , buildProcessor
     , buildOrchestrator
+    , isLocal = False
     }

@@ -40,45 +40,47 @@ pkgs.stdenv.mkDerivation {
   buildPhase = ''
     cd basic
 
-    # ── Step 1: Generate CA + Cassini server/client certs ────────────────────
+    # ── Step 1: Generate CA + Cassini server/client certs via tls-gen ────────
     make CN=cassini SERVER_ALT_NAME=cassini
 
-    # ── Step 2: Generate Neo4j server cert signed by the same CA ─────────────
-    #
-    # tls-gen only supports a single SERVER_ALT_NAME make variable, which maps
-    # to DNS.2 in the cnf. Neo4j needs several SANs for in-cluster routing, so
-    # we patch the openssl.cnf to add them and sign the cert manually.
+    # ── Step 2: Generate a clean Neo4j CA (no tls-gen, no special chars) ─────
+    mkdir -p neo4j_ca/certs neo4j_ca/private
+    touch neo4j_ca/index.txt
+    echo "01" > neo4j_ca/serial
 
-    # Write a custom cnf with all required Neo4j SANs
+    openssl req -x509 \
+      -newkey rsa:4096 \
+      -days 3650 \
+      -nodes \
+      -keyout neo4j_ca/private/cakey.pem \
+      -out neo4j_ca/cacert.pem \
+      -subj "/CN=Polar-Neo4j-CA/O=Polar"
+
+    # ── Step 3: Generate Neo4j server cert signed by the Neo4j CA ─────────────
+    mkdir -p server_neo4j
+
     cat > neo4j-openssl.cnf << 'EOF'
-common_name = neo4j
-client_alt_name = neo4j
-server_alt_name = neo4j
-
 [ ca ]
-default_ca = test_root_ca
+default_ca = neo4j_ca
 
-[ test_root_ca ]
-root_ca_dir   = testca
-certificate   = $root_ca_dir/cacert.pem
-database      = $root_ca_dir/index.txt
-new_certs_dir = $root_ca_dir/certs
-private_key   = $root_ca_dir/private/cakey.pem
-serial        = $root_ca_dir/serial
-default_crl_days = 7
-default_days     = 3650
-default_md       = sha256
-policy           = test_root_ca_policy
-x509_extensions  = certificate_extensions
+[ neo4j_ca ]
+dir               = neo4j_ca
+certificate       = $dir/cacert.pem
+database          = $dir/index.txt
+new_certs_dir     = $dir/certs
+private_key       = $dir/private/cakey.pem
+serial            = $dir/serial
+default_crl_days  = 7
+default_days      = 3650
+default_md        = sha256
+policy            = neo4j_ca_policy
+x509_extensions   = certificate_extensions
 
-[ test_root_ca_policy ]
-commonName          = supplied
-stateOrProvinceName = optional
-countryName         = optional
-emailAddress        = optional
-organizationName    = optional
-organizationalUnitName = optional
-domainComponent     = optional
+[ neo4j_ca_policy ]
+commonName              = supplied
+organizationName        = optional
+stateOrProvinceName     = optional
+countryName             = optional
 
 [ certificate_extensions ]
 basicConstraints = CA:false
@@ -86,24 +88,19 @@ basicConstraints = CA:false
 [ req ]
 default_bits       = 4096
 default_md         = sha256
-prompt             = yes
-distinguished_name = root_ca_distinguished_name
-x509_extensions    = root_ca_extensions
+prompt             = no
+distinguished_name = req_distinguished_name
 
-[ root_ca_distinguished_name ]
-commonName = hostname
-
-[ root_ca_extensions ]
-basicConstraints       = critical,CA:true
-keyUsage               = keyCertSign, cRLSign
-subjectKeyIdentifier   = hash
-authorityKeyIdentifier = keyid:always,issuer
+[ req_distinguished_name ]
+CN = hostname
 
 [ client_extensions ]
 basicConstraints     = CA:false
 keyUsage             = digitalSignature,keyEncipherment
 extendedKeyUsage     = clientAuth
 subjectAltName       = @neo4j_client_alt_names
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid,issuer
 
 [ server_extensions ]
 basicConstraints       = CA:false
@@ -126,39 +123,34 @@ DNS.5 = polar-db-svc.polar-graph.svc.cluster.local
 DNS.6 = localhost
 EOF
 
-    # Generate Neo4j server key
-    mkdir -p server_neo4j
-
     openssl genpkey \
       -algorithm RSA \
       -outform PEM \
       -out server_neo4j/key.pem \
       -pkeyopt rsa_keygen_bits:4096
 
-    # Generate CSR for Neo4j server
     openssl req \
       -config neo4j-openssl.cnf \
       -new \
       -key server_neo4j/key.pem \
       -out server_neo4j/req.pem \
       -outform PEM \
-      -subj "/CN=neo4j/O=server/L=$$$$/" \
+      -subj "/CN=neo4j/O=server" \
       -nodes
 
-    # Sign Neo4j server cert with the CA generated in step 1
     openssl ca \
       -config neo4j-openssl.cnf \
       -days 3650 \
-      -cert testca/cacert.pem \
-      -keyfile testca/private/cakey.pem \
+      -cert neo4j_ca/cacert.pem \
+      -keyfile neo4j_ca/private/cakey.pem \
       -in server_neo4j/req.pem \
       -out server_neo4j/cert.pem \
-      -outdir testca/certs \
+      -outdir neo4j_ca/certs \
       -notext \
       -batch \
       -extensions server_extensions
 
-    # Generate Neo4j client key + cert (for agents connecting to Neo4j with mTLS)
+    # ── Step 4: Generate Neo4j client cert signed by the Neo4j CA ────────────
     mkdir -p client_neo4j
 
     openssl genpkey \
@@ -173,26 +165,23 @@ EOF
       -key client_neo4j/key.pem \
       -out client_neo4j/req.pem \
       -outform PEM \
-      -subj "/CN=neo4j/O=client/L=$$$$/" \
+      -subj "/CN=neo4j/O=client" \
       -nodes
 
     openssl ca \
       -config neo4j-openssl.cnf \
       -days 3650 \
-      -cert testca/cacert.pem \
-      -keyfile testca/private/cakey.pem \
+      -cert neo4j_ca/cacert.pem \
+      -keyfile neo4j_ca/private/cakey.pem \
       -in client_neo4j/req.pem \
       -out client_neo4j/cert.pem \
-      -outdir testca/certs \
+      -outdir neo4j_ca/certs \
       -notext \
       -batch \
       -extensions client_extensions
   '';
 
   installPhase = ''
-    # Nix resets the working directory between phases. The source root is
-    # "tls-gen" but Nix may place us in the build dir root. Use an absolute
-    # path to find the basic/ directory where our artifacts live.
     BASIC_DIR=$(find /build -maxdepth 3 -name "profile.py" -path "*/basic/*" | head -1 | xargs dirname)
     cd "$BASIC_DIR"
 
@@ -204,13 +193,12 @@ EOF
     cp result/client* $out/client/
     cp result/server* $out/server/
 
-    # ── Neo4j certs ───────────────────────────────────────────────────────────
+    # ── Neo4j certs (own CA, clean DNs) ──────────────────────────────────────
     mkdir -p $out/neo4j
-    cp server_neo4j/cert.pem $out/neo4j/server_neo4j_certificate.pem
-    cp server_neo4j/key.pem  $out/neo4j/server_neo4j_key.pem
-    cp client_neo4j/cert.pem $out/neo4j/client_neo4j_certificate.pem
-    cp client_neo4j/key.pem  $out/neo4j/client_neo4j_key.pem
-    # Neo4j shares the CA with Cassini
-    cp result/ca_certificate.pem $out/neo4j/ca_certificate.pem
+    cp server_neo4j/cert.pem     $out/neo4j/server_neo4j_certificate.pem
+    cp server_neo4j/key.pem      $out/neo4j/server_neo4j_key.pem
+    cp client_neo4j/cert.pem     $out/neo4j/client_neo4j_certificate.pem
+    cp client_neo4j/key.pem      $out/neo4j/client_neo4j_key.pem
+    cp neo4j_ca/cacert.pem       $out/neo4j/ca_certificate.pem
   '';
 }

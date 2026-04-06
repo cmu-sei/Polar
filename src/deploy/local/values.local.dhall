@@ -45,4 +45,5 @@ in base //
 
   , neo4j = base.neo4j //
     { image = "nix-neo4j:latest" }
+  , isLocal = True
   }

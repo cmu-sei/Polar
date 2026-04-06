@@ -41,3 +41,4 @@ server/
 pipeline-out/
 ai_models/
 pi/
+src/deploy/local/values-active.dhall

@@ -1,7 +1,8 @@
 let kubernetes = ../../types/kubernetes.dhall
 
 let Constants = ../../types/constants.dhall
-let values = ../values.dhall
+
+let values = ../values-active.dhall
 
 let setupScript = ../../../../scripts/setup-neo4j.sh as Text
 
@@ -164,6 +165,10 @@ let baseVolumeMounts =
         , name = values.neo4j.volumes.logs.name
         , mountPath = values.neo4j.volumes.logs.mountPath
         }
+      , kubernetes.VolumeMount::{
+        , name = "tmp"
+        , mountPath = "/tmp"
+        }
       ]
 
 let tlsVolumeMounts =
@@ -282,6 +287,10 @@ let podSpec =
                 }
               , kubernetes.Volume::{
                 , name = values.neo4j.configVolume
+                , emptyDir = Some kubernetes.EmptyDirVolumeSource::{=}
+                }
+              , kubernetes.Volume::{
+                , name = "tmp"
                 , emptyDir = Some kubernetes.EmptyDirVolumeSource::{=}
                 }
               ]

@@ -2,7 +2,7 @@ let kubernetes = ../../types/kubernetes.dhall
 
 let Constants = ../../types/constants.dhall
 
-let values = ../values.dhall
+let values = ../values-active.dhall
 
 let serviceSpec =
       kubernetes.ServiceSpec::{
