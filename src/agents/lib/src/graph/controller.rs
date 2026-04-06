@@ -44,6 +44,10 @@ pub mod rel {
     pub const TRANSITIONED_TO: &str = "TRANSITIONED_TO";
     pub const HAS_STATE: &str = "HAS_STATE";
     pub const OF_TYPE: &str = "OF_TYPE";
+    pub const DEPENDS_ON: &str = "DEPENDS_ON";
+    pub const ANALYZED_AS: &str = "ANALYZED_AS";
+    pub const BUILT_FROM: &str = "BUILT_FROM";
+    pub const ATTESTS: &str = "ATTESTS";
 }
 
 // ── GraphNodeKey trait ─────────────────────────────────────────────────────────

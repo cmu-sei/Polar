@@ -48,7 +48,20 @@ let binaries =
 
 let attestedBuildArtifacts = List/map Text Output mkBinaryArtifact binaries
 
-let attestedBuildStage
+
+let cargoCycloneDXStage
+    : Lib.Stage
+    = { name = "make-sboms"
+      , command = "nu ../../scripts/nushell/cargo-sbom.nu"
+      , failureMode = Lib.FailureMode.Collect
+      , inputs = [ Lib.StageInput.Workspace ]
+      , outputs = attestedBuildArtifacts
+      , condition = None Text
+      , pure = True
+      , impurityReason = None Text
+      }
+
+let cargoBuildStage
     : Lib.Stage
     = { name = "attested-build"
       , command = "nu ../../scripts/cargo-attested-build.nu"
@@ -59,6 +72,13 @@ let attestedBuildStage
       , pure = True
       , impurityReason = None Text
       }
+
+let stages = [
+    Lib.simpleStage "lint" "cargo clippy -- -D warnings" Lib.FailureMode.Collect
+    , Lib.simpleStage "fmt" "cargo fmt --check" Lib.FailureMode.Collect
+    ,    cargoCycloneDXStage
+    ,    cargoBuildStage
+]
 
 let polarPipeline
     : Lib.PipelineConfig
@@ -77,16 +97,7 @@ let polarPipeline
                   }
             , assertions : List { name : Text, fromStage : Text }
             }
-      , stages =
-          -- Fast gates: fail immediately so the developer gets signal quickly
-          --Cargo fmt in particular returns exit 1 whenever it identifies changes need to be made, so we just warn on that
-          [ Lib.simpleStage "fmt" "cargo fmt --check" Lib.FailureMode.Collect
-          , Lib.simpleStage
-              "lint"
-              "cargo clippy -- -D warnings"
-              Lib.FailureMode.Collect
-          , attestedBuildStage
-          ]
+      , stages
       }
 
 in  polarPipeline
