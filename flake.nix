@@ -30,7 +30,7 @@
     nix-container-lib.inputs.flake-utils.follows  = "flake-utils";
   };
   outputs = { self, nixpkgs, crane, rust-overlay, flake-utils, advisory-db,
-              myNeovimOverlay, staticanalysis, dotacat, nix-container-lib, ... }:
+            myNeovimOverlay, staticanalysis, dotacat, nix-container-lib, ... }@inputs:
     flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = import nixpkgs {
@@ -88,7 +88,7 @@
 
         # ── Workspace binaries + agent images ─────────────────────────────────
         polarPkgs = import ./src/agents/workspace.nix {
-          inherit pkgs lib crane rust-overlay nix-container-lib system;
+          inherit pkgs lib crane rust-overlay nix-container-lib inputs system;
         };
 
         commitMsgHooksPkg = import ./src/git-hooks/package.nix {
@@ -163,6 +163,7 @@
           # ── Build orchestrator ───────────────────────────────────────────────
           orchestratorImage    = polarPkgs.buildOrchestrator.orchestratorImage;
           buildProcessorImage  = polarPkgs.buildOrchestrator.buildProcessorImage;
+          cloneImage           = polarPkgs.buildOrchestrator.cloneImage;
         };
 
         devShells.default = container.devShell.overrideAttrs (old: {

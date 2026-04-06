@@ -1,6 +1,6 @@
 # TODO: A nix module that packages tests and contaienrizes the cargo workspace
 
-{ pkgs, lib, crane, rust-overlay, nix-container-lib, system, ... }:
+{ pkgs, lib, crane, rust-overlay, nix-container-lib, inputs, system, ... }:
 
 let
 
@@ -143,7 +143,7 @@ let
     };
 
     buildOrchestrator = import ./build-orchestrator/package.nix {
-      inherit pkgs commonPaths craneLib workspaceFileset commonUser nix-container-lib system;
+      inherit pkgs commonPaths craneLib workspaceFileset commonUser nix-container-lib inputs system;
       crateArgs = commonArgs // {
         inherit (craneLib.crateNameFromCargoToml { inherit src; }) version;
         doCheck = false;

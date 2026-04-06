@@ -12,6 +12,7 @@
 , workspaceFileset
 , commonUser
 , nix-container-lib   # passed from workspace.nix
+, inputs
 , system
 }:
 
@@ -190,44 +191,14 @@ let
     '';
   };
 
-  # Build the clone init container via nix-container-lib's mkContainer.
-  # Uses Minimal mode: execs git-clone-entrypoint directly, no start.sh.
+  # Clone init container for Cyclops build jobs.
+  # container.dhall declares the image metadata, mode, uid/gid, and runtime
+  # deps (git, cacert). The entrypoint script is built locally and passed via
+  # extraDerivations since it cannot be expressed as a dhall PackageRef.
   cloneContainer = nix-container-lib.lib.${system}.mkContainer {
-    inherit system pkgs;
-    inputs = {};
-    configNixPath = pkgs.writeText "clone-init-container.dhall" (
-      builtins.replaceStrings
-        [ "PRELUDE_PATH" ]
-        [ "${nix-container-lib}/dhall/prelude.dhall" ]
-        ''
-          let Lib      = PRELUDE_PATH
-          let defaults = Lib.defaults
-
-          in defaults.minimalContainer //
-            { name       = "cyclops/git-clone"
-            , entrypoint = Some "git-clone-entrypoint"
-            , staticUid  = Some 65532
-            , staticGid  = Some 65532
-            , packageLayers =
-                [ Lib.PackageLayer.Core
-                , Lib.customLayer "git-clone"
-                    [ { attrPath = "git",    flakeInput = None Text }
-                    , { attrPath = "cacert", flakeInput = None Text }
-                    ]
-                ]
-            , extraEnv =
-                [ { name      = "GIT_SSL_CAINFO"
-                  , value     = "/etc/ssl/certs/ca-bundle.crt"
-                  , placement = < BuildTime | StartTime | UserProvided >.BuildTime
-                  }
-                , { name      = "GIT_TERMINAL_PROMPT"
-                  , value     = "0"
-                  , placement = < BuildTime | StartTime | UserProvided >.BuildTime
-                  }
-                ]
-            }
-        ''
-    );
+    inherit system pkgs inputs;
+    configNixPath    = ./container.nix;
+    extraDerivations = [ gitCloneEntrypoint ];
   };
 
   cloneImage = cloneContainer.image;
