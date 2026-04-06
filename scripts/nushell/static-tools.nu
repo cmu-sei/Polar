@@ -18,6 +18,9 @@
 # The shebang above requires `nu` on PATH. In the dev container, `nu` is
 # provided by the Nix environment — no additional configuration needed.
 
+use pipeline/core.nu
+
+const COMPONENT = "polar-static-analysis"
 # ---------------------------------------------------------------------------
 # Colour helpers
 # ---------------------------------------------------------------------------
@@ -45,7 +48,7 @@ def bold [msg: string] {
 def check-tools [tools: list<string>] {
     let missing = $tools | where { |t| (which $t | is-empty) }
     if ($missing | is-not-empty) {
-        print (red $"Error: missing required tools: ($missing | str join ', ')")
+        log-info --component $COMPONENT (red $"Error: missing required tools: ($missing | str join ', ')")
         exit 1
     }
 }
@@ -62,7 +65,7 @@ def run-tool [
     cmd: list<string>,
 ] {
     let start = (date now)
-    print (yellow $"  → ($name)...")
+    log-info --component $COMPONENT (yellow $"  → ($name)...")
 
     let bin = $cmd.0
     let args = $cmd | skip 1
@@ -265,7 +268,7 @@ def generate-summary [results: table, output_dir: string, skip_summary: bool] {
     }
 
     $sections | str join "\n" | save --force $summary_file
-    print (green $"\nSummary written to ($summary_file)")
+    log-info --component $COMPONENT (green $"\nSummary written to ($summary_file)")
 }
 
 # ---------------------------------------------------------------------------
@@ -273,8 +276,8 @@ def generate-summary [results: table, output_dir: string, skip_summary: bool] {
 # ---------------------------------------------------------------------------
 
 def main [
-    --manifest-path: string = "src/agents/Cargo.toml"  # Path to workspace Cargo.toml
-    --output-path: string = "./output"                  # Directory for output files
+    --manifest-path: string = "src/agents/Cargo.toml"   # Path to workspace Cargo.toml
+    --output-path: string = "./pipeline-out"            # Directory for output files
     --skip-summary                                      # Skip summary report generation
     --no-progress                                       # (reserved; progress always shown for now)
 ] {
@@ -295,15 +298,15 @@ def main [
         noseyparker-cli
     ]
 
-    print (bold "\n=== Polar Static Analysis ===\n")
-    print $"Manifest : ($manifest)"
-    print $"Output   : ($output_dir)"
-    print ""
+    log-info --component $COMPONENT (bold "\n=== Polar Static Analysis ===\n")
+    log-info --component $COMPONENT $"Manifest : ($manifest)"
+    log-info --component $COMPONENT $"Output   : ($output_dir)"
+    log-info --component $COMPONENT ""
 
     # ------------------------------------------------------------------
     # Phase 1: parallel tool batch
     # ------------------------------------------------------------------
-    print (bold "Phase 1 — parallel tools\n")
+    log-info --component $COMPONENT (bold "Phase 1 — parallel tools\n")
 
     let tools = (tool-definitions $manifest $output_dir)
 
@@ -318,8 +321,8 @@ def main [
     # ------------------------------------------------------------------
     # Phase 2: noseyparker (sequential — it manages its own datastore)
     # ------------------------------------------------------------------
-    print ""
-    print (bold "Phase 2 — noseyparker\n")
+    log-info --component $COMPONENT ""
+    log-info --component $COMPONENT (bold "Phase 2 — noseyparker\n")
 
     let np_datastore = $"($output_dir)/noseyparker_datastore"
     let np_scan_out  = $"($output_dir)/noseyparker_scan.txt"
@@ -346,8 +349,8 @@ def main [
     # ------------------------------------------------------------------
     # Phase 3: cargo mutants (sequential — spawns its own workers)
     # ------------------------------------------------------------------
-    print ""
-    print (bold "Phase 3 — cargo mutants (this will take a while)\n")
+    log-info --component $COMPONENT ""
+    log-info --component $COMPONENT (bold "Phase 3 — cargo mutants (this will take a while)\n")
 
     let mutants_out     = $"($output_dir)/cargo_mutants.txt"
     let mutants_out_dir = $"($output_dir)/mutants.out"
@@ -368,18 +371,17 @@ def main [
         | append $mutants_result
     )
 
-    print ""
-    print (bold "=== Results ===")
-    print ($all_results | select name exit_code duration_sec | table)
+    log-info --component $COMPONENT ""
+    log-info --component $COMPONENT (bold "=== Results ===")
+    log-info --component $COMPONENT ($all_results | select name exit_code duration_sec | table)
 
     generate-summary $all_results $output_dir $skip_summary
 
     let failed = $all_results | where exit_code != 0
     if ($failed | is-not-empty) {
-        print (yellow $"\n($failed | length) tools exited non-zero. Check output files in ($output_dir) for details.")
+        log-warn --component $COMPONENT (yellow $"\n($failed | length) tools exited non-zero. Check output files in ($output_dir) for details.")
         exit 1
     } else {
-        print (green "\nAll tools completed successfully.")
+        log-info --component $COMPONENT (green "\nAll tools completed successfully.")
     }
 }
-

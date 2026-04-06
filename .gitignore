@@ -19,9 +19,7 @@ certs
 open-vsx.nix.txt
 vscode-marketplace-nix.txt
 open-vsx-nix.txt
-observer.env
-consumer.env
-gitlab.env
+
 manifests
 chart/
 .direnv/

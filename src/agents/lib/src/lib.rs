@@ -3,6 +3,7 @@ use cassini_types::{ClientEvent, WireTraceCtx};
 use ractor::OutputPort;
 use ractor::{Actor, ActorProcessingErr, ActorRef};
 use reqwest::{Certificate, Client, ClientBuilder};
+use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fmt::Debug;
@@ -28,6 +29,9 @@ pub const QUERY_COMMIT_FAILED: &str = "Error committing transaction to graph";
 pub const QUERY_RUN_FAILED: &str = "Error running query on the graph.";
 pub const UNEXPECTED_MESSAGE_STR: &str = "Received unexpected message!";
 pub const GIT_REPO_DISCOGERY_TOPIC: &str = "polar.git.repositories";
+pub const BUILDS_TOPIC_PREFIX: &str = "polar.builds";
+pub const ARTIFACT_PRODUCED_SUFFIX: &str = "artifact.produced";
+pub const SBOM_RESOLVED_SUFFIX: &str = "sbom.resolved";
 
 pub trait Supervisor {
     /// Helper function to dispatch messages off of message queues to the associated actors within an agent supervision tree.
@@ -46,6 +50,7 @@ pub enum SupervisorMessage {
 /// Until this is resolved, a workaround is to spawn another actor to serve as a subscriber/forwarder to push messages where they need to go.
 /// It's also possible to just have the client attempt to forward any mesages that come from the broker straight to its supervisor, as that's where they
 /// always go anyway. For now, we can leave this up to our future selves to decide what's best
+#[deprecated = "Functionality moved to TcpClient::spawn()"]
 pub async fn spawn_tcp_client<M, F>(
     service_name: &str,
     supervisor: ActorRef<M>,
@@ -75,6 +80,211 @@ where
     .await?;
 
     Ok(tcp_client)
+}
+
+/// ---------------------------------------------------------------------------
+/// BuildEvent — the wire format for events emitted by nushell pipeline stages.
+///
+/// This is NOT the same as ProvenanceEvent. ProvenanceEvent is the internal
+/// domain enum used by the supervisor and linker. BuildEvent is the wire
+/// representation that nushell stages produce as JSON. The distinction
+/// matters because:
+///
+///   1. Rust agents: serialize ProvenanceEvent directly via rkyv.
+///      The supervisor deserializes with rkyv::from_bytes and gets
+///      the domain enum directly. No BuildEvent intermediary.
+///
+///   2. Nushell stages: serialize BuildEvent as JSON (because nushell
+///      can't produce rkyv archives). The supervisor deserializes with
+///      BuildEvent::from_bytes, then calls into_provenance_event() to
+///      map into the domain enum.
+///
+/// Both paths converge at ProvenanceEvent before hitting the linker.
+///
+/// The payload is a concrete enum with #[serde(tag = "type")], which
+/// means serde handles variant dispatch internally. The `type` field
+/// that nushell writes (`$payload | merge { type: $subject_suffix }`)
+/// maps directly to #[serde(rename = "...")] on each variant. No
+/// serde_json::Value intermediary, no manual string matching.
+/// ---------------------------------------------------------------------------
+/// The wire format produced by nushell pipeline stages.
+/// JSON-only — Rust agents bypass this entirely via rkyv.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BuildEvent {
+    pub build_id: String,
+    pub stage_exec_id: String,
+    pub pipeline_exec_id: String,
+    pub observed_at: String,
+    pub payload: BuildEventPayload,
+}
+
+/// Concrete payload variants that nushell stages can emit.
+///
+/// Internally tagged on `type` — this matches the nushell emit function's
+/// `($payload | merge { type: $subject_suffix })`. Serde reads the `type`
+/// field and routes directly to the correct variant. Unknown values produce
+/// a deserialization error rather than silently passing through.
+///
+/// When you add a new `emit-*` function in nushell, add a variant here.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum BuildEventPayload {
+    /// From `emit-sbom-resolved`: the graph projection of a single SBOM.
+    #[serde(rename = "sbom.resolved")]
+    SbomAnalyzed(SbomGraphFragment),
+
+    /// From `emit-artifact-produced`: provenance record for any build output.
+    #[serde(rename = "artifact.produced")]
+    ArtifactProduced(ArtifactProducedPayload),
+
+    #[serde(rename = "binary.linked")]
+    BinaryLinked(BinaryLinkedPayload),
+}
+
+#[derive(
+    Debug, Clone, PartialEq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub struct BinaryLinkedPayload {
+    /// Content hash of the compiled binary.
+    pub binary_content_hash: String,
+
+    /// Filename of the binary (e.g. "polar-linker").
+    pub binary_name: String,
+
+    /// Purl of the package this binary was built from.
+    /// This is the join key to the SBOM's root package node.
+    pub root_purl: String,
+
+    /// Content hash of the SBOM that describes this package's deps.
+    /// Join key to the Sbom node created by handle_sbom_analyzed.
+    pub sbom_content_hash: String,
+
+    /// Attestation binding digest, if computed.
+    /// sha256(binary_hash:cargo_toml_hash:cargo_lock_hash:source_tree_hash)
+    /// Useful for audit, not used for graph structure.
+    #[serde(default)]
+    pub binding_digest: String,
+}
+
+// ---------------------------------------------------------------------------
+// Graph fragment types — the SBOM projection.
+//
+// These derive both serde (for the nushell JSON path) and rkyv (for when
+// a Rust agent constructs and emits an SbomAnalyzed event directly).
+// Both serialization paths produce the same logical data.
+// ---------------------------------------------------------------------------
+
+#[derive(
+    Debug, Clone, PartialEq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub struct PackageRef {
+    pub purl: String,
+    pub name: String,
+    pub version: String,
+    pub component_type: String,
+}
+
+#[derive(
+    Debug, Clone, PartialEq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub struct DependencyEdge {
+    pub from_ref: String,
+    pub to_refs: Vec<String>,
+}
+
+#[derive(
+    Debug, Clone, PartialEq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub struct SbomGraphFragment {
+    /// Content hash of the SBOM file. Provenance join key:
+    /// (Artifact {hash})-[:DESCRIBES]->(Package {purl}).
+    /// This is NOT the package identity — that's root.purl.
+    pub artifact_content_hash: String,
+
+    /// Filename as observed on disk. For debugging, not identity.
+    pub filename: String,
+
+    /// The root package this SBOM describes. None if the SBOM was
+    /// missing metadata.component (spec-noncompliant but it happens).
+    pub root: Option<PackageRef>,
+
+    /// Flat inventory of all dependency nodes. Each becomes a MERGE
+    /// target in Neo4j, keyed on purl.
+    pub components: Vec<PackageRef>,
+
+    /// Dependency tree edges from the CycloneDX `dependencies` array.
+    /// NOT derived from iterating `components` — that's a flat list
+    /// with no parent-child relationships. These are the actual edges.
+    pub edges: Vec<DependencyEdge>,
+}
+
+#[derive(
+    Debug, Clone, PartialEq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub struct ArtifactProducedPayload {
+    pub artifact_content_hash: String,
+    pub artifact_type: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub content_type: String,
+}
+
+// ---------------------------------------------------------------------------
+// Deserialization and conversion
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, thiserror::Error)]
+pub enum BuildEventError {
+    #[error("json deserialization failed: {0}")]
+    Json(#[from] serde_json::Error),
+}
+
+impl BuildEvent {
+    /// Deserialize from raw JSON bytes.
+    ///
+    /// Serde's internally-tagged enum handles dispatch on the `type` field
+    /// inside `payload`. No manual matching, no Value intermediary.
+    pub fn from_bytes(raw: &[u8]) -> Result<Self, BuildEventError> {
+        Ok(serde_json::from_slice(raw)?)
+    }
+
+    /// Convert this wire-format event into the domain ProvenanceEvent.
+    ///
+    /// This is the bridge between "what nushell emitted" (BuildEvent)
+    /// and "what the supervisor operates on" (ProvenanceEvent). The
+    /// mapping is 1:1 — each BuildEventPayload variant corresponds to
+    /// exactly one ProvenanceEvent variant that carries the same data.
+    pub fn into_provenance_event(self) -> (ProvenanceContext, ProvenanceEvent) {
+        let ctx = ProvenanceContext {
+            build_id: self.build_id,
+            stage_exec_id: self.stage_exec_id,
+            pipeline_exec_id: self.pipeline_exec_id,
+            observed_at: self.observed_at,
+        };
+
+        let event = match self.payload {
+            BuildEventPayload::SbomAnalyzed(fragment) => ProvenanceEvent::SbomAnalyzed(fragment),
+            BuildEventPayload::ArtifactProduced(payload) => {
+                ProvenanceEvent::ArtifactProduced(payload)
+            }
+            BuildEventPayload::BinaryLinked(payload) => ProvenanceEvent::BinaryLinked(payload),
+        };
+
+        (ctx, event)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Domain types
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProvenanceContext {
+    pub build_id: String,
+    pub stage_exec_id: String,
+    pub pipeline_exec_id: String,
+    pub observed_at: String,
 }
 
 /// Helper function to parse a file at a given path and return the raw bytes as a vector
@@ -176,6 +386,7 @@ pub struct GitRepositoryDiscoveredEvent {
     pub http_url: Option<String>,
     pub ssh_url: Option<String>,
 }
+
 /// Represents normalized provenance-related events emitted across agents.
 /// Each variant communicates new or updated knowledge about entities in the provenance graph.
 ///
@@ -186,8 +397,15 @@ pub struct GitRepositoryDiscoveredEvent {
 /// - Internal Neo4j IDs (`id(node)`) MUST NOT be emitted in events — they are ephemeral.
 #[derive(Debug, rkyv::Serialize, rkyv::Deserialize, rkyv::Archive)]
 pub enum ProvenanceEvent {
+    ArtifactProduced(ArtifactProducedPayload),
+    SbomAnalyzed(SbomGraphFragment),
+    BinaryLinked(BinaryLinkedPayload),
+
     /// Emitted when more generic unclassified artifacts.
-    ArtifactDiscovered { name: String, url: String },
+    ArtifactDiscovered {
+        name: String,
+        url: String,
+    },
     SBOMResolved {
         uid: String,
         name: String,
@@ -227,13 +445,17 @@ pub enum ProvenanceEvent {
     /// (e.g., observed in a Gitlab, Gitea, Artifactory or registry listing).
     ///
     /// `hostname`: The hostname of the registry (e.g. `"ghcr.io"`).
-    OCIRegistryDiscovered { hostname: String },
+    OCIRegistryDiscovered {
+        hostname: String,
+    },
     /// Emitted when a new OCI artifact is discovered.
     /// observed likely by an agent closest to a registry itself. Either through REST or OCI compatible clients.
     ///
     /// `uri`: The canonical reference string (e.g. `"ghcr.io/org/app:1.2.3"`).
     ///
-    OCIArtifactDiscovered { uri: String },
+    OCIArtifactDiscovered {
+        uri: String,
+    },
     /// Emitted when a new OCI artifact is resolved.
     ///
     ///
@@ -257,7 +479,9 @@ pub enum ProvenanceEvent {
     /// “The artifact is an image”
     /// “This is the canonical truth forever”
     /// It means: there exists evidence linking a claim to an artifact. To that end, it does not represent artifact itself in our database
-    ImageRefDiscovered { uri: String },
+    ImageRefDiscovered {
+        uri: String,
+    },
 
     /// Emitted when a previously discovered image reference has been
     /// resolved (validated via Skopeo or registry metadata) and now includes

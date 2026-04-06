@@ -29,26 +29,6 @@ def workspace-root []: nothing -> string {
     | get workspace_root
 }
 
-# Parse cargo's --message-format=json output to extract compiler artifacts.
-# Returns a table of { package_id, target_name, target_kind, filenames, fresh }.
-def parse-cargo-artifacts [json_lines: string]: nothing -> table {
-    $json_lines
-    | lines
-    | where { ($in | str trim) != "" }
-    | each { try { $in | from json } catch { null } }
-    | where { $in != null }
-    | where { $in.reason? == "compiler-artifact" }
-    | each {|msg|
-        {
-            package_id: $msg.package_id
-            target_name: $msg.target.name
-            target_kind: ($msg.target.kind | first)
-            filenames: $msg.filenames
-            fresh: ($msg.fresh? | default false)
-        }
-    }
-}
-
 def main [
     --package (-p): string = ""    # specific package to build
     --release (-r)                 # release mode
@@ -112,11 +92,11 @@ def main [
             let name = ($exe | path basename)
             let dest = ($artifact_dir | path join $name)
 
-            let artifact_id = content-hash-file $exe
+            let content_hash = content-hash-file $exe
 
             log-debug $"Artifact created: ($exe)" --component $COMPONENT
 
-            emit-artifact-produced $artifact_id $ELF_BINARY_ARTIFACT
+            emit-artifact-produced $content_hash $ELF_BINARY_ARTIFACT
 
             log-debug $"moving ($exe) -> ($dest)" --component $COMPONENT
             mv $exe $dest

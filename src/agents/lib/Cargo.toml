@@ -25,6 +25,7 @@ thiserror.workspace = true
 async-trait.workspace = true
 bytes.workspace = true
 k8s-openapi = { workspace = true, features = ["v1_32"] }
+serde_json.workspace = true
 [dev-dependencies]
 polar.workspace = true
 testcontainers.workspace = true

@@ -1,20 +1,20 @@
-use crate::BROKER_CLIENT_NAME;
 use crate::{
     PROVENANCE_LIKER_NAME,
     linker::{ProvenanceLinker, ProvenanceLinkerArgs},
 };
-use cassini_client::{TCPClientConfig, TcpClientArgs};
 use cassini_types::ClientEvent;
 use cassini_types::WireTraceCtx;
 use neo4rs::Graph;
+use polar::cassini::SubscribeRequest;
 use polar::graph::controller::GraphControllerActor;
 use polar::{
-    PROVENANCE_LINKER_TOPIC, ProvenanceEvent, Supervisor, SupervisorMessage, get_neo_config,
+    ARTIFACT_PRODUCED_SUFFIX, BUILDS_TOPIC_PREFIX, BuildEvent, PROVENANCE_LINKER_TOPIC,
+    ProvenanceEvent, SBOM_RESOLVED_SUFFIX, SupervisorMessage,
+    cassini::{CassiniClient, TcpClient},
+    get_neo_config,
 };
-use ractor::{
-    Actor, ActorProcessingErr, ActorRef, OutputPort, SupervisionEvent, async_trait,
-    registry::where_is,
-};
+use ractor::{Actor, ActorProcessingErr, ActorRef, SupervisionEvent, async_trait};
+use serde_json::{Value, to_string_pretty};
 use std::sync::Arc;
 use tracing::{debug, warn};
 use tracing::{error, instrument, trace};
@@ -22,30 +22,58 @@ use tracing::{error, instrument, trace};
 // === Supervisor state ===
 pub struct ProvenanceSupervisorState {
     pub graph: Graph,
-    pub broker_client: ActorRef<cassini_client::TcpClientMessage>,
-    pub events_output: Arc<OutputPort<ClientEvent>>,
+    pub broker_client: Arc<dyn CassiniClient>,
+    pub linker: Option<ActorRef<ProvenanceEvent>>,
 }
 
 // === Supervisor definition ===
 
 pub struct ProvenanceSupervisor;
 
-impl Supervisor for ProvenanceSupervisor {
-    #[instrument(name = "ProvenanceSupervisor::deserialize_and_dispatch" skip(payload))]
-    fn deserialize_and_dispatch(topic: String, payload: Vec<u8>) {
+impl ProvenanceSupervisor {
+    #[instrument(name = "ProvenanceSupervisor::deserialize_and_dispatch" skip(payload, state))]
+    fn deserialize_and_dispatch(
+        topic: String,
+        payload: Vec<u8>,
+        state: &mut ProvenanceSupervisorState,
+    ) {
         debug!("Received message on topic {topic}");
-        match rkyv::from_bytes::<ProvenanceEvent, rkyv::rancor::Error>(&payload) {
-            Ok(event) => {
-                //lookup linker and forward
-                trace!("looking up actor {PROVENANCE_LINKER_TOPIC} and forwarding");
-                if let Some(linker) = where_is(PROVENANCE_LINKER_TOPIC.to_string()) {
-                    linker
-                        .send_message(event)
-                        .map_err(|e| error!("Failed to forward event to linker! {e}"))
-                        .ok();
+
+        /// ---------------------------------------------------------------------------
+        /// rkyv is the hot path (Rust agents). JSON via BuildEvent is the cold
+        /// path (nushell stages). The topic is available for logging/metrics but
+        /// is NOT used as a deserialization discriminant — serde's tagged enum
+        /// handles that.
+        /// ---------------------------------------------------------------------------
+        pub fn try_deserialize(payload: &[u8]) -> Option<ProvenanceEvent> {
+            // Hot path: Rust agents serialize ProvenanceEvent directly with rkyv.
+            // Zero-copy deserialize — no allocation, no JSON parsing overhead.
+            if let Ok(event) = rkyv::from_bytes::<ProvenanceEvent, rkyv::rancor::Error>(payload) {
+                return Some(event);
+            }
+
+            // Cold path: nushell pipeline stages emit JSON-wrapped BuildEvents.
+            // Parse JSON, then map the typed payload into the domain enum.
+            match BuildEvent::from_bytes(payload) {
+                Ok(e) => {
+                    let (_ctx, event) = e.into_provenance_event();
+                    return Some(event);
+                }
+                Err(e) => {
+                    error!("Failed ot deserialize build event! {e}");
                 }
             }
-            Err(e) => warn!("Failed to parse provenance event. {e}"),
+            //deserialize as raw josn
+            //
+            // let json = serde_json::from_slice::<Value>(payload).unwrap();
+            // debug!("Read json\n {}", to_string_pretty(&json).unwrap());
+            None
+        }
+
+        if let Some(event) = try_deserialize(&payload) {
+            state.linker.as_ref().map(|l| l.send_message(event));
+        } else {
+            warn!("Failed to deserialize provenance event!")
         }
     }
 }
@@ -64,32 +92,20 @@ impl Actor for ProvenanceSupervisor {
 
         let graph = neo4rs::Graph::connect(get_neo_config()?)?;
 
-        let events_output = Arc::new(OutputPort::default());
-
-        events_output.subscribe(myself.clone(), |event| {
-            debug!("Received event: {event:?}");
-            Some(SupervisorMessage::ClientEvent { event })
-        });
-        let config = TCPClientConfig::new()?; // create config (adjust error handling as needed)
-        let client_args = TcpClientArgs {
-            config,
-            registration_id: None,
-            events_output: Some(events_output.clone()),
-            event_handler: None,
-        };
-
-        let (broker_client, _) = Actor::spawn_linked(
-            Some(BROKER_CLIENT_NAME.to_string()),
-            cassini_client::TcpClientActor,
-            client_args,
-            myself.clone().into(),
-        )
-        .await?;
+        // spawn a cassini client
+        let broker_client = Arc::new(
+            TcpClient::spawn(
+                "polar.artifacts.linker.supervisor.tcp",
+                myself.clone(),
+                |event| Some(SupervisorMessage::ClientEvent { event }),
+            )
+            .await?,
+        );
 
         let s = ProvenanceSupervisorState {
             graph,
             broker_client,
-            events_output: events_output.clone(),
+            linker: None,
         };
 
         Ok(s)
@@ -116,12 +132,19 @@ impl Actor for ProvenanceSupervisor {
                     // subscribe to topic
                     //
                     debug!("Subscribing to topic {}", PROVENANCE_LINKER_TOPIC);
-                    state
-                        .broker_client
-                        .cast(cassini_client::TcpClientMessage::Subscribe {
-                            topic: PROVENANCE_LINKER_TOPIC.to_string(),
-                            trace_ctx: WireTraceCtx::from_current_span(),
-                        })?;
+                    state.broker_client.subscribe(SubscribeRequest {
+                        topic: PROVENANCE_LINKER_TOPIC.to_string(),
+                        trace_ctx: WireTraceCtx::from_current_span(),
+                    })?;
+
+                    state.broker_client.subscribe(SubscribeRequest {
+                        topic: format!("{BUILDS_TOPIC_PREFIX}.{ARTIFACT_PRODUCED_SUFFIX}"),
+                        trace_ctx: WireTraceCtx::from_current_span(),
+                    })?;
+                    state.broker_client.subscribe(SubscribeRequest {
+                        topic: format!("{BUILDS_TOPIC_PREFIX}.{SBOM_RESOLVED_SUFFIX}"),
+                        trace_ctx: WireTraceCtx::from_current_span(),
+                    })?;
 
                     let graph = neo4rs::Graph::connect(get_neo_config()?)?;
 
@@ -135,16 +158,18 @@ impl Actor for ProvenanceSupervisor {
 
                     let linker_args = ProvenanceLinkerArgs { compiler };
 
-                    let (_linker, _) = Actor::spawn_linked(
+                    let (linker, _) = Actor::spawn_linked(
                         Some(PROVENANCE_LIKER_NAME.to_string()),
                         ProvenanceLinker,
                         linker_args,
                         myself.clone().into(),
                     )
                     .await?;
+
+                    state.linker = Some(linker);
                 }
                 ClientEvent::MessagePublished { topic, payload, .. } => {
-                    Self::deserialize_and_dispatch(topic, payload)
+                    Self::deserialize_and_dispatch(topic, payload, state)
                 }
                 ClientEvent::TransportError { reason } => {
                     error!("Transport error: {reason}");
