@@ -213,8 +213,6 @@ export def emit [subject_suffix: string, payload: record] {
     # cassini-client publish goes here
     let payload = ($envelope | to json --raw)
 
-    $payload | save --force last_emitted.json
-
     cassini-client publish $"($SUBJECT_PREFIX).($subject_suffix)" $payload
 }
 

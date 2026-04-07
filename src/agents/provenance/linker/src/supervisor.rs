@@ -14,10 +14,9 @@ use polar::{
     get_neo_config,
 };
 use ractor::{Actor, ActorProcessingErr, ActorRef, SupervisionEvent, async_trait};
-use serde_json::{Value, to_string_pretty};
 use std::sync::Arc;
 use tracing::{debug, warn};
-use tracing::{error, instrument, trace};
+use tracing::{error, instrument};
 
 // === Supervisor state ===
 pub struct ProvenanceSupervisorState {
@@ -63,10 +62,6 @@ impl ProvenanceSupervisor {
                     error!("Failed ot deserialize build event! {e}");
                 }
             }
-            //deserialize as raw josn
-            //
-            // let json = serde_json::from_slice::<Value>(payload).unwrap();
-            // debug!("Read json\n {}", to_string_pretty(&json).unwrap());
             None
         }
 
@@ -143,6 +138,11 @@ impl Actor for ProvenanceSupervisor {
                     })?;
                     state.broker_client.subscribe(SubscribeRequest {
                         topic: format!("{BUILDS_TOPIC_PREFIX}.{SBOM_RESOLVED_SUFFIX}"),
+                        trace_ctx: WireTraceCtx::from_current_span(),
+                    })?;
+
+                    state.broker_client.subscribe(SubscribeRequest {
+                        topic: format!("{BUILDS_TOPIC_PREFIX}.binary.linked"),
                         trace_ctx: WireTraceCtx::from_current_span(),
                     })?;
 

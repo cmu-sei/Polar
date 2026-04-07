@@ -379,7 +379,7 @@ impl ProvenanceLinker {
         Self::ensure_edge(state, binary_k.clone(), package_k, rel::BUILT_FROM, vec![])?;
 
         // 4. Link the Binary to the SBOM that describes its deps.
-        //    (Binary)-[:ATTESTS]->(Sbom)
+        //    (SBOM)-[:ATTESTS]->(Binary)
         //    This is a direct edge for convenience — you can already
         //    traverse Binary → Package ← Sbom, but the direct edge
         //    makes queries simpler and encodes the fact that this
@@ -388,7 +388,7 @@ impl ProvenanceLinker {
             let sbom_k = ArtifactNodeKey::Sbom {
                 artifact_content_hash: payload.sbom_content_hash.clone(),
             };
-            Self::ensure_edge(state, binary_k, sbom_k, rel::ATTESTS, vec![])?;
+            Self::ensure_edge(state, sbom_k, binary_k, rel::ATTESTS, vec![])?;
         }
 
         debug!(
