@@ -1,4 +1,3 @@
-
 { pkgs,
   commonPaths,
   craneLib,
@@ -26,9 +25,7 @@ let
         inherit extraCommands;
         name = "provenance-linker-agent";
         tag = "latest";
-        copyToRoot = commonPaths ++ [linkerBin];
-        uid = commonUser.uid;
-        gid = commonUser.gid;
+        contents = commonPaths ++ [linkerBin];
 
         config = {
             User = "${commonUser.uid}:${commonUser.gid}";
@@ -50,18 +47,15 @@ let
       text          = builtins.readFile ./resolver/resolver.json;
     };
 
-    resolverImage = pkgs.dockerTools.buildImage {
+    resolverImage = pkgs.dockerTools.buildLayeredImage {
         inherit extraCommands;
         name = "provenance-resolver-agent";
         tag = "latest";
-        copyToRoot = commonPaths ++ [
+        contents = commonPaths ++ [
           resolverBin
-          pkgs.cacert # this one needs a default trust store, so we'll include one
+          pkgs.cacert
           resolverConfig
         ];
-        uid = commonUser.uid;
-        gid = commonUser.gid;
-
         config = {
             User = "${commonUser.uid}:${commonUser.gid}";
             Cmd = [ "provenance-resolver" ];
@@ -69,7 +63,6 @@ let
             Env = [ ];
         };
     };
-
 
 in
 {
