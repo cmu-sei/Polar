@@ -29,6 +29,59 @@ build-orchestrator/
           └── job.rs                # Job manifest builder + status interpreter
 ```
 
+## Architecture 
+
+- `main.rs` bootstraps config, backend, storage, and spawns two top-level actors: `OrchestratorSupervisor` and `TCPClient`
+- `TCPClient` subscribes to the git processing topic, converts `RefUpdated` events into `BuildRequest`s, and forwards them to the supervisor
+- `OrchestratorSupervisor` owns two children: `BuildRegistryActor` (singleton, serializes all state) and one `BuildJobActor` per build (spawned on demand)
+- `BuildJobActor` drives the state machine, calls the `BuildBackend` trait, and on terminal state calls `StorageClient`
+- `KubernetesBackend` submits Jobs to the k8s API — each Job has a clone init container and a pipeline containerThe user asked for raw Mermaid JS — that means a code block, not a rendered diagram. No widget needed here.
+
+```mermaid
+graph TD
+    subgraph external["external"]
+        GIT[git observer<br/>RefUpdated events]
+        K8S[kubernetes API]
+        MINIO[MinIO<br/>object storage]
+    end
+
+    subgraph process["cyclops-orchestrator process"]
+        CONSUMER[TCPCLient<br/>subscribes GIT_REPO_PROCESSING_TOPIC]
+        
+        subgraph supervisor_tree["OrchestratorSupervisor supervision tree"]
+            SUPERVISOR[OrchestratorSupervisor]
+            REGISTRY[BuildRegistryActor<br/>HashMap&lt;Uuid, BuildRecord&gt;]
+            JOB1[BuildJobActor&lt;build-A&gt;]
+            JOB2[BuildJobActor&lt;build-B&gt;]
+        end
+
+        BACKEND[KubernetesBackend<br/>Arc&lt;dyn BuildBackend&gt;]
+        STORAGE[StorageClient<br/>Arc]
+    end
+
+    subgraph k8s_job["k8s Job pod"]
+        INIT[init container<br/>git-clone]
+        PIPELINE[pipeline container<br/>/bin/pipeline-runner]
+        VOL[(workspace<br/>emptyDir)]
+    end
+
+    GIT -->|RefUpdated| CONSUMER
+    CONSUMER -->|ClientEvent GitRepoUpdatedEvent| SUPERVISOR
+    SUPERVISOR -->|spawn_linked| REGISTRY
+    SUPERVISOR -->|spawn_linked BuildSpec| JOB1
+    SUPERVISOR -->|spawn_linked BuildSpec| JOB2
+    JOB1 -->|Transition messages| REGISTRY
+    JOB1 -->|submit / poll / cancel| BACKEND
+    BACKEND -->|create Job| K8S
+    K8S -->|runs| INIT
+    INIT -->|clone into| VOL
+    VOL -->|read-only mount| PIPELINE
+    JOB1 -->|upload_log<br/>upload_manifest| STORAGE
+    STORAGE -->|PUT object| MINIO
+```
+
+The two things worth noting about the shape: `TCPClient` is intentionally a sibling of the supervisor tree, not a child — a broker disconnect doesn't cascade into in-flight build failures. And `BuildJobActor` instances are spawned on demand and stop themselves on terminal state, so the tree is dynamic — only the registry is a permanent fixture under the supervisor.
+
 ## Running Locally (dev mode)
 
 **NOTE** This assumes you've done the workspace wide setup of configuring environment variables, and standing up the necessary infrastructure, including Cassini, Neo4j, and a Kubernetes cluster.
