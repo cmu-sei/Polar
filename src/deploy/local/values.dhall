@@ -217,4 +217,5 @@ in  { imagePullSecrets
     , buildProcessor
     , buildOrchestrator
     , isLocal = False
+    , proxyCACert = None Text
     }

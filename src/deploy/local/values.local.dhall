@@ -45,5 +45,12 @@ in base //
 
   , neo4j = base.neo4j //
     { image = "nix-neo4j:latest" }
+
+  , buildOrchestrator = base.buildOrchestrator //
+    { image = "build-orchestrator:latest" }
+
+  , buildProcessor = base.buildProcessor //
+    { image = "build-processor:latest" }
+
   , isLocal = True
   }
