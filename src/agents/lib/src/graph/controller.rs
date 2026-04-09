@@ -48,6 +48,13 @@ pub mod rel {
     pub const ANALYZED_AS: &str = "ANALYZED_AS";
     pub const BUILT_FROM: &str = "BUILT_FROM";
     pub const ATTESTS: &str = "ATTESTS";
+    /// An OCIArtifact (registry manifest) refers to a ContainerImage
+    /// (content identity). Multiple OCIArtifacts can refer to the same
+    /// ContainerImage when pushed to different registries.
+    pub const REFERS_TO: &str = "REFERS_TO";
+
+    /// A ContainerImage has layers in a specific order.
+    pub const HAS_LAYER: &str = "HAS_LAYER";
 }
 
 // ── GraphNodeKey trait ─────────────────────────────────────────────────────────

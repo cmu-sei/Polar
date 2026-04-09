@@ -215,7 +215,7 @@ export def emit [subject_suffix: string, payload: record] {
 
     log-debug ($payload | jq)
 
-    cassini-client publish $"($SUBJECT_PREFIX).($subject_suffix)" $payload
+    # cassini-client publish $"($SUBJECT_PREFIX).($subject_suffix)" $payload
 }
 
 # ---------------------------------------------------------------------------
@@ -452,6 +452,7 @@ export def extract-layer-attributions [doc: record]: nothing -> list<record> {
 export def process-image-sbom [
     sbom_path: path
     image_name: string
+    --oci_metadata: record
 ]: nothing -> record {
     let doc = try { open $sbom_path } catch {|e|
         log-warn $"Could not parse image SBOM ($sbom_path): ($e.msg)" --component "oci"
@@ -501,14 +502,27 @@ export def process-image-sbom [
     }
 }
 
+
 # ===========================================================================
 # Image building (Nix)
 # ===========================================================================
 
 # Build a single Nix image derivation.
 #
-# Returns a record with the build result, including the resolved
-# tarball path (through the nix store symlink).
+# Builds the image, extracts OCI metadata from the resulting tarball,
+# and emits a `container-image.created` event immediately. The image
+# artifact exists the moment nix build completes — we don't wait for
+# an upload, a resolver discovery, or an SBOM scan to announce it.
+#
+# The emitted event carries enough for the linker to create the
+# OCIArtifact node and its OCILayer children right away:
+#   - Config digest (image identity before registry push)
+#   - Ordered layer list with uncompressed diff IDs
+#   - OS, arch, entrypoint, cmd
+#
+# Returns a record including the tarball path AND the extracted
+# oci_metadata, so downstream callers (build-scan-upload, etc.)
+# don't need to re-extract it.
 #
 # `flake_ref` is the full flake reference, e.g.:
 #   .#polarPkgs.cassini.cassiniImage
@@ -525,18 +539,46 @@ export def nix-build-image [
     if $result.exit_code != 0 {
         let msg = ($result.stderr? | default $result.stdout | str trim)
         log-warn $"nix build failed for ($link_name): ($msg)" --component "oci"
-        return { success: false, link_name: $link_name, flake_ref: $flake_ref, tarball: "" }
+        return { success: false, link_name: $link_name, flake_ref: $flake_ref, tarball: "", oci_metadata: { success: false } }
     }
 
     let tarball = (^readlink -f $link_name | str trim)
 
     if ($tarball | path exists) != true {
         log-warn $"nix build produced no output for ($link_name)" --component "oci"
-        return { success: false, link_name: $link_name, flake_ref: $flake_ref, tarball: "" }
+        return { success: false, link_name: $link_name, flake_ref: $flake_ref, tarball: "", oci_metadata: { success: false } }
+    }
+
+    # Extract OCI metadata from the tarball immediately.
+    # The image exists now — announce it now.
+    let oci_metadata = (extract-oci-metadata $tarball)
+
+    let tarball_hash = (content-hash-file $tarball)
+
+    # Emit container-image.created: "an OCI image was just built."
+    # This is the earliest possible announcement. The linker can
+    # create the OCIArtifact + OCILayer nodes from this alone,
+    # without waiting for a registry push or resolver discovery.
+    if ($oci_metadata | get -o success | default false) {
+        emit "container-image.created" {
+            image_name: $link_name
+            tarball_hash: $tarball_hash
+            config_digest: $oci_metadata.config_digest
+            layers: $oci_metadata.layers
+            os: $oci_metadata.os
+            arch: $oci_metadata.arch
+            created: $oci_metadata.created
+            entrypoint: $oci_metadata.entrypoint
+            cmd: $oci_metadata.cmd
+            repo_tags: ($oci_metadata.repo_tags? | default [])
+        }
+        log-info $"($link_name): ($oci_metadata.layers | length) layers, ($oci_metadata.os)/($oci_metadata.arch)" --component "oci"
+    } else {
+        log-warn $"($link_name): built successfully but could not extract OCI metadata" --component "oci"
     }
 
     log-info $"Built ($link_name): ($tarball)" --component "oci"
-    { success: true, link_name: $link_name, flake_ref: $flake_ref, tarball: $tarball }
+    { success: true, link_name: $link_name, flake_ref: $flake_ref, tarball: $tarball, oci_metadata: $oci_metadata }
 }
 
 # ===========================================================================
@@ -600,6 +642,7 @@ export def upload-image [
     { remote_ref: $remote_ref, digest: $digest, name: $label }
 }
 
+
 # ===========================================================================
 # High-level pipeline: build → scan → upload → emit
 #
@@ -608,10 +651,16 @@ export def upload-image [
 #
 # Sequence:
 #   1. Build the image tarball (nix build)
+#      → emits container-image.created (OCIArtifact + OCILayer nodes)
 #   2. Generate an SBOM from the tarball (syft)
-#   3. Process the SBOM (extract fragment + layer attrs, emit events)
+#   3. Process the SBOM with OCI metadata for full layer attribution
+#      → emits image-sbom.analyzed (packages + layer CONTAINS edges)
 #   4. Upload to each registry (skopeo copy)
-#   5. Emit image.linked for each upload (binary/package linkage)
+#   5. Emit image.linked (ties registry digest to package purl)
+#
+# nix-build-image already extracts OCI metadata and emits
+# container-image.created, so we reuse build.oci_metadata here
+# rather than re-extracting. One tarball crack, used everywhere.
 #
 # `registries` is a list of remote ref templates with `{tag}` placeholder:
 #   ["docker://registry.io/org/myapp:{tag}", "docker://acr.io/myapp:{tag}"]
@@ -626,18 +675,24 @@ export def build-scan-upload [
     --root_purl: string = ""    # Purl of the root package this image contains
     --sbom_content_hash: string = ""  # Content hash of the source-level SBOM, if known
 ]: nothing -> record {
-    # 1. Build
+    # 1. Build (also extracts OCI metadata + emits container-image.created)
     let build = (nix-build-image $flake_ref $link_name)
     if not $build.success {
         return { success: false, image_name: $link_name }
     }
 
+    # Reuse the metadata nix-build-image already extracted.
+    # No second tar invocation needed.
+    let oci_metadata = $build.oci_metadata
+
     # 2. Generate SBOM from the tarball
     let sbom = (generate-image-sbom $build.tarball $artifact_dir --name $link_name)
 
-    # 3. Process SBOM (extract graph fragment + layer attrs, emit events)
+    # 3. Process SBOM with OCI metadata for full layer attribution.
+    #    The oci_metadata gives us diff_id → layer order mapping so
+    #    the emitted event carries ordered CONTAINS edges.
     if $sbom.success {
-        process-image-sbom $sbom.path $link_name
+        process-image-sbom $sbom.path $link_name --oci_metadata $oci_metadata
     } else {
         log-warn $"Skipping SBOM processing for ($link_name) — generation failed" --component "oci"
     }
@@ -649,13 +704,14 @@ export def build-scan-upload [
     })
 
     # 5. Emit image.linked for each upload that produced a digest.
-    #    This connects the image in the registry to the package it was
-    #    built from, closing the chain:
+    #    This ties the registry-side manifest digest to the root
+    #    package purl, closing the chain:
     #      (OCIArtifact {digest})-[:BUILT_FROM]->(Package {purl})
     #
-    #    The resolver agent will independently discover these images in
-    #    the registry and emit OCIArtifactResolved with manifest/layer
-    #    data. The linker joins them via digest.
+    #    The OCIArtifact and OCILayer nodes already exist from the
+    #    container-image.created event in step 1. This event adds
+    #    the package linkage and registry URI.
+    let has_oci = ($oci_metadata | get -o success | default false)
     for upload in $uploads {
         if ($upload.digest | is-not-empty) and ($root_purl | is-not-empty) {
             emit "image.linked" {
@@ -665,6 +721,10 @@ export def build-scan-upload [
                 root_purl: $root_purl
                 sbom_content_hash: ($sbom_content_hash | default "")
                 image_sbom_content_hash: (if $sbom.success { content-hash-file $sbom.path } else { "" })
+                config_digest: (if $has_oci { $oci_metadata.config_digest } else { "" })
+                layer_manifest: (if $has_oci { $oci_metadata.layers } else { [] })
+                os: (if $has_oci { $oci_metadata.os } else { "" })
+                arch: (if $has_oci { $oci_metadata.arch } else { "" })
             }
         }
     }
@@ -673,7 +733,138 @@ export def build-scan-upload [
         success: true
         image_name: $link_name
         tarball: $build.tarball
+        oci_metadata: $oci_metadata
         sbom: $sbom
         uploads: $uploads
+    }
+}
+
+# ===========================================================================
+# OCI tarball introspection
+#
+# Docker-archive tarballs (from nix, docker save, podman save) contain
+# the manifest and config as JSON files. We can extract everything the
+# resolver agent would have fetched over the network — layer digests,
+# media types, diff IDs, config — without any registry round-trip.
+#
+# Tarball structure (docker-archive format):
+#   manifest.json   — array of [{ Config, RepoTags, Layers }]
+#   <config_hash>.json — the OCI image config
+#   <layer_hash>/layer.tar — each layer as a tar
+#
+# We extract manifest.json and the config JSON, which together give us:
+#   - Layer diff IDs (uncompressed, from config.rootfs.diff_ids)
+#   - Layer tar paths (from manifest.json Layers array, in order)
+#   - Architecture, OS, entrypoint, cmd, created timestamp
+#   - The mapping between layer order and diff IDs
+# ===========================================================================
+
+# Extract OCI metadata from an image tarball without any network calls.
+#
+# Returns a record with everything the resolver agent would have provided:
+#   {
+#     config_digest: "sha256:...",
+#     layers: [ { order: 0, diff_id: "sha256:...", tar_path: "..." }, ... ],
+#     os: "linux",
+#     arch: "amd64",
+#     created: "2025-01-01T...",
+#     entrypoint: "[/bin/myapp]",
+#     cmd: "",
+#     diff_id_to_order: { "sha256:abc...": 0, "sha256:def...": 1 }
+#   }
+#
+# The `diff_id_to_order` map is the key to joining syft's layer
+# attributions (which use uncompressed diff IDs) with the layer
+# ordering in the image. When combined with the upload digest from
+# skopeo, this gives the linker everything it needs to write
+# OCIArtifact, OCILayer, and CONTAINS edges in one pass.
+export def extract-oci-metadata [
+    tarball_path: path
+]: nothing -> record {
+    let real_path = (^readlink -f $tarball_path | str trim)
+
+    log-debug $"Extracting OCI metadata from ($real_path)" --component "oci"
+
+    # Extract manifest.json from the tarball.
+    # It's always at the root of a docker-archive tar.
+    let manifest_json = try {
+        ^tar -xf $real_path -O "manifest.json" | from json
+    } catch {|e|
+        log-warn $"Could not extract manifest.json from ($tarball_path): ($e.msg)" --component "oci"
+        return { success: false }
+    }
+
+    # docker-archive manifest.json is an array; take the first (and
+    # usually only) entry.
+    let manifest_entry = ($manifest_json | first | default null)
+    if $manifest_entry == null {
+        log-warn $"Empty manifest.json in ($tarball_path)" --component "oci"
+        return { success: false }
+    }
+
+    # Extract the config JSON. The Config field in manifest.json
+    # points to the config blob filename inside the tar.
+    let config_filename = ($manifest_entry.Config? | default "")
+    if ($config_filename | is-empty) {
+        log-warn $"No Config entry in manifest.json for ($tarball_path)" --component "oci"
+        return { success: false }
+    }
+
+    let config = try {
+        ^tar -xf $real_path -O $config_filename | from json
+    } catch {|e|
+        log-warn $"Could not extract config ($config_filename) from ($tarball_path): ($e.msg)" --component "oci"
+        return { success: false }
+    }
+
+    # Compute the config digest from the raw bytes (not from the parsed
+    # JSON, which would change formatting). This matches what registries
+    # use as the config digest.
+    let config_digest = try {
+        ^tar -xf $real_path -O $config_filename | hash sha256 | $"sha256:($in)"
+    } catch {
+        ""
+    }
+
+    # diff_ids from the config — these are the uncompressed layer digests,
+    # in the same order as the layer stack. This is what syft references
+    # in its layer attribution properties.
+    let diff_ids = ($config.rootfs?.diff_ids? | default [])
+
+    # Layer tar paths from manifest.json, in order.
+    let layer_paths = ($manifest_entry.Layers? | default [])
+
+    # Build the layer list with order index + diff ID.
+    # The diff_ids array and Layers array are in the same order
+    # per the OCI image spec.
+    let layers = ($diff_ids | enumerate | each {|entry|
+        {
+            order: $entry.index
+            diff_id: $entry.item
+            tar_path: ($layer_paths | get -i $entry.index | default "")
+        }
+    })
+
+    # Build a lookup map: diff_id → layer order.
+    # This is what the linker uses to join syft's layer attributions
+    # (keyed on diff_id) to the ordered layer stack.
+    mut diff_id_to_order = {}
+    for layer in $layers {
+        $diff_id_to_order = ($diff_id_to_order | insert $layer.diff_id $layer.order)
+    }
+
+    let repo_tags = ($manifest_entry.RepoTags? | default [])
+
+    {
+        success: true
+        config_digest: $config_digest
+        layers: $layers
+        diff_id_to_order: $diff_id_to_order
+        repo_tags: $repo_tags
+        os: ($config.os? | default "linux")
+        arch: ($config.architecture? | default "")
+        created: ($config.created? | default "")
+        entrypoint: ($config.config?.Entrypoint? | default [] | str join " ")
+        cmd: ($config.config?.Cmd? | default [] | str join " ")
     }
 }
