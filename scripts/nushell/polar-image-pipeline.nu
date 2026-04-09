@@ -101,7 +101,7 @@ def main [
     --skip-upload                  # Build and scan only, don't push
     --skip-sbom                    # Build and upload, skip syft scanning
 ] {
-    let cassini_job_id = start-cassini-daemon
+    # let cassini_job_id = start-cassini-daemon
 
     mkdir -v $artifact_dir
 
@@ -214,5 +214,5 @@ def main [
         log-warn $"Failed images: ($failures)" --component $COMPONENT
     }
 
-    stop-cassini-daemon $cassini_job_id
+    # stop-cassini-daemon $cassini_job_id
 }

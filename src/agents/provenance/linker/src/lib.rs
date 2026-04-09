@@ -73,6 +73,12 @@ pub enum ArtifactNodeKey {
     BuildArtifact {
         content_hash: String,
     },
+
+    /// A container image identified by its config digest.
+    /// This is the content identity — stable across registries.
+    ContainerImage {
+        config_digest: String,
+    },
 }
 
 impl GraphNodeKey for ArtifactNodeKey {
@@ -130,6 +136,13 @@ impl GraphNodeKey for ArtifactNodeKey {
                 vec![(
                     format!("{prefix}_hash"),
                     BoltType::String(content_hash.clone().into()),
+                )],
+            ),
+            Self::ContainerImage { config_digest } => (
+                format!("({prefix}:ContainerImage {{ config_digest: ${prefix}_config_digest }})"),
+                vec![(
+                    format!("{prefix}_config_digest"),
+                    BoltType::String(config_digest.clone().into()),
                 )],
             ),
         }

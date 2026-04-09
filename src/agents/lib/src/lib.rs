@@ -118,6 +118,56 @@ pub struct BuildEvent {
     pub payload: BuildEventPayload,
 }
 
+// ===========================================================================
+// Payload struct
+//
+// Mirrors exactly what the nushell emit produces. The `layers` array
+// carries uncompressed diff IDs in stack order — these are the layer
+// identities as Nix/Docker sees them, before registry compression.
+// ===========================================================================
+
+#[derive(
+    Debug, Clone, PartialEq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub struct OciLayerEntry {
+    pub order: u32,
+    pub diff_id: String,
+    #[serde(default)]
+    pub tar_path: String,
+}
+
+#[derive(
+    Debug, Clone, PartialEq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub struct ContainerImageCreatedPayload {
+    /// Human-readable name (e.g. "cassini", "kube-observer").
+    pub image_name: String,
+
+    /// Content hash of the tarball on disk. This is the identity of
+    /// the image as a build artifact before it has a registry digest.
+    pub tarball_hash: String,
+
+    /// Digest of the OCI config blob. Stable across re-uploads of
+    /// the same image content to different registries.
+    pub config_digest: String,
+
+    /// Ordered layer stack with uncompressed diff IDs.
+    pub layers: Vec<OciLayerEntry>,
+
+    #[serde(default)]
+    pub os: String,
+    #[serde(default)]
+    pub arch: String,
+    #[serde(default)]
+    pub created: String,
+    #[serde(default)]
+    pub entrypoint: String,
+    #[serde(default)]
+    pub cmd: String,
+    #[serde(default)]
+    pub repo_tags: Vec<String>,
+}
+
 /// Concrete payload variants that nushell stages can emit.
 ///
 /// Internally tagged on `type` — this matches the nushell emit function's
@@ -139,6 +189,9 @@ pub enum BuildEventPayload {
 
     #[serde(rename = "binary.linked")]
     BinaryLinked(BinaryLinkedPayload),
+
+    #[serde(rename = "container-image.created")]
+    ContainerImageCreated(ContainerImageCreatedPayload),
 }
 
 #[derive(
@@ -269,6 +322,9 @@ impl BuildEvent {
                 ProvenanceEvent::ArtifactProduced(payload)
             }
             BuildEventPayload::BinaryLinked(payload) => ProvenanceEvent::BinaryLinked(payload),
+            BuildEventPayload::ContainerImageCreated(payload) => {
+                ProvenanceEvent::ContainerImageCreated(payload)
+            }
         };
 
         (ctx, event)
@@ -494,6 +550,8 @@ pub enum ProvenanceEvent {
         digest: String,
         media_type: String,
     },
+
+    ContainerImageCreated(ContainerImageCreatedPayload),
 
     /// Emitted when a pod container is seen using an image.
     ///

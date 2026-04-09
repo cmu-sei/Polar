@@ -2,7 +2,10 @@ use chrono::Utc;
 use oci_client::manifest::OciManifest;
 use polar::graph::controller::IntoGraphKey;
 use polar::graph::controller::{GraphControllerMsg, GraphOp, GraphValue, Property, rel};
-use polar::{ArtifactProducedPayload, BinaryLinkedPayload, ProvenanceEvent, SbomGraphFragment};
+use polar::{
+    ArtifactProducedPayload, BinaryLinkedPayload, ContainerImageCreatedPayload, ProvenanceEvent,
+    SbomGraphFragment,
+};
 use ractor::ActorRef;
 use ractor::async_trait;
 use ractor::{Actor, ActorProcessingErr};
@@ -398,6 +401,152 @@ impl ProvenanceLinker {
 
         Ok(())
     }
+
+    /// Graph topology produced:
+    ///
+    ///   (Artifact)-[:IS]->(ContainerImage {config_digest})
+    ///   (ContainerImage {config_digest})
+    ///       -[:HAS_LAYER {order: 0}]->(OCILayer {digest: diff_id_0})
+    ///       -[:HAS_LAYER {order: 1}]->(OCILayer {digest: diff_id_1})
+    ///       -[:HAS_LAYER {order: 2}]->(OCILayer {digest: diff_id_2})
+    ///
+    /// This happens at build time, before any registry push. The
+    /// ContainerImage node exists from the moment nix-build-image
+    /// completes. Later, when the image is uploaded and the resolver
+    /// (or image.linked event) provides the manifest digest, we add:
+    ///
+    ///   (OCIArtifact {digest: manifest_digest})-[:REFERS_TO]->(ContainerImage {config_digest})
+    ///
+    /// The ContainerImage is the stable join point. The OCIArtifact is
+    /// the registry-specific handle. This separation matters because:
+    ///   - Same content pushed to GitLab and ACR = two OCIArtifacts,
+    ///     one ContainerImage.
+    ///   - Retagging an image = new OCIArtifact (new manifest digest
+    ///     due to new tag), same ContainerImage.
+    ///   - Rebuilding with same inputs on Nix = same ContainerImage
+    ///     (deterministic config digest), new OCIArtifacts.
+    pub(crate) fn handle_container_image_created(
+        state: &mut ProvenanceLinkerState,
+        payload: ContainerImageCreatedPayload,
+    ) -> Result<(), ActorProcessingErr> {
+        trace!(
+            "Processing ContainerImageCreated: {} ({} layers)",
+            payload.image_name,
+            payload.layers.len()
+        );
+
+        // 1. Upsert the ContainerImage node keyed on config digest.
+        let image_k = ArtifactNodeKey::ContainerImage {
+            config_digest: payload.config_digest.clone(),
+        };
+
+        let mut props: Vec<Property> = vec![
+            Property(
+                "name".into(),
+                GraphValue::String(payload.image_name.clone()),
+            ),
+            Property(
+                "tarball_hash".into(),
+                GraphValue::String(payload.tarball_hash.clone()),
+            ),
+        ];
+        if !payload.os.is_empty() {
+            props.push(Property(
+                "os".into(),
+                GraphValue::String(payload.os.clone()),
+            ));
+        }
+        if !payload.arch.is_empty() {
+            props.push(Property(
+                "arch".into(),
+                GraphValue::String(payload.arch.clone()),
+            ));
+        }
+        if !payload.created.is_empty() {
+            props.push(Property(
+                "created".into(),
+                GraphValue::String(payload.created.clone()),
+            ));
+        }
+        if !payload.entrypoint.is_empty() {
+            props.push(Property(
+                "entrypoint".into(),
+                GraphValue::String(payload.entrypoint.clone()),
+            ));
+        }
+        if !payload.cmd.is_empty() {
+            props.push(Property(
+                "cmd".into(),
+                GraphValue::String(payload.cmd.clone()),
+            ));
+        }
+
+        if !payload.repo_tags.is_empty() {
+            // Store tags as a comma-separated string. Neo4j doesn't
+            // have great support for array properties in MERGE, and
+            // tags are informational, not identity.
+            let tags_str = payload.repo_tags.join(",");
+            props.push(Property(
+                "repo_tags".into(),
+                GraphValue::String(tags_str.into()),
+            ));
+        }
+
+        Self::upsert_node(
+            state,
+            image_k.clone(),
+            props,
+            "Failed to upsert ContainerImage node",
+        )?;
+
+        // 2. Type hierarchy: (Artifact)-[:IS]->(ContainerImage)
+        Self::ensure_edge(
+            state,
+            ArtifactNodeKey::Artifact,
+            image_k.clone(),
+            rel::IS,
+            vec![],
+        )?;
+
+        // 3. Create OCILayer nodes and HAS_LAYER edges with ordering.
+        //    These use the uncompressed diff ID as identity. If the
+        //    resolver later creates OCILayer nodes keyed on compressed
+        //    digest, the linker will need to reconcile them via the
+        //    config's rootfs.diff_ids mapping. For now, diff ID is
+        //    the canonical layer identity for locally-built images.
+        for layer in &payload.layers {
+            let layer_k = ArtifactNodeKey::OCILayer {
+                digest: layer.diff_id.clone(),
+            };
+
+            Self::upsert_node(
+                state,
+                layer_k.clone(),
+                vec![],
+                "Failed to upsert OCILayer node",
+            )?;
+
+            Self::ensure_edge(
+                state,
+                image_k.clone(),
+                layer_k,
+                rel::HAS_LAYER,
+                vec![Property(
+                    "order".into(),
+                    GraphValue::I64(layer.order as i64),
+                )],
+            )?;
+        }
+
+        debug!(
+            "ContainerImageCreated: {} with {} layers (config: {})",
+            payload.image_name,
+            payload.layers.len(),
+            payload.config_digest,
+        );
+
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -761,7 +910,10 @@ impl Actor for ProvenanceLinker {
                 debug!("Binary linked {e:?}");
                 Self::handle_binary_linked(state, e)?;
             }
-
+            ProvenanceEvent::ContainerImageCreated(e) => {
+                debug!("Container Image created");
+                Self::handle_container_image_created(state, e)?;
+            }
             _ => warn!("unexpected linker command {message:?}"),
         }
         Ok(())
