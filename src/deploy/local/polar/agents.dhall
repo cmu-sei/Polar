@@ -95,7 +95,7 @@ let kubeAgentServiceAccountToken =
       , type = Some "kubernetes.io/service-account-token"
       }
 
-let kubeAgentServiceAccountToken =
+let buildOrchestratorServiceAccountToken =
     kubernetes.Secret::{
     , apiVersion = "v1"
     , kind = "Secret"
@@ -337,40 +337,67 @@ let kubeAgentDeployment =
 -- Build Orchestrator agent deployment
 -- =============================================================================
 
+let buildOrchestratorConfigSecret =
+      (functions.makeOpaqueSecret
+        "build-orchestrator-config"
+        "cyclops.yaml"
+        values.buildOrchestrator.config)
+      // { immutable = Some True }
+
 let buildOrchestratorVolumes =
         volumes
         # [ kubernetes.Volume::{
             , name = values.buildOrchestrator.secretName
             , secret = Some kubernetes.SecretVolumeSource::{
-            , secretName = Some values.buildOrchestrator.secretName
+              , secretName = Some values.buildOrchestrator.secretName
+              }
             }
+          , kubernetes.Volume::{
+            , name = "build-orchestrator-config"
+            , secret = Some kubernetes.SecretVolumeSource::{
+              , secretName = Some "build-orchestrator-config"
+              }
             }
-        ]
+          ]
 
 let buildOrchestratorEnv =
         Constants.commonClientEnv
         # [ kubernetes.EnvVar::{
             , name = "KUBE_TOKEN"
             , valueFrom = Some kubernetes.EnvVarSource::{
-            , secretKeyRef = Some kubernetes.SecretKeySelector::{
-                , name = Some values.buildOrchestrator.secretName
-                , key = "token"
-                }
+              , secretKeyRef = Some kubernetes.SecretKeySelector::{
+                  , name = Some values.buildOrchestrator.secretName
+                  , key = "token"
+                  }
+              }
             }
+          , kubernetes.EnvVar::{
+            , name = "ORCHESTRATOR_CONFIG_FILE"
+            , value = Some "/etc/cyclops/cyclops.yaml"
             }
-        ]
-
-let buildProcessorEnv =
-        Constants.commonClientEnv
-        # functions.makeGraphEnv values.neo4jBoltAddr values.buildProcessor.graph Constants.graphSecretKeySelector
+          ]
 
 let buildOrchestratorVolumeMounts =
         [ kubernetes.VolumeMount::{
             , name = values.buildOrchestrator.secretName
             , mountPath = "/var/run/secrets/kubernetes.io/serviceaccount"
             }
-        ]
+          , kubernetes.VolumeMount::{
+            , name = "build-orchestrator-config"
+            , mountPath = "/etc/cyclops"
+            , readOnly = Some True
+            }
+          ]
         # volumeMounts
+
+let buildProcessorEnv =
+        Constants.commonClientEnv
+        # functions.makeGraphEnv values.neo4jBoltAddr values.buildProcessor.graph Constants.graphSecretKeySelector
+        # [ kubernetes.EnvVar::{
+            , name = "ORCHESTRATOR_CONFIG_FILE"
+            , value = Some "/etc/cyclops/cyclops.yaml"
+            }
+          ]
 
 let buildDeployment =
         functions.makeDeployment
@@ -393,7 +420,12 @@ let buildDeployment =
             , imagePullPolicy = Some values.imagePullPolicy
             , securityContext = Some Constants.DropAllCapSecurityContext
             , env = Some buildProcessorEnv
-            , volumeMounts = Some volumeMounts
+            , volumeMounts = Some (volumeMounts # [ kubernetes.VolumeMount::{
+                , name = "build-orchestrator-config"
+                , mountPath = "/etc/cyclops"
+                , readOnly = Some True
+                }
+              ])
             }
             ]
         , volumes = Some buildOrchestratorVolumes
@@ -471,20 +503,21 @@ let resolverDeployment =
             }
         )
 
-in  [ kubernetes.Resource.Deployment gitlabAgentDeployment
-    , kubernetes.Resource.Secret graphSecret
-    , kubernetes.Resource.Secret gitlabSecret
-    , kubernetes.Resource.ClusterRole buildOrchestratorClusterRole
-    , kubernetes.Resource.ServiceAccount buildOrchestratorServiceAccount
-    , kubernetes.Resource.RoleBinding buildOrchestratorRoleBinding
+in  [ kubernetes.Resource.ClusterRole buildOrchestratorClusterRole
     , kubernetes.Resource.ClusterRole kubeAgentClusterRole
-    , kubernetes.Resource.ServiceAccount kubeAgentServiceAccount
-    , kubernetes.Resource.RoleBinding kubeAgentRoleBinding
-    , kubernetes.Resource.Secret kubeAgentServiceAccountToken
+    , kubernetes.Resource.Deployment buildDeployment
+    , kubernetes.Resource.Deployment gitlabAgentDeployment
     , kubernetes.Resource.Deployment kubeAgentDeployment
-    , kubernetes.Resource.Secret resolverSecret
     , kubernetes.Resource.Deployment linkerDeployment
     , kubernetes.Resource.Deployment resolverDeployment
-    , kubernetes.Resource.Deployment buildDeployment
-    ,
+    , kubernetes.Resource.RoleBinding buildOrchestratorRoleBinding
+    , kubernetes.Resource.RoleBinding kubeAgentRoleBinding
+    , kubernetes.Resource.Secret buildOrchestratorConfigSecret
+    , kubernetes.Resource.Secret buildOrchestratorServiceAccountToken
+    , kubernetes.Resource.Secret gitlabSecret
+    , kubernetes.Resource.Secret graphSecret
+    , kubernetes.Resource.Secret kubeAgentServiceAccountToken
+    , kubernetes.Resource.Secret resolverSecret
+    , kubernetes.Resource.ServiceAccount buildOrchestratorServiceAccount
+    , kubernetes.Resource.ServiceAccount kubeAgentServiceAccount
     ]

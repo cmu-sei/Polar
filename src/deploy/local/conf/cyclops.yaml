@@ -2,15 +2,18 @@ backend:
   driver: kubernetes
   kubernetes:
     namespace: stub
-    job_labels: []
 cassini:
   broker_url: "nats://stub:4222"
   inbound_subject: "stub"
 bootstrap:
   builder_image: "stub"
+  target_registry: "stub"
+  container_config_ref: "stub"
 credentials:
   git_secret_name: stub
   registry_secret_name: stub
+repo_mappings:
+  - repo_url: "stub"
 storage:
   endpoint_url: "http://stub:9000"
   access_key: stub

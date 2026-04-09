@@ -147,7 +147,7 @@ impl OrchestratorConfig {
     ///   2. Environment variable overrides with CYCLOPS__ prefix and __ separator
     pub fn load() -> Result<Self, config::ConfigError> {
         let config_path =
-            std::env::var("CYCLOPS_CONFIG").unwrap_or_else(|_| "cyclops.yaml".to_string());
+            std::env::var("ORCHESTRATOR_CONFIG_FILE").unwrap_or_else(|_| "cyclops.yaml".to_string());
 
         config::Config::builder()
             .add_source(config::File::new(&config_path, config::FileFormat::Yaml).required(true))

@@ -62,7 +62,7 @@ let
 
   buildProcessorEnv = pkgs.buildEnv {
     name         = "processor-env";
-    paths        = commonPaths ++ [ orchestrator ];
+    paths        = commonPaths ++ [ buildProcessor ];  # fix: was orchestrator
     pathsToLink  = [ "/bin" "/etc/ssl/certs" ];
   };
 
@@ -73,7 +73,7 @@ let
     inherit extraCommands;
     config = {
       User       = "${commonUser.uid}:${commonUser.gid}";
-      Cmd        = [ "build-orchestrator" ];
+      Cmd        = [ "build-processor" ];  # fix: was build-orchestrator
       WorkingDir = "/";
       Env        = [];
     };
