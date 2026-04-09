@@ -13,7 +13,7 @@ let linker = values.linker
 let resolver = values.resolver
 
 -- Name of the secret containing a proxy ca certificate to be mounted into containers that need it.
-let proxyCACert = Some "proxy-ca-cert"
+let proxyCACert = values.proxyCACert
 
 let volumes = Constants.commonVolumes # functions.ProxyVolume proxyCACert
 

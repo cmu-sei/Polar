@@ -341,8 +341,10 @@ orchestrator target='all':
         all)
             nix build {{_nix_flags}} "$base.orchestratorImage" -o result-orchestrator-image
             nix build {{_nix_flags}} "$base.cloneImage"        -o result-clone-image
+            nix build {{_nix_flags}} "$base.buildProcessorImage" -o result-build-processor-image
             podman load -i result-orchestrator-image
             podman load -i result-clone-image
+            podman load -i result-build-processor-image
             ;;
         agent)
             nix build {{_nix_flags}} "$base.orchestratorImage" -o result-orchestrator-image
@@ -659,6 +661,17 @@ ci:
         bash -c "start.sh; chmod +x scripts/gitlab-ci.sh; chmod +x scripts/static-tools.sh; scripts/gitlab-ci.sh"
 
 # ── nix-usernetes (local cluster) ────────────────────────────────────────────
+#
+# Full cluster startup sequence:
+#
+#   cd ~/Documents/projects/nix-usernetes
+#   just load-node-image   # after every nix build
+#   just reset && just up && just init && just kubeconfig
+#   export KUBECONFIG=$(pwd)/kubeconfig
+#
+#   cd ~/Documents/projects/Polar
+#   just cluster-install-cert-manager
+#   just cluster-render && just cluster-apply-storage && just cluster-load-all && just cluster-apply
 
 _u7s_dir      := env_var('HOME') + "/Documents/projects/nix-usernetes"
 _u7s_kubeconf := _u7s_dir + "/kubeconfig"
@@ -674,6 +687,11 @@ cluster-down:
 # Initialize the cluster (first time only)
 cluster-init:
     just -f {{_u7s_dir}}/Justfile init
+
+# Install cert-manager into the cluster. Required before deploying Polar.
+# cert-manager is a Polar concern — not permanent cluster infrastructure.
+cluster-install-cert-manager:
+    just -f {{_u7s_dir}}/Justfile install-cert-manager
 
 # Wipe all cluster state
 cluster-reset:
@@ -749,28 +767,42 @@ cluster-load-all neo4j_result=_neo4j_result:
     fi
     _load_podman docker.io/library/alpine:3.14.0
     # Polar images — all from nix result symlinks
+    _load ./result-build-processor-image
     _load ./result-cassini-image
     _load ./result-cassini-producer-image
     _load ./result-cassini-sink-image
-    _load ./result-scheduler-processor
-    _load ./result-scheduler-observer
-    _load ./result-orchestrator-image
-    _load ./result-gitlab-observer
+    _load ./result-clone-image
+    _load ./result-git-consumer
     _load ./result-gitlab-consumer
-    _load ./result-kube-observer
+    _load ./result-gitlab-observer
+    _load ./result-git-observer
+    _load ./result-git-scheduler
     _load ./result-kube-consumer
+    _load ./result-kube-observer
+    _load ./result-orchestrator-image
+    _load ./result-provenance-linker
+    _load ./result-provenance-resolver
+    _load ./result-scheduler-observer
+    _load ./result-scheduler-processor
     # Retag to match manifest image references
-    _tag docker.io/library/nix-neo4j:latest                      docker.io/library/neo4j:5.26.2
+    _tag docker.io/library/build-orchestrator:latest             docker.io/library/build-orchestrator:latest
+    _tag docker.io/library/build-processor:latest           docker.io/library/build-processor:latest
     _tag docker.io/library/cassini:latest                        docker.io/library/cassini:latest
+    _tag docker.io/library/cyclops/git-clone:latest          docker.io/library/cyclops/git-clone:latest
     _tag docker.io/library/harness-producer:latest               docker.io/library/harness-producer:latest
     _tag docker.io/library/harness-sink:latest                   docker.io/library/harness-sink:latest
+    _tag docker.io/library/nix-neo4j:latest                      docker.io/library/neo4j:5.26.2
+    _tag docker.io/library/polar-git-consumer:latest         docker.io/library/polar-git-consumer:latest
+    _tag docker.io/library/polar-gitlab-consumer:latest          docker.io/library/polar-gitlab-consumer:latest
+    _tag docker.io/library/polar-gitlab-observer:latest          docker.io/library/polar-gitlab-observer:latest
+    _tag docker.io/library/polar-git-repo-observer:latest    docker.io/library/polar-git-repo-observer:latest
+    _tag docker.io/library/polar-git-scheduler:latest        docker.io/library/polar-git-scheduler:latest
+    _tag docker.io/library/polar-kube-consumer:latest            docker.io/library/polar-kube-consumer:latest
+    _tag docker.io/library/polar-kube-observer:latest            docker.io/library/polar-kube-observer:latest
     _tag docker.io/library/polar-scheduler-observer:latest       docker.io/library/polar-scheduler-observer:latest
     _tag docker.io/library/polar-scheduler-processor:latest      docker.io/library/polar-scheduler-processor:latest
-    _tag docker.io/library/polar-gitlab-observer:latest          docker.io/library/polar-gitlab-observer:latest
-    _tag docker.io/library/polar-gitlab-consumer:latest          docker.io/library/polar-gitlab-consumer:latest
-    _tag docker.io/library/polar-kube-observer:latest            docker.io/library/polar-kube-observer:latest
-    _tag docker.io/library/polar-kube-consumer:latest            docker.io/library/polar-kube-consumer:latest
-    _tag docker.io/library/build-orchestrator:latest             docker.io/library/build-orchestrator:latest
+    _tag docker.io/library/provenance-linker-agent:latest    docker.io/library/provenance-linker-agent:latest
+    _tag docker.io/library/provenance-resolver-agent:latest  docker.io/library/provenance-resolver-agent:latest
     echo "Core images loaded and tagged."
 
 # Render manifests for the local cluster.

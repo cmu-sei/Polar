@@ -195,6 +195,16 @@
             export POLAR_SCHEDULER_SYNC_INTERVAL="120"
             export POLAR_SCHEDULER_GIT_USERNAME=""
             export POLAR_SCHEDULER_GIT_PASSWORD=""
+
+            echo ""
+            echo "Polar dev shell — cluster startup sequence:"
+            echo "  cd ~/Documents/projects/nix-usernetes"
+            echo "  just load-node-image && just reset && just up && just init && just kubeconfig"
+            echo "  export KUBECONFIG=\$(pwd)/kubeconfig"
+            echo "  cd ~/Documents/projects/Polar"
+            echo "  just cluster-install-cert-manager"
+            echo "  just cluster-render && just cluster-apply-storage && just cluster-load-all && just cluster-apply"
+            echo ""
           '';
         });
       });
