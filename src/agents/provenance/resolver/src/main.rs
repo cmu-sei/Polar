@@ -563,6 +563,10 @@ impl Actor for ResolverAgent {
 async fn main() {
     polar::init_logging(RESOLVER_SUPERVISOR_NAME.to_string());
 
+    rustls::crypto::aws_lc_rs::default_provider()
+        .install_default()
+        .expect("Failed to install rustls crypto provider");
+
     let (_supervisor, handle) = Actor::spawn(
         Some(RESOLVER_SUPERVISOR_NAME.to_string()),
         ResolverSupervisor,

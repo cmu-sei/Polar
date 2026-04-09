@@ -25,8 +25,8 @@ let GraphConfig = Agents.GraphConfig
 -- helper to create a registry secret provided a name, namespace, and base64 encoded config.json
 
 let makeGraphEnv
-    : Text -> GraphConfig -> kubernetes.SecretKeySelector.Type -> List kubernetes.EnvVar.Type
-    = \(addr : Text) -> \(g : GraphConfig) -> \(passwordSecret : kubernetes.SecretKeySelector.Type) ->
+    : Text -> GraphConfig -> kubernetes.SecretKeySelector.Type -> Optional Text -> List kubernetes.EnvVar.Type
+    = \(addr : Text) -> \(g : GraphConfig) -> \(passwordSecret : kubernetes.SecretKeySelector.Type) -> \(caCertPath : Optional Text) ->
       [ kubernetes.EnvVar::{ name = "GRAPH_ENDPOINT", value = Some addr }
       , kubernetes.EnvVar::{ name = "GRAPH_DB", value = Some g.graphDB }
       , kubernetes.EnvVar::{ name = "GRAPH_USER", value = Some g.graphUsername }
@@ -36,7 +36,11 @@ let makeGraphEnv
           , secretKeyRef = Some passwordSecret
           }
         }
-      ]
+      ] # merge
+          { Some = \(path : Text) -> [ kubernetes.EnvVar::{ name = "GRAPH_CA_CERT", value = Some path } ]
+          , None = [] : List kubernetes.EnvVar.Type
+          }
+          caCertPath
 
 let makeOpaqueSecret
     : Text -> Text -> Text -> kubernetes.Secret.Type

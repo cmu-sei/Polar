@@ -4,6 +4,10 @@ use ractor::Actor;
 
 #[tokio::main]
 async fn main() {
+    rustls::crypto::aws_lc_rs::default_provider()
+        .install_default()
+        .expect("Failed to install rustls crypto provider");
+
     polar::init_logging(LINKER_SUPERVISOR_NAME.to_string());
     let (_, handle) = Actor::spawn(
         Some(LINKER_SUPERVISOR_NAME.to_string()),

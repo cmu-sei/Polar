@@ -15,6 +15,7 @@ neo4rs.workspace = true
 polar.workspace = true
 ractor.workspace = true
 rkyv.workspace = true
+rustls.workspace = true
 serde_json.workspace = true
 serde.workspace = true
 tokio.workspace = true

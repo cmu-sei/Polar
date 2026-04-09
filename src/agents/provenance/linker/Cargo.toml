@@ -16,6 +16,7 @@ provenance-common.workspace = true
 ractor.workspace = true
 reqwest = { workspace = true, features = ["json"] }
 rkyv.workspace = true
+rustls.workspace = true
 serde_json.workspace = true
 serde.workspace = true
 tokio.workspace = true

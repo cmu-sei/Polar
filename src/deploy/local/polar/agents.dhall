@@ -19,6 +19,29 @@ let volumes = Constants.commonVolumes # functions.ProxyVolume proxyCACert
 
 let volumeMounts = [ values.cassiniTlsVolumeMount ] # functions.ProxyMount proxyCACert
 
+let neo4jCAVolume =
+      [ kubernetes.Volume::{
+        , name = "neo4j-bolt-ca"
+        , secret = Some kubernetes.SecretVolumeSource::{
+          , secretName = Some "neo4j-bolt-ca"
+          }
+        }
+      ]
+
+let neo4jCAVolumeMount =
+      [ kubernetes.VolumeMount::{
+        , name = "neo4j-bolt-ca"
+        , mountPath = "/etc/neo4j-ca"
+        , readOnly = Some True
+        }
+      ]
+
+let neo4jBoltCASecret =
+      functions.makeOpaqueSecret
+        "neo4j-bolt-ca"
+        "ca.pem"
+        (env:NEO4J_TLS_CA_CERT_CONTENT as Text)
+
 -- Base env for all agents: RUST_LOG + mTLS client config
 let envVars =
       [ kubernetes.EnvVar::{ name = "RUST_LOG", value = Some "debug" } ]
@@ -45,6 +68,10 @@ let neo4jEnvVars =
             , key = Constants.neo4jSecret.key
             }
           }
+        }
+      , kubernetes.EnvVar::{
+        , name = "GRAPH_CA_CERT"
+        , value = Some "/etc/neo4j-ca/ca.pem"
         }
       ]
 
@@ -231,7 +258,7 @@ let gitlabObserverEnv =
         ]
 
 let gitlabConsumerEnv =
-      envVars # functions.makeGraphEnv values.neo4jBoltAddr values.gitlabConsumer.graph Constants.graphSecretKeySelector
+      envVars # functions.makeGraphEnv values.neo4jBoltAddr values.gitlabConsumer.graph Constants.graphSecretKeySelector (Some "/etc/neo4j-ca/ca.pem")
 
 let gitlabAgentDeployment =
       functions.makeDeployment
@@ -245,7 +272,7 @@ let gitlabAgentDeployment =
             , imagePullPolicy = Some values.imagePullPolicy
             , securityContext = Some Constants.DropAllCapSecurityContext
             , env = Some gitlabObserverEnv
-            , volumeMounts = Some volumeMounts
+            , volumeMounts = Some (volumeMounts # neo4jCAVolumeMount)
             }
           , kubernetes.Container::{
             , name = values.gitlabConsumer.name
@@ -253,10 +280,10 @@ let gitlabAgentDeployment =
             , imagePullPolicy = Some values.imagePullPolicy
             , securityContext = Some Constants.DropAllCapSecurityContext
             , env = Some gitlabConsumerEnv
-            , volumeMounts = Some volumeMounts
+            , volumeMounts = Some (volumeMounts # neo4jCAVolumeMount)
             }
           ]
-        , volumes = Some (Constants.commonVolumes # functions.ProxyVolume proxyCACert)
+        , volumes = Some (Constants.commonVolumes # functions.ProxyVolume proxyCACert # neo4jCAVolume)
         }
 
 -- =============================================================================
@@ -295,7 +322,7 @@ let kubeObserverEnv =
 
 let kubeConsumerEnv =
       Constants.commonClientEnv
-      # functions.makeGraphEnv values.neo4jBoltAddr values.kubeConsumer.graph Constants.graphSecretKeySelector
+      # functions.makeGraphEnv values.neo4jBoltAddr values.kubeConsumer.graph Constants.graphSecretKeySelector (Some "/etc/neo4j-ca/ca.pem")
 
 let kubeObserverVolumeMounts =
         [ kubernetes.VolumeMount::{
@@ -326,10 +353,10 @@ let kubeAgentDeployment =
             , imagePullPolicy = Some values.imagePullPolicy
             , securityContext = Some Constants.DropAllCapSecurityContext
             , env = Some kubeConsumerEnv
-            , volumeMounts = Some volumeMounts
+            , volumeMounts = Some (volumeMounts # neo4jCAVolumeMount)
             }
           ]
-        , volumes = Some kubeAgentVolumes
+        , volumes = Some (kubeAgentVolumes # neo4jCAVolume)
         }
 
 
@@ -392,7 +419,7 @@ let buildOrchestratorVolumeMounts =
 
 let buildProcessorEnv =
         Constants.commonClientEnv
-        # functions.makeGraphEnv values.neo4jBoltAddr values.buildProcessor.graph Constants.graphSecretKeySelector
+        # functions.makeGraphEnv values.neo4jBoltAddr values.buildProcessor.graph Constants.graphSecretKeySelector (Some "/etc/neo4j-ca/ca.pem")
         # [ kubernetes.EnvVar::{
             , name = "ORCHESTRATOR_CONFIG_FILE"
             , value = Some "/etc/cyclops/cyclops.yaml"
@@ -421,14 +448,13 @@ let buildDeployment =
             , securityContext = Some Constants.DropAllCapSecurityContext
             , env = Some buildProcessorEnv
             , volumeMounts = Some (volumeMounts # [ kubernetes.VolumeMount::{
-                , name = "build-orchestrator-config"
-                , mountPath = "/etc/cyclops"
-                , readOnly = Some True
-                }
-              ])
+              , name = "build-orchestrator-config"
+              , mountPath = "/etc/cyclops"
+              , readOnly = Some True
+            } ] # neo4jCAVolumeMount)
             }
             ]
-        , volumes = Some buildOrchestratorVolumes
+        , volumes = Some (buildOrchestratorVolumes # neo4jCAVolume)
         }
 
 -- =============================================================================
@@ -451,13 +477,13 @@ let linkerDeployment =
               [ kubernetes.Container::{
                 , name = Constants.ProvenanceLinkerName
                 , image = Some linker.image
-            , imagePullPolicy = Some values.imagePullPolicy
+                , imagePullPolicy = Some values.imagePullPolicy
                 , securityContext = Some Constants.DropAllCapSecurityContext
                 , env = Some linkerEnv
-                , volumeMounts = Some volumeMounts
+                , volumeMounts = Some (volumeMounts # neo4jCAVolumeMount)
                 }
               ]
-            , volumes = Some volumes
+            , volumes = Some (volumes # neo4jCAVolume)
             }
         )
 
@@ -518,6 +544,7 @@ in  [ kubernetes.Resource.ClusterRole buildOrchestratorClusterRole
     , kubernetes.Resource.Secret graphSecret
     , kubernetes.Resource.Secret kubeAgentServiceAccountToken
     , kubernetes.Resource.Secret resolverSecret
+    , kubernetes.Resource.Secret neo4jBoltCASecret
     , kubernetes.Resource.ServiceAccount buildOrchestratorServiceAccount
     , kubernetes.Resource.ServiceAccount kubeAgentServiceAccount
     ]

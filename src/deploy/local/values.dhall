@@ -79,7 +79,7 @@ let neo4j =
 let neo4jDNSName =
       "${Constants.neo4jServiceName}.${Constants.GraphNamespace}.svc.cluster.local"
 
-let neo4jBoltAddr = "neo4j://${neo4jDNSName}:${Natural/show neo4j.ports.bolt}"
+let neo4jBoltAddr = "bolt+s://${neo4jDNSName}:${Natural/show neo4j.ports.bolt}"
 
 let jaeger =
       { name = "jaeger"
