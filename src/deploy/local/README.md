@@ -1,146 +1,161 @@
-# Local (Minikube) Deployment Configurations (Dhall)
+# Local Cluster Deployment (nix-usernetes + Dhall)
 
-This directory contains the Dhall sources used to generate Kubernetes manifests for a local Minikube environment. The goal is reproducible configuration expressed in Dhall's type system, with zero template magic and no silent defaults. Everything here is meant to be deliberate and inspectable.
+This directory contains the Dhall sources used to generate Kubernetes manifests
+for the local nix-usernetes development cluster. Configuration is expressed in
+Dhall's type system — no template magic, no silent defaults, everything
+inspectable.
 
-The directory is structured around a few expectations:
+## Prerequisites
 
-* Each Kubernetes object is defined as a Dhall expression returning a single, strongly-typed resource.
-* Nothing in this directory performs external I/O. Dhall does not generate base64, JSON, or derived artifacts. CI does that.
-* Every rendered manifest is meant to be fed directly into `kubectl` without preprocessing.
+- [Nix](https://nixos.org) with flakes enabled
+- [podman](https://podman.io)
+- [just](https://just.systems)
+- The [nix-usernetes](https://github.com/cmu-sei/nix-usernetes) repo checked out
+  alongside this one at `~/Documents/projects/nix-usernetes`
+- The [nix-neo4j](https://github.com/cmu-sei/nix-neo4j) repo checked out at
+  `~/Documents/projects/nix-neo4j`
 
-## Minikube Setup
+## New Machine Setup
 
-You need Minikube installed and a functioning local Docker environment. Start Minikube with enough resources to run whatever you're deploying:
+### 1. Generate Neo4j TLS certificates
+
+The neo4j deployment requires TLS certificates baked into the environment at
+render time. Generate them once and add to `my.env`:
 
 ```sh
-minikube start \
-  --cpus=4 \
-  --memory=8g \
-  --driver=podman # or docker if you prefer
+# Generate CA key and cert
+openssl genrsa -out neo4j-ca.key 4096
+openssl req -x509 -new -nodes -key neo4j-ca.key -sha256 -days 3650 \
+  -subj "/CN=Polar-Neo4j-CA/O=Polar" -out neo4j-ca.crt
 
-# If you rely on container images built locally, point Minikube at the host podman installation:
-# Note that if you want to pull from any remote repos, you'll have to add Image pull secrets.
+# Generate server key and cert signed by CA
+openssl genrsa -out neo4j-server.key 4096
+openssl req -new -key neo4j-server.key \
+  -subj "/CN=polar-db-svc.polar-graph.svc.cluster.local/O=Polar" \
+  -out neo4j-server.csr
+openssl x509 -req -in neo4j-server.csr -CA neo4j-ca.crt -CAkey neo4j-ca.key \
+  -CAcreateserial -out neo4j-server.crt -days 3650 -sha256
 
-eval $(minikube podman-env)
-
-# use kubectl to bootstrap the cluster
-# we use cert-manager to handle certificates so it should be installed first.
-# SEE: https://cert-manager.io/docs/installation/
-kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.19.2/cert-manager.yaml
+# Export to environment (add to my.env)
+export NEO4J_TLS_CA_CERT_CONTENT=$(cat neo4j-ca.crt)
+export NEO4J_TLS_SERVER_CERT_CONTENT=$(cat neo4j-server.crt)
+export NEO4J_TLS_SERVER_KEY_CONTENT=$(cat neo4j-server.key)
 ```
 
-This prevents you from having to push images to a registry just to test them locally.
+### 2. Set up environment
 
-## Environment Setup
+```sh
+cp example.env my.env
+# Fill in all <required> values in my.env
+direnv allow
+```
 
-The Dhall files in this directory read secrets and deployment parameters from environment variables at render time. These must be set before rendering manifests.
+### 3. Create runtime config files
 
-### First-time setup
+**`src/deploy/local/conf/git.json`** — Git agent credentials:
 
-1. Copy the example env file from the repo root:
+```sh
+cp src/deploy/local/conf/git.json.example src/deploy/local/conf/git.json
+# Fill in your GitLab instance details
+```
 
-   ```sh
-   cp example.env my.env
-   ```
+**`src/deploy/local/conf/cyclops.yaml`** — Build orchestrator config.
+See the existing file for the required fields. Stub values are fine for
+local development.
 
-2. Fill in all values marked `<required>` in `my.env`. See the comments in that file for what each variable does and where to get the values.
+### 4. Build the node image
 
-3. `my.env` is automatically sourced by direnv when you enter the project directory, overriding any defaults set by the Nix devShell. If direnv is not prompting you, run:
+```sh
+cd ~/Documents/projects/nix-neo4j
+nix build .#neo4j-image -o result-neo4j-image
 
-   ```sh
-   direnv allow
-   ```
+cd ~/Documents/projects/nix-usernetes
+nix build .#node-image -o result-node-image
+just load-node-image
+```
 
-4. Verify the key deployment variables are set:
+## Cluster Startup Sequence
 
-   ```sh
-   echo $NAMESPACE
-   echo $GRAPH_NAMESPACE
-   echo $GITLAB_TOKEN
-   echo $DOCKER_AUTH_JSON
-   ```
+```sh
+cd ~/Documents/projects/nix-usernetes
+just reset && just up && just init && just kubeconfig
+export KUBECONFIG=$(pwd)/kubeconfig
 
-### Required variables for manifest rendering
+cd ~/Documents/projects/Polar
+just cluster-install-cert-manager
+just cluster-render && just cluster-apply-storage && just cluster-load-all && just cluster-apply
+```
 
-The following variables must be set to render manifests. All others in `my.env` are for running agents locally and are not needed just for rendering.
+## Alternative: Minikube
+
+If using Minikube instead of nix-usernetes:
+
+```sh
+minikube start --cpus=4 --memory=8g --driver=podman
+
+# Point Minikube at the host podman installation for local images
+eval $(minikube podman-env)
+
+# Install cert-manager
+kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.19.2/cert-manager.yaml
+
+# Render and apply
+just cluster-render
+kubectl apply -f manifests/storage.yaml
+kubectl apply -f manifests/
+```
+
+Note: `just cluster-load-all` and `just cluster-install-cert-manager` are
+specific to nix-usernetes. With Minikube, load images via `eval $(minikube
+podman-env)` before building, and install cert-manager via `kubectl apply`
+directly.
+
+## Alternative: kind
+
+If using kind:
+
+```sh
+kind create cluster --name polar
+
+# Load local images into kind
+kind load docker-image <image>:<tag> --name polar
+
+# Install cert-manager
+kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.19.2/cert-manager.yaml
+
+# Render and apply
+just cluster-render
+kubectl apply -f manifests/
+```
+
+The `just kind-*` recipes in the Justfile handle image loading and cluster
+management for kind. See `just --list` for available recipes.
+
+## Required Environment Variables
 
 | Variable | Description |
 |---|---|
-| `CI_COMMIT_SHORT_SHA` | Image tag (auto-set from `git rev-parse --short HEAD`) |
+| `CI_COMMIT_SHORT_SHA` | Image tag (auto-set from git) |
 | `NAMESPACE` | Primary Polar namespace |
 | `GRAPH_NAMESPACE` | Neo4j namespace |
 | `GRAPH_PASSWORD` | Neo4j password |
 | `GITLAB_TOKEN` | GitLab personal access token |
 | `GITLAB_USER` | GitLab username |
-| `DOCKER_AUTH_JSON` | Base64-encoded docker config.json for image pull secrets |
+| `DOCKER_AUTH_JSON` | Base64-encoded docker config.json |
 | `DOCKER_CONFIG_STR` | Docker config string for OCI resolver |
-| `OCI_REGISTRY_AUTH` | Base64-encoded OCI registry auth config |
-| `NEO4J_AUTH` | Neo4j credentials in `user/password` format (derived from `GRAPH_USER`/`GRAPH_PASSWORD`) |
-| `NEO4J_TLS_SERVER_CERT_CONTENT` | PEM content of Neo4j server certificate (required if TLS enabled) |
-| `NEO4J_TLS_SERVER_KEY_CONTENT` | PEM content of Neo4j server key (required if TLS enabled) |
-| `NEO4J_TLS_CA_CERT_CONTENT` | PEM content of Neo4j CA certificate (required if TLS enabled) |
+| `OCI_REGISTRY_AUTH` | Base64-encoded OCI registry auth |
+| `NEO4J_TLS_SERVER_CERT_CONTENT` | PEM content of Neo4j server certificate |
+| `NEO4J_TLS_SERVER_KEY_CONTENT` | PEM content of Neo4j server key |
+| `NEO4J_TLS_CA_CERT_CONTENT` | PEM content of Neo4j CA certificate |
 
-### Runtime config files
-
-Two config files must exist before rendering. They are not checked into the repo because they contain credentials or are environment-specific:
-
-**`src/deploy/local/conf/git.json`** — Git agent credentials. Create with your GitLab instance details:
+## Rendering Manifests
 
 ```sh
-cat > src/deploy/local/conf/git.json << 'EOF'
-{
-  "hosts": {
-    "gitlab.example.com": {
-      "http": {
-        "username": "your-username",
-        "token": "your-token"
-      }
-    }
-  }
-}
-EOF
+just cluster-render
 ```
 
-**`src/deploy/local/conf/cyclops.yaml`** — Build orchestrator config. Compile from the Dhall schema:
-
-```sh
-# See src/agents/build-orchestrator/agent/conf/orchestrator.dhall for the full schema.
-# At minimum:
-cat > src/deploy/local/conf/cyclops.yaml << 'EOF'
-backend:
-  driver: kubernetes
-  kubernetes:
-    namespace: polar-builds
-    job_labels: []
-cassini:
-  broker_url: "nats://cassini:4222"
-  inbound_subject: "polar.builds.orchestrator.events"
-bootstrap:
-  builder_image: "your-registry/builder:latest"
-credentials:
-  git_secret_name: git-secret
-  registry_secret_name: registry-secret
-storage:
-  endpoint_url: "http://minio:9000"
-  access_key: your-access-key
-  secret_key: your-secret-key
-  region: us-east-1
-  bucket: polar-builds
-log:
-  format: json
-  level: info
-EOF
-```
-
-## Render
-
-Once your environment is set up, render all manifests with:
-
-```sh
-sh scripts/render-manifests.sh src/deploy/local ./manifests
-```
-
-This walks each subdirectory under `src/deploy/local`, finds all `.dhall` files one level deep, runs `dhall-to-yaml --documents` on each, and writes the resulting `.yaml` files into `./manifests/`.
+This validates prerequisites, selects `values.local.dhall`, and renders all
+Dhall sources to `manifests/`.
 
 To render and type-check a single file during development:
 
@@ -148,7 +163,7 @@ To render and type-check a single file during development:
 dhall-to-yaml --documents --file src/deploy/local/polar/neo4j.dhall
 ```
 
-To type-check only (no output), useful for debugging:
+To type-check only:
 
 ```sh
 dhall type --file src/deploy/local/polar/neo4j.dhall
@@ -156,64 +171,38 @@ dhall type --file src/deploy/local/polar/neo4j.dhall
 
 ### Troubleshooting render errors
 
-**Missing environment variable** — A Dhall file is reading an env var that isn't set. Check the table above and verify your `my.env` is loaded (`direnv allow`).
+**Missing environment variable** — A Dhall file is reading an env var that
+isn't set. Check the table above and verify `my.env` is loaded (`direnv allow`).
 
-**Missing file** — `git.json` or `cyclops.yaml` doesn't exist. See the Runtime config files section above.
+**Missing file** — `git.json` or `cyclops.yaml` doesn't exist. See above.
 
-**Unbound variable** — A Dhall identifier is referenced but not defined. Usually indicates a commented-out `let` binding that is still referenced elsewhere in the file.
+**Unbound variable** — A Dhall identifier is referenced but not defined.
+Usually a commented-out `let` binding still referenced elsewhere.
 
-**`[] : List kubernetes.Resource.Type`** — Wrong type annotation on an empty list. Use `[] : List kubernetes.Resource` (the union type itself, not `.Type`).
+**`[] : List kubernetes.Resource.Type`** — Wrong type annotation. Use
+`[] : List kubernetes.Resource`.
 
-**Invalid input / unexpected token** — A syntax error in the Dhall file. Common causes: lowercase `true`/`false` (Dhall requires `True`/`False`), missing comma in record literal, or malformed list concatenation with `#`.
+**Invalid input / unexpected token** — Syntax error. Common causes: lowercase
+`true`/`false` (Dhall requires `True`/`False`), missing comma in record
+literal, malformed list concatenation with `#`.
 
-## Applying the Manifests
+## Applying Manifests
 
-Once rendered, deploy them into Minikube:
+```sh
+just cluster-apply
+```
+
+Or manually:
 
 ```sh
 kubectl apply -f ./manifests
 ```
 
-You can reapply at will; Dhall ensures stable output unless you change inputs.
-
-Check resource health:
-
-```sh
-kubectl get all -n <namespace>
-kubectl describe <resource> -n <namespace>
-kubectl logs <pod> -n <namespace>
-```
-
-If you are working with multiple namespaces, ensure your manifests explicitly set them. Nothing here assumes defaults.
-
-## Secret Handling
-
-Secrets in this directory are defined structurally in Dhall but must contain already-encoded values. Dhall does not compute base64 or generate Docker registry auth blobs. CI or a local script should prepare those values and export them as environment variables before rendering.
-
-A typical pattern:
-
-```sh
-export DOCKER_AUTH_JSON=$(cat ~/.docker/config.json | base64 -w0)
-sh scripts/render-manifests.sh src/deploy/local ./manifests
-```
-
-This keeps Dhall deterministic while still allowing your cluster to receive fully-formed secrets.
-
-## Typical Usage Pattern (Local Development)
-
-1. Start Minikube.
-2. Build your local images (if applicable).
-3. Ensure `my.env` is populated and sourced via direnv (`direnv allow`).
-4. Ensure `conf/git.json` and `conf/cyclops.yaml` exist.
-5. Run `sh scripts/render-manifests.sh src/deploy/local ./manifests`.
-6. `kubectl apply -f ./manifests`.
-7. Iterate.
-
-This directory should be treated as an authoritative declarative spec for local cluster state. Anything non-declarative belongs in CI or tooling outside Dhall.
-
 ## Important Notes
 
-* Config is setup to use a proxy; the file `proxy-ca-cert.dhall` needs updating with the base64 string for your certificate.
-* The GitLab site certificate also needs updating for your host. `gitlab-crt.dhall` needs updating with the base64 string for your certificate.
-* The token for access to your GitLab needs updating. The file `gitlab-secret.dhall` contains that secret.
-* The `GITLAB_ENDPOINT` variable needs updating to point at your GitLab server. It is located in `values.dhall`.
+- The proxy CA cert (`proxyCACert`) is optional — set to `None Text` in
+  `values.dhall` for local development without a corporate proxy.
+- GitLab observer will log backoff errors if no GitLab instance is configured.
+  This is expected in a dev cluster.
+- The `neo4j-bolt-ca` secret is generated from `NEO4J_TLS_CA_CERT_CONTENT`
+  at render time and applied automatically by `cluster-apply`.

@@ -815,6 +815,12 @@ cluster-render:
         echo "ERROR: src/deploy/local/conf/git.json missing. Copy from git.json.example and fill in credentials."
         exit 1
     fi
+    for var in NEO4J_TLS_CA_CERT_CONTENT NEO4J_TLS_SERVER_CERT_CONTENT NEO4J_TLS_SERVER_KEY_CONTENT; do
+        if [ -z "${!var:-}" ]; then
+            echo "ERROR: $var is not set. Source example.env and fill in the TLS values."
+            exit 1
+        fi
+    done
     echo './values.local.dhall' > src/deploy/local/values-active.dhall
     bash scripts/render-manifests.sh src/deploy/local manifests
 
