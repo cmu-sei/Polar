@@ -1,0 +1,28 @@
+# src/containers/nu-init/Justfile
+#
+# Dhall rendering for the polar-nu-init container configuration.
+#
+# WORKFLOW
+# --------
+# 1. Edit container.dhall
+# 2. just render   → regenerates container.nix
+# 3. git add container.dhall container.nix && git commit
+# 4. nix build     → uses the .nix file, sandbox-safe
+#
+# WHY RENDER SEPARATELY?
+# The Nix sandbox has no network access. Dhall imports (including the
+# nix-container-lib prelude) resolve over the network. Running dhall-to-nix
+# inside a nix build fails. Pre-rendering produces a pure .nix file that
+# Nix can import directly.
+
+# Render container.dhall → container.nix
+render:
+    @echo "Rendering container.dhall → container.nix..."
+    dhall-to-nix < container.dhall > container.nix
+    @echo "Done. Commit container.nix alongside container.dhall."
+
+# Type-check container.dhall without rendering
+check:
+    @echo "Type-checking container.dhall..."
+    dhall type < container.dhall
+    @echo "OK."

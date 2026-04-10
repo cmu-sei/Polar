@@ -368,6 +368,12 @@ tls:
     nix build {{_nix_flags}} ".#packages.{{platform}}.tlsCerts" -o result-tlsCerts
     ls -alh result-tlsCerts
 
+# Build the polar-nu-init infrastructure container
+nu-init:
+    echo "Building polar-nu-init container..."
+    nix build {{_nix_flags}} ".#packages.{{platform}}.nuInitImage" -o result-nu-init-image
+    podman load -i result-nu-init-image
+
 # ── Run containers ────────────────────────────────────────────────────────────
 
 # Start the agent container (AMD ROCm — RX 9070 XT)
@@ -733,6 +739,7 @@ cluster-build-all:
     just orchestrator all
     just provenance all
     just git-agents all
+    just nu-init
 
 # Build and load all core Polar images into the cluster.
 # All images are loaded directly from nix result symlinks.
@@ -784,6 +791,7 @@ cluster-load-all neo4j_result=_neo4j_result:
     _load ./result-provenance-resolver
     _load ./result-scheduler-observer
     _load ./result-scheduler-processor
+    _load ./result-nu-init-image
     # Retag to match manifest image references
     _tag docker.io/library/build-orchestrator:latest             docker.io/library/build-orchestrator:latest
     _tag docker.io/library/build-processor:latest           docker.io/library/build-processor:latest
@@ -803,6 +811,7 @@ cluster-load-all neo4j_result=_neo4j_result:
     _tag docker.io/library/polar-scheduler-processor:latest      docker.io/library/polar-scheduler-processor:latest
     _tag docker.io/library/provenance-linker-agent:latest    docker.io/library/provenance-linker-agent:latest
     _tag docker.io/library/provenance-resolver-agent:latest  docker.io/library/provenance-resolver-agent:latest
+    _tag docker.io/library/polar-nu-init:latest docker.io/library/polar-nu-init:latest
     echo "Core images loaded and tagged."
 
 # Render manifests for the local cluster.

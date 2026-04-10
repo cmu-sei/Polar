@@ -1,0 +1,10 @@
+{
+  "hosts": {
+    "gitlab.example.com": {
+      "http": {
+        "username": "your-username",
+        "token": "your-token"
+      }
+    }
+  }
+}

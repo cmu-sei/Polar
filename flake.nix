@@ -91,6 +91,10 @@
           inherit pkgs lib crane rust-overlay nix-container-lib inputs system;
         };
 
+        containerPkgs = import ./src/containers/workspace.nix {
+          inherit pkgs lib nix-container-lib inputs system;
+        };
+
         commitMsgHooksPkg = import ./src/git-hooks/package.nix {
           inherit pkgs crane;
         };
@@ -164,6 +168,9 @@
           orchestratorImage    = polarPkgs.buildOrchestrator.orchestratorImage;
           buildProcessorImage  = polarPkgs.buildOrchestrator.buildProcessorImage;
           cloneImage           = polarPkgs.buildOrchestrator.cloneImage;
+
+          # ── Infrastructure containers ─────────────────────────────────────────
+          nuInitImage = containerPkgs.nuInit.image;
         };
 
         devShells.default = container.devShell.overrideAttrs (old: {
