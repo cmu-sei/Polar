@@ -1,3 +1,4 @@
+# src/agents/git/package.nix
 { pkgs,
   commonPaths,
   craneLib,
@@ -8,73 +9,94 @@
 }:
 let
   extraCommands = ''
-    mkdir -p etc
+    mkdir -p etc tmp
+    chmod 1777 tmp
     printf 'polar:x:1000:1000::/home/polar:/bin/bash\n' > etc/passwd
     printf 'polar:x:1000:\n' > etc/group
     printf 'polar:!x:::::::\n' > etc/shadow
   '';
+
+  certPaths = [ pkgs.cacert ];
 
   observer = craneLib.buildPackage (crateArgs // {
     pname = "git-repo-observer";
     cargoExtraArgs = "--bin git-repo-observer --locked";
     src = workspaceFileset ./git/observe;
   });
-
   consumer = craneLib.buildPackage (crateArgs // {
     pname = "git-consumer";
     cargoExtraArgs = "--bin git-repo-processor --locked";
     src = workspaceFileset ./git/consume;
   });
-
   scheduler = craneLib.buildPackage (crateArgs // {
     pname = "scheduler";
     cargoExtraArgs = "--bin scheduler --locked";
     src = workspaceFileset ./git/scheduler;
   });
 
-  observerImage = pkgs.dockerTools.buildImage {
+  observerEnv = pkgs.buildEnv {
+    name = "observer-env";
+    paths = commonPaths ++ certPaths ++ [ observer ];
+    pathsToLink = [ "/bin" "/etc/ssl/certs" ];
+  };
+  consumerEnv = pkgs.buildEnv {
+    name = "consumer-env";
+    paths = commonPaths ++ certPaths ++ [ consumer ];
+    pathsToLink = [ "/bin" "/etc/ssl/certs" ];
+  };
+  schedulerEnv = pkgs.buildEnv {
+    name = "scheduler-env";
+    paths = commonPaths ++ certPaths ++ [ scheduler ];
+    pathsToLink = [ "/bin" "/etc/ssl/certs" ];
+  };
+
+  observerImage = pkgs.dockerTools.buildLayeredImage {
     inherit extraCommands;
     name = "polar-git-repo-observer";
     tag = "latest";
-    copyToRoot = commonPaths ++ [ observer ];
-    uid = commonUser.uid;
-    gid = commonUser.gid;
+    contents = [ observerEnv ];
     config = {
       User = "${commonUser.uid}:${commonUser.gid}";
       Cmd = [ "git-repo-observer" ];
       WorkingDir = "/";
-      Env = [ ];
+      Env = [
+        "SSL_CERT_FILE=/etc/ssl/certs/ca-bundle.crt"
+        "SSL_CERT_DIR=/etc/ssl/certs"
+      ];
     };
+    maxLayers = 100;
   };
-
-  consumerImage = pkgs.dockerTools.buildImage {
+  consumerImage = pkgs.dockerTools.buildLayeredImage {
     inherit extraCommands;
     name = "polar-git-consumer";
     tag = "latest";
-    copyToRoot = commonPaths ++ [ consumer ];
-    uid = commonUser.uid;
-    gid = commonUser.gid;
+    contents = [ consumerEnv ];
     config = {
       User = "${commonUser.uid}:${commonUser.gid}";
       Cmd = [ "git-consumer" ];
       WorkingDir = "/";
-      Env = [ ];
+      Env = [
+        "SSL_CERT_FILE=/etc/ssl/certs/ca-bundle.crt"
+        "SSL_CERT_DIR=/etc/ssl/certs"
+      ];
     };
+    maxLayers = 100;
   };
-
-  schedulerImage = pkgs.dockerTools.buildImage {
+  schedulerImage = pkgs.dockerTools.buildLayeredImage {
     inherit extraCommands;
     name = "polar-git-scheduler";
     tag = "latest";
-    copyToRoot = commonPaths ++ [ scheduler ];
-    uid = commonUser.uid;
-    gid = commonUser.gid;
+    contents = [ schedulerEnv ];
     config = {
       User = "${commonUser.uid}:${commonUser.gid}";
       Cmd = [ "scheduler" ];
       WorkingDir = "/";
-      Env = [ ];
+      Env = [
+        "SSL_CERT_FILE=/etc/ssl/certs/ca-bundle.crt"
+        "SSL_CERT_DIR=/etc/ssl/certs"
+      ];
     };
+    maxLayers = 100;
   };
 in
 {

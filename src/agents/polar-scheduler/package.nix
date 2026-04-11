@@ -1,3 +1,4 @@
+# src/agents/polar-scheduler/package.nix
 { pkgs,
   commonPaths,
   craneLib,
@@ -8,22 +9,23 @@
 }:
 
 let
-    extraCommands = ''
-      mkdir -p etc
-      printf 'polar:x:1000:1000::/home/polar:/bin/bash\n' > etc/passwd
-      printf 'polar:x:1000:\n' > etc/group
-      printf 'polar:!x:::::::\n' > etc/shadow
-    '';
+  extraCommands = ''
+    mkdir -p etc tmp
+    chmod 1777 tmp
+    printf 'polar:x:1000:1000::/home/polar:/bin/bash\n' > etc/passwd
+    printf 'polar:x:1000:\n' > etc/group
+    printf 'polar:!x:::::::\n' > etc/shadow
+  '';
 
-  # Build the processor binary (polar-scheduler)
+  certPaths = [ pkgs.cacert ];
+
   processor = craneLib.buildPackage (crateArgs // {
     pname = "polar-scheduler";
     cargoExtraArgs = "--bin polar-scheduler --locked";
     src = workspaceFileset ./processor;
-    doCheck = false;        # tests run separately in CI
+    doCheck = false;
   });
 
-  # Build the observer binary (polar-scheduler-observer)
   observer = craneLib.buildPackage (crateArgs // {
     pname = "polar-scheduler-observer";
     cargoExtraArgs = "--bin polar-scheduler-observer --locked";
@@ -31,21 +33,18 @@ let
     doCheck = false;
   });
 
-  # Environment for the processor – includes the binary and common paths (CA certs, etc.)
   processorEnv = pkgs.buildEnv {
     name = "processor-env";
-    paths = commonPaths ++ [ processor ];
+    paths = commonPaths ++ certPaths ++ [ processor ];
     pathsToLink = [ "/bin" "/etc/ssl/certs" ];
   };
 
-  # Environment for the observer
   observerEnv = pkgs.buildEnv {
     name = "observer-env";
-    paths = commonPaths ++ [ observer ];
+    paths = commonPaths ++ certPaths ++ [ observer ];
     pathsToLink = [ "/bin" "/etc/ssl/certs" ];
   };
 
-  # Layered container image for the processor
   processorImage = pkgs.dockerTools.buildLayeredImage {
     inherit extraCommands;
     name = "polar-scheduler-processor";
@@ -58,13 +57,11 @@ let
       Env = [
         "SSL_CERT_FILE=/etc/ssl/certs/ca-bundle.crt"
         "SSL_CERT_DIR=/etc/ssl/certs"
-        # Runtime environment variables (e.g. GRAPH_ENDPOINT) should be set by the orchestrator
       ];
     };
-    maxLayers = 100;        # optional, for better layer sharing
+    maxLayers = 100;
   };
 
-  # Layered container image for the observer
   observerImage = pkgs.dockerTools.buildLayeredImage {
     inherit extraCommands;
     name = "polar-scheduler-observer";
