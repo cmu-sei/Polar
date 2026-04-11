@@ -12,6 +12,7 @@ def main [context_nuon: string] {
 
     let values_path = ($chart_dir | path join "values.dhall")
     let merged      = "let v = " + $values_path + " in let o = (" + $overrides + ").build in v // { imagePullSecrets = o.imagePullSecrets, orchestrator = v.orchestrator // o.orchestrator, processor = v.processor // o.processor }"
+    let tls_secret  = "build-agent-tls"
 
     let tmp  = (mktemp --suffix ".dhall")
     let expr = "let v = (" + $merged + ") in " + $chart_dir + "/agent-cert.dhall v.tls"
@@ -27,11 +28,22 @@ def main [context_nuon: string] {
     dhall-to-yaml --documents --file $tmp | save --force ($output_dir | path join "build-agent-rbac.yaml")
     rm $tmp
 
+    let base = "let v = (" + $merged + ") in "
+    let tls  = ", tlsSecretName = \"" + $tls_secret + "\", proxyCACert = v.proxyCACert }"
+    let neo  = ", neo4jBoltAddr = \"" + $neo4j_addr + "\""
+
     let tmp  = (mktemp --suffix ".dhall")
-    let expr = "let v = (" + $merged + ") in " + $chart_dir + "/deployment.dhall (v // { neo4jBoltAddr = \"" + $neo4j_addr + "\" })"
+    let expr = $base + $chart_dir + "/orchestrator.dhall { name = v.orchestrator.name, image = v.orchestrator.image, imagePullPolicy = v.imagePullPolicy, imagePullSecrets = v.imagePullSecrets, serviceAccountName = v.orchestrator.serviceAccountName, secretName = v.orchestrator.secretName" + $tls
     $expr | save --force $tmp
-    print $"  rendering deployment.dhall -> build-agents.yaml"
-    dhall-to-yaml --documents --file $tmp | save --force ($output_dir | path join "build-agents.yaml")
+    print $"  rendering orchestrator.dhall -> build-orchestrator.yaml"
+    dhall-to-yaml --documents --file $tmp | save --force ($output_dir | path join "build-orchestrator.yaml")
+    rm $tmp
+
+    let tmp  = (mktemp --suffix ".dhall")
+    let expr = $base + $chart_dir + "/processor.dhall { name = v.processor.name, image = v.processor.image, imagePullPolicy = v.imagePullPolicy, imagePullSecrets = v.imagePullSecrets" + $neo + $tls
+    $expr | save --force $tmp
+    print $"  rendering processor.dhall -> build-processor.yaml"
+    dhall-to-yaml --documents --file $tmp | save --force ($output_dir | path join "build-processor.yaml")
     rm $tmp
 
     print $"  build: done"

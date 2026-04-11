@@ -12,6 +12,7 @@ def main [context_nuon: string] {
 
     let values_path = ($chart_dir | path join "values.dhall")
     let merged      = "let v = " + $values_path + " in let o = (" + $overrides + ").kube in v // { imagePullSecrets = o.imagePullSecrets, observer = v.observer // o.observer, consumer = v.consumer // o.consumer }"
+    let tls_secret  = "kube-agent-tls"
 
     let tmp  = (mktemp --suffix ".dhall")
     let expr = "let v = (" + $merged + ") in " + $chart_dir + "/agent-cert.dhall v.tls"
@@ -28,10 +29,17 @@ def main [context_nuon: string] {
     rm $tmp
 
     let tmp  = (mktemp --suffix ".dhall")
-    let expr = "let v = (" + $merged + ") in " + $chart_dir + "/deployment.dhall (v // { neo4jBoltAddr = \"" + $neo4j_addr + "\" })"
+    let expr = "let v = (" + $merged + ") in " + $chart_dir + "/observer.dhall { name = v.observer.name, image = v.observer.image, imagePullPolicy = v.imagePullPolicy, imagePullSecrets = v.imagePullSecrets, serviceAccountName = v.observer.serviceAccountName, secretName = v.observer.secretName, tlsSecretName = \"" + $tls_secret + "\", proxyCACert = v.proxyCACert }"
     $expr | save --force $tmp
-    print $"  rendering deployment.dhall -> kube-agent.yaml"
-    dhall-to-yaml --documents --file $tmp | save --force ($output_dir | path join "kube-agent.yaml")
+    print $"  rendering observer.dhall -> kube-observer.yaml"
+    dhall-to-yaml --documents --file $tmp | save --force ($output_dir | path join "kube-observer.yaml")
+    rm $tmp
+
+    let tmp  = (mktemp --suffix ".dhall")
+    let expr = "let v = (" + $merged + ") in " + $chart_dir + "/consumer.dhall { name = v.consumer.name, image = v.consumer.image, imagePullPolicy = v.imagePullPolicy, imagePullSecrets = v.imagePullSecrets, tlsSecretName = \"" + $tls_secret + "\", neo4jBoltAddr = \"" + $neo4j_addr + "\", proxyCACert = v.proxyCACert }"
+    $expr | save --force $tmp
+    print $"  rendering consumer.dhall -> kube-consumer.yaml"
+    dhall-to-yaml --documents --file $tmp | save --force ($output_dir | path join "kube-consumer.yaml")
     rm $tmp
 
     print $"  kube: done"

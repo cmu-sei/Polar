@@ -11,10 +11,8 @@ def main [context_nuon: string] {
     mkdir $output_dir
 
     let values_path = ($chart_dir | path join "values.dhall")
-
-    # Deep merge: merge observer and consumer sub-records individually
-    # so image overrides don't wipe out other observer/consumer fields.
-    let merged = "let v = " + $values_path + " in let o = (" + $overrides + ").gitlab in v // { imagePullSecrets = o.imagePullSecrets, observer = v.observer // o.observer, consumer = v.consumer // o.consumer }"
+    let merged      = "let v = " + $values_path + " in let o = (" + $overrides + ").gitlab in v // { imagePullSecrets = o.imagePullSecrets, observer = v.observer // o.observer, consumer = v.consumer // o.consumer }"
+    let tls_secret  = "gitlab-agent-tls"
 
     # Agent certificate
     let tmp  = (mktemp --suffix ".dhall")
@@ -24,12 +22,20 @@ def main [context_nuon: string] {
     dhall-to-yaml --documents --file $tmp | save --force ($output_dir | path join "gitlab-agent-cert.yaml")
     rm $tmp
 
-    # Deployment
+    # Observer deployment
     let tmp  = (mktemp --suffix ".dhall")
-    let expr = "let v = (" + $merged + ") in " + $chart_dir + "/deployment.dhall (v // { neo4jBoltAddr = \"" + $neo4j_addr + "\", neo4jCAMountPath = \"/etc/neo4j-ca/ca.pem\" })"
+    let expr = "let v = (" + $merged + ") in " + $chart_dir + "/observer.dhall { name = v.observer.name, image = v.observer.image, imagePullPolicy = v.imagePullPolicy, imagePullSecrets = v.imagePullSecrets, endpoint = v.observer.endpoint, baseIntervalSecs = v.observer.baseIntervalSecs, tlsSecretName = \"" + $tls_secret + "\", proxyCACert = v.proxyCACert }"
     $expr | save --force $tmp
-    print $"  rendering deployment.dhall -> gitlab-agents.yaml"
-    dhall-to-yaml --documents --file $tmp | save --force ($output_dir | path join "gitlab-agents.yaml")
+    print $"  rendering observer.dhall -> gitlab-observer.yaml"
+    dhall-to-yaml --documents --file $tmp | save --force ($output_dir | path join "gitlab-observer.yaml")
+    rm $tmp
+
+    # Consumer deployment
+    let tmp  = (mktemp --suffix ".dhall")
+    let expr = "let v = (" + $merged + ") in " + $chart_dir + "/consumer.dhall { name = v.consumer.name, image = v.consumer.image, imagePullPolicy = v.imagePullPolicy, imagePullSecrets = v.imagePullSecrets, tlsSecretName = \"" + $tls_secret + "\", neo4jBoltAddr = \"" + $neo4j_addr + "\", proxyCACert = v.proxyCACert }"
+    $expr | save --force $tmp
+    print $"  rendering consumer.dhall -> gitlab-consumer.yaml"
+    dhall-to-yaml --documents --file $tmp | save --force ($output_dir | path join "gitlab-consumer.yaml")
     rm $tmp
 
     print $"  gitlab: done"

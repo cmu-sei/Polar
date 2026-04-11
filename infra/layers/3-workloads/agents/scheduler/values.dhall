@@ -17,7 +17,7 @@ in  { name            = "polar-scheduler"
       { name         = "polar-scheduler-observer"
       , image        = "polar-scheduler-observer:latest"
       , syncInterval = "120"
-      , localPath    = "/var/lib/polar-schedules"
+      , localPath    = "/tmp/polar-schedules"
       }
 
     , processor =

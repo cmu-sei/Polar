@@ -12,6 +12,7 @@ def main [context_nuon: string] {
 
     let values_path = ($chart_dir | path join "values.dhall")
     let merged      = "let v = " + $values_path + " in let o = (" + $overrides + ").jira in v // { imagePullSecrets = o.imagePullSecrets, observer = v.observer // o.observer, consumer = v.consumer // o.consumer }"
+    let tls_secret  = "jira-agent-tls"
 
     let tmp  = (mktemp --suffix ".dhall")
     let expr = "let v = (" + $merged + ") in " + $chart_dir + "/agent-cert.dhall v.tls"
@@ -20,11 +21,22 @@ def main [context_nuon: string] {
     dhall-to-yaml --documents --file $tmp | save --force ($output_dir | path join "jira-agent-cert.yaml")
     rm $tmp
 
+    let base = "let v = (" + $merged + ") in "
+    let tls  = ", tlsSecretName = \"" + $tls_secret + "\", proxyCACert = v.proxyCACert }"
+    let neo  = ", neo4jBoltAddr = \"" + $neo4j_addr + "\""
+
     let tmp  = (mktemp --suffix ".dhall")
-    let expr = "let v = (" + $merged + ") in " + $chart_dir + "/deployment.dhall (v // { neo4jBoltAddr = \"" + $neo4j_addr + "\" })"
+    let expr = $base + $chart_dir + "/observer.dhall { name = v.observer.name, image = v.observer.image, imagePullPolicy = v.imagePullPolicy, imagePullSecrets = v.imagePullSecrets, jiraUrl = v.observer.jiraUrl" + $tls
     $expr | save --force $tmp
-    print $"  rendering deployment.dhall -> jira-agents.yaml"
-    dhall-to-yaml --documents --file $tmp | save --force ($output_dir | path join "jira-agents.yaml")
+    print $"  rendering observer.dhall -> jira-observer.yaml"
+    dhall-to-yaml --documents --file $tmp | save --force ($output_dir | path join "jira-observer.yaml")
+    rm $tmp
+
+    let tmp  = (mktemp --suffix ".dhall")
+    let expr = $base + $chart_dir + "/consumer.dhall { name = v.consumer.name, image = v.consumer.image, imagePullPolicy = v.imagePullPolicy, imagePullSecrets = v.imagePullSecrets" + $neo + $tls
+    $expr | save --force $tmp
+    print $"  rendering consumer.dhall -> jira-consumer.yaml"
+    dhall-to-yaml --documents --file $tmp | save --force ($output_dir | path join "jira-consumer.yaml")
     rm $tmp
 
     print $"  jira: done"

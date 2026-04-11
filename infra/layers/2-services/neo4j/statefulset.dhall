@@ -143,6 +143,11 @@ let render =
                       , name            = "neo4j-init"
                       , image           = Some "polar-nu-init:latest"
                       , imagePullPolicy = Some v.imagePullPolicy
+                      , securityContext = Some kubernetes.SecurityContext::{
+                        , runAsUser    = Some 0
+                        , runAsGroup   = Some 0
+                        , runAsNonRoot = Some False
+                        }
                       , env             = Some (baseEnv # tlsEnv)
                       , volumeMounts    = Some initVolumeMounts
                       }

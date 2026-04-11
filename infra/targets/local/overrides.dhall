@@ -22,6 +22,12 @@
   , imagePullSecrets = [] : List { name : Optional Text }
   }
 
+, jira =
+  { imagePullSecrets = [] : List { name : Optional Text }
+  , observer = { image = "polar-jira-observer:latest" }
+  , consumer = { image = "polar-jira-consumer:latest" }
+  }
+
 , gitlab =
   { imagePullSecrets = [] : List { name : Optional Text }
   , observer = { image = "polar-gitlab-observer:latest" }
