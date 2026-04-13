@@ -99,8 +99,6 @@ let graphPassword =
       , key  = "secret"
       }
 
-let gitObserverSecretName = "git-observer-secret"
-
 let RegistryResolverName   = "oci-registry-resolver"
 let ArtifactLinkerName     = "artifact-linker"
 let ProvenanceLinkerName   = "provenance-linker"
@@ -195,7 +193,6 @@ in  { PolarNamespace
     , graphConfig
     , gitlabSecretKeySelector
     , graphPassword
-    , gitObserverSecretName
     , RegistryResolverName
     , ArtifactLinkerName
     , ProvenanceLinkerName

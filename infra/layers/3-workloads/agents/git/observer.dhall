@@ -16,18 +16,15 @@ let render =
       ) ->
 
         let volumes =
-              [ kubernetes.Volume::{ name = v.tlsSecretName,       secret = Some kubernetes.SecretVolumeSource::{ secretName = Some v.tlsSecretName } }
-              , kubernetes.Volume::{ name = "git-observer-config", secret = Some kubernetes.SecretVolumeSource::{ secretName = Some Constants.gitObserverSecretName } }
+              [ kubernetes.Volume::{ name = v.tlsSecretName, secret = Some kubernetes.SecretVolumeSource::{ secretName = Some v.tlsSecretName } }
               ] # functions.ProxyVolume v.proxyCACert
 
         let env =
               Constants.commonClientEnv
               # functions.ProxyEnv v.proxyCACert
-              # [ kubernetes.EnvVar::{ name = "GIT_AGENT_CONFIG", value = Some "/etc/git-observer/git.json" } ]
 
         let mounts =
-              [ kubernetes.VolumeMount::{ name = v.tlsSecretName,       mountPath = Constants.tlsPath,         readOnly = Some True }
-              , kubernetes.VolumeMount::{ name = "git-observer-config", mountPath = "/etc/git-observer",       readOnly = Some True }
+              [ kubernetes.VolumeMount::{ name = v.tlsSecretName, mountPath = Constants.tlsPath, readOnly = Some True }
               ] # functions.ProxyMount v.proxyCACert
 
         in  kubernetes.Deployment::{
@@ -42,9 +39,12 @@ let render =
                   , volumes          = Some volumes
                   , containers =
                     [ kubernetes.Container::{
-                      , name = v.name, image = Some v.image, imagePullPolicy = Some v.imagePullPolicy
+                      , name            = v.name
+                      , image           = Some v.image
+                      , imagePullPolicy = Some v.imagePullPolicy
                       , securityContext = Some Constants.DropAllCapSecurityContext
-                      , env = Some env, volumeMounts = Some mounts
+                      , env             = Some env
+                      , volumeMounts    = Some mounts
                       }
                     ]
                   }

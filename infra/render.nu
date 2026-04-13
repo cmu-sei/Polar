@@ -42,9 +42,6 @@ def main [
     print "Validating environment..."
     validate_env $config.required_env
 
-    # Validate required conf files exist
-    let conf_dir = ($config.target_dir | path join "conf")
-    validate_file ($conf_dir | path join "git.json") "git observer config — copy from git.json.example"
 
     print ""
 
