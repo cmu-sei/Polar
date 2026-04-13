@@ -9,6 +9,7 @@ use polar::{
 use ractor::{Actor, ActorProcessingErr, ActorRef, OutputPort, SupervisionEvent, async_trait};
 use rkyv::{from_bytes, rancor, to_bytes};
 use tracing::{debug, error, info, instrument, trace, warn};
+
 pub const SERVICE_NAME: &str = "polar.git.scheduler";
 pub const TCP: &str = "tcp";
 
@@ -18,6 +19,22 @@ pub struct RootSupervisorState {
     tcp_client: ActorRef<TcpClientMessage>,
 }
 
+/// Fetch a stored `RepoObservationConfig` from the graph for a known repo.
+///
+/// Returns `None` if no config node exists for the given `repo_id`, in which
+/// case the caller should produce a default config.
+///
+/// # Credentials
+///
+/// The graph-stored config does not yet include credentials. Credentials will
+/// be sourced from the CredentialAgent at dispatch time once that agent is
+/// implemented. For now, `credentials` is always `None` — callers must treat
+/// the returned config as suitable for public repos only, or augment it with
+/// credentials from another source before dispatching.
+///
+/// TODO: fetch credentials from CredentialAgent and populate
+///       `RepoObservationConfig::credentials` before publishing the
+///       `ConfigurationEvent`.
 #[instrument(level = "trace", skip(graph))]
 pub async fn fetch_repo_observation_config(
     graph: &Graph,
@@ -45,6 +62,7 @@ pub async fn fetch_repo_observation_config(
         let max_depth: Option<i64> = row.get("max_depth")?;
         let tracked_refs: Vec<String> = row.get("tracked_refs")?;
 
+        // credentials: None — public repos only until CredentialAgent is wired in.
         Ok(Some(RepoObservationConfig::new(
             RepoId::new(repo_id),
             repo_url,
@@ -64,12 +82,10 @@ impl RootSupervisor {
         state: &mut RootSupervisorState,
     ) -> Result<(), ActorProcessingErr> {
         debug!("{myself:?} initializing");
-        // subscribe to supervision events
         state.tcp_client.cast(TcpClientMessage::Subscribe {
             topic: GIT_REPO_DISCOGERY_TOPIC.to_string(),
-            trace_ctx: None, // or WireTraceCtx::from_current_span() if you have a span
+            trace_ctx: None,
         })?;
-
         Ok(())
     }
 
@@ -80,65 +96,50 @@ impl RootSupervisor {
         state: &mut RootSupervisorState,
     ) -> Result<(), ActorProcessingErr> {
         trace!("Received message from topic {topic}");
-        let event = from_bytes::<GitRepositoryDiscoveredEvent, rancor::Error>(&payload)?;
 
+        let event = from_bytes::<GitRepositoryDiscoveredEvent, rancor::Error>(&payload)?;
         let graph = Graph::connect(get_neo_config()?)?;
 
-        // Handle configuration request
-        // Example: Fetch repository configuration and send response
-        // query neo4j and send response
-        // TODO: Implement fetching repository configuration from Neo4j, rem
-        // TODO: Implement checking for an ssh or http url
+        // TODO: check for SSH vs HTTP URL
         let repo_url = event.http_url.unwrap();
         let repo_id = RepoId::from_url(&repo_url);
 
-        match fetch_repo_observation_config(&graph, &repo_id).await {
-            Ok(Some(fetched_conig)) => {
-                debug!("Fetched configuration for repo {}", repo_id.to_string());
-
-                let payload = to_bytes::<RkyvError>(&fetched_conig)?;
-
-                // Send response to the client
-                let message = TcpClientMessage::Publish {
-                    topic: GIT_REPO_CONFIG_EVENTS.to_string(),
-                    payload: payload.to_vec(),
-                    trace_ctx: WireTraceCtx::from_current_span(),
-                };
-
-                state.tcp_client.cast(message)?;
+        let config = match fetch_repo_observation_config(&graph, &repo_id).await {
+            Ok(Some(config)) => {
+                debug!("Fetched stored configuration for repo {}", repo_id);
+                config
             }
             Ok(None) => {
                 debug!(
-                    "Couldn't find configuration for repo {}",
-                    repo_id.to_string()
+                    "No stored configuration for repo {} — using defaults",
+                    repo_id
                 );
-
-                let response = ConfigurationEvent {
-                    config: RepoObservationConfig::new(
-                        repo_id,
-                        repo_url.into(),
-                        vec!["origin".to_string()],
-                        Some(100),
-                        vec!["refs/heads/main".to_string()],
-                    ),
-                };
-                debug!("Returning default configuration");
-                let payload = to_bytes::<RkyvError>(&response)?;
-
-                // Send response to the client
-                let message = TcpClientMessage::Publish {
-                    topic: GIT_REPO_CONFIG_EVENTS.to_string(),
-                    payload: payload.to_vec(),
-                    trace_ctx: WireTraceCtx::from_current_span(),
-                };
-
-                state.tcp_client.cast(message)?;
+                // credentials: None — public repo assumed until CredentialAgent is wired in.
+                // TODO: request credentials from CredentialAgent before dispatching
+                //       for private repos.
+                RepoObservationConfig::new(
+                    repo_id,
+                    repo_url,
+                    vec!["origin".to_string()],
+                    Some(100),
+                    vec!["refs/heads/main".to_string()],
+                )
             }
             Err(e) => {
-                error!("Error querying graph for configuration.");
+                error!("Error querying graph for repo configuration");
                 return Err(e);
             }
-        }
+        };
+
+        let event = ConfigurationEvent { config };
+        let payload = to_bytes::<RkyvError>(&event)?;
+
+        state.tcp_client.cast(TcpClientMessage::Publish {
+            topic: GIT_REPO_CONFIG_EVENTS.to_string(),
+            payload: payload.to_vec(),
+            trace_ctx: WireTraceCtx::from_current_span(),
+        })?;
+
         Ok(())
     }
 }
@@ -154,18 +155,14 @@ impl Actor for RootSupervisor {
         myself: ActorRef<Self::Msg>,
         _: (),
     ) -> Result<Self::State, ActorProcessingErr> {
-        // Read Kubernetes credentials and other data from the environment
         debug!("{myself:?} starting");
 
         let events_output = std::sync::Arc::new(OutputPort::default());
-
-        //subscribe to registration event
         events_output.subscribe(myself.clone(), |event| {
             Some(SupervisorMessage::ClientEvent { event })
         });
 
         let config = TCPClientConfig::new()?;
-
         let (tcp_client, _) = Actor::spawn_linked(
             Some(format!("{SERVICE_NAME}.{TCP}")),
             TcpClientActor,
@@ -178,6 +175,7 @@ impl Actor for RootSupervisor {
             myself.clone().into(),
         )
         .await?;
+
         Ok(RootSupervisorState { tcp_client })
     }
 
@@ -205,7 +203,6 @@ impl Actor for RootSupervisor {
             }
             SupervisionEvent::ProcessGroupChanged(..) => todo!(),
         }
-
         Ok(())
     }
 
@@ -217,11 +214,7 @@ impl Actor for RootSupervisor {
     ) -> Result<(), ActorProcessingErr> {
         match message {
             SupervisorMessage::ClientEvent { event } => match event {
-                ClientEvent::ControlResponse {
-                    registration_id: _,
-                    result: _,
-                    trace_ctx: _,
-                } => todo!("handle control response"),
+                ClientEvent::ControlResponse { .. } => todo!("handle control response"),
                 ClientEvent::Registered { .. } => Self::init(myself, state).await?,
                 ClientEvent::MessagePublished { topic, payload, .. } => {
                     Self::deserialize_and_dispatch(topic, payload, state).await?
@@ -263,7 +256,6 @@ mod integration_tests {
     async fn fetch_repo_config_returns_config_when_present() {
         let container = Neo4j::default().start().await.unwrap();
 
-        // prepare neo4rs client
         let config = neo4rs::ConfigBuilder::new()
             .uri(format!(
                 "bolt://{}:{}",
@@ -280,16 +272,14 @@ mod integration_tests {
             .build()
             .unwrap();
 
-        // connect ot Neo4j
         let graph = neo4rs::Graph::connect(config).unwrap();
-        // Prepare test RepoObservationConfig
+
         let repo_id = RepoId::new("test-repo-123".into());
         let repo_url = "https://github.com/test/repo.git";
         let remotes = vec!["origin".to_string()];
         let max_depth = Some(100);
         let tracked_refs = vec!["refs/heads/main".to_string()];
 
-        // Clean previous data just in case
         graph
             .run(
                 query("MATCH (c:RepoObservationConfig { repo_id: $id }) DELETE c")
@@ -298,7 +288,6 @@ mod integration_tests {
             .await
             .unwrap();
 
-        // Insert test config
         graph
             .run(
                 query(
@@ -321,7 +310,6 @@ mod integration_tests {
             .await
             .unwrap();
 
-        // Fetch via our function
         let fetched = fetch_repo_observation_config(&graph, &repo_id)
             .await
             .unwrap()
@@ -331,13 +319,14 @@ mod integration_tests {
         assert_eq!(fetched.repo_url, repo_url);
         assert_eq!(fetched.remotes, remotes);
         assert_eq!(fetched.max_depth, max_depth.unwrap());
+        // credentials should always be None until CredentialAgent is wired in
+        assert!(fetched.credentials.is_none());
     }
 
     #[tokio::test]
     async fn fetch_repo_config_returns_none_when_missing() {
         let container = Neo4j::default().start().await.unwrap();
 
-        // prepare neo4rs client
         let config = neo4rs::ConfigBuilder::new()
             .uri(format!(
                 "bolt://{}:{}",
@@ -354,15 +343,11 @@ mod integration_tests {
             .build()
             .unwrap();
 
-        // connect ot Neo4j
         let graph = neo4rs::Graph::connect(config).unwrap();
-
         let repo_id = RepoId::new("non-existent-repo".into());
-
         let fetched = fetch_repo_observation_config(&graph, &repo_id)
             .await
             .unwrap();
-
         assert!(fetched.is_none());
     }
 }
