@@ -73,7 +73,7 @@ let
     contents = [ consumerEnv ];
     config = {
       User = "${commonUser.uid}:${commonUser.gid}";
-      Cmd = [ "git-consumer" ];
+      Cmd = [ "git-repo-processor" ];
       WorkingDir = "/";
       Env = [
         "SSL_CERT_FILE=/etc/ssl/certs/ca-bundle.crt"

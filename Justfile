@@ -739,6 +739,7 @@ cluster-build-all:
     just orchestrator all
     just provenance all
     just git-agents all
+    just jira all
     just nu-init
 
 # Build and load all core Polar images into the cluster.
@@ -772,7 +773,6 @@ cluster-load-all neo4j_result=_neo4j_result:
     if [ -n "{{neo4j_result}}" ]; then
         _load "{{neo4j_result}}"
     fi
-    _load_podman docker.io/library/alpine:3.14.0
     # Polar images — all from nix result symlinks
     _load ./result-build-processor-image
     _load ./result-cassini-image
@@ -791,27 +791,31 @@ cluster-load-all neo4j_result=_neo4j_result:
     _load ./result-provenance-resolver
     _load ./result-scheduler-observer
     _load ./result-scheduler-processor
+    _load ./result-jira-consumer
+    _load ./result-jira-observer
     _load ./result-nu-init-image
     # Retag to match manifest image references
-    _tag docker.io/library/build-orchestrator:latest             docker.io/library/build-orchestrator:latest
-    _tag docker.io/library/build-processor:latest           docker.io/library/build-processor:latest
-    _tag docker.io/library/cassini:latest                        docker.io/library/cassini:latest
-    _tag docker.io/library/cyclops/git-clone:latest          docker.io/library/cyclops/git-clone:latest
-    _tag docker.io/library/harness-producer:latest               docker.io/library/harness-producer:latest
-    _tag docker.io/library/harness-sink:latest                   docker.io/library/harness-sink:latest
-    _tag docker.io/library/nix-neo4j:latest                      docker.io/library/neo4j:5.26.2
-    _tag docker.io/library/polar-git-consumer:latest         docker.io/library/polar-git-consumer:latest
-    _tag docker.io/library/polar-gitlab-consumer:latest          docker.io/library/polar-gitlab-consumer:latest
-    _tag docker.io/library/polar-gitlab-observer:latest          docker.io/library/polar-gitlab-observer:latest
-    _tag docker.io/library/polar-git-repo-observer:latest    docker.io/library/polar-git-repo-observer:latest
-    _tag docker.io/library/polar-git-scheduler:latest        docker.io/library/polar-git-scheduler:latest
-    _tag docker.io/library/polar-kube-consumer:latest            docker.io/library/polar-kube-consumer:latest
-    _tag docker.io/library/polar-kube-observer:latest            docker.io/library/polar-kube-observer:latest
-    _tag docker.io/library/polar-scheduler-observer:latest       docker.io/library/polar-scheduler-observer:latest
-    _tag docker.io/library/polar-scheduler-processor:latest      docker.io/library/polar-scheduler-processor:latest
-    _tag docker.io/library/provenance-linker-agent:latest    docker.io/library/provenance-linker-agent:latest
-    _tag docker.io/library/provenance-resolver-agent:latest  docker.io/library/provenance-resolver-agent:latest
+    _tag docker.io/library/build-orchestrator:latest            docker.io/library/build-orchestrator:latest
+    _tag docker.io/library/build-processor:latest               docker.io/library/build-processor:latest
+    _tag docker.io/library/cassini:latest                       docker.io/library/cassini:latest
+    _tag docker.io/library/cyclops/git-clone:latest             docker.io/library/cyclops/git-clone:latest
+    _tag docker.io/library/harness-producer:latest              docker.io/library/harness-producer:latest
+    _tag docker.io/library/harness-sink:latest                  docker.io/library/harness-sink:latest
+    _tag docker.io/library/nix-neo4j:latest                     docker.io/library/neo4j:5.26.2
+    _tag docker.io/library/polar-git-consumer:latest            docker.io/library/polar-git-consumer:latest
+    _tag docker.io/library/polar-gitlab-consumer:latest         docker.io/library/polar-gitlab-consumer:latest
+    _tag docker.io/library/polar-gitlab-observer:latest         docker.io/library/polar-gitlab-observer:latest
+    _tag docker.io/library/polar-git-repo-observer:latest       docker.io/library/polar-git-repo-observer:latest
+    _tag docker.io/library/polar-git-scheduler:latest           docker.io/library/polar-git-scheduler:latest
+    _tag docker.io/library/polar-kube-consumer:latest           docker.io/library/polar-kube-consumer:latest
+    _tag docker.io/library/polar-kube-observer:latest           docker.io/library/polar-kube-observer:latest
+    _tag docker.io/library/polar-scheduler-observer:latest      docker.io/library/polar-scheduler-observer:latest
+    _tag docker.io/library/polar-scheduler-processor:latest     docker.io/library/polar-scheduler-processor:latest
+    _tag docker.io/library/provenance-linker-agent:latest       docker.io/library/provenance-linker-agent:latest
+    _tag docker.io/library/provenance-resolver-agent:latest     docker.io/library/provenance-resolver-agent:latest
     _tag docker.io/library/polar-nu-init:latest docker.io/library/polar-nu-init:latest
+    _tag docker.io/library/polar-jira-observer:latest           docker.io/library/polar-jira-observer:latest
+    _tag docker.io/library/polar-jira-consumer:latest           docker.io/library/polar-jira-consumer:latest
     echo "Core images loaded and tagged."
 
 # Render manifests for the local cluster.

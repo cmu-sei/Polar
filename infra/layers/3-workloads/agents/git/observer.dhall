@@ -22,6 +22,7 @@ let render =
         let env =
               Constants.commonClientEnv
               # functions.ProxyEnv v.proxyCACert
+              # [ kubernetes.EnvVar::{ name = "POLAR_CACHE_ROOT", value = Some "/tmp/polar-cache" } ]
 
         let mounts =
               [ kubernetes.VolumeMount::{ name = v.tlsSecretName, mountPath = Constants.tlsPath, readOnly = Some True }
