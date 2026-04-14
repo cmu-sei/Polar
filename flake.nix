@@ -177,7 +177,6 @@
           shellHook = old.shellHook + ''
             export GRAPH_DB="neo4j"
             export GRAPH_ENDPOINT="bolt://127.0.0.1:7687"
-            export GRAPH_PASSWORD="somepassword"
             export GRAPH_USER="neo4j"
 
             export BIND_ADDR="127.0.0.1:8080"
@@ -200,8 +199,6 @@
             export POLAR_SCHEDULER_LOCAL_PATH="~/Documents/projects/polar-sched-test"
             export POLAR_SCHEDULER_REMOTE_URL="https://github.com/daveman1010221/polar-schedules.git"
             export POLAR_SCHEDULER_SYNC_INTERVAL="120"
-            export POLAR_SCHEDULER_GIT_USERNAME=""
-            export POLAR_SCHEDULER_GIT_PASSWORD=""
 
             echo ""
             echo "Polar dev shell — cluster startup sequence:"
@@ -212,6 +209,8 @@
             echo "  just cluster-install-cert-manager"
             echo "  just cluster-render && just cluster-apply-storage && just cluster-load-all && just cluster-apply"
             echo ""
+            export SOPS_AGE_BINARY=$(which rage)
+            export SOPS_AGE_SSH_PRIVATE_KEY_FILE=~/.ssh/id_github
           '';
         });
       });

@@ -40,3 +40,6 @@ pipeline-out/
 ai_models/
 pi/
 src/deploy/local/values-active.dhall
+.sops.yaml
+.user.sops.yaml
+user.sops.yaml
