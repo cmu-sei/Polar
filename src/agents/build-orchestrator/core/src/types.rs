@@ -36,6 +36,8 @@ pub struct BuildRequest {
     /// Used for forward-compatibility — do not rely on specific keys in core logic.
     #[serde(default)]
     pub metadata: HashMap<String, String>,
+
+    pub command: Vec<String>,
 }
 
 /// The state machine for a single build lifecycle.
@@ -80,6 +82,11 @@ pub enum BuildState {
 
     /// Cancelled before reaching a terminal state.
     Cancelled,
+    /// Connectivity to the backend was lost while the job was in-flight.
+    /// Terminal state of the record in this orchestrator instance.
+    /// Requires reconciliation against backend state on reconnect
+    /// before a new BuildRecord can be authoritatively issued.
+    Unreconciled,
 }
 
 impl BuildState {
@@ -109,6 +116,10 @@ impl BuildState {
             | (Bootstrapping, Cancelled)
             | (Scheduled, Cancelled)
             | (Running, Cancelled)
+            // Job actor loses connection to the backend, putting it in an unreconciled state
+            | (Scheduled, Unreconciled)
+            | (Bootstrapping, Unreconciled)
+            | (Running, Unreconciled)
         )
     }
 }
@@ -124,6 +135,7 @@ impl std::fmt::Display for BuildState {
             BuildState::Succeeded => "succeeded",
             BuildState::Failed => "failed",
             BuildState::Cancelled => "cancelled",
+            BuildState::Unreconciled => "unreconciled",
         };
         write!(f, "{}", s)
     }
@@ -228,13 +240,14 @@ impl BuildSpec {
         pipeline_image: String,
         git_credentials: GitCredentials,
         registry_credentials: RegistryCredentials,
+        command: Vec<String>,
     ) -> Self {
         Self {
             build_id,
             repo_url,
             commit_sha,
             pipeline_image,
-            entrypoint: None,
+            entrypoint: Some(command),
             git_credentials,
             registry_credentials,
             env: HashMap::new(),

@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use tokio::io::AsyncRead;
 
 use crate::error::BackendError;
-use crate::types::{BootstrapSpec, BuildSpec};
+use crate::types::BuildSpec;
 
 /// Opaque handle returned by a backend after job submission.
 /// The backend is responsible for interpreting it in poll/cancel/log calls.
@@ -73,7 +73,7 @@ pub type LogStream = Box<dyn AsyncRead + Send + Unpin>;
 
 /// Abstraction over build execution environments.
 ///
-/// The orchestrator uses this trait for both pipeline jobs and bootstrap jobs.
+/// The orchestrator uses this trait for pipeline jobs.
 /// Each has its own submit method because their manifests differ significantly
 /// (different images, resource requirements, env vars, and job naming).
 /// Poll, cancel, and logs work identically for both — the handle is opaque.

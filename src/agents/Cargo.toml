@@ -67,6 +67,7 @@ members = [
     "build-orchestrator/core",
     "build-orchestrator/agent",
     "build-orchestrator/k8s", "build-orchestrator/processor",
+    "build-orchestrator/podman"
 ]
 
 [workspace.package]
@@ -162,7 +163,7 @@ aws-credential-types = "1"
 # Error handling
 thiserror = "1"
 bytes = "1.11.1"
-
+bollard = { version = "0.20.2", default-features = false, features = ["pipe"] }
 # Internal crates (members) – add as workspace dependencies with paths
 cassini-broker = { path = "cassini/broker" }
 cassini-c2 = { path = "cassini/cassini-c2" }
@@ -181,6 +182,8 @@ provenance-common = { path = "provenance/provenance-common" }
 web-agent-common = { path = "openapi/common" }
 orchestrator-core = { path = "build-orchestrator/core" }
 orchestrator-backend-k8s = { path = "build-orchestrator/k8s" }
+orchestrator-backend-podman = { path = "build-orchestrator/podman" }
+
 # Remove dhall and serde_dhall from patch – they are now workspace deps
 [patch.crates-io]
 getrandom = { git = "https://github.com/rust-random/getrandom", tag = "v0.3.3" }

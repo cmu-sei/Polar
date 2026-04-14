@@ -1,4 +1,3 @@
--- config/schema.dhall
 -- Typed schema for Cyclops orchestrator configuration.
 -- Compile to YAML with: dhall-to-yaml --file config/dev.dhall > cyclops.yaml
 let Map = List { mapKey : Text, mapValue : Text }
@@ -28,27 +27,18 @@ let KubernetesBackendConfig =
         { job_labels = [] : Map, resources = None ResourceConfig.Type }
       }
 
+let PodmanBackendConfig =  { Type = { socket_path : Text, image_pull_policy: Optional Text } , default = { socket_path = "/var/run/docker.sock", image_pull_policy = Some "IfNotPresent" } }
+
 let BackendConfig =
       { Type =
-          { driver : Text, kubernetes : Optional KubernetesBackendConfig.Type }
+          { driver : Text, command : List Text, kubernetes : Optional KubernetesBackendConfig.Type, podman : Optional PodmanBackendConfig.Type }
       }
-
-let BootstrapConfig = { Type = { builder_image : Text } }
-
-let CredentialsConfig =
-      { Type = { git_secret_name : Text, registry_secret_name : Text } }
 
 let RepoMapping =
       { Type = { repo_url : Text, pipeline_image : Optional Text }
       , default.pipeline_image = None Text
       }
 
-let CassiniConfig = { Type = { broker_url : Text, inbound_subject : Text } }
-
-let LogConfig =
-      { Type = { format : Text, level : Text }
-      , default = { format = "json", level = "info" }
-      }
 
 let StorageConfig =
       { Type =
@@ -64,25 +54,18 @@ let StorageConfig =
 let OrchestratorConfig =
       { Type =
           { backend : BackendConfig.Type
-          , cassini : CassiniConfig.Type
-          , bootstrap : BootstrapConfig.Type
-          , credentials : CredentialsConfig.Type
           , repo_mappings : List RepoMapping.Type
-          , log : LogConfig.Type
           , storage : StorageConfig.Type
           }
       , default =
-        { repo_mappings = [] : List RepoMapping.Type, log = LogConfig.default }
+        { repo_mappings = [] : List RepoMapping.Type }
       }
 
 in  { OrchestratorConfig
     , BackendConfig
     , KubernetesBackendConfig
+    , PodmanBackendConfig
     , ResourceConfig
-    , BootstrapConfig
-    , CredentialsConfig
     , StorageConfig
     , RepoMapping
-    , CassiniConfig
-    , LogConfig
     }

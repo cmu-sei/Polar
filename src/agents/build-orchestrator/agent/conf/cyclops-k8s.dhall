@@ -3,6 +3,7 @@ let orchestrator = ./orchestrator.dhall
 in  orchestrator.OrchestratorConfig::{
     , backend =
       { driver = "kubernetes"
+      , command = ["cargo", "build"]
       , kubernetes = Some
         { job_labels = [ { mapKey = "cyclops.io/env", mapValue = "dev" } ]
         , namespace = "default"
@@ -13,6 +14,7 @@ in  orchestrator.OrchestratorConfig::{
           , memory_request = Some "512Mi"
           }
         }
+      , podman = None orchestrator.PodmanBackendConfig.Type
       }
     , storage = orchestrator.StorageConfig::{
       , endpoint_url = "http://localhost:9000"
@@ -20,15 +22,6 @@ in  orchestrator.OrchestratorConfig::{
       , secret_key = "minio123"
       , bucket = "cyclops-build-artifacts"
       }
-    , cassini =
-      { broker_url = "cassini://localhost:7400"
-      , inbound_subject = "cyclops.build.requested"
-      }
-    , credentials =
-      { git_secret_name = "cyclops-git-credentials"
-      , registry_secret_name = "cyclops-registry-credentials"
-      }
-    , log = { format = "pretty", level = "cyclops=debug,warn" }
     , repo_mappings =
       [ { pipeline_image = Some "rust:latest"
         , repo_url = "https://github.com/cmu-sei/Polar.git"

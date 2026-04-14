@@ -1,0 +1,23 @@
+[package]
+name = "orchestrator-backend-podman"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+orchestrator-core = { path = "../core" }
+
+# Docker-compatible API client. Podman exposes the Docker v1.41 API over its
+# Unix socket, so bollard works against it without modification.
+bollard.workspace = true
+
+async-trait.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+bytes.workspace = true
+serde.workspace = true
+# futures::StreamExt for log stream consumption
+futures.workspace = true

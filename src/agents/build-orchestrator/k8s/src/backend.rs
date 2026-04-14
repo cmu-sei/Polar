@@ -4,13 +4,11 @@ use orchestrator_core::backend::{
     BackendJobHandle, BuildBackend, JobGraphIdentity, JobStatus, LogStream, SubmittedJob,
 };
 use orchestrator_core::error::BackendError;
-use orchestrator_core::types::{BootstrapSpec, BuildSpec};
+use orchestrator_core::types::BuildSpec;
 use tokio_util::compat::FuturesAsyncReadCompatExt;
 use tracing::{error, info, instrument};
 
-use crate::job::{
-    bootstrap_job_manifest, build_job_manifest, job_name_for_bootstrap, job_name_for_build,
-};
+use crate::job::{build_job_manifest, job_name_for_build};
 
 pub struct KubernetesBackend {
     client: Client,
@@ -104,55 +102,6 @@ impl BuildBackend for KubernetesBackend {
             graph_identity,
         })
     }
-
-    // TODO: implement
-    // #[instrument(skip(self, spec), fields(build_id = %spec.build_id))]
-    // async fn submit_bootstrap(
-    //     &self,
-    //     spec: &BootstrapSpec,
-    // ) -> Result<BackendJobHandle, BackendError> {
-    //     use k8s_openapi::api::batch::v1::Job;
-    //     use kube::api::{Api, PostParams};
-
-    //     let job_name = job_name_for_bootstrap(spec.build_id);
-    //     let manifest = bootstrap_job_manifest(spec, &self.namespace);
-
-    //     let jobs: Api<Job> = Api::namespaced(self.client.clone(), &self.namespace);
-
-    //     let job = jobs
-    //         .create(&PostParams::default(), &manifest)
-    //         .await
-    //         .map_err(|e| BackendError::SubmissionFailed(e.to_string()))?;
-
-    //     let uid = job
-    //         .metadata
-    //         .uid
-    //         .ok_or_else(|| BackendError::SubmissionFailed("created job has no uid".into()))?;
-    //     let name = job
-    //         .metadata
-    //         .name
-    //         .ok_or_else(|| BackendError::SubmissionFailed("created job has no name".into()))?;
-
-    //     tracing::info!(
-    //         build_id = %spec.build_id,
-    //         job_name = %job_name,
-    //         namespace = %self.namespace,
-    //         "pipeline Job created"
-    //     );
-
-    //     let handle = BackendJobHandle { name, uid };
-
-    //     let graph_identity = JobGraphIdentity {
-    //         node_label: "KubernetesJob".into(),
-    //         display_name: name.clone(),
-    //         identity_props: vec![],
-    //     };
-
-    //     Ok(SubmittedJob {
-    //         handle,
-    //         graph_identity,
-    //     })
-    // }
 
     #[instrument(skip(self), fields(handle = %handle))]
     async fn poll(&self, handle: &BackendJobHandle) -> Result<JobStatus, BackendError> {

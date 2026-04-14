@@ -1102,12 +1102,14 @@ dependencies = [
  "aws-config",
  "aws-credential-types",
  "aws-sdk-s3",
+ "bollard",
  "bytes",
  "cassini-client",
  "cassini-types",
  "chrono",
  "config",
  "orchestrator-backend-k8s",
+ "orchestrator-backend-podman",
  "orchestrator-core",
  "polar",
  "ractor",
@@ -4721,6 +4723,22 @@ dependencies = [
  "orchestrator-core",
  "tokio",
  "tokio-util",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "orchestrator-backend-podman"
+version = "1.0.0"
+dependencies = [
+ "async-trait",
+ "bollard",
+ "bytes",
+ "futures",
+ "orchestrator-core",
+ "serde",
+ "thiserror 1.0.69",
+ "tokio",
  "tracing",
  "uuid",
 ]

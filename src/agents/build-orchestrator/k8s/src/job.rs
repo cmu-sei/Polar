@@ -53,6 +53,7 @@
 //! - restartPolicy=Never on the pod — retries are the orchestrator's decision,
 //!   not Kubernetes's. A failed job is a terminal event from k8s's perspective.
 
+use orchestrator_core::WORKSPACE_PATH;
 use std::collections::BTreeMap;
 
 use k8s_openapi::{
@@ -65,7 +66,10 @@ use k8s_openapi::{
     },
     apimachinery::pkg::{api::resource::Quantity, apis::meta::v1::ObjectMeta},
 };
-use orchestrator_core::types::{BootstrapSpec, BuildSpec, GitCredentials, RegistryCredentials};
+use orchestrator_core::{
+    TLS_CERT_DIR, tls_ca_cert_path, tls_client_cert_path, tls_client_key_path,
+    types::{BuildSpec, GitCredentials, RegistryCredentials},
+};
 use uuid::Uuid;
 
 /// The image used as the init container for source cloning.
@@ -81,11 +85,6 @@ use uuid::Uuid;
 /// TODO: move this to OrchestratorConfig once the config schema is extended.
 const CLONE_INIT_IMAGE: &str = "cyclops/git-clone:latest";
 
-/// The path inside every job pod where source code is available.
-/// Both the init container (writer) and the main container (reader) mount
-/// the workspace emptyDir volume here. This is a framework convention.
-const WORKSPACE_PATH: &str = "/workspace";
-
 /// Name of the emptyDir volume shared between init and main containers.
 const WORKSPACE_VOLUME: &str = "workspace";
 
@@ -94,13 +93,8 @@ const WORKSPACE_VOLUME: &str = "workspace";
 /// as env vars into the init container only — never into the main container.
 const GIT_CREDS_VOLUME: &str = "git-credentials";
 
-const TLS_CLIENT_KEY: &str = "tls.key";
-const TLS_CLIENT_CERT: &str = "tls.crt";
-const TLS_CA_CERT: &str = "ca.crt";
-const TLS_CERT_DIR: &str = "/etc/tls";
-
-const CLIENT_TLS_SECRET_NAME: &str = "client-tls";
-const CLIENT_TLS_VOLUME_NAME: &str = CLIENT_TLS_SECRET_NAME;
+pub const CLIENT_TLS_SECRET_NAME: &str = "client-tls";
+pub const CLIENT_TLS_VOLUME_NAME: &str = CLIENT_TLS_SECRET_NAME;
 
 /// Derives a deterministic, DNS-safe Job name from a build ID.
 /// Kubernetes names must be <= 63 chars, lowercase alphanumeric and hyphens.
@@ -177,66 +171,6 @@ pub fn build_job_manifest(spec: &BuildSpec, namespace: &str) -> Job {
         // No service account token — neither container has k8s API access.
         automount_service_account_token: Some(false),
         // image_pull_secrets: Some(image_pull_secrets), // TODO: insert pull secrets dyanmically based on config
-        ..Default::default()
-    };
-
-    assemble_job(job_name, namespace, labels, annotations, pod_spec)
-}
-
-// ── Bootstrap job ─────────────────────────────────────────────────────────────
-
-/// Constructs a batch/v1 Job manifest for a bootstrap build.
-///
-/// A bootstrap job is structurally identical to a pipeline job, with two
-/// differences:
-///
-/// 1. The main container image is the well-known Nix builder rather than a
-///    repo-specific pipeline image. It knows how to evaluate container.dhall
-///    and run `nix build` to produce and push the pipeline image.
-///
-/// 2. The main container receives registry push credentials in addition to
-///    the standard env vars, because it must push the produced image to the
-///    registry. Pipeline jobs never push — they only pull.
-///
-/// The init container is identical to the pipeline job — source must be
-/// cloned so the Nix evaluator can find container.dhall.
-pub fn bootstrap_job_manifest(spec: &BootstrapSpec, namespace: &str) -> Job {
-    let job_name = job_name_for_bootstrap(spec.build_id);
-    let (labels, annotations) =
-        standard_metadata(spec.build_id, &spec.repo_url, &spec.commit_sha, "bootstrap");
-
-    let init_container =
-        clone_init_container(&spec.repo_url, &spec.commit_sha, &spec.git_credentials);
-
-    let bootstrap_env = bootstrap_env_vars(spec);
-
-    // The bootstrap container runs nix build against the cloned source.
-    // It does not have a baked-in entrypoint convention like pipeline images —
-    // the bootstrap image's CMD drives the evaluation and push.
-    let bootstrap_container = Container {
-        name: "bootstrap".to_string(),
-        image: Some(spec.bootstrap_image.clone()),
-        env: Some(bootstrap_env),
-        security_context: Some(hardened_security_context()),
-        // Bootstrap builds are more resource-intensive than typical pipeline
-        // runs because nix evaluation and build closure download happen here.
-        resources: Some(bootstrap_resources()),
-        volume_mounts: Some(vec![workspace_volume_mount()]),
-        ..Default::default()
-    };
-
-    let image_pull_secrets = registry_pull_secrets(&spec.registry_credentials);
-
-    let pod_spec = PodSpec {
-        init_containers: Some(vec![init_container]),
-        containers: vec![bootstrap_container],
-        volumes: Some(vec![
-            workspace_volume(),
-            git_credentials_volume(&spec.git_credentials),
-        ]),
-        restart_policy: Some("Never".to_string()),
-        automount_service_account_token: Some(false),
-        image_pull_secrets: Some(image_pull_secrets),
         ..Default::default()
     };
 
@@ -320,38 +254,33 @@ fn clone_init_container(
 fn pipeline_env_vars(spec: &BuildSpec) -> Vec<EnvVar> {
     vec![
         EnvVar {
-            name: "CYCLOPS_BUILD_ID".to_string(),
+            name: "POLAR_BUILD_ID".to_string(),
             value: Some(spec.build_id.to_string()),
             ..Default::default()
         },
         EnvVar {
-            name: "CYCLOPS_REPO_URL".to_string(),
-            value: Some(spec.repo_url.clone()),
-            ..Default::default()
-        },
-        EnvVar {
-            name: "CYCLOPS_COMMIT_SHA".to_string(),
+            name: "CI_COMMIT_SHORT_SHA".to_string(),
             value: Some(spec.commit_sha.clone()),
             ..Default::default()
         },
         EnvVar {
-            name: "CYCLOPS_WORKSPACE".to_string(),
+            name: "BUILD_WORKSPACE".to_string(),
             value: Some(WORKSPACE_PATH.to_string()),
             ..Default::default()
         },
         EnvVar {
             name: "TLS_CA_CERT".to_string(),
-            value: Some(format!("{TLS_CERT_DIR}/{TLS_CA_CERT}")),
+            value: Some(tls_ca_cert_path()),
             ..Default::default()
         },
         EnvVar {
             name: "TLS_CLIENT_CERT".to_string(),
-            value: Some(format!("{TLS_CERT_DIR}/{TLS_CLIENT_CERT}")),
+            value: Some(tls_client_cert_path()),
             ..Default::default()
         },
         EnvVar {
             name: "TLS_CLIENT_KEY".to_string(),
-            value: Some(format!("{TLS_CERT_DIR}/{TLS_CLIENT_KEY}")),
+            value: Some(tls_client_key_path()),
             ..Default::default()
         },
         // Additional caller-supplied env vars. Injected last so they can
@@ -365,48 +294,6 @@ fn pipeline_env_vars(spec: &BuildSpec) -> Vec<EnvVar> {
         ..Default::default()
     }))
     .collect()
-}
-
-/// Env vars for bootstrap jobs. Superset of pipeline vars.
-///
-/// The bootstrap container additionally needs to know the container config
-/// path so it can find container.dhall within /workspace, and it needs
-/// registry push credentials so it can push the produced image.
-fn bootstrap_env_vars(spec: &BootstrapSpec) -> Vec<EnvVar> {
-    let mut env = vec![
-        EnvVar {
-            name: "POLAR_BUILD_ID".to_string(),
-            value: Some(spec.build_id.to_string()),
-            ..Default::default()
-        },
-        EnvVar {
-            name: "POLAR_REPO_URL".to_string(),
-            value: Some(spec.repo_url.clone()),
-            ..Default::default()
-        },
-        EnvVar {
-            name: "BUILD_COMMIT_SHA".to_string(),
-            value: Some(spec.commit_sha.clone()),
-            ..Default::default()
-        },
-        EnvVar {
-            name: "BUILD_WORKSPACE".to_string(),
-            value: Some(WORKSPACE_PATH.to_string()),
-            ..Default::default()
-        },
-        // The path within /workspace where container.dhall is located.
-        // The bootstrap image evaluates this file to produce the pipeline image.
-        EnvVar {
-            name: "CYCLOPS_CONTAINER_CONFIG_REF".to_string(),
-            value: Some(spec.container_config_ref.clone()),
-            ..Default::default()
-        },
-    ];
-
-    // Registry push credentials for the bootstrap container.
-    // Pipeline containers never push, so these are bootstrap-only.
-    env.extend(registry_push_env_vars(&spec.registry_credentials));
-    env
 }
 
 /// Constructs env vars that source git credentials from a k8s Secret.
