@@ -7,6 +7,7 @@ use build_orchestrator::{
 };
 use cassini_types::ClientEvent;
 use orchestrator_backend_k8s::backend::KubernetesBackend;
+use orchestrator_backend_podman::backend::{PodmanBackend, PodmanConfig};
 use polar::{GitRepositoryUpdatedEvent, RkyvError, SupervisorMessage};
 use ractor::Actor;
 use rkyv::to_bytes;
@@ -26,7 +27,6 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!(
         backend = %config.backend.driver,
-        broker = %config.cassini.broker_url,
         "build orchestrator starting"
     );
 
@@ -47,14 +47,27 @@ async fn main() -> anyhow::Result<()> {
                 tracing::info!(namespace = %k8s_config.namespace, "Kubernetes backend initialized");
                 Arc::new(backend)
             }
+            "podman" => {
+                let p_config = config
+                    .backend
+                    .podman
+                    .as_ref()
+                    .context("Podman backend missing!")?;
+
+                let backend = PodmanBackend::connect(p_config.to_owned())
+                    .expect("Expected to connect to podman socket");
+
+                assert!(backend.ping().await.is_ok());
+
+                tracing::info!("Podman backend initialized");
+                Arc::new(backend)
+            }
             other => anyhow::bail!("unsupported backend driver: {other}"),
         };
 
-    let config = Arc::new(config);
-
     let args = SupervisorArguments {
         backend,
-        config: Arc::clone(&config),
+        config: Arc::new(config),
     };
 
     let (supervisor, handle) = Actor::spawn(

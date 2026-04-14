@@ -101,7 +101,7 @@ def main [
     --skip-upload                  # Build and scan only, don't push
     --skip-sbom                    # Build and upload, skip syft scanning
 ] {
-    # let cassini_job_id = start-cassini-daemon
+    let cassini_job_id = start-cassini-daemon
 
     mkdir -v $artifact_dir
 
@@ -164,8 +164,8 @@ def main [
         # We try to match on the root_purl's package name portion.
         let source_sbom_hash = if ($entry.root_purl | is-not-empty) {
             # Extract the crate name from the purl: pkg:cargo/my-crate@0.1.0 → my-crate
-            let crate_name = ($entry.root_purl | parse "pkg:cargo/{name}@{ver}" | get -i 0 | default { name: "" } | get name)
-            let lookup_entry = ($sbom_lookup | get -i $crate_name | default null)
+            let crate_name = ($entry.root_purl | parse "pkg:cargo/{name}@{ver}" | get -o 0 | default { name: "" } | get name)
+            let lookup_entry = ($sbom_lookup | get -o $crate_name | default null)
             if $lookup_entry != null { $lookup_entry.content_hash? | default "" } else { "" }
         } else {
             ""
@@ -214,5 +214,5 @@ def main [
         log-warn $"Failed images: ($failures)" --component $COMPONENT
     }
 
-    # stop-cassini-daemon $cassini_job_id
+    stop-cassini-daemon $cassini_job_id
 }

@@ -1,3 +1,4 @@
+use orchestrator_backend_podman::backend::{PodmanBackend, PodmanConfig};
 use serde::Deserialize;
 
 use crate::client::StorageConfig;
@@ -5,11 +6,7 @@ use crate::client::StorageConfig;
 #[derive(Debug, Deserialize, Clone)]
 pub struct OrchestratorConfig {
     pub backend: BackendConfig,
-    pub cassini: CassiniConfig,
-    pub bootstrap: BootstrapConfig,
-    pub credentials: CredentialsConfig,
     pub repo_mappings: Vec<RepoMapping>,
-    pub log: LogConfig,
     pub storage: StorageConfig,
 }
 
@@ -19,7 +16,10 @@ pub struct OrchestratorConfig {
 pub struct BackendConfig {
     /// Which backend to use. Currently only "kubernetes" is supported.
     pub driver: String,
+    /// The command entrypoint to use to trigger the job
+    pub command: Vec<String>,
     pub kubernetes: Option<KubernetesBackendConfig>,
+    pub podman: Option<PodmanConfig>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -45,31 +45,6 @@ pub struct ResourceConfig {
     pub memory_request: Option<String>,
 }
 
-// ── Bootstrap ─────────────────────────────────────────────────────────────────
-
-#[derive(Debug, Deserialize, Clone)]
-pub struct BootstrapConfig {
-    /// The well-known Nix builder image used to evaluate container.dhall and
-    /// produce repo-specific pipeline images. Must be pinned by digest.
-    /// Built manually and almost never changes.
-    /// e.g. "registry.internal.example.com/cyclops/nix-bootstrap@sha256:..."
-    pub builder_image: String,
-
-    /// Path within every repo to the Dhall config that defines the pipeline
-    /// container. Convention-based — the same for all repos.
-    #[serde(default = "default_container_config_ref")]
-    pub container_config_ref: String,
-
-    /// Registry base URL where bootstrap jobs push produced pipeline images,
-    /// and where pipeline jobs pull them from.
-    /// e.g. "registry.internal.example.com/builds"
-    pub target_registry: String,
-}
-
-fn default_container_config_ref() -> String {
-    "container.dhall".to_string()
-}
-
 // ── Repo mappings ─────────────────────────────────────────────────────────────
 
 /// Maps a repository URL to its resolved pipeline image.
@@ -89,54 +64,6 @@ pub struct RepoMapping {
     pub pipeline_image: Option<String>,
 }
 
-// ── Credentials ──────────────────────────────────────────────────────────────
-
-/// Names of Kubernetes Secrets that must exist in the build namespace.
-///
-/// These are global for now — every build uses the same secrets. Per-repo
-/// credential selection will be added when the scheduler owns repo mappings
-/// and can carry per-repo credential refs in the build request.
-///
-/// Both secrets must be created in the build namespace before any job runs.
-/// The orchestrator does not provision them.
-#[derive(Debug, Deserialize, Clone)]
-pub struct CredentialsConfig {
-    /// Name of a Secret containing `username` and `password` keys for git
-    /// HTTP auth. Works for GitLab deploy tokens, GitHub PATs, etc.
-    pub git_secret_name: String,
-
-    /// Name of a Secret of type kubernetes.io/dockerconfigjson used for
-    /// pulling pipeline images and pushing bootstrap output.
-    pub registry_secret_name: String,
-}
-
-// ── Cassini ───────────────────────────────────────────────────────────────────
-
-#[derive(Debug, Deserialize, Clone)]
-pub struct CassiniConfig {
-    pub broker_url: String,
-    pub inbound_subject: String,
-}
-
-// ── Logging ───────────────────────────────────────────────────────────────────
-
-#[derive(Debug, Deserialize, Clone)]
-pub struct LogConfig {
-    #[serde(default = "default_log_format")]
-    pub format: String,
-
-    #[serde(default = "default_log_level")]
-    pub level: String,
-}
-
-fn default_log_format() -> String {
-    "json".to_string()
-}
-
-fn default_log_level() -> String {
-    "info".to_string()
-}
-
 // ── Loader ────────────────────────────────────────────────────────────────────
 
 impl OrchestratorConfig {
@@ -146,8 +73,8 @@ impl OrchestratorConfig {
     ///   1. YAML file at the path given by CYCLOPS_CONFIG (default: cyclops.yaml)
     ///   2. Environment variable overrides with CYCLOPS__ prefix and __ separator
     pub fn load() -> Result<Self, config::ConfigError> {
-        let config_path =
-            std::env::var("ORCHESTRATOR_CONFIG_FILE").unwrap_or_else(|_| "cyclops.yaml".to_string());
+        let config_path = std::env::var("ORCHESTRATOR_CONFIG_FILE")
+            .unwrap_or_else(|_| "cyclops.yaml".to_string());
 
         config::Config::builder()
             .add_source(config::File::new(&config_path, config::FileFormat::Yaml).required(true))

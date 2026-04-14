@@ -6,6 +6,8 @@ license.workspace = true
 authors.workspace = true
 
 [dependencies]
+bollard.workspace = true
+
 tokio.workspace = true
 chrono.workspace = true
 serde.workspace = true
@@ -25,6 +27,7 @@ rkyv.workspace = true
 config.workspace = true
 orchestrator-core.workspace = true
 orchestrator-backend-k8s.workspace = true
+orchestrator-backend-podman.workspace = true
 polar.workspace = true
 cassini-client.workspace = true
 cassini-types.workspace = true

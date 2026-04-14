@@ -55,6 +55,7 @@ impl OrchestratorSupervisor {
     /// root agent adds SSH credential issuance, this preference should be
     /// made configurable per repo mapping.
     pub fn build_request_from_event(
+        state: &mut SupervisorState,
         event: &GitRepositoryUpdatedEvent,
     ) -> Result<BuildRequest, EventConversionError> {
         // Validate event_id first — a missing ID means we can't deduplicate.
@@ -110,6 +111,7 @@ impl OrchestratorSupervisor {
             requested_at: DateTime::from_timestamp(event.observed_at, 0).unwrap_or_else(Utc::now),
             metadata,
             target_registry: "some.registry".into(), // todo: remove, vestigitial
+            command: state.config.backend.command.clone(),
         })
     }
 
@@ -134,7 +136,7 @@ impl OrchestratorSupervisor {
         //     return Ok(());
         // }
 
-        match Self::build_request_from_event(&event) {
+        match Self::build_request_from_event(state, &event) {
             Ok(request) => {
                 if let Err(e) = Self::handle_build_requested(&self, myself, state, request).await {
                     tracing::error!(error = %e, "failed to handle build request");

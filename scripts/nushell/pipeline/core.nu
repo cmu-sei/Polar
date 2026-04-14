@@ -132,7 +132,7 @@ def elapsed-ms [start: datetime]: nothing -> int {
 # Logging
 # ---------------------------------------------------------------------------
 
-export def log [level: string, msg: string, --component: string = ""] {
+def log [level: string, msg: string, --component: string = ""] {
     let ts = (date now | format date "%Y-%m-%dT%H:%M:%S%.3fZ")
     print $"($ts) [($level)] ($component) — ($msg)"
 }
@@ -841,7 +841,7 @@ export def extract-oci-metadata [
         {
             order: $entry.index
             diff_id: $entry.item
-            tar_path: ($layer_paths | get -i $entry.index | default "")
+            tar_path: ($layer_paths | get -o $entry.index | default "")
         }
     })
 

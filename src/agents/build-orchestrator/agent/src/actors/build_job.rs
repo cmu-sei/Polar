@@ -49,7 +49,7 @@ use orchestrator_core::{
     backend::{BackendJobHandle, BuildBackend, JobStatus},
     events::{BuildEvent, FailureStage},
     types::{
-        BootstrapSpec, BuildRequest, BuildSpec, BuildState, GitCredentials, RegistryCredentials,
+        BuildRequest, BuildSpec, BuildState, GitCredentials, RegistryCredentials,
         subjects::BUILD_EVENTS_TOPIC,
     },
 };
@@ -85,8 +85,6 @@ pub enum BuildJobMessage {
 /// means "we're done".
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum BuildPhase {
-    /// Waiting on a bootstrap job to produce the pipeline image.
-    Bootstrap,
     /// Waiting on the pipeline job to complete.
     Pipeline,
 }
@@ -230,80 +228,17 @@ impl BuildJobActor {
             None => {
                 // No image recorded for this repo. Run a bootstrap job to
                 // build it, then come back and submit the pipeline job.
-                tracing::info!(
+                tracing::error!(
                     build_id = %build_id,
                     repo = %state.request.repo_url,
                     "no pipeline image found for repo — triggering bootstrap"
                 );
-                self.submit_bootstrap(myself, state).await?;
+                todo!("If there's no container image, we should just fail")
             }
         }
 
         Ok(())
     }
-
-    /// Submits the bootstrap job that will build the missing pipeline image.
-    async fn submit_bootstrap(
-        &self,
-        orchestrator_backend_k8smyself: ActorRef<BuildJobMessage>,
-        state: &mut BuildJobState,
-    ) -> Result<(), ActorProcessingErr> {
-        // TODO: I'm not entirely sure implementing this is the right call at all.
-        // Yes, the build environment is needed, but it can be left to operators to decide how it gets there for now.
-        todo!("Implement bootstrap job submission.");
-        // let build_id = state.request.build_id;
-
-        // // Credentials are taken from config. These are the same secrets for
-        // // every build — credential selection per-repo comes later when the
-        // // scheduler owns repo mappings and can carry per-repo credential refs.
-        // let git_credentials = git_credentials_from_config(&state.config);
-        // let registry_credentials = registry_credentials_from_config(&state.config);
-
-        // let spec = BootstrapSpec {
-        //     build_id,
-        //     repo_url: state.request.repo_url.clone(),
-        //     commit_sha: state.request.commit_sha.clone(),
-        //     bootstrap_image: state.config.bootstrap.builder_image.clone(),
-        //     container_config_ref: state.config.bootstrap.container_config_ref.clone(),
-        //     target_registry: state.config.bootstrap.target_registry.clone(),
-        //     git_credentials,
-        //     registry_credentials,
-        // };
-
-        // match state.backend.submit_bootstrap(&spec).await {
-        //     Ok(handle) => {
-        //         tracing::info!(
-        //             build_id = %build_id,
-        //             handle = %handle,
-        //             "bootstrap Job submitted"
-        //         );
-
-        //         state.backend_handle = Some(handle.clone());
-        //         state.phase = Some(BuildPhase::Bootstrap);
-
-        //         self.transition(
-        //             state,
-        //             BuildState::Bootstrapping,
-        //             Some(handle.to_string()),
-        //             None,
-        //             None,
-        //         )?;
-
-        //         myself.send_after(std::time::Duration::from_millis(POLL_INTERVAL_MS), || {
-        //             BuildJobMessage::PollStatus
-        //         });
-        //     }
-
-        //     Err(e) => {
-        //         tracing::error!(build_id = %build_id, error = %e, "bootstrap Job submission failed");
-        //         self.fail(state, e.to_string(), FailureStage::Scheduling)
-        //             .await?;
-        //         myself.stop(Some("bootstrap submission failed".to_string()));
-        //     }
-        // }
-        // Ok(())
-    }
-
     /// Submits the pipeline job using a known image digest.
     /// Called either directly from handle_start (image was in config) or
     /// from handle_poll after a bootstrap job succeeds.
@@ -326,6 +261,7 @@ impl BuildJobActor {
             pipeline_image.clone(),
             git_credentials,
             registry_credentials,
+            state.request.command.clone(),
         );
 
         match state.backend.submit(&spec).await {
@@ -389,6 +325,8 @@ impl BuildJobActor {
     /// - Bootstrap + Succeeded → extract produced image digest, submit pipeline job.
     /// - Pipeline  + Succeeded → emit completed event, stop actor.
     /// - Any phase + Failed    → emit failed event, stop actor.
+    /// TODO: Failure to poll status from the backend should leave the build in an unreconciled state.
+    /// Failure to reconcile will just result in marking the job as failed.
     async fn handle_poll(
         &self,
         myself: ActorRef<BuildJobMessage>,
@@ -449,33 +387,6 @@ impl BuildJobActor {
                     }
 
                     JobStatus::Succeeded => match phase {
-                        BuildPhase::Bootstrap => {
-                            // Bootstrap complete. The bootstrap job is responsible for
-                            // writing the produced image digest somewhere the orchestrator
-                            // can read it back. For now we construct the expected image
-                            // ref deterministically — the bootstrap image pushes to a
-                            // known location based on repo URL and commit SHA.
-                            //
-                            // TODO: in a future pass the bootstrap job should write its
-                            // output digest to a well-known ConfigMap or Job annotation
-                            // that the orchestrator reads here. For now we derive the
-                            // expected ref, which requires the bootstrap image and the
-                            // orchestrator to agree on the naming convention.
-                            let produced_image = derive_bootstrap_output_image(
-                                &state.request.repo_url,
-                                &state.request.commit_sha,
-                                &state.config.bootstrap.target_registry,
-                            );
-
-                            tracing::info!(
-                                build_id = %build_id,
-                                image = %produced_image,
-                                "bootstrap Job succeeded — submitting pipeline Job"
-                            );
-
-                            self.submit_pipeline(myself, state, produced_image).await?;
-                        }
-
                         BuildPhase::Pipeline => {
                             let duration = state.started_at.elapsed().as_secs();
                             tracing::info!(
@@ -540,7 +451,8 @@ impl BuildJobActor {
 
             Err(e) => {
                 // Poll transport error — transient. Log and retry.
-                // A retry budget will be added in a future pass.
+                // TODO: A retry budget will be added in a future pass.
+                // TODO: When said retry budget fails, we should move to call this build unreconciled
                 tracing::warn!(
                     build_id = %build_id,
                     error = %e,
@@ -663,22 +575,24 @@ impl BuildJobActor {
 }
 
 // ── Credential resolution ─────────────────────────────────────────────────────
-
+// TODO: It has become untenable to resolve secrets on a per agent basis,
+// we will move this responsibility to a "secretAgent" that'll be responsible for managing and distributing secrets
 /// Resolves git credentials from config.
 ///
 /// Currently returns the single configured credential set for all repos.
 /// Per-repo credential selection will be added when the scheduler owns repo
 /// mappings and can carry per-repo credential references in the build request.
-fn git_credentials_from_config(config: &OrchestratorConfig) -> GitCredentials {
+
+fn git_credentials_from_config(_config: &OrchestratorConfig) -> GitCredentials {
     GitCredentials::HttpToken {
-        secret_name: config.credentials.git_secret_name.clone(),
+        secret_name: "some_secret".into(),
     }
 }
 
 /// Resolves registry credentials from config.
-fn registry_credentials_from_config(config: &OrchestratorConfig) -> RegistryCredentials {
+fn registry_credentials_from_config(_config: &OrchestratorConfig) -> RegistryCredentials {
     RegistryCredentials::DockerConfigJson {
-        secret_name: config.credentials.registry_secret_name.clone(),
+        secret_name: "some_secret".into(),
     }
 }
 
@@ -700,7 +614,7 @@ fn registry_credentials_from_config(config: &OrchestratorConfig) -> RegistryCred
 /// authoritative rather than derived.
 ///
 /// TODO: replace with annotation/ConfigMap read after bootstrap polling.
-fn derive_bootstrap_output_image(
+pub(crate) fn derive_bootstrap_output_image(
     repo_url: &str,
     commit_sha: &str,
     target_registry: &str,

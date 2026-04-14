@@ -1,6 +1,14 @@
 # Cyclops Build Orchestrator
 
-Authoritative Build Runner for the Polar DevSecOps observability platform.
+Cyclops is the authoritative build runner for the Polar DevSecOps observability platform. Its job is narrow and deliberate: receive a commit reference, execute the associated pipeline in a controlled environment, and produce a signed, traceable record of what was built, from what source, and what was produced. Every build record Cyclops emits is a provenance node in Polar's knowledge graph — the authoritative answer to "what is actually running and where did it come from."
+
+Cyclops is not a general-purpose CI system. It does not manage pipelines declaratively, schedule deployments, or orchestrate services. It runs one thing: the per-repo pipeline runner image, against a specific commit SHA, and records the outcome with enough fidelity that Polar can answer provenance questions without guessing.
+
+## Why Cyclops Exists
+
+Most commercial CI tooling is optimized for workflow orchestration and developer ergonomics. This makes them poor sources of truth for provenance data. They record what was *requested* rather than what *happened*, and they scatter that information across logs, webhook payloads, and platform-specific APIs that are expensive to query and often inconsistent at scale.
+
+Polar needs to answer questions like "what is deployed right now," "what commit produced that artifact," and "was this build environment trustworthy when this artifact was produced." None of those questions are reliably answerable from standard CI tooling at the fidelity required. Cyclops exists to close that gap by owning the instrumentation at the point where the authoritative events occur.
 
 ## Workspace Layout
 
@@ -8,46 +16,55 @@ Authoritative Build Runner for the Polar DevSecOps observability platform.
 build-orchestrator/
   ├── core/                 # domain types, traits, errors, events
   │   └── src/
-  │       ├── backend.rs            # BuildBackend trait + handle/status types
-  │       ├── error.rs              # CyclopsError, BackendError
-  │       ├── events.rs             # CyclopsEvent, Cassini subjects
-  │       └── types.rs              # BuildRequest, BuildRecord, BuildState, BuildSpec
+  │       ├── backend.rs    # BuildBackend trait + handle/status types
+  │       ├── error.rs      # CyclopsError, BackendError
+  │       ├── events.rs     # CyclopsEvent, Cassini subjects
+  │       └── types.rs      # BuildRequest, BuildRecord, BuildState, BuildSpec
   │
   ├── orchestrator/         # actor tree, config, Cassini integration
   │   └── src/
   │       ├── actors/
-  │       │   ├── supervisor.rs     # OrchestratorSupervisor — root of the actor tree
+  │       │   ├── supervisor.rs     # OrchestratorSupervisor — root of actor tree
   │       │   ├── build_registry.rs # BuildRegistryActor — serialized in-memory state
   │       │   └── build_job.rs      # BuildJobActor — owns one build's full lifecycle
-  │       ├── cassini.rs            # CassiniPublisher trait + LoggingPublisher stub
-  │       ├── config.rs             # OrchestratorConfig — loaded from file + env
-  │       └── main.rs               # process entrypoint
+  │       ├── cassini.rs    # CassiniPublisher trait + LoggingPublisher stub
+  │       ├── config.rs     # OrchestratorConfig — loaded from file + env
+  │       └── main.rs       # process entrypoint
   │
-  └── k8s/          # Kubernetes BuildBackend implementation
+  ├── k8s/                  # Kubernetes BuildBackend implementation
+  │   └── src/
+  │       ├── backend.rs    # KubernetesBackend — kube-rs client wrapper
+  │       └── job.rs        # Job manifest builder + status interpreter
+  │
+  └── podman/               # Podman BuildBackend implementation
       └── src/
-          ├── backend.rs            # KubernetesBackend — kube-rs client wrapper
-          └── job.rs                # Job manifest builder + status interpreter
+          ├── backend.rs    # PodmanBackend — bollard client over Unix socket
+          ├── container.rs  # container lifecycle: create, start, inspect, stop, logs
+          ├── image.rs      # image pull and presence check with pull policy
+          └── error.rs      # PodmanError — maps exhaustively to BackendError
 ```
 
-## Architecture 
+## Architecture
 
-- `main.rs` bootstraps config, backend, storage, and spawns two top-level actors: `OrchestratorSupervisor` and `TCPClient`
-- `TCPClient` subscribes to the git processing topic, converts `RefUpdated` events into `BuildRequest`s, and forwards them to the supervisor
-- `OrchestratorSupervisor` owns two children: `BuildRegistryActor` (singleton, serializes all state) and one `BuildJobActor` per build (spawned on demand)
-- `BuildJobActor` drives the state machine, calls the `BuildBackend` trait, and on terminal state calls `StorageClient`
-- `KubernetesBackend` submits Jobs to the k8s API — each Job has a clone init container and a pipeline containerThe user asked for raw Mermaid JS — that means a code block, not a rendered diagram. No widget needed here.
+The orchestrator is a single long-running process built on an actor supervision tree. The entry point bootstraps configuration, selects and connects a backend, establishes storage and broker connections, then hands off entirely to the actor tree.
+
+- `main.rs` bootstraps config, constructs the configured backend behind `Arc<dyn BuildBackend>`, and spawns two top-level actors: `OrchestratorSupervisor` and `TCPClient`.
+- `TCPClient` subscribes to the git processing topic on Cassini, converts `RefUpdated` events into `BuildRequest`s, and forwards them to the supervisor. It is a sibling of the supervisor tree — not a child — so a broker disconnect does not cascade into in-flight build failures.
+- `OrchestratorSupervisor` owns two children: `BuildRegistryActor` (singleton, serializes all state mutations) and one `BuildJobActor` per active build (spawned on demand, stops itself on terminal state).
+- `BuildJobActor` drives the build state machine, calls the `BuildBackend` trait for all execution operations, and on reaching a confirmed terminal state writes the `BuildRecord` to `StorageClient`.
+- The backend is an `Arc<dyn BuildBackend>` — the actor tree has no knowledge of whether it is talking to Kubernetes or Podman.
 
 ```mermaid
 graph TD
     subgraph external["external"]
         GIT[git observer<br/>RefUpdated events]
-        K8S[kubernetes API]
+        BACKEND_EXT[build backend<br/>k8s API or podman socket]
         MINIO[MinIO<br/>object storage]
     end
 
     subgraph process["cyclops-orchestrator process"]
-        CONSUMER[TCPCLient<br/>subscribes GIT_REPO_PROCESSING_TOPIC]
-        
+        CONSUMER[TCPClient<br/>subscribes GIT_REPO_PROCESSING_TOPIC]
+
         subgraph supervisor_tree["OrchestratorSupervisor supervision tree"]
             SUPERVISOR[OrchestratorSupervisor]
             REGISTRY[BuildRegistryActor<br/>HashMap&lt;Uuid, BuildRecord&gt;]
@@ -55,134 +72,173 @@ graph TD
             JOB2[BuildJobActor&lt;build-B&gt;]
         end
 
-        BACKEND[KubernetesBackend<br/>Arc&lt;dyn BuildBackend&gt;]
+        BACKEND[Arc&lt;dyn BuildBackend&gt;]
         STORAGE[StorageClient<br/>Arc]
     end
 
-    subgraph k8s_job["k8s Job pod"]
-        INIT[init container<br/>git-clone]
-        PIPELINE[pipeline container<br/>/bin/pipeline-runner]
-        VOL[(workspace<br/>emptyDir)]
-    end
-
     GIT -->|RefUpdated| CONSUMER
-    CONSUMER -->|ClientEvent GitRepoUpdatedEvent| SUPERVISOR
+    CONSUMER -->|BuildRequest| SUPERVISOR
     SUPERVISOR -->|spawn_linked| REGISTRY
     SUPERVISOR -->|spawn_linked BuildSpec| JOB1
     SUPERVISOR -->|spawn_linked BuildSpec| JOB2
     JOB1 -->|Transition messages| REGISTRY
-    JOB1 -->|submit / poll / cancel| BACKEND
-    BACKEND -->|create Job| K8S
-    K8S -->|runs| INIT
-    INIT -->|clone into| VOL
-    VOL -->|read-only mount| PIPELINE
-    JOB1 -->|upload_log<br/>upload_manifest| STORAGE
+    JOB1 -->|submit / poll / cancel / logs| BACKEND
+    BACKEND -->|concrete calls| BACKEND_EXT
+    JOB1 -->|upload_log / upload_manifest| STORAGE
     STORAGE -->|PUT object| MINIO
 ```
 
-The two things worth noting about the shape: `TCPClient` is intentionally a sibling of the supervisor tree, not a child — a broker disconnect doesn't cascade into in-flight build failures. And `BuildJobActor` instances are spawned on demand and stop themselves on terminal state, so the tree is dynamic — only the registry is a permanent fixture under the supervisor.
+## Build Backends
 
-## Running Locally (dev mode)
+The `BuildBackend` trait abstracts over execution environments. The orchestrator selects a backend at startup from configuration and never re-examines the choice at runtime. The actor tree holds `Arc<dyn BuildBackend>` and calls the same four methods — `submit`, `poll`, `cancel`, `logs` — regardless of which backend is active.
 
-**NOTE** This assumes you've done the workspace wide setup of configuring environment variables, and standing up the necessary infrastructure, including Cassini, Neo4j, and a Kubernetes cluster.
+### Kubernetes
 
-Startup the build processor, it will attempt to connect to Cassini and ready itself to connect to a neo4j database, much like other graph clients and processors.
+Submits builds as Kubernetes `Job` resources. Each Job has a git-clone init container that checks out the source into a shared `emptyDir` volume, followed by the pipeline container that runs `/bin/pipeline-runner` against the workspace.
 
-```sh
-cargo run -p build-processor
+Requires a reachable Kubernetes API server. This makes it unsuitable for environments where the API server is centrally hosted and may be unreachable during a network partition.
+
+Configured via `[backend] kind = "kubernetes"` in `cyclops.yaml`.
+
+### Podman
+
+Submits builds as rootless Podman containers via the Docker-compatible Unix socket API (`bollard`). No network path to any remote API server is required for job execution — the only dependency is the local Podman daemon. This makes it the correct choice for air-gapped or partition-tolerant enclave deployments.
+
+The pipeline container receives `CYCLOPS_BUILD_ID`, `CYCLOPS_REPO_URL`, and `CYCLOPS_COMMIT_SHA` as environment variables and is responsible for its own git clone. The Kubernetes init-container clone pattern does not apply here.
+
+Configured via `[backend] kind = "podman"` in `cyclops.yaml`. The Podman socket service must be running: `systemctl --user enable --now podman.socket`.
+
+## Build State Machine
+
+A build progresses through two phases: image resolution and execution. Image resolution determines whether the pipeline image for this repo already exists in the registry, and if not, runs a bootstrap job to build it. Execution runs the actual pipeline against the resolved image and commit.
 
 ```
+Pending
+  └─► ResolvingImage
+        ├─► Bootstrapping       (pipeline image absent — bootstrap job running)
+        │     └─► Scheduled
+        └─► Scheduled           (pipeline image present — proceed directly)
+              └─► Running
+                    ├─► Succeeded
+                    └─► Failed
 
-Set `CYCLOPS_DEV_MODE=1` to inject a synthetic BuildRequest and emit build events to Cassini.
-
-```bash
-CYCLOPS_DEV_MODE=1 cargo run -p build-orchestrator
+Cancelled    reachable from any non-terminal state
+Unreconciled reachable from Scheduled, Bootstrapping, Running
+             backend connectivity was lost while job was in-flight;
+             requires reconciliation on reconnect before a new record is issued
 ```
 
-**NOTE**: Config is loaded from `cyclops.yaml` in the working directory by default. set `CYCLOPS_CONFIG= path/to/cyclops.yaml` to use a specific configuration
+`Unreconciled` is not a permanent terminal state. On backend reconnect, `BuildJobActor` attempts to recover the actual outcome from the backend and resolves to `Succeeded` or `Failed`. Any `BuildRecord` remaining `Unreconciled` beyond the configured TTL is surfaced as a Polar alert — an unresolved provenance gap requires human attention.
 
-You'll need a kubeconfig pointing at a cluster. It should be bootstrapped with the desired namespace. Jobs will be submitted to the default namespace if one is not specified in cyclops.yaml
-
-```bash
-# optionally , create a namespace
-# kubectl create namespace polar-builds
-CYCLOPS_DEV_MODE=1 cargo run -p build-orchestrator
-```
-
+`StorageClient` writes only on a confirmed terminal state (`Succeeded` or `Failed`). It never writes on `Unreconciled`.
 
 ## Actor Supervision Tree
 
 ```
 OrchestratorSupervisor
-├── BuildRegistryActor          (singleton, serializes all state mutations)
-└── BuildJobActor per build     (spawned on demand, stops on terminal state)
+├── BuildRegistryActor          (singleton — serializes all state mutations)
+└── BuildJobActor per build     (spawned on demand — stops itself on terminal state)
 ```
+
+`BuildRegistryActor` is the sole writer to the in-memory `HashMap<Uuid, BuildRecord>`. All state transitions go through it. `BuildJobActor` instances send transition messages to the registry rather than mutating shared state directly — this is what makes the state model safe under concurrent builds without locks.
 
 ## Cassini Topic Convention
 
 ```
-
-polar.git.repositories.events    | Git Commit Processor → Build Orchestrator
-
-polar.builds.orchestrator.events | Build Orchestrator -> Build Processor
-
+polar.git.repositories.events      Git Commit Processor  →  Build Orchestrator
+polar.builds.orchestrator.events   Build Orchestrator    →  Build Processor
 ```
 
+## Configuration
 
-## State Machine
+Config is loaded from `cyclops.yaml` in the working directory by default. Override with `CYCLOPS_CONFIG=/path/to/cyclops.yaml`.
 
+```yaml
+# Backend selection. Exactly one backend is active per process instance.
+backend:
+  kind: podman                        # "podman" or "kubernetes"
+
+  podman:
+    socket_path: /run/user/1000/podman/podman.sock
+    image_pull_policy: IfNotPresent   # Always | IfNotPresent | Never
+
+  kubernetes:
+    namespace: polar-builds           # must exist before startup
 ```
-Pending → Scheduled → Running → Succeeded
-                              ↘ Failed
-        ↘ Cancelled (from any non-terminal state)
+
+## Running Locally
+
+### With the Podman backend
+
+Podman requires no cluster. Ensure the Podman socket service is running for your user:
+
+```sh
+systemctl --user enable --now podman.socket
 ```
 
-### Sequence 
+Configure `cyclops.yaml` with `backend.kind = "podman"` and run:
+
+```sh
+cargo run -p build-orchestrator
+```
+
+Set `CYCLOPS_DEV_MODE=1` to inject a synthetic `BuildRequest` without a live Cassini broker:
+
+```sh
+CYCLOPS_DEV_MODE=1 cargo run -p build-orchestrator
+```
+
+### With the Kubernetes backend
+
+Requires a reachable cluster and a `kubeconfig` in the standard location (or `KUBECONFIG` set). The target namespace must exist:
+
+```sh
+kubectl create namespace polar-builds
+CYCLOPS_DEV_MODE=1 cargo run -p build-orchestrator
+```
+
+### Build processor
+
+The build processor consumes events emitted by the orchestrator and writes provenance edges to Neo4j. Run it alongside the orchestrator in dev:
+
+```sh
+cargo run -p build-processor
+```
+
+## Sequence (Podman backend)
+
 ```mermaid
 sequenceDiagram
     participant Git as git host
     participant Polar as polar scheduler
     participant Orch as orchestrator
-    participant K8s as k8s api
-    participant Init as init container
+    participant Podman as podman daemon
     participant Pipe as pipeline container
     participant Minio as minio
 
-    %% ── TRIGGER ──
     Note over Git,Polar: TRIGGER
     Git->>Polar: webhook
 
-    %% ── REQUEST ──
-    Note over Polar,Orch: RepostioryUpdated
+    Note over Polar,Orch: RepositoryUpdated
     Polar->>Orch: RepositoryUpdatedEvent
-    Note over Orch: Create Job
 
-    %% ── SUBMIT ──
-    Note over Orch,K8s: SUBMIT
-    Orch->>K8s: create Job
-    K8s-->>Orch: JobHandle
-    %% Orch->>Minio: upload manifest.json
+    Note over Orch: resolve image<br/>ResolvingImage → Scheduled
 
-    %% ── CLONE ──
-    Note over K8s,Init: CLONE
-    K8s->>Init: start init container
-    Init->>Git: git clone + checkout SHA
-    Init-->>K8s: exit 0
+    Note over Orch,Podman: SUBMIT
+    Orch->>Podman: create + start container
+    Podman-->>Orch: container ID
 
-    %% ── PIPELINE ──
-    Note over K8s,Pipe: PIPELINE
-    K8s->>Pipe: start pipeline container
-    Note over Pipe: /bin/pipeline-runner
-    Pipe-->>K8s: exit 0 / non-zero
+    Note over Podman,Pipe: PIPELINE
+    Podman->>Pipe: start pipeline container
+    Note over Pipe: git clone + /bin/pipeline-runner
+    Pipe-->>Podman: exit 0 / non-zero
 
-    %% ── COLLECT ──
-    Note over Orch,K8s: COLLECT
-    Orch->>K8s: poll status
-    K8s-->>Orch: Succeeded
+    Note over Orch,Podman: COLLECT
+    Orch->>Podman: poll inspect
+    Podman-->>Orch: exited (exit code)
 
-    %% ── UPLOAD ──
     Note over Orch,Minio: UPLOAD
-    Orch->>K8s: stream logs
-    K8s-->>Orch: log bytes
-    Orch->>Minio: upload pipeline.log
+    Orch->>Podman: stream logs
+    Podman-->>Orch: log bytes
+    Orch->>Minio: upload pipeline.log + manifest
 ```
