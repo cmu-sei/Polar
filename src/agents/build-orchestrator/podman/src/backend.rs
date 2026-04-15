@@ -1,11 +1,9 @@
 use std::collections::HashMap;
 
-use crate::container::{
-    ContainerSpec, create_container, inspect_container, log_stream, start_container,
-    stop_and_remove_container,
-};
+use crate::container::{inspect_container, log_stream};
 use crate::error::PodmanError;
 use crate::image::{ImagePullPolicy, ensure_image};
+use crate::pod::{CiPodHandle, CiPodSpec, create_ci_pod, remove_ci_pod};
 use async_trait::async_trait;
 use bollard::Docker;
 use bollard::query_parameters::ListContainersOptions;
@@ -181,7 +179,9 @@ impl BuildBackend for PodmanBackend {
     /// Credential injection via SPIFFE SVID is the intended long-term solution.
     #[instrument(skip(self, spec), fields(build_id = %spec.build_id, image = %spec.pipeline_image))]
     async fn submit(&self, spec: &BuildSpec) -> Result<SubmittedJob, BackendError> {
-        // Step 1: Ensure image is available.
+        // Step 1: Ensure the pipeline image is available locally.
+        // The cloner image (alpine/git) should also be ensured here if you
+        // cannot guarantee it is pre-positioned.
         ensure_image(
             &self.client,
             &spec.pipeline_image,
@@ -190,54 +190,107 @@ impl BuildBackend for PodmanBackend {
         .await
         .map_err(BackendError::from)?;
 
-        // Step 2: Create container (not yet running).
-        let container_spec = ContainerSpec {
+        // Step 2: Map BuildSpec to CiPodSpec.
+        //
+        // GitCredentials is left as None here — for the spike we assume public
+        // repos or ambient SSH agent credentials available to the cloner image.
+        // Wire `spec.git_credentials` through once you have a concrete type.
+        let pod_spec = CiPodSpec {
             build_id: &spec.build_id,
-            image: &spec.pipeline_image,
-            entrypoint: spec.entrypoint.clone(),
-            env: &spec.env,
+            pipeline_image: &spec.pipeline_image,
             repo_url: &spec.repo_url,
             commit_sha: &spec.commit_sha,
+            entrypoint: spec.entrypoint.clone(),
+            env: &spec.env,
+            git_credentials: None, // TODO: wire through from spec
         };
 
-        let (container_name, container_id) = create_container(&self.client, &container_spec)
-            .await
-            .map_err(BackendError::from)?;
-
-        // Step 3: Start it.
-        start_container(&self.client, &container_id)
+        // Step 3: Create pod, run init container, start pipeline container.
+        // This call blocks until the git clone completes (or fails).
+        let handle: CiPodHandle = create_ci_pod(&self.config.socket_path, &pod_spec)
             .await
             .map_err(BackendError::from)?;
 
         info!(
             build_id = %spec.build_id,
-            container_id = %container_id,
-            name = %container_name,
-            "pipeline container started"
+            pod_id = %handle.pod_id,
+            pipeline_container_id = %handle.pipeline_container_id,
+            "pipeline pod started"
         );
 
-        let handle = BackendJobHandle {
-            name: container_name.clone(),
-            uid: container_id.clone(),
+        // `BackendJobHandle.uid` is the pipeline container ID. poll() and
+        // logs() both target this via bollard inspect/logs, which are
+        // Docker-compat and work the same as before.
+        //
+        // We also stash the pod_name in `handle.name` so cancel() can
+        // reconstruct the pod name for pod-level teardown. The pod name is
+        // deterministically derived from build_id so this is redundant, but
+        // being explicit avoids a hidden coupling in cancel().
+        let backend_handle = BackendJobHandle {
+            name: handle.pod_name.clone(),
+            uid: handle.pipeline_container_id.clone(),
         };
 
-        // The graph identity for a Podman container. The container ID is the
-        // stable, unique identifier — the name is human-readable but could
-        // theoretically be reused if a container is removed and recreated.
-        // Polar's graph processor should MERGE on container_id, not name.
         let graph_identity = JobGraphIdentity {
-            node_label: "PodmanContainer".into(),
-            display_name: container_name,
+            node_label: "PodmanPod".into(),
+            display_name: handle.pod_name.clone(),
             identity_props: vec![
-                ("container_id".into(), container_id),
+                ("pod_id".into(), handle.pod_id.clone()),
+                (
+                    "pipeline_container_id".into(),
+                    handle.pipeline_container_id.clone(),
+                ),
                 ("build_id".into(), spec.build_id.to_string()),
             ],
         };
 
         Ok(SubmittedJob {
-            handle,
+            handle: backend_handle,
             graph_identity,
         })
+    }
+
+    /// Stop and remove the container.
+    ///
+    /// Best-effort. If the container is already stopped or not found, log and
+    /// return Ok — the important thing is that the handle is invalidated from
+    /// the orchestrator's perspective.
+    #[instrument(skip(self), fields(handle = %handle))]
+    async fn cancel(&self, handle: &BackendJobHandle) -> Result<(), BackendError> {
+        // handle.name is the pod name (set in submit above).
+        // Reconstruct the CiPodHandle minimally — we only need pod_name and
+        // workspace_volume_name for remove_ci_pod.
+        //
+        // workspace_volume_name is deterministically `cyclops-ws-{build_id}`.
+        // Extract the build_id suffix from the pod name `cyclops-build-{uuid}`.
+        let build_id_str = handle
+            .name
+            .strip_prefix("cyclops-build-")
+            .unwrap_or(&handle.uid); // fallback: should never happen
+
+        let pod_handle = CiPodHandle {
+            pod_id: String::new(), // not needed for removal
+            pod_name: handle.name.clone(),
+            pipeline_container_id: handle.uid.clone(),
+            init_container_id: String::new(), // not needed for removal
+            workspace_volume_name: format!("cyclops-ws-{build_id_str}"),
+        };
+
+        match remove_ci_pod(&self.config.socket_path, &pod_handle).await {
+            Ok(()) => Ok(()),
+            Err(PodmanError::UnexpectedResponse(ref msg)) if msg.contains("404") => {
+                warn!(handle = %handle, "pod already gone during cancel, treating as success");
+                Ok(())
+            }
+            Err(e) => {
+                let err = format!(
+                    "Failed to remove pod {} for job {}",
+                    handle.name, handle.uid
+                );
+                tracing::error!(handle = %handle, error = %e, "{err}");
+                Err(BackendError::CancellationFailed(err))
+            }
+        }
     }
 
     /// Poll the current status of a submitted container.
@@ -258,39 +311,6 @@ impl BuildBackend for PodmanBackend {
                 // before the container record was pruned.
                 warn!(handle = %handle, "container not found during poll, returning Unknown");
                 Ok(JobStatus::Unknown)
-            }
-            Err(e) => Err(BackendError::from(e)),
-        }
-    }
-
-    /// Stop and remove the container.
-    ///
-    /// Best-effort. If the container is already stopped or not found, log and
-    /// return Ok — the important thing is that the handle is invalidated from
-    /// the orchestrator's perspective.
-    #[instrument(skip(self), fields(handle = %handle))]
-    async fn cancel(&self, handle: &BackendJobHandle) -> Result<(), BackendError> {
-        match stop_and_remove_container(&self.client, &handle.uid).await {
-            Ok(()) => Ok(()),
-            Err(PodmanError::CancellationFailed {
-                ref source,
-                container_id,
-            }) => {
-                // If the container is already gone, treat as success.
-                if let bollard::errors::Error::DockerResponseServerError {
-                    status_code: 404, ..
-                } = source
-                {
-                    warn!(handle = %handle, "container already gone during cancel, treating as success");
-                    Ok(())
-                } else {
-                    let err = format!(
-                        "Failed to stop container {container_id} for job {}",
-                        handle.name
-                    );
-                    tracing::error!(handle = %handle, "{err}");
-                    Err(BackendError::CancellationFailed(err))
-                }
             }
             Err(e) => Err(BackendError::from(e)),
         }

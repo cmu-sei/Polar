@@ -4,21 +4,19 @@ use thiserror::Error;
 /// All failure modes the Podman backend can produce.
 ///
 /// Every variant maps to exactly one `BackendError` variant via `From`.
-/// The intent is that `BuildJobActor` never sees `PodmanError` directly —
-/// it only sees `BackendError`, keeping the actor decoupled from the backend
-/// implementation. Internal helper functions within the podman crate use
-/// `PodmanError` freely and convert at the trait boundary.
+/// Variants that previously wrapped `bollard::errors::Error` have been
+/// updated to carry `String` sources now that container/pod lifecycle
+/// operations go through the libpod REST API directly. Only the three
+/// operations that still use bollard (`ping`, `ensure_image`, `logs`)
+/// retain bollard error sources.
 #[derive(Debug, Error)]
 pub enum PodmanError {
     /// The Podman socket is not present or the daemon is not running.
-    /// This is the `Unreconciled` trigger condition — it indicates the
-    /// local execution environment itself is unavailable, not just a
-    /// transient API error.
     #[error("podman socket unreachable: {0}")]
     SocketUnreachable(#[source] bollard::errors::Error),
 
     /// Image pull failed. Could be a missing image, auth failure, or
-    /// registry unreachable. The build cannot proceed.
+    /// registry unreachable.
     #[error("image pull failed for {image}: {source}")]
     ImagePullFailed {
         image: String,
@@ -26,39 +24,34 @@ pub enum PodmanError {
         source: bollard::errors::Error,
     },
 
-    /// Container creation failed before the process started.
+    /// A libpod container or pod create request was rejected by the daemon.
     #[error("container creation failed: {0}")]
-    ContainerCreateFailed(#[source] bollard::errors::Error),
+    ContainerCreateFailed(String),
 
-    /// Container was created but could not be started.
-    #[error("container start failed for {container_id}: {source}")]
+    /// Container was created but the start request failed.
+    #[error("container start failed for {container_id}: {reason}")]
     ContainerStartFailed {
         container_id: String,
-        #[source]
-        source: bollard::errors::Error,
+        reason: String,
     },
 
-    /// Poll (inspect) call failed. The container ID may have been GC'd
-    /// or the daemon restarted. Callers should treat this as `Unknown`
-    /// and transition to `Unreconciled` if the job was in-flight.
-    #[error("container inspect failed for {container_id}: {source}")]
+    /// Inspect call failed or returned 404. Callers should treat this as
+    /// `Unknown` and transition to `Unreconciled` if the job was in-flight.
+    #[error("container inspect failed for {container_id}: {reason}")]
     InspectFailed {
         container_id: String,
-        #[source]
-        source: bollard::errors::Error,
+        reason: String,
     },
 
-    /// Stop or remove failed during cancellation. Best-effort — the
-    /// container may have already exited.
-    #[error("container stop/remove failed for {container_id}: {source}")]
+    /// Pod or container stop/remove failed during cancellation.
+    #[error("cancellation failed for {container_id}: {reason}")]
     CancellationFailed {
         container_id: String,
-        #[source]
-        source: bollard::errors::Error,
+        reason: String,
     },
 
-    /// Log stream could not be attached. The container may not have started
-    /// yet or its logs have been removed.
+    /// Log stream could not be attached. Still sourced from bollard since
+    /// `logs()` in `backend.rs` is the one remaining bollard call.
     #[error("log stream unavailable for {container_id}: {source}")]
     LogStreamUnavailable {
         container_id: String,
@@ -66,31 +59,31 @@ pub enum PodmanError {
         source: bollard::errors::Error,
     },
 
-    /// A Podman API response was structurally valid but semantically
-    /// unexpected — e.g. a created container with no ID in the response.
-    /// These should never happen against a compliant Podman daemon.
+    /// A libpod API response was structurally valid but semantically
+    /// unexpected — e.g. a non-2xx status where success was required,
+    /// or a response body that failed to deserialize.
     #[error("unexpected podman response: {0}")]
     UnexpectedResponse(String),
+
+    /// The git-cloner init container exited non-zero. The workspace was not
+    /// populated so the pipeline container was never started.
+    #[error("init container \"{container_id}\" failed with exit code {exit_code}")]
+    InitContainerFailed {
+        container_id: String,
+        exit_code: i64,
+    },
 }
 
 impl From<PodmanError> for BackendError {
     fn from(e: PodmanError) -> Self {
         match e {
-            PodmanError::SocketUnreachable(_) => {
-                BackendError::Unreachable(e.to_string())
-            }
-            PodmanError::ImagePullFailed { .. } => {
-                BackendError::SubmissionFailed(e.to_string())
-            }
-            PodmanError::ContainerCreateFailed(_) => {
-                BackendError::SubmissionFailed(e.to_string())
-            }
+            PodmanError::SocketUnreachable(_) => BackendError::Unreachable(e.to_string()),
+            PodmanError::ImagePullFailed { .. } => BackendError::SubmissionFailed(e.to_string()),
+            PodmanError::ContainerCreateFailed(_) => BackendError::SubmissionFailed(e.to_string()),
             PodmanError::ContainerStartFailed { .. } => {
                 BackendError::SubmissionFailed(e.to_string())
             }
-            PodmanError::InspectFailed { .. } => {
-                BackendError::PollFailed(e.to_string())
-            }
+            PodmanError::InspectFailed { .. } => BackendError::PollFailed(e.to_string()),
             PodmanError::CancellationFailed { .. } => {
                 BackendError::CancellationFailed(e.to_string())
             }
@@ -101,6 +94,9 @@ impl From<PodmanError> for BackendError {
                 // Treat unexpected responses as poll failures — the state
                 // is ambiguous and the actor should handle accordingly.
                 BackendError::PollFailed(e.to_string())
+            }
+            PodmanError::InitContainerFailed { .. } => {
+                BackendError::SubmissionFailed(e.to_string())
             }
         }
     }

@@ -14,7 +14,7 @@ in  orchestrator.OrchestratorConfig::{
       , bucket = "cyclops-build-artifacts"
       }
     , repo_mappings =
-      [ { pipeline_image = Some "rust:latest"
+      [ { pipeline_image = Some "polar-dev:latest"
         , repo_url = "https://github.com/cmu-sei/Polar.git"
         }
       ]
