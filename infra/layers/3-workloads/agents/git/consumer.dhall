@@ -18,7 +18,7 @@ let render =
 
         let volumes =
               [ kubernetes.Volume::{ name = v.tlsSecretName, secret = Some kubernetes.SecretVolumeSource::{ secretName = Some v.tlsSecretName } }
-              , kubernetes.Volume::{ name = "neo4j-bolt-ca", secret = Some kubernetes.SecretVolumeSource::{ secretName = Some "neo4j-bolt-ca" } }
+              , kubernetes.Volume::{ name = "neo4j-bolt-ca", configMap = Some kubernetes.ConfigMapVolumeSource::{ name = Some "neo4j-bolt-ca" } }
               ] # functions.ProxyVolume v.proxyCACert
 
         let env = Constants.commonClientEnv # functions.makeGraphEnv v.neo4jBoltAddr Constants.graphConfig Constants.graphSecretKeySelector (Some "/etc/neo4j-ca/ca.pem")

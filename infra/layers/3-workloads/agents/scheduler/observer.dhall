@@ -1,4 +1,9 @@
 -- infra/layers/3-workloads/agents/scheduler/observer.dhall
+--
+-- Credentials (POLAR_SCHEDULER_GIT_USERNAME / POLAR_SCHEDULER_GIT_PASSWORD)
+-- have been removed. The polar-schedules repo is public and does not require
+-- authentication. Private repo credential support will come via the
+-- CredentialAgent (see credential-agent issue).
 
 let kubernetes = ../../../../schema/kubernetes.dhall
 let Constants  = ../../../../schema/constants.dhall
@@ -19,8 +24,7 @@ let render =
       ) ->
 
         let volumes =
-              [ kubernetes.Volume::{ name = v.tlsSecretName,        secret = Some kubernetes.SecretVolumeSource::{ secretName = Some v.tlsSecretName } }
-              , kubernetes.Volume::{ name = "scheduler-git-secret", secret = Some kubernetes.SecretVolumeSource::{ secretName = Some "scheduler-git-secret" } }
+              [ kubernetes.Volume::{ name = v.tlsSecretName, secret = Some kubernetes.SecretVolumeSource::{ secretName = Some v.tlsSecretName } }
               ] # functions.ProxyVolume v.proxyCACert
 
         let env =
@@ -29,17 +33,11 @@ let render =
               # [ kubernetes.EnvVar::{ name = "POLAR_SCHEDULER_REMOTE_URL",    value = Some v.remoteUrl    }
                 , kubernetes.EnvVar::{ name = "POLAR_SCHEDULER_LOCAL_PATH",    value = Some v.localPath    }
                 , kubernetes.EnvVar::{ name = "POLAR_SCHEDULER_SYNC_INTERVAL", value = Some v.syncInterval }
-                , kubernetes.EnvVar::{
-                  , name      = "POLAR_SCHEDULER_GIT_USERNAME"
-                  , valueFrom = Some kubernetes.EnvVarSource::{ secretKeyRef = Some kubernetes.SecretKeySelector::{ name = Some "scheduler-git-secret", key = "username" } }
-                  }
-                , kubernetes.EnvVar::{
-                  , name      = "POLAR_SCHEDULER_GIT_PASSWORD"
-                  , valueFrom = Some kubernetes.EnvVarSource::{ secretKeyRef = Some kubernetes.SecretKeySelector::{ name = Some "scheduler-git-secret", key = "password" } }
-                  }
                 ]
 
-        let mounts = [ kubernetes.VolumeMount::{ name = v.tlsSecretName, mountPath = Constants.tlsPath, readOnly = Some True } ] # functions.ProxyMount v.proxyCACert
+        let mounts =
+              [ kubernetes.VolumeMount::{ name = v.tlsSecretName, mountPath = Constants.tlsPath, readOnly = Some True }
+              ] # functions.ProxyMount v.proxyCACert
 
         in  kubernetes.Deployment::{
             , metadata = kubernetes.ObjectMeta::{ name = Some v.name, namespace = Some Constants.PolarNamespace, annotations = Some [ Constants.RejectSidecarAnnotation ] }
@@ -51,7 +49,16 @@ let render =
                 , spec = Some kubernetes.PodSpec::{
                   , imagePullSecrets = Some v.imagePullSecrets
                   , volumes          = Some volumes
-                  , containers = [ kubernetes.Container::{ name = v.name, image = Some v.image, imagePullPolicy = Some v.imagePullPolicy, securityContext = Some Constants.DropAllCapSecurityContext, env = Some env, volumeMounts = Some mounts } ]
+                  , containers =
+                    [ kubernetes.Container::{
+                      , name            = v.name
+                      , image           = Some v.image
+                      , imagePullPolicy = Some v.imagePullPolicy
+                      , securityContext = Some Constants.DropAllCapSecurityContext
+                      , env             = Some env
+                      , volumeMounts    = Some mounts
+                      }
+                    ]
                   }
                 }
               }

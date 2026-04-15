@@ -15,13 +15,9 @@ def main [] {
         output_dir : ($repo_root | path join "manifests")
 
         required_env : [
-            "GRAPH_PASSWORD"
-            "NEO4J_AUTH"
             "NEO4J_TLS_CA_CERT_CONTENT"
             "NEO4J_TLS_SERVER_CERT_CONTENT"
             "NEO4J_TLS_SERVER_KEY_CONTENT"
-            "GITLAB_TOKEN"
-            "DOCKER_AUTH_JSON"
             "POLAR_SCHEDULER_REMOTE_URL"
         ]
 

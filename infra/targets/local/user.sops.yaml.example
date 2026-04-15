@@ -1,0 +1,48 @@
+# user.sops.yaml — Polar local target user-specific secrets.
+#
+# This file is gitignored — it contains credentials that are personal
+# to each developer. Each developer maintains their own copy encrypted
+# to their own key only.
+#
+# To create your encrypted user secrets file:
+#   1. Copy this file to user.sops.yaml
+#   2. Fill in your personal values below
+#   3. Create .user.sops.yaml with your key (see .user.sops.yaml.example)
+#   4. Encrypt: SOPS_CONFIG=.user.sops.yaml sops --encrypt --in-place user.sops.yaml
+#
+# To edit:
+#   EDITOR=$(which nvim) SOPS_CONFIG=.user.sops.yaml sops user.sops.yaml
+#
+# To decrypt:
+#   SOPS_CONFIG=.user.sops.yaml sops --decrypt user.sops.yaml
+
+# =============================================================================
+# GitLab
+# =============================================================================
+
+# GitLab personal access token with read_api scope.
+# Used to create: gitlab-secret (polar namespace)
+gitlab_token: ""
+
+# GitLab username.
+gitlab_user: ""
+
+# GitLab instance endpoint.
+gitlab_endpoint: "https://gitlab.com"
+
+# =============================================================================
+# Jira
+# =============================================================================
+
+# Jira API token.
+# Used to create: jira-secret (polar namespace)
+jira_token: ""
+
+# =============================================================================
+# OCI Registry
+# =============================================================================
+
+# Docker auth JSON for OCI registry access.
+# Generate with: podman login <registry> && cat ~/.docker/config.json
+# Used to create: oci-registry-auth (polar namespace)
+docker_auth_json: ""

@@ -120,9 +120,7 @@ def apply_manifests [config: record, output_dir: string] {
         | default ($env.HOME | path join "Documents/projects/nix-usernetes/kubeconfig")
     )
 
-    let kc = $"kubectl --kubeconfig ($kubeconfig)"
-
-    for filename in $config.apply_order {
+    let apply = {|filename|
         let manifest = ($output_dir | path join $filename)
         if ($manifest | path exists) {
             print $"  applying ($filename)..."
@@ -132,17 +130,27 @@ def apply_manifests [config: record, output_dir: string] {
         }
     }
 
-    # SA token ordering fix — retry agents manifest after brief pause
-    # to allow token controller to populate SA token secrets.
+    # Phase 1: namespaces first — secrets depend on them
+    do $apply "namespaces.yaml"
+
+    # Phase 2: secrets — agents depend on them
+    let secrets_script = ($config.target_dir | path join "secrets.nu")
+    if ($secrets_script | path exists) {
+        print "  creating secrets..."
+        nu $secrets_script $config.target_dir $config.repo_root
+    }
+
+    # Phase 3: everything else
+    for filename in ($config.apply_order | skip 1) {
+        do $apply $filename
+    }
+
+    # SA token ordering fix
     print ""
     print "  waiting 5s for SA token controller..."
     sleep 5sec
     for filename in ["kube-agent-rbac.yaml", "build-agent-rbac.yaml"] {
-        let manifest = ($output_dir | path join $filename)
-        if ($manifest | path exists) {
-            print $"  retrying ($filename)..."
-            run-external "kubectl" "--kubeconfig" $kubeconfig "apply" "-f" $manifest
-        }
+        do $apply $filename
     }
 
     print ""
