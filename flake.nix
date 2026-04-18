@@ -171,6 +171,7 @@
 
           # ── Infrastructure containers ─────────────────────────────────────────
           nuInitImage = containerPkgs.nuInit.image;
+          gitServerImage = containerPkgs.gitServer.image;
         };
 
         devShells.default = container.devShell.overrideAttrs (old: {

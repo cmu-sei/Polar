@@ -26,13 +26,7 @@
     (u:
       u.Core)
     (u:
-      u.CI)
-    (u:
       u.Dev)
-    (u:
-      u.Toolchain)
-    (u:
-      u.Pipeline)
     (u:
       u.Custom {
         name = "polar-extras";
@@ -41,80 +35,15 @@
           { attrPath = "default"; flakeInput = "dotacat"; }
           { attrPath = "default"; flakeInput = "myNeovimOverlay"; }
           { attrPath = "sops"; flakeInput = null; }
-          { attrPath = "rage"; flakeInput = null; }
           { attrPath = "oras"; flakeInput = null; }
           { attrPath = "zed-editor"; flakeInput = null; }
+          { attrPath = "rage"; flakeInput = null; }
+          { attrPath = "cosign"; flakeInput = null; }
+          { attrPath = "default"; flakeInput = "cassini-client"; }
         ];
       })
   ];
-  pipeline = {
-    artifactDir = "/workspace/pipeline-out";
-    name = "polar-devsecops";
-    outputs = null;
-    stages = [
-      {
-        command = "cargo fmt --check";
-        condition = null;
-        failureMode = u:
-          u.Collect;
-        impurityReason = null;
-        inputs = [ (u: u.Workspace) ];
-        name = "fmt";
-        outputs = [ (u: u.None) ];
-        pure = true;
-      }
-      {
-        command = "cargo clippy -- -D warnings";
-        condition = null;
-        failureMode = u:
-          u.Collect;
-        impurityReason = null;
-        inputs = [ (u: u.Workspace) ];
-        name = "lint";
-        outputs = [ (u: u.None) ];
-        pure = true;
-      }
-      {
-        command = "run-analysis --config ./analysis.toml";
-        condition = null;
-        failureMode = u:
-          u.Collect;
-        impurityReason = null;
-        inputs = [ (u: u.Workspace) ];
-        name = "static-analysis";
-        outputs = [ (u: u.Report { name = "static-analysis-report"; }) ];
-        pure = true;
-      }
-      {
-        command = "run-audit --sbom ./sbom.json";
-        condition = null;
-        failureMode = u:
-          u.Collect;
-        impurityReason = null;
-        inputs = [ (u: u.Workspace) ];
-        name = "audit";
-        outputs = [
-          (u:
-            u.Report { name = "audit-report"; })
-          (u:
-            u.Artifact { "content_type" = "application/json"; name = "sbom"; })
-        ];
-        pure = true;
-      }
-      {
-        command = "cargo test --workspace";
-        condition = "CI_FULL";
-        failureMode = u:
-          u.FailFast;
-        impurityReason = "Cannot guarantee environment variable is set";
-        inputs = [ (u: u.Workspace) ];
-        name = "full-test";
-        outputs = [ (u: u.None) ];
-        pure = false;
-      }
-    ];
-    workingDir = "/workspace/src/agents";
-  };
+  pipeline = null;
   shell = {
     colorScheme = "gruvbox";
     plugins = [ "bobthefish" "bass" "grc" ];

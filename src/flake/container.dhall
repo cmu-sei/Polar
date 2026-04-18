@@ -16,7 +16,6 @@ let Lib =
 
 let defaults = Lib.defaults
 
-let polarPipeline = ./pipeline.dhall
 -- ---------------------------------------------------------------------------
 -- Polar-specific packages not covered by standard layers.
 -- flakeInput names must match input names in flake.nix exactly.
@@ -29,6 +28,9 @@ let polarExtras =
     , Lib.nixpkgs "sops"
     , Lib.nixpkgs "oras"
     , Lib.nixpkgs "zed-editor"
+    , Lib.nixpkgs "rage"
+    , Lib.nixpkgs "cosign"
+    , Lib.flakePackage "cassini-client" "default"
     ]
 
 -- ---------------------------------------------------------------------------
@@ -50,14 +52,9 @@ in defaults.devContainer //
 
   , packageLayers =
       [ Lib.PackageLayer.Core
-      , Lib.PackageLayer.CI
       , Lib.PackageLayer.Dev
-      , Lib.PackageLayer.Toolchain
-      , Lib.PackageLayer.Pipeline
       , polarExtras
       ]
-
-  , pipeline = Some polarPipeline
 
   , tls = Some
       ( defaults.defaultTLS //

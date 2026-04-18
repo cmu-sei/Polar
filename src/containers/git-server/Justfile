@@ -1,0 +1,130 @@
+# src/containers/git-server/Justfile
+#
+# Dev workflow for the polar-git-server local git HTTP container.
+#
+# This server runs on the HOST via podman — it is NOT deployed into the cluster.
+# Agents inside the cluster reach it via the host's LAN IP on port 3000.
+#
+# Quickstart:
+#   just build
+#   just serve
+#
+# Then configure agents with clone URLs like:
+#   http://172.26.26.88:3000/Polar.git
+#   http://172.26.26.88:3000/polar-schedules.git
+
+# ── Configuration ─────────────────────────────────────────────────────────────
+
+# Host IP reachable from inside the usernetes cluster.
+# Update this if your LAN IP changes (check with: ip -4 addr show <iface>)
+host_ip := "172.26.26.88"
+
+# Port the git server listens on (must be free on the host)
+port := "3000"
+
+# Image name
+image := "localhost/polar-git-server:latest"
+
+# Absolute paths to the repos to serve.
+# Each repo is mounted into the container at /srv/git/<basename>.git
+# and served at http://<host>:<port>/<basename>.git
+polar_repo          := env_var('HOME') + "/Documents/projects/Polar"
+polar_schedules_repo := env_var('HOME') + "/Documents/projects/polar-schedules"
+
+platform := `uname -m | sed 's/x86_64/x86_64-linux/;s/aarch64/aarch64-linux/'`
+_nix_flags := "-L"
+
+# ── Help ──────────────────────────────────────────────────────────────────────
+
+# List all recipes
+default:
+    @just --list
+
+# ── Build ─────────────────────────────────────────────────────────────────────
+
+# Build the git-server container image and load it into podman
+build:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    echo "Building polar-git-server image..."
+    # Build from the repo root so flake.nix is in scope
+    cd "$(git rev-parse --show-toplevel)"
+    nix build {{_nix_flags}} ".#packages.{{platform}}.gitServerImage" -o result-git-server-image
+    podman load -i result-git-server-image
+    echo "Image loaded: {{image}}"
+
+# ── Run ───────────────────────────────────────────────────────────────────────
+
+# Start the git server (foreground — run in a dedicated terminal or tmux pane)
+#
+# Repos are mounted read-only at /srv/git/<name>.git
+# Clone URLs (from host):    http://localhost:{{port}}/<name>.git
+# Clone URLs (from cluster): http://{{host_ip}}:{{port}}/<name>.git
+serve:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    POLAR="{{polar_repo}}"
+    SCHEDULES="{{polar_schedules_repo}}"
+
+    if [ ! -d "$POLAR" ]; then
+        echo "ERROR: polar repo not found at $POLAR" >&2
+        exit 1
+    fi
+    if [ ! -d "$SCHEDULES" ]; then
+        echo "ERROR: polar-schedules repo not found at $SCHEDULES" >&2
+        exit 1
+    fi
+
+    echo "Starting polar-git-server on port {{port}}..."
+    echo ""
+    echo "  Polar repo:          http://{{host_ip}}:{{port}}/Polar.git"
+    echo "  polar-schedules:     http://{{host_ip}}:{{port}}/polar-schedules.git"
+    echo ""
+    echo "  (from host)          http://localhost:{{port}}/Polar.git"
+    echo ""
+    echo "  Press Ctrl-C to stop."
+    echo ""
+
+    podman run --rm \
+        --userns=keep-id \
+        --name polar-git-server \
+        -p {{port}}:3000 \
+        -v "$POLAR/.git":/srv/git/Polar.git:ro \
+        -v "$SCHEDULES/.git":/srv/git/polar-schedules.git:ro \
+        --tmpfs /tmp:rw,mode=1777 \
+        {{image}}
+
+# Stop the git server (if running in background)
+stop:
+    podman stop polar-git-server 2>/dev/null || echo "git server not running"
+
+# ── Verify ────────────────────────────────────────────────────────────────────
+
+# Test that both repos are clonable from the host
+verify:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    TMPDIR=$(mktemp -d)
+    trap "rm -rf $TMPDIR" EXIT
+
+    echo "Testing Polar clone..."
+    git clone http://localhost:{{port}}/Polar.git "$TMPDIR/Polar" --depth 1 --quiet
+    echo "  OK: $(git -C $TMPDIR/Polar log --oneline -1)"
+
+    echo "Testing polar-schedules clone..."
+    git clone http://localhost:{{port}}/polar-schedules.git "$TMPDIR/polar-schedules" --depth 1 --quiet
+    echo "  OK: $(git -C $TMPDIR/polar-schedules log --oneline -1)"
+
+    echo ""
+    echo "Both repos verified. Agents can clone from:"
+    echo "  http://{{host_ip}}:{{port}}/Polar.git"
+    echo "  http://{{host_ip}}:{{port}}/polar-schedules.git"
+
+# ── Info ──────────────────────────────────────────────────────────────────────
+
+# Show the cluster-facing URLs for use in agent configs and schedules
+urls:
+    @echo "Git server URLs (reachable from inside the usernetes cluster):"
+    @echo "  http://{{host_ip}}:{{port}}/Polar.git"
+    @echo "  http://{{host_ip}}:{{port}}/polar-schedules.git"

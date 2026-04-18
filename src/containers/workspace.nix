@@ -7,8 +7,11 @@
 # pipeline rather than implementing Polar's observability features.
 #
 # Currently:
-#   nu-init  — minimal nushell init container, used wherever a pod needs
-#              nushell-based initialization logic at startup
+#   nu-init     — minimal nushell init container, used wherever a pod needs
+#                 nushell-based initialization logic at startup
+#   git-server  — local dev git HTTP server (host-side only, not deployed
+#                 into the cluster). Serves local working trees over HTTP
+#                 so agents can observe local commits without pushing to GitHub.
 #
 # Adding a new container:
 #   1. Create src/containers/<name>/
@@ -30,7 +33,11 @@ let
     inherit pkgs nix-container-lib inputs system;
   };
 
+  gitServer = import ./git-server/package.nix {
+    inherit pkgs nix-container-lib inputs system;
+  };
+
 in
 {
-  inherit nuInit;
+  inherit nuInit gitServer;
 }

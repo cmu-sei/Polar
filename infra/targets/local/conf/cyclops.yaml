@@ -1,25 +1,19 @@
 backend:
   driver: kubernetes
+  command: ["cargo", "build"]
   kubernetes:
-    namespace: stub
-cassini:
-  broker_url: "nats://stub:4222"
-  inbound_subject: "stub"
-bootstrap:
-  builder_image: "stub"
-  target_registry: "stub"
-  container_config_ref: "stub"
-credentials:
-  git_secret_name: stub
-  registry_secret_name: stub
+    namespace: polar
+    job_labels: {}
+    resources:
+      cpu_limit: "2"
+      cpu_request: "500m"
+      memory_limit: "4Gi"
+      memory_request: "512Mi"
 repo_mappings:
-  - repo_url: "stub"
+  - repo_url: "http://git-server.polar.svc.cluster.local/polar.git"
 storage:
   endpoint_url: "http://stub:9000"
   access_key: stub
   secret_key: stub
   region: us-east-1
   bucket: stub
-log:
-  format: json
-  level: info

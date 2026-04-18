@@ -374,6 +374,10 @@ nu-init:
     nix build {{_nix_flags}} ".#packages.{{platform}}.nuInitImage" -o result-nu-init-image
     podman load -i result-nu-init-image
 
+git-server:
+    nix build {{_nix_flags}} ".#packages.{{platform}}.gitServerImage" -o result-git-server-image
+    podman load -i result-git-server-image
+
 # ── Run containers ────────────────────────────────────────────────────────────
 
 # Start the agent container (AMD ROCm — RX 9070 XT)

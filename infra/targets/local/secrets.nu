@@ -170,6 +170,14 @@ def main [target_dir: string, repo_root: string] {
         run-external "kubectl" "apply" "-f" $jira_cert
     }
 
+    # build-orchestrator-config — cyclops.yaml as a secret
+    let cyclops_yaml = ($target_dir | path join "conf/cyclops.yaml")
+    if ($cyclops_yaml | path exists) {
+        kubectl_upsert_secret "build-orchestrator-config" "polar" [] [$"cyclops.yaml=($cyclops_yaml)"]
+    } else {
+        print $"    WARNING: cyclops.yaml not found at ($cyclops_yaml) — build-orchestrator will not start"
+    }
+
     print ""
     print "  secrets: done"
     print ""

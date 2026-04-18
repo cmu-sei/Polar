@@ -121,7 +121,7 @@ opentelemetry_sdk = "0.31.0"
 parse_link_header = "0.4"
 proptest = "1.10.0"                                       # only in policy-config dev, but ok
 ractor = { version = "0.15.10", features = ["async-trait"] }
-rand = "0.10.0"                                            # upgraded from 0.9
+rand = "0.10.0"
 rand_core = "0.10.0"
 reactor-trait = "3.1.1"
 reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
