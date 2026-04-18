@@ -19,5 +19,10 @@ tracing.workspace = true
 uuid.workspace = true
 bytes.workspace = true
 serde.workspace = true
+serde_json.workspace = true
+hyper-util.workspace = true
+hyper.workspace = true
+hyperlocal.workspace = true
+http-body-util.workspace = true
 # futures::StreamExt for log stream consumption
 futures.workspace = true

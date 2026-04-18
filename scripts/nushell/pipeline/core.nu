@@ -656,7 +656,8 @@ export def upload-image [
 #   3. Process the SBOM with OCI metadata for full layer attribution
 #      → emits image-sbom.analyzed (packages + layer CONTAINS edges)
 #   4. Upload to each registry (skopeo copy)
-#   5. Emit image.linked (ties registry digest to package purl)
+#   5. Cryptographically sign the image and emit an event upon success.
+#   6. Emit image.linked (ties registry digest to package purl)
 #
 # nix-build-image already extracts OCI metadata and emits
 # container-image.created, so we reuse build.oci_metadata here
@@ -703,6 +704,40 @@ export def build-scan-upload [
         upload-image $build.tarball $remote_ref --name $link_name
     })
 
+    # Sign each uploaded image.
+    # cosign needs the digest ref: registry.io/org/app@sha256:abc...
+    let signed_uploads = ($uploads | each {|upload|
+        if ($upload.digest | is-not-empty) {
+            # Build the digest ref from the remote ref.
+            # remote_ref is "docker://registry.io/org/app:tag"
+            # We need "registry.io/org/app@sha256:abc..."
+            let base_ref = ($upload.remote_ref
+                | str replace "docker://" ""
+                | parse "{repo}:{tag}"
+                | get -i 0
+                | default { repo: "" }
+                | get repo)
+            let digest_ref = $"($base_ref)@($upload.digest)"
+
+            let sign_result = (sign-image $digest_ref --name $upload.name)
+
+            if $sign_result.success {
+                emit "image.signed" {
+                    image_digest: $upload.digest
+                    remote_ref: $upload.remote_ref
+                    image_name: $link_name
+                    signing_key_ref: ($env.COSIGN_KEY? | default "")
+                    config_digest: $oci_metadata.config_digest
+                }
+            }
+
+            $upload | insert signed $sign_result.success
+        } else {
+            log-warn $"Failed to sign artifact \"($upload.remote_ref)\", no digest available!" --component "oci"
+            $upload | insert signed false
+        }
+    })
+
     # 5. Emit image.linked for each upload that produced a digest.
     #    This ties the registry-side manifest digest to the root
     #    package purl, closing the chain:
@@ -737,6 +772,45 @@ export def build-scan-upload [
         sbom: $sbom
         uploads: $uploads
     }
+}
+
+# Sign a container image in a registry using cosign.
+#
+# The image must already be pushed — cosign signs by digest in the
+# registry, not from a local tarball. This means signing happens
+# AFTER upload-image, using the remote ref and digest.
+#
+# The signature is stored as a tag in the same registry (cosign's
+# default behavior), so no additional storage infrastructure is needed.
+#
+# Returns a record with the signature status and metadata.
+export def sign-image [
+    remote_ref: string        # Full image ref with digest, e.g. "registry.io/app@sha256:abc..."
+    --key: string = ""        # Cosign key URI (default: $env.COSIGN_KEY)
+    --name: string = ""       # Human-readable name for logging
+]: nothing -> record {
+    let label = if ($name | is-not-empty) { $name } else { $remote_ref }
+    let signing_key = if ($key | is-not-empty) { $key } else { ($env.COSIGN_KEY? | default "") }
+
+    if ($signing_key | is-empty) {
+        log-warn $"No signing key available, skipping signature for ($label)" --component "oci"
+        return { success: false, reason: "no signing key configured" }
+    }
+
+    log-info $"Signing ($label)" --component "oci"
+
+    let result = (
+        ^cosign sign --key $signing_key --yes $remote_ref | complete
+    )
+
+    if $result.exit_code != 0 {
+        let msg = ($result.stderr? | default $result.stdout | str trim)
+        log-warn $"cosign sign failed for ($label): ($msg)" --component "oci"
+        return { success: false, reason: $msg }
+    }
+
+    log-info $"Signed ($label)" --component "oci"
+    { success: true }
 }
 
 # ===========================================================================

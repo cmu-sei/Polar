@@ -7,7 +7,7 @@ use build_orchestrator::{
 };
 use cassini_types::ClientEvent;
 use orchestrator_backend_k8s::backend::KubernetesBackend;
-use orchestrator_backend_podman::backend::{PodmanBackend, PodmanConfig};
+use orchestrator_backend_podman::backend::PodmanBackend;
 use polar::{GitRepositoryUpdatedEvent, RkyvError, SupervisorMessage};
 use ractor::Actor;
 use rkyv::to_bytes;

@@ -135,7 +135,7 @@ pub async fn create_container(
     let response = client
         .create_container(Some(options), config)
         .await
-        .map_err(PodmanError::ContainerCreateFailed)?;
+        .map_err(|e| PodmanError::ContainerCreateFailed(e.to_string()))?;
 
     let container_id = response.id;
 
@@ -162,7 +162,7 @@ pub async fn start_container(client: &Docker, container_id: &str) -> Result<(), 
         .await
         .map_err(|e| PodmanError::ContainerStartFailed {
             container_id: container_id.to_string(),
-            source: e,
+            reason: e.to_string(),
         })?;
 
     info!("container started");
@@ -187,11 +187,11 @@ pub async fn inspect_container(
                 status_code: 404, ..
             } => PodmanError::InspectFailed {
                 container_id: container_id.to_string(),
-                source: e,
+                reason: e.to_string(),
             },
             other => PodmanError::InspectFailed {
                 container_id: container_id.to_string(),
-                source: other,
+                reason: other.to_string(),
             },
         })?;
 
@@ -264,7 +264,7 @@ pub async fn stop_and_remove_container(
         .await
         .map_err(|e| PodmanError::CancellationFailed {
             container_id: container_id.to_string(),
-            source: e,
+            reason: e.to_string(),
         })?;
 
     // Remove the stopped container to clean up the daemon's record.
@@ -280,7 +280,7 @@ pub async fn stop_and_remove_container(
         .await
         .map_err(|e| PodmanError::CancellationFailed {
             container_id: container_id.to_string(),
-            source: e,
+            reason: e.to_string(),
         })?;
 
     info!("container stopped and removed");
