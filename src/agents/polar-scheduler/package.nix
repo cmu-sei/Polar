@@ -50,6 +50,7 @@ let
     name = "polar-scheduler-processor";
     tag = "latest";
     contents = [ processorEnv ];
+    maxLayers = 20;
     config = {
       User = "${commonUser.uid}:${commonUser.gid}";
       Cmd = [ "polar-scheduler" ];
@@ -59,7 +60,6 @@ let
         "SSL_CERT_DIR=/etc/ssl/certs"
       ];
     };
-    maxLayers = 100;
   };
 
   observerImage = pkgs.dockerTools.buildLayeredImage {
@@ -76,7 +76,7 @@ let
         "SSL_CERT_DIR=/etc/ssl/certs"
       ];
     };
-    maxLayers = 100;
+    maxLayers = 20;
   };
 
 in {

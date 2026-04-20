@@ -45,6 +45,7 @@ let
     name = "polar-jira-observer";
     tag = "latest";
     contents = [ observerEnv ];
+    maxLayers = 20;
     config = {
       User = "${commonUser.uid}:${commonUser.gid}";
       Cmd = [ "jira-observer" ];
@@ -54,13 +55,13 @@ let
         "SSL_CERT_DIR=/etc/ssl/certs"
       ];
     };
-    maxLayers = 100;
   };
   consumerImage = pkgs.dockerTools.buildLayeredImage {
     inherit extraCommands;
     name = "polar-jira-consumer";
     tag = "latest";
     contents = [ consumerEnv ];
+    maxLayers = 20;
     config = {
       User = "${commonUser.uid}:${commonUser.gid}";
       Cmd = [ "jira-consumer" ];
@@ -70,7 +71,6 @@ let
         "SSL_CERT_DIR=/etc/ssl/certs"
       ];
     };
-    maxLayers = 100;
   };
 in
 {

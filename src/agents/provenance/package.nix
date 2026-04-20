@@ -56,6 +56,7 @@ let
           pkgs.cacert
           resolverConfig
         ];
+        maxLayers = 20;
         config = {
             User = "${commonUser.uid}:${commonUser.gid}";
             Cmd = [ "provenance-resolver" ];

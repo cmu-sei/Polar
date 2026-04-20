@@ -45,6 +45,7 @@ let
     name      = "build-orchestrator";
     tag       = "latest";
     contents  = commonPaths ++ [ orchestratorEnv ];  # was contents
+    maxLayers = 20;
     inherit extraCommands;
     config = {
       User       = "${commonUser.uid}:${commonUser.gid}";
@@ -70,6 +71,7 @@ let
     name      = "build-processor";
     tag       = "latest";
     contents  = commonPaths ++ [ buildProcessorEnv ];  # was contents
+    maxLayers = 20;
     inherit extraCommands;
     config = {
       User       = "${commonUser.uid}:${commonUser.gid}";

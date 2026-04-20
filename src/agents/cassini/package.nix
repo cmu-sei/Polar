@@ -64,6 +64,7 @@ let
     contents = commonPaths ++ [
         cassiniEnv
     ];
+    maxLayers = 20;
     uid = commonUser.uid;
     gid = commonUser.gid;
 
@@ -84,6 +85,7 @@ let
     contents = commonPaths ++ [
         harnessProducer
     ];
+    maxLayers = 20;
     uid = commonUser.uid;
     gid = commonUser.gid;
 
@@ -102,6 +104,7 @@ let
     contents = commonPaths ++ [
         harnessProducer
     ];
+    maxLayers = 20;
     uid = commonUser.uid;
     gid = commonUser.gid;
 

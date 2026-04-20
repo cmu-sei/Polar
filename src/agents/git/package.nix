@@ -64,7 +64,7 @@ let
         "SSL_CERT_DIR=/etc/ssl/certs"
       ];
     };
-    maxLayers = 100;
+    maxLayers = 20;
   };
   consumerImage = pkgs.dockerTools.buildLayeredImage {
     inherit extraCommands;
@@ -80,7 +80,7 @@ let
         "SSL_CERT_DIR=/etc/ssl/certs"
       ];
     };
-    maxLayers = 100;
+    maxLayers = 20;
   };
   schedulerImage = pkgs.dockerTools.buildLayeredImage {
     inherit extraCommands;
@@ -96,7 +96,7 @@ let
         "SSL_CERT_DIR=/etc/ssl/certs"
       ];
     };
-    maxLayers = 100;
+    maxLayers = 20;
   };
 in
 {
