@@ -14,12 +14,7 @@
         u.BuildTime;
       value = "/etc/ssl/certs";
     }
-    {
-      name = "GIT_HTTP_EXPORT_ALL";
-      placement = u:
-        u.BuildTime;
-      value = "1";
-    }
+    { name = "GIT_HTTP_EXPORT_ALL"; placement = u: u.BuildTime; value = "1"; }
     {
       name = "GIT_PROJECT_ROOT";
       placement = u:
@@ -45,10 +40,10 @@
       u.Custom {
         name = "git-server-deps";
         packages = [
-          { attrPath = "cacert";    flakeInput = null; }
-          { attrPath = "git";       flakeInput = null; }
-          { attrPath = "nginx";     flakeInput = null; }
-          { attrPath = "fcgiwrap";  flakeInput = null; }
+          { attrPath = "cacert"; flakeInput = null; }
+          { attrPath = "git"; flakeInput = null; }
+          { attrPath = "nginx"; flakeInput = null; }
+          { attrPath = "fcgiwrap"; flakeInput = null; }
         ];
       })
   ];

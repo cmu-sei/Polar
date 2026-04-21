@@ -44,12 +44,13 @@
       })
   ];
   pipeline = null;
-  shell = {
-    colorScheme = "gruvbox";
-    plugins = [ "bobthefish" "bass" "grc" ];
-    shell = "/bin/fish";
-    viBindings = true;
-  };
+  shell = u:
+    u.Interactive {
+      colorScheme = "gruvbox";
+      plugins = [ "bobthefish" "bass" "grc" ];
+      shell = "/bin/fish";
+      viBindings = true;
+    };
   ssh = { enable = false; port = 2223; };
   staticGid = null;
   staticUid = null;
