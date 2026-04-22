@@ -12,7 +12,6 @@
         u.BuildTime;
       value = "http://localhost:8080/v1";
     }
-    { name = "PI_SHELL_PATH"; placement = u: u.BuildTime; value = "/bin/bash"; }
     {
       name = "OLLAMA_HOST";
       placement = u:
@@ -24,47 +23,36 @@
     { name = "OPENROUTER_API_KEY"; placement = u: u.UserProvided; value = ""; }
   ];
   mode = u:
-    u.Dev;
+    u.AIAgent;
   name = "polar-agent";
   nix = {
     buildUserCount = u:
       u.Dynamic;
-    enableDaemon = true;
+    enableDaemon = false;
     sandboxPolicy = u:
       u.Auto;
     trustedUsers = [ "root" ];
   };
   packageLayers = [
     (u:
+      u.Micro)
+    (u:
       u.Core)
     (u:
-      u.CI)
-    (u:
-      u.Dev)
-    (u:
-      u.Toolchain)
+      u.RustToolchain)
     (u:
       u.Custom {
         name = "polar-agent-tools";
         packages = [
           { attrPath = "default"; flakeInput = "llamaCpp"; }
-          { attrPath = "sqlite"; flakeInput = null; }
-          { attrPath = "curl"; flakeInput = null; }
-          { attrPath = "default"; flakeInput = "dotacat"; }
-          { attrPath = "sudo"; flakeInput = null; }
           { attrPath = "just"; flakeInput = null; }
-          { attrPath = "moreutils"; flakeInput = null; }
+          { attrPath = "curl"; flakeInput = null; }
         ];
       })
   ];
   pipeline = null;
   shell = u:
-    u.Interactive {
-      colorScheme = "gruvbox";
-      plugins = [ "bobthefish" "bass" "grc" ];
-      shell = "/bin/fish";
-      viBindings = true;
-    };
+    u.Minimal { shell = "/bin/nu"; };
   ssh = { enable = false; port = 2223; };
   staticGid = null;
   staticUid = null;

@@ -25,7 +25,7 @@
     staticanalysis.inputs.rust-overlay.follows    = "rust-overlay";
     dotacat.url                                   = "github:daveman1010221/dotacat-fast";
     dotacat.inputs.nixpkgs.follows                = "nixpkgs";
-    nix-container-lib.url = "github:daveman1010221/nix-container-lib/9da4924831c8e0d81d57448425d6cd10820b71d2";
+    nix-container-lib.url = "github:daveman1010221/nix-container-lib";
     nix-container-lib.inputs.nixpkgs.follows      = "nixpkgs";
     nix-container-lib.inputs.flake-utils.follows  = "flake-utils";
   };
@@ -157,7 +157,7 @@
 
           # ── Jira agent ───────────────────────────────────────────────────────
           jiraObserverImage    = polarPkgs.jiraAgent.observerImage;
-          jiraConsumerImage    = polarPkgs.jiraAgent.consumerImage;
+          jiraConsumerImage    = polarPkgs.jiraAgent.processorImage;
 
           # ── Git agent ────────────────────────────────────────────────────────
           gitObserverImage     = polarPkgs.gitAgent.observerImage;

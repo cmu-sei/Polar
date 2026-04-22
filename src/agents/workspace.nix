@@ -133,7 +133,7 @@ let
 
     # Add these imports alongside the existing ones
     jiraAgent = import ./jira/package.nix {
-      inherit pkgs commonPaths craneLib workspaceFileset cargoArtifacts commonUser;
+      inherit pkgs craneLib workspaceFileset cargoArtifacts nix-container-lib inputs system;
       crateArgs = individualCrateArgs;
     };
 

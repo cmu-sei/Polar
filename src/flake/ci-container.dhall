@@ -10,8 +10,8 @@
 --   dhall hash <<< "https://raw.githubusercontent.com/daveman1010221/nix-container-lib/<rev>/dhall/prelude.dhall"
 
 let Lib =
-      https://raw.githubusercontent.com/daveman1010221/nix-container-lib/9da4924831c8e0d81d57448425d6cd10820b71d2/dhall/prelude.dhall
-        sha256:18acbbb5708565905ab9522fa77a81eb402851f06870a34a22f6c979001c4571
+      https://raw.githubusercontent.com/daveman1010221/nix-container-lib/9b998a47b8042a932c1f4b0dc0e6ce957d26757d/dhall/prelude.dhall
+        sha256:f75818ad203cb90a5e5921b75cd60bcb66ac5753cf7eba976538bf71e855378c
 
 let defaults = Lib.defaults
 
@@ -68,13 +68,14 @@ let polarEnv : List Lib.EnvVar =
   , Lib.buildEnv "GRAPH_USER"     "neo4j"
   ]
 
-in defaults.pipelineContainer //
+in defaults.ciContainer //
   { name = "polar-ci"
 
   , packageLayers =
-      [ Lib.PackageLayer.Core
+      [ Lib.PackageLayer.Micro
+      , Lib.PackageLayer.Core
       , Lib.PackageLayer.CI
-      , Lib.PackageLayer.Pipeline
+      , Lib.PackageLayer.RustToolchain
       , polarCiExtras
       ]
 

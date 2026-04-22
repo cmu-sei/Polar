@@ -23,7 +23,7 @@
 # DM24-0470
 
 [package]
-name = "jira-consumer"
+name = "jira-processor"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -45,5 +45,5 @@ tracing.workspace = true
 url.workspace = true
 
 [[bin]]
-name = "jira-consumer"
+name = "jira-processor"
 path = "src/entrypoint.rs"

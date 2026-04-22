@@ -213,7 +213,7 @@ export def emit [subject_suffix: string, payload: record] {
     # cassini-client publish goes here
     let payload = ($envelope | to json --raw)
 
-    log-debug ($payload | jq)
+    log-debug ($payload | to json --indent 2)
 
     # cassini-client publish $"($SUBJECT_PREFIX).($subject_suffix)" $payload
 }

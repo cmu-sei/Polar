@@ -12,7 +12,7 @@
     { name = "GRAPH_USER"; placement = u: u.BuildTime; value = "neo4j"; }
   ];
   mode = u:
-    u.Pipeline;
+    u.CI;
   name = "polar-ci";
   nix = {
     buildUserCount = u:
@@ -24,11 +24,13 @@
   };
   packageLayers = [
     (u:
+      u.Micro)
+    (u:
       u.Core)
     (u:
       u.CI)
     (u:
-      u.Pipeline)
+      u.RustToolchain)
     (u:
       u.Custom {
         name = "polar-ci-extras";
@@ -108,8 +110,8 @@
   };
   shell = null;
   ssh = null;
-  staticGid = 65532;
-  staticUid = 65532;
+  staticGid = null;
+  staticUid = null;
   tls = null;
   user = {
     createUser = false;

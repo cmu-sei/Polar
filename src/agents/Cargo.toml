@@ -45,7 +45,7 @@ members = [
     "git/process",
     "git/scheduler",
     "jira/common",
-    "jira/consume",
+    "jira/process",
     "jira/observe",
     "kubernetes/common",
     "kubernetes/consume",

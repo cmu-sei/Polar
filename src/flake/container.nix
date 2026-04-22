@@ -26,7 +26,7 @@
     (u:
       u.Core)
     (u:
-      u.Dev)
+      u.InteractiveDev)
     (u:
       u.Custom {
         name = "polar-extras";
