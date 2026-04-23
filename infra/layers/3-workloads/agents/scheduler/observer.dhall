@@ -25,6 +25,7 @@ let render =
 
         let volumes =
               [ kubernetes.Volume::{ name = v.tlsSecretName, secret = Some kubernetes.SecretVolumeSource::{ secretName = Some v.tlsSecretName } }
+              , kubernetes.Volume::{ name = "tmp", emptyDir = Some kubernetes.EmptyDirVolumeSource::{=} }
               ] # functions.ProxyVolume v.proxyCACert
 
         let env =
@@ -37,6 +38,7 @@ let render =
 
         let mounts =
               [ kubernetes.VolumeMount::{ name = v.tlsSecretName, mountPath = Constants.tlsPath, readOnly = Some True }
+              , kubernetes.VolumeMount::{ name = "tmp", mountPath = "/tmp" }
               ] # functions.ProxyMount v.proxyCACert
 
         in  kubernetes.Deployment::{

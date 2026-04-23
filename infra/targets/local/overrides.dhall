@@ -49,8 +49,8 @@
 
 , provenance =
   { imagePullSecrets = [] : List { name : Optional Text }
-  , linker   = { image = "provenance-linker-agent:latest" }
-  , resolver = { image = "provenance-resolver-agent:latest" }
+  , linker   = { image = "provenance-linker:latest" }
+  , resolver = { image = "provenance-resolver:latest" }
   }
 
 , build =
@@ -61,8 +61,8 @@
 
 , scheduler =
   { imagePullSecrets = [] : List { name : Optional Text }
-  , observer  = { image = "polar-scheduler-observer:latest" }
-  , processor = { image = "polar-scheduler-processor:latest" }
+  , observer  = { image = "scheduler-observer:latest" }
+  , processor = { image = "scheduler-processor:latest" }
   }
 
 , openapi =

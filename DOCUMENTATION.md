@@ -42,7 +42,7 @@ Polar is a knowledge graph framework that collects infrastructure data and loads
 ├── dev-container/             # Dev container specifications
 ├── pipeline-out/              # Pipeline output artifacts
 ├── result-agent-container     # Symlink to agent container image
-├── result-tlsCerts            # Symlink to TLS certificates
+├── result-tls-certs            # Symlink to TLS certificates
 └── ca_certificates/           # CA certificate storage
 ```
 

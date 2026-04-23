@@ -222,25 +222,25 @@ git-agents target='all':
     case "{{target}}" in
         all)
             nix build {{_nix_flags}} "$base.observerImage"  -o result-git-observer
-            nix build {{_nix_flags}} "$base.consumerImage"  -o result-git-consumer
+            nix build {{_nix_flags}} "$base.processorImage" -o result-git-processor
             nix build {{_nix_flags}} "$base.schedulerImage" -o result-git-scheduler
             podman load -i result-git-observer
-            podman load -i result-git-consumer
+            podman load -i result-git-processor
             podman load -i result-git-scheduler
             ;;
         observer)
             nix build {{_nix_flags}} "$base.observerImage" -o result-git-observer
             podman load -i result-git-observer
             ;;
-        consumer)
-            nix build {{_nix_flags}} "$base.consumerImage" -o result-git-consumer
-            podman load -i result-git-consumer
+        processor)
+            nix build {{_nix_flags}} "$base.processorImage" -o result-git-processor
+            podman load -i result-git-processor
             ;;
         scheduler)
             nix build {{_nix_flags}} "$base.schedulerImage" -o result-git-scheduler
             podman load -i result-git-scheduler
             ;;
-        *) echo "Unknown target: {{target}}. Use all, observer, consumer, or scheduler." && exit 1 ;;
+        *) echo "Unknown target: {{target}}. Use all, observer, processor, or scheduler." && exit 1 ;;
     esac
 
 # ── OpenAPI agents ────────────────────────────────────────────────────────────
@@ -339,23 +339,27 @@ orchestrator target='all':
     base=".#packages.{{platform}}.polarPkgs.buildOrchestrator"
     case "{{target}}" in
         all)
-            nix build {{_nix_flags}} "$base.orchestratorImage" -o result-orchestrator-image
-            nix build {{_nix_flags}} "$base.cloneImage"        -o result-clone-image
-            nix build {{_nix_flags}} "$base.buildProcessorImage" -o result-build-processor-image
-            podman load -i result-orchestrator-image
+            nix build {{_nix_flags}} "$base.orchestratorImage"  -o result-build-orchestrator
+            nix build {{_nix_flags}} "$base.cloneImage"         -o result-clone-image
+            nix build {{_nix_flags}} "$base.buildProcessorImage" -o result-build-processor
+            podman load -i result-build-orchestrator
             podman load -i result-clone-image
-            podman load -i result-build-processor-image
+            podman load -i result-build-processor
             ;;
         agent)
-            nix build {{_nix_flags}} "$base.orchestratorImage" -o result-orchestrator-image
-            podman load -i result-orchestrator-image
+            nix build {{_nix_flags}} "$base.orchestratorImage" -o result-build-orchestrator
+            podman load -i result-build-orchestrator
             ;;
         clone)
             nix build {{_nix_flags}} "$base.cloneImage" -o result-clone-image
             podman load -i result-clone-image
             ;;
-        *) echo "Unknown target: {{target}}. Use all, agent, or clone." && exit 1 ;;
-    esac
+        processor)
+                    nix build {{_nix_flags}} "$base.buildProcessorImage" -o result-build-processor
+                    podman load -i result-build-processor
+                    ;;
+                *) echo "Unknown target: {{target}}. Use all, agent, clone, or processor." && exit 1 ;;
+            esac
 
 # ── Workspace binaries ────────────────────────────────────────────────────────
 
@@ -365,14 +369,14 @@ agents:
 
 # Build TLS certificates for local testing
 tls:
-    nix build {{_nix_flags}} ".#packages.{{platform}}.tlsCerts" -o result-tlsCerts
-    ls -alh result-tlsCerts
+    nix build {{_nix_flags}} ".#packages.{{platform}}.tlsCerts" -o result-tls-certs
+    ls -alh result-tls-certs
 
-# Build the polar-nu-init infrastructure container
+# Build the nu-init infrastructure container
 nu-init:
-    echo "Building polar-nu-init container..."
-    nix build {{_nix_flags}} ".#packages.{{platform}}.nuInitImage" -o result-nu-init-image
-    podman load -i result-nu-init-image
+    echo "Building nu-init container..."
+    nix build {{_nix_flags}} ".#packages.{{platform}}.nuInitImage" -o result-nu-init
+    podman load -i result-nu-init
 
 git-server:
     nix build {{_nix_flags}} ".#packages.{{platform}}.gitServerImage" -o result-git-server-image
@@ -778,6 +782,7 @@ cluster-build-all:
     just provenance all
     just git-agents all
     just jira all
+    just openapi all
     just nu-init
 
 # Build and load all core Polar images into the cluster.
@@ -812,48 +817,52 @@ cluster-load-all neo4j_result=_neo4j_result:
         _load "{{neo4j_result}}"
     fi
     # Polar images — all from nix result symlinks
-    _load ./result-build-processor-image
-    _load ./result-cassini-image
-    _load ./result-cassini-producer-image
-    _load ./result-cassini-sink-image
+    _load ./result-cassini
+    _load ./result-harness-producer
+    _load ./result-harness-sink
     _load ./result-clone-image
-    _load ./result-git-consumer
-    _load ./result-gitlab-consumer
     _load ./result-gitlab-observer
-    _load ./result-git-observer
-    _load ./result-git-scheduler
-    _load ./result-kube-consumer
+    _load ./result-gitlab-consumer
     _load ./result-kube-observer
-    _load ./result-orchestrator-image
-    _load ./result-provenance-linker
-    _load ./result-provenance-resolver
+    _load ./result-kube-consumer
+    _load ./result-git-observer
+    _load ./result-git-processor
+    _load ./result-git-scheduler
+    _load ./result-jira-observer
+    _load ./result-jira-processor
+    _load ./result-openapi-observer
+    _load ./result-openapi-processor
     _load ./result-scheduler-observer
     _load ./result-scheduler-processor
-    _load ./result-jira-consumer
-    _load ./result-jira-observer
-    _load ./result-nu-init-image
+    _load ./result-provenance-linker
+    _load ./result-provenance-resolver
+    _load ./result-build-orchestrator
+    _load ./result-build-processor
+    _load ./result-nu-init
     # Retag to match manifest image references
-    _tag docker.io/library/build-orchestrator:latest            docker.io/library/build-orchestrator:latest
-    _tag docker.io/library/build-processor:latest               docker.io/library/build-processor:latest
     _tag docker.io/library/cassini:latest                       docker.io/library/cassini:latest
-    _tag docker.io/library/cyclops/git-clone:latest             docker.io/library/cyclops/git-clone:latest
     _tag docker.io/library/harness-producer:latest              docker.io/library/harness-producer:latest
     _tag docker.io/library/harness-sink:latest                  docker.io/library/harness-sink:latest
+    _tag docker.io/library/cyclops/git-clone:latest             docker.io/library/cyclops/git-clone:latest
+    _tag docker.io/library/gitlab-observer:latest               docker.io/library/gitlab-observer:latest
+    _tag docker.io/library/gitlab-consumer:latest               docker.io/library/gitlab-consumer:latest
+    _tag docker.io/library/kube-observer:latest                 docker.io/library/kube-observer:latest
+    _tag docker.io/library/kube-consumer:latest                 docker.io/library/kube-consumer:latest
+    _tag docker.io/library/git-observer:latest                  docker.io/library/git-observer:latest
+    _tag docker.io/library/git-processor:latest                 docker.io/library/git-processor:latest
+    _tag docker.io/library/git-scheduler:latest                 docker.io/library/git-scheduler:latest
+    _tag docker.io/library/jira-observer:latest                 docker.io/library/jira-observer:latest
+    _tag docker.io/library/jira-processor:latest                docker.io/library/jira-processor:latest
+    _tag docker.io/library/openapi-observer:latest              docker.io/library/openapi-observer:latest
+    _tag docker.io/library/openapi-processor:latest             docker.io/library/openapi-processor:latest
+    _tag docker.io/library/scheduler-observer:latest            docker.io/library/scheduler-observer:latest
+    _tag docker.io/library/scheduler-processor:latest           docker.io/library/scheduler-processor:latest
+    _tag docker.io/library/provenance-linker:latest             docker.io/library/provenance-linker:latest
+    _tag docker.io/library/provenance-resolver:latest           docker.io/library/provenance-resolver:latest
+    _tag docker.io/library/build-orchestrator:latest            docker.io/library/build-orchestrator:latest
+    _tag docker.io/library/build-processor:latest               docker.io/library/build-processor:latest
     _tag docker.io/library/nix-neo4j:latest                     docker.io/library/neo4j:5.26.2
-    _tag docker.io/library/polar-git-consumer:latest            docker.io/library/polar-git-consumer:latest
-    _tag docker.io/library/polar-gitlab-consumer:latest         docker.io/library/polar-gitlab-consumer:latest
-    _tag docker.io/library/polar-gitlab-observer:latest         docker.io/library/polar-gitlab-observer:latest
-    _tag docker.io/library/polar-git-repo-observer:latest       docker.io/library/polar-git-repo-observer:latest
-    _tag docker.io/library/polar-git-scheduler:latest           docker.io/library/polar-git-scheduler:latest
-    _tag docker.io/library/polar-kube-consumer:latest           docker.io/library/polar-kube-consumer:latest
-    _tag docker.io/library/polar-kube-observer:latest           docker.io/library/polar-kube-observer:latest
-    _tag docker.io/library/polar-scheduler-observer:latest      docker.io/library/polar-scheduler-observer:latest
-    _tag docker.io/library/polar-scheduler-processor:latest     docker.io/library/polar-scheduler-processor:latest
-    _tag docker.io/library/provenance-linker-agent:latest       docker.io/library/provenance-linker-agent:latest
-    _tag docker.io/library/provenance-resolver-agent:latest     docker.io/library/provenance-resolver-agent:latest
-    _tag docker.io/library/polar-nu-init:latest docker.io/library/polar-nu-init:latest
-    _tag docker.io/library/jira-observer:latest           docker.io/library/jira-observer:latest
-    _tag docker.io/library/jira-processor:latest           docker.io/library/jira-processor:latest
+    _tag docker.io/library/polar-nu-init:latest                 docker.io/library/polar-nu-init:latest
     echo "Core images loaded and tagged."
 
 # Render manifests for the local cluster.
@@ -897,23 +906,9 @@ cluster-apply-storage: cluster-load-provisioner
 
 # Apply all rendered Polar manifests to the local cluster.
 # Order matters: namespaces and storage must exist before dependent resources.
+# Apply all rendered Polar manifests to the local cluster.
 cluster-apply:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    kc="kubectl --kubeconfig {{_u7s_kubeconf}}"
-    # Namespaces, secrets, storage
-    $kc apply -f manifests/polar.yaml
-    $kc apply -f manifests/neo4j.yaml
-    # PKI bootstrap — cert-manager resources
-    $kc apply -f manifests/ca-issuer.yaml
-    $kc apply -f manifests/mtls-ca.yaml
-    $kc apply -f manifests/leaf-issuer.yaml
-    $kc apply -f manifests/cassini-server-cert.yaml
-    $kc apply -f manifests/cassini-client-certificate.yaml
-    # Application workloads
-    $kc apply -f manifests/cassini.yaml
-    $kc apply -f manifests/jaeger.yaml
-    $kc apply -f manifests/agents.yaml
+    nu infra/render.nu local --apply
 
 # ── kind (local cluster) ──────────────────────────────────────────────────────
 

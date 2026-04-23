@@ -153,7 +153,7 @@ def main [target_dir: string, repo_root: string] {
     }
 
     # neo4j-bolt-ca — ConfigMap not Secret (public key material)
-    let ca_cert_path = ($secrets | get -o neo4j_ca_cert_path | default "result-tlsCerts/neo4j/ca_certificate.pem")
+    let ca_cert_path = ($secrets | get -o neo4j_ca_cert_path | default "result-tls-certs/neo4j/ca_certificate.pem")
     let full_ca_path = ($repo_root | path join $ca_cert_path)
 
     if ($full_ca_path | path exists) {
