@@ -157,11 +157,11 @@
 
           # ── Jira agent ───────────────────────────────────────────────────────
           jiraObserverImage    = polarPkgs.jiraAgent.observerImage;
-          jiraConsumerImage    = polarPkgs.jiraAgent.processorImage;
+          jiraProcessorImage   = polarPkgs.jiraAgent.processorImage;
 
           # ── Git agent ────────────────────────────────────────────────────────
           gitObserverImage     = polarPkgs.gitAgent.observerImage;
-          gitConsumerImage     = polarPkgs.gitAgent.consumerImage;
+          gitProcessorImage    = polarPkgs.gitAgent.processorImage;
           gitSchedulerImage    = polarPkgs.gitAgent.schedulerImage;
 
           # ── Build orchestrator ───────────────────────────────────────────────

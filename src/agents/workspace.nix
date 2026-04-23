@@ -123,12 +123,12 @@ let
     };
 
     provenance = import ./provenance/package.nix {
-      inherit pkgs commonPaths craneLib  workspaceFileset cargoArtifacts commonUser;
+      inherit pkgs craneLib workspaceFileset nix-container-lib inputs system;
       crateArgs = individualCrateArgs;
     };
 
     scheduler = import ./polar-scheduler/package.nix {
-      inherit pkgs commonPaths craneLib workspaceFileset cargoArtifacts commonUser;
+      inherit pkgs craneLib workspaceFileset nix-container-lib inputs system;
       crateArgs = individualCrateArgs;
     };
 
@@ -144,7 +144,7 @@ let
     };
 
     buildOrchestrator = import ./build-orchestrator/package.nix {
-      inherit pkgs commonPaths craneLib workspaceFileset commonUser nix-container-lib inputs system;
+      inherit pkgs craneLib workspaceFileset nix-container-lib inputs system;
       crateArgs = commonArgs // {
         inherit (craneLib.crateNameFromCargoToml { inherit src; }) version;
         doCheck = false;

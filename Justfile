@@ -48,34 +48,35 @@ agent-container gpu='rocm':
 # Build every package — binaries, all containers, TLS certs.
 # Use this to verify the full build after disruptive changes.
 build-all:
-    nix build {{_nix_flags}} \
-        ".#packages.{{platform}}.default" \
-        ".#packages.{{platform}}.devContainer" \
-        ".#packages.{{platform}}.ciContainer" \
-        ".#packages.{{platform}}.agentContainer" \
-        ".#packages.{{platform}}.agentContainerRocm" \
-        ".#packages.{{platform}}.agentContainerVulkan" \
-        ".#packages.{{platform}}.tlsCerts" \
-        ".#packages.{{platform}}.cassiniImage" \
-        ".#packages.{{platform}}.cassiniProducerImage" \
-        ".#packages.{{platform}}.cassiniSinkImage" \
-        ".#packages.{{platform}}.gitlabObserverImage" \
-        ".#packages.{{platform}}.gitlabConsumerImage" \
-        ".#packages.{{platform}}.kubeObserverImage" \
-        ".#packages.{{platform}}.kubeConsumerImage" \
-        ".#packages.{{platform}}.openApiObserverImage" \
-        ".#packages.{{platform}}.openApiProcessorImage" \
-        ".#packages.{{platform}}.provenanceLinkerImage" \
-        ".#packages.{{platform}}.provenanceResolverImage" \
-        ".#packages.{{platform}}.schedulerProcessorImage" \
-        ".#packages.{{platform}}.schedulerObserverImage" \
-        ".#packages.{{platform}}.jiraObserverImage" \
-        ".#packages.{{platform}}.jiraProcessorImage" \
-        ".#packages.{{platform}}.gitObserverImage" \
-        ".#packages.{{platform}}.gitConsumerImage" \
-        ".#packages.{{platform}}.gitSchedulerImage" \
-        ".#packages.{{platform}}.orchestratorImage" \
-        ".#packages.{{platform}}.buildProcessorImage"
+    nix build {{_nix_flags}} ".#packages.{{platform}}.default"               -o result-binaries
+    nix build {{_nix_flags}} ".#packages.{{platform}}.devContainer"          -o result-dev-container
+    nix build {{_nix_flags}} ".#packages.{{platform}}.ciContainer"           -o result-ci-container
+    nix build {{_nix_flags}} ".#packages.{{platform}}.agentContainer"        -o result-agent-container
+    nix build {{_nix_flags}} ".#packages.{{platform}}.agentContainerRocm"    -o result-agent-container-rocm
+    nix build {{_nix_flags}} ".#packages.{{platform}}.agentContainerVulkan"  -o result-agent-container-vulkan
+    nix build {{_nix_flags}} ".#packages.{{platform}}.tlsCerts"              -o result-tls-certs
+    nix build {{_nix_flags}} ".#packages.{{platform}}.cassiniImage"          -o result-cassini
+    nix build {{_nix_flags}} ".#packages.{{platform}}.cassiniProducerImage"  -o result-harness-producer
+    nix build {{_nix_flags}} ".#packages.{{platform}}.cassiniSinkImage"      -o result-harness-sink
+    nix build {{_nix_flags}} ".#packages.{{platform}}.gitlabObserverImage"   -o result-gitlab-observer
+    nix build {{_nix_flags}} ".#packages.{{platform}}.gitlabConsumerImage"   -o result-gitlab-consumer
+    nix build {{_nix_flags}} ".#packages.{{platform}}.kubeObserverImage"     -o result-kube-observer
+    nix build {{_nix_flags}} ".#packages.{{platform}}.kubeConsumerImage"     -o result-kube-consumer
+    nix build {{_nix_flags}} ".#packages.{{platform}}.openApiObserverImage"  -o result-openapi-observer
+    nix build {{_nix_flags}} ".#packages.{{platform}}.openApiProcessorImage" -o result-openapi-processor
+    nix build {{_nix_flags}} ".#packages.{{platform}}.provenanceLinkerImage" -o result-provenance-linker
+    nix build {{_nix_flags}} ".#packages.{{platform}}.provenanceResolverImage" -o result-provenance-resolver
+    nix build {{_nix_flags}} ".#packages.{{platform}}.schedulerProcessorImage" -o result-scheduler-processor
+    nix build {{_nix_flags}} ".#packages.{{platform}}.schedulerObserverImage"  -o result-scheduler-observer
+    nix build {{_nix_flags}} ".#packages.{{platform}}.jiraObserverImage"     -o result-jira-observer
+    nix build {{_nix_flags}} ".#packages.{{platform}}.jiraProcessorImage"    -o result-jira-processor
+    nix build {{_nix_flags}} ".#packages.{{platform}}.gitObserverImage"      -o result-git-observer
+    nix build {{_nix_flags}} ".#packages.{{platform}}.gitProcessorImage"     -o result-git-processor
+    nix build {{_nix_flags}} ".#packages.{{platform}}.gitSchedulerImage"     -o result-git-scheduler
+    nix build {{_nix_flags}} ".#packages.{{platform}}.orchestratorImage"     -o result-build-orchestrator
+    nix build {{_nix_flags}} ".#packages.{{platform}}.buildProcessorImage"   -o result-build-processor
+    nix build {{_nix_flags}} ".#packages.{{platform}}.nuInitImage"           -o result-nu-init
+    nix build {{_nix_flags}} ".#packages.{{platform}}.gitServerImage"        -o result-git-server
 
 # ── Dev container ─────────────────────────────────────────────────────────────
 

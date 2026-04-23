@@ -47,7 +47,7 @@ let
 in
 {
   inherit observer consumer scheduler;
-  observerImage   = observerContainer.image;
-  consumerImage   = consumerContainer.image;
-  schedulerImage  = schedulerContainer.image;
+  observerImage  = observerContainer.image;
+  processorImage = consumerContainer.image;
+  schedulerImage = schedulerContainer.image;
 }
