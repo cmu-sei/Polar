@@ -70,7 +70,7 @@ build-all:
         ".#packages.{{platform}}.schedulerProcessorImage" \
         ".#packages.{{platform}}.schedulerObserverImage" \
         ".#packages.{{platform}}.jiraObserverImage" \
-        ".#packages.{{platform}}.jiraConsumerImage" \
+        ".#packages.{{platform}}.jiraProcessorImage" \
         ".#packages.{{platform}}.gitObserverImage" \
         ".#packages.{{platform}}.gitConsumerImage" \
         ".#packages.{{platform}}.gitSchedulerImage" \
@@ -181,11 +181,10 @@ kube target='all':
     esac
 
 # ── Jira agents ───────────────────────────────────────────────────────────────
-
 # Build jira agent images
 # Usage: just jira              (all)
 #        just jira observer
-#        just jira consumer
+#        just jira processor
 jira target='all':
     #!/usr/bin/env bash
     set -euo pipefail
@@ -193,19 +192,19 @@ jira target='all':
     case "{{target}}" in
         all)
             nix build {{_nix_flags}} "$base.observerImage" -o result-jira-observer
-            nix build {{_nix_flags}} "$base.consumerImage" -o result-jira-consumer
+            nix build {{_nix_flags}} "$base.processorImage" -o result-jira-processor
             podman load -i result-jira-observer
-            podman load -i result-jira-consumer
+            podman load -i result-jira-processor
             ;;
         observer)
             nix build {{_nix_flags}} "$base.observerImage" -o result-jira-observer
             podman load -i result-jira-observer
             ;;
-        consumer)
-            nix build {{_nix_flags}} "$base.consumerImage" -o result-jira-consumer
-            podman load -i result-jira-consumer
+        processor)
+            nix build {{_nix_flags}} "$base.processorImage" -o result-jira-processor
+            podman load -i result-jira-processor
             ;;
-        *) echo "Unknown target: {{target}}. Use all, observer, or consumer." && exit 1 ;;
+        *) echo "Unknown target: {{target}}. Use all, observer, or processor." && exit 1 ;;
     esac
 
 # ── Git agents ────────────────────────────────────────────────────────────────
@@ -852,8 +851,8 @@ cluster-load-all neo4j_result=_neo4j_result:
     _tag docker.io/library/provenance-linker-agent:latest       docker.io/library/provenance-linker-agent:latest
     _tag docker.io/library/provenance-resolver-agent:latest     docker.io/library/provenance-resolver-agent:latest
     _tag docker.io/library/polar-nu-init:latest docker.io/library/polar-nu-init:latest
-    _tag docker.io/library/polar-jira-observer:latest           docker.io/library/polar-jira-observer:latest
-    _tag docker.io/library/polar-jira-consumer:latest           docker.io/library/polar-jira-consumer:latest
+    _tag docker.io/library/jira-observer:latest           docker.io/library/jira-observer:latest
+    _tag docker.io/library/jira-processor:latest           docker.io/library/jira-processor:latest
     echo "Core images loaded and tagged."
 
 # Render manifests for the local cluster.

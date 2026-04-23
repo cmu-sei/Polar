@@ -98,21 +98,22 @@ let
       glibcLocalesUtf8
       uutils-coreutils-noprefix # Essential GNU utilities (ls, cat, etc.)
     ];
+
     cassini = import (workspaceRoot + /cassini/package.nix) {
-      inherit pkgs commonPaths craneLib  workspaceFileset commonUser;
+      inherit pkgs craneLib workspaceFileset nix-container-lib inputs system;
       crateArgs = commonArgs // {
-              inherit (craneLib.crateNameFromCargoToml { inherit src; }) version;
-              doCheck = false;
-          };
+        inherit (craneLib.crateNameFromCargoToml { inherit src; }) version;
+        doCheck = false;
+      };
     };
 
     gitlabAgent = import (workspaceRoot + /gitlab/package.nix) {
-      inherit pkgs commonPaths craneLib  workspaceFileset cargoArtifacts commonUser;
+      inherit pkgs craneLib workspaceFileset nix-container-lib inputs system;
       crateArgs = individualCrateArgs;
     };
 
     kubeAgent = import ./kubernetes/package.nix {
-      inherit pkgs commonPaths craneLib  workspaceFileset cargoArtifacts commonUser;
+      inherit pkgs craneLib workspaceFileset nix-container-lib inputs system;
       crateArgs = individualCrateArgs;
     };
 
@@ -138,7 +139,7 @@ let
     };
 
     gitAgent = import ./git/package.nix {
-      inherit pkgs commonPaths craneLib workspaceFileset cargoArtifacts commonUser;
+      inherit pkgs craneLib workspaceFileset nix-container-lib inputs system;
       crateArgs = individualCrateArgs;
     };
 
