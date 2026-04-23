@@ -1,6 +1,4 @@
-# TODO: A nix module that packages tests and contaienrizes the cargo workspace
-
-{ pkgs, lib, crane, rust-overlay, nix-container-lib, inputs, system, ... }:
+{ pkgs, lib, crane, nix-container-lib, inputs, system, ... }:
 
 let
 
@@ -16,9 +14,7 @@ let
         inherit src;
         strictDeps = true;
 
-        buildInputs = [
-        # Add additional build inputs here
-        ];
+        buildInputs = [ ];
 
         nativeBuildInputs = [
         pkgs.openssl
@@ -74,37 +70,9 @@ let
       src = workspaceFileset ./.;
     });
 
-    # define a common uid/gid for use in the images
-    commonUser = {
-      name = "polar";
-      uid = "1000";
-      gid = "1000";
-    };
-
-    # Create passwd/group/shadow files
-    etc = pkgs.runCommand "polar-etc" {
-      buildInputs = [  ];
-    } ''
-      mkdir -p $out/etc $out/home/${commonUser.name}
-
-      echo "${commonUser.name}:x:${commonUser.uid}:${commonUser.gid}::/home/${commonUser.name}:/bin/bash" > $out/etc/passwd
-      echo "${commonUser.name}:x:${commonUser.gid}:" > $out/etc/group
-      echo "${commonUser.name}:!x:::::::" > $out/etc/shadow
-      chmod -R 755 $out/home/${commonUser.name}
-    '';
-    commonPaths = with pkgs; [
-      # -- Basic Required Files --
-      bash # Basic bash to run bare essential code
-      glibcLocalesUtf8
-      uutils-coreutils-noprefix # Essential GNU utilities (ls, cat, etc.)
-    ];
-
     cassini = import (workspaceRoot + /cassini/package.nix) {
       inherit pkgs craneLib workspaceFileset nix-container-lib inputs system;
-      crateArgs = commonArgs // {
-        inherit (craneLib.crateNameFromCargoToml { inherit src; }) version;
-        doCheck = false;
-      };
+      crateArgs = individualCrateArgs;
     };
 
     gitlabAgent = import (workspaceRoot + /gitlab/package.nix) {
@@ -132,9 +100,8 @@ let
       crateArgs = individualCrateArgs;
     };
 
-    # Add these imports alongside the existing ones
     jiraAgent = import ./jira/package.nix {
-      inherit pkgs craneLib workspaceFileset cargoArtifacts nix-container-lib inputs system;
+      inherit pkgs craneLib workspaceFileset nix-container-lib inputs system;
       crateArgs = individualCrateArgs;
     };
 
@@ -145,10 +112,7 @@ let
 
     buildOrchestrator = import ./build-orchestrator/package.nix {
       inherit pkgs craneLib workspaceFileset nix-container-lib inputs system;
-      crateArgs = commonArgs // {
-        inherit (craneLib.crateNameFromCargoToml { inherit src; }) version;
-        doCheck = false;
-      };
+      crateArgs = individualCrateArgs;
     };
 in
 {
