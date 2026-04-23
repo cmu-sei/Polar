@@ -37,6 +37,7 @@ def main [] {
             ($layers | path join "3-workloads/agents/provenance/main.nu")
             ($layers | path join "3-workloads/agents/build/main.nu")
             ($layers | path join "3-workloads/agents/scheduler/main.nu")
+            ($layers | path join "3-workloads/agents/openapi/main.nu")
         ]
 
         apply_order : [
@@ -71,13 +72,16 @@ def main [] {
             "git-consumer.yaml"
             "git-scheduler.yaml"
             "jira-observer.yaml"
-            "jira-consumer.yaml"
+            "jira-processor.yaml"
             "provenance-linker.yaml"
             "provenance-resolver.yaml"
             "build-orchestrator.yaml"
             "build-processor.yaml"
             "scheduler-observer.yaml"
             "scheduler-processor.yaml"
+            "openapi-agent-cert.yaml"
+            "openapi-observer.yaml"
+            "openapi-processor.yaml"
         ]
 
         neo4j_bolt_addr      : "bolt+s://polar-db-svc.polar-graph.svc.cluster.local:7687"

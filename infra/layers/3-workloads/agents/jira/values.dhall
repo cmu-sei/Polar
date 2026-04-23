@@ -2,7 +2,7 @@
 --
 -- Canonical defaults for the jira agent chart.
 -- Observer polls Jira REST API and publishes to Cassini topics.
--- Consumer reads Cassini topics and writes to the graph.
+-- Processor reads Cassini topics and writes to the graph.
 --
 -- Required secrets (in secrets/workloads/agents/jira/):
 --   jira-secret: contains JIRA_TOKEN
@@ -15,13 +15,13 @@ in  { name            = "jira-agents"
 
     , observer =
       { name    = "jira-observer"
-      , image   = "polar-jira-observer:latest"
+      , image   = "jira-observer:latest"
       , jiraUrl = "https://jira.example.com"
       }
 
-    , consumer =
-      { name  = "jira-consumer"
-      , image = "polar-jira-consumer:latest"
+    , processor =
+      { name  = "jira-processor"
+      , image = "jira-processor:latest"
       }
 
     , tls =

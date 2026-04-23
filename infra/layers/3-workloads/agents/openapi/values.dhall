@@ -1,11 +1,8 @@
 -- infra/layers/3-workloads/agents/openapi/values.dhall
 --
--- Canonical defaults for the openapi (web) agent chart.
--- Observer polls OpenAPI endpoints, consumer writes to graph.
---
--- STATUS: Work in progress. Not yet wired into any target.
--- This file is a placeholder — values will be filled in when
--- the agent is ready for deployment.
+-- Canonical defaults for the openapi agent chart.
+-- Observer fetches OpenAPI specs and publishes to Cassini.
+-- Processor reads Cassini topics and writes to the graph.
 
 let Constants = ../../../../schema/constants.dhall
 
@@ -14,13 +11,14 @@ in  { name            = "openapi-agents"
     , imagePullSecrets = [] : List { name : Optional Text }
 
     , observer =
-      { name  = "web-observer"
-      , image = "polar-web-observer:latest"
+      { name            = "openapi-observer"
+      , image           = "openapi-observer:latest"
+      , openapiEndpoint = "http://localhost:3000/api-docs/openapi.json"
       }
 
-    , consumer =
-      { name  = "web-consumer"
-      , image = "polar-web-consumer:latest"
+    , processor =
+      { name  = "openapi-processor"
+      , image = "openapi-processor:latest"
       }
 
     , tls =
@@ -34,6 +32,4 @@ in  { name            = "openapi-agents"
         , secretName  = "openapi-agent-tls"
         }
       }
-
-    , proxyCACert = None Text
     }

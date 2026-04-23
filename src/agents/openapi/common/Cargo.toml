@@ -1,5 +1,5 @@
 [package]
-name = "web-agent-common"
+name = "openapi-common"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

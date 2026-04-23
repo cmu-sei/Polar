@@ -84,6 +84,7 @@ def main [
                 "provenance" => { neo4jBoltAddr: $neo4j_bolt_addr }
                 "build"      => { neo4jBoltAddr: $neo4j_bolt_addr }
                 "scheduler"  => { neo4jBoltAddr: $neo4j_bolt_addr, remoteUrl: $scheduler_remote_url }
+                "openapi"    => { neo4jBoltAddr: $neo4j_bolt_addr }
                 _            => { _placeholder: "" }
             }
         ))

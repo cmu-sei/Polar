@@ -53,7 +53,7 @@ members = [
     "lib",
     "logger",
     "openapi/common",
-    "openapi/consume",
+    "openapi/process",
     "openapi/observe",
     "policy-config",
     "provenance/linker",
@@ -183,7 +183,7 @@ jira_common = { path = "jira/common" }
 kube-common = { path = "kubernetes/common" }
 polar = { path = "lib" }
 provenance-common = { path = "provenance/provenance-common" }
-web-agent-common = { path = "openapi/common" }
+openapi-common = { path = "openapi/common" }
 orchestrator-core = { path = "build-orchestrator/core" }
 orchestrator-backend-k8s = { path = "build-orchestrator/k8s" }
 orchestrator-backend-podman = { path = "build-orchestrator/podman" }

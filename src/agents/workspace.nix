@@ -118,7 +118,7 @@ let
     };
 
     webAgent = import ./openapi/package.nix {
-      inherit pkgs commonPaths craneLib  workspaceFileset cargoArtifacts commonUser;
+      inherit pkgs craneLib workspaceFileset nix-container-lib inputs system;
       crateArgs = individualCrateArgs;
     };
 

@@ -4755,12 +4755,27 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
+name = "openapi-common"
+version = "1.0.0"
+dependencies = [
+ "polar",
+ "ractor",
+ "rkyv",
+ "serde",
+ "tokio",
+ "tracing",
+ "tracing-glog",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "openapi-observer"
 version = "1.0.0"
 dependencies = [
  "cassini-client",
  "cassini-types",
  "native-tls",
+ "openapi-common",
  "polar",
  "ractor",
  "reqwest",
@@ -4770,7 +4785,31 @@ dependencies = [
  "tokio",
  "tracing",
  "utoipa",
- "web-agent-common",
+]
+
+[[package]]
+name = "openapi-processor"
+version = "1.0.0"
+dependencies = [
+ "cassini-client",
+ "cassini-types",
+ "futures-lite",
+ "neo4rs",
+ "openapi-common",
+ "polar",
+ "ractor",
+ "reqwest",
+ "rkyv",
+ "rustls 0.23.38",
+ "rustls-webpki 0.103.13",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+ "utoipa",
+ "webpki-roots",
 ]
 
 [[package]]
@@ -7940,45 +7979,6 @@ dependencies = [
  "hashbrown 0.15.5",
  "indexmap 2.14.0",
  "semver",
-]
-
-[[package]]
-name = "web-agent-common"
-version = "1.0.0"
-dependencies = [
- "polar",
- "ractor",
- "rkyv",
- "serde",
- "tokio",
- "tracing",
- "tracing-glog",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "web-consumer"
-version = "1.0.0"
-dependencies = [
- "cassini-client",
- "cassini-types",
- "futures-lite",
- "neo4rs",
- "polar",
- "ractor",
- "reqwest",
- "rkyv",
- "rustls 0.23.38",
- "rustls-webpki 0.103.13",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "url",
- "utoipa",
- "web-agent-common",
- "webpki-roots",
 ]
 
 [[package]]

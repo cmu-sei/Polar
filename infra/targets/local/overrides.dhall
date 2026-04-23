@@ -24,27 +24,27 @@
 
 , jira =
   { imagePullSecrets = [] : List { name : Optional Text }
-  , observer = { image = "polar-jira-observer:latest" }
-  , consumer = { image = "polar-jira-consumer:latest" }
+  , observer  = { image = "jira-observer:latest" }
+  , processor = { image = "jira-processor:latest" }
   }
 
 , gitlab =
   { imagePullSecrets = [] : List { name : Optional Text }
-  , observer = { image = "polar-gitlab-observer:latest" }
-  , consumer = { image = "polar-gitlab-consumer:latest" }
+  , observer = { image = "gitlab-observer:latest" }
+  , consumer = { image = "gitlab-consumer:latest" }
   }
 
 , kube =
   { imagePullSecrets = [] : List { name : Optional Text }
-  , observer = { image = "polar-kube-observer:latest" }
-  , consumer = { image = "polar-kube-consumer:latest" }
+  , observer = { image = "kube-observer:latest" }
+  , consumer = { image = "kube-consumer:latest" }
   }
 
 , git =
   { imagePullSecrets = [] : List { name : Optional Text }
-  , observer  = { image = "polar-git-repo-observer:latest" }
-  , consumer  = { image = "polar-git-consumer:latest" }
-  , scheduler = { image = "polar-git-scheduler:latest" }
+  , observer  = { image = "git-observer:latest" }
+  , consumer  = { image = "git-processor:latest" }
+  , scheduler = { image = "git-scheduler:latest" }
   }
 
 , provenance =
@@ -63,5 +63,11 @@
   { imagePullSecrets = [] : List { name : Optional Text }
   , observer  = { image = "polar-scheduler-observer:latest" }
   , processor = { image = "polar-scheduler-processor:latest" }
+  }
+
+, openapi =
+  { imagePullSecrets = [] : List { name : Optional Text }
+  , observer  = { image = "openapi-observer:latest", openapiEndpoint = "http://localhost:3000/api-docs/openapi.json" }
+  , processor = { image = "openapi-processor:latest" }
   }
 }

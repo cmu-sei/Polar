@@ -17,4 +17,8 @@ serde.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 utoipa.workspace = true
-web-agent-common.workspace = true
+openapi-common.workspace = true
+
+[[bin]]
+name = "openapi-observer"
+path = "src/main.rs"

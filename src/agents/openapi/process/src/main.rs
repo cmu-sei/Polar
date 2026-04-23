@@ -22,19 +22,19 @@
 */
 use ractor::Actor;
 use std::error::Error;
-use web_consumer::actors::{ConsumerSupervisor, ConsumerSupervisorArgs};
+use openapi_processor::actors::{ConsumerSupervisor, ConsumerSupervisorArgs};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    polar::init_logging("polar.openapi.observer.supervisor".to_string());
+    polar::init_logging("polar.openapi.processor.supervisor".to_string());
 
     let (_, handle) = Actor::spawn(
-        Some("polar.openapi.observer.supervisor".to_string()),
+        Some("polar.openapi.processor.supervisor".to_string()),
         ConsumerSupervisor,
         ConsumerSupervisorArgs,
     )
     .await
-    .expect("Expected to start observer agent");
+    .expect("Expected to start processor agent");
     let _ = handle.await;
 
     Ok(())

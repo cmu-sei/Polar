@@ -63,8 +63,8 @@ build-all:
         ".#packages.{{platform}}.gitlabConsumerImage" \
         ".#packages.{{platform}}.kubeObserverImage" \
         ".#packages.{{platform}}.kubeConsumerImage" \
-        #".#packages.{{platform}}.webObserverImage" \
-        ".#packages.{{platform}}.webConsumerImage" \
+        ".#packages.{{platform}}.openApiObserverImage" \
+        ".#packages.{{platform}}.openApiProcessorImage" \
         ".#packages.{{platform}}.provenanceLinkerImage" \
         ".#packages.{{platform}}.provenanceResolverImage" \
         ".#packages.{{platform}}.schedulerProcessorImage" \
@@ -242,32 +242,32 @@ git-agents target='all':
         *) echo "Unknown target: {{target}}. Use all, observer, consumer, or scheduler." && exit 1 ;;
     esac
 
-# ── Web (OpenAPI) agents ──────────────────────────────────────────────────────
+# ── OpenAPI agents ────────────────────────────────────────────────────────────
 
-# Build web/openapi agent images
-# Usage: just web               (all)
-#        just web observer
-#        just web consumer
-web target='all':
+# Build openapi agent images
+# Usage: just openapi               (all)
+#        just openapi observer
+#        just openapi processor
+openapi target='all':
     #!/usr/bin/env bash
     set -euo pipefail
     base=".#packages.{{platform}}.polarPkgs.webAgent"
     case "{{target}}" in
         all)
-            nix build {{_nix_flags}} "$base.observerImage" -o result-web-observer
-            nix build {{_nix_flags}} "$base.consumerImage" -o result-web-consumer
-            podman load -i result-web-observer
-            podman load -i result-web-consumer
+            nix build {{_nix_flags}} "$base.observerImage"  -o result-openapi-observer
+            nix build {{_nix_flags}} "$base.processorImage" -o result-openapi-processor
+            podman load -i result-openapi-observer
+            podman load -i result-openapi-processor
             ;;
         observer)
-            nix build {{_nix_flags}} "$base.observerImage" -o result-web-observer
-            podman load -i result-web-observer
+            nix build {{_nix_flags}} "$base.observerImage" -o result-openapi-observer
+            podman load -i result-openapi-observer
             ;;
-        consumer)
-            nix build {{_nix_flags}} "$base.consumerImage" -o result-web-consumer
-            podman load -i result-web-consumer
+        processor)
+            nix build {{_nix_flags}} "$base.processorImage" -o result-openapi-processor
+            podman load -i result-openapi-processor
             ;;
-        *) echo "Unknown target: {{target}}. Use all, observer, or consumer." && exit 1 ;;
+        *) echo "Unknown target: {{target}}. Use all, observer, or processor." && exit 1 ;;
     esac
 
 # ── Provenance agents ─────────────────────────────────────────────────────────
@@ -1044,8 +1044,8 @@ kind-load-agents agent='all':
             ;;
         web)
             just web all
-            load ./result-web-observer
-            load ./result-web-consumer
+            load ./result-openapi-observer
+            load ./result-openapi-processor
             ;;
         provenance)
             just provenance all

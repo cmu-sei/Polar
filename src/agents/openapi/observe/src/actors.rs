@@ -15,7 +15,7 @@ use reqwest::Client;
 use tracing::debug;
 use tracing::info;
 use tracing::warn;
-use web_agent_common::AppData;
+use openapi_common::AppData;
 
 pub struct ObserverSupervisor;
 

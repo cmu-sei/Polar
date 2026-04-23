@@ -11,7 +11,7 @@ def main [context_nuon: string] {
     mkdir $output_dir
 
     let values_path = ($chart_dir | path join "values.dhall")
-    let merged      = "let v = " + $values_path + " in let o = (" + $overrides + ").jira in v // { imagePullSecrets = o.imagePullSecrets, observer = v.observer // o.observer, consumer = v.consumer // o.consumer }"
+    let merged      = "let v = " + $values_path + " in let o = (" + $overrides + ").jira in v // { imagePullSecrets = o.imagePullSecrets, observer = v.observer // o.observer, processor = v.processor // o.processor }"
     let tls_secret  = "jira-agent-tls"
 
     let tmp  = (mktemp --suffix ".dhall")
@@ -33,10 +33,10 @@ def main [context_nuon: string] {
     rm $tmp
 
     let tmp  = (mktemp --suffix ".dhall")
-    let expr = $base + $chart_dir + "/consumer.dhall { name = v.consumer.name, image = v.consumer.image, imagePullPolicy = v.imagePullPolicy, imagePullSecrets = v.imagePullSecrets" + $neo + $tls
+    let expr = $base + $chart_dir + "/processor.dhall { name = v.processor.name, image = v.processor.image, imagePullPolicy = v.imagePullPolicy, imagePullSecrets = v.imagePullSecrets" + $neo + $tls
     $expr | save --force $tmp
-    print $"  rendering consumer.dhall -> jira-consumer.yaml"
-    dhall-to-yaml --documents --file $tmp | save --force ($output_dir | path join "jira-consumer.yaml")
+    print $"  rendering processor.dhall -> jira-processor.yaml"
+    dhall-to-yaml --documents --file $tmp | save --force ($output_dir | path join "jira-processor.yaml")
     rm $tmp
 
     print $"  jira: done"

@@ -144,8 +144,8 @@
           kubeConsumerImage    = polarPkgs.kubeAgent.consumerImage;
 
           # ── Web (OpenAPI) agent ───────────────────────────────────────────────
-          webObserverImage     = polarPkgs.webAgent.observerImage;
-          webConsumerImage     = polarPkgs.webAgent.consumerImage;
+          openApiObserverImage  = polarPkgs.webAgent.observerImage;
+          openApiProcessorImage = polarPkgs.webAgent.processorImage;
 
           # ── Provenance agent ─────────────────────────────────────────────────
           provenanceLinkerImage   = polarPkgs.provenance.linkerImage;

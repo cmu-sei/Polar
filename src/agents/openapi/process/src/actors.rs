@@ -1,5 +1,5 @@
 use crate::BROKER_CLIENT_NAME;
-use crate::WEB_CONSUMER_NAME;
+use crate::OPENAPI_PROCESSOR_NAME;
 use cassini_client::TCPClientConfig;
 use cassini_client::*;
 use cassini_types::ClientEvent;
@@ -19,7 +19,7 @@ use tracing::info;
 use tracing::warn;
 use utoipa::openapi::Deprecated;
 use utoipa::openapi::OpenApi;
-use web_agent_common::AppData;
+use openapi_common::AppData;
 
 /// The supervisor for our consumer actors
 pub struct ConsumerSupervisor;
@@ -100,7 +100,7 @@ impl Actor for ConsumerSupervisor {
             SupervisorMessage::ClientEvent { event } => match event {
                 ClientEvent::Registered { .. } => {
                     match Actor::spawn_linked(
-                        Some(WEB_CONSUMER_NAME.to_string()),
+                        Some(OPENAPI_PROCESSOR_NAME.to_string()),
                         ApiConsumer,
                         (),
                         myself.get_cell(),
@@ -112,7 +112,7 @@ impl Actor for ConsumerSupervisor {
                             state
                                 .cassini_client
                                 .send_message(TcpClientMessage::Subscribe {
-                                    topic: WEB_CONSUMER_NAME.to_string(),
+                                    topic: OPENAPI_PROCESSOR_NAME.to_string(),
                                     trace_ctx: WireTraceCtx::from_current_span(),
                                 })
                                 .map_err(|e| {
