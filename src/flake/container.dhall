@@ -35,6 +35,7 @@ let polarExtras =
     , Lib.nixpkgs "curl"
     , Lib.nixpkgs "dhall"
     , Lib.nixpkgs "dhall-json"
+    , Lib.nixpkgs "dhall-nix"
     ]
 
 -- ---------------------------------------------------------------------------

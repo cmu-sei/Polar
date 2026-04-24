@@ -48,6 +48,7 @@
           { attrPath = "curl"; flakeInput = null; }
           { attrPath = "dhall"; flakeInput = null; }
           { attrPath = "dhall-json"; flakeInput = null; }
+          { attrPath = "dhall-nix"; flakeInput = null; }
         ];
       })
   ];
