@@ -179,14 +179,7 @@ def generate-workspace-sboms [
     }
 
     # cargo-cyclonedx just throws sboms in each package's crate root. So we have to move them all to our artifact directory.
-    let move_result = (
-        bash -c $"find ($ws_root) -type f -name '*.cdx.json' | while read -r sbom; do mv \"$sbom\" \"($artifact_dir)/$\(basename \"$sbom\"\)\"; done" | complete
-    )
-
-    if $move_result.exit_code != 0 {
-        log-warn $"failed to move SBOMs: ($move_result.stdout)" --component $COMPONENT
-        return []
-    }
+    glob $"($ws_root)/**/*.cdx.json" | each { |sbom| mv $sbom ($artifact_dir | path join ($sbom | path basename)); null }
 
     # Now read whatever landed in artifact_dir.
     return (

@@ -1,7 +1,7 @@
 -- src/agents/gitlab/container-observer.dhall
 let Lib =
-      https://raw.githubusercontent.com/daveman1010221/nix-container-lib/d8703888ed01e53b30cb093d15e13c0566df6384/dhall/prelude.dhall
-        sha256:f75818ad203cb90a5e5921b75cd60bcb66ac5753cf7eba976538bf71e855378c
+      https://raw.githubusercontent.com/daveman1010221/nix-container-lib/e2334448bd4bb6348a467244d474f907d3d0e36d/dhall/prelude.dhall
+        sha256:b81e69ef2fe811bc853a8a9a0202c0af802f7cd53c78f95f67083bf3dceee86b
 
 let defaults = Lib.defaults
 

@@ -69,10 +69,6 @@
         # Regenerate with: cd src/flake && just render-dev
         container = mkPolarContainer ./src/flake/container.nix;
 
-        # ── CI container ──────────────────────────────────────────────────────
-        # Regenerate with: cd src/flake && just render-ci
-        ciContainer = mkPolarContainer ./src/flake/ci-container.nix;
-
         # ── Agent containers ───────────────────────────────────────────────────
         # Regenerate with: cd src/flake && just render-agent
         mkAgentContainer = llamaCppPkg: extraPkgs:
@@ -124,7 +120,6 @@
 
           # ── Dev / CI / Agent containers ──────────────────────────────────────
           devContainer         = container.image;
-          ciContainer          = ciContainer.image;
           agentContainer       = (mkAgentContainer pkgs.llama-cpp pkgs.stdenv.cc).image;
           agentContainerRocm   = (mkAgentContainer pkgs.llama-cpp-rocm pkgs.stdenv.cc).image;
           agentContainerVulkan = (mkAgentContainer pkgs.llama-cpp-vulkan pkgs.stdenv.cc).image;
