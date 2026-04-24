@@ -6,7 +6,7 @@ let Constants = ../../types/constants.dhall
 
 let functions = ../../types/functions.dhall
 
-let values = ../values-active.dhall
+let values = ../values.dhall
 
 let linker = values.linker
 

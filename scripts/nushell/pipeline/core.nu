@@ -714,7 +714,7 @@ export def build-scan-upload [
             let base_ref = ($upload.remote_ref
                 | str replace "docker://" ""
                 | parse "{repo}:{tag}"
-                | get -i 0
+                | get -o 0
                 | default { repo: "" }
                 | get repo)
             let digest_ref = $"($base_ref)@($upload.digest)"
