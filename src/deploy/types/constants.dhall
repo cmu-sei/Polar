@@ -174,7 +174,7 @@ let ProvenanceLinkerName = "provenance-linker"
 let ProvenanceResolverName = "provenance-resolver"
 
 let OciRegistrySecret =
-      { name = "oci-registry-auth", value = env:DOCKER_AUTH_JSON as Text }
+      { name = "oci-registry-auth", value = env:DOCKER_AUTH_JSON as Text ? "someJson" }
 
 let neo4jCredentialSecret = kubernetes.Secret::{
       apiVersion = "v1"

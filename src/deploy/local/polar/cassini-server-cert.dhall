@@ -1,6 +1,6 @@
 let Constants = ../../types/constants.dhall
 
-let values = ../values-active.dhall
+let values = ../values.dhall
 
 let ServerCertificate = { apiVersion = "cert-manager.io/v1"
 , kind = "Certificate"

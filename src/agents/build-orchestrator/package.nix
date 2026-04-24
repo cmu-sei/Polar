@@ -31,8 +31,6 @@ let
         CYCLOPS_REPO_URL
         CYCLOPS_COMMIT_SHA
         CYCLOPS_WORKSPACE
-        GIT_USERNAME
-        GIT_PASSWORD
       )
       for var in "''${required_vars[@]}"; do
         if [[ -z "''${!var:-}" ]]; then
@@ -50,17 +48,6 @@ let
       echo "[clone] commit: $CYCLOPS_COMMIT_SHA"
       echo "[clone] dest:   $CYCLOPS_WORKSPACE"
 
-      askpass_script=/tmp/git-askpass.sh
-      cat > "$askpass_script" << 'ASKPASS'
-      #!/bin/sh
-      case "$1" in
-        *Username*) echo "$GIT_USERNAME" ;;
-        *Password*) echo "$GIT_PASSWORD" ;;
-      esac
-      ASKPASS
-      chmod 700 "$askpass_script"
-
-      export GIT_ASKPASS="$askpass_script"
       export GIT_CONFIG_NOSYSTEM=1
       export HOME=/tmp
 
@@ -90,9 +77,6 @@ let
 
       echo "[clone] checking out $CYCLOPS_COMMIT_SHA..."
       git checkout "$CYCLOPS_COMMIT_SHA"
-
-      rm -f "$askpass_script"
-      unset GIT_ASKPASS GIT_USERNAME GIT_PASSWORD
 
       rm -rf "$CYCLOPS_WORKSPACE/.git"
 
