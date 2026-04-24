@@ -248,11 +248,11 @@
         "vigil-rs": "vigil-rs"
       },
       "locked": {
-        "lastModified": 1776991422,
-        "narHash": "sha256-UefqaTCSSlhRuBldfqjO+YqC/BVxGj99XQ7Typ/lD9E=",
+        "lastModified": 1777040183,
+        "narHash": "sha256-4wx7378I6bs/TIFTJFarTcnmpz4fz27uiG70LGgM2tg=",
         "owner": "daveman1010221",
         "repo": "nix-container-lib",
-        "rev": "1d33798e2764db180f9ec0e3977397a52178c717",
+        "rev": "d8703888ed01e53b30cb093d15e13c0566df6384",
         "type": "github"
       },
       "original": {
@@ -440,11 +440,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1776981538,
-        "narHash": "sha256-YtZneo5P25P3GMdoyl2ZhSFZ0bbNxAhHXTi2/VlFc10=",
+        "lastModified": 1777032432,
+        "narHash": "sha256-S53G3Taw1Jtq4wbYFewl5xUMrU5Kcu/kbVShKpoDjRw=",
         "owner": "daveman1010221",
         "repo": "uutils-micro",
-        "rev": "3256633184eed9b23784fbea442b684ae0d3b8f0",
+        "rev": "2fbe3486699c56ca9782a3dfbe43bfae02c5a956",
         "type": "github"
       },
       "original": {

@@ -24,9 +24,13 @@
   };
   packageLayers = [
     (u:
+      u.Micro)
+    (u:
       u.Core)
     (u:
       u.InteractiveDev)
+    (u:
+      u.RustToolchain)
     (u:
       u.Custom {
         name = "polar-extras";
@@ -40,6 +44,10 @@
           { attrPath = "rage"; flakeInput = null; }
           { attrPath = "cosign"; flakeInput = null; }
           { attrPath = "default"; flakeInput = "cassini-client"; }
+          { attrPath = "git"; flakeInput = null; }
+          { attrPath = "curl"; flakeInput = null; }
+          { attrPath = "dhall"; flakeInput = null; }
+          { attrPath = "dhall-json"; flakeInput = null; }
         ];
       })
   ];

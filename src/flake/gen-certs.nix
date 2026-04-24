@@ -182,23 +182,40 @@ EOF
   '';
 
   installPhase = ''
-    BASIC_DIR=$(find /build -maxdepth 3 -name "profile.py" -path "*/basic/*" | head -1 | xargs dirname)
-    cd "$BASIC_DIR"
-
+    # Debug: what's actually here?
+    ls -la
+    ls -la basic/ || echo "no basic/"
+    ls -la result/ || echo "no result/"
+    
+    # Try using the actual structure — if the build generated things in-place
+    # under the source tree, the paths from the build log should work
+    cd basic 2>/dev/null || cd tls-gen/basic 2>/dev/null || true
+    
     # ── Cassini certs ─────────────────────────────────────────────────────────
     mkdir -p $out/ca_certificates
     mkdir -p $out/server
     mkdir -p $out/client
-    cp result/ca*     $out/ca_certificates/
-    cp result/client* $out/client/
-    cp result/server* $out/server/
+    cp result/ca*     $out/ca_certificates/ 2>/dev/null || \
+    cp basic/result/ca* $out/ca_certificates/ 2>/dev/null || \
+    cp */result/ca* $out/ca_certificates/
+    
+    cp result/client* $out/client/ 2>/dev/null || \
+    cp basic/result/client* $out/client/
+    
+    cp result/server* $out/server/ 2>/dev/null || \
+    cp basic/result/server* $out/server/
 
-    # ── Neo4j certs (own CA, clean DNs) ──────────────────────────────────────
+    # ── Neo4j certs ──────────────────────────────────────────────────────────
     mkdir -p $out/neo4j
-    cp server_neo4j/cert.pem     $out/neo4j/server_neo4j_certificate.pem
-    cp server_neo4j/key.pem      $out/neo4j/server_neo4j_key.pem
-    cp client_neo4j/cert.pem     $out/neo4j/client_neo4j_certificate.pem
-    cp client_neo4j/key.pem      $out/neo4j/client_neo4j_key.pem
-    cp neo4j_ca/cacert.pem       $out/neo4j/ca_certificate.pem
+    cp server_neo4j/cert.pem     $out/neo4j/server_neo4j_certificate.pem 2>/dev/null || \
+    cp */server_neo4j/cert.pem   $out/neo4j/server_neo4j_certificate.pem
+    cp server_neo4j/key.pem      $out/neo4j/server_neo4j_key.pem 2>/dev/null || \
+    cp */server_neo4j/key.pem    $out/neo4j/server_neo4j_key.pem
+    cp client_neo4j/cert.pem     $out/neo4j/client_neo4j_certificate.pem 2>/dev/null || \
+    cp */client_neo4j/cert.pem   $out/neo4j/client_neo4j_certificate.pem
+    cp client_neo4j/key.pem      $out/neo4j/client_neo4j_key.pem 2>/dev/null || \
+    cp */client_neo4j/key.pem    $out/neo4j/client_neo4j_key.pem
+    cp neo4j_ca/cacert.pem       $out/neo4j/ca_certificate.pem 2>/dev/null || \
+    cp */neo4j_ca/cacert.pem     $out/neo4j/ca_certificate.pem
   '';
 }
