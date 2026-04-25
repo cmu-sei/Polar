@@ -4,7 +4,7 @@
 -- A minimal nushell runtime with local LLM inference via llama.cpp (ROCm).
 --
 
-let Lib = ../containers/contaienr-lib.dhall
+let Lib = ../containers/container-lib.dhall
 
 let defaults = Lib.defaults
 

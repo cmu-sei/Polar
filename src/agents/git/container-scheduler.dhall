@@ -1,6 +1,6 @@
 -- src/agents/git/container-scheduler.dhall
 
-let Lib = ../containers/contaienr-lib.dhall
+let Lib = ../containers/container-lib.dhall
 
 let defaults = Lib.defaults
 

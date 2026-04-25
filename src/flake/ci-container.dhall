@@ -5,7 +5,7 @@
 -- The same pipeline definition as the dev container guarantees that what
 -- runs locally and what runs in CI are identical.
 
-let Lib = ../containers/contaienr-lib.dhall
+let Lib = ../containers/container-lib.dhall
 let defaults = Lib.defaults
 
 -- ---------------------------------------------------------------------------

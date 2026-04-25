@@ -3,7 +3,7 @@
 -- Minimal OCI container for the jira-processor binary.
 
 
-let Lib = ../containers/contaienr-lib.dhall
+let Lib = ../containers/container-lib.dhall
 
 let defaults = Lib.defaults
 
