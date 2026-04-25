@@ -132,6 +132,15 @@ def elapsed-ms [start: datetime]: nothing -> int {
 # Logging
 # ---------------------------------------------------------------------------
 
+# ANSI helpers — used only for static analysis terminal output.
+# TODO: Consider moving to the core library
+# TODO: It would also be interesting if log fns could use this
+export def green  [msg: string] { $"(ansi green)($msg)(ansi reset)" }
+export def red    [msg: string] { $"(ansi red)($msg)(ansi reset)" }
+export def yellow [msg: string] { $"(ansi yellow)($msg)(ansi reset)" }
+export def bold   [msg: string] { $"(ansi attr_bold)($msg)(ansi reset)" }
+
+# Private log fn, we label all logs with some level of importance
 def log [level: string, msg: string, --component: string = ""] {
     let ts = (date now | format date "%Y-%m-%dT%H:%M:%S%.3fZ")
     print $"($ts) [($level)] ($component) — ($msg)"
@@ -146,57 +155,128 @@ export def log-debug [msg: string, --component: string = ""] { log "DEBUG" $msg 
 # Cassini
 # ---------------------------------------------------------------------------
 
-# Start the cassini-client daemon as a background job and wait for it
-# # to be ready. Sets CASSINI_DAEMON_SOCK in the environment so all
-# # subsequent cassini-client invocations find the socket automatically.
-# # Returns the job id so the caller can stop it cleanly on exit.
+# ---------------------------------------------------------------------------
+# Cassini daemon lifecycle
+#
+# The cassini-client daemon re-execs itself as an orphan process when called
+# with --daemon (no --foreground). The parent invocation returns immediately;
+# the child is adopted by PID 1 and runs independently of this script.
+#
+# Consequences for lifetime management:
+#   - Nu's job system cannot track or kill the daemon — it never owned it.
+#   - The daemon writes its own PID file at <socket>.pid before accepting
+#     connections (resolved by Rust's resolve_pid_path: socket.with_extension("pid")).
+#   - The daemon's SIGTERM handler removes both the socket and PID file on exit.
+#   - Stopping = sending SIGTERM to the PID in the PID file.
+#
+# The "already running" path is the normal case in a warm CI environment.
+# start-cassini-daemon is idempotent: if the socket is reachable it returns
+# a sentinel (-1) and stop-cassini-daemon treats -1 as a no-op.
+# ---------------------------------------------------------------------------
+
 export def start-cassini-daemon [
     --socket: string = "/tmp/cassini-pipeline.sock"
-    --timeout: int = 30
+    --timeout: int   = 30
 ]: nothing -> int {
-    # If a daemon is already reachable at the socket, don't start another.
-    let status = (try { cassini-client --socket $socket status | complete } catch { { exit_code: 1 } })
-    if $status.exit_code == 0 {
+    # Probe first — if reachable, reuse the running daemon.
+    # status exits 0 when the daemon responds; non-zero or exception means absent/stale.
+    let probe = (try { ^cassini-client --socket $socket status | complete } catch { { exit_code: 1 } })
+    if $probe.exit_code == 0 {
         log-info "cassini daemon already running, reusing" --component "cassini"
         $env.CASSINI_DAEMON_SOCK = $socket
-        return 1  # sentinel: we didn't start it, don't stop it
+        return (-1)   # sentinel: caller must NOT signal this daemon on exit
+    }
+
+    # Remove a stale socket if one exists — the daemon won't start if it finds
+    # a socket file it didn't create.
+    if ($socket | path exists) {
+        log-warn $"removing stale cassini socket at ($socket)" --component "cassini"
+        rm -f $socket
     }
 
     log-info $"starting cassini daemon at ($socket)" --component "cassini"
 
-    let job_id = (job spawn {
-        cassini-client --daemon --foreground --socket $socket
-    })
+    # --daemon causes the Rust process to re-exec itself with --foreground and
+    # then exit. The child is detached (stdin/stdout/stderr → /dev/null) and
+    # adopted by PID 1. This call returns almost immediately.
+    ^cassini-client --daemon --socket $socket
 
-    # Poll until the socket is accepting commands or we time out.
+    # Poll the socket until the daemon is accepting connections or we time out.
+    # Each iteration is 500ms; total attempts = timeout * 2.
     let ready = (
-        0..($timeout * 2)  # 500ms steps
+        0..($timeout * 2)
         | each {|_|
-            let probe = (try { cassini-client --socket $socket status | complete } catch { { exit_code: 1 } })
-            if $probe.exit_code == 0 { true } else { sleep 500ms; false }
+            let check = (try { ^cassini-client --socket $socket status | complete } catch { { exit_code: 1 } })
+            if $check.exit_code == 0 {
+                true
+            } else {
+                sleep 500ms
+                false
+            }
         }
         | any { $in == true }
     )
 
     if not $ready {
         log-error $"cassini daemon did not become ready within ($timeout)s" --component "cassini"
-        job kill $job_id
+        # Best-effort cleanup — the process may not have written its PID yet.
+        let pid_file = ($socket | path parse | update extension "pid" | path join)
+        if ($pid_file | path exists) {
+            let pid = (try { open --raw $pid_file | str trim | into int } catch { 0 })
+            if $pid > 0 { try { ^kill $pid } catch {} }
+        }
         error make { msg: "cassini daemon startup timeout" }
     }
 
     $env.CASSINI_DAEMON_SOCK = $socket
     log-info "cassini daemon ready" --component "cassini"
-    $job_id
+
+    # Return the PID so stop-cassini-daemon can signal the orphan process.
+    # We read it from the PID file the daemon wrote rather than tracking a
+    # Nu job ID, which would be meaningless for a detached process.
+    let pid_file = ($socket | path parse | update extension "pid" | path join)
+    let pid = (try { open --raw $pid_file | str trim | into int } catch { 0 })
+    if $pid == 0 {
+        log-warn "could not read cassini daemon PID — stop-cassini-daemon will be a no-op" --component "cassini"
+    }
+    $pid
 }
 
-# Stop the daemon job started by start-cassini-daemon.
-# Pass -1 if you didn't start it (reused an existing daemon) and this is a no-op.
-export def stop-cassini-daemon [job_id: int] {
-    if $job_id == -1 { return }
-    log-info "stopping cassini daemon" --component "cassini"
-    try { cassini-client status | complete } catch {}  # flush in-flight
-    job kill $job_id
+# Stop the cassini daemon started by start-cassini-daemon.
+#
+# Pass -1 (the "reused existing daemon" sentinel) to make this a no-op —
+# we must not kill a daemon we didn't start.
+#
+# For a daemon we did start, sends SIGTERM. The daemon's signal handler
+# disconnects from the broker cleanly and removes the socket + PID file.
+# We wait up to 3s for the socket to disappear as confirmation.
+export def stop-cassini-daemon [pid: int, --socket: string = "/tmp/cassini-pipeline.sock"] {
+    if $pid == -1 { return }
+    if $pid == 0  {
+        log-warn "stop-cassini-daemon: no valid PID, skipping" --component "cassini"
+        return
+    }
+
+    log-info $"stopping cassini daemon (pid ($pid))" --component "cassini"
+
+    try { ^kill $pid } catch {|e|
+        log-warn $"could not send SIGTERM to cassini daemon: ($e.msg)" --component "cassini"
+        return
+    }
+
+    # Wait for the socket to disappear — the daemon's signal handler removes
+    # it as part of clean shutdown. If it's still present after 3s something
+    # went wrong, but there's nothing more we can do.
+    let gone = (
+        1..6
+        | each {|_| sleep 500ms; not ($socket | path exists) }
+        | any { $in == true }
+    )
+    if not $gone {
+        log-warn "cassini socket still present after SIGTERM — daemon may not have exited cleanly" --component "cassini"
+    }
 }
+
 
 # ---------------------------------------------------------------------------
 # Cassini provenance emission
@@ -213,9 +293,7 @@ export def emit [subject_suffix: string, payload: record] {
     # cassini-client publish goes here
     let payload = ($envelope | to json --raw)
 
-    log-debug ($payload | to json --indent 2)
-
-    # cassini-client publish $"($SUBJECT_PREFIX).($subject_suffix)" $payload
+    cassini-client publish $"($SUBJECT_PREFIX).($subject_suffix)" $payload
 }
 
 # ---------------------------------------------------------------------------
@@ -642,137 +720,6 @@ export def upload-image [
     { remote_ref: $remote_ref, digest: $digest, name: $label }
 }
 
-
-# ===========================================================================
-# High-level pipeline: build → scan → upload → emit
-#
-# Orchestrates the full lifecycle for a single image. This is the
-# function your project-specific pipeline calls in a loop.
-#
-# Sequence:
-#   1. Build the image tarball (nix build)
-#      → emits container-image.created (OCIArtifact + OCILayer nodes)
-#   2. Generate an SBOM from the tarball (syft)
-#   3. Process the SBOM with OCI metadata for full layer attribution
-#      → emits image-sbom.analyzed (packages + layer CONTAINS edges)
-#   4. Upload to each registry (skopeo copy)
-#   5. Cryptographically sign the image and emit an event upon success.
-#   6. Emit image.linked (ties registry digest to package purl)
-#
-# nix-build-image already extracts OCI metadata and emits
-# container-image.created, so we reuse build.oci_metadata here
-# rather than re-extracting. One tarball crack, used everywhere.
-#
-# `registries` is a list of remote ref templates with `{tag}` placeholder:
-#   ["docker://registry.io/org/myapp:{tag}", "docker://acr.io/myapp:{tag}"]
-# ===========================================================================
-
-export def build-scan-upload [
-    flake_ref: string           # Nix flake reference for the image
-    link_name: string           # Symlink name for nix build output
-    tag: string                 # Image tag (e.g. commit SHA)
-    registries: list<string>    # Remote ref templates with {tag} placeholder
-    artifact_dir: path          # Where to store SBOMs
-    --root_purl: string = ""    # Purl of the root package this image contains
-    --sbom_content_hash: string = ""  # Content hash of the source-level SBOM, if known
-]: nothing -> record {
-    # 1. Build (also extracts OCI metadata + emits container-image.created)
-    let build = (nix-build-image $flake_ref $link_name)
-    if not $build.success {
-        return { success: false, image_name: $link_name }
-    }
-
-    # Reuse the metadata nix-build-image already extracted.
-    # No second tar invocation needed.
-    let oci_metadata = $build.oci_metadata
-
-    # 2. Generate SBOM from the tarball
-    let sbom = (generate-image-sbom $build.tarball $artifact_dir --name $link_name)
-
-    # 3. Process SBOM with OCI metadata for full layer attribution.
-    #    The oci_metadata gives us diff_id → layer order mapping so
-    #    the emitted event carries ordered CONTAINS edges.
-    if $sbom.success {
-        process-image-sbom $sbom.path $link_name --oci_metadata $oci_metadata
-    } else {
-        log-warn $"Skipping SBOM processing for ($link_name) — generation failed" --component "oci"
-    }
-
-    # 4. Upload to each registry
-    let uploads = ($registries | each {|template|
-        let remote_ref = ($template | str replace "{tag}" $tag)
-        upload-image $build.tarball $remote_ref --name $link_name
-    })
-
-    # Sign each uploaded image.
-    # cosign needs the digest ref: registry.io/org/app@sha256:abc...
-    let signed_uploads = ($uploads | each {|upload|
-        if ($upload.digest | is-not-empty) {
-            # Build the digest ref from the remote ref.
-            # remote_ref is "docker://registry.io/org/app:tag"
-            # We need "registry.io/org/app@sha256:abc..."
-            let base_ref = ($upload.remote_ref
-                | str replace "docker://" ""
-                | parse "{repo}:{tag}"
-                | get -o 0
-                | default { repo: "" }
-                | get repo)
-            let digest_ref = $"($base_ref)@($upload.digest)"
-
-            let sign_result = (sign-image $digest_ref --name $upload.name)
-
-            if $sign_result.success {
-                emit "image.signed" {
-                    image_digest: $upload.digest
-                    remote_ref: $upload.remote_ref
-                    image_name: $link_name
-                    signing_key_ref: ($env.COSIGN_KEY? | default "")
-                    config_digest: $oci_metadata.config_digest
-                }
-            }
-
-            $upload | insert signed $sign_result.success
-        } else {
-            log-warn $"Failed to sign artifact \"($upload.remote_ref)\", no digest available!" --component "oci"
-            $upload | insert signed false
-        }
-    })
-
-    # 5. Emit image.linked for each upload that produced a digest.
-    #    This ties the registry-side manifest digest to the root
-    #    package purl, closing the chain:
-    #      (OCIArtifact {digest})-[:BUILT_FROM]->(Package {purl})
-    #
-    #    The OCIArtifact and OCILayer nodes already exist from the
-    #    container-image.created event in step 1. This event adds
-    #    the package linkage and registry URI.
-    let has_oci = ($oci_metadata | get -o success | default false)
-    for upload in $uploads {
-        if ($upload.digest | is-not-empty) and ($root_purl | is-not-empty) {
-            emit "image.linked" {
-                image_digest: $upload.digest
-                remote_ref: $upload.remote_ref
-                image_name: $link_name
-                root_purl: $root_purl
-                sbom_content_hash: ($sbom_content_hash | default "")
-                image_sbom_content_hash: (if $sbom.success { content-hash-file $sbom.path } else { "" })
-                config_digest: (if $has_oci { $oci_metadata.config_digest } else { "" })
-                layer_manifest: (if $has_oci { $oci_metadata.layers } else { [] })
-                os: (if $has_oci { $oci_metadata.os } else { "" })
-                arch: (if $has_oci { $oci_metadata.arch } else { "" })
-            }
-        }
-    }
-
-    {
-        success: true
-        image_name: $link_name
-        tarball: $build.tarball
-        oci_metadata: $oci_metadata
-        sbom: $sbom
-        uploads: $uploads
-    }
-}
 
 # Sign a container image in a registry using cosign.
 #

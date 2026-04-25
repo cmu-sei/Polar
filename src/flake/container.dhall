@@ -25,6 +25,7 @@ let polarExtras =
     , Lib.nixpkgs "zed-editor"
     , Lib.nixpkgs "rage"
     , Lib.nixpkgs "cosign"
+    , Lib.nixpkgs "skopeo"
     , Lib.flakePackage "cassini-client" "default"
     , Lib.nixpkgs "git"
     , Lib.nixpkgs "curl"
