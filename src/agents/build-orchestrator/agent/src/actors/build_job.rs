@@ -191,6 +191,7 @@ impl BuildJobActor {
             topic: BUILD_EVENTS_TOPIC.to_string(),
             payload: to_bytes::<RkyvError>(&event)?.to_vec(),
             trace_ctx: None,
+            offline_behavior: Default::default(),
         };
 
         if let Err(e) = publisher.publish(req) {

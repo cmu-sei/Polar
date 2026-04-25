@@ -5380,9 +5380,11 @@ name = "polar"
 version = "1.0.0"
 dependencies = [
  "async-trait",
+ "base64 0.22.1",
  "bytes",
  "cassini-client",
  "cassini-types",
+ "chrono",
  "hex",
  "k8s-openapi",
  "neo4rs",
