@@ -11,11 +11,15 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::oneshot;
 use tracing::{error, info};
+use std::io::{BufRead, BufReader};
+use std::fs::OpenOptions;
+use crate::QueueEntry;
 // ===== CLI definition =====
 
 /// Default socket path if XDG_RUNTIME_DIR is not set.
 pub const DEFAULT_SOCK_PATH: &str = "/tmp/cassini-daemon.sock";
 pub const DEFAULT_PID_PATH: &str = "/tmp/cassini-daemon.pid";
+pub const DEFAULT_QUEUE_PATH: &str = "/tmp/cassini-queue.jsonl";
 
 #[derive(Parser)]
 #[command(
@@ -47,6 +51,31 @@ pub struct Cli {
     /// Overrides CASSINI_DAEMON_SOCK env var and the default path.
     #[arg(long, global = true)]
     pub socket: Option<PathBuf>,
+
+    /// Path to the persistent message queue file.
+    /// Messages are stored here when the broker is unavailable.
+    #[arg(long, global = true, default_value = DEFAULT_QUEUE_PATH)]
+    pub queue: PathBuf,
+
+    /// Override the broker address (overrides BROKER_ADDR env var).
+    #[arg(long, global = false)]
+    pub broker_addr: Option<String>,
+
+    /// Override the CA certificate path (overrides TLS_CA_CERT env var).
+    #[arg(long, global = false)]
+    pub ca_cert: Option<String>,
+
+    /// Override the client certificate path (overrides TLS_CLIENT_CERT env var).
+    #[arg(long, global = false)]
+    pub client_cert: Option<String>,
+
+    /// Override the client key path (overrides TLS_CLIENT_KEY env var).
+    #[arg(long, global = false)]
+    pub client_key: Option<String>,
+
+    /// Override the server name (overrides CASSINI_SERVER_NAME env var).
+    #[arg(long, global = false)]
+    pub server_name: Option<String>,
 
     #[command(subcommand)]
     pub command: Option<Command>,
@@ -89,6 +118,15 @@ pub enum Command {
 
     /// Print the daemon's current status (pid, socket path, registration id)
     Status,
+
+    /// Replay queued messages from the default queue file to the broker.
+    Drain,
+
+    /// Replay queued messages from a specific queue file to the broker.
+    Replay {
+        #[arg(long, default_value = DEFAULT_QUEUE_PATH)]
+        queue: PathBuf,
+    },
 }
 
 // ===== IPC protocol =====
@@ -415,6 +453,72 @@ async fn wait_for_event(
     }
 }
 
+pub async fn append_to_queue(queue_path: &PathBuf, entry: &QueueEntry) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(queue_path)?;
+    let line = serde_json::to_string(entry)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    writeln!(file, "{}", line)
+}
+
+pub async fn drain_queue(
+    queue_path: PathBuf,
+    client_config: TCPClientConfig,
+    register_timeout: Duration,
+) -> Result<()> {
+    if !queue_path.exists() {
+        info!("Queue file does not exist, nothing to drain.");
+        return Ok(());
+    }
+
+    let file = std::fs::File::open(&queue_path)?;
+    let reader = BufReader::new(file);
+    let entries: Vec<QueueEntry> = reader
+        .lines()
+        .filter_map(|l| l.ok().and_then(|s| serde_json::from_str(&s).ok()))
+        .collect();
+
+    if entries.is_empty() {
+        info!("Queue is empty, nothing to drain.");
+        return Ok(());
+    }
+
+    info!("Draining {} queued message(s) to broker...", entries.len());
+
+    let session = register(client_config, register_timeout).await?;
+
+    for entry in &entries {
+        let payload = base64::Engine::decode(
+            &base64::engine::general_purpose::STANDARD,
+            &entry.payload_b64,
+        )
+        .map_err(|e| anyhow::anyhow!("Failed to decode payload: {e}"))?;
+
+        session
+            .send_and_await(
+                TcpClientMessage::Publish {
+                    topic: entry.topic.clone(),
+                    payload,
+                    trace_ctx: None,
+                },
+                BridgeMode::Publish,
+                Duration::from_secs(10),
+                "Timed out waiting for publish ack",
+            )
+            .await?;
+
+        info!("Drained: {}", entry.topic);
+    }
+
+    session.disconnect().await;
+    std::fs::remove_file(&queue_path)?;
+    info!("Queue drained and cleared.");
+    Ok(())
+}
+
 pub async fn register(
     client_config: TCPClientConfig,
     register_timeout: Duration,
@@ -494,8 +598,8 @@ pub async fn register(
 /// multiplexable and responses carry no correlation id.
 async fn handle_ipc_connection(
     mut stream: UnixStream,
-    session: Arc<tokio::sync::Mutex<Session>>,
-    registration_id: String,
+    session: Arc<tokio::sync::Mutex<Option<Session>>>,
+    queue_path: PathBuf,
 ) {
     let request = match ipc_read_request(&mut stream).await {
         Ok(r) => r,
@@ -512,101 +616,127 @@ async fn handle_ipc_connection(
     };
 
     let response = match request {
-        IpcRequest::Status => IpcResponse::Ok {
-            result: Some(serde_json::json!({
-                "pid": std::process::id(),
-                "registration_id": registration_id,
-            })),
-        },
+        IpcRequest::Status => {
+            let session = session.lock().await;
+            let registration_id = session
+                .as_ref()
+                .map(|s| s.registration_id.clone())
+                .unwrap_or_else(|| "unregistered".to_string());
+            IpcResponse::Ok {
+                result: Some(serde_json::json!({
+                    "pid": std::process::id(),
+                    "registration_id": registration_id,
+                })),
+            }
+        }
 
         IpcRequest::Publish {
             topic,
             payload_b64,
-            timeout_secs,
+            timeout_secs: _,
         } => {
-            let payload = match base64::Engine::decode(
-                &base64::engine::general_purpose::STANDARD,
-                &payload_b64,
-            ) {
-                Ok(b) => b,
-                Err(e) => {
-                    let _ = ipc_write(
-                        &mut stream,
-                        &IpcResponse::Error {
-                            reason: format!("Invalid base64 payload: {e}"),
-                        },
-                    )
-                    .await;
-                    return;
-                }
-            };
-
+            // Publish is always queued if broker unavailable — fire and forget.
             let session = session.lock().await;
-            match session
-                .send_and_await(
+            if let Some(ref s) = *session {
+                // Broker available — send directly.
+                let payload = match base64::Engine::decode(
+                    &base64::engine::general_purpose::STANDARD,
+                    &payload_b64,
+                ) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        let _ = ipc_write(
+                            &mut stream,
+                            &IpcResponse::Error {
+                                reason: format!("Invalid base64 payload: {e}"),
+                            },
+                        )
+                        .await;
+                        return;
+                    }
+                };
+                match s.send_and_await(
                     TcpClientMessage::Publish {
                         topic: topic.clone(),
                         payload,
                         trace_ctx: None,
                     },
                     BridgeMode::Publish,
-                    Duration::from_secs(timeout_secs),
+                    Duration::from_secs(10),
                     "Timed out waiting for publish ack",
                 )
                 .await
-            {
-                Ok(CompletionEvent::Published { topic }) => IpcResponse::Ok {
-                    result: Some(serde_json::json!({"topic": topic})),
-                },
-                Ok(CompletionEvent::TransportError(r)) => IpcResponse::Error {
-                    reason: format!("Transport error: {r}"),
-                },
-                Ok(other) => IpcResponse::Error {
-                    reason: format!("Unexpected event: {other:?}"),
-                },
-                Err(e) => IpcResponse::Error {
-                    reason: e.to_string(),
-                },
+                {
+                    Ok(CompletionEvent::Published { .. }) => IpcResponse::Ok { result: None },
+                    Ok(CompletionEvent::TransportError(r)) => {
+                        // Transport error — fall through to queue.
+                        let entry = QueueEntry {
+                            topic,
+                            payload_b64,
+                            timestamp: chrono::Utc::now().to_rfc3339(),
+                            attempts: 0,
+                        };
+                        if let Err(e) = append_to_queue(&queue_path, &entry).await {
+                            IpcResponse::Error { reason: format!("Transport error and queue failed: {r} / {e}") }
+                        } else {
+                            IpcResponse::Ok { result: None }
+                        }
+                    }
+                    Ok(other) => IpcResponse::Error {
+                        reason: format!("Unexpected event: {other:?}"),
+                    },
+                    Err(e) => IpcResponse::Error {
+                        reason: e.to_string(),
+                    },
+                }
+            } else {
+                // No broker session — queue the message.
+                let entry = QueueEntry {
+                    topic,
+                    payload_b64,
+                    timestamp: chrono::Utc::now().to_rfc3339(),
+                    attempts: 0,
+                };
+                match append_to_queue(&queue_path, &entry).await {
+                    Ok(_) => IpcResponse::Ok { result: None },
+                    Err(e) => IpcResponse::Error {
+                        reason: format!("Broker unavailable and queue failed: {e}"),
+                    },
+                }
             }
         }
 
+        // Control operations require a live broker — return error if unavailable.
         IpcRequest::ListSessions { timeout_secs } => {
             let session = session.lock().await;
-            handle_control_ipc(
-                &session,
-                TcpClientMessage::ListSessions { trace_ctx: None },
-                timeout_secs,
-                "Timed out waiting for session list",
-            )
-            .await
+            match session.as_ref() {
+                Some(s) => handle_control_ipc(s, TcpClientMessage::ListSessions { trace_ctx: None }, timeout_secs, "Timed out waiting for session list").await,
+                None => IpcResponse::Error { reason: "Broker unavailable".to_string() },
+            }
         }
 
         IpcRequest::ListTopics { timeout_secs } => {
             let session = session.lock().await;
-            handle_control_ipc(
-                &session,
-                TcpClientMessage::ListTopics { trace_ctx: None },
-                timeout_secs,
-                "Timed out waiting for topic list",
-            )
-            .await
+            match session.as_ref() {
+                Some(s) => handle_control_ipc(s, TcpClientMessage::ListTopics { trace_ctx: None }, timeout_secs, "Timed out waiting for topic list").await,
+                None => IpcResponse::Error { reason: "Broker unavailable".to_string() },
+            }
         }
 
-        IpcRequest::GetSession {
-            registration_id,
-            timeout_secs,
-        } => {
+        IpcRequest::GetSession { registration_id, timeout_secs } => {
             let session = session.lock().await;
-            handle_control_ipc(
-                &session,
-                TcpClientMessage::ControlRequest {
-                    op: ControlOp::GetSessionInfo { registration_id },
-                    trace_ctx: None,
-                },
-                timeout_secs,
-                "Timed out waiting for session details",
-            )
-            .await
+            match session.as_ref() {
+                Some(s) => handle_control_ipc(
+                    s,
+                    TcpClientMessage::ControlRequest {
+                        op: ControlOp::GetSessionInfo { registration_id },
+                        trace_ctx: None,
+                    },
+                    timeout_secs,
+                    "Timed out waiting for session details",
+                ).await,
+                None => IpcResponse::Error { reason: "Broker unavailable".to_string() },
+            }
         }
     };
 
@@ -655,9 +785,10 @@ fn resolve_pid_path(socket_path: &PathBuf) -> PathBuf {
 
 pub async fn run_daemon(
     socket_path: PathBuf,
-    client_config: TCPClientConfig,
+    client_config: Option<TCPClientConfig>,
     register_timeout: Duration,
     foreground: bool,
+    queue_path: PathBuf,
 ) -> Result<()> {
     // Clean up any stale socket from a previous crash.
     if socket_path.exists() {
@@ -704,17 +835,30 @@ pub async fn run_daemon(
     let pid_path = resolve_pid_path(&socket_path);
     std::fs::write(&pid_path, std::process::id().to_string())?;
 
-    let session = register(client_config, register_timeout).await?;
-    let registration_id = session.registration_id.clone();
-
-    info!(
-        "Daemon listening on {}  registration_id={}",
-        socket_path.display(),
-        registration_id
-    );
-
+    // Bind socket FIRST — daemon is reachable immediately.
+    // Broker connection happens in the background.
     let listener = UnixListener::bind(&socket_path)?;
-    let session = Arc::new(tokio::sync::Mutex::new(session));
+    info!("Daemon listening on {}", socket_path.display());
+
+    let session: Arc<tokio::sync::Mutex<Option<Session>>> = Arc::new(tokio::sync::Mutex::new(None));
+
+    // Attempt broker connection in background if config is available.
+    if let Some(config) = client_config {
+        let session_clone = Arc::clone(&session);
+        tokio::spawn(async move {
+            match register(config, register_timeout).await {
+                Ok(s) => {
+                    info!("Broker connection established. registration_id={}", s.registration_id);
+                    *session_clone.lock().await = Some(s);
+                }
+                Err(e) => {
+                    error!("Failed to connect to broker: {e} — daemon will queue messages");
+                }
+            }
+        });
+    } else {
+        info!("No broker config available — daemon will queue all messages");
+    }
 
     // Signal handler — clean disconnect on SIGTERM/SIGINT.
     let socket_path_clone = socket_path.clone();
@@ -724,15 +868,12 @@ pub async fn run_daemon(
             .expect("Failed to install SIGTERM handler");
         let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
             .expect("Failed to install SIGINT handler");
-
         tokio::select! {
             _ = sigterm.recv() => error!("Received SIGTERM, shutting down"),
             _ = sigint.recv() => info!("Received SIGINT, shutting down"),
         }
-
         let _ = std::fs::remove_file(&socket_path_clone);
         let _ = std::fs::remove_file(&pid_path_clone);
-        // Disconnect is best-effort here; the session Arc may be locked.
         std::process::exit(0);
     });
 
@@ -740,9 +881,9 @@ pub async fn run_daemon(
         match listener.accept().await {
             Ok((stream, _)) => {
                 let session_clone = Arc::clone(&session);
-                let reg_id = registration_id.clone();
+                let queue_path_clone = queue_path.clone();
                 tokio::spawn(async move {
-                    handle_ipc_connection(stream, session_clone, reg_id).await;
+                    handle_ipc_connection(stream, session_clone, queue_path_clone).await;
                 });
             }
             Err(e) => {

@@ -22,6 +22,7 @@ use tokio_rustls::client::TlsStream;
 use tracing::{
     Instrument, debug, debug_span, error, info, info_span, trace, trace_span, warn, warn_span,
 };
+use std::path::PathBuf;
 
 pub mod cli;
 
@@ -40,6 +41,95 @@ pub const CLIENT_DISCONNECTED: &str = "CLIENT_DISCONNECTED";
 /// to the [`OutputPort`], this uses ractor's normal mpsc mailbox and will never silently drop
 /// messages under load. See: https://github.com/slawlor/ractor/issues/225
 pub struct ClientEventForwarder<M: Message + Sync>(PhantomData<M>);
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct QueueEntry {
+    pub topic: String,
+    pub payload_b64: String,
+    pub timestamp: String,
+    pub attempts: u32,
+}
+
+#[derive(Debug, Clone, Default)]
+pub enum OfflineBehavior {
+    #[default]
+    Queue,
+    Drop,
+    Fail,
+}
+
+#[derive(Clone)]
+pub struct MessageQueue {
+    pub path: std::path::PathBuf,
+}
+
+impl MessageQueue {
+    pub fn new(path: PathBuf) -> Self {
+        Self { path }
+    }
+
+    pub fn from_env() -> Option<Self> {
+        std::env::var("CASSINI_QUEUE_PATH")
+            .ok()
+            .map(|p| Self::new(PathBuf::from(p)))
+    }
+
+    pub fn append(&self, entry: &QueueEntry) -> std::io::Result<()> {
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)?;
+        let line = serde_json::to_string(entry)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        writeln!(file, "{}", line)
+    }
+
+    pub fn drain(&self) -> std::io::Result<Vec<QueueEntry>> {
+        if !self.path.exists() {
+            return Ok(vec![]);
+        }
+        let file = std::fs::File::open(&self.path)?;
+        let reader = std::io::BufReader::new(file);
+        let entries = std::io::BufRead::lines(reader)
+            .filter_map(|line| {
+                line.ok()
+                    .and_then(|l| serde_json::from_str::<QueueEntry>(&l).ok())
+            })
+            .collect();
+        std::fs::remove_file(&self.path)?;
+        Ok(entries)
+    }
+
+    pub fn len(&self) -> std::io::Result<usize> {
+        if !self.path.exists() {
+            return Ok(0);
+        }
+        let file = std::fs::File::open(&self.path)?;
+        let reader = std::io::BufReader::new(file);
+        Ok(std::io::BufRead::lines(reader).count())
+    }
+
+    pub fn is_empty(&self) -> std::io::Result<bool> {
+        Ok(self.len()? == 0)
+    }
+
+    pub fn clear(&self) -> std::io::Result<()> {
+        if self.path.exists() {
+            std::fs::remove_file(&self.path)?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct PublishRequest {
+    pub topic: String,
+    pub payload: Vec<u8>,
+    pub trace_ctx: Option<WireTraceCtx>,
+    pub offline_behavior: OfflineBehavior,
+}
+
 
 impl<M: Message + Sync> Default for ClientEventForwarder<M> {
     fn default() -> Self {
@@ -139,6 +229,33 @@ impl TCPClientConfig {
         let server_name = env::var("CASSINI_SERVER_NAME")?;
 
         Ok(TCPClientConfig {
+            broker_endpoint,
+            server_name,
+            ca_certificate_path,
+            client_certificate_path,
+            client_key_path,
+        })
+    }
+
+    pub fn from_cli_or_env(
+        broker_addr: Option<String>,
+        ca_cert: Option<String>,
+        client_cert: Option<String>,
+        client_key: Option<String>,
+        server_name: Option<String>,
+    ) -> Option<Self> {
+        let broker_endpoint = broker_addr
+            .or_else(|| env::var("BROKER_ADDR").ok())?;
+        let server_name = server_name
+            .or_else(|| env::var("CASSINI_SERVER_NAME").ok())?;
+        let ca_certificate_path = ca_cert
+            .or_else(|| env::var("TLS_CA_CERT").ok())?;
+        let client_certificate_path = client_cert
+            .or_else(|| env::var("TLS_CLIENT_CERT").ok())?;
+        let client_key_path = client_key
+            .or_else(|| env::var("TLS_CLIENT_KEY").ok())?;
+
+        Some(TCPClientConfig {
             broker_endpoint,
             server_name,
             ca_certificate_path,
