@@ -382,20 +382,25 @@ git-server:
     nix build {{_nix_flags}} ".#packages.{{platform}}.gitServerImage" -o result-git-server-image
     podman load -i result-git-server-image
 
-# (Re)-render all container.nxi files in the workspace.
-# Run after updating the nix-container-lib input in flake.nix.
-render-container-files:
+# Update the nix-container-lib pin in container-lib.dhall and re-render all container.nix files.
+update-dhall-pins:
     #!/usr/bin/env bash
     set -euo pipefail
-
+    COMMIT=$(nix flake metadata --json | jq -r '.locks.nodes["nix-container-lib"].locked.rev')
+    DHALL_HASH=$(dhall hash <<< "https://raw.githubusercontent.com/daveman1010221/nix-container-lib/${COMMIT}/dhall/prelude.dhall")
+    echo "nix-container-lib commit: $COMMIT"
+    echo "Dhall prelude hash:       $DHALL_HASH"
+    echo "Updating src/containers/container-lib.dhall..."
+    sed -i "s|/nix-container-lib/[a-f0-9]\{40\}/dhall/prelude.dhall|/nix-container-lib/${COMMIT}/dhall/prelude.dhall|g" src/containers/container-lib.dhall
+    sed -i "s|sha256:[a-f0-9]\{64\}|${DHALL_HASH}|g" src/containers/container-lib.dhall
     echo "Re-rendering container.nix files..."
-    for f in $(grep -rl "nix-container-lib" src/ --include="*.dhall"); do
-        OUT="$(dirname $f)/$(basename $f .dhall).nix"
-        dhall-to-nix < "$f" > "$OUT"
-        echo "  rendered: $OUT"
+    for f in $(grep -rl "container-lib.dhall" src/ --include="*.dhall" | grep -v 'container-lib.dhall'); do
+        DIR="$(dirname $f)"
+        BASE="$(basename $f .dhall)"
+        pushd "$DIR" > /dev/null
+        dhall-to-nix < "$BASE.dhall" > "$BASE.nix" && echo "  rendered: $DIR/$BASE.nix" || echo "  skipped:  $f"
+        popd > /dev/null
     done
-
-    echo ""
     echo "Done. Review with: git diff"
 
 # ── Run containers ────────────────────────────────────────────────────────────
