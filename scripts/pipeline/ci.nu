@@ -28,7 +28,7 @@
 # All phases share one artifact directory. Phases 1-3 share one Cassini daemon.
 # Adding a new image = one row in image-manifest. Nothing else changes.
 
-use core.nu *
+use ./core.nu *
 
 const COMPONENT           = "ci"
 const ELF_BINARY_ARTIFACT = "elf-binary"
