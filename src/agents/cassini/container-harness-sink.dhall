@@ -1,6 +1,6 @@
 -- src/agents/cassini/container-harness-sink.dhall
 
-let Lib = ../containers/container-lib.dhall
+let Lib = ../../containers/container-lib.dhall
 let defaults = Lib.defaults
 
 in defaults.minimalContainer //

@@ -1,6 +1,6 @@
 -- src/agents/gitlab/container-consumer.dhall
 
-let Lib = ../containers/container-lib.dhall
+let Lib = ../../containers/container-lib.dhall
 
 let defaults = Lib.defaults
 

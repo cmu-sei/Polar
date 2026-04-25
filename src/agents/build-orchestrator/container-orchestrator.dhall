@@ -1,6 +1,6 @@
 -- src/agents/build-orchestrator/container-orchestrator.dhall
 
-let Lib = ../containers/container-lib.dhall
+let Lib = ../../containers/container-lib.dhall
 let defaults = Lib.defaults
 
 in defaults.minimalContainer //
