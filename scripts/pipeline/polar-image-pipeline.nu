@@ -14,7 +14,7 @@
 #   nu polar-image-pipeline.nu --skip-upload    # build + scan only
 #   nu polar-image-pipeline.nu --skip-sbom      # build + upload, no scanning
 
-use ./pipeline/core.nu *
+use core.nu *
 
 const COMPONENT = "polar-images"
 

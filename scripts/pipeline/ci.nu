@@ -1,0 +1,677 @@
+
+#!/usr/bin/env nu
+# ci.nu — unified Polar build pipeline
+#
+# Runs the full build sequence under a single Cassini daemon:
+#
+#   Phase 0 — Static analysis (no Cassini, no artifacts)
+#     Parallel: cargo deny, clippy, udeps, semver-checks, geiger, hack
+#     Sequential: noseyparker (manages its own datastore), cargo mutants
+#     (spawns its own workers). Failures are reported; --strict-analysis
+#     aborts the pipeline on any non-zero exit.
+#
+#   Phase 1 — Cargo SBOMs
+#     cargo-cyclonedx generates a CycloneDX SBOM per workspace member,
+#     each is parsed into a graph fragment and emitted as sbom.resolved.
+#
+#   Phase 2 — Cargo binaries
+#     cargo build --message-format=json produces ELF artifacts; each binary
+#     is linked back to its Phase 1 SBOM via a cryptographic binding digest.
+#     sbom_lookup flows in-process from Phase 1 — no file-based IPC needed.
+#
+#   Phase 3 — OCI images
+#     nix build → syft SBOM → skopeo upload → cosign sign, one pass per
+#     image in the manifest. Source-level SBOM hashes from Phase 1 are
+#     threaded into image.linked events, closing the full provenance chain:
+#       (OCIArtifact)-[:BUILT_FROM]->(Package)<-[:DESCRIBES]-(SourceSbom)
+#
+# All phases share one artifact directory. Phases 1-3 share one Cassini daemon.
+# Adding a new image = one row in image-manifest. Nothing else changes.
+
+use core.nu *
+
+const COMPONENT           = "ci"
+const ELF_BINARY_ARTIFACT = "elf-binary"
+
+# ===========================================================================
+# Phase 0: Static analysis
+# ===========================================================================
+
+# ANSI helpers — used only for static analysis terminal output.
+# TODO: Consider moving to the core library
+def green  [msg: string] { $"(ansi green)($msg)(ansi reset)" }
+def red    [msg: string] { $"(ansi red)($msg)(ansi reset)" }
+def yellow [msg: string] { $"(ansi yellow)($msg)(ansi reset)" }
+def bold   [msg: string] { $"(ansi attr_bold)($msg)(ansi reset)" }
+
+# Abort early if any required tool is absent from PATH.
+def check-tools [tools: list<string>] {
+    let missing = ($tools | where { |t| (which $t | is-empty) })
+    if ($missing | is-not-empty) {
+        log-error $"missing required tools: ($missing | str join ', ')" --component $COMPONENT
+        error make { msg: "preflight tool check failed" }
+    }
+}
+
+# Run one tool, capturing stdout+stderr to outfile.
+# Returns { name, outfile, exit_code, duration_sec }.
+#
+# The original static-tools.nu ran each command twice (two do --ignore-errors
+# blocks, the first result immediately overwritten). Collapsed to one invocation.
+def run-tool [
+    name:    string
+    outfile: string
+    cmd:     list<string>
+]: nothing -> record {
+    let start = (date now)
+    log-info (yellow $"  → ($name)...") --component $COMPONENT
+
+    let bin  = $cmd.0
+    let args = ($cmd | skip 1)
+
+    let exit_code = (do --ignore-errors {
+        ^$bin ...$args out+err> $outfile
+        0
+    } | if ($in | is-empty) { 1 } else { $in | into int })
+
+    let duration = (((date now) - $start) / 1sec | math round)
+
+    { name: $name, outfile: $outfile, exit_code: $exit_code, duration_sec: $duration }
+}
+
+# Data-driven tool manifest. Separating definitions from execution lets
+# par-each run them cleanly and makes add/remove/reorder a one-liner.
+#
+# cargo mutants is excluded here — it spawns its own worker pool and does
+# heavy disk I/O; running it alongside everything else causes contention.
+# It runs sequentially after this batch, as does noseyparker (own datastore).
+def static-tool-definitions [manifest: string, output_dir: string]: nothing -> list<record> {
+    [
+        {
+            name:    "cargo deny"
+            outfile: $"($output_dir)/cargo_deny.txt"
+            cmd:     [cargo deny --manifest-path $manifest check]
+        }
+        {
+            name:    "cargo clippy"
+            outfile: $"($output_dir)/cargo_clippy.txt"
+            cmd:     [cargo clippy --manifest-path $manifest --all-targets --all-features -- -D warnings]
+        }
+        {
+            name:    "cargo udeps"
+            outfile: $"($output_dir)/cargo_udeps.txt"
+            cmd:     [cargo udeps --manifest-path $manifest --all-targets]
+        }
+        {
+            name:    "cargo semver-checks"
+            outfile: $"($output_dir)/cargo_semver.txt"
+            cmd:     [cargo semver-checks --manifest-path $manifest]
+        }
+        {
+            name:    "cargo geiger"
+            outfile: $"($output_dir)/cargo_geiger.txt"
+            cmd:     [cargo geiger --manifest-path $manifest]
+        }
+        {
+            name:    "cargo hack (feature powerset)"
+            outfile: $"($output_dir)/cargo_hack.txt"
+            cmd:     [cargo hack check --manifest-path $manifest --feature-powerset]
+        }
+    ]
+}
+
+def count-pattern [file: string, pattern: string]: nothing -> int {
+    if not ($file | path exists) { return 0 }
+    open $file | lines | where { |l| $l =~ $pattern } | length
+}
+
+def generate-static-summary [results: table, output_dir: string] {
+    let summary_file = $"($output_dir)/static-analysis-summary.txt"
+
+    mut sections = [(bold "Polar Static Analysis Summary") ""]
+
+    $sections = ($sections | append [(bold "=== Tool Results ===") ($results | select name exit_code duration_sec | to text) ""])
+
+    let clippy_warnings = (count-pattern $"($output_dir)/cargo_clippy.txt" 'warning\[')
+    let clippy_errors   = (count-pattern $"($output_dir)/cargo_clippy.txt" 'error\[')
+    $sections = ($sections | append [(bold "=== cargo clippy ===") $"Warnings: ($clippy_warnings)  Errors: ($clippy_errors)" ""])
+
+    let deny_errors = (count-pattern $"($output_dir)/cargo_deny.txt" '^error')
+    $sections = ($sections | append [(bold "=== cargo deny ===") $"Issues: ($deny_errors)" ""])
+
+    let udeps_file = $"($output_dir)/cargo_udeps.txt"
+    let udeps_lines = if ($udeps_file | path exists) {
+        open $udeps_file | lines | where { |l| $l =~ 'unused|crate' } | first 10
+    } else { [] }
+    let udeps_body = if ($udeps_lines | is-not-empty) { $udeps_lines | str join "\n" } else { "No unused dependencies found." }
+    $sections = ($sections | append [(bold "=== cargo udeps ===") $udeps_body ""])
+
+    let semver_file = $"($output_dir)/cargo_semver.txt"
+    let semver_body = if ($semver_file | path exists) {
+        open $semver_file | lines | where { |l| $l =~ 'Parsed|Checked|Summary|semver' } | str join "\n"
+    } else { "" }
+    $sections = ($sections | append [(bold "=== cargo semver-checks ===") $semver_body ""])
+
+    let geiger_file = $"($output_dir)/cargo_geiger.txt"
+    let geiger_body = if ($geiger_file | path exists) { open $geiger_file | lines | last 15 | str join "\n" } else { "" }
+    $sections = ($sections | append [(bold "=== cargo geiger ===") $geiger_body ""])
+
+    let np_report = $"($output_dir)/noseyparker_report.txt"
+    let np_body = if ($np_report | path exists) { open $np_report | lines | first 30 | str join "\n" } else { "" }
+    $sections = ($sections | append [(bold "=== noseyparker ===") $np_body ""])
+
+    let mutants_file = $"($output_dir)/cargo_mutants.txt"
+    let mutants_body = if ($mutants_file | path exists) {
+        open $mutants_file | lines | where { |l| $l =~ 'caught|missed|unviable|timeout|ok' } | last 10 | str join "\n"
+    } else { "" }
+    $sections = ($sections | append [(bold "=== cargo mutants ===") $mutants_body ""])
+
+    let failed = ($results | where exit_code != 0)
+    if ($failed | is-not-empty) {
+        let callout = ($failed | each { |r| $"  ($r.name) — exit ($r.exit_code) — ($r.outfile)" } | str join "\n")
+        $sections = ($sections | append [(bold "=== Tools with non-zero exit ===") $callout ""])
+    }
+
+    $sections | flatten | str join "\n" | save --force $summary_file
+    log-info (green $"summary written to ($summary_file)") --component $COMPONENT
+}
+
+# Run all static analysis phases and return the aggregated results table.
+# Caller decides whether to abort based on --strict-analysis.
+def run-static-analysis [ws_manifest: path, artifact_dir: path]: nothing -> table {
+    check-tools [
+        cargo cargo-deny cargo-udeps cargo-semver-checks
+        cargo-geiger cargo-hack cargo-mutants noseyparker-cli
+    ]
+
+    log-info (bold "phase 0 — static analysis") --component $COMPONENT
+
+    # Parallel batch — tools that are IO-independent of each other.
+    let parallel_results = (
+        static-tool-definitions ($ws_manifest | path expand | into string) ($artifact_dir | into string)
+        | par-each {|tool| run-tool $tool.name $tool.outfile $tool.cmd }
+    )
+
+    # noseyparker: manages its own datastore, must run sequentially.
+    log-info "  → noseyparker..." --component $COMPONENT
+    let np_datastore = $"($artifact_dir)/noseyparker_datastore"
+    let np_scan_out  = $"($artifact_dir)/noseyparker_scan.txt"
+    let np_report    = $"($artifact_dir)/noseyparker_report.txt"
+    rm -rf $np_datastore
+
+    let np_scan = (run-tool "noseyparker scan" $np_scan_out [noseyparker-cli scan --datastore $np_datastore .])
+    # Report exits 0 always; findings live in the file.
+    noseyparker-cli report --datastore $np_datastore out+err> $np_report
+    let np_report_result = { name: "noseyparker report", outfile: $np_report, exit_code: 0, duration_sec: 0 }
+
+    # cargo mutants: spawns its own worker pool, must run sequentially last.
+    log-info "  → cargo mutants (slow)..." --component $COMPONENT
+    let mutants_out     = $"($artifact_dir)/cargo_mutants.txt"
+    let mutants_out_dir = $"($artifact_dir)/mutants.out"
+    let mutants = (run-tool "cargo mutants" $mutants_out [
+        cargo mutants --manifest-path ($ws_manifest | into string) --output $mutants_out_dir
+    ])
+
+    let all_results = ($parallel_results | append $np_scan | append $np_report_result | append $mutants)
+
+    log-info ($all_results | select name exit_code duration_sec | table) --component $COMPONENT
+    generate-static-summary $all_results ($artifact_dir | into string)
+
+    $all_results
+}
+
+# ===========================================================================
+# Image manifest — single source of truth for OCI images in this project.
+#
+# `root_purl` is the join key to the source-level SBOM. Leave it empty for
+# images that don't correspond to a workspace crate (third-party bases, etc.);
+# the image.linked event will be emitted without package linkage.
+# ===========================================================================
+
+def image-manifest []: nothing -> list<record> {
+    [
+        { name: "cassini",         flake: ".#cassiniImage",            image: "cassini",                 root_purl: "pkg:cargo/cassini@0.1.0"            }
+        { name: "gitlab-observer", flake: ".#gitlabObserverImage",     image: "polar-gitlab-observer",   root_purl: "pkg:cargo/gitlab-observer@0.1.0"    }
+        { name: "gitlab-consumer", flake: ".#gitlabConsumerImage",     image: "polar-gitlab-consumer",   root_purl: "pkg:cargo/gitlab-consumer@0.1.0"    }
+        { name: "kube-observer",   flake: ".#kubeObserverImage",       image: "polar-kube-observer",     root_purl: "pkg:cargo/kube-observer@0.1.0"      }
+        { name: "kube-consumer",   flake: ".#kubeConsumerImage",       image: "polar-kube-consumer",     root_purl: "pkg:cargo/kube-consumer@0.1.0"      }
+        { name: "git-observer",    flake: ".#gitObserverImage",        image: "polar-git-observer",      root_purl: "pkg:cargo/git-repo-observer@0.1.0"  }
+        { name: "git-consumer",    flake: ".#gitConsumerImage",        image: "polar-git-consumer",      root_purl: ""                                   }
+        { name: "git-scheduler",   flake: ".#gitSchedulerImage",       image: "polar-git-scheduler",     root_purl: ""                                   }
+        { name: "linker",          flake: ".#provenanceLinkerImage",   image: "polar-linker-agent",      root_purl: "pkg:cargo/provenance-linker@0.1.0"  }
+        { name: "resolver",        flake: ".#provenanceResolverImage", image: "polar-resolver-agent",    root_purl: "pkg:cargo/provenance-resolver@0.1.0"}
+    ]
+}
+
+# ===========================================================================
+# Cargo: package resolution
+# ===========================================================================
+
+def resolve-packages [
+    --package (-p): string = ""
+]: nothing -> list<record> {
+    let ws_root   = (workspace-root)
+    let manifest  = ($ws_root | path join "Cargo.toml")
+    let meta      = (
+        cargo metadata --manifest-path $manifest --format-version 1 --no-deps
+        | from json
+    )
+
+    let packages = if ($package | is-empty) {
+        let members = ($meta.workspace_members | default [])
+        $meta.packages | where {|pkg| $members | any {|id| $id == $pkg.id } }
+    } else {
+        $meta.packages | where name == $package
+    }
+
+    if ($packages | is-empty) {
+        error make { msg: $"no Cargo package matched '($package)'" }
+    }
+
+    $packages | each {|pkg| {
+        name:          $pkg.name
+        manifest_path: ($pkg.manifest_path | path expand)
+        version:       ($pkg.version? | default "0.0.0")
+        purl:          $"pkg:cargo/($pkg.name)@($pkg.version? | default '0.0.0')"
+    }}
+}
+
+# ===========================================================================
+# Phase 1: SBOM generation and graph projection
+# ===========================================================================
+
+# Run cargo-cyclonedx across the workspace and collect the resulting files
+# into artifact_dir. Returns the list of file records from ls.
+def generate-workspace-sboms [
+    packages:     list<record>
+    ws_manifest:  path
+    artifact_dir: path
+    --target (-t): string = ""
+]: nothing -> list<record> {
+    let ws_root = ($ws_manifest | path dirname)
+
+    log-info $"generating SBOMs for ($packages | length) package\(s\)" --component $COMPONENT
+
+    mut args = [--manifest-path $ws_manifest -f json]
+    if ($target | is-not-empty) { $args = ($args | append [--target $target]) }
+
+    let result = (^cargo cyclonedx ...$args | complete)
+    if $result.exit_code != 0 {
+        let msg = ($result.stderr | default $result.stdout | str trim)
+        log-warn $"cargo-cyclonedx failed: ($msg)" --component $COMPONENT
+        return []
+    }
+
+    # cargo-cyclonedx drops SBOMs in each crate root; collect them centrally.
+    let move_result = (
+        bash -c $"find ($ws_root) -type f -name '*.cdx.json' | while read -r sbom; do mv \"$sbom\" \"($artifact_dir)/$\(basename \"$sbom\"\)\"; done"
+        | complete
+    )
+    if $move_result.exit_code != 0 {
+        log-warn $"failed to move SBOMs: ($move_result.stdout)" --component $COMPONENT
+        return []
+    }
+
+    ls $artifact_dir
+    | where type == file
+    | where { ($in.name | path basename | str ends-with ".cdx.json") }
+}
+
+# Parse each SBOM file, project it into a graph fragment, and emit events.
+#
+# Returns a record keyed by package name (SBOM stem) mapping to:
+#   { content_hash, root_purl, component_count, edge_count }
+#
+# This lookup flows directly into Phase 2 (binary linking) and Phase 3
+# (image.linked events) in-process — no file serialisation required.
+def process-cargo-sboms [
+    sbom_files: list<record>
+    packages:   list<record>
+]: nothing -> record {
+    mut sbom_lookup = {}
+
+    for f in $sbom_files {
+        let doc = try { open $f.name } catch {|e|
+            log-warn $"could not parse ($f.name): ($e.msg)" --component $COMPONENT
+            continue
+        }
+        if ($doc.bomFormat? | default "") != "CycloneDX" { continue }
+
+        let filename     = ($f.name | path basename)
+        let stem         = ($filename | str replace ".cdx.json" "")
+        let content_hash = (content-hash-file $f.name)
+
+        emit-artifact-produced $content_hash "sbom" --name $filename --content_type "application/vnd.cyclonedx+json"
+
+        let fragment = (extract-graph-fragment $doc $content_hash)
+
+        if $fragment.root != null {
+            emit-sbom-analyzed $fragment $filename
+            log-info $"($stem): ($fragment.components | length) components, ($fragment.edges | length) edges" --component $COMPONENT
+        } else {
+            log-warn $"($filename) has no metadata.component — graph fragment not emitted" --component $COMPONENT
+        }
+
+        let matched   = ($packages | where name == $stem | first | default null)
+        let root_purl = if $fragment.root != null {
+            $fragment.root.purl
+        } else if $matched != null {
+            ($matched.purl? | default "")
+        } else {
+            ""
+        }
+
+        $sbom_lookup = ($sbom_lookup | insert $stem {
+            content_hash:    $content_hash
+            root_purl:       $root_purl
+            component_count: ($fragment.components | length)
+            edge_count:      ($fragment.edges | length)
+        })
+    }
+
+    $sbom_lookup
+}
+
+# ===========================================================================
+# Phase 2: Binary build and provenance linking
+# ===========================================================================
+
+def emit-binary-linked [
+    binary_content_hash: string
+    binary_name:         string
+    root_purl:           string
+    sbom_content_hash:   string
+    --binding_digest:    string = ""
+] {
+    mut payload = {
+        binary_content_hash: $binary_content_hash
+        binary_name:         $binary_name
+        root_purl:           $root_purl
+        sbom_content_hash:   $sbom_content_hash
+    }
+    if ($binding_digest | is-not-empty) {
+        $payload = ($payload | insert binding_digest $binding_digest)
+    }
+    emit "binary.linked" $payload
+}
+
+def build-and-link-binaries [
+    packages:         list<record>
+    sbom_lookup:      record
+    artifact_dir:     path
+    --release
+    --target:         string = ""
+    --filter_package: string = ""
+]: nothing -> list<record> {
+    let ws_root = (workspace-root)
+
+    mut cargo_args = ["build" "--message-format=json" "--locked" "--quiet"]
+    if ($filter_package | is-not-empty) { $cargo_args = ($cargo_args | append ["--package" $filter_package]) }
+    if $release                         { $cargo_args = ($cargo_args | append "--release") }
+    if ($target | is-not-empty)         { $cargo_args = ($cargo_args | append ["--target" $target]) }
+
+    log-info $"running: cargo ($cargo_args | str join ' ')" --component $COMPONENT
+
+    let cargo_lock_hash  = (content-hash-file $"($ws_root)/Cargo.lock")
+    let source_tree_hash = (tree-hash $ws_root)
+
+    let binaries = (
+        cargo ...$cargo_args
+        | lines
+        | where { ($in | str trim) != "" }
+        | each {|line| try { $line | from json } catch { null } }
+        | where { $in != null }
+        | where { ($in.reason? | default "") == "compiler-artifact" }
+        | where { ($in.target?.kind? | default []) | any {|k| $k == "bin"} }
+        | where { ($in.executable? | default null) != null }
+        | each {|artifact|
+            let exe         = $artifact.executable
+            let name        = ($exe | path basename)
+            let dest        = ($artifact_dir | path join $name)
+            let binary_hash = (content-hash-file $exe)
+
+            mv $exe $dest
+
+            # manifest_path is the stable match key — target.name is the
+            # binary name (not the package name) and package_id is version-sensitive.
+            let pkg_manifest = ($artifact.manifest_path? | default "")
+            let pkg          = ($packages | where manifest_path == $pkg_manifest | first | default null)
+
+            if $pkg == null {
+                log-warn $"($name): no matching package for manifest ($pkg_manifest)" --component $COMPONENT
+                return null
+            }
+
+            emit-artifact-produced $binary_hash $ELF_BINARY_ARTIFACT --name $name
+
+            let sbom_info = ($sbom_lookup | get -o $pkg.name | default null)
+
+            if $sbom_info != null {
+                let cargo_toml_hash = (content-hash-file $pkg.manifest_path)
+                let binding = (
+                    [$binary_hash $cargo_toml_hash $cargo_lock_hash $source_tree_hash]
+                    | str join ":"
+                    | hash sha256
+                    | $"sha256:($in)"
+                )
+                emit-binary-linked $binary_hash $name $sbom_info.root_purl $sbom_info.content_hash --binding_digest $binding
+                log-info $"($name) -> ($sbom_info.root_purl)" --component $COMPONENT
+            } else {
+                log-warn $"($name): no SBOM for package ($pkg.name) — binary.linked not emitted" --component $COMPONENT
+            }
+
+            {
+                name:              $name
+                path:              $dest
+                binary_hash:       $binary_hash
+                package_name:      $pkg.name
+                root_purl:         ($sbom_info.root_purl?    | default "")
+                sbom_content_hash: ($sbom_info.content_hash? | default "")
+            }
+        }
+        | where { $in != null }
+    )
+
+    if ($env.LAST_EXIT_CODE? | default 0) != 0 {
+        error make { msg: "cargo build failed" }
+    }
+
+    $binaries
+}
+
+# ===========================================================================
+# Phase 3: OCI image build, scan, and upload
+# ===========================================================================
+
+# Construct skopeo destination refs for a given image name.
+# Returns a list of ref templates with the literal string `{tag}` as
+# the placeholder; callers substitute the actual tag via str replace.
+def registry-refs [image_name: string]: nothing -> list<string> {
+    mut refs = []
+    let ci_reg   = ($env.CI_REGISTRY_IMAGE? | default "")
+    let azure_reg = ($env.AZURE_REGISTRY?   | default "")
+    if ($ci_reg   | is-not-empty) { $refs = ($refs | append $"docker://($ci_reg)/($image_name):{tag}") }
+    if ($azure_reg | is-not-empty) { $refs = ($refs | append $"docker://($azure_reg)/($image_name):{tag}") }
+    $refs
+}
+
+# Assemble registry credentials from environment and log in via skopeo.
+# Runs only when --skip-upload is not set.
+def login-to-registries [] {
+    mut creds = []
+
+    let ci_user = ($env.CI_REGISTRY_USER?     | default "")
+    let ci_pass = ($env.CI_REGISTRY_PASSWORD?  | default "")
+    let ci_reg  = ($env.CI_REGISTRY?           | default "")
+    if ($ci_user | is-not-empty) and ($ci_reg | is-not-empty) {
+        $creds = ($creds | append { registry: $ci_reg, username: $ci_user, password: $ci_pass })
+    }
+
+    let acr_user = ($env.ACR_USERNAME?  | default "")
+    let acr_pass = ($env.ACR_TOKEN?     | default "")
+    let acr_reg  = ($env.AZURE_REGISTRY? | default "")
+    if ($acr_user | is-not-empty) and ($acr_reg | is-not-empty) {
+        $creds = ($creds | append { registry: $acr_reg, username: $acr_user, password: $acr_pass })
+    }
+
+    if ($creds | is-not-empty) {
+        registry-login $creds
+    }
+}
+
+# Run the full build → scan → upload → sign sequence for one image,
+# threading the source-level SBOM hash from Phase 1 into image.linked.
+def process-image [
+    entry:        record   # Row from image-manifest
+    image_tag:    string
+    sbom_lookup:  record   # Phase 1 output — in-process, no file IPC
+    artifact_dir: path
+    --skip-upload
+    --skip-sbom
+]: nothing -> record {
+    # Resolve the source-level SBOM content hash for this image's root crate.
+    # purl format: pkg:cargo/<name>@<ver> — we key on the crate name.
+    let source_sbom_hash = if ($entry.root_purl | is-not-empty) {
+        let crate_name   = ($entry.root_purl | parse "pkg:cargo/{name}@{ver}" | get -o 0 | default { name: "" } | get name)
+        let lookup_entry = ($sbom_lookup | get -o $crate_name | default null)
+        $lookup_entry.content_hash? | default ""
+    } else {
+        ""
+    }
+
+    let registries = (registry-refs $entry.image)
+
+    if $skip_upload and $skip_sbom {
+        let build = (nix-build-image $entry.flake $entry.name)
+        return { success: $build.success, image_name: $entry.name, uploads: [] }
+    }
+
+    if $skip_upload {
+        let build = (nix-build-image $entry.flake $entry.name)
+        if not $build.success { return { success: false, image_name: $entry.name, uploads: [] } }
+        let sbom = (generate-image-sbom $build.tarball $artifact_dir --name $entry.name)
+        if $sbom.success { process-image-sbom $sbom.path $entry.name --oci_metadata $build.oci_metadata }
+        return { success: true, image_name: $entry.name, uploads: [] }
+    }
+
+    if $skip_sbom {
+        let build = (nix-build-image $entry.flake $entry.name)
+        if not $build.success { return { success: false, image_name: $entry.name, uploads: [] } }
+        let uploads = ($registries | each {|template|
+            upload-image $build.tarball ($template | str replace "{tag}" $image_tag) --name $entry.name
+        })
+        return { success: true, image_name: $entry.name, uploads: $uploads }
+    }
+
+    # Full path: build → scan → upload → sign → emit image.linked.
+    build-scan-upload $entry.flake $entry.name $image_tag $registries $artifact_dir --root_purl $entry.root_purl --sbom_content_hash $source_sbom_hash
+}
+
+# ===========================================================================
+# Main
+# ===========================================================================
+
+def main [
+    # Cargo flags
+    --package (-p): string = ""   # Restrict cargo phases to a single workspace member
+    --release (-r)                # Pass --release to cargo build
+    --target (-t):  string = ""   # Cross-compilation target triple
+
+    # Image flags
+    --tag:          string = ""   # Image tag; defaults to CI_COMMIT_SHORT_SHA or "latest"
+    --filter:       string = ""   # Only build images whose name contains this string
+    --skip-upload                 # Build and scan only, skip skopeo push
+    --skip-sbom                   # Build and upload, skip syft scanning
+
+    # Shared
+    --artifact-dir:   path = "pipeline-out"
+    --skip-analysis               # Skip Phase 0 static analysis entirely
+    --strict-analysis             # Abort pipeline if any static analysis tool exits non-zero
+    --skip-build                  # Skip cargo binary compilation (SBOM generation still runs)
+    --skip-images                 # Skip Phase 3 entirely
+] {
+    mkdir -v $artifact_dir
+
+    let ws_root     = (workspace-root)
+    let ws_manifest = ($ws_root | path join "Cargo.toml")
+
+    # ------------------------------------------------------------------
+    # Phase 0 — Static analysis (before Cassini; no provenance events)
+    # ------------------------------------------------------------------
+    if not $skip_analysis {
+        let analysis_results = (run-static-analysis $ws_manifest $artifact_dir)
+        let failed = ($analysis_results | where exit_code != 0)
+        if ($failed | is-not-empty) {
+            let names = ($failed | get name | str join ", ")
+            if $strict_analysis {
+                error make { msg: $"static analysis failed (strict mode): ($names)" }
+            } else {
+                log-warn $"static analysis non-zero exits: ($names) — continuing (pass --strict-analysis to abort)" --component $COMPONENT
+            }
+        }
+    }
+
+    let cassini_job_id = (start-cassini-daemon)
+
+    let image_tag  = if ($tag | is-not-empty) { $tag } else { ($env.CI_COMMIT_SHORT_SHA? | default "latest") }
+    let packages   = (resolve-packages --package $package)
+
+    log-info $"($packages | length) package\(s\) in scope, image tag: ($image_tag)" --component $COMPONENT
+
+    # ------------------------------------------------------------------
+    # Phase 1 — Cargo SBOMs
+    # ------------------------------------------------------------------
+    let sbom_files  = (generate-workspace-sboms $packages $ws_manifest $artifact_dir --target $target)
+    let sbom_lookup = (process-cargo-sboms $sbom_files $packages)
+    log-info $"($sbom_files | length) SBOM\(s\) generated and analyzed" --component $COMPONENT
+
+    # ------------------------------------------------------------------
+    # Phase 2 — Cargo binaries
+    # ------------------------------------------------------------------
+    if not $skip_build {
+        let binaries = (
+            build-and-link-binaries $packages $sbom_lookup $artifact_dir
+                --release
+                --target $target
+                --filter_package $package
+        )
+        log-info $"($binaries | length) binary\(ies\) built and linked" --component $COMPONENT
+    }
+
+    # ------------------------------------------------------------------
+    # Phase 3 — OCI images
+    # ------------------------------------------------------------------
+    if not $skip_images {
+        let manifest = if ($filter | is-not-empty) {
+            image-manifest | where { $in.name | str contains $filter }
+        } else {
+            image-manifest
+        }
+
+        if ($manifest | is-empty) {
+            log-warn $"no images match filter '($filter)' — skipping Phase 3" --component $COMPONENT
+        } else {
+            if not $skip_upload { login-to-registries }
+
+            log-info $"building ($manifest | length) image\(s\)" --component $COMPONENT
+
+            let results = ($manifest | each {|entry|
+                log-info $"--- ($entry.name) ---" --component $COMPONENT
+                process-image $entry $image_tag $sbom_lookup $artifact_dir
+                    --skip-upload=$skip_upload
+                    --skip-sbom=$skip_sbom
+            })
+
+            let succeeded = ($results | where success == true  | length)
+            let failed    = ($results | where success == false | length)
+            log-info $"($succeeded) image\(s\) succeeded, ($failed) failed" --component $COMPONENT
+
+            if $failed > 0 {
+                let failures = ($results | where success == false | get image_name | str join ", ")
+                log-warn $"failed images: ($failures)" --component $COMPONENT
+            }
+        }
+    }
+
+    stop-cassini-daemon $cassini_job_id
+}

@@ -1,4 +1,4 @@
-use ./pipeline/core.nu *
+use core.nu *
 
 const COMPONENT = "sbom"
 const ELF_BINARY_ARTIFACT = "elf-binary"
