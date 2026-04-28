@@ -69,6 +69,12 @@
         # Regenerate with: cd src/flake && just render-dev
         container = mkPolarContainer ./src/flake/container.nix;
 
+        # ── CI container ──────────────────────────────────────────────────────
+        ciContainer = import ./src/containers/ci-container.nix {
+          inherit pkgs lib system;
+          cassiniClient = polarPkgs.cassini.client;
+        };
+
         # ── Agent containers ───────────────────────────────────────────────────
         # Regenerate with: cd src/flake && just render-agent
         mkAgentContainer = llamaCppPkg: extraPkgs:
@@ -81,6 +87,7 @@
             };
             configNixPath = ./src/flake/agent-container.nix;
           };
+
 
         # ── Workspace binaries + agent images ─────────────────────────────────
         polarPkgs = import ./src/agents/workspace.nix {
@@ -120,6 +127,7 @@
 
           # ── Dev / CI / Agent containers ──────────────────────────────────────
           devContainer         = container.image;
+          ciContainer          = ciContainer.image;
           agentContainer       = (mkAgentContainer pkgs.llama-cpp pkgs.stdenv.cc).image;
           agentContainerRocm   = (mkAgentContainer pkgs.llama-cpp-rocm pkgs.stdenv.cc).image;
           agentContainerVulkan = (mkAgentContainer pkgs.llama-cpp-vulkan pkgs.stdenv.cc).image;
