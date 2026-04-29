@@ -47,16 +47,22 @@
           { attrPath = "default"; flakeInput = "llamaCpp"; }
           { attrPath = "just"; flakeInput = null; }
           { attrPath = "curl"; flakeInput = null; }
+          { attrPath = "rsync"; flakeInput = null; }
         ];
       })
   ];
   pipeline = null;
   shell = u:
-    u.Minimal { shell = "/bin/nu"; };
+    u.Interactive {
+      colorScheme = "gruvbox";
+      plugins = [];
+      shell = "/bin/nu";
+      viBindings = true;
+    };
   ssh = { enable = false; port = 2223; };
   staticGid = null;
   staticUid = null;
-  tls = { certsPath = null; enable = true; generateCerts = true; };
+  tls = null;
   user = {
     createUser = true;
     defaultShell = "/bin/fish";

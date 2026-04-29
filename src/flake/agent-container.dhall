@@ -13,6 +13,7 @@ let agentTools =
     [ Lib.flakePackage "llamaCpp" "default"
     , Lib.nixpkgs "just"
     , Lib.nixpkgs "curl"
+    , Lib.nixpkgs "rsync"
     ]
 
 let gpuGroups =
@@ -34,17 +35,25 @@ let agentEnv : List Lib.EnvVar =
 
 in defaults.aiAgentContainer //
   { name = "polar-agent"
+  , shell = Some (Lib.Shell.Interactive
+      { shell       = "/bin/nu"
+      , colorScheme = "gruvbox"
+      , viBindings  = True
+      , plugins     = [] : List Text
+      })
   , packageLayers =
       [ Lib.PackageLayer.Micro
       , Lib.PackageLayer.Core
       , Lib.PackageLayer.RustToolchain
       , agentTools
       ]
+  , pipeline = None Lib.PipelineConfig
+  , tls = None Lib.TLSConfig
+  , extraEnv = agentEnv
   , user = defaults.defaultUser //
       { supplementalGroups = gpuGroups }
   , ai = Some
       ( defaults.defaultAi //
         { enable = True }
       )
-  , extraEnv = agentEnv
   }

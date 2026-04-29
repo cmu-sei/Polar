@@ -43,6 +43,7 @@
           { attrPath = "zed-editor"; flakeInput = null; }
           { attrPath = "rage"; flakeInput = null; }
           { attrPath = "cosign"; flakeInput = null; }
+          { attrPath = "skopeo"; flakeInput = null; }
           { attrPath = "default"; flakeInput = "cassini-client"; }
           { attrPath = "git"; flakeInput = null; }
           { attrPath = "curl"; flakeInput = null; }

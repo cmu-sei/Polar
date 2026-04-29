@@ -11,7 +11,7 @@
 # Platform autodetects from uname. Override for cross-builds.
 # Verbose defaults to true (show full nix build logs).
 
-platform := `uname -m | sed 's/x86_64/x86_64-linux/;s/aarch64/aarch64-linux/'`
+platform := `echo "$(uname -m)-linux"`
 verbose   := "true"
 
 _nix_flags := if verbose == "true" { "-L" } else { "--log-format bar-with-logs" }
@@ -451,6 +451,7 @@ run-nvidia:
         -e CREATE_GID="$(id -g)" \
         -e ATUIN_SESSION_NAME=polar-dev \
         -e LD_LIBRARY_PATH=/run/opengl-driver/lib \
+        -e OLLAMA_HOST="0.0.0.0:8080" \
         -v ~/Documents/projects/ai_models/llama:/opt/llama-models:rw \
         -v ~/Documents/projects/ai_models/ollama:/opt/ollama:rw \
         -v ~/Documents/projects/ai_state/pi:/opt/pi:rw \
@@ -527,7 +528,7 @@ llm-omnicoder-nvidia-12GB:
     llama-server \
         --hf-repo Tesslate/OmniCoder-9B-GGUF \
         --hf-file omnicoder-9b-q4_k_m.gguf \
-        --ctx-size 65536 \
+        --ctx-size 131072 \
         --n-gpu-layers 99 \
         --flash-attn on \
         --alias "local-model" \
