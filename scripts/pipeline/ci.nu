@@ -33,350 +33,12 @@ use ./core.nu *
 const COMPONENT           = "ci"
 const ELF_BINARY_ARTIFACT = "elf-binary"
 
-# ===========================================================================
-# Container bootstrap
-#
-# When ci.nu is used as the container entrypoint instead of start.nu, it
-# must reproduce the subset of start.nu that CI actually depends on.
-#
-# DESIGN: we deliberately avoid hardcoding /nix/store/... paths. Store hashes
-# change every time the container image is rebuilt from a new nixpkgs pin, so
-# any hardcoded path is a maintenance time-bomb. Instead we discover paths at
-# runtime through two stable indirections:
-#
-#   1. The Nix profile at /nix/var/nix/profiles/default
-#      The container-lib installs all packages into this profile, which the Nix
-#      tooling maintains as a symlink tree. Paths like:
-#        /nix/var/nix/profiles/default/lib/pkgconfig
-#        /nix/var/nix/profiles/default/include
-#        /nix/var/nix/profiles/default/lib
-#      are stable across rebuilds regardless of what hash is in the store.
-#
-#   2. pkg-config, once PKG_CONFIG_PATH is set from the profile
-#      pkg-config --variable=prefix openssl gives us the openssl store path
-#      without us having to know it in advance. Same for libclang via llvm.
-#
-# Everything else in start.nu (user creation, Fish shell, Dropbear, banner,
-# fish plugins, sftp symlink, exec chroot) is interactive/dev scaffolding
-# that has no place in a CI run.
-# ===========================================================================
-
 # Resolve a pkg-config variable for a package, returning "" on failure.
 # PKG_CONFIG_PATH must already be set before calling this.
 def pc-var [pkg: string, var: string]: nothing -> string {
     try { ^pkg-config --variable $var $pkg | str trim } catch { "" }
 }
 
-def bootstrap-container-env [] {
-    let profile = "/nix/var/nix/profiles/default"
-
-    # ── PKG_CONFIG_PATH ──────────────────────────────────────────────────────
-    # Set this first — everything else that uses pkg-config depends on it.
-    # The profile lib/pkgconfig directory is the canonical aggregation point
-    # for all .pc files installed into the profile, regardless of store hash.
-    let pc_dir = $"($profile)/lib/pkgconfig"
-    let existing_pc = ($env.PKG_CONFIG_PATH? | default "")
-    $env.PKG_CONFIG_PATH = if ($existing_pc | is-empty) {
-        $pc_dir
-    } else {
-        $"($pc_dir):($existing_pc)"
-    }
-
-    # ── OpenSSL ──────────────────────────────────────────────────────────────
-    # openssl-sys checks OPENSSL_DIR, OPENSSL_LIB_DIR, OPENSSL_INCLUDE_DIR in
-    # that order before falling back to pkg-config. We resolve them from
-    # pkg-config so the values track whatever openssl version is in the profile.
-    let openssl_prefix  = (pc-var "openssl" "prefix")
-    let openssl_libdir  = (pc-var "openssl" "libdir")
-
-    if ($openssl_prefix | is-not-empty) {
-        $env.OPENSSL_DIR         = $openssl_prefix
-        $env.OPENSSL_LIB_DIR     = $openssl_libdir
-        $env.OPENSSL_INCLUDE_DIR = $"($openssl_prefix)/include"
-    } else {
-        # pkg-config found nothing — fall back to profile symlink paths.
-        # These exist as long as openssl-dev is in the profile even if the
-        # .pc file is absent or malformed.
-        log-warn "pkg-config could not resolve openssl — falling back to profile paths" --component $COMPONENT
-        $env.OPENSSL_DIR         = $profile
-        $env.OPENSSL_LIB_DIR     = $"($profile)/lib"
-        $env.OPENSSL_INCLUDE_DIR = $"($profile)/include"
-    }
-
-    # ── LIBCLANG_PATH ────────────────────────────────────────────────────────
-    # bindgen needs the directory containing libclang.so. llvm-config gives us
-    # the authoritative answer; we fall back to the profile lib dir if clang
-    # is not on PATH or llvm-config is absent.
-    let libclang = (
-        try { ^llvm-config --libdir | str trim } catch {
-            try {
-                # llvm-config not on PATH as such — try resolving from clang binary location
-                let clang_bin = (^which clang | str trim)
-                ^($clang_bin | path dirname | path join ".." "lib") | path expand | into string
-            } catch {
-                $"($profile)/lib"
-            }
-        }
-    )
-    $env.LIBCLANG_PATH = $libclang
-
-    # ── LOCALE_ARCHIVE ───────────────────────────────────────────────────────
-    # glibc locale tools look for this. The profile exposes it at a stable path
-    # when glibc-locales is in the profile; if not present we leave it unset
-    # rather than pointing at a path that doesn't exist.
-    let locale_archive = $"($profile)/lib/locale/locale-archive"
-    if ($locale_archive | path exists) {
-        $env.LOCALE_ARCHIVE = $locale_archive
-    }
-
-    # ── PATH: profile bin ────────────────────────────────────────────────────
-    # Prepend the profile bin directory so profile-installed tools win over
-    # anything that might be in a system PATH. This covers coreutils, cargo,
-    # rustc, pkg-config, clang, etc. without naming any store path.
-    let profile_bin = $"($profile)/bin"
-    if ($profile_bin | path exists) {
-        $env.PATH = ($env.PATH | split row ":" | prepend $profile_bin | uniq | str join ":")
-    }
-
-    # ── CARGO_TARGET_DIR ─────────────────────────────────────────────────────
-    # Shared build cache across pipeline runs. Warm incremental builds are
-    # meaningfully faster; the tradeoff is disk usage in /var/cache.
-    let cargo_target = "/var/cache/cargo-target"
-    mkdir $cargo_target
-    ^chmod 0755 $cargo_target
-    $env.CARGO_TARGET_DIR = $cargo_target
-
-    # ── nix.conf: trust the CI runner ────────────────────────────────────────
-    # Without extra-trusted-users the nix daemon rejects unsigned builds from
-    # any uid that isn't root or a nixbld user.
-    let ci_user = (^whoami | str trim)
-    let nix_conf = "/etc/nix/nix.conf"
-    let already_trusted = (try { open --raw $nix_conf | str contains $ci_user } catch { false })
-    if not $already_trusted {
-        $"
-extra-trusted-users = ($ci_user)
-" | save --append $nix_conf
-    }
-
-    # ── aarch64: sandbox flags ────────────────────────────────────────────────
-    # QEMU-backed aarch64 runners fail with the default seccomp sandbox.
-    # We disable unconditionally on aarch64 rather than probing /proc/cpuinfo,
-    # which is fragile across kernel and QEMU versions.
-    let arch = (^uname -m | str trim)
-    if $arch == "aarch64" {
-        let already = (try { open --raw $nix_conf | str contains "aarch64-linux" } catch { false })
-        if not $already {
-            "
-system = aarch64-linux
-extra-platforms = x86_64-linux
-sandbox = false
-filter-syscalls = false
-"
-            | save --append $nix_conf
-        }
-    }
-
-    # ── nixbld group + build users ────────────────────────────────────────────
-    # The nix daemon requires these in /etc/passwd and /etc/group before it
-    # will start. They already exist if the container launched via start.nu;
-    # we create them here for the direct-entrypoint case.
-    let cpus = (^nproc | str trim | into int)
-    let dummy_shell = if ("/bin/nologin" | path exists) { "/bin/nologin" } else { "/bin/false" }
-
-    let nixbld_in_group = (try { open --raw /etc/group | str contains "nixbld:" } catch { false })
-    if not $nixbld_in_group {
-        "nixbld:x:30000:
-" | save --append /etc/group
-        "nixbld:x::
-"      | save --append /etc/gshadow
-        mkdir /var/empty
-    }
-
-    let members = (seq 1 $cpus | each {|i|
-        let mname = $"nixbld($i)"
-        let exists = (try { open --raw /etc/passwd | str contains $"($mname):" } catch { false })
-        if not $exists {
-            let muid = 30000 + $i
-            $"($mname):x:($muid):30000:Nix build user ($i):/var/empty:($dummy_shell)
-"
-            | save --append /etc/passwd
-        }
-        $mname
-    })
-
-    open --raw /etc/group
-    | lines
-    | where { not ($in | str starts-with "nixbld:") }
-    | append $"nixbld:x:30000:($members | str join ',')"
-    | str join "
-"
-    | $"($in)
-"
-    | save --force /etc/group
-
-    log-warn "cargo install cargo-cyclonedx --quiet" --component $COMPONENT
-    cargo install cargo-cyclonedx --quiet
-
-    log-info "container environment bootstrapped" --component $COMPONENT
-}
-
-# Start vigild and block until the nix-daemon socket is ready.
-#
-# Must be called before any `nix build` invocation (Phase 3). Deliberately
-# separated from bootstrap-container-env so that --skip-images runs pay zero
-# daemon startup cost.
-#
-# Incorporates the full set of daemon prerequisites from start.nu:
-#   - nixbld group + build users (nix-daemon refuses to start without them)
-#   - gshadow rewrite (parity with start.nu; some PAM configs read this)
-#   - db.sqlite symlink fixup (Docker overlay quirk: nix-daemon rejects a
-#     symlink where it expects a regular file for the store DB)
-#   - vigild supervision layer (only the nix-daemon service — no Dropbear,
-#     no SSH, none of the interactive scaffolding from start.nu)
-#
-# Returns without error if vigild is already running (idempotent).
-def start-nix-daemon [] {
-    if ("/run/vigil/vigild.sock" | path exists) {
-        log-debug "vigild already running, skipping daemon start" --component $COMPONENT
-        return
-    }
-
-    # ── nixbld users ─────────────────────────────────────────────────────────
-    # nix-daemon forks build processes as nixbld(N) users. They must exist in
-    # /etc/passwd and /etc/group before the daemon starts or it will refuse to
-    # spawn builders. start.nu created these; we recreate them here for the
-    # direct-entrypoint path.
-    let cpus        = (^nproc | str trim | into int)
-    let dummy_shell = if ("/bin/nologin" | path exists) { "/bin/nologin" } else { "/bin/false" }
-    let ci_user     = (^whoami | str trim)
-
-    # Append group/gshadow stubs only if they don't already exist.
-    let nixbld_in_group = (try { open --raw /etc/group | str contains "nixbld:" } catch { false })
-    if not $nixbld_in_group {
-        "nixbld:x:30000:
-"  | save --append /etc/group
-        "nixbld:x::
-"       | save --append /etc/gshadow
-        mkdir /var/empty
-    }
-
-    let members = (seq 1 $cpus | each {|i|
-        let muid  = 30000 + $i
-        let mname = $"nixbld($i)"
-        let exists = (try { open --raw /etc/passwd | lines | any { str starts-with $"($mname):" } } catch { false })
-        if not $exists {
-            $"($mname):x:($muid):30000:Nix build user ($i):/var/empty:($dummy_shell)
-"
-            | save --append /etc/passwd
-        }
-        $mname
-    })
-
-    let member_list = ($members | str join ",")
-
-    # Rewrite the full nixbld line in /etc/group and /etc/gshadow so the
-    # member list is complete even if some entries were added incrementally.
-    open --raw /etc/group
-    | lines
-    | where { not ($in | str starts-with "nixbld:") }
-    | append $"nixbld:x:30000:($member_list)"
-    | str join "
-"
-    | $"($in)
-"
-    | save --force /etc/group
-
-    open --raw /etc/gshadow
-    | lines
-    | where { not ($in | str starts-with "nixbld:") }
-    | append $"nixbld:!:($member_list):"
-    | str join "
-"
-    | $"($in)
-"
-    | save --force /etc/gshadow
-
-    # ── nix.conf: trust the current user ─────────────────────────────────────
-    # Duplicates the bootstrap-container-env check as a belt-and-suspenders
-    # guard: if the daemon starts before the conf is written it will reject
-    # our builds, so we ensure it's set immediately before launch.
-    let nix_conf = "/etc/nix/nix.conf"
-    let already_trusted = (try { open --raw $nix_conf | str contains $ci_user } catch { false })
-    if not $already_trusted {
-        $"
-extra-trusted-users = ($ci_user)
-" | save --append $nix_conf
-    }
-
-    # ── db.sqlite symlink fixup ───────────────────────────────────────────────
-    # When Nix is installed into a Docker image, the store DB is sometimes
-    # bind-mounted as a symlink through the overlay filesystem. The nix-daemon
-    # requires regular files at /nix/var/nix/db/db.sqlite (and siblings) and
-    # will refuse to start if it finds symlinks. We detect this case and
-    # materialise the files in-place.
-    if ("/nix/var/nix/db/db.sqlite" | path type) == "symlink" {
-        log-info "nix db.sqlite is a symlink — materialising for daemon compatibility" --component $COMPONENT
-        let db_src = ("/nix/var/nix/db/db.sqlite" | path expand | path dirname)
-        let tmp    = (^mktemp -d | str trim)
-
-        ls $db_src | get name | each {|f| cp --preserve [] $f $tmp; null }
-
-        for f in ["db.sqlite" "db.sqlite-shm" "db.sqlite-wal" "big-lock" "reserved" "schema"] {
-            let p = $"/nix/var/nix/db/($f)"
-            if ($p | path exists) { rm -f $p }
-        }
-
-        ls $tmp | get name | each {|f| cp --preserve [] $f /nix/var/nix/db/; null }
-        rm -rf $tmp
-
-        # Permissions mirror what nix-daemon expects: DB files world-readable,
-        # lock files root-only.
-        ^chmod 644 /nix/var/nix/db/db.sqlite
-        ^chmod 644 /nix/var/nix/db/db.sqlite-shm
-        ^chmod 644 /nix/var/nix/db/db.sqlite-wal
-        ^chmod 644 /nix/var/nix/db/schema
-        ^chmod 600 /nix/var/nix/db/big-lock
-        ^chmod 600 /nix/var/nix/db/reserved
-    }
-
-    # ── vigild: nix-daemon supervision ───────────────────────────────────────
-    # CI-only layer: just nix-daemon. No Dropbear, no interactive services.
-    mkdir /run/vigil/layers
-
-    "summary: ci background services
-
-services:
-  nix-daemon:
-    summary: Nix build daemon
-    command: /bin/nix-daemon --daemon
-    startup: enabled
-    on-success: restart
-    on-failure: restart
-" | save --force /run/vigil/layers/001-ci.yaml
-
-    job spawn { ^/bin/vigild --layers-dir /run/vigil/layers --socket /run/vigil/vigild.sock }
-
-    let vigild_ready = (
-        1..20 | each {|_| sleep 100ms; "/run/vigil/vigild.sock" | path exists }
-        | any {|x| $x }
-    )
-    if not $vigild_ready {
-        log-warn "vigild did not become ready within 2s — nix builds may fail" --component $COMPONENT
-        return
-    }
-    ^chmod 666 /run/vigil/vigild.sock
-
-    let daemon_ready = (
-        1..30 | each {|_| sleep 200ms; "/nix/var/nix/daemon-socket/socket" | path exists }
-        | any {|x| $x }
-    )
-    if not $daemon_ready {
-        log-warn "nix-daemon socket did not appear within 6s — nix build may fail" --component $COMPONENT
-    } else {
-        ^chmod 666 /nix/var/nix/daemon-socket/socket
-        log-info "nix-daemon ready" --component $COMPONENT
-    }
-}
 
 # ===========================================================================
 # Phase 0: Static analysis
@@ -525,7 +187,7 @@ def generate-static-summary [results: table, output_dir: string] {
 def run-static-analysis [ws_manifest: path, artifact_dir: path]: nothing -> table {
     check-tools [
         cargo cargo-deny cargo-udeps cargo-semver-checks
-        cargo-geiger cargo-hack cargo-mutants noseyparker-cli
+        cargo-geiger cargo-hack cargo-mutants
     ]
 
     log-info (bold "phase 0 — static analysis") --component $COMPONENT
@@ -536,18 +198,6 @@ def run-static-analysis [ws_manifest: path, artifact_dir: path]: nothing -> tabl
         | par-each {|tool| run-tool $tool.name $tool.outfile $tool.cmd }
     )
 
-    # noseyparker: manages its own datastore, must run sequentially.
-    log-info "  → noseyparker..." --component $COMPONENT
-    let np_datastore = $"($artifact_dir)/noseyparker_datastore"
-    let np_scan_out  = $"($artifact_dir)/noseyparker_scan.txt"
-    let np_report    = $"($artifact_dir)/noseyparker_report.txt"
-    rm -rf $np_datastore
-
-    let np_scan = (run-tool "noseyparker scan" $np_scan_out [noseyparker-cli scan --datastore $np_datastore .])
-    # Report exits 0 always; findings live in the file.
-    noseyparker-cli report --datastore $np_datastore out+err> $np_report
-    let np_report_result = { name: "noseyparker report", outfile: $np_report, exit_code: 0, duration_sec: 0 }
-
     # cargo mutants: spawns its own worker pool, must run sequentially last.
     log-info "  → cargo mutants (slow)..." --component $COMPONENT
     let mutants_out     = $"($artifact_dir)/cargo_mutants.txt"
@@ -556,7 +206,7 @@ def run-static-analysis [ws_manifest: path, artifact_dir: path]: nothing -> tabl
         cargo mutants --manifest-path ($ws_manifest | into string) --output $mutants_out_dir
     ])
 
-    let all_results = ($parallel_results | append $np_scan | append $np_report_result | append $mutants)
+    let all_results = ($parallel_results | append $mutants)
 
     log-info ($all_results | select name exit_code duration_sec | table) --component $COMPONENT
     generate-static-summary $all_results ($artifact_dir | into string)
@@ -580,7 +230,7 @@ def image-manifest []: nothing -> list<record> {
         { name: "kube-observer",   flake: ".#kubeObserverImage",       image: "polar-kube-observer",     root_purl: "pkg:cargo/kube-observer@0.1.0"      }
         { name: "kube-consumer",   flake: ".#kubeConsumerImage",       image: "polar-kube-consumer",     root_purl: "pkg:cargo/kube-consumer@0.1.0"      }
         { name: "git-observer",    flake: ".#gitObserverImage",        image: "polar-git-observer",      root_purl: "pkg:cargo/git-repo-observer@0.1.0"  }
-        { name: "git-consumer",    flake: ".#gitConsumerImage",        image: "polar-git-consumer",      root_purl: ""                                   }
+        { name: "git-processor",    flake: ".#gitProcessorImage",        image: "polar-git-processor",      root_purl: ""                                   }
         { name: "git-scheduler",   flake: ".#gitSchedulerImage",       image: "polar-git-scheduler",     root_purl: ""                                   }
         { name: "linker",          flake: ".#provenanceLinkerImage",   image: "polar-linker-agent",      root_purl: "pkg:cargo/provenance-linker@0.1.0"  }
         { name: "resolver",        flake: ".#provenanceResolverImage", image: "polar-resolver-agent",    root_purl: "pkg:cargo/provenance-resolver@0.1.0"}
@@ -992,10 +642,6 @@ def main [
     --skip-build                  # Skip cargo binary compilation (SBOM generation still runs)
     --skip-images                 # Skip Phase 3 entirely
 ] {
-    # Bootstrap must run before anything else — sets OpenSSL env vars that
-    # cargo needs. It is fast and idempotent so there is no harm running it
-    # even when the container was launched via start.nu.
-    bootstrap-container-env
 
     mkdir -v $artifact_dir
 
@@ -1013,7 +659,7 @@ def main [
             if $strict_analysis {
                 error make { msg: $"static analysis failed (strict mode): ($names)" }
             } else {
-                log-warn $"static analysis non-zero exits: ($names) — continuing (pass --strict-analysis to abort)" --component $COMPONENT
+                log-warn $"static analysis non-zero exits: ($names) — continuing \(pass --strict-analysis to abort\)" --component $COMPONENT
             }
         }
     }
@@ -1049,9 +695,6 @@ def main [
     # Phase 3 — OCI images
     # ------------------------------------------------------------------
     if not $skip_images {
-        # nix build requires the daemon. Start it now rather than at bootstrap
-        # time so runs with --skip-images pay zero daemon overhead.
-        start-nix-daemon
         let manifest = if ($filter | is-not-empty) {
             image-manifest | where { $in.name | str contains $filter }
         } else {
