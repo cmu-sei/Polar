@@ -32,6 +32,7 @@ description = "Observer agent for Jira — polls APIs, publishes updates via Cas
 [dependencies]
 cassini-client.workspace = true
 cassini-types.workspace = true
+chrono.workspace = true
 clokwerk.workspace = true
 jira_common.workspace = true
 log.workspace = true

@@ -43,7 +43,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
         auth,
         deployment,
         proxy_ca_cert_file,
-        base_interval: 300,
+        // TODO: read these from configuration
+        base_interval: 10800,
         max_backoff_secs: 6000,
     };
     match Actor::spawn(

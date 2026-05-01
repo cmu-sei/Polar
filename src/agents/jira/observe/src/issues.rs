@@ -24,20 +24,24 @@ use crate::{
     BROKER_CLIENT_NAME, Command, JiraObserverArgs, JiraObserverMessage, JiraObserverState,
     handle_backoff, JiraDeployment
 };
+use std::sync::LazyLock;
+use std::env;
 use cassini_client::TcpClientMessage;
 use cassini_types::ClientMessage;
 use jira_common::JIRA_ISSUES_CONSUMER_TOPIC;
 use jira_common::types::{JiraData, JiraField, JsonString};
 use ractor::{Actor, ActorProcessingErr, ActorRef, async_trait, registry::where_is};
 use rkyv::rancor::Error;
-use std::time::Duration;
-use tracing::{debug, info};
+use std::time::{Duration, Instant};
+use tracing::{debug, info, warn};
 
 use cassini_types::WireTraceCtx;
 use serde_json::Value;
 use std::collections::HashMap;
 
 pub struct JiraIssueObserver;
+
+static START_TIME: LazyLock<Instant> = LazyLock::new(Instant::now);
 
 impl JiraIssueObserver {
     fn observe(
@@ -92,6 +96,10 @@ impl Actor for JiraIssueObserver {
         myself: ActorRef<Self::Msg>,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
+        let _ = myself.send_message(
+            JiraObserverMessage::Tick(
+                Command::GetIssues("/rest/api/2/search?".to_string())
+                ));
         JiraIssueObserver::observe(myself, state, state.base_interval);
         Ok(())
     }
@@ -107,86 +115,119 @@ impl Actor for JiraIssueObserver {
                 if let Command::GetIssues(op) = command {
                     let max_results = 50;
                     debug!("Staring to query for issues...");
+
+                    // Load up the fields
                     let field_url = format!("{}/rest/api/2/field", state.jira_url);
-                    let field_result = state
-                        .auth
-                        .apply(state.web_client.get(&field_url))
-                        .send()
-                        .await?
-                        .json::<Vec<JiraField>>()
-                        .await?;
-                    let mut field_map: HashMap<String, JiraField> = HashMap::new();
-                    for field in field_result {
-                        field_map.insert(field.id.to_string(), field);
-                    }
+                    match state.auth.apply(state.web_client.get(&field_url)).send().await {
+                        Ok(f_result) => {
+                            let field_result = f_result.json::<Vec<JiraField>>().await?;
+                            let mut field_map: HashMap<String, JiraField> = HashMap::new();
+                            for field in field_result {
+                                field_map.insert(field.id.to_string(), field);
+                            }
 
-                    match state.deployment {
-                        JiraDeployment::ServerOrDataCenter => {
-                            // Original v2 offset-based pagination, unchanged.
-                            let mut start_at = 0;
-                            let query_string = "''";
+                            // Decide whether this tick is a full pull or an incremental
+                            // pull based on how long the observer has been running, with
+                            // an optional QUERY_DATE env override.
+                            let mut timestr = String::new();
+                            let mut query_date = String::new();
+                            match env::var("QUERY_DATE") {
+                                Ok(val) => query_date = val.clone(),
+                                Err(env::VarError::NotPresent) => (),
+                                Err(env::VarError::NotUnicode(_)) => (),
+                            }
+                            if (*START_TIME + state.base_interval) < Instant::now() {
+                                info!("Updating to do partial pull");
+                                timestr.push_str("&jql=updated>=-");
+                                timestr.push_str(&state.base_interval.as_secs().to_string());
+                                timestr.push_str("s");
+                            } else if query_date != "" {
+                                info!("Adding in date to grab from");
+                                timestr.push_str("&jql=updated>");
+                                timestr.push_str(&query_date.to_string());
+                            }
 
-                            loop {
-                                let url = format!(
-                                    "{}{}?query={}&startAt={}&maxResults={}&expand=changelog",
-                                    state.jira_url, op, query_string, start_at, max_results
-                                );
-                                debug!("{}", url.to_string());
-                                let res = state
-                                    .auth
-                                    .apply(state.web_client.get(&url))
-                                    .send()
-                                    .await?
-                                    .json::<serde_json::Value>()
-                                    .await?;
+                            match state.deployment {
+                                JiraDeployment::ServerOrDataCenter => {
+                                    // Original v2 offset-based pagination, unchanged,
+                                    // plus the incremental-pull filter above appended.
+                                    let mut start_at = 0;
+                                    let query_string = "''";
 
-                                let fetched = publish_issues(&res, &field_map, state)?;
-
-                                let total = res["total"].as_u64().unwrap_or(0);
-                                if (start_at + max_results) >= total as usize {
-                                    break;
+                                    loop {
+                                        let url = format!(
+                                            "{}{}?query={}&startAt={}&maxResults={}&expand=changelog{}",
+                                            state.jira_url, op, query_string, start_at, max_results, timestr
+                                        );
+                                        debug!("{}", url.to_string());
+                                        match state.auth.apply(state.web_client.get(&url)).send().await {
+                                            Ok(response) => {
+                                                let res = response.json::<serde_json::Value>().await?;
+                                                let fetched = publish_issues(&res, &field_map, state)?;
+                                                let total = res["total"].as_u64().unwrap_or(0);
+                                                if (start_at + fetched) >= total as usize {
+                                                    break;
+                                                }
+                                                start_at += fetched;
+                                                debug!("Loaded {}/{}...", start_at, total);
+                                            }
+                                            Err(e) => {
+                                                warn!("Error pulling issues, going to retry: {}", e);
+                                                std::thread::sleep(Duration::from_secs(2));
+                                            }
+                                        }
+                                    }
                                 }
-                                start_at += fetched;
-                                debug!("Loaded {}...", start_at);
+                                JiraDeployment::Cloud => {
+                                    // Cloud removed /rest/api/2/search (CHANGE-2046). Use
+                                    // /rest/api/3/search/jql with cursor-based pagination.
+                                    // "project is not EMPTY" is Atlassian's own recommended
+                                    // dummy bound for unrestricted searches — Cloud rejects
+                                    // fully unbounded JQL queries.
+                                    //
+                                    // TODO: the incremental-pull filter (`timestr` above) is
+                                    // NOT yet applied here. It would need to be AND-combined
+                                    // into this jql= clause rather than appended as a second
+                                    // jql= param. Left out pending a decision on query
+                                    // composition rather than guessing.
+                                    let mut next_page_token: Option<String> = None;
+
+                                    loop {
+                                        let mut url = format!(
+                                            "{}/rest/api/3/search/jql?jql=project%20is%20not%20EMPTY%20order%20by%20created%20DESC&maxResults={}&expand=changelog",
+                                            state.jira_url, max_results
+                                        );
+                                        if let Some(token) = &next_page_token {
+                                            url.push_str(&format!("&nextPageToken={}", token));
+                                        }
+                                        debug!("{}", url.to_string());
+                                        match state.auth.apply(state.web_client.get(&url)).send().await {
+                                            Ok(response) => {
+                                                let res = response.json::<serde_json::Value>().await?;
+                                                publish_issues(&res, &field_map, state)?;
+
+                                                let is_last = res["isLast"].as_bool().unwrap_or(true);
+                                                if is_last {
+                                                    break;
+                                                }
+                                                next_page_token = res["nextPageToken"].as_str().map(|s| s.to_string());
+                                                if next_page_token.is_none() {
+                                                    break;
+                                                }
+                                                debug!("Fetching next page...");
+                                            }
+                                            Err(e) => {
+                                                warn!("Error pulling issues, going to retry: {}", e);
+                                                std::thread::sleep(Duration::from_secs(2));
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
-                        JiraDeployment::Cloud => {
-                            // Cloud removed /rest/api/2/search (CHANGE-2046). Use
-                            // /rest/api/3/search/jql with cursor-based pagination.
-                            // "project is not EMPTY" is Atlassian's own recommended
-                            // dummy bound for unrestricted searches — Cloud rejects
-                            // fully unbounded JQL queries.
-                            let mut next_page_token: Option<String> = None;
-
-                            loop {
-                                let mut url = format!(
-                                    "{}/rest/api/3/search/jql?jql=project%20is%20not%20EMPTY%20order%20by%20created%20DESC&maxResults={}&expand=changelog",
-                                    state.jira_url, max_results
-                                );
-                                if let Some(token) = &next_page_token {
-                                    url.push_str(&format!("&nextPageToken={}", token));
-                                }
-                                debug!("{}", url.to_string());
-                                let res = state
-                                    .auth
-                                    .apply(state.web_client.get(&url))
-                                    .send()
-                                    .await?
-                                    .json::<serde_json::Value>()
-                                    .await?;
-
-                                publish_issues(&res, &field_map, state)?;
-
-                                let is_last = res["isLast"].as_bool().unwrap_or(true);
-                                if is_last {
-                                    break;
-                                }
-                                next_page_token = res["nextPageToken"].as_str().map(|s| s.to_string());
-                                if next_page_token.is_none() {
-                                    break;
-                                }
-                                debug!("Fetching next page...");
-                            }
+                        Err(e) => {
+                            warn!("Error pulling fields, going to retry: {}", e);
+                            std::thread::sleep(Duration::from_secs(2));
                         }
                     }
                 }

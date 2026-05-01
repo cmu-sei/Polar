@@ -122,7 +122,7 @@ impl Actor for JiraGroupObserver {
                             .await?
                             .json::<serde_json::Value>()
                             .await?;
-
+                        debug!("Group Data {}", res["groups"].to_string());
                         let groups: Vec<JiraGroup> = if res["groups"].is_null() {
                             Vec::new()
                         } else {
