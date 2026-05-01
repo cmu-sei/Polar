@@ -10,6 +10,7 @@ use crate::users::JiraUserConsumer;
 use cassini_backoff::{Backoff, ExponentialBackoff};
 use cassini_client::TCPClientConfig;
 use cassini_client::{TcpClientActor, TcpClientArgs, TcpClientMessage};
+use cassini_types::ClientMessage;
 use cassini_types::ClientEvent;
 use jira_common::JIRA_GROUPS_CONSUMER_TOPIC;
 use jira_common::JIRA_ISSUES_CONSUMER_TOPIC;
@@ -38,16 +39,29 @@ pub struct ConsumerSupervisorState {
     graph_config: neo4rs::Config,
 }
 impl Supervisor for ConsumerSupervisor {
-    fn deserialize_and_dispatch(topic: String, payload: Vec<u8>) {
-        match rkyv::from_bytes::<JiraData, rkyv::rancor::Error>(&payload) {
-            Ok(message) => {
-                if let Some(consumer) = where_is(topic.clone())
-                    && let Err(e) = consumer.send_message(message)
-                {
-                    tracing::warn!("Error forwarding message. {e}");
+    fn deserialize_and_dispatch(topic: String, new_payload: Vec<u8>) {
+        warn!("Payload:{:?}", topic);
+        match rkyv::from_bytes::<ClientMessage, rkyv::rancor::Error>(&new_payload) {
+            Ok(msg) => {
+                match msg {
+                    ClientMessage::PublishRequest {topic, payload, .. } => {
+                        match rkyv::from_bytes::<JiraData, rkyv::rancor::Error>(&payload) {
+                            Ok(message) => {
+                                if let Some(consumer) = where_is(topic.clone())
+                                    && let Err(e) = consumer.send_message(message)
+                                {
+                                    tracing::warn!("Error forwarding message. {e}");
+                                }
+                            },
+                            Err(err) => warn!("Failed to deserialize message: {:?}", err),
+                        }
+                    },
+                    other => {
+                        warn!("Received unexpected ClientMessage variant: {:?}", other);
+                    }
                 }
             }
-            Err(err) => warn!("Failed to deserialize message: {:?}", err),
+            Err(err) => warn!("Failed to deserialize payload: {:?}", err),
         }
     }
 }

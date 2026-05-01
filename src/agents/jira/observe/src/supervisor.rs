@@ -23,6 +23,7 @@ use reqwest::Client;
 use reqwest::ClientBuilder;
 use tracing::error;
 use tracing::{debug, info, warn};
+use std::time::{Duration, Instant};
 pub struct ObserverSupervisor;
 
 pub struct ObserverSupervisorState {

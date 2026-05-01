@@ -122,7 +122,7 @@ impl Actor for JiraGroupObserver {
                             .await?
                             .json::<serde_json::Value>()
                             .await?;
-
+                        debug!("Group Data {}", res["groups"].to_string());
                         let groups: Vec<JiraGroup> = serde_json::from_value(res["groups"].clone())?;
                         let total = res["total"].as_u64().unwrap_or(0);
                         let fetched = groups.len();
