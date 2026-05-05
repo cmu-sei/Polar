@@ -80,6 +80,10 @@ pub struct CaConfig {
     pub provisioner_key_path: String,
     /// Default cert lifetime. Per-class overrides may layer on this.
     pub default_lifetime: Duration,
+    /// Signing algorithm of the provisioner key. v1 supports
+    /// "ES256" and "EdDSA". The string is mapped to a
+    /// jsonwebtoken::Algorithm in main.rs.
+    pub provisioner_alg: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

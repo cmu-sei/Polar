@@ -31,7 +31,7 @@ in  schema.ServiceConfig::{
     , ca = schema.CaConfig::{
       , url = "https://step-ca.polar-system.svc.cluster.local:9000"
       , provisioner = "cert-issuer"
-      , provisioner_key_path = "/etc/cert-issuer/provisioner.key"
+      , provisioner_key_path = "/home/vcaaron/projects/Polar/src/agents/cert-issuer/agent/conf/provisioner.key"
       , -- Slightly shorter lifetime in dev to surface restart-driven
         -- renewal issues quickly. Production typically uses the
         -- 1-hour default.

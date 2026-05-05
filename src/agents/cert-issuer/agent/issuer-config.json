@@ -1,20 +1,17 @@
 {
-  "bind_addr": "0.0.0.0:8443",
+  "bind_addr": "0.0.0.0:3000",
   "ca": {
     "default_lifetime": {
       "nanos": 0,
       "secs": 1800
     },
     "provisioner": "cert-issuer",
-    "provisioner_key_path": "/etc/cert-issuer/provisioner.key",
+    "provisioner_alg": "ES256",
+    "provisioner_key_path": "/home/vcaaron/projects/Polar/src/agents/cert-issuer/agent/conf/ec-private.pem",
     "url": "https://step-ca.polar-system.svc.cluster.local:9000"
   },
   "issuer": {
-    "allowed_algorithms": [
-      "RS256",
-      "ES256",
-      "EdDSA"
-    ],
+    "allowed_algorithms": ["RS256", "ES256", "EdDSA"],
     "audience": "polar-cert-issuer.dev",
     "instance_binding_claim": "kubernetes.io/pod/uid",
     "issuer": "https://kubernetes.default.svc",

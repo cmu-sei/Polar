@@ -77,6 +77,7 @@ let CaConfig =
           , provisioner : Text
           , provisioner_key_path : Text
           , default_lifetime : Duration
+          , provisioner_alg : Text
           }
       , default =
           { url = ""
@@ -90,7 +91,8 @@ let CaConfig =
             -- itself may clamp this further per its provisioner
             -- policy.
             default_lifetime = hours 1
-          }
+            , provisioner_alg = "ES256"
+        }
       }
 
 let ServiceConfig =

@@ -27,7 +27,7 @@ ring = "0.17"
 rcgen = "0.13"  # CSR generation
 
 # JWT / OIDC
-jsonwebtoken = "9"
+jsonwebtoken = "10.3.0"
 
 # Serialization
 serde = { version = "1", features = ["derive"] }

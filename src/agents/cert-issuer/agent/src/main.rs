@@ -35,7 +35,7 @@ use cert_issuer::handler::Handler;
 use cert_issuer::oidc::Validator;
 use cert_issuer::server::build_router;
 use std::sync::Arc;
-use tracing::info;
+use tracing::{debug, info};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -63,6 +63,11 @@ async fn main() -> Result<()> {
     // production this path points at a mounted Kubernetes secret
     // (or a Vault-rendered file). The key bytes never leave the
     // process after this point.
+    debug!(
+        "Reading provisioner key PEM file at {}",
+        config.ca.provisioner_key_path
+    );
+
     let provisioner_key_pem =
         std::fs::read(&config.ca.provisioner_key_path).with_context(|| {
             format!(
@@ -71,16 +76,26 @@ async fn main() -> Result<()> {
             )
         })?;
 
-    // We assume EdDSA for the provisioner key in v1. ES256 is also
-    // supported by `StepCaClient::new`; if your provisioner uses
-    // ES256, change this constant or add a config field.
+    let provisioner_alg = match config.ca.provisioner_alg.as_str() {
+        "ES256" => jsonwebtoken::Algorithm::ES256,
+        "EdDSA" => jsonwebtoken::Algorithm::EdDSA,
+        other => {
+            anyhow::bail!("unsupported provisioner_alg '{other}'; v1 supports ES256 and EdDSA")
+        }
+    };
+
+    debug!("Provisioner configured with {provisioner_alg:?} Algorithm");
+
+    debug!("Initializing CA Client...");
     let ca = StepCaClient::new(
         config.ca.url.clone(),
         config.ca.provisioner.clone(),
         &provisioner_key_pem,
-        jsonwebtoken::Algorithm::EdDSA,
+        provisioner_alg,
     )
     .map_err(|e| anyhow::anyhow!("constructing CA client: {e}"))?;
+
+    let ca_arc = Arc::new(ca);
 
     // ---- OIDC validator ----
     let validator = Validator::new(config.issuer.clone());
@@ -88,7 +103,7 @@ async fn main() -> Result<()> {
     // ---- Handler ----
     let handler = Arc::new(Handler {
         validator: Arc::new(validator),
-        ca: Arc::new(ca),
+        ca: ca_arc,
         default_lifetime: config.ca.default_lifetime,
     });
 
