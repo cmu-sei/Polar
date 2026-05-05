@@ -209,6 +209,7 @@ let
     cosign
     cassiniClient
     vim
+    buildah
   ];
 
   image = pkgs.dockerTools.buildLayeredImage {

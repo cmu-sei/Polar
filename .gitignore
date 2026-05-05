@@ -35,7 +35,6 @@ ci.env
 docker.json
 .polar/
 ca_certificates/
-server/
 pipeline-out/
 ai_models/
 pi/

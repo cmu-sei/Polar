@@ -38,6 +38,18 @@ services:
       # - ./neo4j-no-ssl.conf:/var/lib/neo4j/conf
       - ./neo4j_setup/imports:/var/lib/neo4j/import
 
+  step-ca:
+    image: smallstep/step-ca:latest
+    ports:
+      - 9000:9000
+    environment:
+      - DOCKER_STEPCA_INIT_NAME=Polar Test CA
+      - DOCKER_STEPCA_INIT_DNS_NAMES=localhost
+      - DOCKER_STEPCA_INIT_PROVISIONER_NAME=cert-issuer
+      - DOCKER_STEPCA_INIT_PASSWORD=somepassword
+    volumes:
+      - /var/step:/home/step
+
   jaeger:
     image: cr.jaegertracing.io/jaegertracing/jaeger:2.11.0
     ports:

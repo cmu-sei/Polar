@@ -68,7 +68,7 @@ members = [
     "build-orchestrator/agent",
     "build-orchestrator/k8s", "build-orchestrator/processor",
     "build-orchestrator/podman"
-]
+, "cert-issuer/agent","cert-issuer/init", "cert-issuer/common"]
 
 [workspace.package]
 version = "1.0.0"
@@ -187,6 +187,10 @@ openapi-common = { path = "openapi/common" }
 orchestrator-core = { path = "build-orchestrator/core" }
 orchestrator-backend-k8s = { path = "build-orchestrator/k8s" }
 orchestrator-backend-podman = { path = "build-orchestrator/podman" }
+time = { version = "0.3.47", features = ["serde"]}
+wiremock = "0.6"
+x509-parser = { version = "0.16", features = ["verify"]}
+rsa = "0.9"
 
 # Remove dhall and serde_dhall from patch – they are now workspace deps
 [patch.crates-io]

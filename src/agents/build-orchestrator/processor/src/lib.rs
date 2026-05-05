@@ -18,6 +18,7 @@ use polar::{
 use ractor::{Actor, ActorProcessingErr, ActorRef, SupervisionEvent, async_trait};
 use rkyv::from_bytes;
 use std::sync::Arc;
+use tokio::time::error;
 use tracing::{debug, error, info, warn};
 
 // ── Event projection ───────────────────────────────────────────────────────────
@@ -296,8 +297,10 @@ impl Actor for BuildProcessorSupervisor {
     ) -> Result<Self::State, ActorProcessingErr> {
         debug!("BuildProcessorSupervisor starting");
 
+        debug!("Loading graph database configuration");
         let graph_config = get_neo_config()?;
 
+        debug!("Spawning tcp client");
         let tcp_client = polar::cassini::TcpClient::spawn(
             "polar.builds.processor.tcp",
             myself.clone(),
