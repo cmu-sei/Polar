@@ -1,46 +1,48 @@
 //! Cert issuer binary entry point.
 //!
-//! Loads config, validates it, constructs the service components,
-//! and serves HTTPS.
+//! Loads config, validates it, ensures the CA materials are
+//! present (loading if they exist, generating if they don't),
+//! constructs the service components, and serves HTTP.
 //!
 //! # Configuration
 //!
 //! Config path comes from `CERT_ISSUER_CONFIG` env var, expected
 //! to point at a JSON file matching the `ServiceConfig` schema.
-//! The CA provisioner key is loaded from the path given in the
-//! `ca.provisioner_key_path` field of the config.
+//! The CA cert and private key are loaded from the paths given in
+//! `ca.ca_cert_path` and `ca.ca_key_path`. If those files don't
+//! exist on first startup, the service generates a fresh CA
+//! keypair and writes them — see `ca::load_or_bootstrap_ca` for
+//! the full state-handling rules.
 //!
 //! The intent is that `CERT_ISSUER_CONFIG` is the only thing the
 //! deployment manifest needs to know — everything else flows from
-//! that file. In production the config file itself is a mounted
-//! Kubernetes secret or a Vault-rendered template; in development
-//! it's a JSON file you write by hand.
+//! that file. In production the CA materials live on a Kubernetes
+//! Secret-backed volume that persists across pod restarts; in
+//! development they're files in a local directory that the cert
+//! issuer creates on first run.
 //!
 //! # TLS
 //!
-//! The cert issuer's serving certificate is loaded from paths
-//! given in `tls.cert_path` and `tls.key_path` (added to the config
-//! when TLS is needed). v1 omits TLS termination from this
-//! binary — we expect a TLS-terminating proxy in front (Envoy,
-//! nginx-ingress, or a service mesh sidecar). When/if we need
-//! native TLS in this binary, we'll add a `tls` section to the
-//! config and use `axum-server`'s TLS support. For now, plain HTTP
-//! on the bind address is what we serve, and the deployment is
-//! responsible for TLS.
+//! v1 omits TLS termination from this binary — we expect a
+//! TLS-terminating proxy in front (Envoy, nginx-ingress, or a
+//! service mesh sidecar). When/if we need native TLS in this
+//! binary, we'll add a `tls` section to the config and use
+//! `axum-server`'s TLS support.
 
 use anyhow::{Context, Result};
-use cert_issuer::ca::StepCaClient;
-use cert_issuer::config::ServiceConfig;
-use cert_issuer::handler::Handler;
-use cert_issuer::oidc::Validator;
-use cert_issuer::server::build_router;
+use cert_issuer::{
+    ca::{RcgenCaClient, load_or_bootstrap_ca},
+    config::ServiceConfig,
+    handler::Handler,
+    oidc::Validator,
+    server::build_router,
+};
 use std::sync::Arc;
-use tracing::{debug, info};
+use tracing::info;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    polar::init_logging("polar.certificates.issuer".to_string());
-
+    polar::init_logging("polar.cert-issuer.svc".to_string());
     // ---- Config ----
     let config_path = std::env::var("CERT_ISSUER_CONFIG")
         .context("CERT_ISSUER_CONFIG environment variable must be set")?;
@@ -57,45 +59,27 @@ async fn main() -> Result<()> {
         "cert issuer starting"
     );
 
-    // ---- CA client ----
+    // ---- CA materials ----
     //
-    // The provisioner key is loaded from disk per the config. In
-    // production this path points at a mounted Kubernetes secret
-    // (or a Vault-rendered file). The key bytes never leave the
-    // process after this point.
-    debug!(
-        "Reading provisioner key PEM file at {}",
-        config.ca.provisioner_key_path
-    );
-
-    let provisioner_key_pem =
-        std::fs::read(&config.ca.provisioner_key_path).with_context(|| {
-            format!(
-                "reading provisioner key from {}",
-                config.ca.provisioner_key_path
-            )
-        })?;
-
-    let provisioner_alg = match config.ca.provisioner_alg.as_str() {
-        "ES256" => jsonwebtoken::Algorithm::ES256,
-        "EdDSA" => jsonwebtoken::Algorithm::EdDSA,
-        other => {
-            anyhow::bail!("unsupported provisioner_alg '{other}'; v1 supports ES256 and EdDSA")
-        }
-    };
-
-    debug!("Provisioner configured with {provisioner_alg:?} Algorithm");
-
-    debug!("Initializing CA Client...");
-    let ca = StepCaClient::new(
-        config.ca.url.clone(),
-        config.ca.provisioner.clone(),
-        &provisioner_key_pem,
-        provisioner_alg,
+    // Either load existing CA materials from disk, or generate a
+    // fresh CA root if no materials exist yet. See
+    // `load_or_bootstrap_ca` for the full state-handling rules:
+    // partial state (only one of the two files present, key with
+    // bad permissions, etc.) is a hard error rather than something
+    // we silently paper over.
+    let (ca_cert_pem, ca_key_pem) = load_or_bootstrap_ca(
+        &config.ca.ca_cert_path,
+        &config.ca.ca_key_path,
+        // CA Common Name. Used only when bootstrapping; loaded CAs
+        // keep whatever CN they were created with. Operators can
+        // override this in the config if they care; the default is
+        // descriptive enough for ad-hoc deployments.
+        "Polar Internal CA",
     )
-    .map_err(|e| anyhow::anyhow!("constructing CA client: {e}"))?;
+    .context("CA materials")?;
 
-    let ca_arc = Arc::new(ca);
+    let ca = RcgenCaClient::new(&ca_cert_pem, &ca_key_pem)
+        .map_err(|e| anyhow::anyhow!("constructing CA client: {e}"))?;
 
     // ---- OIDC validator ----
     let validator = Validator::new(config.issuer.clone());
@@ -103,7 +87,7 @@ async fn main() -> Result<()> {
     // ---- Handler ----
     let handler = Arc::new(Handler {
         validator: Arc::new(validator),
-        ca: ca_arc,
+        ca: Arc::new(ca),
         default_lifetime: config.ca.default_lifetime,
     });
 

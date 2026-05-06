@@ -1,3 +1,4 @@
+
 -- Schema for the cert issuer's ServiceConfig.
 --
 -- This file is the single source of truth for the config types.
@@ -7,7 +8,10 @@
 --
 -- The schema mirrors the Rust ServiceConfig struct in
 -- cert-issuer/src/config.rs. If you change the struct, change this
--- file.
+-- file. The CI pipeline runs `dhall-to-json` on each environment's
+-- config and feeds the result to the Rust validator at startup, so
+-- a schema-vs-code drift surfaces as a CI failure rather than a
+-- runtime crash.
 
 let Duration =
       -- Rust's serde-default Duration form is {secs: N, nanos: M}.
@@ -73,26 +77,22 @@ let IssuerConfig =
 
 let CaConfig =
       { Type =
-          { url : Text
-          , provisioner : Text
-          , provisioner_key_path : Text
+          { ca_cert_path : Text
+          , ca_key_path : Text
           , default_lifetime : Duration
-          , provisioner_alg : Text
           }
       , default =
-          { url = ""
-          , provisioner = ""
-          , -- The path inside the running container where the
-            -- provisioner private key is mounted. In production
-            -- this is a Kubernetes Secret mounted as a file; in
-            -- development it's wherever you generated the key.
-            provisioner_key_path = "/etc/cert-issuer/provisioner.key"
-          , -- 1 hour matches the v1 spec recommendation. The CA
-            -- itself may clamp this further per its provisioner
-            -- policy.
+          { -- Paths to the CA's self-signed cert and PKCS#8 PEM
+            -- private key. The cert issuer holds these in memory
+            -- for the service's lifetime and signs CSRs directly
+            -- (no external CA process). Generate with:
+            -- or with the `bootstrap_ca()` helper from `ca.rs`.
+            ca_cert_path = "/etc/cert-issuer/ca.crt"
+          , ca_key_path = "/etc/cert-issuer/ca.key"
+          , -- 1 hour matches the v1 spec recommendation. Workload
+            -- certs renew via init-container restart at expiry.
             default_lifetime = hours 1
-            , provisioner_alg = "ES256"
-        }
+          }
       }
 
 let ServiceConfig =

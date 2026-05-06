@@ -70,20 +70,9 @@ pub struct IssuerConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CaConfig {
-    /// Base URL of the Smallstep CA.
-    pub url: String,
-    /// JWK provisioner name registered with the CA.
-    pub provisioner: String,
-    /// Path to the JWK provisioner credential. The credential itself
-    /// is loaded via the secrets backend, not from this path directly
-    /// when running in production — but tests load from disk.
-    pub provisioner_key_path: String,
-    /// Default cert lifetime. Per-class overrides may layer on this.
+    pub ca_cert_path: String,
+    pub ca_key_path: String,
     pub default_lifetime: Duration,
-    /// Signing algorithm of the provisioner key. v1 supports
-    /// "ES256" and "EdDSA". The string is mapped to a
-    /// jsonwebtoken::Algorithm in main.rs.
-    pub provisioner_alg: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

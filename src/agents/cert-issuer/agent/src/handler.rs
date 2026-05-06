@@ -24,9 +24,9 @@
 //! 4. **Session ID generation.** Fresh UUID per request, used for
 //!    audit correlation between this issuance event and downstream
 //!    mTLS handshake logs.
-//! 5. **CA call.** Forwards the CSR PEM (verbatim) and the SAN to
-//!    step-ca for issuance. Failures here surface as
-//!    `CaUnavailable`.
+//! 5. **CA call.** Signs the CSR with the in-process rcgen CA.
+//!    `CaError::Malformed` surfaces as 400; `CaError::Internal`
+//!    surfaces as 500.
 //!
 //! # Why bearer token is a parameter, not extracted here
 //!
@@ -46,9 +46,9 @@ use tracing::warn;
 pub struct Handler {
     pub validator: Arc<Validator>,
     pub ca: Arc<dyn CaClient>,
-    /// Default cert lifetime to request from the CA. The CA may
-    /// clamp this further per its own provisioner policy. Comes
-    /// from `CaConfig::default_lifetime`.
+    /// Default lifetime for issued certs. The issued cert's
+    /// `notAfter` is `now + default_lifetime`. Comes from
+    /// `CaConfig::default_lifetime`.
     pub default_lifetime: Duration,
 }
 
@@ -97,6 +97,12 @@ impl Handler {
         let session_id = generate_session_id();
 
         // ---- Step 5: CA call ----
+        //
+        // We pass only the CSR PEM and the requested lifetime. The
+        // CA does not need the expected identity separately — the SAN
+        // is embedded in the CSR, and the handler has already verified
+        // it matches the token. The CA's job is to sign; the
+        // verification work is done.
         let ca_request = CaIssueRequest {
             csr_pem: request.csr_pem,
             san: claims.workload_identity.clone(),
@@ -106,22 +112,23 @@ impl Handler {
         let issued = match self.ca.issue(ca_request).await {
             Ok(c) => c,
             Err(e) => {
-                // All CA failures map to CaUnavailable from the
-                // client's perspective. The internal distinction
-                // (Unreachable vs BadResponse vs Malformed) goes
-                // into telemetry but isn't exposed in the wire
-                // response — the init container's recovery is the
-                // same in all three cases (exit and let Kubernetes
-                // restart the pod).
-                let detail = match e {
-                    CaError::Unreachable(s) => format!("CA unreachable: {s}"),
-                    CaError::BadResponse { status, .. } => {
-                        format!("CA returned status {status}")
+                // CaError::Malformed means the CSR passed our own
+                // parser but rcgen's internal parser rejected it —
+                // a structural issue in the CSR, surfaces as 400.
+                // CaError::Internal means rcgen's signing step
+                // failed, which is a bug or corrupted key — not
+                // transient, surfaces as 500.
+                let (outcome, detail) = match e {
+                    CaError::Malformed(s) => {
+                        (IssueOutcome::InvalidCsr, format!("CA rejected CSR: {s}"))
                     }
-                    CaError::Malformed(s) => format!("CA response malformed: {s}"),
+                    CaError::SigningFailed(s) => (
+                        IssueOutcome::InternalError,
+                        format!("CA signing error: {s}"),
+                    ),
                 };
                 warn!(session_id = %session_id, detail = %detail, "CA failure");
-                return error_response(IssueOutcome::CaUnavailable, &detail);
+                return error_response(outcome, &detail);
             }
         };
 

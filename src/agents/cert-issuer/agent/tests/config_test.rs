@@ -24,9 +24,8 @@ fn valid_issuer() -> IssuerConfig {
 
 fn valid_ca() -> CaConfig {
     CaConfig {
-        url: "https://ca.internal.example.com".to_string(),
-        provisioner: "cert-issuer".to_string(),
-        provisioner_key_path: "/tmp/dummy".to_string(),
+        ca_cert_path: "/tmp/ca.crt".to_string(),
+        ca_key_path: "/tmp/ca.key".to_string(),
         default_lifetime: Duration::from_secs(3600),
     }
 }
