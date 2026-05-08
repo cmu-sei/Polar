@@ -1494,8 +1494,13 @@ dependencies = [
 name = "cert-issuer-init"
 version = "1.0.0"
 dependencies = [
+ "base64 0.22.1",
  "cert-issuer-common",
+ "jsonwebtoken",
+ "rcgen",
  "reqwest",
+ "rsa",
+ "serde_json",
  "tempfile",
  "thiserror 1.0.69",
  "time",

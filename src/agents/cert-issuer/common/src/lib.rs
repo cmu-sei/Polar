@@ -6,7 +6,7 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use time::OffsetDateTime;
-
+pub mod identity;
 /// Request body for `POST /issue`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IssueRequest {

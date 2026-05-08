@@ -8,44 +8,42 @@ by [`rcgen`](https://crates.io/crates/rcgen).
 See [`architecture-spec.md`](architecture-spec.md) for the full
 design rationale, threat model, and v2 directions.
 
-## Workspace Layout
+## Package Layout
 
 ```
 .
 ├── agent
-│   ├── Cargo.toml
-│   ├── conf
-│   │   ├── dev.dhall
-│   │   └── schema.dhall
-│   ├── issuer-config.json
-│   ├── src
-│   │   ├── ca.rs
-│   │   ├── config.rs
-│   │   ├── lib.rs
-│   │   ├── main.rs
-│   │   ├── oidc.rs
-│   │   └── telemetry.rs
-│   └── tests
-│       ├── config_test.rs
-│       └── oidc_test.rs
+│   ├── tests
+│   ├── conf
+│   │   ├── dev.dhall
+│   │   └── schema.dhall
+│   ├── issuer-config.json
+│   └── src
+│       ├── ca.rs
+│       ├── config.rs
+│       ├── csr.rs
+│       ├── handler.rs
+│       ├── lib.rs
+│       ├── main.rs
+│       ├── oidc.rs
+│       ├── server.rs
+│       └── telemetry.rs
 ├── common
-│   ├── Cargo.toml
-│   └── src
-│       └── lib.rs
+│   ├── Cargo.toml
+│   └── src
+│       ├── identity.rs
+│       └── lib.rs
 ├── init
-│   ├── Cargo.toml
-│   ├── src
-│   │   ├── handshake.rs
-│   │   ├── keypair.rs
-│   │   ├── lib.rs
-│   │   └── output.rs
-│   └── tests
-│       ├── handshake_test.rs
-│       ├── keypair_test.rs
-│       └── output_test.rs
+│   ├── Cargo.toml
+│   ├── tests
+│   ├─ src
+│       ├── handshake.rs
+│       ├── keypair.rs
+│       ├── lib.rs
+│       ├── main.rs
+│       ├── output.rs
+│       └── token.rs
 └── README.md
-
-10 directories, 23 files
 ```
 
 ## Building
@@ -54,7 +52,7 @@ The workspace builds with stable Rust 1.75+. There are no native
 build dependencies beyond a working `cargo` and a C linker.
 
 ```sh
-cargo build --workspace --release
+cargo build --bin cert-issuer --bin cert-issuer-init --release
 ```
 
 Two binaries land in `target/release/`:
@@ -65,8 +63,8 @@ Two binaries land in `target/release/`:
 For development:
 
 ```sh
-cargo build --workspace
-cargo test --workspace
+cargo build -p cert-issuer -p cert-issuer-init -p cert-issuer-common
+cargo test -p cert-issuer -p cert-issuer-init -p cert-issuer-common
 ```
 
 ## CA Model
@@ -92,8 +90,8 @@ materials if they don't exist.
 
 The state machine is straightforward:
 
-| Cert file | Key file | Behavior                        |
-|-----------|----------|---------------------------------|
+| Cert file | Key file | Behavior                         |
+|-----------|----------|----------------------------------|
 | missing   | missing  | Bootstrap a fresh CA, write both |
 | present   | present  | Validate and load                |
 | present   | missing  | **Error:** partial state         |
@@ -113,22 +111,19 @@ This is a deliberately strict model. Silent regeneration on any
 inconsistency would either mask security problems (someone else
 writing into the materials directory) or destroy CA materials that
 downstream clients are still trusting. The only state we recover
-from automatically is "neither file exists" — which is the only
-state where regeneration is unambiguously the right action.
+from automatically is "neither file exists."
 
 ### What this means operationally
 
 For first-run on a fresh volume: the cert issuer generates
-materials, writes them with mode 0600 on the key, and proceeds.
-The CA cert is logged at INFO; the CA key never leaves the
-process.
+materials, writes them with mode `0600` on the key, and proceeds.
+The CA cert is logged at INFO; the CA key never leaves the process.
 
 For steady state: the materials persist on the configured volume
 and the cert issuer loads them on each restart. The CA root has a
-10-year validity by default, and rotation is operator-driven (see
-below).
+10-year validity by default, and rotation is operator-driven.
 
-For volume corruption / wrong mount: the cert issuer fails to
+For volume corruption or wrong mount: the cert issuer fails to
 start with a clear error explaining which file is missing or
 unreadable. This is intentional — silently regenerating would
 issue certs from a new root that downstream clients don't trust,
@@ -143,19 +138,15 @@ would generate a fresh CA every restart and silently invalidate
 all outstanding certs. Use a `PersistentVolumeClaim`, a mounted
 Secret with `defaultMode: 0600`, or a similar persistent store.
 
-If you must rotate the CA, do so by:
+To rotate the CA:
 
-1. Distributing the new CA cert to all clients alongside the old
-   one, so clients accept either during the transition window.
-2. Wiping the cert issuer's volume.
-3. Restarting the cert issuer (which bootstraps a fresh CA).
+1. Distribute the new CA cert to all clients alongside the old
+   one so clients accept either during the transition window.
+2. Wipe the cert issuer's volume.
+3. Restart the cert issuer (which bootstraps a fresh CA).
 4. Once all certs issued under the old root have expired
    (`default_lifetime` after step 3), retire the old cert from
    clients.
-
-Cross-signing for zero-downtime rotation is a v1.x addition
-(currently the implementation supports loading exactly one CA at
-a time).
 
 ### Distributing the CA cert to clients
 
@@ -164,7 +155,7 @@ a trust root. After first run, copy it out of the volume:
 
 ```sh
 # Local development
-cat ./tmp/ca.crt
+cat ./dev/tmp/ca.crt
 
 # Kubernetes
 kubectl exec -n polar-system deploy/cert-issuer -- cat /etc/cert-issuer/ca.crt
@@ -174,75 +165,163 @@ Distribute it as a ConfigMap mounted into client pods, or via
 whatever trust-distribution mechanism the rest of your cluster
 uses.
 
+## Identity Normalization
+
+Kubernetes service account tokens carry a `sub` claim in the form:
+
+```
+system:serviceaccount:<namespace>:<name>
+```
+
+This is not a valid DNS name. The cert issuer and init container
+both normalize this to a DNS SAN using the shared function in
+`cert_issuer_common::identity`:
+
+```
+system:serviceaccount:polar:git-observer
+  -> git-observer.polar.serviceaccount.cluster.local
+```
+
+The normalization lives in `common/` so both sides are guaranteed
+to use the same implementation. Drift between the two sides would
+cause every issuance to fail with `IDENTITY_MISMATCH`.
+
 ## Configuration
 
-Config is provided as a JSON file referenced by the
-`CERT_ISSUER_CONFIG` environment variable. The file's schema is
-defined in [`dhall/schema.dhall`](dhall/schema.dhall).
-
-We use Dhall as the source of truth and render JSON for the binary
-because Dhall gives us type-checked composition across environments
-without forcing the binary to depend on a Dhall parser.
+Config is provided as a JSON file. The path is set via the
+`CERT_ISSUER_CONFIG` environment variable. Dhall is the source of
+truth for config authoring; JSON is what the binary reads.
 
 ```sh
-dhall-to-json --file dhall/dev.dhall > /tmp/cert-issuer.json
-CERT_ISSUER_CONFIG=/tmp/cert-issuer.json ./target/debug/cert-issuer
+dhall-to-json --file conf/dev.dhall > /tmp/cert-issuer.json
+CERT_ISSUER_CONFIG=/tmp/cert-issuer.json cargo run --bin cert-issuer
 ```
 
-A minimal per-environment config:
+A representative config (JSON):
 
-```dhall
-let schema = ./schema.dhall
-in  schema.ServiceConfig::{
-    , issuer = schema.IssuerConfig::{
-      , issuer = "https://kubernetes.default.svc"
-      , audience = "polar-cert-issuer.prod"
-      , jwks_uri = Some "https://kubernetes.default.svc/openid/v1/jwks"
-      }
-    , ca = schema.CaConfig::{
-      , ca_cert_path = "/etc/cert-issuer/ca.crt"
-      , ca_key_path = "/etc/cert-issuer/ca.key"
-      }
-    }
+```json
+{
+  "bind_addr": "127.0.0.1:8443",
+  "ca": {
+    "ca_cert_path": "./dev/tmp/ca.crt",
+    "ca_key_path": "./dev/tmp/ca.key",
+    "default_lifetime": { "secs": 1800, "nanos": 0 }
+  },
+  "issuer": {
+    "issuer": "https://kubernetes.default.svc",
+    "audience": "polar-cert-issuer.prod",
+    "jwks_uri": "https://kubernetes.default.svc/openid/v1/jwks",
+    "workload_identity_claim": "sub",
+    "instance_binding_claim": "kubernetes.io/pod/uid",
+    "allowed_algorithms": ["RS256", "ES256", "EdDSA"],
+    "jwks_cache_ttl_min": { "secs": 30, "nanos": 0 },
+    "jwks_cache_ttl_max": { "secs": 3600, "nanos": 0 }
+  }
+}
 ```
-
-See [`dhall/dev.dhall`](dhall/dev.dhall) for a complete example
-with comments.
-
-### Required fields
 
 Two fields have no defaults and must be set per-environment:
 
 - `issuer.issuer` — the OIDC issuer URL the cert issuer trusts
 - `issuer.audience` — the audience tokens must claim
 
-The Rust validator at startup rejects empty values for these
-fields. Misconfigured configs fail fast.
+The Rust validator at startup rejects empty values for these fields.
 
 ### TLS
 
-v1 of the cert issuer **does not terminate TLS itself**. The binary
-serves plain HTTP on the configured `bind_addr`, and TLS is the
-responsibility of whatever fronts it — typically a service mesh
-sidecar, an ingress controller, or a sidecar proxy.
+v1 does not terminate TLS. The binary serves plain HTTP on the
+configured `bind_addr`. TLS is the responsibility of whatever
+fronts it — a service mesh sidecar, ingress controller, or sidecar
+proxy. In Kubernetes, a NetworkPolicy restricting access to the
+cert issuer's pod is strongly recommended regardless.
 
-If you're running this outside Kubernetes and need TLS, the
-fastest path is a Caddy or nginx reverse proxy in front, with the
-cert issuer bound to localhost only.
+## Local Development
+
+The dev setup is automated. One command generates all required
+fixtures (CA keypair, OIDC signing keypair, JWKS document, test
+token, dev config) and prints the exact commands to run:
+
+```sh
+cargo run --bin cert-issuer-setup
+```
+
+Output:
+
+```
+--- Step 1: generating CA keypair and self-signed cert ---
+  wrote dev/tmp/ca.crt
+  wrote dev/tmp/ca.key
+--- Step 2: generating OIDC issuer signing keypair ---
+--- Step 3: writing JWKS ---
+  wrote dev/jwks.json
+--- Step 4: minting JWT ---
+  wrote dev/token
+  sub:     system:serviceaccount:polar:git-observer
+  iss:     http://localhost:8080
+  aud:     polar-cert-issuer.dev
+  expires: 3600 seconds from now
+--- Step 5: writing config ---
+  wrote dev/config.json
+
+=== Dev environment ready. Run in three terminals: ===
+
+  # Terminal 1: JWKS server
+  python3 -m http.server 8080 --directory dev/
+
+  # Terminal 2: cert issuer
+  cargo run --bin cert-issuer -- --config dev/config.json
+
+  # Terminal 3: init container
+  POLAR_SA_TOKEN_PATH=dev/token \
+  POLAR_CERT_ISSUER_URL=http://127.0.0.1:8443 \
+  POLAR_CERT_DIR=dev/certs \
+  cargo run --bin cert-issuer-init
+
+  # Inspect output
+  openssl x509 -in dev/certs/cert.pem -text -noout
+```
+
+The generated files under `dev/` are not secrets — the keypairs
+are test-only and the token has no real cluster privileges. They
+are safe to commit as reproducible dev fixtures.
+
+To reset and regenerate everything:
+
+```sh
+rm -rf dev/tmp dev/certs dev/token dev/jwks.json dev/config.json
+cargo run --bin cert-issuer-setup
+```
+
+The token expires after one hour. Re-run `cert-issuer-setup` to
+mint a fresh one; existing CA materials are preserved.
+
+### What a successful run looks like
+
+```
+Certificate:
+    Data:
+        Version: 3 (0x2)
+        Serial Number: 7b:2c:4f:f6:...
+        Signature Algorithm: ecdsa-with-SHA256
+        Issuer: CN=Polar Internal CA
+        Validity
+            Not Before: May  8 05:58:00 2026 GMT
+            Not After : May  8 06:28:00 2026 GMT
+        Subject:
+        Subject Public Key Info:
+            Public Key Algorithm: ED25519
+        X509v3 extensions:
+            X509v3 Subject Alternative Name: critical
+                DNS:git-observer.polar.serviceaccount.cluster.local
+```
+
+Key things to verify: 30-minute lifetime, Ed25519 public key,
+correct DNS SAN, empty Subject (identity is entirely in the SAN),
+signed by your dev CA.
 
 ## Deploying
 
-The deployment story has two layers: deploying the cert issuer
-service itself, and updating client agent pods to use the init
-container model.
-
-### Deploying the cert issuer service
-
-The service runs as a single Kubernetes Deployment. v1 is
-single-instance-with-rapid-restart per the architecture spec —
-in-process state means no horizontal replication for v1.
-
-A representative Deployment:
+### The cert issuer service
 
 ```yaml
 apiVersion: apps/v1
@@ -253,16 +332,11 @@ metadata:
 spec:
   replicas: 1
   strategy:
-    # Recreate (not RollingUpdate) — we don't want two cert issuer
-    # pods racing on the same CA materials directory.
-    type: Recreate
+    type: Recreate   # not RollingUpdate — avoid two instances racing on CA materials
   selector:
     matchLabels:
       app: cert-issuer
   template:
-    metadata:
-      labels:
-        app: cert-issuer
     spec:
       serviceAccountName: cert-issuer
       containers:
@@ -291,35 +365,9 @@ spec:
           claimName: cert-issuer-ca
 ```
 
-The ConfigMap holds the rendered JSON config. The
-PersistentVolumeClaim holds the CA cert and key — written by the
-cert issuer on first run, persisted across pod restarts. The
-config's `ca_cert_path` and `ca_key_path` should point at locations
-inside this mount (e.g. `/etc/cert-issuer/ca.crt` and
-`/etc/cert-issuer/ca.key`).
+### Client agent pods
 
-The PVC's storage class must give the pod read/write access. The
-cert issuer creates parent directories as needed, so you can mount
-an empty volume.
-
-A NetworkPolicy restricting traffic to the cert issuer's pod is
-strongly recommended — only the agents that need to attest should
-be able to reach `:8443`.
-
-### Updating client agents
-
-Each agent that consumes a cert from this service needs three
-changes to its pod spec:
-
-1. **Add a projected service account token volume** with the
-   audience set to the cert issuer's configured audience.
-2. **Add an `emptyDir` volume** for cert/key/CA chain sharing
-   between the init container and the workload container.
-3. **Add the `polar-nu-init` init container** with the projected
-   token and the emptyDir mounted, configured to call the cert
-   issuer with the agent's expected identity.
-
-A representative pod spec fragment:
+Each agent needs three additions to its pod spec:
 
 ```yaml
 spec:
@@ -330,22 +378,20 @@ spec:
       sources:
       - serviceAccountToken:
           path: token
-          # MUST match the cert issuer's configured audience.
-          audience: polar-cert-issuer.prod
+          audience: polar-cert-issuer.prod   # must match issuer.audience in config
           expirationSeconds: 3600
   - name: certs
     emptyDir: {}
+
   initContainers:
   - name: cert-handshake
     image: registry.example.com/polar/cert-issuer-init:v0.1.0
     env:
-    - name: CERT_ISSUER_ADDR
-      value: https://cert-issuer.polar-system.svc.cluster.local:8443
-    - name: WORKLOAD_IDENTITY
-      value: system:serviceaccount:polar:git-observer
-    - name: SA_TOKEN_PATH
+    - name: POLAR_SA_TOKEN_PATH
       value: /var/run/secrets/sa-token/token
-    - name: OUTPUT_DIR
+    - name: POLAR_CERT_ISSUER_URL
+      value: http://cert-issuer.polar-system.svc.cluster.local:8443
+    - name: POLAR_CERT_DIR
       value: /var/run/polar/certs
     volumeMounts:
     - name: sa-token
@@ -353,6 +399,7 @@ spec:
       readOnly: true
     - name: certs
       mountPath: /var/run/polar/certs
+
   containers:
   - name: git-observer
     image: registry.example.com/polar/git-observer:v0.4.2
@@ -360,100 +407,82 @@ spec:
     - name: certs
       mountPath: /var/run/polar/certs
       readOnly: true
+    # No sa-token mount here — the SA token is scoped to the init
+    # container only. The workload never holds it.
 ```
 
-The `audience` field on the projected SA token is the
-single-most-common deployment misconfiguration. If it's missing
-or wrong, the cert issuer rejects the token with
-`INVALID_AUDIENCE` and the init container exits non-zero.
+### Init container environment variables
 
-## Local Development
+| Variable              | Required | Default                          | Description                          |
+|-----------------------|----------|----------------------------------|--------------------------------------|
+| `POLAR_CERT_ISSUER_URL` | Yes    | —                                | Base URL of the cert issuer service  |
+| `POLAR_SA_TOKEN_PATH`   | No     | `/var/run/secrets/polar/token`   | Path to the projected SA token file  |
+| `POLAR_CERT_DIR`        | No     | `/var/run/polar/certs`           | Output directory for cert bundle     |
 
-```sh
-# 1. Render the dev config (paths point at ./tmp/ca.{crt,key})
-mkdir -p ./tmp
-dhall-to-json --file dhall/dev.dhall > ./tmp/cert-issuer.json
+### Init container exit codes
 
-# 2. Run the cert issuer. First run will bootstrap the CA into ./tmp.
-CERT_ISSUER_CONFIG=./tmp/cert-issuer.json \
-  RUST_LOG=debug \
-  cargo run --bin cert-issuer
+The init container's exit code is what operators see in
+`kubectl describe pod` when issuance fails. The mapping is:
 
-# 3. In another terminal, stand up an OIDC stub that serves a JWKS
-#    at http://localhost:8080/jwks.json and lets you mint signed JWTs.
+| Code | Meaning                                                   | Action                        |
+|------|-----------------------------------------------------------|-------------------------------|
+| `0`  | Success — cert bundle written to `POLAR_CERT_DIR`         | —                             |
+| `1`  | Misconfiguration — wrong audience, identity mismatch, bad token | Fix the pod spec, redeploy |
+| `2`  | Transient failure — cert issuer unreachable, CA unavailable | Kubernetes will retry        |
+| `3`  | Internal error — unexpected failure, malformed response   | Page someone                  |
 
-# 4. Mint a token, generate a CSR, POST to /issue:
-#    curl -X POST http://127.0.0.1:8443/issue \
-#      -H "Authorization: Bearer $TOKEN" \
-#      -d "{\"csr_pem\": ...}"
-```
-
-A `local-test.sh` script that automates steps 3-4 is the
-recommended next step for the development workflow.
-
-To start over with a fresh CA:
-
-```sh
-rm -rf ./tmp/ca.crt ./tmp/ca.key
-# Next run will bootstrap a new pair.
-```
-
-To inspect the bootstrapped CA cert:
-
-```sh
-openssl x509 -in ./tmp/ca.crt -text -noout
-```
+The single most common misconfiguration is a missing or wrong
+`audience` on the projected SA token volume — the cert issuer
+rejects it with `INVALID_AUDIENCE` and the init container exits 1.
+Check the projected token's `audiences` field first.
 
 ## Test Layout
 
-The test suite is organized so that each concern has its own file
-and the tests in that file pin down a specific category of
-behavior. Reading the test file alone should give you a useful
-picture of what the module does and what its boundaries are.
-
 ### `agent/tests/`
 
-| File | What it pins down |
-|------|-------------------|
-| `config_test.rs` | Config validation rejects forbidden algorithms (HS256, "none") at load time |
-| `oidc_test.rs` | Token validation: signature, audience, issuer, expiry, algorithm restrictions, JWKS caching with TTL bounds |
-| `csr_test.rs` | CSR parsing, single-SAN enforcement, identity matching is exact-string |
-| `handler_unit_test.rs` | Outcome-to-status-code mapping and wire serialization are stable |
-| `handler_integration_test.rs` | End-to-end ordering: CA is never called when upstream validation fails. Session IDs are unique per request |
+| File                        | What it pins down                                                               |
+|-----------------------------|---------------------------------------------------------------------------------|
+| `config_test.rs`            | Config validation rejects HS256 and "none" at load time                         |
+| `oidc_test.rs`              | Signature, audience, issuer, expiry, algorithm restrictions, JWKS caching       |
+| `csr_test.rs`               | CSR parsing, single-SAN enforcement, exact-string identity matching             |
+| `handler_unit_test.rs`      | Outcome-to-status-code mapping and wire serialization stability                 |
+| `handler_integration_test.rs` | End-to-end ordering: CA never called when upstream validation fails           |
 
-CA tests (issuance, bootstrap, the load-or-bootstrap state machine,
-key permission checks, cert-key matching) live in `agent/src/ca.rs`
-as `#[cfg(test)] mod tests`.
+CA tests (bootstrap state machine, key permission checks, cert-key
+matching) live in `agent/src/ca.rs` as `#[cfg(test)] mod tests`.
 
 ### `init/tests/`
 
-| File | What it pins down |
-|------|-------------------|
-| `handshake_test.rs` | HTTP client correctly sends bearer token, parses success and error responses, distinguishes unreachable from rejected |
-| `keypair_test.rs` | Each call generates a distinct keypair; CSR is parseable by the cert issuer's parser; empty identity is rejected |
-| `output_test.rs` | Three files written, key file is mode 0640, writes are atomic, existing files overwritten on re-run |
+| File                 | What it pins down                                                                     |
+|----------------------|---------------------------------------------------------------------------------------|
+| `handshake_test.rs`  | Bearer token sent correctly, all response categories mapped to correct error variants |
+| `keypair_test.rs`    | Distinct keypair per call, CSR parseable by cert issuer, Ed25519 algorithm enforced   |
+| `output_test.rs`     | Three files written, key is mode 0640, atomic writes, existing files overwritten      |
 
-## What's NOT Tested at This Layer
+### `common/tests/`
 
-These are deliberately deferred to either later phases or to
-end-to-end testing in a real cluster:
+| File                 | What it pins down                                                                     |
+|----------------------|---------------------------------------------------------------------------------------|
+| `identity_test.rs`   | Kubernetes SA sub normalized to DNS form; non-Kubernetes sub rejected in v1           |
 
-- TLS termination on the cert issuer's HTTPS endpoint.
-- Cassini event publication (Phase B).
-- Prometheus metrics emission (smoke tests, not unit tests).
-- The init container binary's exit codes (subprocess invocation
-  in CI).
+## What's Not Tested at This Layer
+
+Deliberately deferred to end-to-end testing in a real cluster:
+
+- TLS termination on the cert issuer's HTTPS endpoint (v1 serves plain HTTP)
+- Cassini event publication (Phase B)
+- Prometheus metrics emission
+- Init container exit codes under subprocess invocation in CI
 
 ## v2 Directions
 
-See Section 12 of the architecture spec for the full v2 backlog.
+See Section 12 of the architecture spec for the full v2 backlog
+with explicit trigger conditions.
 
-- **Cosign signature verification** of the requesting workload's
-  image, gating cert issuance on supply-chain provenance.
-- **Workload-image attestation via downward API**.
-- **Multi-issuer OIDC support** for hybrid environments.
-- **Bare-metal targets** via TPM or SPIRE node attestation.
-- **CA cross-signing** for zero-downtime rotation.
-
-Each has explicit trigger conditions in the spec — they get added
-when there's a concrete reason, not speculatively.
+- **Cosign signature verification** of the requesting workload's image
+- **Workload-image attestation** via downward API
+- **Multi-issuer OIDC support** for hybrid environments (GitLab CI,
+  AWS IRSA, GCP Workload Identity) — see open issue on GitLab trust
+  model before adding GitLab as an issuer
+- **Bare-metal targets** via TPM or SPIRE node attestation
+- **CA cross-signing** for zero-downtime rotation

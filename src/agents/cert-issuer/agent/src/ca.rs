@@ -69,7 +69,7 @@ pub struct IssuedCert {
     pub not_after: OffsetDateTime,
 }
 
-#[derive(Debug, Error)]
+#[derive(Debug, Clone, Error)]
 pub enum CaError {
     /// CSR parse failure or other input-level error. The closest
     /// analogue to step-ca's "client-side problem"; surfaces as

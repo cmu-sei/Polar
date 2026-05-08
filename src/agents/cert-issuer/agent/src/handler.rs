@@ -38,7 +38,9 @@
 use crate::ca::{CaClient, CaError, IssueRequest as CaIssueRequest};
 use crate::csr;
 use crate::oidc::{ValidationError, Validator};
-use cert_issuer_common::{IssueError, IssueOutcome, IssueRequest, IssueResponse};
+use cert_issuer_common::{
+    IssueError, IssueOutcome, IssueRequest, IssueResponse, identity::normalize_identity,
+};
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::warn;
@@ -86,7 +88,12 @@ impl Handler {
         // from being used to obtain a cert for another agent's
         // identity. The CSR module's `verify_identity` does the
         // actual byte-exact comparison.
-        if let Err(e) = csr::verify_identity(&parsed_csr, &claims.workload_identity) {
+        // First, we normalize the identity string
+        let dns_identity = match normalize_identity(&claims.workload_identity) {
+            Ok(id) => id,
+            Err(e) => return error_response(IssueOutcome::InvalidToken, &e.to_string()),
+        };
+        if let Err(e) = csr::verify_identity(&parsed_csr, &dns_identity) {
             return error_response(IssueOutcome::IdentityMismatch, &e.to_string());
         }
 

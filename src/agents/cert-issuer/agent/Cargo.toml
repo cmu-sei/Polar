@@ -20,12 +20,12 @@ anyhow.workspace = true
 time.workspace = true
 tracing.workspace = true
 async-trait.workspace = true
+rcgen.workspace = true
+jsonwebtoken.workspace = true
 
 axum = "0.7"
 tower = "0.5"
 tower-http = { version = "0.6", features = ["trace"] }
-rcgen = { version = "0.14.7", features = ["x509-parser"] }
-jsonwebtoken = { version = "10.3.0", features = ["aws_lc_rs"] }
 dashmap = "6"
 cert-issuer-common = { path = "../common" }
 polar = { path = "../../lib" }
