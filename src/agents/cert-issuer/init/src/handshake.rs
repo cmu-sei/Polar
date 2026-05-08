@@ -1,6 +1,6 @@
 // cert_issuer_init/src/handshake.rs
 
-use cert_issuer_common::{IssueError, IssueRequest, IssueResponse};
+use cert_issuer_common::{CertType, IssueError, IssueRequest, IssueResponse};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -61,10 +61,13 @@ impl HandshakeClient {
         &self,
         bearer_token: &str,
         csr_pem: &str,
+        cert_type: CertType,
     ) -> Result<IssueResponse, HandshakeError> {
         let url = format!("{}/issue", self.base_url);
+
         let body = IssueRequest {
             csr_pem: csr_pem.to_string(),
+            cert_type,
         };
 
         let response = self
@@ -96,10 +99,11 @@ impl HandshakeClient {
             // Non-2xx: attempt to deserialize as IssueError. If that
             // fails, the response isn't from the cert issuer (proxy,
             // load balancer, wrong endpoint) and Malformed is correct.
-            let issue_error = serde_json::from_slice::<IssueError>(&body_bytes)
-                .map_err(|e| HandshakeError::Malformed(
-                    format!("non-2xx response ({status}) with unparseable body: {e}")
-                ))?;
+            let issue_error = serde_json::from_slice::<IssueError>(&body_bytes).map_err(|e| {
+                HandshakeError::Malformed(format!(
+                    "non-2xx response ({status}) with unparseable body: {e}"
+                ))
+            })?;
             Err(HandshakeError::Rejected(issue_error))
         }
     }

@@ -35,7 +35,7 @@
 //! layer (in `crate::server`) extracts the `Authorization` header
 //! and passes the token in. Tests bypass the Axum layer entirely.
 
-use crate::ca::{CaClient, CaError, IssueRequest as CaIssueRequest};
+use crate::ca::{CaClient, CaError, CaIssueRequest};
 use crate::csr;
 use crate::oidc::{ValidationError, Validator};
 use cert_issuer_common::{
@@ -114,6 +114,7 @@ impl Handler {
             csr_pem: request.csr_pem,
             san: claims.workload_identity.clone(),
             lifetime: self.default_lifetime,
+            cert_type: request.cert_type,
         };
 
         let issued = match self.ca.issue(ca_request).await {

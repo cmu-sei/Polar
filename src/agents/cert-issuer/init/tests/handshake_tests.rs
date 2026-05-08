@@ -9,10 +9,10 @@
 //! misconfigurations from infrastructure failures from CA failures
 //! by looking at the pod's init container exit code.
 
-use cert_issuer_common::{IssueError, IssueOutcome, IssueResponse};
+use cert_issuer_common::{CertType, IssueError, IssueOutcome, IssueResponse};
 use cert_issuer_init::handshake::{HandshakeClient, HandshakeError};
 use time::OffsetDateTime;
-use wiremock::matchers::{body_json_schema, header, method, path};
+use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 fn fake_success_response() -> IssueResponse {
@@ -45,29 +45,63 @@ async fn sends_bearer_token_in_authorization_header() {
         .await;
 
     make_client(server.uri())
-        .issue("the-specific-token", "fake-csr-pem")
+        .issue("the-specific-token", "fake-csr-pem", CertType::Client)
         .await
         .expect("must succeed when authorization header matches exactly");
 }
 
 #[tokio::test]
 async fn sends_csr_pem_in_request_body() {
-    // The request body must be JSON with a `csr_pem` field. The cert
-    // issuer's Json extractor will return 422 if this field is absent.
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/issue"))
         .and(wiremock::matchers::body_partial_json(
-            serde_json::json!({ "csr_pem": "the-csr-content" })
+            serde_json::json!({ "csr_pem": "the-csr-content" }),
         ))
         .respond_with(ResponseTemplate::new(200).set_body_json(fake_success_response()))
         .mount(&server)
         .await;
 
     make_client(server.uri())
-        .issue("any-token", "the-csr-content")
+        .issue("any-token", "the-csr-content", CertType::Client)
         .await
         .expect("must send csr_pem in request body");
+}
+
+#[tokio::test]
+async fn sends_cert_type_client_in_request_body() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/issue"))
+        .and(wiremock::matchers::body_partial_json(
+            serde_json::json!({ "cert_type": "CLIENT" }),
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(fake_success_response()))
+        .mount(&server)
+        .await;
+
+    make_client(server.uri())
+        .issue("any-token", "fake-csr-pem", CertType::Client)
+        .await
+        .expect("must send cert_type CLIENT in request body");
+}
+
+#[tokio::test]
+async fn sends_cert_type_server_in_request_body() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/issue"))
+        .and(wiremock::matchers::body_partial_json(
+            serde_json::json!({ "cert_type": "SERVER" }),
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(fake_success_response()))
+        .mount(&server)
+        .await;
+
+    make_client(server.uri())
+        .issue("any-token", "fake-csr-pem", CertType::Server)
+        .await
+        .expect("must send cert_type SERVER in request body");
 }
 
 #[tokio::test]
@@ -81,7 +115,7 @@ async fn sends_content_type_application_json() {
         .await;
 
     make_client(server.uri())
-        .issue("any-token", "fake-csr-pem")
+        .issue("any-token", "fake-csr-pem", CertType::Client)
         .await
         .expect("must set Content-Type: application/json");
 }
@@ -100,7 +134,7 @@ async fn successful_response_returns_issue_response() {
         .await;
 
     let response = make_client(server.uri())
-        .issue("test-token", "fake-csr-pem")
+        .issue("test-token", "fake-csr-pem", CertType::Client)
         .await
         .expect("200 response must return Ok");
 
@@ -110,7 +144,7 @@ async fn successful_response_returns_issue_response() {
 }
 
 // ---------------------------------------------------------------------------
-// Rejection variants — each maps to a distinct exit code
+// Rejection variants
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -126,7 +160,7 @@ async fn invalid_audience_rejection_maps_to_rejected_variant() {
         .await;
 
     let err = make_client(server.uri())
-        .issue("bad-token", "fake-csr-pem")
+        .issue("bad-token", "fake-csr-pem", CertType::Client)
         .await
         .expect_err("401 must be an error");
 
@@ -149,7 +183,7 @@ async fn invalid_token_rejection_maps_to_rejected_variant() {
         .await;
 
     let err = make_client(server.uri())
-        .issue("bad-token", "fake-csr-pem")
+        .issue("bad-token", "fake-csr-pem", CertType::Client)
         .await
         .expect_err("401 must be an error");
 
@@ -172,7 +206,7 @@ async fn identity_mismatch_maps_to_rejected_variant() {
         .await;
 
     let err = make_client(server.uri())
-        .issue("test-token", "fake-csr-pem")
+        .issue("test-token", "fake-csr-pem", CertType::Client)
         .await
         .expect_err("403 must be an error");
 
@@ -184,10 +218,6 @@ async fn identity_mismatch_maps_to_rejected_variant() {
 
 #[tokio::test]
 async fn ca_unavailable_maps_to_rejected_variant() {
-    // CA unavailability is transient — the init container should
-    // exit with a code that signals "retry" rather than "this pod
-    // is permanently broken." The Kubernetes restart policy handles
-    // the retry; our job is to use the right exit code.
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/issue"))
@@ -199,7 +229,7 @@ async fn ca_unavailable_maps_to_rejected_variant() {
         .await;
 
     let err = make_client(server.uri())
-        .issue("test-token", "fake-csr-pem")
+        .issue("test-token", "fake-csr-pem", CertType::Client)
         .await
         .expect_err("503 must be an error");
 
@@ -215,10 +245,8 @@ async fn ca_unavailable_maps_to_rejected_variant() {
 
 #[tokio::test]
 async fn unreachable_server_maps_to_unreachable_variant() {
-    // Port 1 is never listening. This exercises the network-level
-    // failure path, distinct from the cert issuer returning an error.
     let err = make_client("http://127.0.0.1:1".to_string())
-        .issue("test-token", "fake-csr-pem")
+        .issue("test-token", "fake-csr-pem", CertType::Client)
         .await
         .expect_err("unreachable server must be an error");
 
@@ -238,7 +266,7 @@ async fn malformed_success_body_maps_to_malformed_variant() {
         .await;
 
     let err = make_client(server.uri())
-        .issue("test-token", "fake-csr-pem")
+        .issue("test-token", "fake-csr-pem", CertType::Client)
         .await
         .expect_err("malformed body must be an error");
 
@@ -250,9 +278,6 @@ async fn malformed_success_body_maps_to_malformed_variant() {
 
 #[tokio::test]
 async fn malformed_error_body_maps_to_malformed_variant() {
-    // The cert issuer returned a non-200 but the body isn't valid
-    // IssueError JSON. We can't map it to a Rejected variant so
-    // Malformed is the right fallback.
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/issue"))
@@ -261,7 +286,7 @@ async fn malformed_error_body_maps_to_malformed_variant() {
         .await;
 
     let err = make_client(server.uri())
-        .issue("test-token", "fake-csr-pem")
+        .issue("test-token", "fake-csr-pem", CertType::Client)
         .await
         .expect_err("non-JSON error body must be an error");
 

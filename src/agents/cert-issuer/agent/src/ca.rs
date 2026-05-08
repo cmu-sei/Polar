@@ -37,7 +37,10 @@
 //! current implementation supports loading a single CA at a time;
 //! cross-signing for transition would be a v1.x addition.
 
-use rcgen::{CertificateSigningRequestParams, Issuer, KeyPair};
+use cert_issuer_common::CertType;
+use rcgen::{
+    CertificateSigningRequestParams, ExtendedKeyUsagePurpose, Issuer, KeyPair, KeyUsagePurpose,
+};
 use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
@@ -48,7 +51,7 @@ use time::OffsetDateTime;
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone)]
-pub struct IssueRequest {
+pub struct CaIssueRequest {
     /// PEM-encoded CSR. Parsed and validated by the `CaClient`
     /// before signing.
     pub csr_pem: String,
@@ -59,6 +62,7 @@ pub struct IssueRequest {
     /// Cert lifetime. The issued cert's `notAfter` is computed as
     /// `now + lifetime`.
     pub lifetime: Duration,
+    pub cert_type: CertType,
 }
 
 #[derive(Debug, Clone)]
@@ -85,7 +89,7 @@ pub enum CaError {
 
 #[async_trait::async_trait]
 pub trait CaClient: Send + Sync {
-    async fn issue(&self, req: IssueRequest) -> Result<IssuedCert, CaError>;
+    async fn issue(&self, req: CaIssueRequest) -> Result<IssuedCert, CaError>;
 }
 
 // ---------------------------------------------------------------------------
@@ -129,12 +133,22 @@ impl RcgenCaClient {
 
 #[async_trait::async_trait]
 impl CaClient for RcgenCaClient {
-    async fn issue(&self, req: IssueRequest) -> Result<IssuedCert, CaError> {
+    async fn issue(&self, req: CaIssueRequest) -> Result<IssuedCert, CaError> {
         let mut csr = CertificateSigningRequestParams::from_pem(&req.csr_pem)
             .map_err(|e| CaError::Malformed(format!("CSR parse: {e}")))?;
 
         let not_before = OffsetDateTime::now_utc();
         let not_after = not_before + req.lifetime;
+
+        let eku = match req.cert_type {
+            CertType::Client => vec![ExtendedKeyUsagePurpose::ClientAuth],
+            CertType::Server => vec![
+                ExtendedKeyUsagePurpose::ServerAuth,
+                ExtendedKeyUsagePurpose::ClientAuth, // keep both — Cassini connects to peers too
+            ],
+        };
+        csr.params.extended_key_usages = eku;
+        csr.params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
         csr.params.not_before = not_before;
         csr.params.not_after = not_after;
 
@@ -497,24 +511,15 @@ fn parse_serial_from_pem(pem: &str) -> Option<String> {
 // Tests
 // ---------------------------------------------------------------------------
 
+// cert-issuer/agent/src/ca.rs — #[cfg(test)] mod tests
+
 #[cfg(test)]
 mod tests {
-    //! Tests for the rcgen-backed CA client.
-    //!
-    //! Unlike the previous step-ca tests, these don't simulate a
-    //! wire format — they exercise the actual signing path against
-    //! real CA materials and verify the issued cert is structurally
-    //! valid. That's what's available now that the CA is in-process:
-    //! end-to-end correctness instead of "the request shape we send
-    //! looks right."
-
     use super::*;
+    use cert_issuer_common::CertType;
     use rcgen::CertificateParams as RcgenParams;
     use std::sync::OnceLock;
 
-    /// CA materials shared across all tests. Bootstrap is fast
-    /// enough to do per-test (<10ms), but caching keeps the test
-    /// suite snappy.
     fn test_ca_materials() -> &'static (String, String) {
         static CA: OnceLock<(String, String)> = OnceLock::new();
         CA.get_or_init(|| bootstrap_ca("Test CA").expect("bootstrap"))
@@ -525,8 +530,6 @@ mod tests {
         RcgenCaClient::new(cert, key).expect("client construction")
     }
 
-    /// Generate a CSR for the given identity. Mirrors what the
-    /// init container does in production.
     fn make_csr(identity: &str) -> String {
         let params = RcgenParams::new(vec![identity.to_string()]).expect("csr params");
         let key_pair = KeyPair::generate().expect("csr keypair");
@@ -536,11 +539,21 @@ mod tests {
         csr.pem().expect("CSR PEM")
     }
 
-    fn sample_request(identity: &str) -> IssueRequest {
-        IssueRequest {
+    fn sample_request(identity: &str) -> CaIssueRequest {
+        CaIssueRequest {
             csr_pem: make_csr(identity),
             san: identity.to_string(),
             lifetime: Duration::from_secs(3600),
+            cert_type: CertType::Client,
+        }
+    }
+
+    fn server_request(identity: &str) -> CaIssueRequest {
+        CaIssueRequest {
+            csr_pem: make_csr(identity),
+            san: identity.to_string(),
+            lifetime: Duration::from_secs(3600),
+            cert_type: CertType::Server,
         }
     }
 
@@ -550,9 +563,6 @@ mod tests {
         let req = sample_request("agent.polar.svc.cluster.local");
         let result = client.issue(req).await.expect("must succeed");
 
-        // The PEM must contain a real cert that x509-parser can
-        // round-trip. If rcgen produces something malformed, this
-        // catches it.
         assert!(result.certificate_pem.contains("BEGIN CERTIFICATE"));
         assert!(result.ca_chain_pem.contains("BEGIN CERTIFICATE"));
 
@@ -573,8 +583,6 @@ mod tests {
             x509_parser::pem::parse_x509_pem(result.certificate_pem.as_bytes()).expect("pem");
         let (_, cert) = x509_parser::parse_x509_certificate(&pem.contents).expect("x509");
 
-        // SAN extraction. The issued cert's SAN extension should
-        // contain the identity from the CSR.
         let san_ext = cert
             .extensions()
             .iter()
@@ -596,13 +604,89 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn client_cert_has_only_client_auth_eku() {
+        let client = make_client();
+        let req = sample_request("git-observer.polar.svc.cluster.local");
+        let result = client.issue(req).await.expect("must succeed");
+
+        let (_, pem) =
+            x509_parser::pem::parse_x509_pem(result.certificate_pem.as_bytes()).expect("pem");
+        let (_, cert) = x509_parser::parse_x509_certificate(&pem.contents).expect("x509");
+
+        let eku = cert
+            .extensions()
+            .iter()
+            .find_map(|e| match e.parsed_extension() {
+                x509_parser::extensions::ParsedExtension::ExtendedKeyUsage(eku) => Some(eku),
+                _ => None,
+            })
+            .expect("EKU extension must be present");
+
+        assert!(eku.client_auth, "client cert must have clientAuth EKU");
+        assert!(!eku.server_auth, "client cert must not have serverAuth EKU");
+    }
+
+    #[tokio::test]
+    async fn server_cert_has_server_auth_and_client_auth_eku() {
+        // Server certs carry both EKUs because Cassini connects to
+        // peers as a client as well as accepting connections as a
+        // server. A cert with only serverAuth would fail client-side
+        // TLS handshakes on those outbound connections.
+        let client = make_client();
+        let req = server_request("cassini.polar.svc.cluster.local");
+        let result = client.issue(req).await.expect("must succeed");
+
+        let (_, pem) =
+            x509_parser::pem::parse_x509_pem(result.certificate_pem.as_bytes()).expect("pem");
+        let (_, cert) = x509_parser::parse_x509_certificate(&pem.contents).expect("x509");
+
+        let eku = cert
+            .extensions()
+            .iter()
+            .find_map(|e| match e.parsed_extension() {
+                x509_parser::extensions::ParsedExtension::ExtendedKeyUsage(eku) => Some(eku),
+                _ => None,
+            })
+            .expect("EKU extension must be present");
+
+        assert!(eku.server_auth, "server cert must have serverAuth EKU");
+        assert!(eku.client_auth, "server cert must have clientAuth EKU");
+    }
+
+    #[tokio::test]
+    async fn client_cert_has_digital_signature_key_usage() {
+        // KeyUsage::DigitalSignature is required alongside clientAuth
+        // EKU. Some TLS stacks check both; missing it causes
+        // BadCertificate on stricter verifiers.
+        let client = make_client();
+        let req = sample_request("git-observer.polar.svc.cluster.local");
+        let result = client.issue(req).await.expect("must succeed");
+
+        let (_, pem) =
+            x509_parser::pem::parse_x509_pem(result.certificate_pem.as_bytes()).expect("pem");
+        let (_, cert) = x509_parser::parse_x509_certificate(&pem.contents).expect("x509");
+
+        let ku = cert
+            .extensions()
+            .iter()
+            .find_map(|e| match e.parsed_extension() {
+                x509_parser::extensions::ParsedExtension::KeyUsage(ku) => Some(ku),
+                _ => None,
+            })
+            .expect("KeyUsage extension must be present");
+
+        assert!(
+            ku.digital_signature(),
+            "cert must have DigitalSignature key usage"
+        );
+    }
+
+    #[tokio::test]
     async fn issued_cert_has_serial_number() {
         let client = make_client();
         let req = sample_request("agent.polar.svc.cluster.local");
         let result = client.issue(req).await.expect("must succeed");
 
-        // Serial is hex-encoded; it must be non-empty and not the
-        // "unknown" placeholder we'd emit if extraction failed.
         assert!(!result.serial_number.is_empty());
         assert_ne!(result.serial_number, "unknown");
     }
@@ -610,20 +694,18 @@ mod tests {
     #[tokio::test]
     async fn lifetime_is_honored() {
         let client = make_client();
-        let lifetime = Duration::from_secs(900); // 15 minutes
-        let req = IssueRequest {
+        let lifetime = Duration::from_secs(900);
+        let req = CaIssueRequest {
             csr_pem: make_csr("agent.polar.svc.cluster.local"),
             san: "agent.polar.svc.cluster.local".to_string(),
             lifetime,
+            cert_type: CertType::Client,
         };
 
         let before = OffsetDateTime::now_utc();
         let result = client.issue(req).await.expect("must succeed");
         let after = OffsetDateTime::now_utc();
 
-        // The cert's notAfter should be lifetime seconds past
-        // when issuance happened. Allow a small slop window for
-        // the time spent inside `issue`.
         let expected_min = before + lifetime;
         let expected_max = after + lifetime;
         assert!(
@@ -638,10 +720,11 @@ mod tests {
     #[tokio::test]
     async fn malformed_csr_returns_malformed() {
         let client = make_client();
-        let req = IssueRequest {
+        let req = CaIssueRequest {
             csr_pem: "not a CSR".to_string(),
             san: "agent.polar.svc.cluster.local".to_string(),
             lifetime: Duration::from_secs(3600),
+            cert_type: CertType::Client,
         };
 
         let err = client.issue(req).await.expect_err("must fail");
@@ -650,9 +733,6 @@ mod tests {
 
     #[tokio::test]
     async fn issued_cert_is_signed_by_the_ca() {
-        // Verify the issued cert chains up to the CA we constructed
-        // the client with. A bug in `signed_by` (or in our wiring)
-        // would surface as a chain that doesn't verify.
         let client = make_client();
         let req = sample_request("agent.polar.svc.cluster.local");
         let result = client.issue(req).await.expect("must succeed");
@@ -664,19 +744,17 @@ mod tests {
         let (_, ca_pem) = x509_parser::pem::parse_x509_pem(result.ca_chain_pem.as_bytes()).unwrap();
         let (_, ca) = x509_parser::parse_x509_certificate(&ca_pem.contents).unwrap();
 
-        // The leaf's issuer DN must equal the CA's subject DN.
-        // This is a structural check; a full signature verification
-        // would require pulling in a verifier crate. The structural
-        // check is sufficient to catch the most likely failure mode
-        // (we wired the wrong CA into the issuer).
-        assert_eq!(leaf.issuer().as_raw(), ca.subject().as_raw());
+        assert_eq!(
+            leaf.issuer().as_raw(),
+            ca.subject().as_raw(),
+            "leaf cert issuer DN must match CA subject DN"
+        );
     }
 
     #[test]
     fn bootstrap_produces_valid_ca() {
         let (cert_pem, key_pem) = bootstrap_ca("Bootstrap Test").expect("bootstrap");
 
-        // Cert must parse as X.509 with is_ca = true.
         let (_, pem) = x509_parser::pem::parse_x509_pem(cert_pem.as_bytes()).expect("ca cert pem");
         let (_, cert) = x509_parser::parse_x509_certificate(&pem.contents).expect("ca x509");
 
@@ -690,7 +768,6 @@ mod tests {
             .expect("BasicConstraints present on CA");
         assert!(bc.ca, "is_ca must be true");
 
-        // Key must be parseable as a rcgen KeyPair.
         KeyPair::from_pem(&key_pem).expect("ca key pem parses");
     }
 
@@ -704,8 +781,6 @@ mod tests {
 
     use tempfile::TempDir;
 
-    /// Helper: build paths under a temp directory without creating
-    /// the files. Returned paths are guaranteed not to exist.
     fn fresh_paths(dir: &TempDir) -> (String, String) {
         let cert = dir.path().join("ca.crt").to_string_lossy().into_owned();
         let key = dir.path().join("ca.key").to_string_lossy().into_owned();
@@ -714,8 +789,6 @@ mod tests {
 
     #[test]
     fn first_run_with_neither_file_present_bootstraps() {
-        // Both paths point at an empty directory. Bootstrap should
-        // succeed, return a valid pair, and write both files to disk.
         let dir = TempDir::new().unwrap();
         let (cert_path, key_path) = fresh_paths(&dir);
 
@@ -727,16 +800,11 @@ mod tests {
         assert!(std::path::Path::new(&cert_path).exists());
         assert!(std::path::Path::new(&key_path).exists());
 
-        // The newly-written pair must validate (sanity check that
-        // we wrote what we returned).
         validate_pair(&cert_pem, &key_pem).expect("bootstrapped pair must validate");
     }
 
     #[test]
     fn second_run_with_both_files_loads_existing() {
-        // First run bootstraps, second run loads. The second run
-        // must return the SAME materials the first run wrote — not
-        // a freshly-generated pair.
         let dir = TempDir::new().unwrap();
         let (cert_path, key_path) = fresh_paths(&dir);
 
@@ -764,7 +832,6 @@ mod tests {
     fn key_present_but_cert_missing_is_a_partial_state_error() {
         let dir = TempDir::new().unwrap();
         let (cert_path, key_path) = fresh_paths(&dir);
-        // Even with mode 0600 on the key, missing cert is an error.
         std::fs::write(&key_path, "anything").unwrap();
         #[cfg(unix)]
         {
@@ -784,15 +851,13 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn key_with_loose_permissions_is_rejected() {
-        // Bootstrap a real CA, then chmod the key to be readable.
-        // The next load must reject it with InsecureKeyPermissions.
         let dir = TempDir::new().unwrap();
         let (cert_path, key_path) = fresh_paths(&dir);
         load_or_bootstrap_ca(&cert_path, &key_path, "Test CA").unwrap();
 
         use std::os::unix::fs::PermissionsExt;
         let mut perms = std::fs::metadata(&key_path).unwrap().permissions();
-        perms.set_mode(0o644); // group + world readable
+        perms.set_mode(0o644);
         std::fs::set_permissions(&key_path, perms).unwrap();
 
         let err = load_or_bootstrap_ca(&cert_path, &key_path, "Test CA")
@@ -819,10 +884,6 @@ mod tests {
 
     #[test]
     fn mismatched_cert_and_key_is_a_mismatch_error() {
-        // Bootstrap two independent CAs into separate temp dirs,
-        // then point load_or_bootstrap_ca at CA-A's cert and CA-B's
-        // key. Both files exist, both parse, neither is malformed —
-        // but they don't form a matching pair.
         let dir_a = TempDir::new().unwrap();
         let dir_b = TempDir::new().unwrap();
         let (cert_a, key_a) = fresh_paths(&dir_a);
@@ -830,7 +891,6 @@ mod tests {
         load_or_bootstrap_ca(&cert_a, &key_a, "CA A").unwrap();
         load_or_bootstrap_ca(&cert_b, &key_b, "CA B").unwrap();
 
-        // Now construct a fresh dir holding A's cert and B's key.
         let mismatch_dir = TempDir::new().unwrap();
         let mismatch_cert = mismatch_dir
             .path()
@@ -862,10 +922,6 @@ mod tests {
 
     #[test]
     fn corrupt_cert_file_is_an_error() {
-        // Bootstrap, then truncate the cert file. The next load
-        // must fail. The exact error variant doesn't matter much —
-        // it could be Other (parse failure) — but it must NOT be
-        // success.
         let dir = TempDir::new().unwrap();
         let (cert_path, key_path) = fresh_paths(&dir);
         load_or_bootstrap_ca(&cert_path, &key_path, "Test CA").unwrap();
@@ -877,15 +933,10 @@ mod tests {
 
     #[test]
     fn bootstrap_creates_parent_directories() {
-        // If the configured paths point into a directory that
-        // doesn't exist, bootstrap creates it. This matters for
-        // first-run on a freshly-mounted volume where only the
-        // mountpoint exists.
         let dir = TempDir::new().unwrap();
         let nested = dir.path().join("nested").join("subdir");
         let cert_path = nested.join("ca.crt").to_string_lossy().into_owned();
         let key_path = nested.join("ca.key").to_string_lossy().into_owned();
-        // `nested` does not exist yet.
 
         load_or_bootstrap_ca(&cert_path, &key_path, "Test CA")
             .expect("must create parent dirs and bootstrap");

@@ -1,31 +1,41 @@
-// cert_issuer_init/src/main.rs
+// cert-issuer-init/src/main.rs
 
-use cert_issuer_common::{IssueOutcome, identity::normalize_identity};
+use cert_issuer_common::{CertType, identity::normalize_identity};
+use cert_issuer_init::{handshake, keypair, output, token};
+use clap::Parser;
 
-use cert_issuer_init::{
-    handshake::{HandshakeClient, HandshakeError},
-    keypair, output, token,
-};
+#[derive(Parser, Debug)]
+#[command(
+    name = "cert-issuer-init",
+    about = "Obtain a short-lived mTLS certificate from the Polar cert issuer"
+)]
+struct Args {
+    /// URL of the cert issuer service
+    #[arg(long)]
+    cert_issuer_url: String,
+
+    /// Path to the projected service account token
+    #[arg(long, default_value = "/workspace/token")]
+    token_path: String,
+
+    /// Directory to write cert.pem, key.pem, and ca.pem into
+    #[arg(long, default_value = "/etc/tls/certs")]
+    cert_dir: String,
+
+    /// Certificate type: CLIENT or SERVER
+    /// TODO: see how we can turn this into a flag instead
+    #[arg(long, default_value_t = CertType::Client)]
+    cert_type: CertType,
+}
 
 #[tokio::main]
 async fn main() {
-    std::process::exit(run().await);
+    let args = Args::parse();
+    std::process::exit(run(args).await);
 }
 
-async fn run() -> i32 {
-    let token_path = std::env::var("POLAR_SA_TOKEN_PATH")
-        .unwrap_or_else(|_| "/var/run/secrets/polar/token".to_string());
-    let cert_issuer_url = match std::env::var("POLAR_CERT_ISSUER_URL") {
-        Ok(u) => u,
-        Err(_) => {
-            eprintln!("error: POLAR_CERT_ISSUER_URL must be set");
-            return 1;
-        }
-    };
-    let cert_dir =
-        std::env::var("POLAR_CERT_DIR").unwrap_or_else(|_| "/workspace/certs".to_string());
-
-    let sa_token = match token::read_token(&token_path) {
+async fn run(args: Args) -> i32 {
+    let sa_token = match token::read_token(&args.token_path) {
         Ok(t) => t,
         Err(e) => {
             eprintln!("error: failed to read SA token: {e}");
@@ -44,7 +54,7 @@ async fn run() -> i32 {
     let dns_identity = match normalize_identity(&sub) {
         Ok(i) => i,
         Err(e) => {
-            eprintln!("error: failed to normalize identity: {e}");
+            eprintln!("error: failed to normalize identity '{sub}': {e}");
             return 1;
         }
     };
@@ -57,28 +67,31 @@ async fn run() -> i32 {
         }
     };
 
-    let client = HandshakeClient::new(cert_issuer_url);
-    let response = match client.issue(&sa_token, &csr_output.csr_pem).await {
+    let client = handshake::HandshakeClient::new(args.cert_issuer_url);
+    let response = match client
+        .issue(&sa_token, &csr_output.csr_pem, args.cert_type)
+        .await
+    {
         Ok(r) => r,
-        Err(HandshakeError::Unreachable(e)) => {
+        Err(handshake::HandshakeError::Unreachable(e)) => {
             eprintln!("error: cert issuer unreachable: {e}");
             return 2;
         }
-        Err(HandshakeError::Rejected(e)) => {
+        Err(handshake::HandshakeError::Rejected(e)) => {
             eprintln!(
-                "error: cert issuer rejected request: {:?} — {}",
+                "error: cert issuer rejected: {:?} — {}",
                 e.outcome, e.detail
             );
             return match e.outcome {
-                IssueOutcome::InvalidAudience => 1,
-                IssueOutcome::InvalidToken => 1,
-                IssueOutcome::IdentityMismatch => 1,
-                IssueOutcome::CaUnavailable => 2,
+                cert_issuer_common::IssueOutcome::InvalidAudience => 1,
+                cert_issuer_common::IssueOutcome::InvalidToken => 1,
+                cert_issuer_common::IssueOutcome::IdentityMismatch => 1,
+                cert_issuer_common::IssueOutcome::CaUnavailable => 2,
                 _ => 3,
             };
         }
-        Err(HandshakeError::Malformed(e)) => {
-            eprintln!("error: malformed response from cert issuer: {e}");
+        Err(handshake::HandshakeError::Malformed(e)) => {
+            eprintln!("error: malformed response: {e}");
             return 3;
         }
     };
@@ -89,8 +102,14 @@ async fn run() -> i32 {
         ca_pem: &response.ca_chain_pem,
     };
 
-    match output::write_bundle(std::path::Path::new(&cert_dir), &bundle) {
-        Ok(()) => 0,
+    match output::write_bundle(std::path::Path::new(&args.cert_dir), &bundle) {
+        Ok(()) => {
+            eprintln!(
+                "issued cert for '{dns_identity}', expires {}",
+                response.expires_at
+            );
+            0
+        }
         Err(e) => {
             eprintln!("error: failed to write cert bundle: {e}");
             3

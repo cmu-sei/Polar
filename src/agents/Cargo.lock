@@ -1485,6 +1485,7 @@ dependencies = [
 name = "cert-issuer-common"
 version = "1.0.0"
 dependencies = [
+ "clap",
  "serde",
  "thiserror 1.0.69",
  "time",
@@ -1496,6 +1497,7 @@ version = "1.0.0"
 dependencies = [
  "base64 0.22.1",
  "cert-issuer-common",
+ "clap",
  "jsonwebtoken",
  "rcgen",
  "reqwest",
