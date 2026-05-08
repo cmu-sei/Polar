@@ -5,7 +5,7 @@ pod startup against a configured OIDC issuer (Kubernetes projected
 service account tokens in v1) and signed by an in-process CA backed
 by [`rcgen`](https://crates.io/crates/rcgen).
 
-See [`architecture-spec.md`](architecture-spec.md) for the full
+See the [specification document](../../../docs/architecture/cert-issuer-architecture.md) for the full
 design rationale, threat model, and v2 directions.
 
 ## Package Layout
