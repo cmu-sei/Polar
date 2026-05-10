@@ -13,7 +13,7 @@ The cert issuer is a service that mints short-lived X.509 client certificates fo
 
 This service exists to remove TLS material from agent deployment manifests. Today, every Polar agent has cert-manager-issued certs mounted into its pod via Kubernetes secrets, and every agent's manifest carries the configuration plumbing for those mounts. With sixteen agents across multiple environments and a Dhall-rendered manifest pipeline that has to keep all of this consistent, the per-agent TLS configuration is the largest single source of configuration drift in the system. The cert issuer collapses this into a single bootstrap call at agent startup: the agent presents its projected SA token, gets a certificate, and proceeds. Manifests stop carrying TLS material entirely.
 
-The cert issuer is also the trust anchor for the credential agent that will be built after it. The credential agent's clients will authenticate via the certs this service issues; the credential agent itself will obtain its own cert from this service at startup. Building the cert issuer first means the credential agent has a clean authentication primitive to depend on rather than inventing one. This ordering is deliberate and not optional.
+The cert issuer is
 
 ## 2. Scope and Non-Goals
 

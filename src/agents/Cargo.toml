@@ -68,7 +68,7 @@ members = [
     "build-orchestrator/agent",
     "build-orchestrator/k8s", "build-orchestrator/processor",
     "build-orchestrator/podman"
-, "cert-issuer/agent","cert-issuer/init", "cert-issuer/common"]
+, "cert-issuer/server","cert-issuer/client", "cert-issuer/common"]
 
 [workspace.package]
 version = "1.0.0"
@@ -192,6 +192,8 @@ wiremock = "0.6"
 x509-parser = { version = "0.16", features = ["verify"]}
 rsa = "0.9"
 
+jsonwebtoken = { version = "10.3.0", features = ["aws_lc_rs"] }
+rcgen = { version = "0.14.7", features = ["x509-parser"] }
 # Remove dhall and serde_dhall from patch – they are now workspace deps
 [patch.crates-io]
 getrandom = { git = "https://github.com/rust-random/getrandom", tag = "v0.3.3" }

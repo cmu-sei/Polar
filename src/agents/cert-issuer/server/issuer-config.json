@@ -1,0 +1,27 @@
+{
+  "bind_addr": "127.0.0.1:8443",
+  "ca": {
+    "ca_cert_path": "./tmp/ca.crt",
+    "ca_key_path": "./tmp/ca.key",
+    "default_lifetime": {
+      "nanos": 0,
+      "secs": 1800
+    }
+  },
+  "issuer": {
+    "allowed_algorithms": ["RS256", "ES256", "EdDSA"],
+    "audience": "polar-cert-issuer.dev",
+    "instance_binding_claim": "kubernetes.io/pod/uid",
+    "issuer": "http://localhost:8081",
+    "jwks_cache_ttl_max": {
+      "nanos": 0,
+      "secs": 3600
+    },
+    "jwks_cache_ttl_min": {
+      "nanos": 0,
+      "secs": 30
+    },
+    "jwks_uri": "http://localhost:8081/jwks.json",
+    "workload_identity_claim": "sub"
+  }
+}

@@ -6,6 +6,31 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use time::OffsetDateTime;
+pub mod identity;
+
+// cert_issuer_common/src/lib.rs — add to IssueRequest
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, clap::ValueEnum)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum CertType {
+    Client,
+    Server,
+}
+
+impl ToString for CertType {
+    fn to_string(&self) -> String {
+        let s = match self {
+            Self::Client => "client",
+            Self::Server => "server",
+        };
+        s.into()
+    }
+}
+
+impl Default for CertType {
+    fn default() -> Self {
+        CertType::Client
+    }
+}
 
 /// Request body for `POST /issue`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -13,6 +38,9 @@ pub struct IssueRequest {
     /// PEM-encoded CSR. The SAN must match the workload identity claim
     /// from the bearer token, or the cert issuer rejects with `IDENTITY_MISMATCH`.
     pub csr_pem: String,
+
+    #[serde(default)]
+    pub cert_type: CertType,
 }
 
 /// Successful response body for `POST /issue`.

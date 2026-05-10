@@ -13,7 +13,6 @@ src/agents/*/result
 result*
 report.json
 config.json
-bin
 certs
 .vscode/settings.json
 open-vsx.nix.txt
@@ -31,6 +30,7 @@ git.json
 # ephemeral bullshit - do not check this in
 my.env
 .env.nuon
+.env.ci.nuon
 ci.env
 docker.json
 .polar/
@@ -42,3 +42,5 @@ src/deploy/local/values-active.dhall
 .sops.yaml
 .user.sops.yaml
 user.sops.yaml
+# ignore rendered cotnainer nix files
+*.container.nix

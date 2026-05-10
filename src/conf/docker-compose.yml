@@ -26,7 +26,6 @@ services:
   neo4j:
     user: 7474:7474
     image: neo4j:5.26.2
-    restart: never
     environment:
       - NEO4J_AUTH=neo4j/somepassword
     networks:
@@ -39,16 +38,20 @@ services:
       - ./neo4j_setup/imports:/var/lib/neo4j/import
 
   step-ca:
-    image: smallstep/step-ca:latest
+    image: docker.io/smallstep/step-ca
+    container_name: step-ca
+    user: 1000:1000
     ports:
-      - 9000:9000
+      - "9000:9000"
     environment:
-      - DOCKER_STEPCA_INIT_NAME=Polar Test CA
-      - DOCKER_STEPCA_INIT_DNS_NAMES=localhost
-      - DOCKER_STEPCA_INIT_PROVISIONER_NAME=cert-issuer
-      - DOCKER_STEPCA_INIT_PASSWORD=somepassword
+      DOCKER_STEPCA_INIT_NAME: "Polar Test CA"
+      DOCKER_STEPCA_INIT_DNS_NAMES: "localhost"
+      DOCKER_STEPCA_INIT_PROVISIONER_NAME: "cert-issuer"
+      DOCKER_STEPCA_INIT_PASSWORD: "devpassword"
+    networks:
+      - polar
     volumes:
-      - /var/step:/home/step
+      - step:/home/step
 
   jaeger:
     image: cr.jaegertracing.io/jaegertracing/jaeger:2.11.0
@@ -67,4 +70,5 @@ networks:
   polar:
 
 volumes:
+  step:
   neo4j-data:
