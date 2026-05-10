@@ -1,6 +1,6 @@
 // cert_issuer_init/src/keypair.rs
 
-use rcgen::{CertificateParams, DistinguishedName, DnType, KeyPair, SanType, string::Ia5String};
+use rcgen::{CertificateParams, DistinguishedName, KeyPair, SanType, string::Ia5String};
 use thiserror::Error;
 
 #[derive(Debug, Error, PartialEq, Eq)]

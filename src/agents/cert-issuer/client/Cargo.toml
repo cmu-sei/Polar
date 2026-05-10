@@ -1,5 +1,5 @@
 [package]
-name = "cert-issuer-init"
+name = "cert-client"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -24,7 +24,7 @@ cert-issuer-common = { path = "../common" }
 
 
 [[bin]]
-name = "cert-issuer-init"
+name = "cert-client"
 path = "src/main.rs"
 
 [[bin]]

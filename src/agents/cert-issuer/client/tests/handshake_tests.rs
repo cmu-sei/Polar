@@ -9,8 +9,8 @@
 //! misconfigurations from infrastructure failures from CA failures
 //! by looking at the pod's init container exit code.
 
+use cert_client::handshake::{HandshakeClient, HandshakeError};
 use cert_issuer_common::{CertType, IssueError, IssueOutcome, IssueResponse};
-use cert_issuer_init::handshake::{HandshakeClient, HandshakeError};
 use time::OffsetDateTime;
 use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};

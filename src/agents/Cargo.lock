@@ -1451,6 +1451,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "cert-client"
+version = "1.0.0"
+dependencies = [
+ "base64 0.22.1",
+ "cert-issuer-common",
+ "clap",
+ "jsonwebtoken",
+ "rcgen",
+ "reqwest",
+ "rsa",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "time",
+ "tokio",
+ "wiremock",
+ "x509-parser 0.16.0",
+]
+
+[[package]]
 name = "cert-issuer"
 version = "1.0.0"
 dependencies = [
@@ -1489,26 +1509,6 @@ dependencies = [
  "serde",
  "thiserror 1.0.69",
  "time",
-]
-
-[[package]]
-name = "cert-issuer-init"
-version = "1.0.0"
-dependencies = [
- "base64 0.22.1",
- "cert-issuer-common",
- "clap",
- "jsonwebtoken",
- "rcgen",
- "reqwest",
- "rsa",
- "serde_json",
- "tempfile",
- "thiserror 1.0.69",
- "time",
- "tokio",
- "wiremock",
- "x509-parser 0.16.0",
 ]
 
 [[package]]

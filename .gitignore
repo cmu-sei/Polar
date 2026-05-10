@@ -42,3 +42,5 @@ src/deploy/local/values-active.dhall
 .sops.yaml
 .user.sops.yaml
 user.sops.yaml
+# ignore rendered cotnainer nix files
+*.container.nix

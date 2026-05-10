@@ -68,7 +68,7 @@ members = [
     "build-orchestrator/agent",
     "build-orchestrator/k8s", "build-orchestrator/processor",
     "build-orchestrator/podman"
-, "cert-issuer/agent","cert-issuer/init", "cert-issuer/common"]
+, "cert-issuer/server","cert-issuer/client", "cert-issuer/common"]
 
 [workspace.package]
 version = "1.0.0"

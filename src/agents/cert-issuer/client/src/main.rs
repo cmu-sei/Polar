@@ -1,7 +1,7 @@
 // cert-issuer-init/src/main.rs
 
+use cert_client::{handshake, keypair, output, token};
 use cert_issuer_common::{CertType, identity::normalize_identity};
-use cert_issuer_init::{handshake, keypair, output, token};
 use clap::Parser;
 
 #[derive(Parser, Debug)]

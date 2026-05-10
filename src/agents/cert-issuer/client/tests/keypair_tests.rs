@@ -10,7 +10,7 @@
 //! Normalization from Kubernetes SA form to DNS form is tested
 //! separately in cert_issuer_common's identity tests.
 
-use cert_issuer_init::keypair::{CsrOutput, KeypairError, generate_csr};
+use cert_client::keypair::{KeypairError, generate_csr};
 use x509_parser::extensions::{GeneralName, ParsedExtension};
 use x509_parser::prelude::*;
 

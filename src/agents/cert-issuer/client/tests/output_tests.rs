@@ -1,7 +1,7 @@
 // tests/output_tests.rs
 //! Tests for atomic cert bundle writing to the shared emptyDir volume.
 
-use cert_issuer_init::output::{OutputBundle, OutputError, write_bundle};
+use cert_client::output::{OutputBundle, OutputError, write_bundle};
 use std::os::unix::fs::PermissionsExt;
 use tempfile::TempDir;
 

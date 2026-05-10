@@ -373,20 +373,27 @@ struct JwksDoc {
 
 /// A JSON Web Key as published in a JWKS document. We deserialize
 /// only the fields we use; unknown fields are ignored.
+/// TODO: We haven't found a use for "alg" and "crv" fields _yet_,
+/// but we still want to deserailzie them just in case we stumble upon a token with the fields set.
+/// If it becomes necessary to use them, remove the underscores and serde field attributes
 #[derive(Debug, Deserialize)]
 struct Jwk {
     kty: String,
     kid: Option<String>,
     #[serde(rename = "use")]
     use_: Option<String>,
-    alg: Option<String>,
+    #[serde(rename(serialize = "alg"))]
+    #[serde(rename(deserialize = "alg"))]
+    _alg: Option<String>,
 
     // RSA fields
     n: Option<String>,
     e: Option<String>,
 
     // EC fields
-    crv: Option<String>,
+    #[serde(rename(serialize = "crv"))]
+    #[serde(rename(deserialize = "crv"))]
+    _crv: Option<String>,
     x: Option<String>,
     y: Option<String>,
 }

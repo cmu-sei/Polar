@@ -12,7 +12,7 @@ design rationale, threat model, and v2 directions.
 
 ```
 .
-├── agent
+├── server
 │   ├── tests
 │   ├── conf
 │   │   ├── dev.dhall
@@ -33,7 +33,7 @@ design rationale, threat model, and v2 directions.
 │   └── src
 │       ├── identity.rs
 │       └── lib.rs
-├── init
+├── client 
 │   ├── Cargo.toml
 │   ├── tests
 │   ├─ src
@@ -52,19 +52,19 @@ The workspace builds with stable Rust 1.75+. There are no native
 build dependencies beyond a working `cargo` and a C linker.
 
 ```sh
-cargo build --bin cert-issuer --bin cert-issuer-init --release
+cargo build --bin cert-issuer --bin cert-client --release
 ```
 
 Two binaries land in `target/release/`:
 
 - `cert-issuer` — the service
-- `cert-issuer-init` — the init container client
+- `cert-client` — the init container client
 
 For development:
 
 ```sh
-cargo build -p cert-issuer -p cert-issuer-init -p cert-issuer-common
-cargo test -p cert-issuer -p cert-issuer-init -p cert-issuer-common
+cargo build -p cert-issuer -p cert-client -p cert-issuer-common
+cargo test -p cert-issuer -p cert-client -p cert-issuer-common
 ```
 
 ## CA Model
