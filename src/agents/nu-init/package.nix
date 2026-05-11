@@ -13,6 +13,7 @@
 , nix-container-lib
 , inputs
 , system
+, certIssuerClient
 }:
 
 let
@@ -44,7 +45,7 @@ let
   nuInitContainer = nix-container-lib.lib.${system}.mkContainer {
     inherit system pkgs inputs;
     configNixPath    = ./container.nix;
-    extraDerivations = [ nuInitEntrypoint ];
+    extraDerivations = [ nuInitEntrypoint certIssuerClient ];
   };
 
 in

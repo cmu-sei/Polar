@@ -14,6 +14,7 @@
 , lib
 , system
 , cassiniClient
+, certIssuerClient
 }:
 
 let
@@ -208,6 +209,7 @@ let
     skopeo
     cosign
     cassiniClient
+    certIssuerClient
     vim
     buildah
   ];

@@ -1,23 +1,22 @@
 let kubernetes = ./kubernetes.dhall
 
-let Agent = ./agents.dhall
+let Agents = ./agents.dhall
 
--- TODO: Define a set of constants for environment variable strings
 let commitSha = env:CI_COMMIT_SHORT_SHA as Text ? "latest"
 
-let imagePullSecretName =  "registry-secret"
-
-let SandboxRegistry =
-      { url = "sandboxaksacr.azurecr.us"
-      , imagePullSecrets =
-        [ kubernetes.LocalObjectReference::{ name = Some "sandbox-registry" } ]
-      }
+let imagePullSecretName = "registry-secret"
 
 let PolarNamespace = env:NAMESPACE as Text ? "polar"
+
 let GraphNamespace = env:GRAPH_NAMESPACE as Text ? "polar-db"
 
+let polarInitScript = ../../../scripts/polar-init.nu as Text
+
+let polarHomeDir = "/home/polar"
+
 let neo4jConfigmapName = "neo4j-config"
-let graphSecretName = "polar-graph-pw"
+
+let initScriptVolumeName  = "cert-init-script"
 
 let neo4jSecret =
       kubernetes.SecretKeySelector::{
@@ -25,32 +24,29 @@ let neo4jSecret =
       , name = Some "neo4j-secret"
       }
 
-let graphSecretKeySelector = kubernetes.SecretKeySelector::{
-        , name = Some "polar-graph-pw"
-        , key = "secret"
-        }
+let graphSecretKeySelector =
+      kubernetes.SecretKeySelector::{
+      , name = Some "polar-graph-pw"
+      , key = "secret"
+      }
 
-let neo4jSecretEnv = kubernetes.EnvVar::{
-          , name = "NEO4J_AUTH"
-          , valueFrom = Some kubernetes.EnvVarSource::{
-            , secretKeyRef = Some neo4jSecret
-            }
-          }
+let neo4jSecretEnv =
+      kubernetes.EnvVar::{
+      , name = "NEO4J_AUTH"
+      , valueFrom = Some kubernetes.EnvVarSource::{
+        , secretKeyRef = Some neo4jSecret
+        }
+      }
+
 let RejectSidecarAnnotation =
       { mapKey = "sidecar.istio.io/inject", mapValue = "false" }
 
-let tlsPath = "/etc/tls"
+let certDir = "/home/polar/certs"
 
-let mtls =
-      { commonName = "polar"
-      , caCertificateIssuerName = "ca-issuer"
-      , caCertificateRequest = "ca-certificate"
-      , caCertName = "ca-cert"
-      , leafIssuerName = "polar-leaf-issuer"
-      , caCertPath = "${tlsPath}/ca.crt"
-      , certPath = "${tlsPath}/tls.crt"
-      , keyPath = "${tlsPath}/tls.key"
-      , proxyCertificate = "proxy-ca-cert"
+let certPaths =
+      { ca = "${certDir}/ca.pem"
+      , cert = "${certDir}/cert.pem"
+      , key = "${certDir}/key.pem"
       }
 
 let cassiniPort = 8080
@@ -62,49 +58,51 @@ let cassiniDNSName =
 
 let cassiniAddr = "${cassiniDNSName}:${Natural/show cassiniPort}"
 
+let cassiniServerName = "cassini.polar.serviceaccount.cluster.local"
+
 let commonClientTls
-    : Agent.ClientTlsConfig
+    : Agents.ClientTlsConfig
     = { broker_endpoint = cassiniAddr
-      , server_name = cassiniDNSName
-      , client_certificate_path = mtls.certPath
-      , client_key_path = mtls.keyPath
-      , client_ca_cert_path = mtls.caCertPath
+      , server_name = cassiniServerName
+      , client_certificate_path = certPaths.cert
+      , client_key_path = certPaths.key
+      , client_ca_cert_path = certPaths.ca
       }
 
-let polarAgentCertificateSpec =
-      { commonName = mtls.commonName
-      , dnsNames = [ cassiniDNSName ]
-      , duration = "2160h"
-      , issuerRef = { kind = "Issuer", name = mtls.leafIssuerName }
-      , renewBefore = "360h"
-      , secretName = "cassini-tls"
-      }
-
-let CassiniServerCertificateSecret = "cassini-tls"
-
-let sandboxHostSuffix = "sandbox.labz.s-box.org"
-
-let gitRepoSecret =
-      kubernetes.SecretReference::{
-      , name = Some "flux-repo-secret"
-      , namespace = Some PolarNamespace
-      }
-
-let deployRepository =
-      { name = "polar-deploy-repo"
-      , spec =
-        { interval = "5m0s"
-        , ref.branch = "sandbox"
-        , url = "https://gitlab.sandbox.labz.s-box.org/sei/polar-deploy"
-        , secretRef.name = gitRepoSecret.name
+let commonClientEnv =
+      [ kubernetes.EnvVar::{ name = "TLS_CA_CERT", value = Some certPaths.ca }
+      , kubernetes.EnvVar::{
+        , name = "TLS_CLIENT_CERT"
+        , value = Some certPaths.cert
         }
+      , kubernetes.EnvVar::{
+        , name = "TLS_CLIENT_KEY"
+        , value = Some certPaths.key
+        }
+      , kubernetes.EnvVar::{ name = "BROKER_ADDR", value = Some cassiniAddr }
+      , kubernetes.EnvVar::{
+        , name = "CASSINI_SERVER_NAME"
+        , value = Some cassiniServerName
+        }
+      ]
+
+let defaultCertClientConfig
+    : Agents.CertClientConfig
+    = { sa_token_path   = "/home/polar/sa-token/token"
+      , cert_issuer_url =
+          "http://cert-issuer.${PolarNamespace}.svc.cluster.local:8443"
+      , audience = "polar-cert-issuer.local"
+      , cert_dir = certDir
+      , cert_type = "client"
       }
 
-let gitlabSecretKeySelector =
-    kubernetes.SecretKeySelector::{
-    , key = "token"
-    , name = Some "gitlab-secret"
-    }
+let saTokenVolumeName = "sa-token"
+
+let certVolumeName = "polar-certs"
+
+let certTokenExpiry = 3600
+
+let graphSecretName = "polar-graph-pw"
 
 let graphPassword =
       kubernetes.SecretKeySelector::{
@@ -113,7 +111,7 @@ let graphPassword =
       }
 
 let graphConfig
-    : Agent.GraphConfig
+    : Agents.GraphConfig
     = { graphDB = "neo4j"
       , graphUsername = "neo4j"
       , graphPassword = neo4jSecret
@@ -127,68 +125,8 @@ let DropAllCapSecurityContext =
       , capabilities = Some kubernetes.Capabilities::{ drop = Some [ "ALL" ] }
       }
 
-let commonClientEnv =
+let graphClientEnvVars =
       [ kubernetes.EnvVar::{
-        , name = "TLS_CA_CERT"
-        , value = Some mtls.caCertPath
-        }
-      , kubernetes.EnvVar::{
-        , name = "TLS_CLIENT_CERT"
-        , value = Some mtls.certPath
-        }
-      , kubernetes.EnvVar::{
-        , name = "TLS_CLIENT_KEY"
-        , value = Some mtls.keyPath
-        }
-      , kubernetes.EnvVar::{ name = "BROKER_ADDR", value = Some cassiniAddr }
-      , kubernetes.EnvVar::{
-        , name = "CASSINI_SERVER_NAME"
-        , value = Some cassiniDNSName
-        }
-      ]
-
-
-let ClientTlsVolume =
-      kubernetes.Volume::{
-      , name = "client-tls"
-      , secret = Some kubernetes.SecretVolumeSource::{
-        , secretName = Some "client-tls"
-        }
-      }
-
-let ClientTlsVolumeMount =
-      kubernetes.VolumeMount::{
-      , name = CassiniServerCertificateSecret
-      , mountPath = tlsPath
-      }
-
-let neo4jServiceName = "polar-db-svc"
-
-let neo4jDNSName = "${neo4jServiceName}.${GraphNamespace}.svc.cluster.local"
-
-
-let RegistryResolverName = "oci-registry-resolver"
-let ArtifactLinkerName = "artifact-linker"
-let ProvenanceLinkerName = "provenance-linker"
-
-let ProvenanceResolverName = "provenance-resolver"
-
-let OciRegistrySecret =
-      { name = "oci-registry-auth", value = env:DOCKER_AUTH_JSON as Text ? "someJson" }
-
-let neo4jCredentialSecret = kubernetes.Secret::{
-      apiVersion = "v1"
-      , kind = "Secret"
-      , metadata = kubernetes.ObjectMeta::{
-          name = Some "polar-graph-pw"
-          , namespace = Some PolarNamespace
-          }
-       , immutable = Some True
-      , stringData = Some [ { mapKey = neo4jSecret.key, mapValue = env:GRAPH_PASSWORD as Text } ]
-      , type = Some "Opaque"
-      }
-
-let graphClientEnvVars = [      kubernetes.EnvVar::{
         , name = "GRAPH_DB"
         , value = Some graphConfig.graphDB
         }
@@ -207,33 +145,81 @@ let graphClientEnvVars = [      kubernetes.EnvVar::{
         }
       ]
 
-let gitObserverSecretName = "git-observer-secret"
--- constant volumes mounted by every agent
-let commonVolumes = [ ClientTlsVolume ]
+let gitRepoSecret =
+      kubernetes.SecretReference::{
+      , name = Some "flux-repo-secret"
+      , namespace = Some PolarNamespace
+      }
 
-      in  {
-      graphSecretKeySelector
-      , imagePullSecretName
-      ,polarAgentCertificateSpec
-      ,commitSha
-      , commonVolumes
-      ,gitlabSecretKeySelector
-    , SandboxRegistry
+let gitlabSecretKeySelector =
+      kubernetes.SecretKeySelector::{
+      , key = "token"
+      , name = Some "gitlab-secret"
+      }
+
+let neo4jServiceName = "polar-db-svc"
+
+let neo4jDNSName = "${neo4jServiceName}.${GraphNamespace}.svc.cluster.local"
+
+let RegistryResolverName = "oci-registry-resolver"
+
+let ArtifactLinkerName = "artifact-linker"
+
+let ProvenanceLinkerName = "provenance-linker"
+
+let ProvenanceResolverName = "provenance-resolver"
+
+let OciRegistrySecret =
+      { name = "oci-registry-auth"
+      , value = env:DOCKER_AUTH_JSON as Text ? "someJson"
+      }
+
+let neo4jCredentialSecret =
+      kubernetes.Secret::{
+      , apiVersion = "v1"
+      , kind = "Secret"
+      , metadata = kubernetes.ObjectMeta::{
+        , name = Some "polar-graph-pw"
+        , namespace = Some PolarNamespace
+        }
+      , immutable = Some True
+      , stringData = Some
+        [ { mapKey = neo4jSecret.key
+          , mapValue = env:GRAPH_PASSWORD as Text ? "somepassword"
+          }
+        ]
+      , type = Some "Opaque"
+      }
+
+let gitObserverSecretName = "git-observer-secret"
+
+let saTokenDir  = "/home/polar/sa-token"
+let saTokenFile = "${saTokenDir}/token"
+let initScriptConfigMapName = "cert-init-script"
+
+in  { graphSecretKeySelector
+    , saTokenDir
+    , saTokenFile
+    , polarInitScript
+    , defaultCertClientConfig
+    , imagePullSecretName
+    , commitSha
+    , gitlabSecretKeySelector
     , graphSecretName
-    , tlsPath
-    , CassiniServerCertificateSecret
+    , certDir
+    , certPaths
+    , saTokenVolumeName
+    , certVolumeName
+    , certTokenExpiry
     , RejectSidecarAnnotation
-    , mtls
     , commonClientTls
-    , ClientTlsVolume
     , PolarNamespace
     , GraphNamespace
-    , sandboxHostSuffix
     , gitRepoSecret
-    , deployRepository
     , neo4jConfigmapName
     , neo4jSecret
     , neo4jServiceName
+    , neo4jDNSName
     , graphPassword
     , graphConfig
     , graphClientEnvVars
@@ -242,6 +228,7 @@ let commonVolumes = [ ClientTlsVolume ]
     , cassiniService
     , cassiniAddr
     , cassiniDNSName
+    , cassiniServerName
     , commonClientEnv
     , RegistryResolverName
     , ArtifactLinkerName
@@ -249,4 +236,7 @@ let commonVolumes = [ ClientTlsVolume ]
     , ProvenanceResolverName
     , OciRegistrySecret
     , gitObserverSecretName
+    , neo4jCredentialSecret
+    , initScriptVolumeName
+    , initScriptConfigMapName
     }

@@ -1,129 +1,175 @@
+{-
+  local/cassini.dhall — Cassini broker deployment for local cluster development.
+
+  Uses the polar-nu-init image to run the cert bootstrap script at pod
+  startup. The nushell script is mounted from a ConfigMap at /scripts/init.nu.
+  The nu-init entrypoint checks for the script, executes it, and exits.
+  Cassini starts only after the init container exits zero.
+-}
+
 let kubernetes = ../../types/kubernetes.dhall
+let Constants  = ../../types/constants.dhall
+let functions  = ../../types/functions.dhall
+let values     = ../values.dhall
 
-let Constants = ../../types/constants.dhall
+let cassini = values.cassini
 
-let values = ../values.dhall
-
-let serviceSpec =
-      kubernetes.ServiceSpec::{
-      , selector = Some (toMap { name = values.cassini.name })
-      , type = Some Constants.cassiniService.type
-      , ports = Some
-        [ kubernetes.ServicePort::{
-          , name = Some "cassini-tcp"
-          , targetPort = Some
-              (kubernetes.NatOrString.Nat values.cassini.ports.tcp)
-          , port = values.cassini.ports.tcp
-          }
-        , kubernetes.ServicePort::{
-          , name = Some "cassini-http"
-          , targetPort = Some
-              (kubernetes.NatOrString.Nat values.cassini.ports.http)
-          , port = values.cassini.ports.http
-          }
-        ]
-      }
+let nuInitImage       = "polar-nu-init:${Constants.commitSha}"
+let scriptVolumeName  = Constants.initScriptVolumeName
+let scriptConfigName  = Constants.initScriptConfigMapName
+-- =============================================================================
+-- Service
+-- =============================================================================
 
 let cassiniService =
       kubernetes.Service::{
       , metadata = kubernetes.ObjectMeta::{
-        , name = Some Constants.cassiniService.name
+        , name      = Some Constants.cassiniService.name
         , namespace = Some Constants.PolarNamespace
         }
-      , spec = Some kubernetes.ServiceSpec::serviceSpec
-      }
-
-let environment =
-      [ kubernetes.EnvVar::{
-        , name = "TLS_CA_CERT"
-        , value = Some Constants.mtls.caCertPath
-        }
-      , kubernetes.EnvVar::{
-        , name = "TLS_SERVER_CERT_CHAIN"
-        , value = Some Constants.mtls.certPath
-        }
-      , kubernetes.EnvVar::{
-        , name = "TLS_SERVER_KEY"
-        , value = Some Constants.mtls.keyPath
-        }
-      , kubernetes.EnvVar::{
-        , name = "CASSINI_BIND_ADDR"
-        , value = Some "0.0.0.0:${Natural/show values.cassini.ports.tcp}"
-        }
-      , kubernetes.EnvVar::{
-          , name = "JAEGER_OTLP_ENDPOINT"
-          , value = Some values.jaegerDNSName
-          }
-      ]
-
-let volumes =
-      [ kubernetes.Volume::{
-        , name = Constants.CassiniServerCertificateSecret
-        , secret = Some kubernetes.SecretVolumeSource::{
-          , secretName = Some Constants.CassiniServerCertificateSecret
-          }
-        }
-      ]
-
-let volumeMounts =
-      [ kubernetes.VolumeMount::{
-        , name = Constants.CassiniServerCertificateSecret
-        , mountPath = Constants.tlsPath
-        , readOnly = Some True
-        }
-      ]
-
-let containers =
-      [ kubernetes.Container::{
-        , name = "cassini"
-        , image = Some values.cassini.image
-        , imagePullPolicy = Some values.imagePullPolicy
-        , securityContext = Some kubernetes.SecurityContext::{
-          , runAsGroup = Some 1000
-          , runAsNonRoot = Some True
-          , runAsUser = Some 1000
-          , capabilities = Some kubernetes.Capabilities::{
-            , drop = Some [ "ALL" ]
+      , spec = Some kubernetes.ServiceSpec::{
+        , selector = Some (toMap { name = cassini.name })
+        , type     = Some Constants.cassiniService.type
+        , ports    = Some
+          [ kubernetes.ServicePort::{
+            , name       = Some "cassini-tcp"
+            , port       = cassini.ports.tcp
+            , targetPort = Some (kubernetes.NatOrString.Nat cassini.ports.tcp)
             }
-          }
-        , env = Some environment
-        , ports = Some
-          [ kubernetes.ContainerPort::{
-            , containerPort = values.cassini.ports.tcp
-            }
-          , kubernetes.ContainerPort::{
-            , containerPort = values.cassini.ports.http
+          , kubernetes.ServicePort::{
+            , name       = Some "cassini-http"
+            , port       = cassini.ports.http
+            , targetPort = Some (kubernetes.NatOrString.Nat cassini.ports.http)
             }
           ]
-        , volumeMounts = Some volumeMounts
+        }
+      }
+
+-- =============================================================================
+-- Service account
+-- =============================================================================
+
+let cassiniServiceAccount =
+      kubernetes.ServiceAccount::{
+      , apiVersion = "v1"
+      , kind       = "ServiceAccount"
+      , metadata   = kubernetes.ObjectMeta::{
+        , name      = Some cassini.serviceAccountName
+        , namespace = Some Constants.PolarNamespace
+        }
+      , automountServiceAccountToken = Some False
+      }
+
+-- =============================================================================
+-- ConfigMap carrying the nushell init script
+-- =============================================================================
+
+let certInitScriptConfigMap =
+      functions.makeNuInitScript
+        scriptConfigName
+        Constants.polarInitScript
+
+-- =============================================================================
+-- Volumes
+-- =============================================================================
+
+let certVolumes =
+      functions.makeCertVolumes
+        Constants.saTokenVolumeName
+        Constants.certVolumeName
+        cassini.certClient.audience
+        Constants.certTokenExpiry
+
+let scriptVolume =
+      kubernetes.Volume::{
+      , name      = scriptVolumeName
+      , configMap = Some kubernetes.ConfigMapVolumeSource::{
+        , name        = Some scriptConfigName
+        }
+      }
+
+let allVolumes = certVolumes # [ scriptVolume ]
+
+-- =============================================================================
+-- Init container
+-- =============================================================================
+
+let certInitContainer =
+(functions.makeNuInitContainer
+        nuInitImage
+        (cassini.certClient // { cert_type = "server" })
+        Constants.saTokenVolumeName
+        Constants.certVolumeName
+        scriptVolumeName) // { imagePullPolicy = Some values.imagePullPolicy }
+-- =============================================================================
+-- Cassini container
+-- =============================================================================
+
+let environment =
+      [ kubernetes.EnvVar::{ name = "TLS_CA_CERT",           value = Some cassini.tls.ca_cert_path }
+      , kubernetes.EnvVar::{ name = "TLS_SERVER_CERT_CHAIN",  value = Some cassini.tls.server_cert_path }
+      , kubernetes.EnvVar::{ name = "TLS_SERVER_KEY",         value = Some cassini.tls.server_key_path }
+      , kubernetes.EnvVar::{
+        , name  = "CASSINI_BIND_ADDR"
+        , value = Some "0.0.0.0:${Natural/show cassini.ports.tcp}"
+        }
+      , kubernetes.EnvVar::{
+        , name  = "JAEGER_OTLP_ENDPOINT"
+        , value = Some values.jaegerDNSName
         }
       ]
 
-let spec = kubernetes.PodSpec::{ containers, volumes = Some volumes , imagePullSecrets = Some values.imagePullSecrets  }
+let cassiniContainer =
+      kubernetes.Container::{
+      , name            = cassini.name
+      , image           = Some cassini.image
+      , imagePullPolicy = Some values.imagePullPolicy
+      , securityContext = Some Constants.DropAllCapSecurityContext
+      , env             = Some environment
+      , ports           = Some
+        [ kubernetes.ContainerPort::{ containerPort = cassini.ports.tcp }
+        , kubernetes.ContainerPort::{ containerPort = cassini.ports.http }
+        ]
+      , volumeMounts = Some
+          ( functions.makeAgentCertMount
+              Constants.certVolumeName
+              cassini.certClient.cert_dir
+          )
+      }
 
+-- =============================================================================
+-- Deployment
+-- =============================================================================
 
 let deployment =
       kubernetes.Deployment::{
       , metadata = kubernetes.ObjectMeta::{
-        , name = Some values.cassini.name
+        , name      = Some cassini.name
         , namespace = Some Constants.PolarNamespace
         }
       , spec = Some kubernetes.DeploymentSpec::{
-        , selector = kubernetes.LabelSelector::{
-          , matchLabels = Some (toMap { name = values.cassini.name })
-          }
         , replicas = Some 1
+        , selector = kubernetes.LabelSelector::{
+          , matchLabels = Some (toMap { name = cassini.name })
+          }
         , template = kubernetes.PodTemplateSpec::{
           , metadata = Some kubernetes.ObjectMeta::{
-            , name = Some values.cassini.name
-            , labels = Some
-              [ { mapKey = "name", mapValue = values.cassini.name } ]
+            , name   = Some cassini.name
+            , labels = Some [ { mapKey = "name", mapValue = cassini.name } ]
             }
-          , spec = Some spec
+          , spec = Some kubernetes.PodSpec::{
+            , serviceAccountName = Some cassini.serviceAccountName
+            , imagePullSecrets   = Some values.imagePullSecrets
+            , initContainers     = Some [ certInitContainer ]
+            , containers         = [ cassiniContainer ]
+            , volumes            = Some allVolumes
+            }
           }
         }
       }
 
-in  [ kubernetes.Resource.Service cassiniService
-    , kubernetes.Resource.Deployment deployment
+in  [ kubernetes.Resource.ConfigMap     certInitScriptConfigMap
+    , kubernetes.Resource.ServiceAccount cassiniServiceAccount
+    , kubernetes.Resource.Service        cassiniService
+    , kubernetes.Resource.Deployment     deployment
     ]

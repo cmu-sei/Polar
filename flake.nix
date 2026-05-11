@@ -70,9 +70,10 @@
         container = mkPolarContainer ./src/flake/container.nix;
 
         # ── CI container ──────────────────────────────────────────────────────
-        ciContainer = import ./src/containers/ci-container.nix {
+        ciContainer = import ./src/flake/ci-container.nix {
           inherit pkgs lib system;
           cassiniClient = polarPkgs.cassini.client;
+          certIssuerClient = polarPkgs.certIssuer.client;
         };
 
         # ── Agent containers ───────────────────────────────────────────────────
@@ -133,6 +134,9 @@
           agentContainerVulkan = (mkAgentContainer pkgs.llama-cpp-vulkan pkgs.stdenv.cc).image;
           agentContainerNvidia = (mkAgentContainer pkgsCuda.llama-cpp pkgsCuda.cudaPackages.cuda_cudart).image;
 
+          # ── Certificate Issuer ──────────────────────────────────────────────────────────
+          certIssuerImage         = polarPkgs.certIssuer.serverImage;
+
           # ── Cassini ──────────────────────────────────────────────────────────
           cassiniImage         = polarPkgs.cassini.cassiniImage;
           cassiniProducerImage = polarPkgs.cassini.producerImage;
@@ -173,8 +177,8 @@
           cloneImage           = polarPkgs.buildOrchestrator.cloneImage;
 
           # ── Infrastructure containers ─────────────────────────────────────────
-          nuInitImage = containerPkgs.nuInit.image;
-          gitServerImage = containerPkgs.gitServer.image;
+          nuInitImage = polarPkgs.nuInit.image;
+          gitServerImage = polarPkgs.gitServer.image;
         };
 
         devShells.default = container.devShell.overrideAttrs (old: {

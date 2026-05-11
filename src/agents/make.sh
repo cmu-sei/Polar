@@ -1,1 +1,0 @@
-RUSTFLAGS="-Awarnings" cargo build

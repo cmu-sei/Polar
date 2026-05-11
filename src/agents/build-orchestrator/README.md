@@ -1,5 +1,7 @@
 # Cyclops Build Orchestrator
 
+**NOTE**: Cyclops was created as part of a SPIKE to see what an authoritative builder would look like, but it has since been moved to a "low maintence mode" to avoid maitnaining a full CI/CD system while trying to implement our observability framework."
+
 Cyclops is the authoritative build runner for the Polar DevSecOps observability platform. Its job is narrow and deliberate: receive a commit reference, execute the associated pipeline in a controlled environment, and produce a signed, traceable record of what was built, from what source, and what was produced. Every build record Cyclops emits is a provenance node in Polar's knowledge graph — the authoritative answer to "what is actually running and where did it come from."
 
 Cyclops is not a general-purpose CI system. It does not manage pipelines declaratively, schedule deployments, or orchestrate services. It runs one thing: the per-repo pipeline runner image, against a specific commit SHA, and records the outcome with enough fidelity that Polar can answer provenance questions without guessing.

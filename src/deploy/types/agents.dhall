@@ -1,6 +1,5 @@
 let kubernetes = ./kubernetes.dhall
 
-
 let GraphConfig =
       { graphDB : Text
       , graphUsername : Text
@@ -15,53 +14,58 @@ let ClientTlsConfig =
       , client_ca_cert_path : Text
       }
 
--- Base type. Every agent in the system has at minimum these three fields.
+let CertClientConfig =
+      { sa_token_path : Text
+      , cert_issuer_url : Text
+      , audience : Text
+      , cert_dir : Text
+      , cert_type : Text
+      }
+
 let PolarAgent =
       { name : Text
       , image : Text
+      , certClient : CertClientConfig
       , tls : ClientTlsConfig
       }
 
--- Structural extensions. Use these to build concrete agent types.
 let GraphProcessor = PolarAgent //\\ { graph : GraphConfig }
 
 let WithConfig = PolarAgent //\\ { config : Text }
 
-let WithServiceAccount =
-      { serviceAccountName : Text, secretName : Text }
+let WithServiceAccount = { serviceAccountName : Text, secretName : Text }
 
--- Concrete agent type aliases. These exist purely for documentation clarity
--- at the call site; structurally they are identical to their base.
+let CertIssuer =
+      { name : Text, image : Text, config : Text, serviceAccountName : Text }
+
 let GitConsumer = GraphProcessor
+
 let GitScheduler = GraphProcessor
+
 let ProvenanceLinker = GraphProcessor
+
 let KubeConsumer = GraphProcessor
+
 let GitlabConsumer = GraphProcessor
 
 let GitObserver = WithConfig
+
 let BuildOrchestrator = WithConfig //\\ WithServiceAccount
 
 let BuildProcessor = GraphProcessor
 
 let KubeObserver = PolarAgent //\\ WithServiceAccount
 
--- ProvenanceResolver doesn't need graph access, just the base agent + TLS.
--- Keeping it as a named alias makes intent explicit at the values.dhall level.
 let ProvenanceResolver = PolarAgent
 
--- GitlabObserver is the only genuine structural outlier.
 let GitlabObserver =
-      PolarAgent
-        //\\ { baseIntervalSecs : Natural
-             , maxBackoffSecs : Natural
-             , endpoint : Text
-             , token : Optional Text
-             }
+          PolarAgent
+      //\\  { baseIntervalSecs : Natural
+            , maxBackoffSecs : Natural
+            , endpoint : Text
+            , token : Optional Text
+            }
 
-{- ============================================================================
-   Git Agent Static Credential Configuration Types
-   ----------------------------------------------------------------------------
--}
 let HttpCredential = { username : Text, token : Text }
 
 let HostCredentialConfig = { http : Optional HttpCredential }
@@ -69,13 +73,14 @@ let HostCredentialConfig = { http : Optional HttpCredential }
 let StaticCredentialConfig =
       { hosts : List { mapKey : Text, mapValue : HostCredentialConfig } }
 
-in  {
-    ClientTlsConfig
+in  { ClientTlsConfig
     , GraphConfig
+    , CertClientConfig
     , PolarAgent
     , GraphProcessor
     , WithConfig
     , WithServiceAccount
+    , CertIssuer
     , GitlabObserver
     , GitlabConsumer
     , KubeObserver

@@ -66,6 +66,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
 use tokio::time::Instant;
+use tracing::{debug, instrument};
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -516,11 +517,24 @@ pub struct HttpJwksSource {
 
 impl HttpJwksSource {
     pub fn new() -> Self {
+        let mut builder = reqwest::Client::builder().timeout(Duration::from_secs(10));
+
+        // In-cluster: add the Kubernetes API server's CA cert so
+        // JWKS fetches to https://kubernetes.default.svc.cluster.local
+        // verify correctly. The path is the standard serviceaccount
+        // mount; outside a cluster this file won't exist and we fall
+        // through to the system bundle.
+        if let Ok(ca_path) = std::env::var("KUBERNETES_CA_CERT") {
+            if let Ok(ca_bytes) = std::fs::read(&ca_path) {
+                if let Ok(cert) = reqwest::Certificate::from_pem(&ca_bytes) {
+                    builder = builder.add_root_certificate(cert);
+                    debug!("Loaded additonal CA certificate for web client from: {ca_path}");
+                }
+            }
+        }
+
         Self {
-            client: reqwest::Client::builder()
-                .timeout(Duration::from_secs(10))
-                .build()
-                .expect("reqwest client"),
+            client: builder.build().expect("reqwest client"),
         }
     }
 }
@@ -533,10 +547,24 @@ impl Default for HttpJwksSource {
 
 #[async_trait::async_trait]
 impl JwksSource for HttpJwksSource {
+    #[instrument(level = "debug", skip(self))]
     async fn fetch(&self, jwks_uri: &str) -> Result<(Vec<u8>, Option<Duration>), String> {
-        let response = self
-            .client
-            .get(jwks_uri)
+        let mut request = self.client.get(jwks_uri);
+
+        // In-cluster: present the service account token so the
+        // Kubernetes API server accepts the JWKS request. The token
+        // is rotated automatically by Kubernetes; we re-read it on
+        // every fetch so we always use the current value rather than
+        // caching a token that may have expired.
+        if let Ok(token) =
+            std::fs::read_to_string(std::env::var("KUBERNETES_SA_TOKEN").unwrap_or_else(|_| {
+                "/var/run/secrets/kubernetes.io/serviceaccount/token".to_string()
+            }))
+        {
+            request = request.bearer_auth(token.trim());
+        }
+
+        let response = request
             .send()
             .await
             .map_err(|e| format!("fetch failed: {e}"))?;
@@ -545,10 +573,6 @@ impl JwksSource for HttpJwksSource {
             return Err(format!("JWKS endpoint returned {}", response.status()));
         }
 
-        // Parse Cache-Control: max-age=N if present. We don't honor
-        // any other directives (no-cache, must-revalidate, etc.) —
-        // the cache TTL is a local correctness concern and the issuer's
-        // intent beyond max-age isn't relevant.
         let max_age = response
             .headers()
             .get(reqwest::header::CACHE_CONTROL)

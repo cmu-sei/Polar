@@ -70,6 +70,11 @@ let
       src = workspaceFileset ./.;
     });
 
+    certIssuer = import (workspaceRoot + /cert-issuer/package.nix) {
+      inherit pkgs craneLib workspaceFileset nix-container-lib inputs system;
+      crateArgs = individualCrateArgs;
+    };
+
     cassini = import (workspaceRoot + /cassini/package.nix) {
       inherit pkgs craneLib workspaceFileset nix-container-lib inputs system;
       crateArgs = individualCrateArgs;
@@ -114,7 +119,17 @@ let
       inherit pkgs craneLib workspaceFileset nix-container-lib inputs system;
       crateArgs = individualCrateArgs;
     };
+
+    nuInit = import ./nu-init/package.nix {
+      inherit pkgs nix-container-lib inputs system;
+      certIssuerClient = certIssuer.client;
+    };
+
+    gitServer = import ./git-server/package.nix {
+      inherit pkgs nix-container-lib inputs system;
+    };
+
 in
 {
-  inherit workspacePackages gitlabAgent cassini kubeAgent webAgent provenance scheduler jiraAgent gitAgent buildOrchestrator;
+  inherit workspacePackages gitlabAgent cassini kubeAgent webAgent provenance scheduler jiraAgent gitAgent buildOrchestrator certIssuer nuInit gitServer;
 }

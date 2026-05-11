@@ -643,6 +643,7 @@ def main [
     --skip-images                 # Skip Phase 3 entirely
 ] {
 
+    # Setup
     mkdir -v $artifact_dir
 
     let ws_root     = (workspace-root)

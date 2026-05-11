@@ -1,29 +1,44 @@
--- types/Cassini.dhall
+-- types/cassini.dhall
 {-
-  This describes the full configuration needed to deploy an instance of Cassini
-  Further configurations specific to the deployment and pod can be provided in the manifest
-  TODO: Specify some reasonable constants for things like image, ports, tls stuff
--}
+  Describes the full configuration needed to deploy Cassini, the mTLS
+  message broker at the center of the Polar system.
 
+  Cassini is the only component that acts as a TLS *server* — all agents
+  connect to it as clients. Its cert is issued by the cert-client at pod
+  startup using a projected SA token, exactly like agent client certs, but
+  with --cert-type server so the issued cert carries serverAuth EKU.
+
+  Agents verify Cassini's server cert against the shared CA. Cassini
+  verifies agent client certs against the same CA via WebPkiClientVerifier.
+  One CA, one trust anchor for the whole system.
+-}
 let kubernetes = ./kubernetes.dhall
 
-let Cassini = {
- name : Text
-, image : Text
-, ports : { http: Natural, tcp: Natural }
--- We use cert manager handle certificate issuance, so this configuration is mostly centered
--- around configuring it and letting us pass values around.
-, tls :
-    { certificateRequestName : Text
-    , certificateSpec :
-      { commonName : Text -- Common name of the certificate issuer
-      , dnsNames : List Text -- DNS names to associate with the certificate
-      , duration : Text -- How long the certis should be valid for
-      , issuerRef : { kind : Text, name : Text } -- Reference to the cert manager certificate issuer
-      , renewBefore : Text
-      , secretName : Text -- the name that should be used for the secret containing the cert/key pair
-      }
-    }
-}
+let Agents = ./agents.dhall
 
-in Cassini
+let Constants = ./constants.dhall
+
+let CassiniTlsConfig =
+      { ca_cert_path : Text, server_cert_path : Text, server_key_path : Text }
+
+let Cassini =
+      { name : Text
+      , image : Text
+      , ports : { http : Natural, tcp : Natural }
+      , serviceAccountName : Text
+      , certClient : Agents.CertClientConfig
+      , tls : CassiniTlsConfig
+      }
+
+let defaults =
+      { name = "cassini"
+      , ports = { http = 3000, tcp = 8080 }
+      , tls =
+        { ca_cert_path = "${Constants.certDir}/ca.pem"
+        , server_cert_path = "${Constants.certDir}/cert.pem"
+        , server_key_path = "${Constants.certDir}/key.pem"
+        }
+        , serviceAccountName = "cassini"   -- was "cassini-sa"
+      }
+
+in  { Type = Cassini, defaults, CassiniTlsConfig }

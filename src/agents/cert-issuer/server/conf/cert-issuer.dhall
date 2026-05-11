@@ -87,8 +87,8 @@ let CaConfig =
             -- for the service's lifetime and signs CSRs directly
             -- (no external CA process). Generate with:
             -- or with the `bootstrap_ca()` helper from `ca.rs`.
-            ca_cert_path = "/etc/cert-issuer/ca.crt"
-          , ca_key_path = "/etc/cert-issuer/ca.key"
+            ca_cert_path = "/home/polar/ca.crt"
+          , ca_key_path = "/home/polar/ca.key"
           , -- 1 hour matches the v1 spec recommendation. Workload
             -- certs renew via init-container restart at expiry.
             default_lifetime = hours 1
