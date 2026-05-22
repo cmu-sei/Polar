@@ -43,7 +43,7 @@ use cert_issuer_common::{
 };
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::warn;
+use tracing::{error, instrument, warn};
 
 pub struct Handler {
     pub validator: Arc<Validator>,
@@ -68,6 +68,7 @@ pub enum HandlerBody {
 
 impl Handler {
     /// Process an `/issue` request.
+    #[instrument(skip(self))]
     pub async fn handle(&self, bearer_token: &str, request: IssueRequest) -> HandlerResponse {
         // ---- Step 1: OIDC validation ----
         let claims = match self.validator.validate(bearer_token).await {
@@ -97,6 +98,15 @@ impl Handler {
             return error_response(IssueOutcome::IdentityMismatch, &e.to_string());
         }
 
+        // TODO: pass this in so we get a cert valid for multiple SANs
+        let all_sans = match csr::validate_extra_sans(&dns_identity, &request.extra_sans) {
+            Ok(all_sans) => all_sans,
+            Err(e) => {
+                error!("{e}");
+                return error_response(IssueOutcome::InvalidCsr, &e.to_string());
+            }
+        };
+
         // ---- Step 4: session ID ----
         //
         // Fresh UUID per request. Used downstream for audit
@@ -112,7 +122,7 @@ impl Handler {
         // verification work is done.
         let ca_request = CaIssueRequest {
             csr_pem: request.csr_pem,
-            san: claims.workload_identity.clone(),
+            sans: all_sans,
             lifetime: self.default_lifetime,
             cert_type: request.cert_type,
         };

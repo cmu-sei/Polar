@@ -25,7 +25,7 @@ pub const SECONDARY_KID: &str = "test-key-2";
 pub fn ensure_crypto_provider() {
     static INIT: OnceLock<()> = OnceLock::new();
     INIT.get_or_init(|| {
-        if let Err(e) = jsonwebtoken::crypto::aws_lc::DEFAULT_PROVIDER.install_default() {
+        if let Err(_e) = jsonwebtoken::crypto::aws_lc::DEFAULT_PROVIDER.install_default() {
             println!("Crypto provider already configured")
         }
     });

@@ -55,10 +55,11 @@ pub struct CaIssueRequest {
     /// PEM-encoded CSR. Parsed and validated by the `CaClient`
     /// before signing.
     pub csr_pem: String,
-    /// SAN to encode in the issued cert. Already validated by the
-    /// caller against both the workload identity claim from the
-    /// OIDC token and the SAN in the CSR.
-    pub san: String,
+    /// SANs to encode in the issued cert. The first entry is always
+    /// the identity SAN derived from the OIDC token and verified
+    /// against the CSR. Subsequent entries are extra SANs validated
+    /// by the handler before this request is constructed.
+    pub sans: Vec<String>,
     /// Cert lifetime. The issued cert's `notAfter` is computed as
     /// `now + lifetime`.
     pub lifetime: Duration,
@@ -136,6 +137,23 @@ impl CaClient for RcgenCaClient {
     async fn issue(&self, req: CaIssueRequest) -> Result<IssuedCert, CaError> {
         let mut csr = CertificateSigningRequestParams::from_pem(&req.csr_pem)
             .map_err(|e| CaError::Malformed(format!("CSR parse: {e}")))?;
+
+        // Override the SANs from the CSR with the server-validated list.
+        // The handler has already verified the first SAN matches the token
+        // identity and validated any extras. We don't trust the CSR's SAN
+        // list directly — we trust what the handler computed.
+        csr.params.subject_alt_names = req
+            .sans
+            .iter()
+            .map(|s| {
+                rcgen::SanType::DnsName(
+                    s.clone()
+                        .try_into()
+                        .map_err(|e| CaError::Malformed(format!("SAN: {e}")))
+                        .unwrap(),
+                )
+            })
+            .collect::<Vec<_>>();
 
         let not_before = OffsetDateTime::now_utc();
         let not_after = not_before + req.lifetime;
@@ -542,7 +560,7 @@ mod tests {
     fn sample_request(identity: &str) -> CaIssueRequest {
         CaIssueRequest {
             csr_pem: make_csr(identity),
-            san: identity.to_string(),
+            sans: vec![identity.to_string()],
             lifetime: Duration::from_secs(3600),
             cert_type: CertType::Client,
         }
@@ -551,7 +569,7 @@ mod tests {
     fn server_request(identity: &str) -> CaIssueRequest {
         CaIssueRequest {
             csr_pem: make_csr(identity),
-            san: identity.to_string(),
+            sans: vec![identity.to_string()],
             lifetime: Duration::from_secs(3600),
             cert_type: CertType::Server,
         }
@@ -697,7 +715,7 @@ mod tests {
         let lifetime = Duration::from_secs(900);
         let req = CaIssueRequest {
             csr_pem: make_csr("agent.polar.svc.cluster.local"),
-            san: "agent.polar.svc.cluster.local".to_string(),
+            sans: vec!["agent.polar.svc.cluster.local".to_string()],
             lifetime,
             cert_type: CertType::Client,
         };
@@ -722,7 +740,7 @@ mod tests {
         let client = make_client();
         let req = CaIssueRequest {
             csr_pem: "not a CSR".to_string(),
-            san: "agent.polar.svc.cluster.local".to_string(),
+            sans: vec!["agent.polar.svc.cluster.local".to_string()],
             lifetime: Duration::from_secs(3600),
             cert_type: CertType::Client,
         };

@@ -10,7 +10,7 @@
 //! Normalization from Kubernetes SA form to DNS form is tested
 //! separately in cert_issuer_common's identity tests.
 
-use cert_client::keypair::{KeypairError, generate_csr};
+use cert_client::keypair::{KeyAlgorithm, KeypairError, generate_csr};
 use x509_parser::extensions::{GeneralName, ParsedExtension};
 use x509_parser::prelude::*;
 
@@ -41,8 +41,12 @@ fn extract_dns_sans_from_csr(csr_pem: &str) -> Vec<String> {
 
 #[test]
 fn generates_valid_pem_blocks() {
-    let out = generate_csr("git-observer.polar.serviceaccount.cluster.local")
-        .expect("generation must succeed for a valid DNS identity");
+    let out = generate_csr(
+        "git-observer.polar.serviceaccount.cluster.local",
+        &KeyAlgorithm::Ed25519,
+        &[],
+    )
+    .expect("generation must succeed for a valid DNS identity");
 
     assert!(
         out.csr_pem.contains("-----BEGIN CERTIFICATE REQUEST-----"),
@@ -65,7 +69,12 @@ fn generates_valid_pem_blocks() {
 #[test]
 fn csr_contains_identity_as_dns_san() {
     let identity = "git-observer.polar.serviceaccount.cluster.local";
-    let out = generate_csr(identity).expect("generation must succeed");
+    let out = generate_csr(
+        "git-observer.polar.serviceaccount.cluster.local",
+        &KeyAlgorithm::Ed25519,
+        &[],
+    )
+    .expect("Failed to generate csr");
 
     let sans = extract_dns_sans_from_csr(&out.csr_pem);
     assert_eq!(
@@ -74,19 +83,75 @@ fn csr_contains_identity_as_dns_san() {
         "CSR must contain exactly the provided identity as a DNS SAN"
     );
 }
-
 #[test]
-fn csr_contains_exactly_one_san() {
-    // The cert issuer's parser rejects multi-SAN CSRs. The generator
-    // must never produce more than one SAN regardless of input.
-    let out = generate_csr("git-observer.polar.serviceaccount.cluster.local")
-        .expect("generation must succeed");
+fn csr_with_no_extra_sans_contains_exactly_one_san() {
+    let out = generate_csr(
+        "git-observer.polar.serviceaccount.cluster.local",
+        &KeyAlgorithm::Ed25519,
+        &[],
+    )
+    .expect("generation must succeed");
 
     let sans = extract_dns_sans_from_csr(&out.csr_pem);
     assert_eq!(
         sans.len(),
         1,
-        "CSR must contain exactly one DNS SAN, got: {sans:?}"
+        "CSR with no extras must have exactly one SAN"
+    );
+}
+
+#[test]
+fn extra_sans_appear_in_csr_after_identity() {
+    let identity = "neo4j.polar.serviceaccount.cluster.local";
+    let extras = vec![
+        "neo4j.polar.svc.cluster.local".to_string(),
+        "polar-db-svc.polar.svc.cluster.local".to_string(),
+    ];
+    let out =
+        generate_csr(identity, &KeyAlgorithm::Ed25519, &extras).expect("generation must succeed");
+
+    let sans = extract_dns_sans_from_csr(&out.csr_pem);
+    assert_eq!(sans.len(), 3, "should have identity + 2 extras");
+    assert_eq!(sans[0], identity, "identity SAN must be first");
+    assert_eq!(sans[1], extras[0]);
+    assert_eq!(sans[2], extras[1]);
+}
+
+#[test]
+fn wildcard_extra_san_is_rejected() {
+    let err = generate_csr(
+        "neo4j.polar.serviceaccount.cluster.local",
+        &KeyAlgorithm::Ed25519,
+        &["*.polar.svc.cluster.local".to_string()],
+    )
+    .expect_err("wildcard SAN must be rejected");
+    assert!(
+        matches!(err, KeypairError::WildcardSanRejected(_)),
+        "expected WildcardSanRejected, got {err:?}"
+    );
+}
+
+#[test]
+fn ecdsa_p256_keypair_generates_correct_oid() {
+    let out = generate_csr(
+        "neo4j.polar.serviceaccount.cluster.local",
+        &KeyAlgorithm::EcdsaP256,
+        &[],
+    )
+    .expect("generation must succeed");
+
+    let (_, pem) = parse_x509_pem(out.csr_pem.as_bytes()).expect("valid PEM");
+    let (_, csr) = X509CertificationRequest::from_der(&pem.contents).expect("valid DER");
+    let oid = &csr
+        .certification_request_info
+        .subject_pki
+        .algorithm
+        .algorithm;
+    // ECDSA OID: 1.2.840.10045.2.1 (RFC 5480)
+    assert_eq!(
+        oid.to_id_string(),
+        "1.2.840.10045.2.1",
+        "key algorithm must be ECDSA"
     );
 }
 
@@ -96,8 +161,12 @@ fn csr_self_signature_verifies() {
     // trusting any of its contents. If this fails, every issuance
     // attempt will be rejected with InvalidSignature regardless of
     // whether the token is valid.
-    let out = generate_csr("git-observer.polar.serviceaccount.cluster.local")
-        .expect("generation must succeed");
+    let out = generate_csr(
+        "git-observer.polar.serviceaccount.cluster.local",
+        &KeyAlgorithm::Ed25519,
+        &[],
+    )
+    .expect("generation must succeed");
 
     let (_, pem) = parse_x509_pem(out.csr_pem.as_bytes()).expect("valid PEM");
     let (_, csr) = X509CertificationRequest::from_der(&pem.contents).expect("valid DER");
@@ -107,12 +176,16 @@ fn csr_self_signature_verifies() {
 
 #[test]
 fn key_algorithm_is_ed25519() {
-    // Ed25519 is the required algorithm per the architecture spec.
+    // Ed25519 was the required algorithm per the architecture spec.
     // If rcgen's default changes or the generator is updated to use
     // a different algorithm, this test catches it before the cert
     // issuer rejects the CSR with DisallowedAlgorithm.
-    let out = generate_csr("git-observer.polar.serviceaccount.cluster.local")
-        .expect("generation must succeed");
+    let out = generate_csr(
+        "git-observer.polar.serviceaccount.cluster.local",
+        &KeyAlgorithm::Ed25519,
+        &[],
+    )
+    .expect("generation must succeed");
 
     let (_, pem) = parse_x509_pem(out.csr_pem.as_bytes()).expect("valid PEM");
     let (_, csr) = X509CertificationRequest::from_der(&pem.contents).expect("valid DER");
@@ -134,8 +207,18 @@ fn key_algorithm_is_ed25519() {
 fn each_call_produces_distinct_keypair() {
     // Two pods starting the same agent simultaneously must not share
     // a private key. This is a fundamental security property.
-    let a = generate_csr("git-observer.polar.serviceaccount.cluster.local").unwrap();
-    let b = generate_csr("git-observer.polar.serviceaccount.cluster.local").unwrap();
+    let a = generate_csr(
+        "git-observer.polar.serviceaccount.cluster.local",
+        &KeyAlgorithm::Ed25519,
+        &[],
+    )
+    .expect("Must succeed");
+    let b = generate_csr(
+        "git-observer.polar.serviceaccount.cluster.local",
+        &KeyAlgorithm::Ed25519,
+        &[],
+    )
+    .expect("must succeed");
 
     assert_ne!(
         a.private_key_pem, b.private_key_pem,
@@ -149,7 +232,8 @@ fn each_call_produces_distinct_keypair() {
 
 #[test]
 fn empty_identity_is_rejected() {
-    let err = generate_csr("").expect_err("empty identity must be rejected before CSR generation");
+    let err = generate_csr("", &KeyAlgorithm::default(), &vec![])
+        .expect_err("empty identity must be rejected before CSR generation");
     assert!(
         matches!(err, KeypairError::EmptyIdentity),
         "expected EmptyIdentity, got {err:?}"
@@ -162,7 +246,13 @@ fn csr_label_is_certificate_request_not_new_certificate_request() {
     // labels. Some older tooling emits this. rcgen emits the correct
     // label but this test pins that so a rcgen version bump that
     // changes it is caught immediately.
-    let out = generate_csr("git-observer.polar.serviceaccount.cluster.local").unwrap();
+    let out = generate_csr(
+        "git-observer.polar.serviceaccount.cluster.local",
+        &KeyAlgorithm::Ed25519,
+        &[],
+    )
+    .expect("Expected to succeed");
+
     let (_, pem) = parse_x509_pem(out.csr_pem.as_bytes()).expect("valid PEM");
     assert_eq!(
         pem.label, "CERTIFICATE REQUEST",

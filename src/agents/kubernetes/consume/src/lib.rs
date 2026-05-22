@@ -1,8 +1,9 @@
-use cassini_client::{TcpClient, TcpClientMessage};
+use cassini_client::{OfflineBehavior, PublishRequest, TcpClientMessage};
 use chrono::Utc;
 use k8s_openapi::api::apps::v1::Deployment;
 use k8s_openapi::api::batch::v1::Job;
 use k8s_openapi::{api::core::v1::Pod, apimachinery::pkg::apis::meta::v1::OwnerReference};
+use polar::cassini::{CassiniClient, TcpClient};
 use polar::graph::controller::IntoGraphKey;
 use polar::{
     PROVENANCE_DISCOVERY_TOPIC, ProvenanceEvent, RkyvError,
@@ -495,10 +496,12 @@ impl GraphOperable for Pod {
             let event = ProvenanceEvent::ImageRefDiscovered { uri: image };
 
             let payload = to_bytes::<RkyvError>(&event)?;
-            tcp_client.cast(TcpClientMessage::Publish {
+
+            tcp_client.publish(PublishRequest {
                 topic: PROVENANCE_DISCOVERY_TOPIC.into(),
                 payload: payload.into(),
                 trace_ctx: None,
+                offline_behavior: OfflineBehavior::default(),
             })?;
 
             // ---- Container Lifecycle ----

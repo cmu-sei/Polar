@@ -782,41 +782,79 @@ pub fn get_web_client() -> Result<Client, ActorProcessingErr> {
     }
 }
 
-/// Standard helper fn to get a neo4rs configuration based on environment variables
-/// All of the following variables are required fields unless otherwise specified.
-/// GRAPH_DB - name of the neo4j database
-/// GRAPH_PASSWORD - password credential used to sign in
-/// GRAPH_USER - the username to authenticate with the database
-/// GRAPH_ENDPOINT - endpoint of the database
-/// GRAPH_CA_CERT - an optional proxy CA certificate if needed to connect to the neo4j instance.
+/// Standard helper fn to get a neo4rs configuration based on environment variables.
+///
+/// All of the following variables are required unless otherwise specified.
+///
+///   GRAPH_DB        — name of the neo4j database
+///   GRAPH_USER      — username to authenticate with
+///   GRAPH_PASSWORD  — password credential
+///   GRAPH_ENDPOINT  — bolt endpoint, e.g. bolt+s://neo4j.polar.svc.cluster.local:7687
+///
+/// mTLS (all three required together, or none):
+///   TLS_CLIENT_CERT — path to the client certificate (cert.pem from cert-issuer-init)
+///   TLS_CLIENT_KEY  — path to the client private key  (key.pem from cert-issuer-init)
+///   TLS_CA_CERT     — path to the CA certificate      (ca.pem from cert-issuer-init)
+///
+/// If all three TLS vars are present, mTLS is configured. If none are present,
+/// the connection is made without client certificates (Neo4j still uses TLS on
+/// the bolt+s:// scheme; we just don't present a client cert). If only some are
+/// present, startup fails fast rather than silently degrading.
+///
+/// GRAPH_CA_CERT is retained as a fallback for environments where a proxy CA
+/// cert is needed in addition to the standard mTLS setup (e.g. istio sidecars).
+/// If present alongside the TLS vars it is passed as the CA cert instead.
 pub fn get_neo_config() -> Result<neo4rs::Config, ractor::ActorProcessingErr> {
     let database_name = std::env::var("GRAPH_DB")?;
     let neo_user = std::env::var("GRAPH_USER")?;
     let neo_password = std::env::var("GRAPH_PASSWORD")?;
     let neo4j_endpoint = std::env::var("GRAPH_ENDPOINT")?;
+
     info!("Using Neo4j database at {neo4j_endpoint}");
 
-    let config = match std::env::var("GRAPH_CA_CERT") {
-        Ok(client_certificate) => {
-            info!("Found GRAPH_CA_CERT at {client_certificate}. Configuring graph client.");
-            neo4rs::ConfigBuilder::default()
-                .uri(neo4j_endpoint)
-                .user(neo_user)
-                .password(neo_password)
-                .db(database_name)
-                .fetch_size(500)
-                .with_client_certificate(client_certificate)
-                .max_connections(10)
+    let client_cert = std::env::var("TLS_CLIENT_CERT").ok();
+    let client_key = std::env::var("TLS_CLIENT_KEY").ok();
+    // GRAPH_CA_CERT takes precedence over TLS_CA_CERT for environments
+    // that route Neo4j through a proxy with its own CA.
+    let ca_cert = std::env::var("GRAPH_CA_CERT")
+        .ok()
+        .or_else(|| std::env::var("TLS_CA_CERT").ok());
+
+    let builder = neo4rs::ConfigBuilder::default()
+        .uri(neo4j_endpoint)
+        .user(neo_user)
+        .password(neo_password)
+        .db(database_name)
+        .fetch_size(500)
+        .max_connections(10);
+
+    let config = match (client_cert, client_key, ca_cert) {
+        (Some(cert), Some(key), Some(ca)) => {
+            info!("Configuring Neo4j mTLS with cert={cert} key={key} ca={ca}");
+            builder
+                .with_mutual_tls_validation(Some(ca), cert, key)
                 .build()?
         }
-        Err(_) => neo4rs::ConfigBuilder::default()
-            .uri(neo4j_endpoint)
-            .user(neo_user)
-            .password(neo_password)
-            .db(database_name)
-            .fetch_size(500)
-            .max_connections(10)
-            .build()?,
+        (None, None, Some(ca)) => {
+            // TLS without client cert — Neo4j verifies server, we don't present a cert.
+            // Covers the old istio proxy CA case.
+            info!("Configuring Neo4j TLS (no client cert) with ca={ca}");
+            builder.with_client_certificate(ca).build()?
+        }
+        (None, None, None) => {
+            info!("Configuring Neo4j without TLS client configuration");
+            builder.build()?
+        }
+        (cert, key, ca) => {
+            // Partial TLS config — fail fast rather than silently connecting
+            // without the full cert chain.
+            return Err(ractor::ActorProcessingErr::from(format!(
+                "Incomplete Neo4j TLS configuration: \
+                 TLS_CLIENT_CERT={:?}\nTLS_CLIENT_KEY={:?}\nTLS_CA_CERT/GRAPH_CA_CERT={:?} \
+                 All three must be set together or not at all.",
+                cert, key, ca
+            )));
+        }
     };
 
     Ok(config)

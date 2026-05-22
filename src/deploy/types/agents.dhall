@@ -20,6 +20,8 @@ let CertClientConfig =
       , audience : Text
       , cert_dir : Text
       , cert_type : Text
+      , key_algorithm: Text
+      , extra_sans: Optional Text
       }
 
 let PolarAgent =

@@ -38,9 +38,10 @@ use cert_issuer::{
     server::build_router,
 };
 use std::sync::Arc;
-use tracing::info;
+use tracing::{debug, info, instrument};
 
 #[tokio::main]
+#[instrument]
 async fn main() -> Result<()> {
     polar::init_logging("polar.cert-issuer.svc".to_string());
     // ---- Config ----
@@ -80,9 +81,11 @@ async fn main() -> Result<()> {
 
     let ca = RcgenCaClient::new(&ca_cert_pem, &ca_key_pem)
         .map_err(|e| anyhow::anyhow!("constructing CA client: {e}"))?;
+    debug!("Internal certificate authroity initialized.");
 
     // ---- OIDC validator ----
     let validator = Validator::new(config.issuer.clone());
+    debug!("OIDC validator initialized.");
 
     // ---- Handler ----
     let handler = Arc::new(Handler {

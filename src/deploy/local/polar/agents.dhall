@@ -43,7 +43,7 @@ let certMount =
 let baseMounts = certMount # functions.ProxyMount proxyCACert
 
 let envVars =
-      [ kubernetes.EnvVar::{ name = "RUST_LOG", value = Some "debug" } ]
+      [ kubernetes.EnvVar::{ name = "RUST_LOG", value = Some "trace" } ]
       # Constants.commonClientEnv
 
 -- Init script ConfigMap volume — same script mounted into every agent pod.
@@ -98,7 +98,7 @@ let neo4jEnvVars =
             }
           }
         }
-      , kubernetes.EnvVar::{ name = "GRAPH_CA_CERT", value = Some "/etc/neo4j-ca/ca.pem" }
+        , kubernetes.EnvVar::{ name = "GRAPH_CA_CERT", value = Some "/home/polar/certs/ca.pem" }
       ]
 
 -- =============================================================================
@@ -465,13 +465,7 @@ let kubeObserverEnv =
           }
         ]
 
-let kubeConsumerEnv =
-      envVars
-      # functions.makeGraphEnv
-          values.neo4jBoltAddr
-          values.kubeConsumer.graph
-          Constants.graphSecretKeySelector
-          (Some "/etc/neo4j-ca/ca.pem")
+let kubeConsumerEnv = (envVars # neo4jEnvVars)
 
 let kubeObserverVolumeMounts =
       baseMounts

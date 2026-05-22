@@ -238,6 +238,11 @@ let makeNuInitContainer
             , kubernetes.EnvVar::{ name = "POLAR_SA_TOKEN_PATH",   value = Some cfg.sa_token_path }
             , kubernetes.EnvVar::{ name = "POLAR_CERT_DIR",        value = Some cfg.cert_dir }
             , kubernetes.EnvVar::{ name = "POLAR_CERT_TYPE",       value = Some cfg.cert_type }
+            , kubernetes.EnvVar::{ name = "POLAR_KEY_ALGORITHM", value = Some cfg.key_algorithm }
+            , kubernetes.EnvVar::{
+              , name  = "POLAR_EXTRA_SANS"
+              , value =  cfg.extra_sans
+              }
             ]
         , volumeMounts = Some
             [ makeSaTokenMount saTokenVolumeName cfg.sa_token_path

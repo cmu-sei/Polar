@@ -8,16 +8,36 @@
 //!   1. Generates a CA keypair and self-signed CA cert -> dev/tmp/
 //!   2. Generates an RSA signing keypair for the fake OIDC issuer
 //!   3. Writes a JWKS document for that keypair -> dev/jwks.json
-//!   4. Mints two tokens:
-//!      - dev/token-cassini  (server cert, serverAuth + clientAuth EKU)
-//!      - dev/token-agent    (client cert, clientAuth EKU only)
+//!   4. Mints three tokens:
+//!      - dev/token-cassini  — Cassini broker (server cert, serverAuth + clientAuth EKU)
+//!      - dev/token-neo4j    — Neo4j database (server cert, serverAuth + clientAuth EKU)
+//!                             issued with extra SANs for the in-cluster Service DNS names)
+//!      - dev/token-agent    — generic agent stand-in (client cert, clientAuth EKU only)
 //!   5. Writes dev/config.json
-//!   6. Prints the exact commands and env vars to run the full local stack
+//!   6. Prints exact commands and env vars to run the full local stack
 //!
-//! In production each agent runs cert-issuer-init with its own
-//! projected SA token. The dev/token-agent here is a stand-in for
-//! that — same flow, generic identity. Swap it for any real SA token
-//! to test a specific agent identity.
+//! CERT IDENTITY MODEL — read this before getting confused:
+//!
+//!   Every workload gets its own server or client cert. The SAN in the cert
+//!   must match the hostname clients use to connect to that workload.
+//!   All certs are signed by the same Polar Internal CA (dev/tmp/ca.crt).
+//!
+//!   SERVER CERTS (--cert-type server, serverAuth + clientAuth EKU):
+//!     Cassini  → SAN: cassini.polar.serviceaccount.cluster.local
+//!                     clients set CASSINI_SERVER_NAME to this value
+//!     Neo4j    → SAN: neo4j.polar.serviceaccount.cluster.local
+//!                     clients set GRAPH_ENDPOINT to bolt+s://neo4j:7687
+//!                     and GRAPH_CA_CERT to dev/certs/neo4j-server/ca.pem
+//!
+//!   CLIENT CERTS (--cert-type client, clientAuth EKU only):
+//!     Agents   → SAN: polar-agent.polar.serviceaccount.cluster.local
+//!                     the SAME client cert is used for both Cassini and Neo4j
+//!                     connections — it identifies the agent, not the server
+//!
+//!   The CA cert (dev/tmp/ca.crt) is the trust anchor for everyone.
+//!   Cassini loads it to verify agent client certs.
+//!   Neo4j loads it to verify agent client certs.
+//!   Agents load it to verify Cassini's and Neo4j's server certs.
 //!
 //! Tokens expire after one hour. Re-run cert-issuer-setup to refresh.
 //! CA materials in dev/tmp/ are preserved across re-runs — delete
@@ -30,6 +50,7 @@ use rcgen::{BasicConstraints, CertificateParams, DistinguishedName, IsCa, KeyPai
 use rsa::pkcs8::EncodePrivateKey;
 use rsa::traits::PublicKeyParts;
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const ISSUER: &str = "http://localhost:8081";
@@ -38,8 +59,9 @@ const AUDIENCE: &str = "polar-cert-issuer.dev";
 const CASSINI_SUBJECT: &str = "system:serviceaccount:polar:cassini";
 const CASSINI_DNS: &str = "cassini.polar.serviceaccount.cluster.local";
 
-// Generic agent identity used as a stand-in for any real agent in dev.
-// In production this is replaced by whatever SA the agent pod runs as.
+const NEO4J_SUBJECT: &str = "system:serviceaccount:polar:neo4j";
+const NEO4J_DNS: &str = "neo4j";
+
 const AGENT_SUBJECT: &str = "system:serviceaccount:polar:polar-agent";
 const AGENT_DNS: &str = "polar-agent.polar.serviceaccount.cluster.local";
 
@@ -48,6 +70,7 @@ const TOKEN_LIFETIME_SECS: u64 = 3600;
 fn main() {
     fs::create_dir_all("dev/tmp").expect("create dev/tmp");
     fs::create_dir_all("dev/certs/server").expect("create dev/certs/server");
+    fs::create_dir_all("dev/certs/neo4j-server").expect("create dev/certs/neo4j-server");
     fs::create_dir_all("dev/certs/client").expect("create dev/certs/client");
 
     // ---- Step 1: CA --------------------------------------------------------
@@ -56,8 +79,10 @@ fn main() {
     let (ca_cert_pem, ca_key_pem) = generate_ca();
     fs::write("dev/tmp/ca.crt", &ca_cert_pem).expect("write ca.crt");
     fs::write("dev/tmp/ca.key", &ca_key_pem).expect("write ca.key");
+    fs::set_permissions("dev/tmp/ca.key", fs::Permissions::from_mode(0o600))
+        .expect("set ca.key permissions");
     println!("  wrote dev/tmp/ca.crt");
-    println!("  wrote dev/tmp/ca.key");
+    println!("  wrote dev/tmp/ca.key (0600)");
 
     // ---- Step 2: OIDC signing keypair -------------------------------------
 
@@ -91,17 +116,17 @@ fn main() {
 
     let cassini_token = mint_token(kid, &oidc_private_key, CASSINI_SUBJECT);
     fs::write("dev/token-cassini", &cassini_token).expect("write token-cassini");
-    println!("  wrote dev/token-cassini");
-    println!("    sub: {CASSINI_SUBJECT}");
-    println!("    dns: {CASSINI_DNS}");
+    println!("  wrote dev/token-cassini  sub={CASSINI_SUBJECT}  dns={CASSINI_DNS}");
+
+    let neo4j_token = mint_token(kid, &oidc_private_key, NEO4J_SUBJECT);
+    fs::write("dev/token-neo4j", &neo4j_token).expect("write token-neo4j");
+    println!("  wrote dev/token-neo4j    sub={NEO4J_SUBJECT}  dns={NEO4J_DNS}");
 
     let agent_token = mint_token(kid, &oidc_private_key, AGENT_SUBJECT);
     fs::write("dev/token-agent", &agent_token).expect("write token-agent");
-    println!("  wrote dev/token-agent");
-    println!("    sub: {AGENT_SUBJECT}");
-    println!("    dns: {AGENT_DNS}");
+    println!("  wrote dev/token-agent    sub={AGENT_SUBJECT}  dns={AGENT_DNS}");
 
-    println!("  both tokens expire in {TOKEN_LIFETIME_SECS}s");
+    println!("  all tokens expire in {TOKEN_LIFETIME_SECS}s");
 
     // ---- Step 5: config ----------------------------------------------------
 
@@ -131,6 +156,17 @@ fn main() {
     .expect("write config.json");
     println!("  wrote dev/config.json");
 
+    // ---- Step 6: Neo4j cert layout dirs -----------------------------------
+    // Cert files are NOT copied here because they don't exist yet —
+    // cert-client must run first to issue them. This just ensures the
+    // directory layout exists so the copy commands below work immediately.
+    println!("--- Step 6: preparing Neo4j cert layout directories ---");
+    for protocol in &["https", "bolt"] {
+        let trusted = format!("dev/certs/neo4j/{protocol}/trusted");
+        fs::create_dir_all(&trusted).expect("create neo4j trusted dir");
+        println!("  created dev/certs/neo4j/{protocol}/trusted/");
+    }
+
     // ---- Instructions ------------------------------------------------------
 
     println!();
@@ -145,19 +181,40 @@ fn main() {
     println!("  cargo run --bin cert-issuer -- --config dev/config.json");
     println!();
 
-    println!("  # Terminal 3: issue Cassini server cert (serverAuth + clientAuth)");
-    println!("  cargo run --bin cert-issuer-init -- \\");
+    println!("  # Issue Cassini server cert (SAN: {CASSINI_DNS})");
+    println!("  cargo run --bin cert-client -- \\");
     println!("    --cert-issuer-url http://127.0.0.1:8443 \\");
     println!("    --token-path dev/token-cassini \\");
     println!("    --cert-dir dev/certs/server \\");
-    println!("    --cert-type server");
+    println!("    --cert-type server \\");
+    println!("    --key-algorithm ecdsa-p256");
     println!();
 
-    println!("  # Terminal 3: issue generic agent client cert (clientAuth only)");
-    println!("  cargo run --bin cert-issuer-init -- \\");
+    println!("  # Issue Neo4j server cert (SAN: {NEO4J_DNS})");
+    println!("  cargo run --bin cert-client -- \\");
+    println!("    --cert-issuer-url http://127.0.0.1:8443 \\");
+    println!("    --token-path dev/token-neo4j \\");
+    println!("    --cert-dir dev/certs/neo4j-server \\");
+    println!("    --cert-type server \\");
+    println!("    --key-algorithm ecdsa-p256 \\");
+    println!("    --extra-san neo4j.polar.svc.cluster.local \\");
+    println!("    --extra-san polar-db-svc.polar.svc.cluster.local");
+
+    println!("  # Copy Neo4j server cert into Neo4j's expected directory layout");
+    println!("  for p in https bolt; do");
+    println!("    cp dev/certs/neo4j-server/cert.pem dev/certs/neo4j/$p/public.crt");
+    println!("    cp dev/certs/neo4j-server/key.pem  dev/certs/neo4j/$p/private.key");
+    println!("    cp dev/certs/neo4j-server/ca.pem   dev/certs/neo4j/$p/trusted/ca.pem");
+    println!("  done");
+    println!();
+
+    println!("  # Issue generic agent client cert (SAN: {AGENT_DNS})");
+    println!("  # This same cert is used for BOTH Cassini and Neo4j connections.");
+    println!("  cargo run --bin cert-client -- \\");
     println!("    --cert-issuer-url http://127.0.0.1:8443 \\");
     println!("    --token-path dev/token-agent \\");
-    println!("    --cert-dir dev/certs/client");
+    println!("    --cert-dir dev/certs/client \\");
+    println!("    --key-algorithm ecdsa-p256");
     println!();
 
     println!("  # Cassini env vars:");
@@ -167,7 +224,7 @@ fn main() {
     println!("  export BROKER_ADDR=127.0.0.1:8080");
     println!();
 
-    println!("  # Agent env vars:");
+    println!("  # Agent env vars (Cassini connection):");
     println!("  export TLS_CA_CERT=$(pwd)/dev/tmp/ca.crt");
     println!("  export TLS_CLIENT_CERT=$(pwd)/dev/certs/client/cert.pem");
     println!("  export TLS_CLIENT_KEY=$(pwd)/dev/certs/client/key.pem");
@@ -175,9 +232,21 @@ fn main() {
     println!("  export BROKER_ADDR=127.0.0.1:8080");
     println!();
 
-    println!("  # Verify EKUs:");
+    println!(
+        "  # Agent env vars (Neo4j connection — same client cert, different CA and endpoint):"
+    );
+    println!("  export GRAPH_ENDPOINT=bolt+s://neo4j:7687");
+    println!("  export GRAPH_CA_CERT=$(pwd)/dev/certs/neo4j-server/ca.pem");
+    println!("  export TLS_CLIENT_CERT=$(pwd)/dev/certs/client/cert.pem");
+    println!("  export TLS_CLIENT_KEY=$(pwd)/dev/certs/client/key.pem");
+    println!();
+
+    println!("  # Verify EKUs after issuance:");
     println!(
         "  openssl x509 -in dev/certs/server/cert.pem -noout -text | grep -A5 'Extended Key Usage'"
+    );
+    println!(
+        "  openssl x509 -in dev/certs/neo4j-server/cert.pem -noout -text | grep -A5 'Extended Key Usage'"
     );
     println!(
         "  openssl x509 -in dev/certs/client/cert.pem -noout -text | grep -A5 'Extended Key Usage'"
@@ -188,8 +257,6 @@ fn main() {
 }
 
 /// Generate a self-signed CA cert and key using rcgen.
-///
-/// Validity: 2026-01-01 to 2036-01-01.
 fn generate_ca() -> (String, String) {
     let key_pair = KeyPair::generate_for(&rcgen::PKCS_ED25519).expect("CA keypair generation");
 
@@ -209,10 +276,6 @@ fn generate_ca() -> (String, String) {
 }
 
 /// Mint an RS256 JWT for the given subject.
-///
-/// The sub claim is what the cert issuer normalizes into the cert's
-/// DNS SAN. The kubernetes.io block is structurally correct but the
-/// pod UID is fake — used for telemetry only, not issuance.
 fn mint_token(kid: &str, key: &rsa::RsaPrivateKey, subject: &str) -> String {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)

@@ -94,6 +94,8 @@ let defaultCertClientConfig
       , audience = "polar-cert-issuer.local"
       , cert_dir = certDir
       , cert_type = "client"
+      , key_algorithm = "ecdsa-p256"
+      , extra_sans = None Text
       }
 
 let saTokenVolumeName = "sa-token"
@@ -157,7 +159,7 @@ let gitlabSecretKeySelector =
       , name = Some "gitlab-secret"
       }
 
-let neo4jServiceName = "polar-db-svc"
+let neo4jServiceName = "neo4j"
 
 let neo4jDNSName = "${neo4jServiceName}.${GraphNamespace}.svc.cluster.local"
 

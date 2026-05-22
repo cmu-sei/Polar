@@ -62,12 +62,14 @@ impl HandshakeClient {
         bearer_token: &str,
         csr_pem: &str,
         cert_type: CertType,
+        extra_sans: Vec<String>,
     ) -> Result<IssueResponse, HandshakeError> {
         let url = format!("{}/issue", self.base_url);
 
         let body = IssueRequest {
             csr_pem: csr_pem.to_string(),
             cert_type,
+            extra_sans,
         };
 
         let response = self

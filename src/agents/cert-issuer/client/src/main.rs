@@ -1,5 +1,6 @@
 // cert-issuer-init/src/main.rs
 
+use cert_client::keypair::KeyAlgorithm;
 use cert_client::{handshake, keypair, output, token};
 use cert_issuer_common::{CertType, identity::normalize_identity};
 use clap::Parser;
@@ -26,6 +27,14 @@ struct Args {
     /// TODO: see how we can turn this into a flag instead
     #[arg(long, default_value_t = CertType::Client)]
     cert_type: CertType,
+
+    #[arg(long, default_value = "ed25519")]
+    key_algorithm: KeyAlgorithm,
+    /// Additional DNS SANs to include in the certificate alongside the
+    /// identity SAN derived from the SA token. May be specified multiple
+    /// times. Wildcards and IP addresses are rejected.
+    #[arg(long = "extra-san", value_name = "DNS_NAME")]
+    extra_sans: Vec<String>,
 }
 
 #[tokio::main]
@@ -59,17 +68,23 @@ async fn run(args: Args) -> i32 {
         }
     };
 
-    let csr_output = match keypair::generate_csr(&dns_identity) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("error: failed to generate CSR: {e}");
-            return 3;
-        }
-    };
+    let csr_output =
+        match keypair::generate_csr(&dns_identity, &args.key_algorithm, &args.extra_sans) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("error: failed to generate CSR: {e}");
+                return 3;
+            }
+        };
 
     let client = handshake::HandshakeClient::new(args.cert_issuer_url);
     let response = match client
-        .issue(&sa_token, &csr_output.csr_pem, args.cert_type)
+        .issue(
+            &sa_token,
+            &csr_output.csr_pem,
+            args.cert_type,
+            args.extra_sans,
+        )
         .await
     {
         Ok(r) => r,

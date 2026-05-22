@@ -30,6 +30,16 @@ fn make_client(base_url: String) -> HandshakeClient {
     HandshakeClient::new(base_url)
 }
 
+// Helper to call issue with no extra SANs — keeps test callsites clean
+async fn issue(
+    client: &HandshakeClient,
+    token: &str,
+    csr: &str,
+    cert_type: CertType,
+) -> Result<cert_issuer_common::IssueResponse, cert_client::handshake::HandshakeError> {
+    client.issue(token, csr, cert_type, Vec::new()).await
+}
+
 // ---------------------------------------------------------------------------
 // Request shape
 // ---------------------------------------------------------------------------
@@ -44,10 +54,14 @@ async fn sends_bearer_token_in_authorization_header() {
         .mount(&server)
         .await;
 
-    make_client(server.uri())
-        .issue("the-specific-token", "fake-csr-pem", CertType::Client)
-        .await
-        .expect("must succeed when authorization header matches exactly");
+    issue(
+        &make_client(server.uri()),
+        "the-specific-token",
+        "fake-csr-pem",
+        CertType::Client,
+    )
+    .await
+    .expect("must succeed when authorization header matches exactly");
 }
 
 #[tokio::test]
@@ -62,10 +76,17 @@ async fn sends_csr_pem_in_request_body() {
         .mount(&server)
         .await;
 
-    make_client(server.uri())
-        .issue("any-token", "the-csr-content", CertType::Client)
-        .await
-        .expect("must send csr_pem in request body");
+    issue(
+        &make_client(server.uri()),
+        "the-specific-token",
+        "the-csr-content",
+        CertType::Client,
+    )
+    .await
+    .expect("must send csr_pem in request body");
+
+    let received = server.received_requests().await.unwrap();
+    println!("{}", std::str::from_utf8(&received[0].body).unwrap());
 }
 
 #[tokio::test]
@@ -80,10 +101,14 @@ async fn sends_cert_type_client_in_request_body() {
         .mount(&server)
         .await;
 
-    make_client(server.uri())
-        .issue("any-token", "fake-csr-pem", CertType::Client)
-        .await
-        .expect("must send cert_type CLIENT in request body");
+    issue(
+        &make_client(server.uri()),
+        "the-specific-token",
+        "fake-csr-pem",
+        CertType::Client,
+    )
+    .await
+    .expect("must send cert_type CLIENT in request body");
 }
 
 #[tokio::test]
@@ -98,10 +123,17 @@ async fn sends_cert_type_server_in_request_body() {
         .mount(&server)
         .await;
 
-    make_client(server.uri())
-        .issue("any-token", "fake-csr-pem", CertType::Server)
-        .await
-        .expect("must send cert_type SERVER in request body");
+    issue(
+        &make_client(server.uri()),
+        "the-specific-token",
+        "fake-csr-pem",
+        CertType::Server,
+    )
+    .await
+    .expect("must send cert_type SERVER in request body");
+
+    let received = server.received_requests().await.unwrap();
+    println!("{}", std::str::from_utf8(&received[0].body).unwrap());
 }
 
 #[tokio::test]
@@ -114,10 +146,14 @@ async fn sends_content_type_application_json() {
         .mount(&server)
         .await;
 
-    make_client(server.uri())
-        .issue("any-token", "fake-csr-pem", CertType::Client)
-        .await
-        .expect("must set Content-Type: application/json");
+    issue(
+        &make_client(server.uri()),
+        "the-specific-token",
+        "fake-csr-pem",
+        CertType::Client,
+    )
+    .await
+    .expect("must set Content-Type: application/json");
 }
 
 // ---------------------------------------------------------------------------
@@ -133,10 +169,14 @@ async fn successful_response_returns_issue_response() {
         .mount(&server)
         .await;
 
-    let response = make_client(server.uri())
-        .issue("test-token", "fake-csr-pem", CertType::Client)
-        .await
-        .expect("200 response must return Ok");
+    let response = issue(
+        &make_client(server.uri()),
+        "the-specific-token",
+        "fake-csr-pem",
+        CertType::Client,
+    )
+    .await
+    .expect("200 response must return Ok");
 
     assert_eq!(response.session_id, "00000000-0000-0000-0000-000000000001");
     assert!(!response.certificate_pem.is_empty());
@@ -159,10 +199,14 @@ async fn invalid_audience_rejection_maps_to_rejected_variant() {
         .mount(&server)
         .await;
 
-    let err = make_client(server.uri())
-        .issue("bad-token", "fake-csr-pem", CertType::Client)
-        .await
-        .expect_err("401 must be an error");
+    let err = issue(
+        &make_client(server.uri()),
+        "the-specific-token",
+        "fake-csr-pem",
+        CertType::Client,
+    )
+    .await
+    .expect_err("401 must be an error");
 
     assert!(
         matches!(err, HandshakeError::Rejected(ref e) if e.outcome == IssueOutcome::InvalidAudience),
@@ -182,10 +226,14 @@ async fn invalid_token_rejection_maps_to_rejected_variant() {
         .mount(&server)
         .await;
 
-    let err = make_client(server.uri())
-        .issue("bad-token", "fake-csr-pem", CertType::Client)
-        .await
-        .expect_err("401 must be an error");
+    let err = issue(
+        &make_client(server.uri()),
+        "the-specific-token",
+        "fake-csr-pem",
+        CertType::Client,
+    )
+    .await
+    .expect_err("401 must be an error");
 
     assert!(
         matches!(err, HandshakeError::Rejected(ref e) if e.outcome == IssueOutcome::InvalidToken),
@@ -205,10 +253,14 @@ async fn identity_mismatch_maps_to_rejected_variant() {
         .mount(&server)
         .await;
 
-    let err = make_client(server.uri())
-        .issue("test-token", "fake-csr-pem", CertType::Client)
-        .await
-        .expect_err("403 must be an error");
+    let err = issue(
+        &make_client(server.uri()),
+        "the-specific-token",
+        "fake-csr-pem",
+        CertType::Client,
+    )
+    .await
+    .expect_err("403 must be an error");
 
     assert!(
         matches!(err, HandshakeError::Rejected(ref e) if e.outcome == IssueOutcome::IdentityMismatch),
@@ -228,10 +280,14 @@ async fn ca_unavailable_maps_to_rejected_variant() {
         .mount(&server)
         .await;
 
-    let err = make_client(server.uri())
-        .issue("test-token", "fake-csr-pem", CertType::Client)
-        .await
-        .expect_err("503 must be an error");
+    let err = issue(
+        &make_client(server.uri()),
+        "the-specific-token",
+        "fake-csr-pem",
+        CertType::Client,
+    )
+    .await
+    .expect_err("503 must be an error");
 
     assert!(
         matches!(err, HandshakeError::Rejected(ref e) if e.outcome == IssueOutcome::CaUnavailable),
@@ -245,10 +301,14 @@ async fn ca_unavailable_maps_to_rejected_variant() {
 
 #[tokio::test]
 async fn unreachable_server_maps_to_unreachable_variant() {
-    let err = make_client("http://127.0.0.1:1".to_string())
-        .issue("test-token", "fake-csr-pem", CertType::Client)
-        .await
-        .expect_err("unreachable server must be an error");
+    let err = issue(
+        &make_client("127.0.0.1:1".into()),
+        "the-specific-token",
+        "fake-csr-pem",
+        CertType::Client,
+    )
+    .await
+    .expect_err("unreachable server must be an error");
 
     assert!(
         matches!(err, HandshakeError::Unreachable(_)),
@@ -265,10 +325,14 @@ async fn malformed_success_body_maps_to_malformed_variant() {
         .mount(&server)
         .await;
 
-    let err = make_client(server.uri())
-        .issue("test-token", "fake-csr-pem", CertType::Client)
-        .await
-        .expect_err("malformed body must be an error");
+    let err = issue(
+        &make_client(server.uri()),
+        "the-specific-token",
+        "fake-csr-pem",
+        CertType::Client,
+    )
+    .await
+    .expect_err("malformed body must be an error");
 
     assert!(
         matches!(err, HandshakeError::Malformed(_)),
@@ -285,13 +349,40 @@ async fn malformed_error_body_maps_to_malformed_variant() {
         .mount(&server)
         .await;
 
-    let err = make_client(server.uri())
-        .issue("test-token", "fake-csr-pem", CertType::Client)
-        .await
-        .expect_err("non-JSON error body must be an error");
+    let err = issue(
+        &make_client(server.uri()),
+        "the-specific-token",
+        "fake-csr-pem",
+        CertType::Client,
+    )
+    .await
+    .expect_err("non-JSON error body must be an error");
 
     assert!(
         matches!(err, HandshakeError::Malformed(_)),
         "expected Malformed for unparseable error body, got {err:?}"
     );
+}
+
+#[tokio::test]
+async fn sends_extra_sans_in_request_body() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/issue"))
+        .and(wiremock::matchers::body_partial_json(serde_json::json!({
+            "extra_sans": ["neo4j.polar.svc.cluster.local"]
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(fake_success_response()))
+        .mount(&server)
+        .await;
+
+    make_client(server.uri())
+        .issue(
+            "any-token",
+            "fake-csr-pem",
+            CertType::Client,
+            vec!["neo4j.polar.svc.cluster.local".to_string()],
+        )
+        .await
+        .expect("must send extra_sans in request body");
 }

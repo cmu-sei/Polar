@@ -1,14 +1,24 @@
 // cert_issuer_init/src/keypair.rs
 
 use rcgen::{CertificateParams, DistinguishedName, KeyPair, SanType, string::Ia5String};
-use thiserror::Error;
 
-#[derive(Debug, Error, PartialEq, Eq)]
+#[derive(Debug, Clone, clap::ValueEnum, Default)]
+pub enum KeyAlgorithm {
+    #[default]
+    Ed25519,
+    EcdsaP256,
+}
+
+#[derive(Debug, thiserror::Error)]
 pub enum KeypairError {
     #[error("identity must not be empty")]
     EmptyIdentity,
     #[error("CSR generation failed: {0}")]
     CsrFailed(String),
+    #[error("invalid SAN: {0}")]
+    InvalidSan(String),
+    #[error("wildcard SANs are not permitted: {0}")]
+    WildcardSanRejected(String),
 }
 
 /// The output of a successful CSR generation: the PEM-encoded CSR
@@ -32,24 +42,54 @@ pub struct CsrOutput {
 /// The private key never leaves this function's return value.
 /// The caller writes it to the shared emptyDir; the cert issuer
 /// never sees it.
-pub fn generate_csr(identity: &str) -> Result<CsrOutput, KeypairError> {
+pub fn generate_csr(
+    identity: &str,
+    algorithm: &KeyAlgorithm,
+    extra_sans: &[String],
+) -> Result<CsrOutput, KeypairError> {
     if identity.is_empty() {
         return Err(KeypairError::EmptyIdentity);
     }
 
-    // Ed25519 is the required algorithm per the architecture spec:
-    // small keys, fast verification, no parameter ambiguity.
-    let key_pair = KeyPair::generate_for(&rcgen::PKCS_ED25519)
-        .map_err(|e| KeypairError::CsrFailed(e.to_string()))?;
+    let pkcs = match algorithm {
+        KeyAlgorithm::Ed25519 => &rcgen::PKCS_ED25519,
+        KeyAlgorithm::EcdsaP256 => &rcgen::PKCS_ECDSA_P256_SHA256,
+    };
+
+    let key_pair =
+        KeyPair::generate_for(pkcs).map_err(|e| KeypairError::CsrFailed(e.to_string()))?;
+
+    // Identity SAN is always first and always present.
+    let mut sans = vec![identity.to_string()];
+
+    // Extra SANs are additive — syntactic validation only here,
+    // the server re-validates before signing.
+    for san in extra_sans {
+        let san = san.trim().to_string();
+        if san.is_empty() {
+            return Err(KeypairError::InvalidSan(san));
+        }
+        if san.contains('*') {
+            return Err(KeypairError::WildcardSanRejected(san));
+        }
+        sans.push(san);
+    }
+
+    let san_types = sans
+        .iter()
+        .map(|s| {
+            Ia5String::try_from(s.as_str())
+                .map(SanType::DnsName)
+                .map_err(|e| KeypairError::CsrFailed(e.to_string()))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
 
     let mut params =
         CertificateParams::new(vec![]).map_err(|e| KeypairError::CsrFailed(e.to_string()))?;
 
-    // Exactly one DNS SAN. The cert issuer's parser rejects CSRs
-    // with zero or more than one SAN.
-    params.subject_alt_names = vec![SanType::DnsName(
-        Ia5String::try_from(identity).map_err(|e| KeypairError::CsrFailed(e.to_string()))?,
-    )];
+    // Identity SAN first, followed by any validated extra SANs.
+    // The server re-validates and overrides these before signing.
+    params.subject_alt_names = san_types;
 
     // Empty distinguished name. The identity is entirely in the SAN;
     // the Subject field carries no information in this protocol and
