@@ -3,6 +3,7 @@ use chrono::Utc;
 use k8s_openapi::api::apps::v1::Deployment;
 use k8s_openapi::api::batch::v1::Job;
 use k8s_openapi::{api::core::v1::Pod, apimachinery::pkg::apis::meta::v1::OwnerReference};
+use kube_common::flux::{kustomization::Kustomization, oci_repositories::OciRepository};
 use polar::cassini::{CassiniClient, TcpClient};
 use polar::graph::controller::IntoGraphKey;
 use polar::{
@@ -991,6 +992,315 @@ impl GraphOperable for ReplicaSet {
             to: state_key.into_key(),
             rel_type: "TRANSITIONED_TO".into(),
             props: vec![Property("at".into(), GraphValue::String(now))],
+        }))?;
+
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Flux: OCIRepository
+// ---------------------------------------------------------------------------
+
+impl GraphOperable for OciRepository {
+    fn project_into_graph(
+        self,
+        graph: &GraphController,
+        _tcp_client: &TcpClient,
+    ) -> Result<(), ActorProcessingErr> {
+        let uid = self.metadata.uid.clone().unwrap_or_default();
+        let name = self.metadata.name.clone().unwrap_or_default();
+        let namespace = self
+            .metadata
+            .namespace
+            .clone()
+            .unwrap_or_else(|| "default".into());
+
+        let repo_key = KubeNodeKey::FluxOciRepository { uid: uid.clone() };
+
+        // ---- Anchor node ----
+        //
+        // spec.url is the only mandatory field that meaningfully identifies
+        // this source — it's the registry address being polled.
+
+        graph.cast(GraphControllerMsg::Op(GraphOp::UpsertNode {
+            key: repo_key.clone().into_key(),
+            props: vec![
+                Property("name".into(), GraphValue::String(name.clone())),
+                Property("namespace".into(), GraphValue::String(namespace.clone())),
+                Property("url".into(), GraphValue::String(self.spec.url.clone())),
+                Property(
+                    "observed_at".into(),
+                    GraphValue::String(Utc::now().to_rfc3339()),
+                ),
+            ],
+        }))?;
+
+        // ---- State ----
+        //
+        // We only emit a state node when status.artifact is present — the
+        // resource exists in the API before its first successful sync, and
+        // there is nothing meaningful to record until Flux has actually
+        // resolved the artifact.
+
+        let Some(status) = self.status else {
+            return Ok(());
+        };
+
+        let ready_condition = status
+            .conditions
+            .as_ref()
+            .and_then(|conds| conds.iter().find(|c| c.type_ == "Ready"))
+            .map(|c| c.reason.clone())
+            .unwrap_or_else(|| "Unknown".into());
+
+        let Some(artifact) = status.artifact else {
+            return Ok(());
+        };
+
+        // Use artifact.last_update_time as valid_from so the state timeline
+        // reflects when Flux actually resolved the artifact, not when the
+        // observer happened to receive the event.
+        let valid_from = artifact.last_update_time.clone();
+
+        let state_key = KubeNodeKey::FluxOciRepositoryState {
+            uid: uid.clone(),
+            valid_from: valid_from.clone(),
+        };
+
+        graph.cast(GraphControllerMsg::Op(GraphOp::UpdateState {
+            resource_key: repo_key.clone().into_key(),
+            state_type_key: KubeNodeKey::State.into_key(),
+            state_instance_key: state_key.into_key(),
+            state_instance_props: vec![
+                Property("digest".into(), GraphValue::String(artifact.digest.clone())),
+                Property(
+                    "revision".into(),
+                    GraphValue::String(artifact.revision.clone()),
+                ),
+                Property("ready_reason".into(), GraphValue::String(ready_condition)),
+                // OCI annotations — org.opencontainers.image.revision etc.
+                // Serialized wholesale; the processor graph queries can
+                // extract individual annotation values as needed.
+                Property("annotations".into(), opt_json(&artifact.metadata)),
+                Property("valid_from".into(), GraphValue::String(valid_from)),
+                Property(
+                    "observed_at".into(),
+                    GraphValue::String(Utc::now().to_rfc3339()),
+                ),
+            ],
+        }))?;
+
+        Ok(())
+    }
+
+    fn project_delete(self, graph: &GraphController) -> Result<(), ActorProcessingErr> {
+        let uid = self.metadata.uid.clone().unwrap_or_default();
+        let repo_key = KubeNodeKey::FluxOciRepository { uid: uid.clone() };
+        let now = Utc::now().to_rfc3339();
+
+        let state_key = KubeNodeKey::FluxOciRepositoryState {
+            uid: uid.clone(),
+            valid_from: now.clone(),
+        };
+
+        graph.cast(GraphControllerMsg::Op(GraphOp::UpdateState {
+            resource_key: repo_key.into_key(),
+            state_type_key: KubeNodeKey::State.into_key(),
+            state_instance_key: state_key.into_key(),
+            state_instance_props: vec![
+                Property("phase".into(), GraphValue::String("Deleted".into())),
+                Property("valid_from".into(), GraphValue::String(now.clone())),
+                Property("observed_at".into(), GraphValue::String(now)),
+            ],
+        }))?;
+
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Flux: Kustomization
+// ---------------------------------------------------------------------------
+
+impl GraphOperable for Kustomization {
+    fn project_into_graph(
+        self,
+        graph: &GraphController,
+        _tcp_client: &TcpClient,
+    ) -> Result<(), ActorProcessingErr> {
+        let uid = self.metadata.uid.clone().unwrap_or_default();
+        let name = self.metadata.name.clone().unwrap_or_default();
+        let namespace = self
+            .metadata
+            .namespace
+            .clone()
+            .unwrap_or_else(|| "default".into());
+
+        let ks_key = KubeNodeKey::FluxKustomization { uid: uid.clone() };
+
+        // ---- Anchor node ----
+        //
+        // source_ref is serialized wholesale so the graph retains the full
+        // pointer — kind, name, namespace — without requiring a separate
+        // edge resolution at write time. The RECONCILES_FROM edge below
+        // handles the structural link; this is for query convenience.
+
+        graph.cast(GraphControllerMsg::Op(GraphOp::UpsertNode {
+            key: ks_key.clone().into_key(),
+            props: vec![
+                Property("name".into(), GraphValue::String(name.clone())),
+                Property("namespace".into(), GraphValue::String(namespace.clone())),
+                Property(
+                    "source_ref".into(),
+                    GraphValue::String(
+                        serde_json::to_string(&self.spec.source_ref)
+                            .unwrap_or_else(|_| "{}".into()),
+                    ),
+                ),
+                Property(
+                    "observed_at".into(),
+                    GraphValue::String(Utc::now().to_rfc3339()),
+                ),
+            ],
+        }))?;
+
+        // ---- RECONCILES_FROM edge ----
+        //
+        // Link this Kustomization to the OCIRepository it reconciles from.
+        // We only handle OCIRepository sources here — GitRepository and Bucket
+        // are intentionally out of scope (see spike #201 notes).
+        //
+        // The join is by name within the source_ref namespace, falling back to
+        // the Kustomization's own namespace when source_ref.namespace is None,
+        // which is the Flux-specified default behaviour.
+        //
+        // EnsureEdge must be idempotent on missing endpoints — verify that
+        // GraphOp::EnsureEdge upserts both sides before relying on this.
+
+        if matches!(
+            self.spec.source_ref.kind,
+            kube_common::flux::kustomization::KustomizationSourceRefKind::OciRepository
+        ) {
+            // Resolve the namespace the OCIRepository lives in. Flux defaults
+            // to the Kustomization's own namespace when source_ref.namespace
+            // is absent.
+            let source_namespace = self
+                .spec
+                .source_ref
+                .namespace
+                .clone()
+                .unwrap_or_else(|| namespace.clone());
+
+            let source_name = self.spec.source_ref.name.clone();
+
+            // We don't have the OCIRepository's uid here — only its name and
+            // namespace. KubeNodeKey::FluxOciRepository keys by uid, so we
+            // need a name+namespace-based lookup key. Two options:
+            //
+            // A) Add a FluxOciRepositoryRef { name, namespace } variant to
+            //    KubeNodeKey whose cypher_match matches on those properties.
+            //
+            // B) Use GenericOwner { uid: name, kind: "FluxOCIRepository",
+            //    namespace: source_namespace } as a provisional key and rely
+            //    on the graph merge semantics to unify with the uid-keyed node
+            //    once the OCIRepository event arrives.
+            //
+            // Option A is cleaner. Add the variant and its cypher_match arm,
+            // then replace this comment with the edge cast.
+            //
+            // TODO: add KubeNodeKey::FluxOciRepositoryRef { name, namespace }
+            // and implement its cypher_match before enabling this edge.
+            let _ = (source_name, source_namespace); // suppress unused warnings until resolved
+        }
+
+        // ---- State ----
+        //
+        // Guard on status presence — Kustomizations start life with no status.
+
+        let Some(status) = self.status else {
+            return Ok(());
+        };
+
+        // Extract the Ready condition. last_transition_time is the authoritative
+        // valid_from — it's when kustomize-controller actually finished, not
+        // when we observed it.
+        let ready_condition = status
+            .conditions
+            .as_ref()
+            .and_then(|conds| conds.iter().find(|c| c.type_ == "Ready"));
+
+        let valid_from = ready_condition
+            .map(|c| c.last_transition_time.0.to_rfc3339())
+            .unwrap_or_else(|| Utc::now().to_rfc3339());
+
+        let ready_reason = ready_condition
+            .map(|c| c.reason.clone())
+            .unwrap_or_else(|| "Unknown".into());
+
+        // Only record state when we have at least one of the revision fields.
+        // A Kustomization that has never successfully reconciled has nothing
+        // meaningful to write.
+        if status.last_applied_revision.is_none() && status.last_applied_origin_revision.is_none() {
+            return Ok(());
+        }
+
+        let state_key = KubeNodeKey::FluxKustomizationState {
+            uid: uid.clone(),
+            valid_from: valid_from.clone(),
+        };
+
+        graph.cast(GraphControllerMsg::Op(GraphOp::UpdateState {
+            resource_key: ks_key.clone().into_key(),
+            state_type_key: KubeNodeKey::State.into_key(),
+            state_instance_key: state_key.into_key(),
+            state_instance_props: vec![
+                // last_applied_revision is the OCI content digest — the join
+                // key that links this reconciliation back to what Flux fetched
+                // from the registry.
+                Property(
+                    "last_applied_revision".into(),
+                    opt_string(&status.last_applied_revision),
+                ),
+                // last_applied_origin_revision carries the value of
+                // org.opencontainers.image.revision from the OCI annotations
+                // — the git ref or commit SHA embedded by the pipeline.
+                // This is the join key back to SCM events.
+                Property(
+                    "last_applied_origin_revision".into(),
+                    opt_string(&status.last_applied_origin_revision),
+                ),
+                Property("ready_reason".into(), GraphValue::String(ready_reason)),
+                Property("valid_from".into(), GraphValue::String(valid_from)),
+                Property(
+                    "observed_at".into(),
+                    GraphValue::String(Utc::now().to_rfc3339()),
+                ),
+            ],
+        }))?;
+
+        Ok(())
+    }
+
+    fn project_delete(self, graph: &GraphController) -> Result<(), ActorProcessingErr> {
+        let uid = self.metadata.uid.clone().unwrap_or_default();
+        let ks_key = KubeNodeKey::FluxKustomization { uid: uid.clone() };
+        let now = Utc::now().to_rfc3339();
+
+        let state_key = KubeNodeKey::FluxKustomizationState {
+            uid: uid.clone(),
+            valid_from: now.clone(),
+        };
+
+        graph.cast(GraphControllerMsg::Op(GraphOp::UpdateState {
+            resource_key: ks_key.into_key(),
+            state_type_key: KubeNodeKey::State.into_key(),
+            state_instance_key: state_key.into_key(),
+            state_instance_props: vec![
+                Property("phase".into(), GraphValue::String("Deleted".into())),
+                Property("valid_from".into(), GraphValue::String(now.clone())),
+                Property("observed_at".into(), GraphValue::String(now)),
+            ],
         }))?;
 
         Ok(())

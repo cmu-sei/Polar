@@ -4107,6 +4107,7 @@ checksum = "06d9e5e61dd037cdc51da0d7e2b2be10f497478ea7e120d85dad632adb99882b"
 dependencies = [
  "base64 0.22.1",
  "chrono",
+ "schemars 1.2.1",
  "serde",
  "serde_json",
 ]
@@ -4202,10 +4203,12 @@ dependencies = [
  "cassini-broker",
  "cynic",
  "futures-lite",
+ "k8s-openapi",
  "kube",
  "polar",
  "ractor",
  "rkyv",
+ "schemars 1.2.1",
  "serde",
  "serde_json",
  "sysinfo",

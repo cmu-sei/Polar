@@ -74,6 +74,20 @@ pub enum KubeNodeKey {
         uid: String,
         valid_from: String,
     },
+    FluxOciRepository {
+        uid: String,
+    },
+    FluxOciRepositoryState {
+        uid: String,
+        valid_from: String,
+    },
+    FluxKustomization {
+        uid: String,
+    },
+    FluxKustomizationState {
+        uid: String,
+        valid_from: String,
+    },
 }
 impl GraphNodeKey for KubeNodeKey {
     fn cypher_match(&self, prefix: &str) -> (String, Vec<(String, BoltType)>) {
@@ -178,7 +192,9 @@ impl GraphNodeKey for KubeNodeKey {
                 let pod_uid_k = format!("{prefix}_pod_uid");
                 let valid_from_k = format!("{prefix}_valid_from");
                 (
-                    format!("({prefix}:PodState {{ {prefix}_uid: ${pod_uid_k}, {prefix}_valid_from: ${valid_from_k} }})"),
+                    format!(
+                        "({prefix}:PodState {{ {prefix}_uid: ${pod_uid_k}, {prefix}_valid_from: ${valid_from_k} }})"
+                    ),
                     vec![
                         (pod_uid_k, BoltType::String(pod_uid.to_string().into())),
                         (
