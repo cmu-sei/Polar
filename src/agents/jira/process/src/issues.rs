@@ -25,6 +25,10 @@ use crate::{JiraConsumerArgs, JiraConsumerState, subscribe_to_topic};
 use polar::{QUERY_COMMIT_FAILED, QUERY_RUN_FAILED, TRANSACTION_FAILED_ERROR};
 use std::collections::HashMap;
 
+// Temp to write cypher to a file
+use std::fs::{OpenOptions, File};
+use std::io::Write;
+
 use jira_common::JIRA_ISSUES_CONSUMER_TOPIC;
 use jira_common::types::JiraData;
 use jira_common::types::{FieldValue, FirstTierField, JiraIssue, NestedListTypes};
@@ -33,6 +37,36 @@ use ractor::{Actor, ActorProcessingErr, ActorRef, async_trait};
 use tracing::{debug, info, warn};
 
 pub struct JiraIssueConsumer;
+
+
+fn append_to_file(path: &str, content: &str) -> std::io::Result<()> {
+    // Open file in append mode; create it if it doesn't exist
+    let mut file = OpenOptions::new()
+        .write(true)
+        .append(true)
+        .create(true)
+        .open(path)?;
+
+    // Write the content (note: append mode does *not* automatically add a newline)
+    file.write_all(content.as_bytes())?;
+
+    Ok(())
+}
+
+fn convert_map_to_cypher_params(map: &HashMap<String, String>, output_path: &str) -> std::io::Result<()> {
+    // 1. Serialize the Rust HashMap into a pretty-printed JSON string
+    let json_string = serde_json::to_string_pretty(map)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+
+    // 2. Format it into the valid Neo4j Cypher Shell parameter layout
+    let file_content = format!(":param {};\n", json_string);
+
+    // 3. Write out to the file
+    let mut file = File::create(output_path)?;
+    file.write_all(file_content.as_bytes())?;
+
+    Ok(())
+}
 
 #[async_trait]
 impl Actor for JiraIssueConsumer {
@@ -141,7 +175,7 @@ impl Actor for JiraIssueConsumer {
                 cypher.push_str(&format!("MERGE (u)-[:{}]->(i)\n", role));
             }
         }
-
+        //info!("Got Issue Data:{:?}", message);
         match state.graph.start_txn().await {
             Ok(mut transaction) => {
                 if let JiraData::Issues(issue_json) = message {
@@ -162,7 +196,6 @@ impl Actor for JiraIssueConsumer {
                     params.insert(String::from("issueKey"), issue.key.clone());
                     let mut field_count: u32 = 0;
                     issue_cypher.push_str("MERGE (i:JiraIssue {key: $issueKey})\nSET ");
-
                     for key in issue.fields.keys() {
                         if let Some(value) = issue.fields.get(&key.clone()) {
                             match value {
@@ -192,7 +225,6 @@ impl Actor for JiraIssueConsumer {
                                     first_issue_att = false;
                                 }
                                 FieldValue::List(v) if !v.is_empty() => {
-                                    //println!("Found({:?}) list:{:?}", key, v);
                                     let label = key
                                         .clone()
                                         .replace(" ", "_")
@@ -445,7 +477,6 @@ impl Actor for JiraIssueConsumer {
                                             ));
                                         }
                                     } else {
-                                        //println!("Found({:?}) Object:{:?}", key, v);
                                         let mut first_one = true;
                                         let mut sub_key = String::new();
                                         if let Some(FirstTierField::Option(Some(name))) =
@@ -531,7 +562,10 @@ impl Actor for JiraIssueConsumer {
                                                             val
                                                         ));
                                                         first_one = false;
-                                                    }
+                                                    },
+                                                    //other => {
+                                                    //    info!("Unable to verify:{:?} with val:{:?}", label, other);
+                                                    //}
                                                     _ => (),
                                                 }
                                             }
@@ -545,8 +579,11 @@ impl Actor for JiraIssueConsumer {
                                             //key.replace(" ", "_").replace("-", "_")
                                         ));
                                     }
+                                },
+                                other => {
+                                    // Produces too much output but can be helpful when troubleshooting.
+                                    //info!("{:?} Unable to determine{:?}:{:?}",issue.key.clone(), key.clone(),  other);
                                 }
-                                _ => (),
                             }
                         }
                     }
@@ -554,20 +591,6 @@ impl Actor for JiraIssueConsumer {
                     // Add logic for changelog
                     let mut changelogs = String::new();
                     let mut counter: u32 = 0;
-                    /*
-                    let mut change_vec = Vec::new();
-                    pub struct JiraChangeHistory {
-                        pub baseId: String,
-                        pub id: String,
-                        pub author: Option<String>,
-                        pub created: Option<String>,
-                        pub field: Option<String>,
-                        pub fieldtype: Option<String>,
-                        pub from: Option<String>,
-                        pub fromString: Option<String>,
-                        pub to: Option<String>,
-                        pub toString: Option<String>,
-                    }*/
 
                     // Going through each JiraItemHistory item
                     for base_item in issue.changelog.histories {
@@ -644,6 +667,15 @@ impl Actor for JiraIssueConsumer {
                     issue_cypher.push('\n');
                     issue_cypher.push_str(&second_cypher);
                     issue_cypher.push_str(&changelogs);
+                    issue_cypher.push(';');
+                    /*
+                    let mut filename = String::new();
+                    filename.push_str("path to store cypher files");
+                    filename.push_str(&issue.key.clone());
+                    filename.push_str(".cypher");
+                    convert_map_to_cypher_params(&params, filename.as_str());
+                    append_to_file(&filename, issue_cypher.as_str());
+                    */
                     warn!("Completed cypher build");
                     if let Err(_e) = transaction
                         .run(Query::new(issue_cypher.clone()).params(params))

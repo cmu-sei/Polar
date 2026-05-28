@@ -115,6 +115,7 @@ impl Actor for JiraIssueObserver {
                 if let Command::GetIssues(op) = command {
                     let max_results = 50;
                     debug!("Staring to query for issues...");
+                    info!("Start:{:?} Now:{:?} Value:{}", (*START_TIME + state.base_interval), Instant::now(), ((*START_TIME + state.base_interval) < Instant::now()));
 
                     // Load up the fields
                     let field_url = format!("{}/rest/api/2/field", state.jira_url);
@@ -139,8 +140,8 @@ impl Actor for JiraIssueObserver {
                             if (*START_TIME + state.base_interval) < Instant::now() {
                                 info!("Updating to do partial pull");
                                 timestr.push_str("&jql=updated>=-");
-                                timestr.push_str(&state.base_interval.as_secs().to_string());
-                                timestr.push_str("s");
+                                timestr.push_str(&(state.base_interval.as_secs() / 60).to_string());
+                                timestr.push_str("m");
                             } else if query_date != "" {
                                 info!("Adding in date to grab from");
                                 timestr.push_str("&jql=updated>");
@@ -271,8 +272,15 @@ fn publish_issues(
                     replacements.push((new_key.to_string(), value.clone()));
                 }
             }
+            // Don't clobber a field that already has a value when a
+            // duplicate/aliased key maps to the same target name.
             for (new_key, value) in replacements {
-                fields[new_key] = value;
+                match fields.get(&new_key) {
+                    Some(_) => (),
+                    None => {
+                        fields[new_key] = value.clone();
+                    }
+                }
             }
             for key in field_map.keys() {
                 fields.as_object_mut().unwrap().remove(key);
