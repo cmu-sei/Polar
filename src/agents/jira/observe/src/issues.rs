@@ -117,7 +117,7 @@ impl Actor for JiraIssueObserver {
                     let mut start_at = 0;
                     let max_results = 50;
                     println!("Staring to query for issues...");
-
+                    info!("Start:{:?} Now:{:?} Value:{}", (*START_TIME + state.base_interval), Instant::now(), ((*START_TIME + state.base_interval) < Instant::now()));
                     // Load up the fields
                     let field_url = format!("{}/rest/api/2/field", state.jira_url);
                     match state.web_client.get(&field_url).bearer_auth(state.token.clone().expect("TOKEN").to_string()).send().await {
@@ -134,11 +134,12 @@ impl Actor for JiraIssueObserver {
                                 Err(env::VarError::NotPresent) => (),
                                 Err(env::VarError::NotUnicode(_)) => ()
                             }
+                            info!("Start:{:?} Now:{:?} Value:{}", (*START_TIME + state.base_interval), Instant::now(), ((*START_TIME + state.base_interval) < Instant::now()));
                             if (*START_TIME + state.base_interval) < Instant::now() {
                                 info!("Updating to do partial pull");
                                 timestr.push_str("&jql=updated>=-");
-                                timestr.push_str(&state.base_interval.as_secs().to_string());
-                                timestr.push_str("s");
+                                timestr.push_str(&(state.base_interval.as_secs()/60).to_string());
+                                timestr.push_str("m");
                             } else if query_date != "" {
                                 info!("Adding in date to grab from");
                                 timestr.push_str("&jql=updated>");
@@ -146,7 +147,7 @@ impl Actor for JiraIssueObserver {
                             }
                             loop {
                                 let url = format!(
-                                    "{}{}?startAt={}&maxResults={}&expand=changelog{}",
+                                    "{}{}startAt={}&maxResults={}&expand=changelog{}",
                                     state.jira_url, op, start_at, max_results, timestr
                                 );
                                 info!("{}", url.to_string());
@@ -158,7 +159,7 @@ impl Actor for JiraIssueObserver {
                                         if let Some(items) = value.as_array() {
                                             for issue in items {
                                                 let mut cloned_issue = issue.clone();
-
+                                                info!("Key:{:?}", cloned_issue.get_mut("key"));
                                                 // Replace the "customfield_*" with the name
                                                 let fields = cloned_issue.get_mut("fields").expect("FIELDS");
 
@@ -169,9 +170,16 @@ impl Actor for JiraIssueObserver {
                                                         replacements.push((new_key.to_string(), value.clone()));
                                                     }
                                                 }
+                                                //let mut log_str = String::new();
                                                 for (new_key, value) in replacements {
-                                                    fields[new_key] = value;
+                                                    match fields.get(&new_key) {
+                                                        Some(val) => (),
+                                                        None      => {
+                                                            fields[new_key] = value.clone();
+                                                        },
+                                                    }
                                                 }
+                                                //info!("fields/values: {}", log_str);
                                                 for key in field_map.keys() {
                                                     fields.as_object_mut().unwrap().remove(key);
                                                 }
@@ -181,7 +189,8 @@ impl Actor for JiraIssueObserver {
                                                 let wrap = JiraData::Issues(JsonString {
                                                     json: cloned_issue.to_string(),
                                                 });
-                                                let bytes = rkyv::to_bytes::<Error>(&wrap).unwrap();
+                                                info!("Before Issue:{:?}", wrap);
+                                                let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&wrap).unwrap();
 
                                                 let msg = ClientMessage::PublishRequest {
                                                     topic: JIRA_ISSUES_CONSUMER_TOPIC.to_string(),
@@ -189,11 +198,9 @@ impl Actor for JiraIssueObserver {
                                                     registration_id: state.registration_id.clone(),
                                                     trace_ctx: None,
                                                 };
-
                                                 // Serialize the inner client message before sending
                                                 let payload = rkyv::to_bytes::<rkyv::rancor::Error>(&msg)
                                                     .expect("Failed to serialize ClientMessage::PublishRequest");
-
                                                 tcp_client.send_message(TcpClientMessage::Publish {
                                                     topic: JIRA_ISSUES_CONSUMER_TOPIC.to_string(),
                                                     payload: payload.into_vec(),

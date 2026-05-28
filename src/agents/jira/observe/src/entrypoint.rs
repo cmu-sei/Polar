@@ -44,7 +44,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         jira_token: Some(jira_token),
         proxy_ca_cert_file,
         // TODO: read these from configuration
-        base_interval: 10800,
+        base_interval: 1800,
         max_backoff_secs: 6000,
     };
 
