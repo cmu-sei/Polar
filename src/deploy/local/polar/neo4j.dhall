@@ -54,7 +54,7 @@ let neo4jServiceAccount =
       , apiVersion = "v1"
       , kind       = "ServiceAccount"
       , metadata   = kubernetes.ObjectMeta::{
-        , name      = Some "neo4j"
+        , name      = Some "neo4j-sa"
         , namespace = Some Constants.PolarNamespace
         }
       , automountServiceAccountToken = Some False

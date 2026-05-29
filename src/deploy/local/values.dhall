@@ -43,12 +43,6 @@ let img = \(name : Text) -> "${name}:${commitSha}"
 
 let tls = Constants.commonClientTls
 
-let imagePullSecrets =
-      [ kubernetes.LocalObjectReference::{
-        , name = Some Constants.imagePullSecretName
-        }
-      ]
-
 let certIssuer
     : Agents.CertIssuer
     = { name = "cert-issuer"
@@ -223,8 +217,8 @@ let buildProcessor
 
 let proxyCACert = None Text
 
-in  { imagePullSecrets
-    , imagePullPolicy
+in  {
+    imagePullPolicy
     , certIssuer
     , cassini
     , gitlabObserver

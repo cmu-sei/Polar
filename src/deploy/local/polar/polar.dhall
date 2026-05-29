@@ -1,7 +1,7 @@
 let kubernetes = ../../types/kubernetes.dhall
 
 let Constants = ../../types/constants.dhall
-
+let functions = ../../types/functions.dhall
 let values = ../values.dhall
 
 let namespace =
@@ -31,19 +31,16 @@ let neo4jCredentialSecret =
 
 let ociSecret = env:DOCKER_AUTH_JSON as Text
 
-let imagePullSecret =
-      kubernetes.Secret::{
-      , apiVersion = "v1"
-      , kind = "Secret"
-      , metadata = kubernetes.ObjectMeta::{
-        , name = Some Constants.imagePullSecretName
-        , namespace = Some Constants.PolarNamespace
-        }
-      , type = Some "kubernetes.io/dockerconfigjson"
-      , data = Some [ { mapKey = ".dockerconfigjson", mapValue = ociSecret } ]
-      }
+-- =============================================================================
+-- Init script ConfigMap — emitted once, mounted into every pod that leverages mTLS
+-- =============================================================================
+
+let agentInitScriptConfigMap =
+    functions.makeNuInitScript
+        Constants.initScriptConfigMapName
+        Constants.polarInitScript
 
 in  [ kubernetes.Resource.Namespace namespace
     , kubernetes.Resource.Secret neo4jCredentialSecret
-    , kubernetes.Resource.Secret imagePullSecret
+    , kubernetes.Resource.ConfigMap agentInitScriptConfigMap
     ]

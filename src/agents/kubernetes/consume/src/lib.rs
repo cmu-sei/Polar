@@ -122,7 +122,7 @@ impl GraphOperable for Job {
                 ),
                 Property(
                     "observed_at".into(),
-                    GraphValue::String(Utc::now().to_rfc3339()),
+                    GraphValue::String(Utc::now().to_string()),
                 ),
             ],
         }))?;
@@ -161,8 +161,8 @@ impl GraphOperable for Job {
 
         let transition_time = status
             .and_then(|s| s.completion_time.as_ref())
-            .map(|t| t.0.to_rfc3339())
-            .unwrap_or_else(|| Utc::now().to_rfc3339());
+            .map(|t| t.0.to_string())
+            .unwrap_or_else(|| Utc::now().to_string());
 
         let state_key = KubeNodeKey::JobState {
             uid: uid.clone(),
@@ -182,7 +182,7 @@ impl GraphOperable for Job {
                 Property("valid_from".into(), GraphValue::String(transition_time)),
                 Property(
                     "observed_at".into(),
-                    GraphValue::String(Utc::now().to_rfc3339()),
+                    GraphValue::String(Utc::now().to_string()),
                 ),
             ],
         }))?;
@@ -193,7 +193,7 @@ impl GraphOperable for Job {
     fn project_delete(self, graph: &GraphController) -> Result<(), ActorProcessingErr> {
         let uid = self.metadata.uid.clone().unwrap_or_default();
         let job_key = KubeNodeKey::Job { uid: uid.clone() };
-        let now = Utc::now().to_rfc3339();
+        let now = Utc::now().to_string();
 
         let state_key = KubeNodeKey::JobState {
             uid: uid.clone(),
@@ -252,7 +252,7 @@ impl GraphOperable for Pod {
 
         // Canonical signature
 
-        let transition_time = Utc::now().to_rfc3339();
+        let transition_time = Utc::now().to_string();
         // deterministic state node key
         let new_state_key = KubeNodeKey::PodState {
             pod_uid: uid.clone(),
@@ -285,7 +285,7 @@ impl GraphOperable for Pod {
                 Property("sa_name".into(), GraphValue::String(sa_name)),
                 Property(
                     "observed_at".into(),
-                    GraphValue::String(Utc::now().to_rfc3339()),
+                    GraphValue::String(Utc::now().to_string()),
                 ),
             ],
         }))?;
@@ -525,7 +525,7 @@ impl GraphOperable for Pod {
                     {
                         (
                             "Waiting",
-                            Utc::now().to_rfc3339(),
+                            Utc::now().to_string(),
                             vec![
                                 Property(
                                     "reason".into(),
@@ -548,8 +548,8 @@ impl GraphOperable for Pod {
                             running
                                 .clone()
                                 .started_at
-                                .map(|t| t.0.to_rfc3339())
-                                .unwrap_or_else(|| Utc::now().to_rfc3339()),
+                                .map(|t| t.0.to_string())
+                                .unwrap_or_else(|| Utc::now().to_string()),
                             vec![
                                 Property(
                                     "started".into(),
@@ -568,8 +568,8 @@ impl GraphOperable for Pod {
                             "Terminated",
                             term.clone()
                                 .finished_at
-                                .map(|t| t.0.to_rfc3339())
-                                .unwrap_or_else(|| Utc::now().to_rfc3339()),
+                                .map(|t| t.0.to_string())
+                                .unwrap_or_else(|| Utc::now().to_string()),
                             vec![
                                 Property(
                                     "exit_code".into(),
@@ -588,7 +588,7 @@ impl GraphOperable for Pod {
                     } else {
                         (
                             NULL_FIELD,
-                            Utc::now().to_rfc3339(),
+                            Utc::now().to_string(),
                             vec![Property(
                                 "restart_count".into(),
                                 GraphValue::I64(cs.restart_count as i64),
@@ -668,7 +668,7 @@ impl GraphOperable for Pod {
         let uid = self.metadata.uid.clone().unwrap();
         let pod_key = KubeNodeKey::Pod { uid: uid.clone() };
 
-        let now = Utc::now().to_rfc3339();
+        let now = Utc::now().to_string();
 
         let state_key = KubeNodeKey::PodState {
             pod_uid: uid.clone(),
@@ -750,14 +750,14 @@ impl GraphOperable for Deployment {
                 Property("namespace".into(), GraphValue::String(namespace)),
                 Property(
                     "observed_at".into(),
-                    GraphValue::String(Utc::now().to_rfc3339()),
+                    GraphValue::String(Utc::now().to_string()),
                 ),
             ],
         }))?;
 
         // ---- Immutable DeploymentState ----
 
-        let transition_time = Utc::now().to_rfc3339();
+        let transition_time = Utc::now().to_string();
         let state_key = KubeNodeKey::DeploymentState {
             uid: uid.clone(),
             valid_from: transition_time.clone(),
@@ -791,7 +791,7 @@ impl GraphOperable for Deployment {
                 ),
                 Property(
                     "observed_at".into(),
-                    GraphValue::String(Utc::now().to_rfc3339()),
+                    GraphValue::String(Utc::now().to_string()),
                 ),
             ],
         };
@@ -838,14 +838,14 @@ impl GraphOperable for Deployment {
 
         let deployment_key = KubeNodeKey::Deployment { uid: uid.clone() };
 
-        let now = Utc::now().to_rfc3339();
+        let now = Utc::now().to_string();
 
         let state_key = KubeNodeKey::DeploymentState {
             uid: uid.clone(),
             valid_from: now.clone(),
         };
 
-        let transition_time = Utc::now().to_rfc3339();
+        let transition_time = Utc::now().to_string();
         let op = GraphOp::UpdateState {
             resource_key: deployment_key.clone().into_key(),
             state_type_key: KubeNodeKey::State.into_key(),
@@ -874,7 +874,7 @@ impl GraphOperable for Deployment {
                 ),
                 Property(
                     "observed_at".into(),
-                    GraphValue::String(Utc::now().to_rfc3339()),
+                    GraphValue::String(Utc::now().to_string()),
                 ),
             ],
         };
@@ -902,7 +902,7 @@ impl GraphOperable for ReplicaSet {
         let ready = status.ready_replicas.unwrap_or(0);
         let available = status.available_replicas.unwrap_or(0);
 
-        let transition_time = Utc::now().to_rfc3339();
+        let transition_time = Utc::now().to_string();
 
         let rs_key = KubeNodeKey::ReplicaSet { uid: uid.clone() };
         if let Some(owners) = self.metadata.owner_references {
@@ -918,7 +918,7 @@ impl GraphOperable for ReplicaSet {
                 Property("namespace".into(), GraphValue::String(namespace)),
                 Property(
                     "observed_at".into(),
-                    GraphValue::String(Utc::now().to_rfc3339()),
+                    GraphValue::String(Utc::now().to_string()),
                 ),
             ],
         }))?;
@@ -947,7 +947,7 @@ impl GraphOperable for ReplicaSet {
                 ),
                 Property(
                     "observed_at".into(),
-                    GraphValue::String(Utc::now().to_rfc3339()),
+                    GraphValue::String(Utc::now().to_string()),
                 ),
             ],
         }))?;
@@ -969,7 +969,7 @@ impl GraphOperable for ReplicaSet {
         let uid = self.metadata.uid.clone().unwrap();
         let rs_key = KubeNodeKey::ReplicaSet { uid: uid.clone() };
 
-        let now = Utc::now().to_rfc3339();
+        let now = Utc::now().to_string();
 
         let state_key = KubeNodeKey::ReplicaSetState {
             uid: uid.clone(),
@@ -1031,7 +1031,7 @@ impl GraphOperable for OciRepository {
                 Property("url".into(), GraphValue::String(self.spec.url.clone())),
                 Property(
                     "observed_at".into(),
-                    GraphValue::String(Utc::now().to_rfc3339()),
+                    GraphValue::String(Utc::now().to_string()),
                 ),
             ],
         }))?;
@@ -1086,7 +1086,7 @@ impl GraphOperable for OciRepository {
                 Property("valid_from".into(), GraphValue::String(valid_from)),
                 Property(
                     "observed_at".into(),
-                    GraphValue::String(Utc::now().to_rfc3339()),
+                    GraphValue::String(Utc::now().to_string()),
                 ),
             ],
         }))?;
@@ -1097,7 +1097,7 @@ impl GraphOperable for OciRepository {
     fn project_delete(self, graph: &GraphController) -> Result<(), ActorProcessingErr> {
         let uid = self.metadata.uid.clone().unwrap_or_default();
         let repo_key = KubeNodeKey::FluxOciRepository { uid: uid.clone() };
-        let now = Utc::now().to_rfc3339();
+        let now = Utc::now().to_string();
 
         let state_key = KubeNodeKey::FluxOciRepositoryState {
             uid: uid.clone(),
@@ -1160,7 +1160,7 @@ impl GraphOperable for Kustomization {
                 ),
                 Property(
                     "observed_at".into(),
-                    GraphValue::String(Utc::now().to_rfc3339()),
+                    GraphValue::String(Utc::now().to_string()),
                 ),
             ],
         }))?;
@@ -1231,8 +1231,8 @@ impl GraphOperable for Kustomization {
             .and_then(|conds| conds.iter().find(|c| c.type_ == "Ready"));
 
         let valid_from = ready_condition
-            .map(|c| c.last_transition_time.0.to_rfc3339())
-            .unwrap_or_else(|| Utc::now().to_rfc3339());
+            .map(|c| c.last_transition_time.0.to_string())
+            .unwrap_or_else(|| Utc::now().to_string());
 
         let ready_reason = ready_condition
             .map(|c| c.reason.clone())
@@ -1274,7 +1274,7 @@ impl GraphOperable for Kustomization {
                 Property("valid_from".into(), GraphValue::String(valid_from)),
                 Property(
                     "observed_at".into(),
-                    GraphValue::String(Utc::now().to_rfc3339()),
+                    GraphValue::String(Utc::now().to_string()),
                 ),
             ],
         }))?;
@@ -1285,7 +1285,7 @@ impl GraphOperable for Kustomization {
     fn project_delete(self, graph: &GraphController) -> Result<(), ActorProcessingErr> {
         let uid = self.metadata.uid.clone().unwrap_or_default();
         let ks_key = KubeNodeKey::FluxKustomization { uid: uid.clone() };
-        let now = Utc::now().to_rfc3339();
+        let now = Utc::now().to_string();
 
         let state_key = KubeNodeKey::FluxKustomizationState {
             uid: uid.clone(),

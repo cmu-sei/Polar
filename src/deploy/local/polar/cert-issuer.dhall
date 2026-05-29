@@ -123,7 +123,6 @@ let certIssuerDeployment =
             }
           , spec = Some kubernetes.PodSpec::{
             , serviceAccountName = Some values.certIssuer.serviceAccountName
-            , imagePullSecrets   = Some values.imagePullSecrets
             , containers =
               [ kubernetes.Container::{
                 , name            = values.certIssuer.name
