@@ -112,8 +112,8 @@ getrandom = "0.3.4"
 git2 = "0.20"
 hex = "0.4.3"
 indexmap = "2.13"                                        # used in jira/common
-k8s-openapi = { version = "0.26", features = ["v1_32"] }
-kube = { version = "2.0.1", default-features = false, features = ["client", "rustls-tls", "runtime", "derive"] }
+k8s-openapi = { version = "0.27", features = ["v1_35", "schemars"] }
+kube = { version = "3.1.0", default-features = false, features = ["client", "rustls-tls", "runtime", "derive"] }
 libloading = "0.8.9"
 log = "0.4.29"                                            # used in jira/observe
 notify = "7"

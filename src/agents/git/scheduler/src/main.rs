@@ -15,9 +15,7 @@ pub const TCP: &str = "tcp";
 
 pub struct RootSupervisor;
 
-pub struct RootSupervisorState {
-    tcp_client: ActorRef<TcpClientMessage>,
-}
+pub struct RootSupervisorState {}
 
 /// Fetch a stored `RepoObservationConfig` from the graph for a known repo.
 ///

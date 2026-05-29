@@ -74,6 +74,20 @@ pub enum KubeNodeKey {
         uid: String,
         valid_from: String,
     },
+    FluxOciRepository {
+        uid: String,
+    },
+    FluxOciRepositoryState {
+        uid: String,
+        valid_from: String,
+    },
+    FluxKustomization {
+        uid: String,
+    },
+    FluxKustomizationState {
+        uid: String,
+        valid_from: String,
+    },
 }
 impl GraphNodeKey for KubeNodeKey {
     fn cypher_match(&self, prefix: &str) -> (String, Vec<(String, BoltType)>) {
@@ -86,7 +100,6 @@ impl GraphNodeKey for KubeNodeKey {
                 )
             }
             KubeNodeKey::State => ("(:State)".to_string(), vec![]),
-
             KubeNodeKey::Namespace { name, cluster_uid } => {
                 let name_k = format!("{prefix}_name");
                 let cluster_uid_k = format!("{prefix}_cluster_uid");
@@ -157,7 +170,6 @@ impl GraphNodeKey for KubeNodeKey {
                     vec![(uid_k, BoltType::String(uid.clone().into()))],
                 )
             }
-
             KubeNodeKey::JobState { uid, valid_from } => {
                 let uid_k = format!("{prefix}_uid");
                 let vf_k = format!("{prefix}_valid_from");
@@ -178,7 +190,9 @@ impl GraphNodeKey for KubeNodeKey {
                 let pod_uid_k = format!("{prefix}_pod_uid");
                 let valid_from_k = format!("{prefix}_valid_from");
                 (
-                    format!("({prefix}:PodState {{ {prefix}_uid: ${pod_uid_k}, {prefix}_valid_from: ${valid_from_k} }})"),
+                    format!(
+                        "({prefix}:PodState {{ {prefix}_uid: ${pod_uid_k}, {prefix}_valid_from: ${valid_from_k} }})"
+                    ),
                     vec![
                         (pod_uid_k, BoltType::String(pod_uid.to_string().into())),
                         (
@@ -232,7 +246,6 @@ impl GraphNodeKey for KubeNodeKey {
                     ],
                 )
             }
-
             KubeNodeKey::PersistentVolumeClaim { name, namespace } => {
                 let name_k = format!("{prefix}_name");
                 let namespace_k = format!("{prefix}_namespace");
@@ -257,7 +270,6 @@ impl GraphNodeKey for KubeNodeKey {
                     ],
                 )
             }
-
             KubeNodeKey::ConfigMap { name, namespace } => {
                 let name_k = format!("{prefix}_name");
                 let namespace_k = format!("{prefix}_namespace");
@@ -271,7 +283,79 @@ impl GraphNodeKey for KubeNodeKey {
                     ],
                 )
             }
-            _ => todo!("Implement queries for {self:?}"),
+            // ----------------------------------------------------------------
+            // Flux source-controller: OCIRepository
+            //
+            // Anchor node keyed by uid — same pattern as KubernetesJob.
+            // The uid comes from metadata.uid on the OCIRepository object,
+            // guaranteed unique within the cluster.
+            // ----------------------------------------------------------------
+            KubeNodeKey::FluxOciRepository { uid } => {
+                let uid_k = format!("{prefix}_uid");
+                (
+                    format!("({prefix}:FluxOCIRepository {{ uid: ${uid_k} }})"),
+                    vec![(uid_k, BoltType::String(uid.clone().into()))],
+                )
+            }
+
+            // State node keyed by (uid, valid_from).
+            // valid_from is sourced from status.artifact.last_update_time —
+            // the moment Flux resolved a new digest from the registry — not
+            // observer wall-clock time. This makes the state timeline reflect
+            // actual source-controller reconciliation events.
+            KubeNodeKey::FluxOciRepositoryState { uid, valid_from } => {
+                let uid_k = format!("{prefix}_uid");
+                let vf_k = format!("{prefix}_valid_from");
+                (
+                    format!(
+                        "({prefix}:FluxOCIRepositoryState {{ uid: ${uid_k}, valid_from: ${vf_k} }})"
+                    ),
+                    vec![
+                        (uid_k, BoltType::String(uid.clone().into())),
+                        (vf_k, BoltType::String(valid_from.clone().into())),
+                    ],
+                )
+            }
+
+            // ----------------------------------------------------------------
+            // Flux kustomize-controller: Kustomization
+            //
+            // Anchor node keyed by uid. The state node carries the revision
+            // fields that close the lead time chain:
+            //   last_applied_revision        — OCI content digest, join key
+            //                                  to FluxOCIRepositoryState
+            //   last_applied_origin_revision — org.opencontainers.image.revision
+            //                                  annotation, join key back to
+            //                                  the pipeline commit / SCM event
+            //
+            // valid_from is sourced from the Ready condition's
+            // last_transition_time, not wall clock. This is when
+            // kustomize-controller actually finished reconciling, which is
+            // what makes the state timeline meaningful for lead time queries.
+            // ----------------------------------------------------------------
+            KubeNodeKey::FluxKustomization { uid } => {
+                let uid_k = format!("{prefix}_uid");
+                (
+                    format!("({prefix}:FluxKustomization {{ uid: ${uid_k} }})"),
+                    vec![(uid_k, BoltType::String(uid.clone().into()))],
+                )
+            }
+
+            KubeNodeKey::FluxKustomizationState { uid, valid_from } => {
+                let uid_k = format!("{prefix}_uid");
+                let vf_k = format!("{prefix}_valid_from");
+                (
+                    format!(
+                        "({prefix}:FluxKustomizationState {{ uid: ${uid_k}, valid_from: ${vf_k} }})"
+                    ),
+                    vec![
+                        (uid_k, BoltType::String(uid.clone().into())),
+                        (vf_k, BoltType::String(valid_from.clone().into())),
+                    ],
+                )
+            }
+
+            _ => todo!("Handle unimplemented types"),
         }
     }
 }

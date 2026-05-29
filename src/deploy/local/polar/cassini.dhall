@@ -15,8 +15,6 @@ let values     = ../values.dhall
 let cassini = values.cassini
 
 let nuInitImage       = "polar-nu-init:${Constants.commitSha}"
-let scriptVolumeName  = Constants.initScriptVolumeName
-let scriptConfigName  = Constants.initScriptConfigMapName
 -- =============================================================================
 -- Service
 -- =============================================================================
@@ -61,15 +59,6 @@ let cassiniServiceAccount =
       }
 
 -- =============================================================================
--- ConfigMap carrying the nushell init script
--- =============================================================================
-
-let certInitScriptConfigMap =
-      functions.makeNuInitScript
-        scriptConfigName
-        Constants.polarInitScript
-
--- =============================================================================
 -- Volumes
 -- =============================================================================
 
@@ -82,9 +71,9 @@ let certVolumes =
 
 let scriptVolume =
       kubernetes.Volume::{
-      , name      = scriptVolumeName
+      , name      = Constants.initScriptVolumeName
       , configMap = Some kubernetes.ConfigMapVolumeSource::{
-        , name        = Some scriptConfigName
+        , name        = Some Constants.initScriptConfigMapName
         }
       }
 
@@ -100,7 +89,7 @@ let certInitContainer =
         (cassini.certClient // { cert_type = "server" })
         Constants.saTokenVolumeName
         Constants.certVolumeName
-        scriptVolumeName) // { imagePullPolicy = Some values.imagePullPolicy }
+        Constants.initScriptVolumeName) // { imagePullPolicy = Some values.imagePullPolicy }
 -- =============================================================================
 -- Cassini container
 -- =============================================================================
@@ -159,7 +148,6 @@ let deployment =
             }
           , spec = Some kubernetes.PodSpec::{
             , serviceAccountName = Some cassini.serviceAccountName
-            , imagePullSecrets   = Some values.imagePullSecrets
             , initContainers     = Some [ certInitContainer ]
             , containers         = [ cassiniContainer ]
             , volumes            = Some allVolumes
@@ -168,8 +156,8 @@ let deployment =
         }
       }
 
-in  [ kubernetes.Resource.ConfigMap     certInitScriptConfigMap
-    , kubernetes.Resource.ServiceAccount cassiniServiceAccount
+in  [
+      kubernetes.Resource.ServiceAccount cassiniServiceAccount
     , kubernetes.Resource.Service        cassiniService
     , kubernetes.Resource.Deployment     deployment
     ]

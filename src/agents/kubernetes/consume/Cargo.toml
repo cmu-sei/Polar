@@ -8,7 +8,7 @@ license.workspace = true
 cassini-client.workspace = true
 cassini-types.workspace = true
 chrono.workspace = true
-k8s-openapi = { workspace = true, features = ["v1_32"] }
+k8s-openapi = { workspace = true }
 kube-common.workspace = true
 neo4rs.workspace = true
 polar.workspace = true

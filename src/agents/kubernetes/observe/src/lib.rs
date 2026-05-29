@@ -7,6 +7,8 @@ use k8s_openapi::apiextensions_apiserver::pkg::apis::apiextensions::v1::CustomRe
 use kube::runtime::watcher::Event;
 use kube::{Api, Client, Resource};
 use kube::{api::ListParams, runtime::watcher};
+use kube_common::flux::kustomization::Kustomization;
+use kube_common::flux::oci_repositories::OciRepository;
 use kube_common::{
     BATCH_PROCESS_ACTION, KUBERNETES_CONSUMER, RESOURCE_APPLIED_ACTION, RESOURCE_DELETED_ACTION,
     RawKubeEvent,
@@ -327,12 +329,13 @@ pub struct NamespacedWatcherState {
     pub kind: &'static str,
 }
 
+// TODO: Change existging calls to these macros to use constants defined in kube-common
 #[macro_export]
 macro_rules! impl_namespaced_watcher {
     (
         $actor_name:ident,
         resource = $resource_ty:ty,
-        kind = $kind:literal
+        kind = $kind:expr
     ) => {
         pub struct $actor_name;
 
@@ -395,7 +398,7 @@ macro_rules! impl_global_watcher {
     (
         $actor_name:ident,
         resource = $resource_ty:ty,
-        kind = $kind:literal
+        kind = $kind:expr
     ) => {
         pub struct $actor_name;
 
@@ -470,3 +473,18 @@ impl_global_watcher!(
 );
 
 //
+// // ---- Flux CRD watchers ----
+//
+// These use impl_global_watcher because Flux resources are not scoped to a
+// single application namespace. KIND_* constants from kube_common ensure the
+// kind strings here match exactly what the processor dispatches on.
+impl_global_watcher!(
+    OciRepositoryWatcher,
+    resource = OciRepository,
+    kind = KIND_OCIREPOSITORY
+);
+impl_global_watcher!(
+    KustomizationWatcher,
+    resource = Kustomization,
+    kind = KIND_KUSTOMIZATION
+);
