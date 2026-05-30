@@ -391,8 +391,6 @@ update-dhall-pins:
     echo "nix-container-lib commit: $COMMIT"
     echo "Dhall prelude hash:       $DHALL_HASH"
     echo "Updating src/containers/container-lib.dhall..."
-    sed -i "s|/nix-container-lib/[a-f0-9]\{40\}/dhall/prelude.dhall|/nix-container-lib/${COMMIT}/dhall/prelude.dhall|g" src/containers/container-lib.dhall
-    sed -i "s|sha256:[a-f0-9]\{64\}|${DHALL_HASH}|g" src/containers/container-lib.dhall
     echo "Re-rendering container.nix files..."
     for f in $(grep -rl "container-lib.dhall" src/ --include="*.dhall" | grep -v 'container-lib.dhall'); do
         DIR="$(dirname $f)"
