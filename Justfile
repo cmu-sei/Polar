@@ -508,8 +508,8 @@ llm-qwen:
 llm-omnicoder-rocm-16GB:
     llama-server \
         --hf-repo Tesslate/OmniCoder-9B-GGUF \
-        --hf-file omnicoder-9b-q4_k_m.gguf \
-        --ctx-size 131072 \
+        --hf-file omnicoder-9b-q8_0.gguf \
+        --ctx-size 262144 \
         --n-gpu-layers 99 \
         --flash-attn on \
         --alias "local-model" \
@@ -522,12 +522,12 @@ llm-omnicoder-rocm-16GB:
         --jinja \
         --spec-type ngram-mod \
         -ub 512 \
-        -ctk q4_0 -ctv q4_0 > /tmp/llama-server.log 2>&1
+        -ctk q8_0 -ctv q8_0 > /tmp/llama-server.log 2>&1
 
 llm-omnicoder-nvidia-12GB:
     llama-server \
         --hf-repo Tesslate/OmniCoder-9B-GGUF \
-        --hf-file omnicoder-9b-q4_k_m.gguf \
+        --hf-file omnicoder-9b-q8_0.gguf \
         --ctx-size 131072 \
         --n-gpu-layers 99 \
         --flash-attn on \
@@ -541,7 +541,7 @@ llm-omnicoder-nvidia-12GB:
         --jinja \
         --spec-type ngram-mod \
         -ub 512 \
-        -ctk q4_0 -ctv q4_0 > /tmp/llama-server.log 2>&1
+        -ctk q8_0 -ctv q8_0 > /tmp/llama-server.log 2>&1
 
 # ── Inside container: Pi agent ────────────────────────────────────────────────
 
