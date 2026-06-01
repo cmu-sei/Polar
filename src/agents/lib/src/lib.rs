@@ -13,6 +13,16 @@ use tracing::{debug, info};
 pub mod cassini;
 pub mod graph;
 
+/// Re-export of [`GraphControllerActor::get_neo_config`] as a free function.
+///
+/// Agents that need a Neo4j connection config can call `polar::get_neo_config()`
+/// without importing `GraphControllerActor` directly. The implementation lives
+/// on the controller so it stays co-located with the graph connection logic;
+/// this wrapper exists purely for call-site ergonomics.
+pub fn get_neo_config() -> Result<neo4rs::Config, ractor::ActorProcessingErr> {
+    graph::controller::GraphControllerActor::get_neo_config()
+}
+
 /// wrapper definition for a ractor outputport where a raw message payload and a topic can be piped to a necessary dispatcher
 pub type QueueOutput = Arc<OutputPort<(Vec<u8>, String)>>;
 
