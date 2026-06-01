@@ -134,8 +134,9 @@
           agentContainerVulkan = (mkAgentContainer pkgs.llama-cpp-vulkan pkgs.stdenv.cc).image;
           agentContainerNvidia = (mkAgentContainer pkgsCuda.llama-cpp pkgsCuda.cudaPackages.cuda_cudart).image;
 
-          # ── Certificate Issuer ──────────────────────────────────────────────────────────
+          # ── Certificate Issuer ───────────────────────────────────────────────
           certIssuerImage         = polarPkgs.certIssuer.serverImage;
+          certClientImage         = polarPkgs.certIssuer.clientImage;
 
           # ── Cassini ──────────────────────────────────────────────────────────
           cassiniImage         = polarPkgs.cassini.cassiniImage;

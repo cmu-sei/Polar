@@ -16,15 +16,4 @@ in  { name            = "cassini"
       { http = 3000
       , tcp  = 8080
       }
-    , tls =
-      { certificateRequestName = "cassini-certificate"
-      , certificateSpec =
-        { commonName  = Constants.mtls.commonName
-        , dnsNames    = [ "cassini-ip-svc.polar.svc.cluster.local" ]
-        , duration    = "2160h"
-        , issuerRef   = { kind = "Issuer", name = Constants.mtls.leafIssuerName }
-        , renewBefore = "360h"
-        , secretName  = Constants.CassiniServerCertificateSecret
-        }
-      }
     }

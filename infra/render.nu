@@ -62,6 +62,9 @@ def main [
     let neo4j_bolt_addr      = $config.neo4j_bolt_addr
     let jaeger_dns_name      = $config.jaeger_dns_name
     let scheduler_remote_url = $config.scheduler_remote_url
+    let cert_issuer_url      = $config.cert_issuer_url
+    let cert_issuer_audience = $config.cert_issuer_audience
+    let cert_client_image    = $config.cert_client_image
 
     # ── Render each chart ─────────────────────────────────────────────────────
     print "Rendering charts..."
@@ -76,16 +79,17 @@ def main [
         # Build chart-specific context by extending base context
         let chart_context = ($base_context | merge { chart_dir: $chart_dir } | merge (
             match $chart_name {
-                "cassini"    => { jaegerDNSName: $jaeger_dns_name }
-                "gitlab"     => { neo4jBoltAddr: $neo4j_bolt_addr }
-                "kube"       => { neo4jBoltAddr: $neo4j_bolt_addr }
-                "git"        => { neo4jBoltAddr: $neo4j_bolt_addr }
-                "jira"       => { neo4jBoltAddr: $neo4j_bolt_addr }
-                "provenance" => { neo4jBoltAddr: $neo4j_bolt_addr }
-                "build"      => { neo4jBoltAddr: $neo4j_bolt_addr }
-                "scheduler"  => { neo4jBoltAddr: $neo4j_bolt_addr, remoteUrl: $scheduler_remote_url }
-                "openapi"    => { neo4jBoltAddr: $neo4j_bolt_addr }
-                _            => { _placeholder: "" }
+                "cert-issuer" => { _placeholder: "" }
+                "cassini"     => { jaegerDNSName: $jaeger_dns_name, certIssuerUrl: $cert_issuer_url, certIssuerAudience: $cert_issuer_audience, certClientImage: $cert_client_image }
+                "gitlab"      => { neo4jBoltAddr: $neo4j_bolt_addr, certIssuerUrl: $cert_issuer_url, certIssuerAudience: $cert_issuer_audience, certClientImage: $cert_client_image }
+                "kube"        => { neo4jBoltAddr: $neo4j_bolt_addr, certIssuerUrl: $cert_issuer_url, certIssuerAudience: $cert_issuer_audience, certClientImage: $cert_client_image }
+                "git"         => { neo4jBoltAddr: $neo4j_bolt_addr, certIssuerUrl: $cert_issuer_url, certIssuerAudience: $cert_issuer_audience, certClientImage: $cert_client_image }
+                "jira"        => { neo4jBoltAddr: $neo4j_bolt_addr, certIssuerUrl: $cert_issuer_url, certIssuerAudience: $cert_issuer_audience, certClientImage: $cert_client_image }
+                "provenance"  => { neo4jBoltAddr: $neo4j_bolt_addr, certIssuerUrl: $cert_issuer_url, certIssuerAudience: $cert_issuer_audience, certClientImage: $cert_client_image }
+                "build"       => { neo4jBoltAddr: $neo4j_bolt_addr, certIssuerUrl: $cert_issuer_url, certIssuerAudience: $cert_issuer_audience, certClientImage: $cert_client_image }
+                "scheduler"   => { neo4jBoltAddr: $neo4j_bolt_addr, remoteUrl: $scheduler_remote_url, certIssuerUrl: $cert_issuer_url, certIssuerAudience: $cert_issuer_audience, certClientImage: $cert_client_image }
+                "openapi"     => { neo4jBoltAddr: $neo4j_bolt_addr, certIssuerUrl: $cert_issuer_url, certIssuerAudience: $cert_issuer_audience, certClientImage: $cert_client_image }
+                _             => { _placeholder: "" }
             }
         ))
 

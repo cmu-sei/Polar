@@ -23,19 +23,6 @@ in  { name            = "gitlab-agents"
       , image = "polar-gitlab-consumer:latest"
       }
 
-    -- Per-agent cert spec — issued by the leaf issuer, mounted at tlsPath
-    , tls =
-      { certificateRequestName = "gitlab-agent-certificate"
-      , certificateSpec =
-        { commonName  = Constants.mtls.commonName
-        , dnsNames    = [ Constants.cassiniDNSName ]
-        , duration    = "2160h"
-        , issuerRef   = { kind = "Issuer", name = Constants.mtls.leafIssuerName }
-        , renewBefore = "360h"
-        , secretName  = "gitlab-agent-tls"
-        }
-      }
-
     -- proxyCACert: set to Some "proxy-ca-cert" if a proxy sits in front of GitLab
     , proxyCACert = None Text
     }

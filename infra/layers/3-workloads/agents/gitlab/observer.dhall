@@ -9,29 +9,21 @@ let functions  = ../../../../schema/functions.dhall
 
 let render =
       \(v :
-          { name            : Text
-          , image           : Text
-          , imagePullPolicy : Text
+          { name             : Text
+          , image            : Text
+          , imagePullPolicy  : Text
           , imagePullSecrets : List { name : Optional Text }
-          , endpoint        : Text
+          , certClientImage  : Text
+          , certIssuerUrl    : Text
+          , saTokenAudience  : Text
+          , endpoint         : Text
           , baseIntervalSecs : Natural
-          , tlsSecretName   : Text
-          , proxyCACert     : Optional Text
+          , proxyCACert      : Optional Text
           }
       ) ->
-
-        let tlsMount =
-              kubernetes.VolumeMount::{
-              , name      = v.tlsSecretName
-              , mountPath = Constants.tlsPath
-              , readOnly  = Some True
-              }
-
         let volumes =
-              [ kubernetes.Volume::{
-                , name   = v.tlsSecretName
-                , secret = Some kubernetes.SecretVolumeSource::{ secretName = Some v.tlsSecretName }
-                }
+              [ Constants.certEmptyDirVolume
+              , Constants.saTokenVolume v.saTokenAudience
               ] # functions.ProxyVolume v.proxyCACert
 
         let env =
@@ -42,33 +34,26 @@ let render =
                 , kubernetes.EnvVar::{
                   , name      = "GITLAB_TOKEN"
                   , valueFrom = Some kubernetes.EnvVarSource::{
-                    , secretKeyRef = Some kubernetes.SecretKeySelector::{
-                      , name = Some "gitlab-secret"
-                      , key  = "token"
-                      }
+                    , secretKeyRef = Some kubernetes.SecretKeySelector::{ name = Some "gitlab-secret", key = "token" }
                     }
                   }
                 ]
 
+        let mounts =
+              [ Constants.certVolumeMount
+              ] # functions.ProxyMount v.proxyCACert
+
         in  kubernetes.Deployment::{
-            , metadata = kubernetes.ObjectMeta::{
-              , name        = Some v.name
-              , namespace   = Some Constants.PolarNamespace
-              , annotations = Some [ Constants.RejectSidecarAnnotation ]
-              }
+            , metadata = kubernetes.ObjectMeta::{ name = Some v.name, namespace = Some Constants.PolarNamespace, annotations = Some [ Constants.RejectSidecarAnnotation ] }
             , spec = Some kubernetes.DeploymentSpec::{
-              , selector = kubernetes.LabelSelector::{
-                , matchLabels = Some (toMap { name = v.name })
-                }
+              , selector = kubernetes.LabelSelector::{ matchLabels = Some (toMap { name = v.name }) }
               , replicas = Some 1
               , template = kubernetes.PodTemplateSpec::{
-                , metadata = Some kubernetes.ObjectMeta::{
-                  , name   = Some v.name
-                  , labels = Some [ { mapKey = "name", mapValue = v.name } ]
-                  }
+                , metadata = Some kubernetes.ObjectMeta::{ name = Some v.name, labels = Some [ { mapKey = "name", mapValue = v.name } ] }
                 , spec = Some kubernetes.PodSpec::{
                   , imagePullSecrets = Some v.imagePullSecrets
                   , volumes          = Some volumes
+                  , initContainers   = Some [ functions.makeCertClientInitContainer v.certIssuerUrl v.certClientImage v.saTokenAudience ]
                   , containers =
                     [ kubernetes.Container::{
                       , name            = v.name
@@ -76,7 +61,7 @@ let render =
                       , imagePullPolicy = Some v.imagePullPolicy
                       , securityContext = Some Constants.DropAllCapSecurityContext
                       , env             = Some env
-                      , volumeMounts    = Some ([ tlsMount ] # functions.ProxyMount v.proxyCACert)
+                      , volumeMounts    = Some mounts
                       }
                     ]
                   }

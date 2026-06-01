@@ -25,17 +25,5 @@ in  { name            = "build-agents"
       , image = "build-processor:latest"
       }
 
-    , tls =
-      { certificateRequestName = "build-agent-certificate"
-      , certificateSpec =
-        { commonName  = Constants.mtls.commonName
-        , dnsNames    = [ Constants.cassiniDNSName ]
-        , duration    = "2160h"
-        , issuerRef   = { kind = "Issuer", name = Constants.mtls.leafIssuerName }
-        , renewBefore = "360h"
-        , secretName  = "build-agent-tls"
-        }
-      }
-
     , proxyCACert = None Text
     }

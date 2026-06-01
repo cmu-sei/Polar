@@ -21,17 +21,5 @@ in  { imagePullPolicy  = "IfNotPresent"
       , image = "provenance-resolver-agent:latest"
       }
 
-    , tls =
-      { certificateRequestName = "provenance-agent-certificate"
-      , certificateSpec =
-        { commonName  = Constants.mtls.commonName
-        , dnsNames    = [ Constants.cassiniDNSName ]
-        , duration    = "2160h"
-        , issuerRef   = { kind = "Issuer", name = Constants.mtls.leafIssuerName }
-        , renewBefore = "360h"
-        , secretName  = "provenance-agent-tls"
-        }
-      }
-
     , proxyCACert = None Text
     }

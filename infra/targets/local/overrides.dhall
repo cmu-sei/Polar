@@ -70,4 +70,13 @@
   , observer  = { image = "openapi-observer:latest", openapiEndpoint = "http://localhost:3000/api-docs/openapi.json" }
   , processor = { image = "openapi-processor:latest" }
   }
+
+, certIssuer =
+  { image           = "polar-cert-issuer:latest"
+  , certClientImage = "polar-cert-client:latest"
+  , imagePullSecrets = [] : List { name : Optional Text }
+  , oidcIssuerUrl   = "https://kubernetes.default.svc.cluster.local"
+  , oidcAudience    = "polar-cert-issuer.local"
+  , oidcJwksUri     = Some "https://kubernetes.default.svc.cluster.local/openid/v1/jwks"
+  }
 }

@@ -9,68 +9,43 @@ let functions  = ../../../../schema/functions.dhall
 
 let render =
       \(v :
-          { name            : Text
-          , image           : Text
-          , imagePullPolicy : Text
+          { name             : Text
+          , image            : Text
+          , imagePullPolicy  : Text
           , imagePullSecrets : List { name : Optional Text }
-          , tlsSecretName   : Text
-          , neo4jBoltAddr   : Text
-          , proxyCACert     : Optional Text
+          , certClientImage  : Text
+          , certIssuerUrl    : Text
+          , saTokenAudience  : Text
+          , neo4jBoltAddr    : Text
+          , proxyCACert      : Optional Text
           }
       ) ->
-
-        let tlsMount =
-              kubernetes.VolumeMount::{
-              , name      = v.tlsSecretName
-              , mountPath = Constants.tlsPath
-              , readOnly  = Some True
-              }
-
-        let neo4jCAMount =
-              kubernetes.VolumeMount::{
-              , name      = "neo4j-bolt-ca"
-              , mountPath = "/etc/neo4j-ca"
-              , readOnly  = Some True
-              }
-
         let volumes =
-              [ kubernetes.Volume::{
-                , name   = v.tlsSecretName
-                , secret = Some kubernetes.SecretVolumeSource::{ secretName = Some v.tlsSecretName }
-                }
-              , kubernetes.Volume::{
-                , name   = "neo4j-bolt-ca"
-                , configMap = Some kubernetes.ConfigMapVolumeSource::{ name = Some "neo4j-bolt-ca" }
-                }
+              [ Constants.certEmptyDirVolume
+              , Constants.saTokenVolume v.saTokenAudience
+              , kubernetes.Volume::{ name = "neo4j-bolt-ca", configMap = Some kubernetes.ConfigMapVolumeSource::{ name = Some "neo4j-bolt-ca" } }
               ] # functions.ProxyVolume v.proxyCACert
 
         let env =
               Constants.commonClientEnv
-              # functions.makeGraphEnv
-                  v.neo4jBoltAddr
-                  Constants.graphConfig
-                  Constants.graphSecretKeySelector
-                  (Some "/etc/neo4j-ca/ca.pem")
+              # functions.makeGraphEnv v.neo4jBoltAddr Constants.graphConfig Constants.graphSecretKeySelector (Some "/etc/neo4j-ca/ca.pem")
+
+        let mounts =
+              [ Constants.certVolumeMount
+              , kubernetes.VolumeMount::{ name = "neo4j-bolt-ca", mountPath = "/etc/neo4j-ca", readOnly = Some True }
+              ] # functions.ProxyMount v.proxyCACert
 
         in  kubernetes.Deployment::{
-            , metadata = kubernetes.ObjectMeta::{
-              , name        = Some v.name
-              , namespace   = Some Constants.PolarNamespace
-              , annotations = Some [ Constants.RejectSidecarAnnotation ]
-              }
+            , metadata = kubernetes.ObjectMeta::{ name = Some v.name, namespace = Some Constants.PolarNamespace, annotations = Some [ Constants.RejectSidecarAnnotation ] }
             , spec = Some kubernetes.DeploymentSpec::{
-              , selector = kubernetes.LabelSelector::{
-                , matchLabels = Some (toMap { name = v.name })
-                }
+              , selector = kubernetes.LabelSelector::{ matchLabels = Some (toMap { name = v.name }) }
               , replicas = Some 1
               , template = kubernetes.PodTemplateSpec::{
-                , metadata = Some kubernetes.ObjectMeta::{
-                  , name   = Some v.name
-                  , labels = Some [ { mapKey = "name", mapValue = v.name } ]
-                  }
+                , metadata = Some kubernetes.ObjectMeta::{ name = Some v.name, labels = Some [ { mapKey = "name", mapValue = v.name } ] }
                 , spec = Some kubernetes.PodSpec::{
                   , imagePullSecrets = Some v.imagePullSecrets
                   , volumes          = Some volumes
+                  , initContainers   = Some [ functions.makeCertClientInitContainer v.certIssuerUrl v.certClientImage v.saTokenAudience ]
                   , containers =
                     [ kubernetes.Container::{
                       , name            = v.name
@@ -78,7 +53,7 @@ let render =
                       , imagePullPolicy = Some v.imagePullPolicy
                       , securityContext = Some Constants.DropAllCapSecurityContext
                       , env             = Some env
-                      , volumeMounts    = Some ([ tlsMount, neo4jCAMount ] # functions.ProxyMount v.proxyCACert)
+                      , volumeMounts    = Some mounts
                       }
                     ]
                   }

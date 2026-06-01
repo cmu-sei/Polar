@@ -86,6 +86,31 @@ dev-container:
     nix build {{_nix_flags}} ".#packages.{{platform}}.devContainer" -o result-dev-container
     podman load -i result-dev-container
 
+# Build cert-issuer and cert-client images
+# Usage: just cert-issuer          (all)
+#        just cert-issuer server
+#        just cert-issuer client
+cert-issuer target='all':
+    #!/usr/bin/env bash
+    set -euo pipefail
+    case "{{target}}" in
+        all)
+            nix build {{_nix_flags}} ".#packages.{{platform}}.certIssuerImage" -o result-cert-issuer
+            nix build {{_nix_flags}} ".#packages.{{platform}}.certClientImage" -o result-cert-client
+            podman load -i result-cert-issuer
+            podman load -i result-cert-client
+            ;;
+        server)
+            nix build {{_nix_flags}} ".#packages.{{platform}}.certIssuerImage" -o result-cert-issuer
+            podman load -i result-cert-issuer
+            ;;
+        client)
+            nix build {{_nix_flags}} ".#packages.{{platform}}.certClientImage" -o result-cert-client
+            podman load -i result-cert-client
+            ;;
+        *) echo "Unknown target: {{target}}. Use all, server, or client." && exit 1 ;;
+    esac
+
 # ── Cassini ───────────────────────────────────────────────────────────────────
 
 # Build cassini images
@@ -760,6 +785,7 @@ _neo4j_result := env_var('HOME') + "/Documents/projects/nix-neo4j/result-neo4j-i
 
 # Build all images needed for cluster deployment with correct result symlink names
 cluster-build-all:
+    just cert-issuer all
     just cassini all
     just gitlab all
     just kube all
@@ -804,6 +830,8 @@ cluster-load-all neo4j_result=_neo4j_result:
     fi
     # Polar images — all from nix result symlinks
     _load ./result-cassini
+    _load ./result-cert-issuer
+    _load ./result-cert-client
     _load ./result-harness-producer
     _load ./result-harness-sink
     _load ./result-clone-image
@@ -849,6 +877,8 @@ cluster-load-all neo4j_result=_neo4j_result:
     _tag docker.io/library/build-processor:latest               docker.io/library/build-processor:latest
     _tag docker.io/library/nix-neo4j:latest                     docker.io/library/neo4j:5.26.2
     _tag docker.io/library/polar-nu-init:latest                 docker.io/library/polar-nu-init:latest
+    _tag docker.io/library/cert-issuer:latest        docker.io/library/cert-issuer:latest
+    _tag docker.io/library/polar-cert-client:latest  docker.io/library/polar-cert-client:latest
     echo "Core images loaded and tagged."
 
 # Render manifests for the local cluster.

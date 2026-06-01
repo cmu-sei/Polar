@@ -7,7 +7,6 @@
 , ...
 }:
 let
-
   server = craneLib.buildPackage (crateArgs // {
     pname = "cert-issuer";
     cargoExtraArgs = "--bin cert-issuer --locked";
@@ -29,8 +28,7 @@ let
     doCheck = false;
   });
 
-
-  # TODO: Integrate this image with the larger container library
+  # TODO: Integrate these images with the larger container library
   polarUid = "10000";
   polarGid = "10000";
 
@@ -110,7 +108,53 @@ let
     };
   };
 
+  # Minimal init container image for the cert-client binary.
+  # Runs once at pod startup, obtains a signed certificate from the
+  # cert-issuer, writes the bundle to a shared emptyDir volume, and exits.
+  # No shell or busybox needed — the binary is self-contained.
+  clientImage = pkgs.dockerTools.buildLayeredImage {
+    name = "polar-cert-client";
+    tag  = "latest";
+
+    contents = [
+      client
+      pkgs.iana-etc
+      pkgs.cacert
+    ];
+
+    fakeRootCommands = ''
+      # Identity files
+      mkdir -p ./etc
+      cp ${passwdFile} ./etc/passwd
+      cp ${groupFile}  ./etc/group
+
+      # cert output directory — shadowed by emptyDir mount in the pod spec
+      mkdir -p ./etc/tls/certs
+      chown ${polarUid}:${polarGid} ./etc/tls/certs
+
+      # SA token directory — shadowed by projected volume mount
+      mkdir -p ./workspace
+      chown ${polarUid}:${polarGid} ./workspace
+    '';
+
+    enableFakechroot = true;
+
+    config = {
+      Entrypoint = [ "${client}/bin/cert-client" ];
+      Cmd        = [];
+      User       = "${polarUid}:${polarGid}";
+      WorkingDir = "/home/polar";
+      Env = [
+        "SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
+      ];
+      Labels = {
+        "org.opencontainers.image.title"       = "polar-cert-client";
+        "org.opencontainers.image.description" = "Polar mTLS certificate init container";
+      };
+    };
+  };
+
 in
 {
-  inherit server client setupBin serverImage;
+  inherit server client setupBin serverImage clientImage;
 }

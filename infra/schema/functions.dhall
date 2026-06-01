@@ -174,4 +174,24 @@ let DockerRegistrySecret =
                 ]
             }
 
-in { makeGraphEnv, makeOpaqueSecret, makeDeployment, DockerRegistrySecret, mkProxySecret, ProxyVolume, ProxyMount, ProxyEnv, GraphProxyEnv }
+let makeCertClientInitContainer =
+      \(certIssuerUrl : Text) ->
+      \(certClientImage : Text) ->
+      \(audience : Text) ->
+        kubernetes.Container::{
+        , name  = "cert-client"
+        , image = Some certClientImage
+        , args  = Some
+          [ "--cert-issuer-url", certIssuerUrl
+          , "--token-path",      "/workspace/token"
+          , "--cert-dir",        "/etc/tls/certs"
+          , "--cert-type",       "client"
+          ]
+        , securityContext = Some Constants.DropAllCapSecurityContext
+        , volumeMounts = Some
+          [ kubernetes.VolumeMount::{ name = Constants.certVolumeName,    mountPath = "/etc/tls/certs" }
+          , kubernetes.VolumeMount::{ name = Constants.saTokenVolumeName, mountPath = "/workspace"     }
+          ]
+        }
+
+in { makeGraphEnv, makeOpaqueSecret, makeDeployment, DockerRegistrySecret, mkProxySecret, ProxyVolume, ProxyMount, ProxyEnv, GraphProxyEnv, makeCertClientInitContainer }

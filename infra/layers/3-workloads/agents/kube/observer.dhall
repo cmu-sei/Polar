@@ -10,32 +10,28 @@ let render =
           , image              : Text
           , imagePullPolicy    : Text
           , imagePullSecrets   : List { name : Optional Text }
+          , certClientImage    : Text
+          , certIssuerUrl      : Text
+          , saTokenAudience    : Text
           , serviceAccountName : Text
           , secretName         : Text
-          , tlsSecretName      : Text
           , proxyCACert        : Optional Text
           }
       ) ->
-
         let volumes =
-              [ kubernetes.Volume::{ name = v.tlsSecretName, secret = Some kubernetes.SecretVolumeSource::{ secretName = Some v.tlsSecretName } }
-              , kubernetes.Volume::{ name = v.secretName,    secret = Some kubernetes.SecretVolumeSource::{ secretName = Some v.secretName    } }
+              [ Constants.certEmptyDirVolume
+              , Constants.saTokenVolume v.saTokenAudience
+              , kubernetes.Volume::{ name = v.secretName, secret = Some kubernetes.SecretVolumeSource::{ secretName = Some v.secretName } }
               ] # functions.ProxyVolume v.proxyCACert
 
         let env =
               Constants.commonClientEnv
               # functions.ProxyEnv v.proxyCACert
-              # [ kubernetes.EnvVar::{
-                  , name      = "KUBE_TOKEN"
-                  , valueFrom = Some kubernetes.EnvVarSource::{
-                    , secretKeyRef = Some kubernetes.SecretKeySelector::{ name = Some v.secretName, key = "token" }
-                    }
-                  }
-                ]
+              # [ kubernetes.EnvVar::{ name = "KUBE_TOKEN", valueFrom = Some kubernetes.EnvVarSource::{ secretKeyRef = Some kubernetes.SecretKeySelector::{ name = Some v.secretName, key = "token" } } } ]
 
         let mounts =
-              [ kubernetes.VolumeMount::{ name = v.tlsSecretName, mountPath = Constants.tlsPath, readOnly = Some True }
-              , kubernetes.VolumeMount::{ name = v.secretName,    mountPath = "/var/run/secrets/kubernetes.io/serviceaccount" }
+              [ Constants.certVolumeMount
+              , kubernetes.VolumeMount::{ name = v.secretName, mountPath = "/var/run/secrets/kubernetes.io/serviceaccount" }
               ] # functions.ProxyMount v.proxyCACert
 
         in  kubernetes.Deployment::{
@@ -49,6 +45,7 @@ let render =
                   , imagePullSecrets   = Some v.imagePullSecrets
                   , serviceAccountName = Some v.serviceAccountName
                   , volumes            = Some volumes
+                  , initContainers     = Some [ functions.makeCertClientInitContainer v.certIssuerUrl v.certClientImage v.saTokenAudience ]
                   , containers =
                     [ kubernetes.Container::{
                       , name            = v.name

@@ -22,20 +22,32 @@ let GraphNamespace = "polar-graph"
 -- =============================================================================
 -- TLS / mTLS
 -- =============================================================================
+-- Paths match cert-client defaults: --cert-dir /etc/tls/certs
 
-let tlsPath = "/etc/tls"
+let tlsPath = "/etc/tls/certs"
 
 let mtls =
-      { commonName              = "polar"
-      , caCertificateIssuerName = "ca-issuer"
-      , caCertificateRequest    = "ca-certificate"
-      , caCertName              = "ca-cert"
-      , leafIssuerName          = "polar-leaf-issuer"
-      , caCertPath              = "${tlsPath}/ca.crt"
-      , certPath                = "${tlsPath}/tls.crt"
-      , keyPath                 = "${tlsPath}/tls.key"
-      , proxyCertificate        = "proxy-ca-cert"
+      { commonName  = "polar"
+      , caCertPath  = "${tlsPath}/ca.pem"
+      , certPath    = "${tlsPath}/cert.pem"
+      , keyPath     = "${tlsPath}/key.pem"
+      , proxyCertificate = "proxy-ca-cert"
       }
+
+-- =============================================================================
+-- Cert-issuer
+-- =============================================================================
+-- The cert-client init container talks to this URL to obtain its certificate.
+-- Matches the cert-issuer Service name and port defined in 2-services/cert-issuer/.
+
+let certIssuerUrl =
+      "http://cert-issuer.${PolarNamespace}.svc.cluster.local:8443"
+
+-- Volume and mount names used by every agent pod's cert-client init container.
+let certVolumeName    = "polar-certs"
+let saTokenVolumeName = "sa-token"
+-- Path where the projected SA token is mounted — matches cert-client default.
+let saTokenPath = "/workspace/token"
 
 -- =============================================================================
 -- Cassini
@@ -104,7 +116,6 @@ let ArtifactLinkerName     = "artifact-linker"
 let ProvenanceLinkerName   = "provenance-linker"
 let ProvenanceResolverName = "provenance-resolver"
 
--- Secret name only — the value (DOCKER_AUTH_JSON) is managed in secrets/shared/
 let OciRegistrySecret = { name = "oci-registry-auth" }
 
 -- =============================================================================
@@ -136,36 +147,45 @@ let commonClientTls
       , client_ca_cert_path     = mtls.caCertPath
       }
 
-let polarAgentCertificateSpec =
-      { commonName  = mtls.commonName
-      , dnsNames    = [ cassiniDNSName ]
-      , duration    = "2160h"
-      , issuerRef   = { kind = "Issuer", name = mtls.leafIssuerName }
-      , renewBefore = "360h"
-      , secretName  = "cassini-tls"
-      }
-
 -- =============================================================================
--- Common volumes and env vars
--- Mounted / injected into every agent pod.
+-- Common volumes
+-- Every agent pod mounts these two volumes: one emptyDir for the cert bundle
+-- written by the cert-client init container, one projected SA token for the
+-- init container to authenticate against the cert-issuer.
 -- =============================================================================
 
-let ClientTlsVolume =
+let certEmptyDirVolume =
       kubernetes.Volume::{
-      , name   = "client-tls"
-      , secret = Some kubernetes.SecretVolumeSource::{
-          , secretName = Some "client-tls"
-          }
+      , name      = certVolumeName
+      , emptyDir  = Some kubernetes.EmptyDirVolumeSource::{=}
       }
 
-let ClientTlsVolumeMount =
+let saTokenVolume =
+      \(audience : Text) ->
+        kubernetes.Volume::{
+        , name = saTokenVolumeName
+        , projected = Some kubernetes.ProjectedVolumeSource::{
+          , sources = Some
+            [ kubernetes.VolumeProjection::{
+              , serviceAccountToken = Some kubernetes.ServiceAccountTokenProjection::{
+                , path     = "token"
+                , audience = Some audience
+                , expirationSeconds = Some 3600
+                }
+              }
+            ]
+          }
+        }
+
+let certVolumeMount =
       kubernetes.VolumeMount::{
-      , name      = CassiniServerCertificateSecret
+      , name      = certVolumeName
       , mountPath = tlsPath
       }
 
--- Volumes mounted by every agent
-let commonVolumes = [ ClientTlsVolume ]
+-- =============================================================================
+-- Common env vars injected into every agent container
+-- =============================================================================
 
 let commonClientEnv =
       [ kubernetes.EnvVar::{ name = "TLS_CA_CERT",         value = Some mtls.caCertPath  }
@@ -179,6 +199,10 @@ in  { PolarNamespace
     , GraphNamespace
     , tlsPath
     , mtls
+    , certIssuerUrl
+    , certVolumeName
+    , saTokenVolumeName
+    , saTokenPath
     , cassiniPort
     , cassiniService
     , cassiniDNSName
@@ -201,9 +225,8 @@ in  { PolarNamespace
     , DropAllCapSecurityContext
     , RejectSidecarAnnotation
     , commonClientTls
-    , polarAgentCertificateSpec
-    , ClientTlsVolume
-    , ClientTlsVolumeMount
-    , commonVolumes
+    , certEmptyDirVolume
+    , saTokenVolume
+    , certVolumeMount
     , commonClientEnv
     }

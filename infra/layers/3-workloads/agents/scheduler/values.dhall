@@ -25,17 +25,5 @@ in  { name            = "polar-scheduler"
       , image = "polar-scheduler-processor:latest"
       }
 
-    , tls =
-      { certificateRequestName = "scheduler-agent-certificate"
-      , certificateSpec =
-        { commonName  = Constants.mtls.commonName
-        , dnsNames    = [ Constants.cassiniDNSName ]
-        , duration    = "2160h"
-        , issuerRef   = { kind = "Issuer", name = Constants.mtls.leafIssuerName }
-        , renewBefore = "360h"
-        , secretName  = "scheduler-agent-tls"
-        }
-      }
-
     , proxyCACert = None Text
     }

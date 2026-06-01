@@ -20,16 +20,4 @@ in  { name            = "openapi-agents"
       { name  = "openapi-processor"
       , image = "openapi-processor:latest"
       }
-
-    , tls =
-      { certificateRequestName = "openapi-agent-certificate"
-      , certificateSpec =
-        { commonName  = Constants.mtls.commonName
-        , dnsNames    = [ Constants.cassiniDNSName ]
-        , duration    = "2160h"
-        , issuerRef   = { kind = "Issuer", name = Constants.mtls.leafIssuerName }
-        , renewBefore = "360h"
-        , secretName  = "openapi-agent-tls"
-        }
-      }
     }

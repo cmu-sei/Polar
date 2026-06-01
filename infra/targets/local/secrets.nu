@@ -163,19 +163,20 @@ def main [target_dir: string, repo_root: string] {
         print "    Run: nix build .#tlsCerts first"
     }
 
-    # jira-agent-cert — cert-manager misses this on fresh apply
-    let jira_cert = ($repo_root | path join "manifests/jira-agent-cert.yaml")
-    if ($jira_cert | path exists) {
-        print "    applying jira-agent-cert.yaml..."
-        run-external "kubectl" "apply" "-f" $jira_cert
-    }
-
     # build-orchestrator-config — cyclops.yaml as a secret
     let cyclops_yaml = ($target_dir | path join "conf/cyclops.yaml")
     if ($cyclops_yaml | path exists) {
         kubectl_upsert_secret "build-orchestrator-config" "polar" [] [$"cyclops.yaml=($cyclops_yaml)"]
     } else {
         print $"    WARNING: cyclops.yaml not found at ($cyclops_yaml) — build-orchestrator will not start"
+    }
+
+    # git-config — StaticCredentialConfig JSON for the git observer
+    let git_config = ($target_dir | path join "conf/git.json")
+    if ($git_config | path exists) {
+        kubectl_upsert_secret "git-config" "polar" [] [$"git.json=($git_config)"]
+    } else {
+        print $"    WARNING: git.json not found at ($target_dir)/conf/git.json — git observer will not start"
     }
 
     print ""

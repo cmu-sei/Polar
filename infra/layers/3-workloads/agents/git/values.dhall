@@ -9,8 +9,8 @@
 
 let Constants = ../../../../schema/constants.dhall
 
-in  { name            = "git-agents"
-    , imagePullPolicy = "IfNotPresent"
+in  { name             = "git-agents"
+    , imagePullPolicy  = "IfNotPresent"
     , imagePullSecrets = [] : List { name : Optional Text }
 
     , observer =
@@ -26,18 +26,6 @@ in  { name            = "git-agents"
     , scheduler =
       { name  = "git-scheduler"
       , image = "polar-git-scheduler:latest"
-      }
-
-    , tls =
-      { certificateRequestName = "git-agent-certificate"
-      , certificateSpec =
-        { commonName  = Constants.mtls.commonName
-        , dnsNames    = [ Constants.cassiniDNSName ]
-        , duration    = "2160h"
-        , issuerRef   = { kind = "Issuer", name = Constants.mtls.leafIssuerName }
-        , renewBefore = "360h"
-        , secretName  = "git-agent-tls"
-        }
       }
 
     , proxyCACert = None Text
