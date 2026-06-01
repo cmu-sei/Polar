@@ -72,66 +72,35 @@ impl Actor for RootSupervisor {
         match msg {
             SupervisorMessage::ClientEvent { event } => match event {
                 ClientEvent::Registered { .. } => {
-                    let neo_config = {
-                        let uri = std::env::var("GRAPH_ENDPOINT")
-                            .map_err(|_| ActorProcessingErr::from("GRAPH_ENDPOINT not set"))?;
-                        let user = std::env::var("GRAPH_USER")
-                            .map_err(|_| ActorProcessingErr::from("GRAPH_USER not set"))?;
-                        let password = std::env::var("GRAPH_PASSWORD")
-                            .map_err(|_| ActorProcessingErr::from("GRAPH_PASSWORD not set"))?;
-                        let db = std::env::var("GRAPH_DB").unwrap_or_else(|_| "neo4j".to_string());
+                    let (graph_controller, _) = GraphControllerActor::spawn_linked(
+                        Some(format!("{}.graph_controller", SERVICE_NAME)),
+                        GraphControllerActor,
+                        (),
+                        myself.get_cell(),
+                    )
+                    .await?;
 
-                        let mut builder = neo4rs::ConfigBuilder::default()
-                            .uri(uri)
-                            .user(user)
-                            .password(password)
-                            .db(db)
-                            .fetch_size(500)
-                            .max_connections(10);
+                    let (processor, _) = Actor::spawn_linked(
+                        Some(format!("{}.processor", SERVICE_NAME)),
+                        ScheduleInfoProcessor,
+                        (state.tcp_client.clone(), graph_controller),
+                        myself.clone().into(),
+                    )
+                    .await?;
+                    state.processor = Some(processor);
 
-                        if let Ok(cert) = std::env::var("GRAPH_CA_CERT") {
-                            builder = builder.with_client_certificate(cert);
-                        }
-
-                        builder.build().expect("Failed to build Neo4j config")
-                    };
-
-                    match neo4rs::Graph::connect(neo_config) {
-                        Ok(graph) => {
-                            let (graph_controller, _) = Actor::spawn_linked(
-                                Some(format!("{}.graph_controller", SERVICE_NAME)),
-                                GraphControllerActor,
-                                graph,
-                                myself.clone().into(),
-                            )
-                            .await?;
-                            let (processor, _) = Actor::spawn_linked(
-                                Some(format!("{}.processor", SERVICE_NAME)),
-                                ScheduleInfoProcessor,
-                                (state.tcp_client.clone(), graph_controller),
-                                myself.clone().into(),
-                            )
-                            .await?;
-                            state.processor = Some(processor);
-
-                            state.tcp_client.cast(TcpClientMessage::Subscribe {
-                                topic: "scheduler.in".to_string(),
-                                trace_ctx: None,
-                            })?;
-                            state.tcp_client.cast(TcpClientMessage::Subscribe {
-                                topic: "scheduler.adhoc".to_string(),
-                                trace_ctx: None,
-                            })?;
-                            state.tcp_client.cast(TcpClientMessage::Subscribe {
-                                topic: "events.#".to_string(),
-                                trace_ctx: None,
-                            })?;
-                        }
-                        Err(e) => {
-                            error!("Failed to connect to Neo4j: {:?}", e);
-                            myself.stop(Some(format!("Neo4j connection failed: {}", e)));
-                        }
-                    }
+                    state.tcp_client.cast(TcpClientMessage::Subscribe {
+                        topic: "scheduler.in".to_string(),
+                        trace_ctx: None,
+                    })?;
+                    state.tcp_client.cast(TcpClientMessage::Subscribe {
+                        topic: "scheduler.adhoc".to_string(),
+                        trace_ctx: None,
+                    })?;
+                    state.tcp_client.cast(TcpClientMessage::Subscribe {
+                        topic: "events.#".to_string(),
+                        trace_ctx: None,
+                    })?;
                 }
                 ClientEvent::MessagePublished { topic, payload, .. } => {
                     if let Some(p) = &state.processor {

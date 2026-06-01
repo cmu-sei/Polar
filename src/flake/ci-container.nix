@@ -178,6 +178,7 @@ let
     nixConf
     nixRegistry
     containerPolicy
+    oras
     git
     curl
     cacert

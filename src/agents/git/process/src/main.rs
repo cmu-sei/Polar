@@ -3,7 +3,6 @@ use cassini_types::ClientEvent;
 use chrono::Utc;
 use git_agent_common::{GIT_REPO_PROCESSING_TOPIC, GitRepositoryMessage};
 use polar::SupervisorMessage;
-use polar::get_neo_config;
 use polar::graph::controller::GraphControllerActor;
 use polar::graph::controller::IntoGraphKey;
 use polar::graph::{
@@ -227,13 +226,11 @@ impl Actor for GitRepoProcessingManager {
                 ClientEvent::Registered { .. } => {
                     // get graph connection
 
-                    let graph = neo4rs::Graph::connect(get_neo_config()?)?;
-
                     let (controller, _) = Actor::spawn_linked(
                         Some("linker.graph.controller".to_string()),
                         GraphControllerActor,
-                        graph,
-                        myself.clone().into(),
+                        (),
+                        myself.get_cell(),
                     )
                     .await?;
 

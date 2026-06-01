@@ -1,15 +1,18 @@
 use crate::BROKER_CLIENT_NAME;
 use crate::GraphOperable;
-use cassini_client::*;
 use cassini_types::ClientEvent;
 use k8s_openapi::api::apps::v1::{Deployment, ReplicaSet};
 use k8s_openapi::api::batch::v1::Job;
 use k8s_openapi::api::core::v1::Pod;
+use kube_common::{
+    KIND_KUSTOMIZATION, KIND_OCI_REPOSITORY, RESOURCE_APPLIED_ACTION, RESOURCE_DELETED_ACTION,
+    flux::{kustomization::Kustomization, oci_repositories::OciRepository},
+};
 use kube_common::{KUBERNETES_CONSUMER, RawKubeEvent};
-use kube_common::{RESOURCE_APPLIED_ACTION, RESOURCE_DELETED_ACTION};
-use neo4rs::{Config, Graph};
 use polar::SupervisorMessage;
-use polar::get_neo_config;
+use polar::cassini::CassiniClient;
+use polar::cassini::SubscribeRequest;
+use polar::cassini::TcpClient;
 use polar::graph::controller::{GraphController, GraphControllerActor};
 use ractor::Actor;
 use ractor::ActorProcessingErr;
@@ -117,8 +120,7 @@ impl ProjectionCache {
 pub struct ClusterConsumerSupervisor;
 
 pub struct ClusterConsumerSupervisorState {
-    graph_config: Config,
-    broker_client: ActorRef<TcpClientMessage>,
+    broker_client: TcpClient,
     graph_controller: Option<GraphController>,
     projection_cache: ProjectionCache,
 }
@@ -160,6 +162,7 @@ impl ClusterConsumerSupervisor {
         // 1) Parse the raw message into your RawKubeEvent
         let ev: RawKubeEvent = serde_json::from_slice(&payload)?;
 
+        // TODO: Define constants for these and match on them instead, these literals are also used in the marco calls to define their watchers
         match ev.kind.as_str() {
             "Pod" => Self::handle_event::<Pod>(ev, cache, graph_controller, tcp_client)?,
             "Deployment" => {
@@ -170,6 +173,12 @@ impl ClusterConsumerSupervisor {
             }
             "Job" => Self::handle_event::<Job>(ev, cache, graph_controller, tcp_client)?,
             "Node" => todo!("Nodes"),
+            KIND_OCI_REPOSITORY => {
+                Self::handle_event::<OciRepository>(ev, cache, graph_controller, tcp_client)?
+            }
+            KIND_KUSTOMIZATION => {
+                Self::handle_event::<Kustomization>(ev, cache, graph_controller, tcp_client)?
+            }
             _ => warn!("Unexpected resource type {}", ev.kind),
         }
 
@@ -190,38 +199,21 @@ impl Actor for ClusterConsumerSupervisor {
     ) -> Result<Self::State, ActorProcessingErr> {
         debug!("{myself:?} starting");
 
-        let graph_config = get_neo_config()?;
-        let events_output = std::sync::Arc::new(ractor::OutputPort::default());
-
-        events_output.subscribe(myself.clone(), |event| {
+        info!("Read neo configuration successfully.");
+        match TcpClient::spawn(BROKER_CLIENT_NAME, myself, |event| {
             Some(SupervisorMessage::ClientEvent { event })
-        });
-
-        let client_config = TCPClientConfig::new()?;
-
-        let (broker_client, _) = Actor::spawn_linked(
-            Some(BROKER_CLIENT_NAME.to_string()),
-            TcpClientActor,
-            TcpClientArgs {
-                config: client_config,
-                registration_id: None,
-                events_output: Some(events_output),
-                event_handler: None,
-            },
-            myself.clone().into(),
-        )
-        .await?;
-
-        let state = ClusterConsumerSupervisorState {
-            graph_config,
-            broker_client,
-            graph_controller: None,
-            projection_cache: ProjectionCache {
-                entries: HashMap::new(),
-            },
-        };
-
-        Ok(state)
+        })
+        .await
+        {
+            Ok(broker_client) => Ok(ClusterConsumerSupervisorState {
+                broker_client,
+                graph_controller: None,
+                projection_cache: ProjectionCache {
+                    entries: HashMap::new(),
+                },
+            }),
+            Err(e) => return Err(ActorProcessingErr::from(e)),
+        }
     }
 
     async fn handle(
@@ -234,27 +226,32 @@ impl Actor for ClusterConsumerSupervisor {
             SupervisorMessage::ClientEvent { event } => {
                 match event {
                     ClientEvent::Registered { .. } => {
-                        // try to conect to the graph
-                        let graph = Graph::connect(state.graph_config.clone())?;
-
-                        state.graph_controller = Actor::spawn_linked(
+                        match GraphControllerActor::spawn_linked(
                             Some("kubernetes.cluster.graph.controller".to_string()),
                             GraphControllerActor,
-                            graph,
-                            myself.clone().into(),
+                            (),
+                            myself.get_cell(),
                         )
-                        .await?
-                        .0
-                        .into();
+                        .await
+                        {
+                            Ok((graph_controller, _)) => {
+                                state.graph_controller = Some(graph_controller)
+                            }
+                            Err(e) => {
+                                error!("Error initializng graph controller! {e}");
+                                return Err(ActorProcessingErr::from(e));
+                            }
+                        }
 
+                        info!("Subscribing to topics...");
                         // subscribe
                         //
-                        if let Err(e) = state.broker_client.cast(TcpClientMessage::Subscribe {
+                        if let Err(e) = state.broker_client.subscribe(SubscribeRequest {
                             topic: KUBERNETES_CONSUMER.into(),
                             trace_ctx: None,
                         }) {
                             error!("{e}");
-                            myself.stop(None);
+                            return Err(ActorProcessingErr::from(e.to_string()));
                         }
                     }
                     ClientEvent::MessagePublished { topic, payload, .. } => {

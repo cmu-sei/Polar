@@ -46,9 +46,8 @@ use x509_parser::prelude::*;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedCsr {
-    /// The SAN values from the CSR. v1 expects exactly one DNS name
-    /// matching the workload identity. Multi-SAN CSRs are rejected
-    /// in v1 to keep the identity binding unambiguous.
+    /// matching the workload identity, optionally followed by extra
+    /// SANs requested by the client. The identity SAN is always first.
     pub san: Vec<String>,
     /// Public key algorithm (e.g., "Ed25519", "ECDSA-P256").
     /// Used both for telemetry and for enforcing allowed algorithms.
@@ -71,6 +70,12 @@ pub enum CsrError {
     DisallowedAlgorithm(String),
     #[error("CSR SAN '{san}' does not match workload identity '{identity}'")]
     IdentityMismatch { san: String, identity: String },
+    #[error("wildcard SANs are not permitted: {0}")]
+    WildcardSanRejected(String),
+    #[error("invalid SAN: {0}")]
+    InvalidSan(String),
+    #[error("IP address SANs are not permitted: {0}")]
+    IpSanRejected(String),
 }
 
 // ---------------------------------------------------------------------------
@@ -143,8 +148,7 @@ pub fn parse_csr(pem: &str) -> Result<ParsedCsr, CsrError> {
 
     match san_strings.len() {
         0 => return Err(CsrError::NoSan),
-        1 => {} // happy path
-        _ => return Err(CsrError::MultipleSans),
+        _ => {} // one identity SAN + zero or more extras are valid
     }
 
     // ---- Stage 5: public key algorithm ------------------------------------
@@ -188,6 +192,37 @@ pub fn verify_identity(csr: &ParsedCsr, expected_identity: &str) -> Result<(), C
             identity: expected_identity.to_string(),
         })
     }
+}
+
+/// Validate extra SANs supplied by the client in the IssueRequest.
+///
+/// Called by the handler after parse_csr and verify_identity, using
+/// the extra_sans field from the wire request. Returns the full SAN
+/// list — identity first, validated extras appended — ready to pass
+/// to the CA for signing.
+///
+/// Extra SANs are caller-supplied and are a weaker claim than the
+/// identity SAN (not backed by OIDC). Every extra SAN is logged at
+/// INFO for auditability. Wildcards and IPs are rejected outright.
+pub fn validate_extra_sans(identity: &str, extra_sans: &[String]) -> Result<Vec<String>, CsrError> {
+    let mut all_sans = vec![identity.to_string()];
+
+    for san in extra_sans {
+        let san = san.trim();
+        if san.is_empty() {
+            return Err(CsrError::InvalidSan(san.to_string()));
+        }
+        if san.contains('*') {
+            return Err(CsrError::WildcardSanRejected(san.to_string()));
+        }
+        if san.parse::<std::net::IpAddr>().is_ok() {
+            return Err(CsrError::IpSanRejected(san.to_string()));
+        }
+        tracing::info!(extra_san = %san, identity = %identity, "extra SAN requested at issuance");
+        all_sans.push(san.to_string());
+    }
+
+    Ok(all_sans)
 }
 
 /// The set of key algorithms the cert issuer accepts in v1.

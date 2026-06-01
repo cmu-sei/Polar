@@ -38,9 +38,9 @@ pub struct IssueRequest {
     /// PEM-encoded CSR. The SAN must match the workload identity claim
     /// from the bearer token, or the cert issuer rejects with `IDENTITY_MISMATCH`.
     pub csr_pem: String,
-
-    #[serde(default)]
     pub cert_type: CertType,
+    #[serde(default)]
+    pub extra_sans: Vec<String>,
 }
 
 /// Successful response body for `POST /issue`.

@@ -43,12 +43,6 @@ let img = \(name : Text) -> "${name}:${commitSha}"
 
 let tls = Constants.commonClientTls
 
-let imagePullSecrets =
-      [ kubernetes.LocalObjectReference::{
-        , name = Some Constants.imagePullSecretName
-        }
-      ]
-
 let certIssuer
     : Agents.CertIssuer
     = { name = "cert-issuer"
@@ -102,7 +96,7 @@ let neo4j =
       }
 
 let neo4jDNSName =
-      "${Constants.neo4jServiceName}.${Constants.GraphNamespace}.svc.cluster.local"
+      "${Constants.neo4jServiceName}.${Constants.PolarNamespace}.svc.cluster.local"
 
 let neo4jBoltAddr = "bolt+s://${neo4jDNSName}:${Natural/show neo4j.ports.bolt}"
 
@@ -223,8 +217,8 @@ let buildProcessor
 
 let proxyCACert = None Text
 
-in  { imagePullSecrets
-    , imagePullPolicy
+in  {
+    imagePullPolicy
     , certIssuer
     , cassini
     , gitlabObserver

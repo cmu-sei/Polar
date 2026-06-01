@@ -38,7 +38,6 @@ use tracing::{instrument, trace};
 pub struct ConsumerSupervisor;
 
 pub struct ConsumerSupervisorState {
-    graph_config: neo4rs::Config,
     tcp_client: ActorRef<TcpClientMessage>,
     u_consumer: Option<GitlabConsumer>,
 }
@@ -175,10 +174,8 @@ impl Actor for ConsumerSupervisor {
         )
         .await?;
 
-        let graph_config = get_neo_config()?;
         let state = ConsumerSupervisorState {
             tcp_client,
-            graph_config,
             u_consumer: None,
         };
 
@@ -195,34 +192,29 @@ impl Actor for ConsumerSupervisor {
             SupervisorMessage::ClientEvent { event } => match event {
                 ClientEvent::Registered { .. } => {
                     info!("Initializing agent.");
-                    if let Ok(graph) = neo4rs::Graph::connect(state.graph_config.clone()) {
-                        match Actor::spawn_linked(
-                            Some("polar.gitlab.consumer.graph".to_string()),
-                            GraphControllerActor,
-                            graph,
-                            myself.clone().into(),
-                        )
-                        .await
-                        {
-                            Ok((graph_controller, _)) => {
-                                // TODO: I guess technically we could wrap this state in an arc and not have to copy it at all?
-                                let c_state = GitlabConsumerState {
-                                    graph_controller,
-                                    tcp_client: state.tcp_client.clone(),
-                                };
+                    match Actor::spawn_linked(
+                        Some("polar.gitlab.consumer.graph".to_string()),
+                        GraphControllerActor,
+                        (),
+                        myself.get_cell(),
+                    )
+                    .await
+                    {
+                        Ok((graph_controller, _)) => {
+                            // TODO: I guess technically we could wrap this state in an arc and not have to copy it at all?
+                            let c_state = GitlabConsumerState {
+                                graph_controller,
+                                tcp_client: state.tcp_client.clone(),
+                            };
 
-                                Self::spawn_children(myself.get_cell(), state, c_state).await?;
-                            }
-                            Err(e) => {
-                                error!("{e}");
-                                myself.stop(Some(e.to_string()));
-                            }
+                            Self::spawn_children(myself.get_cell(), state, c_state).await?;
                         }
-                    } else {
-                        let err = "Failed to initialize connection to graph database.".into();
-                        error!("{err}");
-                        myself.stop(Some(err));
+                        Err(e) => {
+                            error!("{e}");
+                            myself.stop(Some(e.to_string()));
+                        }
                     }
+
                     info!("Finished initialization. Waiting for messages...");
                 }
                 ClientEvent::MessagePublished { topic, payload, .. } => {

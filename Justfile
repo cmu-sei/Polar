@@ -391,8 +391,6 @@ update-dhall-pins:
     echo "nix-container-lib commit: $COMMIT"
     echo "Dhall prelude hash:       $DHALL_HASH"
     echo "Updating src/containers/container-lib.dhall..."
-    sed -i "s|/nix-container-lib/[a-f0-9]\{40\}/dhall/prelude.dhall|/nix-container-lib/${COMMIT}/dhall/prelude.dhall|g" src/containers/container-lib.dhall
-    sed -i "s|sha256:[a-f0-9]\{64\}|${DHALL_HASH}|g" src/containers/container-lib.dhall
     echo "Re-rendering container.nix files..."
     for f in $(grep -rl "container-lib.dhall" src/ --include="*.dhall" | grep -v 'container-lib.dhall'); do
         DIR="$(dirname $f)"
@@ -471,7 +469,6 @@ run-dev-container:
         -e CREATE_UID="$(id -u)" \
         -e CREATE_GID="$(id -g)" \
         -e ATUIN_SESSION_NAME=polar-dev \
-        -e DROPBEAR_ENABLE=1 \
         -v $PWD:/workspace \
         -v $HOME/.config/atuin:/root/.config/atuin:ro \
         -v $HOME/.local/share/atuin:/root/.local/share/atuin \
@@ -509,7 +506,26 @@ llm-qwen:
 llm-omnicoder-rocm-16GB:
     llama-server \
         --hf-repo Tesslate/OmniCoder-9B-GGUF \
-        --hf-file omnicoder-9b-q4_k_m.gguf \
+        --hf-file omnicoder-9b-q8_0.gguf \
+        --ctx-size 262144 \
+        --n-gpu-layers 99 \
+        --flash-attn on \
+        --alias "local-model" \
+        --port 8080 --host 0.0.0.0 \
+        --temperature 0.3 \
+        --top-p 0.95 \
+        --top-k 20 \
+        --min-p 0.0 \
+        --repeat-penalty 1.0 \
+        --jinja \
+        --spec-type ngram-mod \
+        -ub 512 \
+        -ctk q8_0 -ctv q8_0 > /tmp/llama-server.log 2>&1
+
+llm-omnicoder-nvidia-12GB:
+    llama-server \
+        --hf-repo Tesslate/OmniCoder-9B-GGUF \
+        --hf-file omnicoder-9b-q8_0.gguf \
         --ctx-size 131072 \
         --n-gpu-layers 99 \
         --flash-attn on \
@@ -523,42 +539,7 @@ llm-omnicoder-rocm-16GB:
         --jinja \
         --spec-type ngram-mod \
         -ub 512 \
-        -ctk q4_0 -ctv q4_0 > /tmp/llama-server.log 2>&1
-
-llm-omnicoder-nvidia-12GB:
-    llama-server \
-        --hf-repo Tesslate/OmniCoder-9B-GGUF \
-        --hf-file omnicoder-9b-q4_k_m.gguf \
-        --ctx-size 262144 \
-        --n-gpu-layers 99 \
-        --flash-attn on \
-        --alias "local-model" \
-        --port 8080 --host 0.0.0.0 \
-        --temperature 0.3 \
-        --top-p 0.95 \
-        --top-k 20 \
-        --min-p 0.0 \
-        --repeat-penalty 1.0 \
-        --jinja \
-        -ub 512 \
-        -ctk q4_0 -ctv q4_0 > /tmp/llama-server.log 2>&1
-
-llm-qwen35-uncensored-nvidia-12GB:
-    llama-server \
-        -hf LEONW24/Qwen3.5-9B-Uncensored:Q4_K_M \
-        --ctx-size 131072 \
-        --n-gpu-layers 99 \
-        --flash-attn on \
-        --alias "local-model" \
-        --port 8080 --host 0.0.0.0 \
-        --temperature 0.3 \
-        --top-p 0.95 \
-        --top-k 20 \
-        --min-p 0.0 \
-        --repeat-penalty 1.0 \
-        --jinja \
-        -ub 512 \
-        -ctk q4_0 -ctv q4_0 > /tmp/llama-server.log 2>&1
+        -ctk q8_0 -ctv q8_0 > /tmp/llama-server.log 2>&1
 
 # ── Inside container: Pi agent ────────────────────────────────────────────────
 

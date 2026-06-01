@@ -326,12 +326,10 @@ impl Actor for BuildProcessorSupervisor {
                 ClientEvent::Registered { .. } => {
                     info!("Cassini client registered — connecting to Neo4j");
 
-                    let graph = neo4rs::Graph::connect(state.graph_config.clone())?;
-
                     state.graph_controller = Actor::spawn_linked(
                         Some("cyclops.processor.graph.controller".to_string()),
                         GraphControllerActor,
-                        graph,
+                        (),
                         myself.clone().into(),
                     )
                     .await?

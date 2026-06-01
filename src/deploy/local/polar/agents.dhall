@@ -43,7 +43,7 @@ let certMount =
 let baseMounts = certMount # functions.ProxyMount proxyCACert
 
 let envVars =
-      [ kubernetes.EnvVar::{ name = "RUST_LOG", value = Some "debug" } ]
+      [ kubernetes.EnvVar::{ name = "RUST_LOG", value = Some "trace" } ]
       # Constants.commonClientEnv
 
 -- Init script ConfigMap volume — same script mounted into every agent pod.
@@ -98,7 +98,7 @@ let neo4jEnvVars =
             }
           }
         }
-      , kubernetes.EnvVar::{ name = "GRAPH_CA_CERT", value = Some "/etc/neo4j-ca/ca.pem" }
+        , kubernetes.EnvVar::{ name = "GRAPH_CA_CERT", value = Some "/home/polar/certs/ca.pem" }
       ]
 
 -- =============================================================================
@@ -120,20 +120,9 @@ let makeCertInit =
 -- Init script ConfigMap — emitted once, mounted into every agent pod
 -- =============================================================================
 
-let agentInitScriptConfigMap =
-      functions.makeNuInitScript
-        Constants.initScriptConfigMapName
-        Constants.polarInitScript
-
 -- =============================================================================
 -- Secrets
 -- =============================================================================
-
-let graphSecret =
-      functions.makeOpaqueSecret
-        "polar-graph-pw"
-        Constants.neo4jSecret.key
-        (env:GRAPH_PASSWORD as Text)
 
 let gitlabSecret =
       ( functions.makeOpaqueSecret
@@ -352,7 +341,6 @@ let gitlabAgentDeployment =
       functions.makeDeployment
         "gitlab-agents"
         kubernetes.PodSpec::{
-        , imagePullSecrets   = Some values.imagePullSecrets
         , serviceAccountName = Some "gitlab-observer-sa"
         , initContainers     = Some [ makeCertInit values.gitlabObserver.certClient ]
         , containers =
@@ -388,7 +376,6 @@ let gitAgentDeployment =
       functions.makeDeployment
         "git-agents"
         kubernetes.PodSpec::{
-        , imagePullSecrets   = Some values.imagePullSecrets
         , serviceAccountName = Some "git-observer-sa"
         , initContainers     = Some [ makeCertInit values.gitObserver.certClient ]
         , containers =
@@ -465,13 +452,7 @@ let kubeObserverEnv =
           }
         ]
 
-let kubeConsumerEnv =
-      envVars
-      # functions.makeGraphEnv
-          values.neo4jBoltAddr
-          values.kubeConsumer.graph
-          Constants.graphSecretKeySelector
-          (Some "/etc/neo4j-ca/ca.pem")
+let kubeConsumerEnv = (envVars # neo4jEnvVars)
 
 let kubeObserverVolumeMounts =
       baseMounts
@@ -485,7 +466,6 @@ let kubeAgentDeployment =
       functions.makeDeployment
         "kube-agents"
         kubernetes.PodSpec::{
-        , imagePullSecrets   = Some values.imagePullSecrets
         , serviceAccountName = Some values.kubeObserver.serviceAccountName
         , initContainers     = Some [ makeCertInit values.kubeObserver.certClient ]
         , containers =
@@ -524,7 +504,6 @@ let kubeAgentDeployment =
               functions.makeDeployment
                 "build-processor"
                 kubernetes.PodSpec::{
-                , imagePullSecrets   = Some values.imagePullSecrets
                 , serviceAccountName = Some "build-processor-sa"
                 , initContainers     = Some [ makeCertInit values.buildProcessor.certClient ]
                 , containers =
@@ -549,7 +528,6 @@ let linkerDeployment =
         ( functions.makeDeployment
             Constants.ArtifactLinkerName
             kubernetes.PodSpec::{
-            , imagePullSecrets   = Some values.imagePullSecrets
             , serviceAccountName = Some "linker-sa"
             , initContainers     = Some [ makeCertInit values.linker.certClient ]
             , containers =
@@ -590,7 +568,6 @@ let resolverDeployment =
         ( functions.makeDeployment
             Constants.RegistryResolverName
             kubernetes.PodSpec::{
-            , imagePullSecrets   = Some values.imagePullSecrets
             , serviceAccountName = Some "resolver-sa"
             , initContainers     = Some [ makeCertInit values.resolver.certClient ]
             , containers =
@@ -620,7 +597,6 @@ in  [ kubernetes.Resource.ClusterRole    kubeAgentClusterRole
     , kubernetes.Resource.Deployment     resolverDeployment
     , kubernetes.Resource.RoleBinding    kubeAgentRoleBinding
     , kubernetes.Resource.Secret         gitlabSecret
-    , kubernetes.Resource.Secret         graphSecret
     , kubernetes.Resource.Secret         gitObserverSecret
     , kubernetes.Resource.Secret         kubeAgentServiceAccountToken
     , kubernetes.Resource.Secret         neo4jBoltCASecret
@@ -635,5 +611,4 @@ in  [ kubernetes.Resource.ClusterRole    kubeAgentClusterRole
     , kubernetes.Resource.ServiceAccount kubeConsumerSA
     , kubernetes.Resource.ServiceAccount linkerSA
     , kubernetes.Resource.ServiceAccount resolverSA
-    , kubernetes.Resource.ConfigMap      agentInitScriptConfigMap
     ]

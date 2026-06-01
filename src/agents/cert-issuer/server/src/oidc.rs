@@ -561,6 +561,7 @@ impl JwksSource for HttpJwksSource {
                 "/var/run/secrets/kubernetes.io/serviceaccount/token".to_string()
             }))
         {
+            debug!("Presenting discovered JWKS token");
             request = request.bearer_auth(token.trim());
         }
 

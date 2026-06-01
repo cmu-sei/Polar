@@ -50,7 +50,7 @@ pub enum SupervisorMessage {
 /// Until this is resolved, a workaround is to spawn another actor to serve as a subscriber/forwarder to push messages where they need to go.
 /// It's also possible to just have the client attempt to forward any mesages that come from the broker straight to its supervisor, as that's where they
 /// always go anyway. For now, we can leave this up to our future selves to decide what's best
-#[deprecated = "Functionality moved to TcpClient::spawn()"]
+#[deprecated = "There is a known bug in the ractor framework that makes output ports drop messages and freeze under high load. Functionality moved to TcpClient::spawn()"]
 pub async fn spawn_tcp_client<M, F>(
     service_name: &str,
     supervisor: ActorRef<M>,
@@ -780,46 +780,6 @@ pub fn get_web_client() -> Result<Client, ActorProcessingErr> {
             Ok(ClientBuilder::new().build()?)
         }
     }
-}
-
-/// Standard helper fn to get a neo4rs configuration based on environment variables
-/// All of the following variables are required fields unless otherwise specified.
-/// GRAPH_DB - name of the neo4j database
-/// GRAPH_PASSWORD - password credential used to sign in
-/// GRAPH_USER - the username to authenticate with the database
-/// GRAPH_ENDPOINT - endpoint of the database
-/// GRAPH_CA_CERT - an optional proxy CA certificate if needed to connect to the neo4j instance.
-pub fn get_neo_config() -> Result<neo4rs::Config, ractor::ActorProcessingErr> {
-    let database_name = std::env::var("GRAPH_DB")?;
-    let neo_user = std::env::var("GRAPH_USER")?;
-    let neo_password = std::env::var("GRAPH_PASSWORD")?;
-    let neo4j_endpoint = std::env::var("GRAPH_ENDPOINT")?;
-    info!("Using Neo4j database at {neo4j_endpoint}");
-
-    let config = match std::env::var("GRAPH_CA_CERT") {
-        Ok(client_certificate) => {
-            info!("Found GRAPH_CA_CERT at {client_certificate}. Configuring graph client.");
-            neo4rs::ConfigBuilder::default()
-                .uri(neo4j_endpoint)
-                .user(neo_user)
-                .password(neo_password)
-                .db(database_name)
-                .fetch_size(500)
-                .with_client_certificate(client_certificate)
-                .max_connections(10)
-                .build()?
-        }
-        Err(_) => neo4rs::ConfigBuilder::default()
-            .uri(neo4j_endpoint)
-            .user(neo_user)
-            .password(neo_password)
-            .db(database_name)
-            .fetch_size(500)
-            .max_connections(10)
-            .build()?,
-    };
-
-    Ok(config)
 }
 
 /// A canonical reference to a container image

@@ -37,19 +37,6 @@ fn empty_string_is_rejected() {
 }
 
 #[test]
-fn csr_with_multiple_sans_is_rejected_in_v1() {
-    // v1's identity binding is unambiguous: one SAN, one identity.
-    // Multi-SAN CSRs are rejected. This is a v1 policy choice; v2
-    // may relax it if we have a use case.
-    let pem = generate_csr_pem(vec![
-        "agent.polar.svc.cluster.local".to_string(),
-        "other.polar.svc.cluster.local".to_string(),
-    ]);
-    let err = parse_csr(&pem).expect_err("multi-SAN must be rejected in v1");
-    assert_eq!(err, CsrError::MultipleSans);
-}
-
-#[test]
 fn csr_with_no_san_is_rejected() {
     let pem = generate_csr_pem(vec![]);
     let err = parse_csr(&pem).expect_err("no-SAN CSR must be rejected");

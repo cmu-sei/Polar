@@ -146,12 +146,10 @@ impl Actor for ProvenanceSupervisor {
                         trace_ctx: WireTraceCtx::from_current_span(),
                     })?;
 
-                    let graph = neo4rs::Graph::connect(get_neo_config()?)?;
-
                     let (compiler, _) = Actor::spawn_linked(
                         Some("linker.graph.controller".to_string()),
                         GraphControllerActor,
-                        graph,
+                        (),
                         myself.clone().into(),
                     )
                     .await?;

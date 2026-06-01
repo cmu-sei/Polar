@@ -35,7 +35,12 @@ if not ($token_path | path exists) {
 
 print $"obtaining ($cert_type) cert from ($issuer_url)"
 
-cert-client --cert-issuer-url $issuer_url --token-path $token_path --cert-dir $cert_dir --cert-type $cert_type
+# Request certificates, hardcoded to use ecdsa-p256 algorithms until it becomes necessary/desirable to use another.
+let extra_sans = ($env | get -o POLAR_EXTRA_SANS | default "" | split row "," | each { str trim } | where { |s| $s != "" })
+
+let extra_san_flags = ($extra_sans | each { |san| ["--extra-san", $san] } | flatten)
+
+cert-client --cert-issuer-url $issuer_url --token-path $token_path --cert-dir $cert_dir --cert-type $cert_type --key-algorithm ecdsa-p256 ...$extra_san_flags
 
 let exit_code = $env.LAST_EXIT_CODE
 

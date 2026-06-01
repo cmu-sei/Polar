@@ -7,6 +7,7 @@ use kube::Config;
 use kube::ResourceExt;
 use kube::runtime::{watcher, watcher::Event};
 use kube::{Api, Client, api::ListParams};
+use kube_common::{KIND_KUSTOMIZATION, KIND_OCI_REPOSITORY};
 use polar::{SupervisorMessage, spawn_tcp_client};
 use ractor::concurrency::Duration;
 use ractor::{Actor, ActorProcessingErr, ActorRef, SupervisionEvent, async_trait};
@@ -16,7 +17,8 @@ use tracing::{debug, error, info, warn};
 use tracing::{instrument, trace};
 
 use crate::{
-    NamespacedWatcherState, TCP_CLIENT_NAME, WatcherMsg, emit_event, impl_namespaced_watcher,
+    GlobalWatcherState, KustomizationWatcher, NamespacedWatcherState, OciRepositoryWatcher,
+    TCP_CLIENT_NAME, WatcherMsg, emit_event, impl_namespaced_watcher,
 };
 use futures::{StreamExt, TryStreamExt};
 use kube_common::{RESOURCE_APPLIED_ACTION, RESOURCE_DELETED_ACTION, RawKubeEvent};
@@ -33,6 +35,10 @@ pub struct ClusterObserverSupervisorState {
     #[allow(dead_code)]
     node_watcher: Option<Watcher>,
     namespace_watcher: Option<Watcher>,
+    /// Watches Flux OCIRepository resources cluster-wide.
+    oci_repository_watcher: Option<Watcher>,
+    /// Watches Flux Kustomization resources cluster-wide.
+    kustomization_watcher: Option<Watcher>,
 }
 
 impl ClusterObserverSupervisor {
@@ -55,6 +61,8 @@ impl ClusterObserverSupervisor {
                     tcp_client,
                     namespace_watcher: None,
                     node_watcher: None,
+                    oci_repository_watcher: None,
+                    kustomization_watcher: None,
                 })
             }
             Err(e) => Err(ActorProcessingErr::from(e)),
@@ -151,6 +159,54 @@ impl Actor for ClusterObserverSupervisor {
                     // We'll have to investigate.
 
                     state.namespace_watcher = Some(ns_watcher);
+
+                    // ---- Flux: OCIRepository (global) ----
+                    //
+                    // OCIRepository is a cluster-wide concern. Flux may be installed
+                    // in any namespace, so we use a global watcher rather than
+                    // scoping to flux-system. This mirrors the approach taken for
+                    // Node and ClusterRole watchers.
+                    let oci_watcher_state = GlobalWatcherState {
+                        tcp_client: state.tcp_client.clone(),
+                        kube_client: state.kube_client.clone(),
+                        kind: KIND_OCI_REPOSITORY,
+                    };
+
+                    let (oci_watcher, _) = Actor::spawn_linked(
+                        Some("cluster.flux.ocirepositories".into()),
+                        OciRepositoryWatcher,
+                        oci_watcher_state,
+                        myself.clone().into(),
+                    )
+                    .await?;
+
+                    state.oci_repository_watcher = Some(oci_watcher);
+
+                    // ---- Flux: Kustomization (global) ----
+                    //
+                    // Same rationale as OCIRepository. Kustomization resources are
+                    // namespaced in the Kubernetes API sense, but we want visibility
+                    // across all namespaces regardless of where Flux is deployed.
+                    let ks_watcher_state = GlobalWatcherState {
+                        tcp_client: state.tcp_client.clone(),
+                        kube_client: state.kube_client.clone(),
+                        kind: KIND_KUSTOMIZATION,
+                    };
+
+                    let (ks_watcher, _) = Actor::spawn_linked(
+                        Some("cluster.flux.kustomizations".into()),
+                        KustomizationWatcher,
+                        ks_watcher_state,
+                        myself.clone().into(),
+                    )
+                    .await?;
+
+                    state.kustomization_watcher = Some(ks_watcher);
+
+                    /*
+                     * TODO: Consider and start watchers for other CRDs we might want to observe.
+                     * I suspect this will take a great deal of work.
+                     */
                 }
                 ClientEvent::MessagePublished { .. } => {
                     todo!("Handle incoming messages")

@@ -1,37 +1,36 @@
-# Polar (OSS)
-
-# Copyright 2024 Carnegie Mellon University.
-
-# NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING
-# INSTITUTE MATERIAL IS FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON
-# UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER EXPRESSED OR IMPLIED, AS
-# TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR PURPOSE
-# OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE
-# MATERIAL. CARNEGIE MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND
-# WITH RESPECT TO FREEDOM FROM PATENT, TRADEMARK, OR COPYRIGHT INFRINGEMENT.
-
-# Licensed under a MIT-style license, please see license.txt or contact
-# permission@sei.cmu.edu for full terms.
-
-# [DISTRIBUTION STATEMENT A] This material has been approved for public release
-# and unlimited distribution.  Please see Copyright notice for non-US
-# Government use and distribution.
-
-# This Software includes and/or makes use of Third-Party Software each subject
-# to its own license.
-
-# DM24-0470
-
+# Polar dev — with mTLS Neo4j for debugging kube-consumer graph connection
 services:
   neo4j:
-    user: 7474:7474
     image: neo4j:5.26.2
+    user: "7474:7474"
+    # command:
+    #   - sleep
+    #   - infinity
     environment:
       - NEO4J_AUTH=neo4j/somepassword
+      - NEO4J_dbms_ssl_policy_bolt_enabled=true
+      - NEO4J_dbms_ssl_policy_bolt_base__directory=/var/lib/neo4j/certificates/bolt
+      - NEO4J_dbms_ssl_policy_bolt_private__key=private.key
+      - NEO4J_dbms_ssl_policy_bolt_public__certificate=public.crt
+      - NEO4J_dbms_ssl_policy_bolt_client__auth=REQUIRE
+      - NEO4J_dbms_ssl_policy_https_enabled=true
+      - NEO4J_dbms_ssl_policy_https_base__directory=/var/lib/neo4j/certificates/https
+      - NEO4J_dbms_ssl_policy_https_private__key=private.key
+      - NEO4J_dbms_ssl_policy_https_public__certificate=public.crt
+      - NEO4J_dbms_ssl_policy_https_client__auth=REQUIRE
+      - NEO4J_dbms_connector_bolt_tls__level=REQUIRED
+      - NEO4J_server_jvm_additional=-Djavax.net.debug=ssl:handshake
+
+    volumes:
+      - neo4j-data:/var/lib/neo4j/data
+      - neo4j-logs:/var/lib/neo4j/logs
+      - ./src/agents/dev/certs/neo4j:/var/lib/neo4j/certificates
+
     networks:
       - polar
     ports:
       - "7474:7474"
+      - "7473:7473"
       - "7687:7687"
 
   jaeger:
@@ -40,8 +39,6 @@ services:
       - 16686:16686
       - 4317:4317
       - 4318:4318
-      - 5778:5778
-      - 9411:9411
     networks:
       - polar
     environment:
@@ -51,5 +48,5 @@ networks:
   polar:
 
 volumes:
-  step:
   neo4j-data:
+  neo4j-logs:
