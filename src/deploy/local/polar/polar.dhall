@@ -1,6 +1,6 @@
 let kubernetes = ../../types/kubernetes.dhall
 
-let Constants = ../../types/constants.dhall
+let Constants = ../../types/lib-constants.dhall
 let functions = ../../types/functions.dhall
 let values = ../values.dhall
 
@@ -9,7 +9,7 @@ let namespace =
       , apiVersion = "v1"
       , kind = "Namespace"
       , metadata = kubernetes.ObjectMeta::{
-        , name = Some Constants.PolarNamespace
+        , name = Some Constants.polarNamespace
         }
       }
 
@@ -19,10 +19,10 @@ let neo4jCredentialSecret =
       , kind = "Secret"
       , metadata = kubernetes.ObjectMeta::{
         , name = Some "polar-graph-pw"
-        , namespace = Some Constants.PolarNamespace
+        , namespace = Some Constants.polarNamespace
         }
       , stringData = Some
-        [ { mapKey = Constants.neo4jSecret.key
+        [ { mapKey = "secret"
           , mapValue = env:GRAPH_PASSWORD as Text
           }
         ]
@@ -35,10 +35,12 @@ let ociSecret = env:DOCKER_AUTH_JSON as Text
 -- Init script ConfigMap — emitted once, mounted into every pod that leverages mTLS
 -- =============================================================================
 
+let polarInitScript = ../../../../scripts/polar-init.nu as Text
+
 let agentInitScriptConfigMap =
     functions.makeNuInitScript
         Constants.initScriptConfigMapName
-        Constants.polarInitScript
+        polarInitScript
 
 in  [ kubernetes.Resource.Namespace namespace
     , kubernetes.Resource.Secret neo4jCredentialSecret

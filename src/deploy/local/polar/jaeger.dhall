@@ -1,5 +1,5 @@
 let k8s = ../../types/kubernetes.dhall
-let Constants = ../../types/constants.dhall
+let Constants = ../../types/lib-constants.dhall
 
 let Deployment = k8s.Deployment
 
@@ -52,7 +52,7 @@ let spec
 let deployment = k8s.Deployment::{
     , metadata = k8s.ObjectMeta::{
     , name = Some JAEGER
-    , namespace = Some Constants.PolarNamespace
+    , namespace = Some Constants.polarNamespace
     }
     , spec = Some k8s.DeploymentSpec::{
     , selector = k8s.LabelSelector::{
@@ -99,7 +99,7 @@ let service =
       k8s.Service::{
       , metadata = k8s.ObjectMeta::{
         , name = Some "jaeger-svc"
-        , namespace = Some Constants.PolarNamespace
+        , namespace = Some Constants.polarNamespace
         }
       , spec = Some k8s.ServiceSpec::serviceSpec
       }

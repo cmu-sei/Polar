@@ -1,10 +1,10 @@
 let kubernetes = ./kubernetes.dhall
 
-let Constants = ./constants.dhall
-
 let Agents = ./agents.dhall
 
 let GraphConfig = Agents.GraphConfig
+
+let PolarNamespace = "polar"
 
 let makeGraphEnv
     : Text →
@@ -51,7 +51,7 @@ let makeOpaqueSecret
         , kind = "Secret"
         , metadata = kubernetes.ObjectMeta::{
           , name = Some name
-          , namespace = Some Constants.PolarNamespace
+          , namespace = Some PolarNamespace
           }
         , stringData = Some [ { mapKey = key, mapValue = value } ]
         , type = Some "Opaque"
@@ -64,7 +64,7 @@ let makeDeployment
         kubernetes.Deployment::{
         , metadata = kubernetes.ObjectMeta::{
           , name = Some name
-          , namespace = Some Constants.PolarNamespace
+          , namespace = Some PolarNamespace
           }
         , spec = Some kubernetes.DeploymentSpec::{
           , selector = kubernetes.LabelSelector::{
@@ -200,7 +200,7 @@ let makeSaTokenMount
     -> \(sa_token_path : Text)
     -> kubernetes.VolumeMount::{
         , name      = saTokenVolumeName
-        , mountPath = "/home/polar/sa-token"
+        , mountPath = sa_token_path
         , readOnly  = Some True
         }
 
@@ -218,18 +218,30 @@ let makeNuInitScript
         , kind       = "ConfigMap"
         , metadata   = kubernetes.ObjectMeta::{
             , name      = Some name
-            , namespace = Some Constants.PolarNamespace
+            , namespace = Some PolarNamespace
             }
         , data = Some [ { mapKey = "init.nu", mapValue = script } ]
         }
 
+--
+-- makeNuInitContainer applies Constants.DropAllCapSecurityContext unconditionally.
+-- The security context is a reasonable default, but it's hardcoded rather than passed in.
+-- A consumer who needs a different security context for the init container —
+-- different UID/GID, additional capabilities dropped,
+-- or seccompProfile set — cannot override it without forking the function.
+-- TODO: Consider Adding an Optional kubernetes.SecurityContext.Type parameter.
+-- If None, apply Constants.DropAllCapSecurityContext as the default.
+-- If Some ctx, apply that instead.
+-- Alternatively, accept it as a required parameter and provide Constants.DropAllCapSecurityContext as a documented default the consumer can pass explicitly.
+-- The latter is more Dhall-idiomatic and avoids conditional logic.
 let makeNuInitContainer
-    : Text -> Agents.CertClientConfig -> Text -> Text -> Text -> kubernetes.Container.Type
+    : Text -> Agents.CertClientConfig.Type -> Text -> Text -> Text -> kubernetes.SecurityContext.Type -> kubernetes.Container.Type
     = \(nuInitImage : Text)
-    -> \(cfg : Agents.CertClientConfig)
+    -> \(cfg : Agents.CertClientConfig.Type)
     -> \(saTokenVolumeName : Text)
     -> \(certVolumeName : Text)
     -> \(scriptVolumeName : Text)
+    -> \(securityContext : kubernetes.SecurityContext.Type)
     -> kubernetes.Container::{
         , name  = "polar-nu-init"
         , image = Some nuInitImage
@@ -253,7 +265,7 @@ let makeNuInitContainer
             , readOnly  = Some True
             }
             ]
-        , securityContext = Some Constants.DropAllCapSecurityContext
+        , securityContext = Some securityContext
         }
 
 let makeCertVolumes

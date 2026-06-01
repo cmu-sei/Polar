@@ -13,10 +13,8 @@
   One CA, one trust anchor for the whole system.
 -}
 let kubernetes = ./kubernetes.dhall
-
+let constants = ./lib-constants.dhall
 let Agents = ./agents.dhall
-
-let Constants = ./constants.dhall
 
 let CassiniTlsConfig =
       { ca_cert_path : Text, server_cert_path : Text, server_key_path : Text }
@@ -26,17 +24,17 @@ let Cassini =
       , image : Text
       , ports : { http : Natural, tcp : Natural }
       , serviceAccountName : Text
-      , certClient : Agents.CertClientConfig
+      , certClient : Agents.CertClientConfig.Type
       , tls : CassiniTlsConfig
       }
 
 let defaults =
       { name = "cassini"
-      , ports = { http = 3000, tcp = 8080 }
+      , ports = { http = constants.cassiniHttpPort, tcp = constants.cassiniTcpPort }
       , tls =
-        { ca_cert_path = "${Constants.certDir}/ca.pem"
-        , server_cert_path = "${Constants.certDir}/cert.pem"
-        , server_key_path = "${Constants.certDir}/key.pem"
+        { ca_cert_path = constants.certPaths.ca
+        , server_cert_path = constants.certPaths.cert
+        , server_key_path = constants.certPaths.key
         }
         , serviceAccountName = "cassini"   -- was "cassini-sa"
       }

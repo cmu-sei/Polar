@@ -1,4 +1,6 @@
 let kubernetes = ./kubernetes.dhall
+let constants = ./lib-constants.dhall
+let PolarNamespace = constants.polarNamespace
 
 let GraphConfig =
       { graphDB : Text
@@ -15,19 +17,31 @@ let ClientTlsConfig =
       }
 
 let CertClientConfig =
-      { sa_token_path : Text
-      , cert_issuer_url : Text
-      , audience : Text
-      , cert_dir : Text
-      , cert_type : Text
-      , key_algorithm: Text
-      , extra_sans: Optional Text
+      { Type =
+          { sa_token_path : Text
+          , cert_issuer_url : Text
+          , audience : Text
+          , cert_dir : Text
+          , cert_type : Text
+          , key_algorithm : Text
+          , extra_sans : Optional Text
+          }
+      , default =
+        { sa_token_path = "/home/polar/sa-token/token"
+        , cert_issuer_url =
+            "http://cert-issuer.${PolarNamespace}.svc.cluster.local:8443"
+        , audience = "polar-cert-issuer.local"
+        , cert_dir = constants.certDir
+        , cert_type = "client"
+        , key_algorithm = "ecdsa-p256"
+        , extra_sans = None Text
+        }
       }
 
 let PolarAgent =
       { name : Text
       , image : Text
-      , certClient : CertClientConfig
+      , certClient : CertClientConfig.Type
       , tls : ClientTlsConfig
       }
 

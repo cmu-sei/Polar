@@ -1,71 +1,162 @@
 # Polar Deployments
 
-This directory contains dhall configurations to generate kubernetes manifests needed for Polar services.
+This directory contains Dhall configurations for generating Kubernetes manifests for Polar services, along with a typed Dhall library that defines the public surface of Polar's agent and infrastructure types.
 
-## Overview
-The `render-manifests.sh` script (located under the `scripts` folder) automates the conversion of **Dhall configuration files** into valid kubernetes manifests for deployment. It is part of the foundation of our GitOps workflow. It creates:
-- **Repeatable, Immutable Manifests** for GitOps workflows.
-- **Linting and Template Verification** with Helm.
-- **Safe GitOps Deployments** by generating Helm artifacts that can be stored and deployed consistently.
+## Structure
 
-## On Kubernetes
+```
+types/          # Public Dhall library — types, defaults, and constructor functions
+local/          # Local development deployment expressions
+local/polar/    # Per-component manifests (agents, cassini, cert-issuer, neo4j, ...)
+local/flux/     # Flux GitOps resources for local cluster
+local/conf/     # Static config files embedded into ConfigMaps at render time
+```
 
-### GitOps & Immutability
-To maintain immutability, we package our manifests as OCI artifacts using the oras too. That way, our container images can be provided alongside our deployment artifacts and share versioning.
+## The Types Library
 
+`types/package.dhall` is the single import point for the Polar Dhall library. It exports:
 
-### Why Immutability Matters
-By ensuring the kubernetes manifest is generated **before deployment and version controlled**, we:
-- Avoid deployment drift caused by manual `helm install` changes.
-- Ensure the desired configuration is deployed across environments.
-- Enable rollbacks to previous **known-good** kubernetes manifest versions.
-- Improve auditability and traceability of deployments.
+- **`agents`** — type definitions for every Polar agent (`PolarAgent`, `GraphProcessor`, `CassiniTlsConfig`, `CertClientConfig`, and all named agent types). `CertClientConfig` ships with a `default` record covering the standard cert-issuer setup — override individual fields with record completion (`//`) where needed.
+- **`cassini`** — the `Cassini` schema with a `defaults` record for standard port and TLS path configuration. Use record completion (`Cassini::{ ... }`) and supply at minimum `image` and `certClient`.
+- **`functions`** — constructor functions for Kubernetes resources: `makeDeployment`, `makeNuInitContainer`, `makeGraphEnv`, `makeCertVolumes`, `makeOpaqueSecret`, and others.
 
-## Tools
-To accomplish this, we leverage the following tooling.
-- **Dhall-to-YAML** (`dhall-to-yaml`): Converts Dhall configurations into Kubernetes YAML.
-- A `neo4j.conf` file to configure neo4j.
-- [Minikube](https://minikube.sigs.k8s.io/docs/start/) - Initially used for local testing, feel free to use your own!
-- Some client and server certificates from a trusted authority. For testing, consider [generating your own](../agents/README.md)
-- A Personal Access Token for a Gitlab instance with, at minimum, read permissions for apis, registries, and repositories.
-- Container images for neo4j, cassini, and the gitlab agent should also be present. [See the documentation for info on building them](../agents/README.md). You can use your own preferred neo4j container image.
-- [cert-manager ](https://cert-manager.io/docs/installation/)
+`types/lib-constants.dhall` contains values that are fixed by Polar's architecture and safe to close over — cert paths, Cassini's service name and address, the cert-issuer URL, the polar namespace, and so on. It contains no environment variable reads and no file embeds. Consumer deployment expressions import this directly alongside `package.dhall`.
 
+### Remote import
 
-## Layout
-We follow a pretty typical layout here, where all desired deployment environments are separated by directory.
-From here,  we define a simple `types` library containing code to define types and values used across environments. We also import others.
+Once the library is published, import it by pinning a specific commit or tag:
 
-When we want to deploy one of these environments, we run the script to generate a kubernetes manifest from Dhall configurations using this command in our CI
-  `sh scripts/render-manifests.sh src/deploy/<environment> <output-dir>`
+```dhall
+let Polar =
+      https://raw.githubusercontent.com/your-org/polar/COMMIT_SHA/deploy/types/package.dhall
+        sha256:HASH
 
-We recommend that anyone who to deploy our services take a similar approach within their own constraints.
+let C =
+      https://raw.githubusercontent.com/your-org/polar/COMMIT_SHA/deploy/types/lib-constants.dhall
+        sha256:HASH
+```
 
+Replace `COMMIT_SHA` and `sha256:HASH` with the values produced by `dhall freeze --all types/package.dhall` after each release. Never pin to `master` — the hash provides the safety guarantee; a moving ref defeats it.
 
-## Flux and Continuous Deployment
+### Consuming the library
 
-Flux sits on the cluster constantly watching our Git repository and detects every change we make to the kubernetes manifests.
-If the GitRepository or Kustomization manifests are updated, Flux will automatically pick up those changes and deploy them to the Kubernetes cluster, closing the loop to ensure continuous deployment!
+A minimal agent deployment expression looks like this:
 
-At this time, many environment variables need to be present within our CI/CD environment.
-Particularly those related to our Azure cloud environment.
+```dhall
+let Polar     = ../../types/package.dhall
+let C         = ../../types/lib-constants.dhall
+let Agent     = Polar.agents
+let functions = Polar.functions
 
-Firstly, a service principal had to be created to maintain read access to our key vaults. So we need some of the following vars.
+let myAgent : Agent.PolarAgent =
+      { name       = "my-agent"
+      , image      = "my-agent:abc1234"
+      , certClient = Agent.CertClientConfig.default
+      , tls =
+        { broker_endpoint         = C.cassiniAddr
+        , server_name             = C.cassiniServerName
+        , client_certificate_path = C.certPaths.cert
+        , client_key_path         = C.certPaths.key
+        , client_ca_cert_path     = C.certPaths.ca
+        }
+      }
+```
 
-`AZURE_CLIENT_ID` – The client ID of the Azure service principal
-`AZURE_TENANT_ID` – The Azure tenant ID where the application is registered.
-`ACR_USERNAME` - the username associated with the ACR token
-`ACR_TOKEN` – The token used to authenticate with the azure container registry so we can upload our images.
-`AZURE_CLIENT_SECRET` – Token used to authenticate with azure.
-`AZURE_ENVIRONMENT` - Should be "AzureUsGovernment" since that's what we're using
-`AZURE_AUTHORITY_HOST` - Should point to the Azure Gov login (.us suffix)
+Cassini uses record completion against its defaults:
 
-Then there are the variables needed for actually deploying Polar's services.
+```dhall
+let Cassini = Polar.cassini
 
-`GITLAB_USER` - A username for authenticating with gitlab, particularly for flux's uses
-`GITLAB_TOKEN` - A token for authenticating with gitlab.
-`NEO4J_AUTH` - The default credentials for the Neo4J instance. Stored in a "username/password" foramt.
-`CI_COMMIT_SHORT_SHA` - The 7 character short commit sha, used as a tag for most of our image's services by default. (This is populated automatically by Gitlab when running in CI)
-`OCI_REGISTRY_AUTH` - A config.json file, stored as a base64 encoded string, containing credentials to one or more OCI artifact registries. This is used by the resolver agent to authenticate.
+let cassini : Cassini.Type =
+      Cassini.defaults // { image = "cassini:abc1234", certClient = Agent.CertClientConfig.default }
+```
 
-Each of Polar's services will also need environment variables of their own when deployed. See their README files for details.
+## Local Development
+
+### Prerequisites
+
+- `dhall-to-yaml` — converts Dhall expressions to Kubernetes YAML
+- A local Kubernetes cluster — Minikube, Orbstack, or usernetes
+- Container images built for the components you want to deploy. See [`../agents/README.md`](../agents/README.md) for build instructions. Neo4j uses a stock upstream image; everything else is built from source.
+- Depending on what you're evaluating, you may also need a local GitLab instance, OCI registry, or Git remote.
+
+### Rendering manifests
+
+Each component under `local/polar/` is a Dhall file that evaluates to a `List kubernetes.Resource`. Render to YAML with:
+
+```sh
+dhall-to-yaml --file local/polar/agents.dhall   > local/polar/agents.yaml
+dhall-to-yaml --file local/polar/cassini.dhall  > local/polar/cassini.yaml
+dhall-to-yaml --file local/polar/cert-issuer.dhall > local/polar/cert-issuer.yaml
+dhall-to-yaml --file local/polar/neo4j.dhall    > local/polar/neo4j.yaml
+```
+
+Or regenerate all manifests at once if you have a script for it.
+
+### Deployment order
+
+Polar's mTLS bootstrap has a strict dependency chain. Apply in this order and wait for each rollout before proceeding:
+
+```sh
+kubectl apply -f local/polar/cert-issuer.yaml
+kubectl rollout status deploy/cert-issuer -n polar
+
+kubectl apply -f local/polar/cassini.yaml
+kubectl rollout status deploy/cassini -n polar
+
+kubectl apply -f local/polar/agents.yaml
+```
+
+Neo4j and Jaeger are independent of the mTLS chain and can be applied in any order relative to each other, but agents that write to the graph depend on Neo4j being healthy.
+
+### Environment variables required at render time
+
+These must be set in your shell when running `dhall-to-yaml`:
+
+| Variable | Description |
+|---|---|
+| `CI_COMMIT_SHORT_SHA` | Image tag for all Polar service images. Defaults to `latest` if unset. |
+| `GITLAB_TOKEN` | GitLab API token. Required if deploying the GitLab observer or consumer. |
+| `GRAPH_PASSWORD` | Neo4j password. Written into the `polar-graph-pw` Kubernetes secret. |
+| `NEO4J_AUTH` | Neo4j auth string in `username/password` format. Written into `neo4j-secret`. |
+| `NEO4J_TLS_CA_CERT_CONTENT` | PEM content of the Neo4j TLS CA. Written into `neo4j-bolt-ca` secret. |
+| `DOCKER_AUTH_JSON` | Base64-encoded `config.json` with OCI registry credentials. Used by the provenance resolver. |
+
+### What is and is not configurable
+
+The `polar` namespace is fixed — it is not a parameter and the library provides no mechanism to change it. Polar is a single-instance system; deploying two instances in the same cluster is not a supported configuration.
+
+Image references, TLS paths, broker addresses, and graph credentials are all caller-supplied. The library provides defaults via `CertClientConfig.default` and `Cassini.defaults` that reflect the standard deployment layout, but every field can be overridden via Dhall record completion.
+
+`imagePullPolicy` is not set by any library function. Local deployment expressions append it via record override (`// { imagePullPolicy = Some "Never" }`) on init containers where needed. Set it appropriately for your environment.
+
+## GitOps and Immutability
+
+Manifests are generated from Dhall before deployment and committed to version control. This ensures:
+
+- No deployment drift from ad-hoc `helm install` or `kubectl edit` changes
+- Rollbacks to any previous known-good manifest are a `git revert` away
+- Full auditability — the exact YAML applied to the cluster is in the repo
+
+Manifests are packaged as OCI artifacts using `oras` so that container images and deployment manifests share the same versioning and can be promoted through environments together.
+
+## CI/CD Environment Variables
+
+The following are required in the CI environment for the full Flux-based deployment pipeline:
+
+| Variable | Description |
+|---|---|
+| `AZURE_CLIENT_ID` | Client ID of the Azure service principal for key vault access |
+| `AZURE_TENANT_ID` | Azure tenant ID |
+| `AZURE_CLIENT_SECRET` | Secret for Azure service principal authentication |
+| `AZURE_ENVIRONMENT` | Set to `AzureUsGovernment` |
+| `AZURE_AUTHORITY_HOST` | Azure Government login endpoint |
+| `ACR_USERNAME` | Username for the Azure Container Registry token |
+| `ACR_TOKEN` | Token for ACR authentication |
+| `GITLAB_USER` | GitLab username for Flux authentication |
+| `GITLAB_TOKEN` | GitLab token for Flux authentication |
+| `CI_COMMIT_SHORT_SHA` | Populated automatically by GitLab CI |
+| `NEO4J_AUTH` | Neo4j credentials in `username/password` format |
+| `DOCKER_AUTH_JSON` | Base64-encoded OCI registry `config.json` |
+
+Each Polar agent may require additional environment variables of its own at runtime. See the individual agent README files under `../agents/` for details.

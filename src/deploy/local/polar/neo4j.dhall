@@ -3,7 +3,7 @@
 
   Two init containers run in sequence:
     1. polar-nu-init with polar-init.nu  — cert bootstrap (server cert)
-    2. polar-nu-init with neo4j-init.nu  — conf copy, cert layout, chown
+    2. alpine with neo4j-init.sh         — conf copy, cert layout, chown
 
   Each container mounts its own script ConfigMap at /scripts/init.nu so
   the polar-nu-init entrypoint finds exactly the right script in both cases.
@@ -11,43 +11,83 @@
 -}
 
 let kubernetes = ../../types/kubernetes.dhall
-let Constants  = ../../types/constants.dhall
-let functions  = ../../types/functions.dhall
-let Agent      = ../../types/agents.dhall
+let C          = ../../types/lib-constants.dhall
+let Polar      = ../../types/package.dhall
+let Agent      = Polar.agents
+let functions  = Polar.functions
 let values     = ../values.dhall
 
-let polarInitScript  = ../../../../scripts/polar-init.nu as Text
-let neo4jInitScript  = ../../../../scripts/setup-neo4j.sh as Text
+let polarInitScript = ../../../../scripts/polar-init.nu as Text
+let neo4jInitScript = ../../../../scripts/setup-neo4j.sh as Text
 
 let configContent =
       if values.neo4j.enableTls
       then ../conf/neo4j-ssl.conf as Text
       else ../conf/neo4j-no-ssl.conf as Text
 
-let instanceName = "polar-neo4j"
+-- -------------------------------------------------------------------------
+-- Deployment-local constants
+-- -------------------------------------------------------------------------
 
+let commitSha = env:CI_COMMIT_SHORT_SHA as Text ? "latest"
+
+let nuInitImage = "polar-nu-init:${commitSha}"
+
+let certTokenExpiry = 3600
+
+-- Neo4j runs under UID/GID 7474 — different from the standard polar 1000.
+let neo4jSecurityContext =
+      kubernetes.SecurityContext::{
+      , runAsGroup   = Some 7474
+      , runAsNonRoot = Some True
+      , runAsUser    = Some 7474
+      , capabilities = Some kubernetes.Capabilities::{ drop = Some [ "ALL" ] }
+      }
+
+let dropAllCapSecurityContext =
+      kubernetes.SecurityContext::{
+      , runAsGroup   = Some 1000
+      , runAsNonRoot = Some True
+      , runAsUser    = Some 1000
+      , capabilities = Some kubernetes.Capabilities::{ drop = Some [ "ALL" ] }
+      }
+
+-- Neo4j's cert directory is separate from the standard polar certDir —
+-- it follows Neo4j's expected layout under its data directory.
 let neo4jCertDir = "/var/lib/neo4j/certificates"
 
-let neo4jSaTokenVolume   = "neo4j-sa-token"
-let neo4jCertVolume      = "neo4j-polar-certs"
-
--- Two distinct volume and ConfigMap names — one per init container
-let certInitScriptVolume = "neo4j-cert-init-script"
-let certInitScriptCmName = "neo4j-cert-init-script"
+-- Volume names are local pod wiring — only need to be consistent within
+-- this file's pod spec.
+let neo4jSaTokenVolume    = "neo4j-sa-token"
+let neo4jCertVolume       = "neo4j-polar-certs"
+let certInitScriptVolume  = "neo4j-cert-init-script"
+let certInitScriptCmName  = "neo4j-cert-init-script"
 let neo4jInitScriptVolume = "neo4j-setup-script"
 let neo4jInitScriptCmName = "neo4j-setup-script"
+let neo4jConfigmapName    = "neo4j-config"
 
+-- The SecretKeySelector for the neo4j auth secret. The secret name and key
+-- are fixed by the Secret manifest emitted in this file.
+let neo4jSecretSelector =
+      kubernetes.SecretKeySelector::{
+      , name = Some "neo4j-secret"
+      , key  = "secret"
+      }
+
+-- CertClientConfig for Neo4j's cert bootstrap. Overrides the standard
+-- defaults: different cert directory, server cert type, and extra SANs
+-- for the DNS names Neo4j will be reachable at.
 let neo4jCertClientConfig
-    : Agent.CertClientConfig
-    =     Constants.defaultCertClientConfig
-      //  { cert_dir  = neo4jCertDir
-          , cert_type = "server"
+    : Agent.CertClientConfig.Type
+    =     Agent.CertClientConfig.default
+      //  { cert_dir   = neo4jCertDir
+          , cert_type  = "server"
           , extra_sans = Some "neo4j.polar.svc.cluster.local,polar-db-svc.polar.svc.cluster.local"
           }
 
--- =============================================================================
+-- -------------------------------------------------------------------------
 -- Service account
--- =============================================================================
+-- -------------------------------------------------------------------------
 
 let neo4jServiceAccount =
       kubernetes.ServiceAccount::{
@@ -55,53 +95,53 @@ let neo4jServiceAccount =
       , kind       = "ServiceAccount"
       , metadata   = kubernetes.ObjectMeta::{
         , name      = Some "neo4j-sa"
-        , namespace = Some Constants.PolarNamespace
+        , namespace = Some C.polarNamespace
         }
       , automountServiceAccountToken = Some False
       }
 
--- =============================================================================
+-- -------------------------------------------------------------------------
 -- ConfigMaps
--- =============================================================================
+-- -------------------------------------------------------------------------
 
 let neo4jConfigMap =
       kubernetes.ConfigMap::{
       , apiVersion = "v1"
       , kind       = "ConfigMap"
       , metadata   = kubernetes.ObjectMeta::{
-        , name      = Some Constants.neo4jConfigmapName
-        , namespace = Some Constants.PolarNamespace
+        , name      = Some neo4jConfigmapName
+        , namespace = Some C.polarNamespace
         }
       , data = Some [ { mapKey = "neo4j.conf", mapValue = configContent } ]
       }
 
--- Script for init container 1: cert bootstrap
+-- Script for init container 1: cert bootstrap via polar-nu-init
 let certInitScriptConfigMap =
       kubernetes.ConfigMap::{
       , apiVersion = "v1"
       , kind       = "ConfigMap"
       , metadata   = kubernetes.ObjectMeta::{
         , name      = Some certInitScriptCmName
-        , namespace = Some Constants.PolarNamespace
+        , namespace = Some C.polarNamespace
         }
       , data = Some [ { mapKey = "init.nu", mapValue = polarInitScript } ]
       }
 
--- Script for init container 2: neo4j setup
+-- Script for init container 2: neo4j setup (conf copy, cert layout, chown)
 let neo4jInitScriptConfigMap =
       kubernetes.ConfigMap::{
       , apiVersion = "v1"
       , kind       = "ConfigMap"
       , metadata   = kubernetes.ObjectMeta::{
         , name      = Some neo4jInitScriptCmName
-        , namespace = Some Constants.PolarNamespace
+        , namespace = Some C.polarNamespace
         }
       , data = Some [ { mapKey = "init.nu", mapValue = neo4jInitScript } ]
       }
 
--- =============================================================================
+-- -------------------------------------------------------------------------
 -- Secret
--- =============================================================================
+-- -------------------------------------------------------------------------
 
 let neo4jSecret =
       kubernetes.Secret::{
@@ -109,25 +149,22 @@ let neo4jSecret =
       , kind       = "Secret"
       , metadata   = kubernetes.ObjectMeta::{
         , name      = Some "neo4j-secret"
-        , namespace = Some Constants.PolarNamespace
+        , namespace = Some C.polarNamespace
         }
       , stringData = Some
-          [ { mapKey   = Constants.neo4jSecret.key
-            , mapValue = env:NEO4J_AUTH as Text
-            }
-          ]
+          [ { mapKey = neo4jSecretSelector.key, mapValue = env:NEO4J_AUTH as Text } ]
       , type = Some "Opaque"
       }
 
--- =============================================================================
+-- -------------------------------------------------------------------------
 -- PVCs
--- =============================================================================
+-- -------------------------------------------------------------------------
 
 let dataVolumeClaim =
       kubernetes.PersistentVolumeClaim::{
       , metadata = kubernetes.ObjectMeta::{
         , name      = Some values.neo4j.volumes.data.name
-        , namespace = Some Constants.PolarNamespace
+        , namespace = Some C.polarNamespace
         }
       , spec = Some kubernetes.PersistentVolumeClaimSpec::{
         , accessModes      = Some [ "ReadWriteOnce" ]
@@ -143,7 +180,7 @@ let logVolumeClaim =
       kubernetes.PersistentVolumeClaim::{
       , metadata = kubernetes.ObjectMeta::{
         , name      = Some values.neo4j.volumes.logs.name
-        , namespace = Some Constants.PolarNamespace
+        , namespace = Some C.polarNamespace
         }
       , spec = Some kubernetes.PersistentVolumeClaimSpec::{
         , accessModes      = Some [ "ReadWriteOnce" ]
@@ -155,15 +192,15 @@ let logVolumeClaim =
         }
       }
 
--- =============================================================================
+-- -------------------------------------------------------------------------
 -- Volumes
--- =============================================================================
+-- -------------------------------------------------------------------------
 
 let saTokenVolume =
       functions.makeSaTokenVolume
         neo4jSaTokenVolume
         neo4jCertClientConfig.audience
-        Constants.certTokenExpiry
+        certTokenExpiry
 
 let certEmptyDir =
       kubernetes.Volume::{
@@ -171,12 +208,11 @@ let certEmptyDir =
       , emptyDir = Some kubernetes.EmptyDirVolumeSource::{=}
       }
 
--- Each script gets its own volume pointing at its own ConfigMap
 let certInitScriptVol =
       kubernetes.Volume::{
       , name      = certInitScriptVolume
       , configMap = Some kubernetes.ConfigMapVolumeSource::{
-        , name        = Some certInitScriptCmName
+        , name = Some certInitScriptCmName
         }
       }
 
@@ -184,52 +220,54 @@ let neo4jInitScriptVol =
       kubernetes.Volume::{
       , name      = neo4jInitScriptVolume
       , configMap = Some kubernetes.ConfigMapVolumeSource::{
-        , name        = Some neo4jInitScriptCmName
+        , name = Some neo4jInitScriptCmName
         }
       }
 
--- =============================================================================
+-- -------------------------------------------------------------------------
 -- Init containers
--- =============================================================================
+-- -------------------------------------------------------------------------
 
 -- 1. Cert bootstrap — polar-init.nu mounted at /scripts/init.nu
 let certInitContainer =
-          functions.makeNuInitContainer
-            "polar-nu-init:${Constants.commitSha}"
-            neo4jCertClientConfig
-            neo4jSaTokenVolume
-            neo4jCertVolume
-            certInitScriptVolume
-      //  { imagePullPolicy = Some values.imagePullPolicy }
+      ( functions.makeNuInitContainer
+          nuInitImage
+          neo4jCertClientConfig
+          neo4jSaTokenVolume
+          neo4jCertVolume
+          certInitScriptVolume
+          dropAllCapSecurityContext
+      ) // { imagePullPolicy = Some values.imagePullPolicy }
 
--- 2. Neo4j setup — neo4j-init.nu mounted at /scripts/init.nu
---    Runs as root (no runAsUser) so it can chown for uid 7474.
+-- 2. Neo4j setup — runs as root so it can chown for uid 7474.
+--    Executes the shell script directly rather than via polar-nu-init.
 let neo4jInitContainer =
       kubernetes.Container::{
       , name            = "neo4j-init"
       , image           = Some "docker.io/alpine:3.14.0"
       , imagePullPolicy = Some values.imagePullPolicy
-      , command = Some [ "/bin/sh", "-c" ]
-      , args = Some [ neo4jInitScript ]
+      , command         = Some [ "/bin/sh", "-c" ]
+      , args            = Some [ neo4jInitScript ]
       , env = Some
           [ kubernetes.EnvVar::{ name = "POLAR_CERT_DIR", value = Some neo4jCertDir }
           , kubernetes.EnvVar::{
             , name      = "NEO4J_AUTH"
             , valueFrom = Some kubernetes.EnvVarSource::{
-              , secretKeyRef = Some Constants.neo4jSecret
+              , secretKeyRef = Some neo4jSecretSelector
               }
             }
           ]
       , volumeMounts = Some
-          [ kubernetes.VolumeMount::{ name = neo4jInitScriptVolume, mountPath = "/scripts",              readOnly = Some True }
-          , kubernetes.VolumeMount::{ name = Constants.neo4jConfigmapName, mountPath = "/config",        readOnly = Some True }
-          , kubernetes.VolumeMount::{ name = values.neo4j.configVolume,    mountPath = "/var/lib/neo4j/conf" }
-          , kubernetes.VolumeMount::{ name = neo4jCertVolume,              mountPath = neo4jCertDir }
+          [ kubernetes.VolumeMount::{ name = neo4jInitScriptVolume,  mountPath = "/scripts",              readOnly = Some True }
+          , kubernetes.VolumeMount::{ name = neo4jConfigmapName,     mountPath = "/config",               readOnly = Some True }
+          , kubernetes.VolumeMount::{ name = values.neo4j.configVolume, mountPath = "/var/lib/neo4j/conf" }
+          , kubernetes.VolumeMount::{ name = neo4jCertVolume,        mountPath = neo4jCertDir }
           ]
       }
--- =============================================================================
+
+-- -------------------------------------------------------------------------
 -- Main container
--- =============================================================================
+-- -------------------------------------------------------------------------
 
 let baseVolumeMounts =
       [ kubernetes.VolumeMount::{ name = values.neo4j.configVolume,      mountPath = "/var/lib/neo4j/conf" }
@@ -248,18 +286,12 @@ let neo4jContainer =
       , name            = values.neo4j.name
       , image           = Some values.neo4j.image
       , imagePullPolicy = Some values.imagePullPolicy
-      --, command = Some [ "sleep", "infinity" ]
-      , securityContext = Some kubernetes.SecurityContext::{
-        , runAsGroup   = Some 7474
-        , runAsNonRoot = Some True
-        , runAsUser    = Some 7474
-        , capabilities = Some kubernetes.Capabilities::{ drop = Some [ "ALL" ] }
-        }
+      , securityContext = Some neo4jSecurityContext
       , env = Some
           [ kubernetes.EnvVar::{
             , name      = "NEO4J_AUTH"
             , valueFrom = Some kubernetes.EnvVarSource::{
-              , secretKeyRef = Some Constants.neo4jSecret
+              , secretKeyRef = Some neo4jSecretSelector
               }
             }
           ]
@@ -275,9 +307,9 @@ let neo4jContainer =
       , volumeMounts = Some (baseVolumeMounts # tlsVolumeMounts)
       }
 
--- =============================================================================
+-- -------------------------------------------------------------------------
 -- Pod spec
--- =============================================================================
+-- -------------------------------------------------------------------------
 
 let allVolumes =
       [ kubernetes.Volume::{
@@ -306,7 +338,9 @@ let allVolumes =
 let podSpec =
       kubernetes.PodSpec::{
       , serviceAccountName = Some "neo4j-sa"
-      , enableServiceLinks = Some False -- Disabled so neo4j doesn't pick up k8s injected vars prefixed with our service name "NEO4J"
+      -- Disabled so neo4j doesn't pick up k8s-injected env vars prefixed
+      -- with the service name "NEO4J_", which collide with its own config vars.
+      , enableServiceLinks = Some False
       , initContainers     = Some [ certInitContainer, neo4jInitContainer ]
       , containers         = [ neo4jContainer ]
       , securityContext    = Some kubernetes.PodSecurityContext::{
@@ -316,18 +350,18 @@ let podSpec =
       , volumes = Some allVolumes
       }
 
--- =============================================================================
+-- -------------------------------------------------------------------------
 -- Service
--- =============================================================================
+-- -------------------------------------------------------------------------
 
 let service =
       kubernetes.Service::{
       , metadata = kubernetes.ObjectMeta::{
-        , name      = Some Constants.neo4jServiceName
-        , namespace = Some Constants.PolarNamespace
+        , name      = Some values.neo4jServiceName
+        , namespace = Some C.polarNamespace
         }
       , spec = Some kubernetes.ServiceSpec::{
-        , selector = Some (toMap { name = instanceName })
+        , selector = Some (toMap { name = values.neo4j.name })
         , type     = Some (if values.neo4j.enableTls then "LoadBalancer" else "NodePort")
         , ports    = Some
             ( if values.neo4j.enableTls
@@ -343,9 +377,9 @@ let service =
         }
       }
 
--- =============================================================================
+-- -------------------------------------------------------------------------
 -- StatefulSet
--- =============================================================================
+-- -------------------------------------------------------------------------
 
 let statefulSet =
       kubernetes.StatefulSet::{
@@ -353,11 +387,11 @@ let statefulSet =
       , kind       = "StatefulSet"
       , metadata   = kubernetes.ObjectMeta::{
         , name      = Some values.neo4j.name
-        , namespace = Some Constants.PolarNamespace
+        , namespace = Some C.polarNamespace
         }
       , spec = Some kubernetes.StatefulSetSpec::{
         , selector    = kubernetes.LabelSelector::{ matchLabels = Some (toMap { name = values.neo4j.name }) }
-        , serviceName = Constants.neo4jServiceName
+        , serviceName = Some values.neo4jServiceName
         , replicas    = Some 1
         , template    = kubernetes.PodTemplateSpec::{
           , metadata = Some kubernetes.ObjectMeta::{
@@ -369,9 +403,9 @@ let statefulSet =
         }
       }
 
--- =============================================================================
+-- -------------------------------------------------------------------------
 -- Resource list
--- =============================================================================
+-- -------------------------------------------------------------------------
 
 in  [ kubernetes.Resource.ServiceAccount        neo4jServiceAccount
     , kubernetes.Resource.ConfigMap             neo4jConfigMap

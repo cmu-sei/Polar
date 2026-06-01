@@ -13,8 +13,24 @@
 -}
 
 let kubernetes = ../../types/kubernetes.dhall
-let Constants  = ../../types/constants.dhall
+let C          = ../../types/lib-constants.dhall
 let values     = ../values.dhall
+
+-- -------------------------------------------------------------------------
+-- Deployment-local constants
+-- -------------------------------------------------------------------------
+
+let dropAllCapSecurityContext =
+      kubernetes.SecurityContext::{
+      , runAsGroup   = Some 1000
+      , runAsNonRoot = Some True
+      , runAsUser    = Some 1000
+      , capabilities = Some kubernetes.Capabilities::{ drop = Some [ "ALL" ] }
+      }
+
+-- -------------------------------------------------------------------------
+-- RBAC
+-- -------------------------------------------------------------------------
 
 let certIssuerServiceAccount =
       kubernetes.ServiceAccount::{
@@ -22,7 +38,7 @@ let certIssuerServiceAccount =
       , kind       = "ServiceAccount"
       , metadata   = kubernetes.ObjectMeta::{
         , name      = Some values.certIssuer.serviceAccountName
-        , namespace = Some Constants.PolarNamespace
+        , namespace = Some C.polarNamespace
         }
       , automountServiceAccountToken = Some True
       }
@@ -55,10 +71,14 @@ let certIssuerClusterRoleBinding =
         [ kubernetes.Subject::{
           , kind      = "ServiceAccount"
           , name      = values.certIssuer.serviceAccountName
-          , namespace = Some Constants.PolarNamespace
+          , namespace = Some C.polarNamespace
           }
         ]
       }
+
+-- -------------------------------------------------------------------------
+-- ConfigMap
+-- -------------------------------------------------------------------------
 
 let certIssuerConfigMap =
       kubernetes.ConfigMap::{
@@ -66,17 +86,21 @@ let certIssuerConfigMap =
       , kind       = "ConfigMap"
       , metadata   = kubernetes.ObjectMeta::{
         , name      = Some "cert-issuer-config"
-        , namespace = Some Constants.PolarNamespace
+        , namespace = Some C.polarNamespace
         }
       , data = Some
         [ { mapKey = "config.json", mapValue = values.certIssuer.config } ]
       }
 
+-- -------------------------------------------------------------------------
+-- PVC — persistent storage for the CA key material
+-- -------------------------------------------------------------------------
+
 let certIssuerPvc =
       kubernetes.PersistentVolumeClaim::{
       , metadata = kubernetes.ObjectMeta::{
         , name      = Some "cert-issuer-ca"
-        , namespace = Some Constants.PolarNamespace
+        , namespace = Some C.polarNamespace
         }
       , spec = Some kubernetes.PersistentVolumeClaimSpec::{
         , accessModes = Some [ "ReadWriteOnce" ]
@@ -86,29 +110,38 @@ let certIssuerPvc =
         }
       }
 
+-- -------------------------------------------------------------------------
+-- Service
+-- -------------------------------------------------------------------------
+
 let certIssuerService =
-    kubernetes.Service::{
-    , metadata = kubernetes.ObjectMeta::{
+      kubernetes.Service::{
+      , metadata = kubernetes.ObjectMeta::{
         , name      = Some "cert-issuer"
-        , namespace = Some Constants.PolarNamespace
+        , namespace = Some C.polarNamespace
         }
-    , spec = Some kubernetes.ServiceSpec::{
+      , spec = Some kubernetes.ServiceSpec::{
         , selector = Some (toMap { name = values.certIssuer.name })
         , type     = Some "ClusterIP"
         , ports    = Some
-        [ kubernetes.ServicePort::{
+          [ kubernetes.ServicePort::{
             , name       = Some "cert-issuer-http"
             , port       = 8443
             , targetPort = Some (kubernetes.NatOrString.Nat 8443)
             }
-        ]
+          ]
         }
-    }
+      }
+
+-- -------------------------------------------------------------------------
+-- Deployment
+-- -------------------------------------------------------------------------
+
 let certIssuerDeployment =
       kubernetes.Deployment::{
       , metadata = kubernetes.ObjectMeta::{
         , name      = Some values.certIssuer.name
-        , namespace = Some Constants.PolarNamespace
+        , namespace = Some C.polarNamespace
         }
       , spec = Some kubernetes.DeploymentSpec::{
         , replicas = Some 1
@@ -128,18 +161,12 @@ let certIssuerDeployment =
                 , name            = values.certIssuer.name
                 , image           = Some values.certIssuer.image
                 , imagePullPolicy = Some values.imagePullPolicy
-                , securityContext = Some Constants.DropAllCapSecurityContext
+                , securityContext = Some dropAllCapSecurityContext
                 , env = Some
-                  [ kubernetes.EnvVar::{ name = "RUST_LOG",             value = Some "debug" }
-                  , kubernetes.EnvVar::{ name = "CERT_ISSUER_CONFIG",   value = Some "/etc/cert-issuer/config.json" }
-                  , kubernetes.EnvVar::{
-                    , name  = "KUBERNETES_CA_CERT"
-                    , value = Some "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
-                    }
-                    , kubernetes.EnvVar::{
-                    , name  = "KUBERNETES_SA_TOKEN"
-                    , value = Some "/var/run/secrets/kubernetes.io/serviceaccount/token"
-                    }
+                  [ kubernetes.EnvVar::{ name = "RUST_LOG",           value = Some "debug" }
+                  , kubernetes.EnvVar::{ name = "CERT_ISSUER_CONFIG", value = Some "/etc/cert-issuer/config.json" }
+                  , kubernetes.EnvVar::{ name = "KUBERNETES_CA_CERT", value = Some "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt" }
+                  , kubernetes.EnvVar::{ name = "KUBERNETES_SA_TOKEN", value = Some "/var/run/secrets/kubernetes.io/serviceaccount/token" }
                   ]
                 , ports = Some
                   [ kubernetes.ContainerPort::{ containerPort = 8443 } ]
@@ -176,11 +203,11 @@ let certIssuerDeployment =
         }
       }
 
-in  [ kubernetes.Resource.ClusterRole             certIssuerClusterRole
-    , kubernetes.Resource.RoleBinding             certIssuerClusterRoleBinding
-    , kubernetes.Resource.ServiceAccount          certIssuerServiceAccount
-    , kubernetes.Resource.ConfigMap               certIssuerConfigMap
-    , kubernetes.Resource.PersistentVolumeClaim   certIssuerPvc
-    , kubernetes.Resource.Service                 certIssuerService
-    , kubernetes.Resource.Deployment              certIssuerDeployment
+in  [ kubernetes.Resource.ClusterRole           certIssuerClusterRole
+    , kubernetes.Resource.RoleBinding           certIssuerClusterRoleBinding
+    , kubernetes.Resource.ServiceAccount        certIssuerServiceAccount
+    , kubernetes.Resource.ConfigMap             certIssuerConfigMap
+    , kubernetes.Resource.PersistentVolumeClaim certIssuerPvc
+    , kubernetes.Resource.Service               certIssuerService
+    , kubernetes.Resource.Deployment            certIssuerDeployment
     ]

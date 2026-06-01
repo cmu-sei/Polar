@@ -11,56 +11,119 @@
     3. kubectl apply -f agents.dhall
 -}
 
-let Agent      = ../../types/agents.dhall
+let Polar      = ../../types/package.dhall
+let C          = ../../types/lib-constants.dhall
 let kubernetes = ../../types/kubernetes.dhall
-let Constants  = ../../types/constants.dhall
-let functions  = ../../types/functions.dhall
 let values     = ../values.dhall
+let Agent      = Polar.agents
+let functions  = Polar.functions
 
-let proxyCACert  = values.proxyCACert
-let nuInitImage  = "polar-nu-init:${Constants.commitSha}"
+-- -------------------------------------------------------------------------
+-- Deployment-local constants
+-- These are not architectural constants (they don't belong in lib-constants)
+-- and are not environment-specific values (they don't belong in values.dhall).
+-- They are implementation details of how this deployment wires pods together.
+-- -------------------------------------------------------------------------
 
-let scriptVolumeName = Constants.initScriptVolumeName
+let commitSha = env:CI_COMMIT_SHORT_SHA as Text ? "latest"
 
--- =============================================================================
+let nuInitImage = "polar-nu-init:${commitSha}"
+
+let saTokenVolumeName   = C.saTokenVolumeName
+let certVolumeName       = C.certVolumeName
+let initScriptVolumeName = C.initScriptVolumeName
+let certTokenExpiry      =  C.certTokenExpiry
+-- ConfigMap name for the nu init script, shared across all agent pods.
+let initScriptConfigMapName = C.initScriptConfigMapName
+
+-- Secret names for agent-specific credentials.
+let gitObserverSecretName = "git-observer-secret"
+
+-- OCI registry secret wired into the provenance resolver pod.
+let ociRegistrySecretName  = "oci-registry-auth"
+let ociRegistrySecretValue = env:DOCKER_AUTH_JSON as Text ? "someJson"
+
+-- Well-known deployment/container names for linker and resolver.
+-- These match the names the graph uses to identify these agents.
+let artifactLinkerName     = "artifact-linker"
+let provenanceLinkerName   = "provenance-linker"
+let provenanceResolverName = "provenance-resolver"
+let registryResolverName   = "oci-registry-resolver"
+
+-- Security context applied to every container. Drop all capabilities,
+-- run as non-root UID/GID 1000.
+let dropAllCapSecurityContext =
+      kubernetes.SecurityContext::{
+      , runAsGroup  = Some 1000
+      , runAsNonRoot = Some True
+      , runAsUser   = Some 1000
+      , capabilities = Some kubernetes.Capabilities::{ drop = Some [ "ALL" ] }
+      }
+
+-- Istio sidecar injection annotation — applied to deployments that must
+-- not have the sidecar (linker, resolver) to avoid mTLS double-wrapping.
+let rejectSidecarAnnotation =
+      { mapKey = "sidecar.istio.io/inject", mapValue = "false" }
+
+-- Secret key selectors for credentials mounted via env.
+let gitlabSecretKey = "token"
+
+let graphSecretKeySelector =
+      kubernetes.SecretKeySelector::{
+      , name = Some "polar-graph-pw"
+      , key  = "secret"
+      }
+
+-- commonClientEnv: the five env vars every agent needs to connect to Cassini.
+-- Derived entirely from lib-constants — no env var reads, no deployment state.
+let commonClientEnv =
+      [ kubernetes.EnvVar::{ name = "TLS_CA_CERT",          value = Some C.certPaths.ca }
+      , kubernetes.EnvVar::{ name = "TLS_CLIENT_CERT",      value = Some C.certPaths.cert }
+      , kubernetes.EnvVar::{ name = "TLS_CLIENT_KEY",       value = Some C.certPaths.key }
+      , kubernetes.EnvVar::{ name = "BROKER_ADDR",          value = Some C.cassiniAddr }
+      , kubernetes.EnvVar::{ name = "CASSINI_SERVER_NAME",  value = Some C.cassiniServerName }
+      ]
+
+-- -------------------------------------------------------------------------
 -- Shared cert bootstrap volumes and mounts
--- =============================================================================
+-- -------------------------------------------------------------------------
+
+let proxyCACert = values.proxyCACert
 
 let baseCertVolumes =
       functions.makeCertVolumes
-        Constants.saTokenVolumeName
-        Constants.certVolumeName
-        Constants.defaultCertClientConfig.audience
-        Constants.certTokenExpiry
+        saTokenVolumeName
+        certVolumeName
+        values.cassini.certClient.audience
+        certTokenExpiry
 
 let baseVolumes = baseCertVolumes # functions.ProxyVolume proxyCACert
 
 let certMount =
       functions.makeAgentCertMount
-        Constants.certVolumeName
-        Constants.certDir
+        certVolumeName
+        C.certDir
 
 let baseMounts = certMount # functions.ProxyMount proxyCACert
 
 let envVars =
       [ kubernetes.EnvVar::{ name = "RUST_LOG", value = Some "trace" } ]
-      # Constants.commonClientEnv
+      # commonClientEnv
 
 -- Init script ConfigMap volume — same script mounted into every agent pod.
--- The ConfigMap itself is emitted once in this file.
 let initScriptVolume =
       kubernetes.Volume::{
-      , name      = scriptVolumeName
+      , name      = initScriptVolumeName
       , configMap = Some kubernetes.ConfigMapVolumeSource::{
-        , name        = Some Constants.initScriptConfigMapName
+        , name = Some initScriptConfigMapName
         }
       }
 
 let agentVolumes = baseVolumes # [ initScriptVolume ]
 
--- =============================================================================
--- Neo4j
--- =============================================================================
+-- -------------------------------------------------------------------------
+-- Neo4j volumes, mounts, and env
+-- -------------------------------------------------------------------------
 
 let neo4jCAVolume =
       [ kubernetes.Volume::{
@@ -87,62 +150,58 @@ let neo4jBoltCASecret =
 
 let neo4jEnvVars =
       [ kubernetes.EnvVar::{ name = "GRAPH_ENDPOINT", value = Some values.neo4jBoltAddr }
-      , kubernetes.EnvVar::{ name = "GRAPH_DB",       value = Some Constants.graphConfig.graphDB }
-      , kubernetes.EnvVar::{ name = "GRAPH_USER",     value = Some Constants.graphConfig.graphUsername }
+      , kubernetes.EnvVar::{ name = "GRAPH_DB",       value = Some values.neo4j.hostName }
+      , kubernetes.EnvVar::{ name = "GRAPH_USER",     value = Some "neo4j" }
       , kubernetes.EnvVar::{
         , name      = "GRAPH_PASSWORD"
         , valueFrom = Some kubernetes.EnvVarSource::{
           , secretKeyRef = Some kubernetes.SecretKeySelector::{
             , name = Some "polar-graph-pw"
-            , key  = Constants.neo4jSecret.key
+            , key  = "secret"
             }
           }
         }
-        , kubernetes.EnvVar::{ name = "GRAPH_CA_CERT", value = Some "/home/polar/certs/ca.pem" }
+      , kubernetes.EnvVar::{ name = "GRAPH_CA_CERT", value = Some C.certPaths.ca }
       ]
 
--- =============================================================================
+-- -------------------------------------------------------------------------
 -- Init container factory
--- Every agent gets the same nu-init container with its own certClient config.
--- For testing, we explcitly never pull images.
--- =============================================================================
+-- -------------------------------------------------------------------------
 
 let makeCertInit =
-      \(cfg : Agent.CertClientConfig) ->
-      (        functions.makeNuInitContainer
-        nuInitImage
-        cfg
-        Constants.saTokenVolumeName
-        Constants.certVolumeName
-        scriptVolumeName) // { imagePullPolicy = Some "Never" }
+      \(cfg : Polar.agents.CertClientConfig.Type) ->
+        ( functions.makeNuInitContainer
+            nuInitImage
+            cfg
+            saTokenVolumeName
+            certVolumeName
+            initScriptVolumeName
+            dropAllCapSecurityContext
+        ) // { imagePullPolicy = Some values.imagePullPolicy }
 
--- =============================================================================
--- Init script ConfigMap — emitted once, mounted into every agent pod
--- =============================================================================
-
--- =============================================================================
+-- -------------------------------------------------------------------------
 -- Secrets
--- =============================================================================
+-- -------------------------------------------------------------------------
 
 let gitlabSecret =
       ( functions.makeOpaqueSecret
           "gitlab-secret"
-          Constants.gitlabSecretKeySelector.key
+          gitlabSecretKey
           (env:GITLAB_TOKEN as Text)
       ) // { immutable = Some True }
 
 let gitObserverSecret =
       ( functions.makeOpaqueSecret
-          Constants.gitObserverSecretName
+          gitObserverSecretName
           "git.json"
           values.gitObserver.config
       ) // { immutable = Some True }
 
 let resolverSecret =
       ( functions.makeOpaqueSecret
-          Constants.OciRegistrySecret.name
-          Constants.OciRegistrySecret.name
-          Constants.OciRegistrySecret.value
+          ociRegistrySecretName
+          ociRegistrySecretName
+          ociRegistrySecretValue
       ) // { immutable = Some True }
 
 let kubeAgentServiceAccountToken =
@@ -151,7 +210,7 @@ let kubeAgentServiceAccountToken =
       , kind       = "Secret"
       , metadata   = kubernetes.ObjectMeta::{
         , name      = Some values.kubeObserver.secretName
-        , namespace = Some Constants.PolarNamespace
+        , namespace = Some C.polarNamespace
         , annotations = Some
           [ { mapKey   = "kubernetes.io/service-account.name"
             , mapValue = values.kubeObserver.serviceAccountName
@@ -167,7 +226,7 @@ let buildOrchestratorServiceAccountToken =
       , kind       = "Secret"
       , metadata   = kubernetes.ObjectMeta::{
         , name      = Some values.buildOrchestrator.secretName
-        , namespace = Some Constants.PolarNamespace
+        , namespace = Some C.polarNamespace
         , annotations = Some
           [ { mapKey   = "kubernetes.io/service-account.name"
             , mapValue = values.buildOrchestrator.serviceAccountName
@@ -177,9 +236,9 @@ let buildOrchestratorServiceAccountToken =
       , type = Some "kubernetes.io/service-account-token"
       }
 
--- =============================================================================
+-- -------------------------------------------------------------------------
 -- Service accounts
--- =============================================================================
+-- -------------------------------------------------------------------------
 
 let mkServiceAccount =
       \(name : Text) ->
@@ -188,7 +247,7 @@ let mkServiceAccount =
         , kind       = "ServiceAccount"
         , metadata   = kubernetes.ObjectMeta::{
           , name      = Some name
-          , namespace = Some Constants.PolarNamespace
+          , namespace = Some C.polarNamespace
           }
         , automountServiceAccountToken = Some False
         }
@@ -203,9 +262,9 @@ let resolverSA       = mkServiceAccount "resolver-sa"
 let buildProcessorSA = mkServiceAccount "build-processor-sa"
 let kubeConsumerSA   = mkServiceAccount "kube-consumer-sa"
 
--- =============================================================================
+-- -------------------------------------------------------------------------
 -- RBAC (kube observer)
--- =============================================================================
+-- -------------------------------------------------------------------------
 
 let kubeAgentClusterRole =
       kubernetes.ClusterRole::{
@@ -227,7 +286,7 @@ let kubeAgentServiceAccount =
       , kind       = "ServiceAccount"
       , metadata   = kubernetes.ObjectMeta::{
         , name      = Some values.kubeObserver.serviceAccountName
-        , namespace = Some Constants.PolarNamespace
+        , namespace = Some C.polarNamespace
         }
       , automountServiceAccountToken = Some False
       }
@@ -246,72 +305,22 @@ let kubeAgentRoleBinding =
         [ kubernetes.Subject::{
           , kind      = "ServiceAccount"
           , name      = values.kubeObserver.serviceAccountName
-          , namespace = Some Constants.PolarNamespace
+          , namespace = Some C.polarNamespace
           }
         ]
       }
 
--- =============================================================================
--- RBAC (build orchestrator)
--- =============================================================================
-
---let buildOrchestratorClusterRoleName = "build-orchestrator-read"
-
---let buildOrchestratorClusterRole =
---      kubernetes.ClusterRole::{
---      , apiVersion = "rbac.authorization.k8s.io/v1"
---      , kind       = "ClusterRole"
---      , metadata   = kubernetes.ObjectMeta::{ name = Some buildOrchestratorClusterRoleName }
---      , rules      = Some
---        [ kubernetes.PolicyRule::{
---          , apiGroups = Some [ "*" ]
---          , resources = Some [ "*" ]
---          , verbs     = [ "get", "list", "watch" ]
---          }
---        ]
---      }
-
---let buildOrchestratorServiceAccount =
---      kubernetes.ServiceAccount::{
---      , apiVersion = "v1"
---      , kind       = "ServiceAccount"
---      , metadata   = kubernetes.ObjectMeta::{
---        , name      = Some values.buildOrchestrator.serviceAccountName
---        , namespace = Some Constants.PolarNamespace
---        }
---      , automountServiceAccountToken = Some False
---      }
-
---let buildOrchestratorRoleBinding =
---      kubernetes.RoleBinding::{
---      , apiVersion = "rbac.authorization.k8s.io/v1"
---      , kind       = "ClusterRoleBinding"
---      , metadata   = kubernetes.ObjectMeta::{ name = Some buildOrchestratorClusterRoleName }
---      , roleRef    = kubernetes.RoleRef::{
---        , apiGroup = "rbac.authorization.k8s.io"
---        , kind     = "ClusterRole"
---        , name     = buildOrchestratorClusterRoleName
---        }
---      , subjects = Some
---        [ kubernetes.Subject::{
---          , kind      = "ServiceAccount"
---          , name      = values.buildOrchestrator.serviceAccountName
---          , namespace = Some Constants.PolarNamespace
---          }
---        ]
---      }
-
--- =============================================================================
+-- -------------------------------------------------------------------------
 -- Sidecar rejection helper
--- =============================================================================
+-- -------------------------------------------------------------------------
 
 let withRejectSidecar =
       \(d : kubernetes.Deployment.Type) ->
-        d // { metadata = d.metadata // { annotations = Some [ Constants.RejectSidecarAnnotation ] } }
+        d // { metadata = d.metadata // { annotations = Some [ rejectSidecarAnnotation ] } }
 
--- =============================================================================
+-- -------------------------------------------------------------------------
 -- GitLab agents
--- =============================================================================
+-- -------------------------------------------------------------------------
 
 let gitlabObserverEnv =
       envVars
@@ -323,7 +332,7 @@ let gitlabObserverEnv =
           , valueFrom = Some kubernetes.EnvVarSource::{
             , secretKeyRef = Some kubernetes.SecretKeySelector::{
               , name = Some "gitlab-secret"
-              , key  = "token"
+              , key  = gitlabSecretKey
               }
             }
           }
@@ -334,7 +343,7 @@ let gitlabConsumerEnv =
       # functions.makeGraphEnv
           values.neo4jBoltAddr
           values.gitlabConsumer.graph
-          Constants.graphSecretKeySelector
+          graphSecretKeySelector
           (Some "/etc/neo4j-ca/ca.pem")
 
 let gitlabAgentDeployment =
@@ -348,7 +357,7 @@ let gitlabAgentDeployment =
             , name            = values.gitlabObserver.name
             , image           = Some values.gitlabObserver.image
             , imagePullPolicy = Some values.imagePullPolicy
-            , securityContext = Some Constants.DropAllCapSecurityContext
+            , securityContext = Some dropAllCapSecurityContext
             , env             = Some gitlabObserverEnv
             , volumeMounts    = Some (baseMounts # neo4jCAVolumeMount)
             }
@@ -356,7 +365,7 @@ let gitlabAgentDeployment =
             , name            = values.gitlabConsumer.name
             , image           = Some values.gitlabConsumer.image
             , imagePullPolicy = Some values.imagePullPolicy
-            , securityContext = Some Constants.DropAllCapSecurityContext
+            , securityContext = Some dropAllCapSecurityContext
             , env             = Some gitlabConsumerEnv
             , volumeMounts    = Some (baseMounts # neo4jCAVolumeMount)
             }
@@ -364,9 +373,9 @@ let gitlabAgentDeployment =
         , volumes = Some (agentVolumes # neo4jCAVolume)
         }
 
--- =============================================================================
+-- -------------------------------------------------------------------------
 -- Git agents
--- =============================================================================
+-- -------------------------------------------------------------------------
 
 let gitObserverEnv =
       envVars
@@ -383,12 +392,12 @@ let gitAgentDeployment =
             , name            = values.gitObserver.name
             , image           = Some values.gitObserver.image
             , imagePullPolicy = Some values.imagePullPolicy
-            , securityContext = Some Constants.DropAllCapSecurityContext
+            , securityContext = Some dropAllCapSecurityContext
             , env             = Some gitObserverEnv
             , volumeMounts    = Some
                 ( baseMounts
                   # [ kubernetes.VolumeMount::{
-                      , name      = Constants.gitObserverSecretName
+                      , name      = gitObserverSecretName
                       , mountPath = "/etc/git-observer"
                       }
                     ]
@@ -398,16 +407,30 @@ let gitAgentDeployment =
             , name            = values.gitConsumer.name
             , image           = Some values.gitConsumer.image
             , imagePullPolicy = Some values.imagePullPolicy
-            , securityContext = Some Constants.DropAllCapSecurityContext
-            , env             = Some (envVars # functions.makeGraphEnv values.neo4jBoltAddr values.gitConsumer.graph Constants.graphSecretKeySelector (Some "/etc/neo4j-ca/ca.pem"))
+            , securityContext = Some dropAllCapSecurityContext
+            , env             = Some
+                ( envVars
+                  # functions.makeGraphEnv
+                      values.neo4jBoltAddr
+                      values.gitConsumer.graph
+                      graphSecretKeySelector
+                      (Some "/etc/neo4j-ca/ca.pem")
+                )
             , volumeMounts    = Some (baseMounts # neo4jCAVolumeMount)
             }
           , kubernetes.Container::{
             , name            = values.gitScheduler.name
             , image           = Some values.gitScheduler.image
             , imagePullPolicy = Some values.imagePullPolicy
-            , securityContext = Some Constants.DropAllCapSecurityContext
-            , env             = Some (envVars # functions.makeGraphEnv values.neo4jBoltAddr values.gitScheduler.graph Constants.graphSecretKeySelector (Some "/etc/neo4j-ca/ca.pem"))
+            , securityContext = Some dropAllCapSecurityContext
+            , env             = Some
+                ( envVars
+                  # functions.makeGraphEnv
+                      values.neo4jBoltAddr
+                      values.gitScheduler.graph
+                      graphSecretKeySelector
+                      (Some "/etc/neo4j-ca/ca.pem")
+                )
             , volumeMounts    = Some (baseMounts # neo4jCAVolumeMount)
             }
           ]
@@ -415,18 +438,18 @@ let gitAgentDeployment =
             ( agentVolumes
               # neo4jCAVolume
               # [ kubernetes.Volume::{
-                  , name   = Constants.gitObserverSecretName
+                  , name   = gitObserverSecretName
                   , secret = Some kubernetes.SecretVolumeSource::{
-                    , secretName = Some Constants.gitObserverSecretName
+                    , secretName = Some gitObserverSecretName
                     }
                   }
                 ]
             )
         }
 
--- =============================================================================
+-- -------------------------------------------------------------------------
 -- Kube agents
--- =============================================================================
+-- -------------------------------------------------------------------------
 
 let kubeAgentVolumes =
       agentVolumes
@@ -440,7 +463,7 @@ let kubeAgentVolumes =
       # neo4jCAVolume
 
 let kubeObserverEnv =
-      Constants.commonClientEnv
+      commonClientEnv
       # [ kubernetes.EnvVar::{
           , name      = "KUBE_TOKEN"
           , valueFrom = Some kubernetes.EnvVarSource::{
@@ -452,7 +475,7 @@ let kubeObserverEnv =
           }
         ]
 
-let kubeConsumerEnv = (envVars # neo4jEnvVars)
+let kubeConsumerEnv = envVars # neo4jEnvVars
 
 let kubeObserverVolumeMounts =
       baseMounts
@@ -473,7 +496,7 @@ let kubeAgentDeployment =
             , name            = values.kubeObserver.name
             , image           = Some values.kubeObserver.image
             , imagePullPolicy = Some values.imagePullPolicy
-            , securityContext = Some Constants.DropAllCapSecurityContext
+            , securityContext = Some dropAllCapSecurityContext
             , env             = Some kubeObserverEnv
             , volumeMounts    = Some kubeObserverVolumeMounts
             }
@@ -481,61 +504,62 @@ let kubeAgentDeployment =
             , name            = values.kubeConsumer.name
             , image           = Some values.kubeConsumer.image
             , imagePullPolicy = Some values.imagePullPolicy
-            , securityContext = Some Constants.DropAllCapSecurityContext
+            , securityContext = Some dropAllCapSecurityContext
             , env             = Some kubeConsumerEnv
             , volumeMounts    = Some (baseMounts # neo4jCAVolumeMount)
             }
           ]
         , volumes = Some kubeAgentVolumes
         }
-        -- =============================================================================
-        -- Build processor (build orchestrator deprecated, removed from local deploy)
-        -- =============================================================================
 
-        let buildProcessorEnv =
-              envVars
-              # functions.makeGraphEnv
-                  values.neo4jBoltAddr
-                  values.buildProcessor.graph
-                  Constants.graphSecretKeySelector
-                  (Some "/etc/neo4j-ca/ca.pem")
+-- -------------------------------------------------------------------------
+-- Build processor
+-- -------------------------------------------------------------------------
 
-        let buildProcessorDeployment =
-              functions.makeDeployment
-                "build-processor"
-                kubernetes.PodSpec::{
-                , serviceAccountName = Some "build-processor-sa"
-                , initContainers     = Some [ makeCertInit values.buildProcessor.certClient ]
-                , containers =
-                  [ kubernetes.Container::{
-                    , name            = values.buildProcessor.name
-                    , image           = Some values.buildProcessor.image
-                    , imagePullPolicy = Some values.imagePullPolicy
-                    , securityContext = Some Constants.DropAllCapSecurityContext
-                    , env             = Some buildProcessorEnv
-                    , volumeMounts    = Some (baseMounts # neo4jCAVolumeMount)
-                    }
-                  ]
-                , volumes = Some (agentVolumes # neo4jCAVolume)
-                }
+let buildProcessorEnv =
+      envVars
+      # functions.makeGraphEnv
+          values.neo4jBoltAddr
+          values.buildProcessor.graph
+          graphSecretKeySelector
+          (Some "/etc/neo4j-ca/ca.pem")
 
--- =============================================================================
+let buildProcessorDeployment =
+      functions.makeDeployment
+        "build-processor"
+        kubernetes.PodSpec::{
+        , serviceAccountName = Some "build-processor-sa"
+        , initContainers     = Some [ makeCertInit values.buildProcessor.certClient ]
+        , containers =
+          [ kubernetes.Container::{
+            , name            = values.buildProcessor.name
+            , image           = Some values.buildProcessor.image
+            , imagePullPolicy = Some values.imagePullPolicy
+            , securityContext = Some dropAllCapSecurityContext
+            , env             = Some buildProcessorEnv
+            , volumeMounts    = Some (baseMounts # neo4jCAVolumeMount)
+            }
+          ]
+        , volumes = Some (agentVolumes # neo4jCAVolume)
+        }
+
+-- -------------------------------------------------------------------------
 -- Linker and resolver
--- =============================================================================
+-- -------------------------------------------------------------------------
 
 let linkerDeployment =
       withRejectSidecar
         ( functions.makeDeployment
-            Constants.ArtifactLinkerName
+            artifactLinkerName
             kubernetes.PodSpec::{
             , serviceAccountName = Some "linker-sa"
             , initContainers     = Some [ makeCertInit values.linker.certClient ]
             , containers =
               [ kubernetes.Container::{
-                , name            = Constants.ProvenanceLinkerName
+                , name            = provenanceLinkerName
                 , image           = Some values.linker.image
                 , imagePullPolicy = Some values.imagePullPolicy
-                , securityContext = Some Constants.DropAllCapSecurityContext
+                , securityContext = Some dropAllCapSecurityContext
                 , env             = Some (envVars # neo4jEnvVars)
                 , volumeMounts    = Some (baseMounts # neo4jCAVolumeMount)
                 }
@@ -547,10 +571,11 @@ let linkerDeployment =
 let resolverVolumes =
       agentVolumes
       # [ kubernetes.Volume::{
-          , name   = Constants.OciRegistrySecret.name
+          , name   = ociRegistrySecretName
           , secret = Some kubernetes.SecretVolumeSource::{
-            , secretName = Some Constants.OciRegistrySecret.name
-            , items      = Some [ kubernetes.KeyToPath::{ key = "oci-registry-auth", path = "config.json" } ]
+            , secretName = Some ociRegistrySecretName
+            , items      = Some
+              [ kubernetes.KeyToPath::{ key = "oci-registry-auth", path = "config.json" } ]
             }
           }
         ]
@@ -558,7 +583,7 @@ let resolverVolumes =
 let resolverVolumeMounts =
       baseMounts
       # [ kubernetes.VolumeMount::{
-          , name      = Constants.OciRegistrySecret.name
+          , name      = ociRegistrySecretName
           , mountPath = "/home/polar/.docker/"
           }
         ]
@@ -566,16 +591,16 @@ let resolverVolumeMounts =
 let resolverDeployment =
       withRejectSidecar
         ( functions.makeDeployment
-            Constants.RegistryResolverName
+            registryResolverName
             kubernetes.PodSpec::{
             , serviceAccountName = Some "resolver-sa"
             , initContainers     = Some [ makeCertInit values.resolver.certClient ]
             , containers =
               [ kubernetes.Container::{
-                , name            = Constants.ProvenanceResolverName
+                , name            = provenanceResolverName
                 , image           = Some values.resolver.image
                 , imagePullPolicy = Some values.imagePullPolicy
-                , securityContext = Some Constants.DropAllCapSecurityContext
+                , securityContext = Some dropAllCapSecurityContext
                 , env             = Some (envVars # functions.ProxyEnv proxyCACert)
                 , volumeMounts    = Some resolverVolumeMounts
                 }
@@ -584,9 +609,9 @@ let resolverDeployment =
             }
         )
 
--- =============================================================================
+-- -------------------------------------------------------------------------
 -- Resource list
--- =============================================================================
+-- -------------------------------------------------------------------------
 
 in  [ kubernetes.Resource.ClusterRole    kubeAgentClusterRole
     , kubernetes.Resource.Deployment     buildProcessorDeployment
