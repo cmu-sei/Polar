@@ -32,6 +32,7 @@ let polarExtras =
     , Lib.nixpkgs "dhall"
     , Lib.nixpkgs "dhall-json"
     , Lib.nixpkgs "dhall-nix"
+    , Lib.nixpkgs "dropbear"
     ]
 
 -- ---------------------------------------------------------------------------
@@ -66,7 +67,7 @@ in defaults.devContainer //
 
   , ssh = Some
       ( defaults.defaultSSH //
-        { enable = False
+        { enable = True
         , port   = 2223
         }
       )
