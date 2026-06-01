@@ -25,7 +25,7 @@ chart/
 authorized_keys
 *-output.json
 env.fish
-src/agents/cassini/test/producer/config.dhall
+
 git.json
 # ephemeral bullshit - do not check this in
 my.env
@@ -42,8 +42,7 @@ src/deploy/local/values-active.dhall
 .sops.yaml
 .user.sops.yaml
 user.sops.yaml
-# ignore rendered cotnainer nix files
-*.container.nix
+
 # ignore rendered local deployment configurations
 src/deploy/local/conf/*.json
 src/deploy/local/conf/*.yaml
