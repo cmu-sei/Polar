@@ -1,42 +1,43 @@
 -- flux-kustomization.dhall
 --
--- Flux Kustomization that reconciles manifests from the OCIRepository above.
--- Tells kustomize-controller to apply whatever the source-controller resolved.
+-- Three Flux Kustomizations encoding Polar's deployment order:
+--
+--   1. polar-core        — cert-issuer only. Nothing works without it.
+--   2. polar-infra       — cassini and neo4j. Depends on polar-core.
+--   3. polar-agents      — all agents. Depends on polar-infra.
+--
+-- Each Kustomization points at a subdirectory inside the OCI artifact,
+-- so your artifact must be structured as:
+--
+--   core/      kustomization.yaml → cert-issuer.yaml
+--   infra/     kustomization.yaml → cassini.yaml, neo4j.yaml
+--   agents/    kustomization.yaml → agents.yaml (and jaeger, storage, etc.)
 --
 -- Generate and apply:
---   dhall-to-yaml <<< ./flux-kustomization.dhall | kubectl apply -f -
+--   dhall-to-yaml --documents <<< ./flux-kustomization.dhall | kubectl apply -f -
 --
--- Watch:
---   kubectl get kustomization polar-test -n flux-system -w
+-- Watch the chain:
+--   kubectl get kustomization -n flux-system -w
 --   flux logs --all-namespaces --follow
---
--- When reconciliation completes, verify the status fields that close the chain:
---   kubectl get kustomization polar-test -n flux-system -o jsonpath=\
---     '{.status.lastAppliedRevision}{"\n"}{.status.lastAppliedOriginRevision}{"\n"}'
---
--- lastAppliedRevision should be the OCI content digest (sha256:...).
--- lastAppliedOriginRevision should be the value you passed to --revision
--- when pushing the artifact.
 
-{ apiVersion = "kustomize.toolkit.fluxcd.io/v1"
-, kind = "Kustomization"
-, metadata =
-  { name = "polar-test"
-  , namespace = "flux-system"
-  }
-, spec =
-  { interval = "1m"
-  , sourceRef =
-    { kind = "OCIRepository"
-      -- Must match metadata.name in flux-oci-repository.dhall exactly.
-    , name = "polar-test"
-    }
-    -- "." means root of the artifact. Adjust if your kustomization.yaml
-    -- lives in a subdirectory inside the artifact.
-  , path = "."
-  , prune = True
-    -- Give the controller enough time to apply and health-check before
-    -- marking the reconciliation as failed.
-  , timeout = "2m"
-  }
-}
+let mkKustomization =
+      \(name : Text) ->
+      \(path : Text) ->
+      \(dependsOn : List { name : Text }) ->
+        { apiVersion = "kustomize.toolkit.fluxcd.io/v1"
+        , kind       = "Kustomization"
+        , metadata   = { name, namespace = "flux-system" }
+        , spec =
+          { interval  = "1m"
+          , sourceRef = { kind = "OCIRepository", name = "polar-test" }
+          , path
+          , prune     = True
+          , timeout   = "2m"
+          , dependsOn
+          }
+        }
+
+in  [ mkKustomization "polar-core"   "./core"   ([] : List { name : Text })
+    , mkKustomization "polar-infra"  "./infra"  [ { name = "polar-core" } ]
+    , mkKustomization "polar-agents" "./agents" [ { name = "polar-infra" } ]
+    ]

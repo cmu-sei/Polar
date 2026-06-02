@@ -1,10 +1,12 @@
 let kubernetes = ./kubernetes.dhall
 
+let C = ./lib-constants.dhall
+
 let Agents = ./agents.dhall
 
 let GraphConfig = Agents.GraphConfig
 
-let PolarNamespace = "polar"
+let PolarNamespace = C.polarNamespace
 
 let makeGraphEnv
     : Text →
@@ -195,12 +197,11 @@ let makeCertVolume
         }
 
 let makeSaTokenMount
-    : Text -> Text -> kubernetes.VolumeMount.Type
+    : Text -> kubernetes.VolumeMount.Type
     = \(saTokenVolumeName : Text)
-    -> \(sa_token_path : Text)
     -> kubernetes.VolumeMount::{
         , name      = saTokenVolumeName
-        , mountPath = sa_token_path
+        , mountPath = C.saTokenDir
         , readOnly  = Some True
         }
 
@@ -223,17 +224,6 @@ let makeNuInitScript
         , data = Some [ { mapKey = "init.nu", mapValue = script } ]
         }
 
---
--- makeNuInitContainer applies Constants.DropAllCapSecurityContext unconditionally.
--- The security context is a reasonable default, but it's hardcoded rather than passed in.
--- A consumer who needs a different security context for the init container —
--- different UID/GID, additional capabilities dropped,
--- or seccompProfile set — cannot override it without forking the function.
--- TODO: Consider Adding an Optional kubernetes.SecurityContext.Type parameter.
--- If None, apply Constants.DropAllCapSecurityContext as the default.
--- If Some ctx, apply that instead.
--- Alternatively, accept it as a required parameter and provide Constants.DropAllCapSecurityContext as a documented default the consumer can pass explicitly.
--- The latter is more Dhall-idiomatic and avoids conditional logic.
 let makeNuInitContainer
     : Text -> Agents.CertClientConfig.Type -> Text -> Text -> Text -> kubernetes.SecurityContext.Type -> kubernetes.Container.Type
     = \(nuInitImage : Text)
@@ -257,7 +247,7 @@ let makeNuInitContainer
               }
             ]
         , volumeMounts = Some
-            [ makeSaTokenMount saTokenVolumeName cfg.sa_token_path
+            [ makeSaTokenMount saTokenVolumeName
             , makeCertMount    certVolumeName    cfg.cert_dir
             , kubernetes.VolumeMount::{
             , name      = scriptVolumeName

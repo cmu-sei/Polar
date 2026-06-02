@@ -38,6 +38,38 @@ let C =
 
 Replace `COMMIT_SHA` and `sha256:HASH` with the values produced by `dhall freeze --all types/package.dhall` after each release. Never pin to `master` — the hash provides the safety guarantee; a moving ref defeats it.
 
+### Keeping the frozen hashes current
+
+`dhall freeze` embeds a `sha256` hash for every import in the file it
+processes. That hash is both a cache key and a security guarantee — Dhall will
+refuse to evaluate an import whose content no longer matches the recorded hash.
+This means **any change to a library file requires re-freezing `package.dhall`
+before the change takes effect**, even locally.
+
+The failure mode is silent and confusing: your edited file is on disk, the
+change looks correct, but rendered output is stale because Dhall is serving the
+previous expression from its on-disk cache at
+`~/.cache/dhall/` (or `$XDG_CACHE_HOME/dhall/`). Re-freezing updates the hash,
+which busts the cache entry and forces re-evaluation.
+
+After any change to `agents.dhall`, `cassini.dhall`, `functions.dhall`, or
+`lib-constants.dhall`:
+
+    dhall freeze --all types/package.dhall
+
+Then re-render all manifests. If you want to verify you are not hitting a stale
+cache entry without re-freezing, clear the cache explicitly:
+
+    dhall cache clear
+
+and re-run `dhall-to-yaml`. If the output changes, you had a stale cache and
+need to refreeze. If it doesn't, the hash is still valid.
+
+Never edit a frozen file and skip re-freezing on the assumption that the change
+is "small" — the hash covers the entire normal form of the expression, not just
+the source text, and Dhall will silently ignore your change until the hash is
+updated.
+
 ### Consuming the library
 
 A minimal agent deployment expression looks like this:
