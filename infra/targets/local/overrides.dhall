@@ -72,7 +72,7 @@
   }
 
 , certIssuer =
-  { image           = "polar-cert-issuer:latest"
+  { image           = "cert-issuer:latest"
   , certClientImage = "polar-cert-client:latest"
   , imagePullSecrets = [] : List { name : Optional Text }
   , oidcIssuerUrl   = "https://kubernetes.default.svc.cluster.local"

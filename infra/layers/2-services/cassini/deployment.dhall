@@ -32,6 +32,7 @@ let render =
               k8s.Container::{
               , name  = "cert-client"
               , image = Some v.certClientImage
+              , imagePullPolicy = Some "IfNotPresent"
               , args  = Some
                 [ "--cert-issuer-url", v.certIssuerUrl
                 , "--token-path",      "/workspace/token"
@@ -65,7 +66,7 @@ let render =
                       [ k8s.Container::{
                         , name            = "cassini"
                         , image           = Some v.image
-                        , imagePullPolicy = Some v.imagePullPolicy
+                        , imagePullPolicy = Some "IfNotPresent"
                         , securityContext = Some Constants.DropAllCapSecurityContext
                         , env             = Some environment
                         , ports           = Some

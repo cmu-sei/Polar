@@ -181,6 +181,7 @@ let makeCertClientInitContainer =
         kubernetes.Container::{
         , name  = "cert-client"
         , image = Some certClientImage
+        , imagePullPolicy = Some "IfNotPresent"
         , args  = Some
           [ "--cert-issuer-url", certIssuerUrl
           , "--token-path",      "/workspace/token"

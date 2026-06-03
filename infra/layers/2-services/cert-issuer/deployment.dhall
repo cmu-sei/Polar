@@ -32,16 +32,16 @@ let render =
               , imagePullSecrets = Some v.imagePullSecrets
               , volumes = Some
                 [ k8s.Volume::{
-                  , name                   = v.caVolumeName
-                  , persistentVolumeClaim  = Some k8s.PersistentVolumeClaimVolumeSource::{
-                    , claimName = "${v.name}-ca"
-                    }
+                  , name                  = v.caVolumeName
+                  , persistentVolumeClaim = Some k8s.PersistentVolumeClaimVolumeSource::{ claimName = "${v.name}-ca" }
                   }
                 , k8s.Volume::{
                   , name      = "config"
-                  , configMap = Some k8s.ConfigMapVolumeSource::{
-                    , name = Some "${v.name}-config"
-                    }
+                  , configMap = Some k8s.ConfigMapVolumeSource::{ name = Some "${v.name}-config" }
+                  }
+                , k8s.Volume::{
+                  , name      = "kube-api-ca"
+                  , hostPath  = Some k8s.HostPathVolumeSource::{ path = "/var/run/secrets/kubernetes.io/serviceaccount" }
                   }
                 ]
               , containers =
@@ -57,7 +57,11 @@ let render =
                       }
                     , k8s.EnvVar::{
                       , name  = "RUST_LOG"
-                      , value = Some "info"
+                      , value = Some "info,cert_issuer=debug"
+                      }
+                    , k8s.EnvVar::{
+                      , name  = "KUBERNETES_CA_CERT"
+                      , value = Some "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
                       }
                     ]
                   , ports = Some

@@ -829,7 +829,7 @@ cluster-load-all neo4j_result=_neo4j_result:
         _load "{{neo4j_result}}"
     fi
     # Polar images — all from nix result symlinks
-    _load ./result-cassini
+    _load ./result-cassini-image
     _load ./result-cert-issuer
     _load ./result-cert-client
     _load ./result-harness-producer
