@@ -12,7 +12,7 @@ use std::time::Duration;
 fn valid_issuer() -> IssuerConfig {
     IssuerConfig {
         issuer: "https://kubernetes.default.svc".to_string(),
-        audience: "polar-cert-issuer".to_string(),
+        audience: vec!["polar-cert-issuer".to_string()],
         jwks_uri: None,
         workload_identity_claim: "sub".to_string(),
         instance_binding_claim: "kubernetes.io.pod.uid".to_string(),
@@ -68,7 +68,7 @@ fn empty_audience_is_rejected() {
     // Audience matching is non-negotiable; an empty audience would
     // accept any token regardless of intended recipient.
     let mut cfg = valid_config();
-    cfg.issuer.audience = String::new();
+    cfg.issuer.audience = vec![];
     let err = cfg.validate().expect_err("empty audience must be rejected");
     assert!(matches!(err, ConfigError::EmptyAudience));
 }

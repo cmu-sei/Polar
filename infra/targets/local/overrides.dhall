@@ -76,7 +76,7 @@
   , certClientImage = "polar-cert-client:latest"
   , imagePullSecrets = [] : List { name : Optional Text }
   , oidcIssuerUrl   = "https://kubernetes.default.svc.cluster.local"
-  , oidcAudience    = "polar-cert-issuer.local"
+  , oidcAudience    = ["polar-cert-issuer.local", "polar-cert-issuer-neo4j.local"]
   , oidcJwksUri     = Some "https://kubernetes.default.svc.cluster.local/openid/v1/jwks"
   }
 }

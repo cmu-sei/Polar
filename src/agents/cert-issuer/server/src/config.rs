@@ -42,7 +42,7 @@ pub struct IssuerConfig {
     /// Expected `aud` claim. REQUIRED — there is no "match any audience"
     /// mode. Misconfigurations here are surfaced as INVALID_AUDIENCE so
     /// they're distinguishable from other token failures.
-    pub audience: String,
+    pub audience: Vec<String>,
 
     /// JWKS URL. If None, derived from the OIDC discovery document.
     pub jwks_uri: Option<String>,
@@ -119,6 +119,11 @@ impl ServiceConfig {
         // ---- Empty audience ----
         if self.issuer.audience.is_empty() {
             return Err(ConfigError::EmptyAudience);
+        }
+        for aud in &self.issuer.audience {
+            if aud.is_empty() {
+                return Err(ConfigError::EmptyAudience);
+            }
         }
 
         // ---- Empty issuer ----

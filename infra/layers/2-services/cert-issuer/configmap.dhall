@@ -13,7 +13,7 @@ let render =
           , caCertPath    : Text
           , caKeyPath     : Text
           , oidcIssuerUrl : Text
-          , oidcAudience  : Text
+          , oidcAudience  : List Text
           , oidcJwksUri   : Optional Text
           }
       ) ->
@@ -44,7 +44,7 @@ let render =
                     , issuer = JSON.object
                       ( toMap
                         { issuer   = JSON.string v.oidcIssuerUrl
-                        , audience = JSON.string v.oidcAudience
+                        , audience = JSON.array (List/map Text JSON.Type JSON.string v.oidcAudience)
                         , jwks_uri = jwks
                         , workload_identity_claim = JSON.string "sub"
                         , instance_binding_claim  = JSON.string "kubernetes.io/pod/uid"

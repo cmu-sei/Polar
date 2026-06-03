@@ -11,14 +11,14 @@ use kube_common::flux::kustomization::Kustomization;
 use kube_common::flux::oci_repositories::OciRepository;
 use kube_common::{
     BATCH_PROCESS_ACTION, KUBERNETES_CONSUMER, RESOURCE_APPLIED_ACTION, RESOURCE_DELETED_ACTION,
-    RawKubeEvent,
+    RawKubeEvent, KIND_OCI_REPOSITORY, KIND_KUSTOMIZATION,
 };
 use ractor::ActorProcessingErr;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::{to_value, to_vec};
 use std::fmt::Debug;
-use tracing::{debug, error, instrument, trace};
+use tracing::{warn, debug, error, instrument, trace};
 // pub mod pods;
 pub mod supervisor;
 
@@ -443,8 +443,20 @@ macro_rules! impl_global_watcher {
                         )
                         .await
                         {
-                            error!("{e}");
-                            myself.stop(None);
+                            // A 404 means the CRD isn't installed in this cluster.
+                            // Log a warning and exit cleanly rather than crashing the
+                            // supervisor — Flux CRDs are optional infrastructure.
+                            let err_str = e.to_string();
+                            if err_str.contains("404") || err_str.contains("not found") {
+                                warn!(
+                                    "CRD for {} not found in cluster (404) — \
+                                     skipping watcher. Install the CRD to enable observation.",
+                                    $kind
+                                );
+                            } else {
+                                error!("{e}");
+                                myself.stop(None);
+                            }
                         }
                     }
                 }
@@ -481,7 +493,7 @@ impl_global_watcher!(
 impl_global_watcher!(
     OciRepositoryWatcher,
     resource = OciRepository,
-    kind = KIND_OCIREPOSITORY
+    kind = KIND_OCI_REPOSITORY
 );
 impl_global_watcher!(
     KustomizationWatcher,

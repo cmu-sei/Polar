@@ -34,7 +34,7 @@ use helpers::*;
 fn test_issuer_config() -> IssuerConfig {
     IssuerConfig {
         issuer: TEST_ISSUER.to_string(),
-        audience: TEST_AUDIENCE.to_string(),
+        audience: vec![TEST_AUDIENCE.to_string()],
         jwks_uri: Some("https://test-issuer.example.com/jwks".to_string()),
         workload_identity_claim: "sub".to_string(),
         // JSON Pointer syntax: /-separated, with the literal

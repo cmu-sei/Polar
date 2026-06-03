@@ -56,7 +56,7 @@ async fn main() -> Result<()> {
     info!(
         bind_addr = %config.bind_addr,
         issuer = %config.issuer.issuer,
-        audience = %config.issuer.audience,
+        audience = %config.issuer.audience.join(", "),
         "cert issuer starting"
     );
 

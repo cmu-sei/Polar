@@ -15,6 +15,6 @@ in  { name             = "cert-issuer"
     , caKeyPath  = "/home/polar/ca/ca.key"
     -- These two MUST be overridden per target in overrides.dhall:
     , oidcIssuerUrl    = ""
-    , oidcAudience     = ""
+    , oidcAudience     = [] : List Text
     , oidcJwksUri      = None Text
     }

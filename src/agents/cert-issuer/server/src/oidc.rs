@@ -255,7 +255,9 @@ impl Validator {
         // expected issuer, expected audience, and to require exp.
         let mut validation = Validation::new(header.alg);
         validation.set_issuer(&[&self.config.issuer]);
-        validation.set_audience(&[&self.config.audience]);
+        validation.set_audience(
+            &self.config.audience.iter().map(|s| s.as_str()).collect::<Vec<_>>()
+        );
         validation.set_required_spec_claims(&["exp", "iss", "aud"]);
         // We don't tighten `validation.algorithms` further here
         // because we've already gated on the allow-list. Trust
@@ -289,7 +291,12 @@ impl Validator {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
-        let audience = self.config.audience.clone();
+
+        let audience = raw_claims
+            .get("aud")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
 
         Ok(ValidatedClaims {
             workload_identity,
