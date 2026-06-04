@@ -58,16 +58,19 @@ let render =
         }
 
         let baseVolumeMounts =
-              [ kubernetes.VolumeMount::{ name = v.configVolume,      mountPath = "/var/lib/neo4j/conf"   }
-              , kubernetes.VolumeMount::{ name = v.volumes.data.name, mountPath = v.volumes.data.mountPath }
-              , kubernetes.VolumeMount::{ name = v.volumes.logs.name, mountPath = v.volumes.logs.mountPath }
-              , kubernetes.VolumeMount::{ name = "tmp",               mountPath = "/tmp"                   }
+              [ kubernetes.VolumeMount::{ name = v.configVolume,       mountPath = "/var/lib/neo4j/conf"           }
+              , kubernetes.VolumeMount::{ name = v.volumes.data.name,  mountPath = v.volumes.data.mountPath        }
+              , kubernetes.VolumeMount::{ name = v.volumes.logs.name,  mountPath = v.volumes.logs.mountPath        }
+              , kubernetes.VolumeMount::{ name = v.volumes.certs.name, mountPath = v.volumes.certs.mountPath       }
+              , kubernetes.VolumeMount::{ name = "tmp",                mountPath = "/tmp"                          }
               ]
 
         let initVolumeMounts =
-              [ kubernetes.VolumeMount::{ name = Constants.neo4jConfigmapName, mountPath = "/config"             }
-              , kubernetes.VolumeMount::{ name = v.configVolume,               mountPath = "/var/lib/neo4j/conf"  }
-              , kubernetes.VolumeMount::{ name = "neo4j-init-script",          mountPath = "/scripts"             }
+              [ kubernetes.VolumeMount::{ name = Constants.neo4jConfigmapName, mountPath = "/config"                    }
+              , kubernetes.VolumeMount::{ name = v.configVolume,               mountPath = "/var/lib/neo4j/conf"         }
+              , kubernetes.VolumeMount::{ name = "neo4j-init-script",          mountPath = "/scripts"                    }
+              , kubernetes.VolumeMount::{ name = v.volumes.certs.name,         mountPath = v.volumes.certs.mountPath     }
+              , kubernetes.VolumeMount::{ name = "neo4j-tls",                  mountPath = "/etc/neo4j-tls", readOnly = Some True }
               ]
 
         let baseEnv =
@@ -100,6 +103,10 @@ let render =
                   , name  = Some v.config.name
                   , items = Some [ kubernetes.KeyToPath::{ key = "neo4j.conf", path = "neo4j.conf" } ]
                   }
+                }
+              , kubernetes.Volume::{
+                , name                  = v.volumes.certs.name
+                , persistentVolumeClaim = Some kubernetes.PersistentVolumeClaimVolumeSource::{ claimName = v.volumes.certs.name }
                 }
               , kubernetes.Volume::{ name = v.configVolume, emptyDir = Some kubernetes.EmptyDirVolumeSource::{=} }
               , kubernetes.Volume::{ name = "tmp",          emptyDir = Some kubernetes.EmptyDirVolumeSource::{=} }
@@ -147,14 +154,25 @@ let render =
                         , runAsNonRoot = Some False
                         }
                       , env          = Some baseEnv
+                      , volumeMounts = Some initVolumeMounts
+                      }
+                    , kubernetes.Container::{
+                      , name            = "neo4j-cacerts"
+                      , image           = Some v.image
+                      , imagePullPolicy = Some v.imagePullPolicy
+                      , securityContext = Some kubernetes.SecurityContext::{
+                        , runAsUser    = Some 0
+                        , runAsGroup   = Some 0
+                        , runAsNonRoot = Some False
+                        }
+                      , command = Some [ "/bin/sh", "-c" ]
+                      , args = Some
+                      [ "JAVA_HOME=$(dirname $(dirname $(readlink -f /bin/java))) && cp $JAVA_HOME/lib/security/cacerts /var/lib/neo4j/conf/cacerts && chmod u+w /var/lib/neo4j/conf/cacerts && /bin/keytool -import -noprompt -alias polar-internal-ca -file /var/lib/neo4j/certificates/https/trusted/ca.pem -keystore /var/lib/neo4j/conf/cacerts -storepass changeit"
+                      ]
                       , volumeMounts = Some
-                        ( baseVolumeMounts
-                        # [ kubernetes.VolumeMount::{
-                            , name      = v.volumes.certs.name
-                            , mountPath = v.volumes.certs.mountPath
-                            }
-                          ]
-                        )
+                        [ kubernetes.VolumeMount::{ name = v.configVolume,       mountPath = "/var/lib/neo4j/conf"        }
+                        , kubernetes.VolumeMount::{ name = v.volumes.certs.name, mountPath = v.volumes.certs.mountPath     }
+                        ]
                       }
                     ]
                   , containers =

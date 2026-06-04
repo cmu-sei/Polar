@@ -64,6 +64,12 @@ let neo4jSecret =
       , name = Some "neo4j-secret"
       }
 
+let neo4jClientCertVolumeName = "neo4j-client-tls"
+
+let neo4jClientCertPath       = "/etc/neo4j-client-tls"
+
+let neo4jClientSaTokenVolName = "neo4j-client-sa-token"
+
 let graphSecretKeySelector =
       kubernetes.SecretKeySelector::{
       , name = Some "polar-graph-pw"
@@ -199,4 +205,7 @@ in  { PolarNamespace
     , saTokenVolume
     , certVolumeMount
     , commonClientEnv
+    , neo4jClientCertVolumeName
+    , neo4jClientCertPath
+    , neo4jClientSaTokenVolName
     }

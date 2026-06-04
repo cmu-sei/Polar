@@ -40,11 +40,11 @@ let makeGraphEnv
             }
           , kubernetes.EnvVar::{
             , name = "GRAPH_CLIENT_CERT"
-            , value = Some "/etc/neo4j-tls/cert.pem"
+            , value = Some "/etc/neo4j-client-tls/cert.pem"
             }
           , kubernetes.EnvVar::{
             , name = "GRAPH_CLIENT_KEY"
-            , value = Some "/etc/neo4j-tls/key.pem"
+            , value = Some "/etc/neo4j-client-tls/key.pem"
             }
           ]
         # merge
@@ -185,67 +185,57 @@ let DockerRegistrySecret =
         }
 
 let makeCertInitContainer =
-      λ(certIssuerUrl : Text) →
-      λ(certClientImage : Text) →
-      λ(certType : Text) →
-      λ(certDir : Text) →
-      λ(volumeName : Text) →
-      λ(saTokenVolName : Text) →
-      λ(extraSans : List Text) →
+      \(containerName : Text) ->
+      \(certIssuerUrl : Text) ->
+      \(certClientImage : Text) ->
+      \(certType : Text) ->
+      \(certDir : Text) ->
+      \(volumeName : Text) ->
+      \(saTokenVolName : Text) ->
+      \(keyAlgorithm : Text) ->
+      \(extraSans : List Text) ->
         kubernetes.Container::{
-        , name = "cert-client"
+        , name  = containerName
         , image = Some certClientImage
         , imagePullPolicy = Some "IfNotPresent"
-        , args = Some
-            (   [ "--cert-issuer-url"
-                , certIssuerUrl
-                , "--token-path"
-                , "/workspace/token"
-                , "--cert-dir"
-                , certDir
-                , "--cert-type"
-                , certType
-                ]
-              # Prelude.List.concatMap
-                  Text
-                  Text
-                  (λ(san : Text) → [ "--extra-san", san ])
-                  extraSans
-            )
+        , args  = Some
+          (   [ "--cert-issuer-url", certIssuerUrl
+              , "--token-path",      "/workspace/token"
+              , "--cert-dir",        certDir
+              , "--cert-type",       certType
+              , "--key-algorithm",   keyAlgorithm
+              ]
+            # Prelude.List.concatMap Text Text (\(san : Text) -> ["--extra-san", san]) extraSans
+          )
         , securityContext = Some Constants.DropAllCapSecurityContext
         , volumeMounts = Some
-          [ kubernetes.VolumeMount::{ name = volumeName, mountPath = certDir }
-          , kubernetes.VolumeMount::{
-            , name = saTokenVolName
-            , mountPath = "/workspace"
-            }
+          [ kubernetes.VolumeMount::{ name = volumeName,     mountPath = certDir      }
+          , kubernetes.VolumeMount::{ name = saTokenVolName, mountPath = "/workspace" }
           ]
         }
 
 let makeCertClientInitContainer =
-      λ(certIssuerUrl : Text) →
-      λ(certClientImage : Text) →
-      λ(audience : Text) →
+      \(certIssuerUrl : Text) ->
+      \(certClientImage : Text) ->
+      \(audience : Text) ->
         makeCertInitContainer
-          certIssuerUrl
-          certClientImage
-          "client"
-          "/etc/tls/certs"
-          Constants.certVolumeName
-          Constants.saTokenVolumeName
+          "cert-client"
+          certIssuerUrl certClientImage
+          "client" "/etc/tls/certs"
+          Constants.certVolumeName Constants.saTokenVolumeName
+          "ecdsa-p256"
           ([] : List Text)
 
 let makeCertServerInitContainer =
-      λ(certIssuerUrl : Text) →
-      λ(certClientImage : Text) →
-      λ(extraSans : List Text) →
+      \(certIssuerUrl : Text) ->
+      \(certClientImage : Text) ->
+      \(extraSans : List Text) ->
         makeCertInitContainer
-          certIssuerUrl
-          certClientImage
-          "server"
-          "/etc/neo4j-tls"
-          "neo4j-tls"
-          "neo4j-sa-token"
+          "cert-client-server"
+          certIssuerUrl certClientImage
+          "server" "/etc/neo4j-tls"
+          "neo4j-tls" "neo4j-sa-token"
+          "ecdsa-p256"
           extraSans
 
 in  { makeGraphEnv

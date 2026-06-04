@@ -14,7 +14,7 @@
 
 , neo4j =
   { image              = "nix-neo4j:latest"
-  , certIssuerUrl      = "https://cert-issuer.polar.svc.cluster.local:8443"
+  , certIssuerUrl      = "http://cert-issuer.polar.svc.cluster.local:8443"
   , certIssuerAudience = "polar-cert-issuer-neo4j.local"
   , neo4jSans          =
     [ "neo4j"

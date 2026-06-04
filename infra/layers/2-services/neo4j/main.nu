@@ -44,7 +44,7 @@ def main [context_nuon: string] {
         "let v = " + $merged + " in "
         + $chart_dir + "/pvcs.dhall {"
         + "  namespace = v.namespace"
-        + ", volumes   = { data = v.volumes.data, logs = v.volumes.logs }"
+        + ", volumes   = { data = v.volumes.data, logs = v.volumes.logs, certs = v.volumes.certs }"
         + "}"
     )
     $expr | save --force $tmp

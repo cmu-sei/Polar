@@ -39,6 +39,7 @@ in defaults.minimalContainer //
       [ Lib.PackageLayer.Core
       , Lib.customLayer "nu-init-deps"
           [ Lib.nixpkgs "cacert"
+          ,  Lib.nixpkgs "openssl"
           ]
       ]
   , extraEnv =

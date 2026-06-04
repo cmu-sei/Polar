@@ -37,11 +37,13 @@ let render =
           , volumes   :
             { data : VolumeSpec
             , logs : VolumeSpec
+            , certs : VolumeSpec
             }
           }
       ) ->
         [ kubernetes.Resource.PersistentVolumeClaim (makePVC v.namespace v.volumes.data)
         , kubernetes.Resource.PersistentVolumeClaim (makePVC v.namespace v.volumes.logs)
+        , kubernetes.Resource.PersistentVolumeClaim (makePVC v.namespace v.volumes.certs)
         ]
 
 in render
