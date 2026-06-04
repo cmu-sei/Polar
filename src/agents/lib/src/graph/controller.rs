@@ -475,8 +475,8 @@ impl GraphControllerActor {
 
         info!("Using Neo4j database at {neo4j_endpoint}");
 
-        let client_cert = std::env::var("TLS_CLIENT_CERT").ok();
-        let client_key = std::env::var("TLS_CLIENT_KEY").ok();
+        let client_cert = std::env::var("GRAPH_CLIENT_CERT").ok();
+        let client_key  = std::env::var("GRAPH_CLIENT_KEY").ok();
         // GRAPH_CA_CERT takes precedence over TLS_CA_CERT for environments
         // that route Neo4j through a proxy with its own CA.
         let ca_cert = std::env::var("GRAPH_CA_CERT")

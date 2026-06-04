@@ -1,6 +1,8 @@
 -- infra/layers/2-services/neo4j/pvcs.dhall
 --
--- Neo4j PersistentVolumeClaims: data, logs, and (if TLS enabled) certs.
+-- Neo4j PersistentVolumeClaims: data and logs.
+-- The certs PVC has been removed — TLS certs are now issued by the
+-- cert-issuer and written to an emptyDir by the cert-client init container.
 
 let kubernetes = ../../../schema/kubernetes.dhall
 
@@ -32,22 +34,14 @@ let makePVC =
 let render =
       \(v :
           { namespace : Text
-          , enableTls : Bool
           , volumes   :
-            { data  : VolumeSpec
-            , logs  : VolumeSpec
-            , certs : VolumeSpec
+            { data : VolumeSpec
+            , logs : VolumeSpec
             }
           }
       ) ->
-          [ kubernetes.Resource.PersistentVolumeClaim (makePVC v.namespace v.volumes.data)
-          , kubernetes.Resource.PersistentVolumeClaim (makePVC v.namespace v.volumes.logs)
-          ]
-        # ( if v.enableTls
-            then
-              [ kubernetes.Resource.PersistentVolumeClaim (makePVC v.namespace v.volumes.certs) ]
-            else
-              [] : List kubernetes.Resource
-          )
+        [ kubernetes.Resource.PersistentVolumeClaim (makePVC v.namespace v.volumes.data)
+        , kubernetes.Resource.PersistentVolumeClaim (makePVC v.namespace v.volumes.logs)
+        ]
 
 in render
