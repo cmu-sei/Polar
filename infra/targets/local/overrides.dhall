@@ -13,8 +13,17 @@
   }
 
 , neo4j =
-  { image          = "nix-neo4j:latest"
-  , imagePullSecrets = [] : List { name : Optional Text }
+  { image              = "nix-neo4j:latest"
+  , certIssuerUrl      = "http://cert-issuer.polar.svc.cluster.local:8443"
+  , certIssuerAudience = "polar-cert-issuer-neo4j.local"
+  , neo4jSans          =
+    [ "neo4j"
+    , "polar-neo4j"
+    , "polar-db-svc"
+    , "polar-db-svc.polar-graph"
+    , "polar-db-svc.polar-graph.svc.cluster.local"
+    , "localhost"
+    ]
   }
 
 , cassini =

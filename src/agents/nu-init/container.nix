@@ -32,7 +32,10 @@
     (u:
       u.Custom {
         name = "nu-init-deps";
-        packages = [ { attrPath = "cacert"; flakeInput = null; } ];
+        packages = [
+          { attrPath = "cacert"; flakeInput = null; }
+          { attrPath = "openssl"; flakeInput = null; }
+        ];
       })
   ];
   pipeline = null;

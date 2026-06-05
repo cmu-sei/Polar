@@ -23,16 +23,17 @@ let render =
         let volumes =
               [ Constants.certEmptyDirVolume
               , Constants.saTokenVolume v.saTokenAudience
-              , kubernetes.Volume::{ name = "neo4j-bolt-ca", configMap = Some kubernetes.ConfigMapVolumeSource::{ name = Some "neo4j-bolt-ca" } }
+              , kubernetes.Volume::{ name = Constants.neo4jClientCertVolumeName, emptyDir = Some kubernetes.EmptyDirVolumeSource::{=} }
+              , Constants.saTokenVolume v.saTokenAudience // { name = Constants.neo4jClientSaTokenVolName }
               ] # functions.ProxyVolume v.proxyCACert
 
         let env =
               Constants.commonClientEnv
-              # functions.makeGraphEnv v.neo4jBoltAddr Constants.graphConfig Constants.graphSecretKeySelector (Some "/etc/neo4j-ca/ca.pem")
+              # functions.makeGraphEnv v.neo4jBoltAddr Constants.graphConfig Constants.graphSecretKeySelector (Some "/etc/neo4j-client-tls/ca.pem")
 
         let mounts =
               [ Constants.certVolumeMount
-              , kubernetes.VolumeMount::{ name = "neo4j-bolt-ca", mountPath = "/etc/neo4j-ca", readOnly = Some True }
+              , kubernetes.VolumeMount::{ name = Constants.neo4jClientCertVolumeName, mountPath = Constants.neo4jClientCertPath, readOnly = Some True }
               ] # functions.ProxyMount v.proxyCACert
 
         in  kubernetes.Deployment::{
@@ -45,7 +46,19 @@ let render =
                 , spec = Some kubernetes.PodSpec::{
                   , imagePullSecrets = Some v.imagePullSecrets
                   , volumes          = Some volumes
-                  , initContainers   = Some [ functions.makeCertClientInitContainer v.certIssuerUrl v.certClientImage v.saTokenAudience ]
+                  , initContainers   = Some
+                    [ functions.makeCertClientInitContainer v.certIssuerUrl v.certClientImage v.saTokenAudience
+                    , functions.makeCertInitContainer
+                        "neo4j-cert-client"
+                        v.certIssuerUrl
+                        v.certClientImage
+                        "client"
+                        Constants.neo4jClientCertPath
+                        Constants.neo4jClientCertVolumeName
+                        Constants.neo4jClientSaTokenVolName
+                        "ecdsa-p256"
+                        ([] : List Text)
+                    ]
                   , containers =
                     [ kubernetes.Container::{
                       , name            = v.name

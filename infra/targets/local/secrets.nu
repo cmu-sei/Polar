@@ -152,17 +152,6 @@ def main [target_dir: string, repo_root: string] {
         kubectl_upsert_secret "oci-registry-auth" "polar" ["oci-registry-auth={}"]
     }
 
-    # neo4j-bolt-ca — ConfigMap not Secret (public key material)
-    let ca_cert_path = ($secrets | get -o neo4j_ca_cert_path | default "result-tls-certs/neo4j/ca_certificate.pem")
-    let full_ca_path = ($repo_root | path join $ca_cert_path)
-
-    if ($full_ca_path | path exists) {
-        kubectl_upsert_configmap "neo4j-bolt-ca" "polar" [$"ca.pem=($full_ca_path)"]
-    } else {
-        print $"    WARNING: neo4j CA cert not found at ($full_ca_path)"
-        print "    Run: nix build .#tlsCerts first"
-    }
-
     # build-orchestrator-config — cyclops.yaml as a secret
     let cyclops_yaml = ($target_dir | path join "conf/cyclops.yaml")
     if ($cyclops_yaml | path exists) {
