@@ -719,6 +719,63 @@ ci:
         polar-dev:0.1.0 \
         bash -c "start.sh; chmod +x scripts/gitlab-ci.sh; chmod +x scripts/static-tools.sh; scripts/gitlab-ci.sh"
 
+# Install neo4j mTLS client cert into the browser's NSS certificate store.
+# Fetches fresh certs from the running cluster and imports into Librewolf.
+# Usage: just neo4j-install-certs
+neo4j-install-certs:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    AGENT_POD=$(kubectl get pod -n polar -l name=kube-consumer -o jsonpath='{.items[0].metadata.name}')
+    echo "Fetching certs from $AGENT_POD..."
+    kubectl exec -n polar "$AGENT_POD" -c kube-consumer -- cat /etc/neo4j-client-tls/cert.pem > /tmp/neo4j-client-cert.pem
+    kubectl exec -n polar "$AGENT_POD" -c kube-consumer -- cat /etc/neo4j-client-tls/key.pem  > /tmp/neo4j-client-key.pem
+    kubectl exec -n polar-graph polar-neo4j-0 -- cat /var/lib/neo4j/certificates/https/trusted/ca.pem > /tmp/neo4j-ca.pem
+    echo "Bundling PKCS12..."
+    openssl pkcs12 -export \
+        -out /tmp/neo4j-client.p12 \
+        -inkey /tmp/neo4j-client-key.pem \
+        -in /tmp/neo4j-client-cert.pem \
+        -certfile /tmp/neo4j-ca.pem \
+        -name "Polar Neo4j Client" \
+        -passout pass:changeit
+    NSS_DB=~/.librewolf/$(ls ~/.librewolf/ | head -1)
+    echo "Importing into Librewolf NSS db at $NSS_DB..."
+    nix-shell -p nssTools --run "pk12util -i /tmp/neo4j-client.p12 -d '$NSS_DB' -W changeit"
+    nix-shell -p nssTools --run "certutil -M -n 'Polar Internal CA' -t 'CT,,' -d '$NSS_DB'"
+    echo "Done. Port-forward and browse to https://localhost:7473"
+
+# Load a neo4j dump file into the cluster database.
+# Scales down neo4j, runs a loader pod as root, chowns the data, scales back up.
+# Usage: just neo4j-load-dump ~/Documents/projects/jira.5.26.26.neo4j.dump
+neo4j-load-dump dump_path:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ ! -f "{{dump_path}}" ]; then
+        echo "ERROR: dump file not found: {{dump_path}}"
+        exit 1
+    fi
+    echo "Scaling neo4j down..."
+    kubectl scale statefulset -n polar-graph polar-neo4j --replicas=0
+    kubectl wait --for=delete pod/polar-neo4j-0 -n polar-graph --timeout=60s 2>/dev/null || true
+    echo "Launching loader pod..."
+    kubectl run -n polar-graph neo4j-loader \
+        --image=neo4j:5.26.2 \
+        --restart=Never \
+        --overrides='{"spec":{"securityContext":{"runAsUser":0,"runAsGroup":0},"volumes":[{"name":"data","persistentVolumeClaim":{"claimName":"polar-db-data"}},{"name":"logs","persistentVolumeClaim":{"claimName":"polar-db-logs"}}],"containers":[{"name":"neo4j-loader","image":"neo4j:5.26.2","command":["/bin/sh","-c","sleep 3600"],"volumeMounts":[{"name":"data","mountPath":"/var/lib/neo4j/data"},{"name":"logs","mountPath":"/var/lib/neo4j/logs"}]}]}}'
+    kubectl wait --for=condition=Ready pod/neo4j-loader -n polar-graph --timeout=60s
+    echo "Copying dump file..."
+    cat "{{dump_path}}" | kubectl exec -i -n polar-graph neo4j-loader -- /bin/sh -c 'cat > /var/lib/neo4j/data/neo4j.dump'
+    echo "Loading dump..."
+    kubectl exec -n polar-graph neo4j-loader -- /bin/sh -c \
+        'mkdir -p /var/lib/neo4j/tmp && NEO4J_HOME=/var/lib/neo4j NEO4J_CONF=/var/lib/neo4j/conf JAVA_TOOL_OPTIONS="-Djava.io.tmpdir=/var/lib/neo4j/tmp" /nix/store/qbds1qr8sf5qkzz8cady90bwhcnw05xf-neo4j-community-src-2025.8.0/opt/neo4j/bin/neo4j-admin database load neo4j --from-path=/var/lib/neo4j/data --overwrite-destination=true'
+    echo "Fixing ownership..."
+    kubectl exec -n polar-graph neo4j-loader -- /bin/sh -c 'chown -R 7474:7474 /var/lib/neo4j/data'
+    echo "Cleaning up loader pod..."
+    kubectl delete pod -n polar-graph neo4j-loader
+    echo "Scaling neo4j back up..."
+    kubectl scale statefulset -n polar-graph polar-neo4j --replicas=1
+    echo "Done. Neo4j is starting up."
+
 # ── nix-usernetes (local cluster) ────────────────────────────────────────────
 #
 # Full cluster startup sequence:
