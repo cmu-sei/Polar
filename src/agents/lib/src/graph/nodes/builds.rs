@@ -40,12 +40,55 @@ pub enum BuildNodeKey {
         node_label: String,
         identity_props: Vec<(String, String)>,
     },
+    /// A named stage within a BuildExecution. Keyed on (build_id, stage_id)
+    /// because stage_id alone isn't guaranteed unique across backends.
+    /// Stage-level timing is where bottleneck analysis lives.
+    BuildStage { build_id: String, stage_id: String },
+
+    /// An immutable, content-addressed output of a BuildExecution.
+    /// Digest is the sole primary key — two builds producing the same digest
+    /// correctly converge to the same node (reproducible build detection).
+    /// The PRODUCED edge carries the relationship back to the BuildJob.
+    BuildArtifact { digest: String },
+
+    /// A vulnerability found during a build scan. Keyed on identifier so that
+    /// the same CVE/GHSA found across multiple builds converges to one node —
+    /// the FOUND_VULNERABILITY edge on BuildJob records which builds saw it,
+    /// and FOUND_IN links it to the specific artifact if the scanner attributed it.
+    Vulnerability { identifier: String },
 }
 
 impl GraphNodeKey for BuildNodeKey {
     fn cypher_match(&self, prefix: &str) -> (String, Vec<(String, BoltType)>) {
         match self {
             BuildNodeKey::State => ("(:State)".to_string(), vec![]),
+            BuildNodeKey::BuildStage { build_id, stage_id } => {
+                let bid_k = format!("{prefix}_build_id");
+                let sid_k = format!("{prefix}_stage_id");
+                (
+                    format!("({prefix}:BuildStage {{ build_id: ${bid_k}, stage_id: ${sid_k} }})"),
+                    vec![
+                        (bid_k, BoltType::String(build_id.clone().into())),
+                        (sid_k, BoltType::String(stage_id.clone().into())),
+                    ],
+                )
+            }
+
+            BuildNodeKey::BuildArtifact { digest } => {
+                let dk = format!("{prefix}_digest");
+                (
+                    format!("({prefix}:BuildArtifact {{ digest: ${dk} }})"),
+                    vec![(dk, BoltType::String(digest.clone().into()))],
+                )
+            }
+
+            BuildNodeKey::Vulnerability { identifier } => {
+                let ik = format!("{prefix}_identifier");
+                (
+                    format!("({prefix}:Vulnerability {{ identifier: ${ik} }})"),
+                    vec![(ik, BoltType::String(identifier.clone().into()))],
+                )
+            }
             BuildNodeKey::BackendJob {
                 node_label,
                 identity_props,

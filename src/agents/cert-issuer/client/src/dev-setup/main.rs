@@ -140,7 +140,7 @@ fn main() {
         },
         "issuer": {
             "issuer": ISSUER,
-            "audience": AUDIENCE,
+            "audience":  [AUDIENCE],
             "jwks_uri": "http://localhost:8081/jwks.json",
             "workload_identity_claim": "sub",
             "instance_binding_claim": "kubernetes.io/pod/uid",

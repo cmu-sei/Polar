@@ -274,6 +274,43 @@ let makeAgentCertMount
       λ(cert_dir : Text) →
         [ makeCertMount certVolumeName cert_dir ]
 
+{-
+NOTE:
+I'm left wondering what pieces of the functions.dhall should be exported and which should remain private.
+
+I think the right question for each function is: can a consumer meaningfully call this without knowing Polar's internal conventions?
+If the answer is no — meaning that calling it correctly requires knowing C.saTokenDir,
+or the projected volume path convention,
+or the cert directory layout —
+then it's an internal helper, not a public API.
+
+I think we can break down most of the lib into three categories:
+
+Clearly public — these are genuinely useful to any consumer writing a Polar agent deployment and require no internal knowledge to call correctly:
+
+makeDeployment,
+makeOpaqueSecret,
+makeGraphEnv,
+ProxyEnv,
+ProxyVolume,
+ProxyMount.
+
+These take explicit parameters and produce correct output without the caller needing to know anything about Polar's internal wiring.
+
+Clearly internal — makeSaTokenMount, makeCertMount, makeSaTokenVolume.
+These are only correct when called with C.saTokenDir, C.certDir, and the specific volume name conventions.
+A consumer who calls makeSaTokenMount with the wrong directory gets a broken pod.
+The function's correctness is inseparable from constants the consumer shouldn't need to know.
+
+Genuinely ambiguous — makeNuInitContainer, makeCertVolumes, makeAgentCertMount.
+These are the interesting ones. They encode the full cert bootstrap pattern
+— which is exactly what a consumer needs if they're deploying a Polar agent.
+
+But they also close over C.saTokenDir now,
+and their correct use requires understanding the init container / projected volume / cert mount relationship.
+You could argue they're the highest-value exports precisely because they encode that complexity correctly so consumers don't have to.
+
+-}
 in  { makeGraphEnv
     , makeOpaqueSecret
     , makeDeployment
@@ -283,10 +320,7 @@ in  { makeGraphEnv
     , ProxyMount
     , ProxyEnv
     , GraphProxyEnv
-    , makeSaTokenVolume
     , makeCertVolume
-    , makeSaTokenMount
-    , makeCertMount
     , makeCertVolumes
     , makeAgentCertMount
     , makeNuInitScript

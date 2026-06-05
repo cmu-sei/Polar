@@ -8,17 +8,17 @@ services:
     #   - infinity
     environment:
       - NEO4J_AUTH=neo4j/somepassword
-      - NEO4J_dbms_ssl_policy_bolt_enabled=true
+      # - NEO4J_dbms_ssl_policy_bolt_enabled=true
       - NEO4J_dbms_ssl_policy_bolt_base__directory=/var/lib/neo4j/certificates/bolt
       - NEO4J_dbms_ssl_policy_bolt_private__key=private.key
       - NEO4J_dbms_ssl_policy_bolt_public__certificate=public.crt
-      - NEO4J_dbms_ssl_policy_bolt_client__auth=REQUIRE
+      # - NEO4J_dbms_ssl_policy_bolt_client__auth=REQUIRE
       - NEO4J_dbms_ssl_policy_https_enabled=true
       - NEO4J_dbms_ssl_policy_https_base__directory=/var/lib/neo4j/certificates/https
       - NEO4J_dbms_ssl_policy_https_private__key=private.key
       - NEO4J_dbms_ssl_policy_https_public__certificate=public.crt
       - NEO4J_dbms_ssl_policy_https_client__auth=REQUIRE
-      - NEO4J_dbms_connector_bolt_tls__level=REQUIRED
+      # - NEO4J_dbms_connector_bolt_tls__level=REQUIRED
       - NEO4J_server_jvm_additional=-Djavax.net.debug=ssl:handshake
 
     volumes:

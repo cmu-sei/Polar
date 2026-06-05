@@ -537,7 +537,7 @@ impl Actor for GraphControllerActor {
     async fn pre_start(
         &self,
         _myself: ActorRef<Self::Msg>,
-        graph: Self::Arguments,
+        _: Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
         debug!("GraphControllerActor starting");
         match Self::get_neo_config() {

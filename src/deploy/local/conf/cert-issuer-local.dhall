@@ -14,7 +14,7 @@ in  CertIssuer.ServiceConfig::{
     , bind_addr = "0.0.0.0:8443"
     , issuer = CertIssuer.IssuerConfig::{
       , issuer = "https://kubernetes.default.svc.cluster.local"
-      , audience = "polar-cert-issuer.local"
+      , audience = [ "polar-cert-issuer.local" ]
       , jwks_uri = Some
           "https://kubernetes.default.svc.cluster.local/openid/v1/jwks"
       }

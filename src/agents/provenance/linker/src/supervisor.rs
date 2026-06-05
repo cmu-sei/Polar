@@ -8,8 +8,7 @@ use neo4rs::Graph;
 use polar::cassini::SubscribeRequest;
 use polar::graph::controller::GraphControllerActor;
 use polar::{
-    ARTIFACT_PRODUCED_SUFFIX, BUILDS_TOPIC_PREFIX, BuildEvent, PROVENANCE_LINKER_TOPIC,
-    ProvenanceEvent, SBOM_RESOLVED_SUFFIX, SupervisorMessage,
+    BUILD_EVENTS_TOPIC, BuildEvent, PROVENANCE_LINKER_TOPIC, ProvenanceEvent, SupervisorMessage,
     cassini::{CassiniClient, TcpClient},
     get_neo_config,
 };
@@ -38,31 +37,15 @@ impl ProvenanceSupervisor {
     ) {
         debug!("Received message on topic {topic}");
 
-        /// ---------------------------------------------------------------------------
-        /// rkyv is the hot path (Rust agents). JSON via BuildEvent is the cold
-        /// path (nushell stages). The topic is available for logging/metrics but
-        /// is NOT used as a deserialization discriminant — serde's tagged enum
-        /// handles that.
-        /// ---------------------------------------------------------------------------
-        pub fn try_deserialize(payload: &[u8]) -> Option<ProvenanceEvent> {
-            // Hot path: Rust agents serialize ProvenanceEvent directly with rkyv.
-            // Zero-copy deserialize — no allocation, no JSON parsing overhead.
-            if let Ok(event) = rkyv::from_bytes::<ProvenanceEvent, rkyv::rancor::Error>(payload) {
-                return Some(event);
-            }
-
-            // Cold path: nushell pipeline stages emit JSON-wrapped BuildEvents.
-            // Parse JSON, then map the typed payload into the domain enum.
+        // in line helper
+        fn try_deserialize(payload: &[u8]) -> Option<ProvenanceEvent> {
             match BuildEvent::from_bytes(payload) {
-                Ok(e) => {
-                    let (_ctx, event) = e.into_provenance_event();
-                    return Some(event);
-                }
+                Ok(e) => Some(e.into_provenance_event()),
                 Err(e) => {
-                    error!("Failed ot deserialize build event! {e}");
+                    error!("failed to deserialize build event: {e}");
+                    None
                 }
             }
-            None
         }
 
         if let Some(event) = try_deserialize(&payload) {
@@ -133,16 +116,7 @@ impl Actor for ProvenanceSupervisor {
                     })?;
 
                     state.broker_client.subscribe(SubscribeRequest {
-                        topic: format!("{BUILDS_TOPIC_PREFIX}.{ARTIFACT_PRODUCED_SUFFIX}"),
-                        trace_ctx: WireTraceCtx::from_current_span(),
-                    })?;
-                    state.broker_client.subscribe(SubscribeRequest {
-                        topic: format!("{BUILDS_TOPIC_PREFIX}.{SBOM_RESOLVED_SUFFIX}"),
-                        trace_ctx: WireTraceCtx::from_current_span(),
-                    })?;
-
-                    state.broker_client.subscribe(SubscribeRequest {
-                        topic: format!("{BUILDS_TOPIC_PREFIX}.binary.linked"),
+                        topic: BUILD_EVENTS_TOPIC.to_string(),
                         trace_ctx: WireTraceCtx::from_current_span(),
                     })?;
 

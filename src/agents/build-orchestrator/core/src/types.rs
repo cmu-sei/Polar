@@ -7,7 +7,7 @@ use uuid::Uuid;
 /// Cassini subjects the orchestrator agents are interested in
 /// Mirrors the subject constants defined in cyclops-core.
 pub mod subjects {
-    pub const BUILD_EVENTS_TOPIC: &str = "polar.orchestrator.builds..events";
+    pub const BUILD_EVENTS_TOPIC: &str = "polar.builds.events";
     pub const BUILD_REQUESTS_TOPIC: &str = "polar.orchestrator.builds.requests";
 }
 

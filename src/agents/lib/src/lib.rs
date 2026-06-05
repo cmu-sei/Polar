@@ -39,9 +39,7 @@ pub const QUERY_COMMIT_FAILED: &str = "Error committing transaction to graph";
 pub const QUERY_RUN_FAILED: &str = "Error running query on the graph.";
 pub const UNEXPECTED_MESSAGE_STR: &str = "Received unexpected message!";
 pub const GIT_REPO_DISCOGERY_TOPIC: &str = "polar.git.repositories";
-pub const BUILDS_TOPIC_PREFIX: &str = "polar.builds";
-pub const ARTIFACT_PRODUCED_SUFFIX: &str = "artifact.produced";
-pub const SBOM_RESOLVED_SUFFIX: &str = "sbom.resolved";
+pub const BUILD_EVENTS_TOPIC: &str = "polar.builds.events";
 
 pub trait Supervisor {
     /// Helper function to dispatch messages off of message queues to the associated actors within an agent supervision tree.
@@ -92,6 +90,20 @@ where
     Ok(tcp_client)
 }
 
+/// Source system identity carried on every canonical event.
+/// Used for audit and the SOURCED_FROM edge — never branched on by the processor.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BuildOrigin {
+    /// Lowercase stable identifier: "gitlab", "github_actions", "cyclops", "gitea"
+    pub system: String,
+    /// The native ID in the source system: pipeline ID, run ID, Cyclops UUID
+    pub native_id: String,
+    /// Job-level native ID where applicable — GitLab job ID, Actions step ID.
+    /// None for systems where job granularity isn't meaningful at event time.
+    pub native_job_id: Option<String>,
+    /// Deep link back to the source for operator debugging
+    pub native_url: Option<String>,
+}
 /// ---------------------------------------------------------------------------
 /// BuildEvent — the wire format for events emitted by nushell pipeline stages.
 ///
@@ -122,9 +134,9 @@ where
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BuildEvent {
     pub build_id: String,
-    pub stage_exec_id: String,
-    pub pipeline_exec_id: String,
-    pub observed_at: String,
+    pub source: BuildOrigin,
+    pub emitted_at: i64,  // must be i64, not String
+    pub observed_at: i64, // must be i64, not String
     pub payload: BuildEventPayload,
 }
 
@@ -146,6 +158,97 @@ pub struct OciLayerEntry {
     pub tar_path: String,
 }
 
+/// Concrete payload variants that nushell stages can emit.
+///
+/// Internally tagged on `type` — this matches the nushell emit function's
+/// `($payload | merge { type: $subject_suffix })`. Serde reads the `type`
+/// field and routes directly to the correct variant. Unknown values produce
+/// a deserialization error rather than silently passing through.
+///
+/// When you add a new `emit-*` function in nushell, add a variant here.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum BuildEventPayload {
+    // ── Build execution lifecycle ──────────────────────────────────────────────
+    // Routed to the build processor. The linker discards these via the
+    // catch-all arm in into_provenance_event.
+    ExecutionStarted {
+        commit_sha: String,
+        ref_name: String,
+        repo_url: String,
+        triggered_by: Option<String>,
+        backend: Option<BackendIdentity>,
+    },
+    StageStarted {
+        stage_name: String,
+        stage_id: String,
+    },
+    StageCompleted {
+        stage_name: String,
+        stage_id: String,
+        duration_secs: u64,
+        outcome: StageOutcome,
+    },
+    ExecutionCompleted {
+        duration_secs: u64,
+    },
+    ExecutionFailed {
+        reason: String,
+        stage: Option<String>,
+    },
+    ExecutionCancelled {
+        reason: Option<String>,
+    },
+    VulnerabilityFound {
+        severity: String,
+        identifier: String,
+        in_artifact: Option<String>,
+    },
+
+    // ── Artifact domain ────────────────────────────────────────────────────────
+    // Routed to the artifact linker. The build processor discards these.
+    ArtifactProduced {
+        content_hash: String,
+        artifact_type: String,
+        #[serde(default)]
+        name: Option<String>,
+        #[serde(default)]
+        content_type: Option<String>,
+    },
+    SbomAnalyzed {
+        filename: String,
+        artifact_content_hash: String,
+        root: Option<PackageRef>,
+        components: Vec<PackageRef>,
+        edges: Vec<DependencyEdge>,
+    },
+    BinaryLinked {
+        binary_content_hash: String,
+        binary_name: String,
+        root_purl: String,
+        sbom_content_hash: String,
+        #[serde(default)]
+        binding_digest: Option<String>,
+    },
+    ContainerImageCreated {
+        image_name: String,
+        tarball_hash: String,
+        config_digest: String,
+        layers: Vec<OciLayerEntry>,
+        #[serde(default)]
+        os: String,
+        #[serde(default)]
+        arch: String,
+        #[serde(default)]
+        created: String,
+        #[serde(default)]
+        entrypoint: String,
+        #[serde(default)]
+        cmd: String,
+        #[serde(default)]
+        repo_tags: Vec<String>,
+    },
+}
 #[derive(
     Debug, Clone, PartialEq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
@@ -178,32 +281,6 @@ pub struct ContainerImageCreatedPayload {
     pub repo_tags: Vec<String>,
 }
 
-/// Concrete payload variants that nushell stages can emit.
-///
-/// Internally tagged on `type` — this matches the nushell emit function's
-/// `($payload | merge { type: $subject_suffix })`. Serde reads the `type`
-/// field and routes directly to the correct variant. Unknown values produce
-/// a deserialization error rather than silently passing through.
-///
-/// When you add a new `emit-*` function in nushell, add a variant here.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type")]
-pub enum BuildEventPayload {
-    /// From `emit-sbom-resolved`: the graph projection of a single SBOM.
-    #[serde(rename = "sbom.resolved")]
-    SbomAnalyzed(SbomGraphFragment),
-
-    /// From `emit-artifact-produced`: provenance record for any build output.
-    #[serde(rename = "artifact.produced")]
-    ArtifactProduced(ArtifactProducedPayload),
-
-    #[serde(rename = "binary.linked")]
-    BinaryLinked(BinaryLinkedPayload),
-
-    #[serde(rename = "container-image.created")]
-    ContainerImageCreated(ContainerImageCreatedPayload),
-}
-
 #[derive(
     Debug, Clone, PartialEq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
@@ -229,6 +306,95 @@ pub struct BinaryLinkedPayload {
     pub binding_digest: String,
 }
 
+impl BuildEvent {
+    pub fn from_bytes(raw: &[u8]) -> Result<Self, BuildEventError> {
+        Ok(serde_json::from_slice(raw)?)
+    }
+
+    /// Bridge from wire format to the provenance domain enum.
+    /// Artifact domain variants map 1:1 to ProvenanceEvent variants,
+    /// constructing polar's domain types from the inline fields.
+    /// Execution lifecycle variants are discarded — the linker doesn't
+    /// handle them and they should not reach it as errors.
+    pub fn into_provenance_event(self) -> ProvenanceEvent {
+        match self.payload {
+            BuildEventPayload::ArtifactProduced {
+                content_hash,
+                artifact_type,
+                name,
+                content_type,
+            } => ProvenanceEvent::ArtifactProduced(ArtifactProducedPayload {
+                artifact_content_hash: content_hash,
+                artifact_type,
+                name: name.unwrap_or_default(),
+                content_type: content_type.unwrap_or_default(),
+            }),
+
+            BuildEventPayload::SbomAnalyzed {
+                filename,
+                artifact_content_hash,
+                root,
+                components,
+                edges,
+            } => ProvenanceEvent::SbomAnalyzed(SbomGraphFragment {
+                filename,
+                artifact_content_hash,
+                root,
+                components,
+                edges,
+            }),
+
+            BuildEventPayload::BinaryLinked {
+                binary_content_hash,
+                binary_name,
+                root_purl,
+                sbom_content_hash,
+                binding_digest,
+            } => ProvenanceEvent::BinaryLinked(BinaryLinkedPayload {
+                binary_content_hash,
+                binary_name,
+                root_purl,
+                sbom_content_hash,
+                binding_digest: binding_digest.unwrap_or_default(),
+            }),
+
+            BuildEventPayload::ContainerImageCreated {
+                image_name,
+                tarball_hash,
+                config_digest,
+                layers,
+                os,
+                arch,
+                created,
+                entrypoint,
+                cmd,
+                repo_tags,
+            } => ProvenanceEvent::ContainerImageCreated(ContainerImageCreatedPayload {
+                image_name,
+                tarball_hash,
+                config_digest,
+                layers,
+                os,
+                arch,
+                created,
+                entrypoint,
+                cmd,
+                repo_tags,
+            }),
+
+            // Execution lifecycle variants have no provenance handler.
+            // Named explicitly so the compiler forces a decision if new
+            // variants are added to BuildEventPayload.
+            BuildEventPayload::ExecutionStarted { .. }
+            | BuildEventPayload::StageStarted { .. }
+            | BuildEventPayload::StageCompleted { .. }
+            | BuildEventPayload::ExecutionCompleted { .. }
+            | BuildEventPayload::ExecutionFailed { .. }
+            | BuildEventPayload::ExecutionCancelled { .. }
+            | BuildEventPayload::VulnerabilityFound { .. } => ProvenanceEvent::Ignored,
+        }
+    }
+}
 // ---------------------------------------------------------------------------
 // Graph fragment types — the SBOM projection.
 //
@@ -301,44 +467,6 @@ pub struct ArtifactProducedPayload {
 pub enum BuildEventError {
     #[error("json deserialization failed: {0}")]
     Json(#[from] serde_json::Error),
-}
-
-impl BuildEvent {
-    /// Deserialize from raw JSON bytes.
-    ///
-    /// Serde's internally-tagged enum handles dispatch on the `type` field
-    /// inside `payload`. No manual matching, no Value intermediary.
-    pub fn from_bytes(raw: &[u8]) -> Result<Self, BuildEventError> {
-        Ok(serde_json::from_slice(raw)?)
-    }
-
-    /// Convert this wire-format event into the domain ProvenanceEvent.
-    ///
-    /// This is the bridge between "what nushell emitted" (BuildEvent)
-    /// and "what the supervisor operates on" (ProvenanceEvent). The
-    /// mapping is 1:1 — each BuildEventPayload variant corresponds to
-    /// exactly one ProvenanceEvent variant that carries the same data.
-    pub fn into_provenance_event(self) -> (ProvenanceContext, ProvenanceEvent) {
-        let ctx = ProvenanceContext {
-            build_id: self.build_id,
-            stage_exec_id: self.stage_exec_id,
-            pipeline_exec_id: self.pipeline_exec_id,
-            observed_at: self.observed_at,
-        };
-
-        let event = match self.payload {
-            BuildEventPayload::SbomAnalyzed(fragment) => ProvenanceEvent::SbomAnalyzed(fragment),
-            BuildEventPayload::ArtifactProduced(payload) => {
-                ProvenanceEvent::ArtifactProduced(payload)
-            }
-            BuildEventPayload::BinaryLinked(payload) => ProvenanceEvent::BinaryLinked(payload),
-            BuildEventPayload::ContainerImageCreated(payload) => {
-                ProvenanceEvent::ContainerImageCreated(payload)
-            }
-        };
-
-        (ctx, event)
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -463,6 +591,7 @@ pub struct GitRepositoryDiscoveredEvent {
 /// - Internal Neo4j IDs (`id(node)`) MUST NOT be emitted in events — they are ephemeral.
 #[derive(Debug, rkyv::Serialize, rkyv::Deserialize, rkyv::Archive)]
 pub enum ProvenanceEvent {
+    Ignored,
     ArtifactProduced(ArtifactProducedPayload),
     SbomAnalyzed(SbomGraphFragment),
     BinaryLinked(BinaryLinkedPayload),
@@ -827,4 +956,25 @@ pub fn emit_provenance_event(
     })?;
 
     Ok(())
+}
+
+// ── Supporting enums ───────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StageOutcome {
+    Succeeded,
+    Failed,
+    Skipped,
+    Cancelled,
+}
+
+/// Identity of the execution backend that ran the build.
+/// Self-describing — label and identity props vary by system.
+/// Maps to BuildNodeKey::BackendJob in the graph.
+///
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BackendIdentity {
+    pub node_label: String,
+    pub identity_props: Vec<(String, String)>,
 }
