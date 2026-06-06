@@ -139,6 +139,7 @@ impl Actor for ClusterObserverSupervisor {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
+            SupervisorMessage::Heartbeat => {}
             SupervisorMessage::ClientEvent { event } => match event {
                 ClientEvent::Registered { .. } => {
                     let ns_watcher_state = NamespaceSupervisorState {

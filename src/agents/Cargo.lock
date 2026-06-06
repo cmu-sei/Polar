@@ -5631,6 +5631,7 @@ dependencies = [
  "opentelemetry-otlp",
  "opentelemetry_sdk",
  "polar",
+ "polar-health",
  "ractor",
  "reqwest",
  "rkyv",
@@ -5644,6 +5645,24 @@ dependencies = [
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "polar-health"
+version = "1.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
+name = "polar-healthcheck"
+version = "1.0.0"
+dependencies = [
+ "polar-health",
+ "serde_json",
+ "x509-parser 0.16.0",
 ]
 
 [[package]]

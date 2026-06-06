@@ -26,6 +26,8 @@ use tracing::debug;
 use tracing::error;
 use tracing::info;
 use tracing::warn;
+use polar::health::HealthState;
+use std::time::Duration;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StateFingerprint {
@@ -200,6 +202,10 @@ impl Actor for ClusterConsumerSupervisor {
         debug!("{myself:?} starting");
 
         info!("Read neo configuration successfully.");
+
+        // Always send a heartbeat to get us started.
+        let _ = myself.send_after(Duration::from_secs(30), || SupervisorMessage::Heartbeat).await;
+
         match TcpClient::spawn(BROKER_CLIENT_NAME, myself, |event| {
             Some(SupervisorMessage::ClientEvent { event })
         })
@@ -274,6 +280,10 @@ impl Actor for ClusterConsumerSupervisor {
                     }
                     _ => (),
                 }
+            }
+            SupervisorMessage::Heartbeat => {
+                HealthState::healthy(true, state.graph_controller.is_some()).write();
+                let _ = myself.send_after(Duration::from_secs(30), || SupervisorMessage::Heartbeat).await;
             }
         }
         Ok(())

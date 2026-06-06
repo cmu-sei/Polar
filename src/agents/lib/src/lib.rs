@@ -12,6 +12,8 @@ use std::sync::Arc;
 use tracing::{debug, info};
 pub mod cassini;
 pub mod graph;
+pub use polar_health;
+pub use polar_health as health;
 
 /// Re-export of [`GraphControllerActor::get_neo_config`] as a free function.
 ///
@@ -52,6 +54,7 @@ pub trait Supervisor {
 
 pub enum SupervisorMessage {
     ClientEvent { event: ClientEvent },
+    Heartbeat,
 }
 
 /// Helper to spawn a TCP client to connect to the message broker, Cassini.

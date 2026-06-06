@@ -61,6 +61,9 @@
             cassini-client = {
               packages.${system}.default = polarPkgs.cassini.client;
             };
+            polar-healthcheck = {
+              packages.${system}.default = polarPkgs.healthcheck;
+            };
           };
           inherit configNixPath;
         };

@@ -1,9 +1,7 @@
 -- infra/layers/3-workloads/agents/kube/consumer.dhall
-
 let kubernetes = ../../../../schema/kubernetes.dhall
 let Constants  = ../../../../schema/constants.dhall
 let functions  = ../../../../schema/functions.dhall
-
 let render =
       \(v :
           { name             : Text
@@ -22,17 +20,17 @@ let render =
               , Constants.saTokenVolume v.saTokenAudience
               , kubernetes.Volume::{ name = Constants.neo4jClientCertVolumeName, emptyDir = Some kubernetes.EmptyDirVolumeSource::{=} }
               , Constants.saTokenVolume v.saTokenAudience // { name = Constants.neo4jClientSaTokenVolName }
+              , kubernetes.Volume::{ name = "polar-health", emptyDir = Some kubernetes.EmptyDirVolumeSource::{=} }
               ] # functions.ProxyVolume v.proxyCACert
-
         let env =
               Constants.commonClientEnv
               # functions.makeGraphEnv v.neo4jBoltAddr Constants.graphConfig Constants.graphSecretKeySelector (Some "/etc/neo4j-client-tls/ca.pem")
-
+              # [ kubernetes.EnvVar::{ name = "POLAR_HEALTH_FILE", value = Some "/var/run/polar-health/polar-health.json" } ]
         let mounts =
               [ Constants.certVolumeMount
               , kubernetes.VolumeMount::{ name = Constants.neo4jClientCertVolumeName, mountPath = Constants.neo4jClientCertPath, readOnly = Some True }
+              , kubernetes.VolumeMount::{ name = "polar-health", mountPath = "/var/run/polar-health" }
               ] # functions.ProxyMount v.proxyCACert
-
         in  kubernetes.Deployment::{
             , metadata = kubernetes.ObjectMeta::{ name = Some v.name, namespace = Some Constants.PolarNamespace, annotations = Some [ Constants.RejectSidecarAnnotation ] }
             , spec = Some kubernetes.DeploymentSpec::{
@@ -64,11 +62,17 @@ let render =
                       , securityContext = Some Constants.DropAllCapSecurityContext
                       , env             = Some env
                       , volumeMounts    = Some mounts
+                      , livenessProbe   = Some kubernetes.Probe::{
+                          , exec                = Some { command = Some [ "polar-healthcheck" ] }
+                          , initialDelaySeconds = Some 150
+                          , periodSeconds       = Some 30
+                          , failureThreshold    = Some 2
+                          , timeoutSeconds      = Some 5
+                          }
                       }
                     ]
                   }
                 }
               }
             }
-
 in render

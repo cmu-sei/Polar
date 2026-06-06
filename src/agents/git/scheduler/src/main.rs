@@ -213,6 +213,7 @@ impl Actor for RootSupervisor {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
+            SupervisorMessage::Heartbeat => {}
             SupervisorMessage::ClientEvent { event } => match event {
                 ClientEvent::ControlResponse { .. } => todo!("handle control response"),
                 ClientEvent::Registered { .. } => Self::init(myself, state).await?,

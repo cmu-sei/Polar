@@ -88,6 +88,7 @@ let
     kubeAgent = import ./kubernetes/package.nix {
       inherit pkgs craneLib workspaceFileset nix-container-lib inputs system;
       crateArgs = individualCrateArgs;
+      healthcheckDrv = healthcheck;
     };
 
     webAgent = import ./openapi/package.nix {
@@ -129,7 +130,13 @@ let
       inherit pkgs nix-container-lib inputs system;
     };
 
+    healthcheck = craneLib.buildPackage (individualCrateArgs // {
+      pname = "polar-healthcheck";
+      cargoExtraArgs = "--package polar-healthcheck --locked";
+      src = workspaceFileset ./.;
+    });
+
 in
 {
-  inherit workspacePackages gitlabAgent cassini kubeAgent webAgent provenance scheduler jiraAgent gitAgent buildOrchestrator certIssuer nuInit gitServer;
+  inherit workspacePackages gitlabAgent cassini kubeAgent webAgent provenance scheduler jiraAgent gitAgent buildOrchestrator certIssuer nuInit gitServer healthcheck;
 }

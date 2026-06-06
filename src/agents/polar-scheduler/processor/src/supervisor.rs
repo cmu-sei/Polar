@@ -70,6 +70,7 @@ impl Actor for RootSupervisor {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match msg {
+            SupervisorMessage::Heartbeat => {}
             SupervisorMessage::ClientEvent { event } => match event {
                 ClientEvent::Registered { .. } => {
                     let (graph_controller, _) = GraphControllerActor::spawn_linked(
