@@ -4040,6 +4040,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "oci-resolver"
+version = "1.0.0"
+dependencies = [
+ "cassini-client",
+ "cassini-types",
+ "cyclonedx-bom",
+ "docker_credential",
+ "features",
+ "oci-client",
+ "polar",
+ "ractor",
+ "reqwest",
+ "rkyv",
+ "rustls",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "oci-spec"
 version = "0.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4928,32 +4949,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8991c4cbdb8bc5b11f0b074ffe286c30e523de90fee5ba8132f1399f23cb3dd7"
 dependencies = [
  "prost",
-]
-
-[[package]]
-name = "provenance-common"
-version = "1.0.0"
-
-[[package]]
-name = "provenance-resolver"
-version = "1.0.0"
-dependencies = [
- "cassini-client",
- "cassini-types",
- "cyclonedx-bom",
- "docker_credential",
- "features",
- "oci-client",
- "polar",
- "provenance-common",
- "ractor",
- "reqwest",
- "rkyv",
- "rustls",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
 ]
 
 [[package]]

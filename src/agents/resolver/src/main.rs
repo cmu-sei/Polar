@@ -1,4 +1,4 @@
-use cassini_client::TcpClientMessage;
+use cassini_client::{OfflineBehavior, PublishRequest, TcpClientMessage};
 use cassini_types::ClientEvent;
 use oci_client::{
     Client as OciClient, Reference,
@@ -8,20 +8,24 @@ use oci_client::{
 };
 use polar::{
     PROVENANCE_LINKER_TOPIC, ProvenanceEvent, Supervisor, SupervisorMessage,
-    async_get_file_as_byte_vec, get_web_client, spawn_tcp_client, topics::PROVENANCE_DISCOVERY,
+    async_get_file_as_byte_vec,
+    cassini::{CassiniClient, SubscribeRequest, TcpClient},
+    get_web_client,
+    topics::PROVENANCE_DISCOVERY,
     try_get_proxy_ca_cert,
 };
-use provenance_common::RESOLVER_SUPERVISOR_NAME;
+
 use ractor::{
     Actor, ActorProcessingErr, ActorRef, SupervisionEvent, async_trait, registry::where_is,
 };
 use reqwest::Client as WebClient;
 use std::str::FromStr;
 use tracing::{debug, error, info, instrument, trace, warn};
-pub const BROKER_CLIENT_NAME: &str = "polar.provenance.resolver.tcp";
+pub const BROKER_CLIENT_NAME: &str = "polar.oci.resolver.tcp";
 use cassini_types::WireTraceCtx;
 use serde::Deserialize;
 
+pub const RESOLVER_SUPERVISOR_NAME: &str = "polar.oci.resolver.supervisor";
 #[derive(Debug, serde::Serialize, Deserialize, Clone)]
 pub struct ResolverConfig {
     pub registries: Vec<RegistryConfig>,
@@ -39,7 +43,7 @@ pub struct ResolverSupervisor;
 
 #[derive(Clone)]
 pub struct ResolverSupervisorState {
-    tcp_client: ActorRef<TcpClientMessage>,
+    tcp_client: TcpClient,
     config: Option<ResolverConfig>,
     oci_client: Option<OciClient>,
 }
@@ -152,7 +156,7 @@ impl Actor for ResolverSupervisor {
     ) -> Result<Self::State, ActorProcessingErr> {
         debug!("{myself:?} starting");
 
-        let tcp_client = spawn_tcp_client(BROKER_CLIENT_NAME, myself, |ev| {
+        let tcp_client = TcpClient::spawn(BROKER_CLIENT_NAME, myself, |ev| {
             Some(SupervisorMessage::ClientEvent { event: ev })
         })
         .await?;
@@ -389,10 +393,11 @@ impl ResolverAgent {
         trace!("Forwarding event to {PROVENANCE_LINKER_TOPIC}: {:?}", event);
         let payload = rkyv::to_bytes::<rkyv::rancor::Error>(&event)?;
 
-        Ok(state.cassini_client.cast(TcpClientMessage::Publish {
+        Ok(state.cassini_client.publish(PublishRequest {
             topic: PROVENANCE_LINKER_TOPIC.to_string(),
             payload: payload.into(),
             trace_ctx: WireTraceCtx::from_current_span(),
+            offline_behavior: OfflineBehavior::default(),
         })?)
     }
 
@@ -435,7 +440,7 @@ impl ResolverAgent {
 }
 
 pub struct ResolverAgentState {
-    pub cassini_client: ActorRef<TcpClientMessage>,
+    pub cassini_client: TcpClient,
     pub web_client: WebClient,
     pub oci_client: OciClient,
     pub config: ResolverConfig,
@@ -463,7 +468,7 @@ impl Actor for ResolverAgent {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         info!("Subscribing to topic {PROVENANCE_DISCOVERY}");
-        state.cassini_client.cast(TcpClientMessage::Subscribe {
+        state.cassini_client.subscribe(SubscribeRequest {
             topic: PROVENANCE_DISCOVERY.to_string(),
             trace_ctx: WireTraceCtx::from_current_span(),
         })?;

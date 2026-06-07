@@ -1,5 +1,5 @@
 [package]
-name = "provenance-resolver"
+name = "oci-resolver"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -12,7 +12,6 @@ docker_credential.workspace = true
 features.workspace = true
 oci-client.workspace = true
 polar.workspace = true
-provenance-common.workspace = true
 ractor.workspace = true
 reqwest = { workspace = true, features = ["json"] }
 rkyv.workspace = true

@@ -1,6 +1,6 @@
 {
   ai = null;
-  entrypoint = "provenance-linker";
+  entrypoint = "oci-resolver";
   extraEnv = [
     {
       name = "SSL_CERT_FILE";
@@ -17,7 +17,7 @@
   ];
   mode = u:
     u.Minimal;
-  name = "provenance-linker";
+  name = "oci-resolver";
   nix = {
     buildUserCount = u:
       u.Dynamic;

@@ -4,8 +4,8 @@ let Lib = ../../containers/container-lib.dhall
 let defaults = Lib.defaults
 
 in defaults.minimalContainer //
-  { name       = "provenance-resolver"
-  , entrypoint = Some "provenance-resolver"
+  { name       = "oci-resolver"
+  , entrypoint = Some "oci-resolver"
   , staticUid  = Some 1000
   , staticGid  = Some 1000
   , extraEnv   =
