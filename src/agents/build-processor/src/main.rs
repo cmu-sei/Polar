@@ -1,5 +1,5 @@
-use provenance_common::LINKER_SUPERVISOR_NAME;
-use provenance_linker::supervisor::ProvenanceSupervisor;
+use build_processor::supervisor::BuildProcessorSupervisor;
+use polar::BUILD_PROCESSOR_NAME;
 use ractor::Actor;
 
 #[tokio::main]
@@ -8,10 +8,10 @@ async fn main() {
         .install_default()
         .expect("Failed to install rustls crypto provider");
 
-    polar::init_logging(LINKER_SUPERVISOR_NAME.to_string());
+    polar::init_logging(BUILD_PROCESSOR_NAME.to_string());
     let (_, handle) = Actor::spawn(
-        Some(LINKER_SUPERVISOR_NAME.to_string()),
-        ProvenanceSupervisor,
+        Some(BUILD_PROCESSOR_NAME.to_string()),
+        BuildProcessorSupervisor,
         (),
     )
     .await

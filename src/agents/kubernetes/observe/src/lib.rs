@@ -1,4 +1,4 @@
-use cassini_client::{TcpClient, TcpClientMessage};
+use cassini_client::TcpClientMessage;
 use futures::{StreamExt, TryStreamExt};
 use k8s_openapi::NamespaceResourceScope;
 use k8s_openapi::api::core::v1::Node;
@@ -10,15 +10,17 @@ use kube::{api::ListParams, runtime::watcher};
 use kube_common::flux::kustomization::Kustomization;
 use kube_common::flux::oci_repositories::OciRepository;
 use kube_common::{
-    BATCH_PROCESS_ACTION, KUBERNETES_CONSUMER, RESOURCE_APPLIED_ACTION, RESOURCE_DELETED_ACTION,
-    RawKubeEvent, KIND_OCI_REPOSITORY, KIND_KUSTOMIZATION,
+    BATCH_PROCESS_ACTION, KIND_KUSTOMIZATION, KIND_OCI_REPOSITORY, KUBERNETES_CONSUMER,
+    RESOURCE_APPLIED_ACTION, RESOURCE_DELETED_ACTION, RawKubeEvent,
 };
+
+use polar::cassini::{CassiniClient, SubscribeRequest, TcpClient};
 use ractor::ActorProcessingErr;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::{to_value, to_vec};
 use std::fmt::Debug;
-use tracing::{warn, debug, error, instrument, trace};
+use tracing::{debug, error, instrument, trace, warn};
 // pub mod pods;
 pub mod supervisor;
 
@@ -304,9 +306,8 @@ where
 async fn emit_event(tcp_client: &TcpClient, ev: RawKubeEvent) -> Result<(), ActorProcessingErr> {
     let payload = to_vec(&ev)?;
     trace!("Emitting event {ev:?}");
-    tcp_client.cast(TcpClientMessage::Publish {
+    tcp_client.subscribe(SubscribeRequest {
         topic: KUBERNETES_CONSUMER.to_string(),
-        payload,
         trace_ctx: None,
     })?;
 

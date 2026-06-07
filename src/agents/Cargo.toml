@@ -56,7 +56,6 @@ members = [
     "openapi/process",
     "openapi/observe",
     "policy-config",
-    "provenance/linker",
     "provenance/provenance-common",
     "provenance/resolver",
     "polar-scheduler/common",
@@ -64,12 +63,7 @@ members = [
     "polar-scheduler/processor",
     "polar-scheduler/tests/mock-agent",
     "polar-scheduler/tests/mock-adhoc-agent",
-    "build-orchestrator/core",
-    # "build-orchestrator/agent", build orchestrator is deprecated, considered frozen
-    # Until it becomes appearent we need/want a framework native CI systemn, this is where it remains.
-    # "build-orchestrator/k8s",
-    # "build-orchestrator/podman"
-    "build-orchestrator/processor",
+    "build-processor",
     "cert-issuer/server","cert-issuer/client", "cert-issuer/common"
 ]
 

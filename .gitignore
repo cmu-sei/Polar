@@ -10,6 +10,7 @@ env_setup.sh
 var/
 output/
 src/agents/*/result
+src/agents/dev
 result*
 report.json
 config.json

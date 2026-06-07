@@ -746,24 +746,22 @@ checksum = "dc0b364ead1874514c8c2855ab558056ebfeb775653e7ae45ff72f28f8f3166c"
 name = "build-processor"
 version = "1.0.0"
 dependencies = [
+ "anyhow",
  "cassini-client",
  "cassini-types",
  "chrono",
- "k8s-openapi",
- "kube-common",
+ "cyclonedx-bom",
  "neo4rs",
- "orchestrator-core",
+ "oci-client",
  "polar",
  "ractor",
+ "reqwest",
  "rkyv",
  "rustls",
  "serde",
  "serde_json",
  "tokio",
  "tracing",
- "tracing-glog",
- "tracing-subscriber",
- "uuid",
 ]
 
 [[package]]
@@ -4284,23 +4282,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "orchestrator-core"
-version = "1.0.0"
-dependencies = [
- "async-trait",
- "chrono",
- "futures",
- "polar",
- "rkyv",
- "serde",
- "serde_json",
- "thiserror 1.0.69",
- "tokio",
- "tracing",
- "uuid",
-]
-
-[[package]]
 name = "ordered-float"
 version = "2.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4952,29 +4933,6 @@ dependencies = [
 [[package]]
 name = "provenance-common"
 version = "1.0.0"
-
-[[package]]
-name = "provenance-linker"
-version = "1.0.0"
-dependencies = [
- "anyhow",
- "cassini-client",
- "cassini-types",
- "chrono",
- "cyclonedx-bom",
- "neo4rs",
- "oci-client",
- "polar",
- "provenance-common",
- "ractor",
- "reqwest",
- "rkyv",
- "rustls",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
-]
 
 [[package]]
 name = "provenance-resolver"

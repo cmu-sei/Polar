@@ -22,7 +22,8 @@
 */
 
 use crate::{GitlabConsumerState, UNKNOWN_FILED};
-use cassini_client::{TcpClient, TcpClientMessage};
+use cassini_client::{OfflineBehavior, PublishRequest, TcpClientMessage};
+use polar::cassini::{CassiniClient, SubscribeRequest, TcpClient};
 use polar::{
     GIT_REPO_DISCOGERY_TOPIC, GitRepositoryDiscoveredEvent,
     graph::{
@@ -123,10 +124,11 @@ impl GitlabProjectConsumer {
 
         let payload = to_bytes::<rkyv::rancor::Error>(&event)?.to_vec();
         trace!("emitting event {event:?}");
-        tcp_client.cast(TcpClientMessage::Publish {
+        tcp_client.publish(PublishRequest {
             topic: GIT_REPO_DISCOGERY_TOPIC.to_string(),
             payload,
             trace_ctx: None,
+            offline_behavior: OfflineBehavior::default(),
         })?;
 
         Ok(())
@@ -146,7 +148,7 @@ impl Actor for GitlabProjectConsumer {
     ) -> Result<Self::State, ActorProcessingErr> {
         debug!("{myself:?} starting");
 
-        state.tcp_client.cast(TcpClientMessage::Subscribe {
+        state.tcp_client.subscribe(SubscribeRequest {
             topic: PROJECTS_CONSUMER_TOPIC.to_string(),
             trace_ctx: None,
         })?;

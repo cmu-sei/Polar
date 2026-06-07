@@ -25,6 +25,7 @@ use crate::GitlabConsumerState;
 use common::RUNNERS_CONSUMER_TOPIC;
 use common::types::{GitlabData, GitlabEnvelope};
 use gitlab_queries::runners::CiRunner;
+use polar::cassini::{CassiniClient, SubscribeRequest, TcpClient};
 use polar::graph::{
     controller::{GraphControllerMsg, GraphOp, GraphValue, IntoGraphKey, Property},
     nodes::gitlab::GitlabNodeKey,
@@ -32,7 +33,6 @@ use polar::graph::{
 use ractor::{Actor, ActorProcessingErr, ActorRef, async_trait};
 use tracing::{debug, info};
 
-use cassini_client::TcpClientMessage;
 pub struct GitlabRunnerConsumer;
 
 impl GitlabRunnerConsumer {
@@ -119,7 +119,7 @@ impl Actor for GitlabRunnerConsumer {
         state: Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
         // fire off subscribe message
-        state.tcp_client.cast(TcpClientMessage::Subscribe {
+        state.tcp_client.subscribe(SubscribeRequest {
             topic: RUNNERS_CONSUMER_TOPIC.to_string(),
             trace_ctx: None,
         })?;

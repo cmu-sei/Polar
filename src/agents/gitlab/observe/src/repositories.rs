@@ -37,7 +37,7 @@ use gitlab_queries::projects::{
     SingleProjectQueryArguments,
 };
 use gitlab_schema::ContainerRepositoryID;
-use polar::{PROVENANCE_DISCOVERY_TOPIC, ProvenanceEvent};
+use polar::{ProvenanceEvent, topics::PROVENANCE_DISCOVERY};
 use ractor::{Actor, ActorProcessingErr, ActorRef, async_trait};
 use serde_json::from_str;
 use tracing::{debug, error, info, trace, warn};
@@ -258,7 +258,7 @@ impl Actor for GitlabRepositoryObserver {
 
                                                                                         // OCI artifact discoveries however, are a "claim" that they exist. Gitlab told us a lot, but we still need to verify them.
                                                                                         state.tcp_client.cast(TcpClientMessage::Publish {
-                                                                                            topic: PROVENANCE_DISCOVERY_TOPIC.to_string(),
+                                                                                            topic: PROVENANCE_DISCOVERY.to_string(),
                                                                                             payload: payload.into(),
                                                                                             trace_ctx: WireTraceCtx::from_current_span(),
                                                                                         })?;

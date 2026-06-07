@@ -1,6 +1,5 @@
 use cassini_client::TcpClientMessage;
 use cassini_types::ClientEvent;
-use classifier::*;
 use oci_client::{
     Client as OciClient, Reference,
     client::{Certificate, CertificateEncoding, ClientConfig},
@@ -8,12 +7,11 @@ use oci_client::{
     secrets::RegistryAuth,
 };
 use polar::{
-    PROVENANCE_DISCOVERY_TOPIC, PROVENANCE_LINKER_TOPIC, ProvenanceEvent, Supervisor,
-    SupervisorMessage, async_get_file_as_byte_vec, get_web_client, spawn_tcp_client,
+    PROVENANCE_LINKER_TOPIC, ProvenanceEvent, Supervisor, SupervisorMessage,
+    async_get_file_as_byte_vec, get_web_client, spawn_tcp_client, topics::PROVENANCE_DISCOVERY,
     try_get_proxy_ca_cert,
 };
 use provenance_common::RESOLVER_SUPERVISOR_NAME;
-use provenance_resolver::classifier;
 use ractor::{
     Actor, ActorProcessingErr, ActorRef, SupervisionEvent, async_trait, registry::where_is,
 };
@@ -188,18 +186,6 @@ impl Actor for ResolverSupervisor {
                 ClientEvent::Registered { .. } => {
                     let web_client = get_web_client()?;
 
-                    let (classifier, _) = Actor::spawn_linked(
-                        Some("polar.provenance.classifier".to_string()),
-                        ArtifactClassifier,
-                        ArtifactClassifierState {
-                            web_client: web_client.clone(),
-                            tcp_client: state.tcp_client.clone(),
-                        },
-                        myself.clone().into(),
-                    )
-                    .await
-                    .inspect_err(|e| error!("Failed to start classifier {e}"))?;
-
                     if let Err(e) = Self::load_resolver_config(state).await {
                         error!("Failed to load resolver configuration. {e}");
                         return Err(e);
@@ -211,7 +197,6 @@ impl Actor for ResolverSupervisor {
                     }
 
                     let args = ResolverAgentState {
-                        classifier: Some(classifier),
                         cassini_client: state.tcp_client.clone(),
                         config: state.config.clone().unwrap(),
                         web_client,
@@ -219,7 +204,7 @@ impl Actor for ResolverSupervisor {
                     };
 
                     Actor::spawn_linked(
-                        Some(PROVENANCE_DISCOVERY_TOPIC.to_string()),
+                        Some(PROVENANCE_DISCOVERY.to_string()),
                         ResolverAgent,
                         args,
                         myself.clone().into(),
@@ -451,7 +436,6 @@ impl ResolverAgent {
 
 pub struct ResolverAgentState {
     pub cassini_client: ActorRef<TcpClientMessage>,
-    pub classifier: Option<ActorRef<ArtifactClassifierMsg>>,
     pub web_client: WebClient,
     pub oci_client: OciClient,
     pub config: ResolverConfig,
@@ -478,9 +462,9 @@ impl Actor for ResolverAgent {
         _myself: ActorRef<Self::Msg>,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        info!("Subscribing to topic {PROVENANCE_DISCOVERY_TOPIC}");
+        info!("Subscribing to topic {PROVENANCE_DISCOVERY}");
         state.cassini_client.cast(TcpClientMessage::Subscribe {
-            topic: PROVENANCE_DISCOVERY_TOPIC.to_string(),
+            topic: PROVENANCE_DISCOVERY.to_string(),
             trace_ctx: WireTraceCtx::from_current_span(),
         })?;
 
@@ -539,18 +523,6 @@ impl Actor for ResolverAgent {
                         error!("Failed to resolve image: {uri}, {e}");
                     }
                 }
-            }
-            ProvenanceEvent::ArtifactDiscovered { name, url } => {
-                trace!("Received ArtifactDiscovered directive");
-                // forward for classification
-                //
-                state.classifier.as_ref().map(|c| {
-                    c.cast(ArtifactClassifierMsg::Classify {
-                        download_url: url,
-                        filename: name,
-                    })
-                    .map_err(|e| error!("Failed to contact classifier: {c:?}. {e}"))
-                });
             }
             _ => warn!("Received unexpected message! {msg:?}"),
         }

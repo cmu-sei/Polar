@@ -5,15 +5,17 @@ use k8s_openapi::api::batch::v1::Job;
 use k8s_openapi::{api::core::v1::Pod, apimachinery::pkg::apis::meta::v1::OwnerReference};
 use kube_common::flux::{kustomization::Kustomization, oci_repositories::OciRepository};
 use polar::cassini::{CassiniClient, TcpClient};
+use polar::emit_provenance_event;
 use polar::graph::controller::IntoGraphKey;
 use polar::{
-    PROVENANCE_DISCOVERY_TOPIC, ProvenanceEvent, RkyvError,
+    ProvenanceEvent, RkyvError,
     graph::{
         controller::{
             GraphController, GraphControllerMsg, GraphOp, GraphValue, NULL_FIELD, Property,
         },
         nodes::kube::KubeNodeKey,
     },
+    topics::PROVENANCE_DISCOVERY,
 };
 use ractor::{ActorProcessingErr, ActorRef};
 use rkyv::to_bytes;
@@ -494,16 +496,10 @@ impl GraphOperable for Pod {
             }))?;
 
             // provenance side channel
-            let event = ProvenanceEvent::ImageRefDiscovered { uri: image };
-
-            let payload = to_bytes::<RkyvError>(&event)?;
-
-            tcp_client.publish(PublishRequest {
-                topic: PROVENANCE_DISCOVERY_TOPIC.into(),
-                payload: payload.into(),
-                trace_ctx: None,
-                offline_behavior: OfflineBehavior::default(),
-            })?;
+            let ev = emit_provenance_event(
+                ProvenanceEvent::ImageRefDiscovered { uri: image },
+                tcp_client,
+            )?;
 
             // ---- Container Lifecycle ----
 

@@ -2,8 +2,9 @@ use neo4rs::BoltType;
 use polar::graph::controller::GraphNodeKey;
 use serde::{Deserialize, Serialize};
 use std::fmt::Debug;
-
+pub mod build;
 pub mod linker;
+pub mod projection;
 pub mod supervisor;
 pub const PROVENANCE_LIKER_NAME: &str = "polar.provenance.linker";
 pub const PROVENANCE_SUPERVISOR_NAME: &str = "polar.provenance.supervisor";

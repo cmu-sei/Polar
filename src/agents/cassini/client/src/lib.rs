@@ -11,6 +11,7 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
 use socket2::SockRef;
 use std::env;
 use std::marker::PhantomData;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
 use tokio::io::{AsyncReadExt, BufWriter, ReadHalf, WriteHalf, split};
@@ -22,12 +23,8 @@ use tokio_rustls::client::TlsStream;
 use tracing::{
     Instrument, debug, debug_span, error, info, info_span, trace, trace_span, warn, warn_span,
 };
-use std::path::PathBuf;
 
 pub mod cli;
-
-// TODO: REMOVE ASAP, we have a proper abstraction in the standard library, so we no longer need a type alias
-pub type TcpClient = ActorRef<TcpClientMessage>;
 
 pub const UNEXPECTED_DISCONNECT: &str = "UNEXPECTED_DISCONNECT";
 pub const REGISTRATION_EXPECTED: &str =
@@ -129,7 +126,6 @@ pub struct PublishRequest {
     pub trace_ctx: Option<WireTraceCtx>,
     pub offline_behavior: OfflineBehavior,
 }
-
 
 impl<M: Message + Sync> Default for ClientEventForwarder<M> {
     fn default() -> Self {
@@ -244,16 +240,11 @@ impl TCPClientConfig {
         client_key: Option<String>,
         server_name: Option<String>,
     ) -> Option<Self> {
-        let broker_endpoint = broker_addr
-            .or_else(|| env::var("BROKER_ADDR").ok())?;
-        let server_name = server_name
-            .or_else(|| env::var("CASSINI_SERVER_NAME").ok())?;
-        let ca_certificate_path = ca_cert
-            .or_else(|| env::var("TLS_CA_CERT").ok())?;
-        let client_certificate_path = client_cert
-            .or_else(|| env::var("TLS_CLIENT_CERT").ok())?;
-        let client_key_path = client_key
-            .or_else(|| env::var("TLS_CLIENT_KEY").ok())?;
+        let broker_endpoint = broker_addr.or_else(|| env::var("BROKER_ADDR").ok())?;
+        let server_name = server_name.or_else(|| env::var("CASSINI_SERVER_NAME").ok())?;
+        let ca_certificate_path = ca_cert.or_else(|| env::var("TLS_CA_CERT").ok())?;
+        let client_certificate_path = client_cert.or_else(|| env::var("TLS_CLIENT_CERT").ok())?;
+        let client_key_path = client_key.or_else(|| env::var("TLS_CLIENT_KEY").ok())?;
 
         Some(TCPClientConfig {
             broker_endpoint,

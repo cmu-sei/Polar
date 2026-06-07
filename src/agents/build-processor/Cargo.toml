@@ -1,5 +1,5 @@
 [package]
-name = "provenance-linker"
+name = "build-processor"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -12,7 +12,6 @@ chrono.workspace = true
 cyclonedx-bom.workspace = true
 neo4rs.workspace = true
 polar.workspace = true
-provenance-common.workspace = true
 ractor.workspace = true
 reqwest = { workspace = true, features = ["json"] }
 rkyv.workspace = true
