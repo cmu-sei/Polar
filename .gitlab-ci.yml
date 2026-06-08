@@ -15,7 +15,7 @@ build-dev-environment:
     - changes:
         - flake.nix
         - flake.lock
-        - src/flake/*
+        - src/flake/ci-container.nix
         - .gitlab-ci.yml
   script:
     #install needed tools
@@ -27,16 +27,16 @@ build-dev-environment:
       echo '{"default":[{"type":"insecureAcceptAnything"}]}' > /etc/containers/policy.json
       git config --global --add safe.directory "$(pwd)"
     # build dev and testing environments
-    - nix build .#containers.devContainer --quiet -o polar-dev
+    - nix build .#ciContainer -o polar-ci
 
     #  Use skopeo to inspect and upload our images
     - skopeo login --username "$CI_REGISTRY_USER" --password "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
     - skopeo inspect docker-archive://$(readlink -f ./polar-dev)
-    - skopeo copy docker-archive://$(readlink -f ./polar-dev) docker://$CI_REGISTRY_IMAGE/polar-dev:0.1.0
+    - skopeo copy docker-archive://$(readlink -f ./polar-dev) docker://$CI_REGISTRY_IMAGE/polar-ci:0.1.0
 
 build:
   image:
-    name: registry.sandbox.labz.s-box.org/sei/polar-mirror/polar-dev:0.1.0
+    name: registry.sandbox.labz.s-box.org/sei/polar-mirror/polar-ci:0.1.0
   stage: build
   variables:
     AZURE_REGISTRY: sandboxaksacr.azurecr.us/polar
@@ -47,10 +47,8 @@ build:
       # TODO: We could elimiante this when we fully own the test runner's configuration.
     - git config --global --add safe.directory "$(pwd)"
     # TODO: remove this and add cargo-cyclonedx to the static-tools derviation
-    - cargo install -q cargo-cyclonedx
-
     - chmod +x -R scripts
-    - sh scripts/gitlab-ci.sh
+    - nu scripts/pipeline/ci.nu --skip-upload
   artifacts:
     when: always
     paths:

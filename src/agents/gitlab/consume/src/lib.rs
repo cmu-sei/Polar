@@ -21,9 +21,9 @@
    DM24-0470
 */
 
-use cassini_client::TcpClient;
 use common::types::GitlabEnvelope;
 use neo4rs::BoltType;
+use polar::cassini::TcpClient;
 use polar::graph::controller::GraphController;
 use ractor::ActorRef;
 

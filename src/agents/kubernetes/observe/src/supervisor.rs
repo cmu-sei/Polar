@@ -1,4 +1,4 @@
-use cassini_client::{TcpClient, TcpClientMessage};
+use cassini_client::TcpClientMessage;
 use cassini_types::ClientEvent;
 use k8s_openapi::api::apps::v1::{Deployment, ReplicaSet};
 use k8s_openapi::api::batch::v1::Job;
@@ -8,7 +8,7 @@ use kube::ResourceExt;
 use kube::runtime::{watcher, watcher::Event};
 use kube::{Api, Client, api::ListParams};
 use kube_common::{KIND_KUSTOMIZATION, KIND_OCI_REPOSITORY};
-use polar::{SupervisorMessage, spawn_tcp_client};
+use polar::{SupervisorMessage, cassini::TcpClient};
 use ractor::concurrency::Duration;
 use ractor::{Actor, ActorProcessingErr, ActorRef, SupervisionEvent, async_trait};
 use serde_json::to_value;
@@ -31,7 +31,7 @@ pub struct ClusterObserverSupervisor;
 
 pub struct ClusterObserverSupervisorState {
     kube_client: kube::Client,
-    tcp_client: ActorRef<TcpClientMessage>,
+    tcp_client: TcpClient,
     #[allow(dead_code)]
     node_watcher: Option<Watcher>,
     namespace_watcher: Option<Watcher>,
@@ -51,7 +51,7 @@ impl ClusterObserverSupervisor {
             Ok(kube_client) => {
                 debug!("Kubernetes client initialized");
 
-                let tcp_client = spawn_tcp_client(TCP_CLIENT_NAME, myself, |event| {
+                let tcp_client = TcpClient::spawn(TCP_CLIENT_NAME, myself, |event| {
                     Some(SupervisorMessage::ClientEvent { event })
                 })
                 .await?;

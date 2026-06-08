@@ -1,0 +1,22 @@
+[package]
+name = "oci-resolver"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+cassini-client.workspace = true
+cassini-types.workspace = true
+cyclonedx-bom.workspace = true
+docker_credential.workspace = true
+features.workspace = true
+oci-client.workspace = true
+polar.workspace = true
+ractor.workspace = true
+reqwest = { workspace = true, features = ["json"] }
+rkyv.workspace = true
+rustls.workspace = true
+serde_json.workspace = true
+serde.workspace = true
+tokio.workspace = true
+tracing.workspace = true

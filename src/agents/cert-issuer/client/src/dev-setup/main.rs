@@ -136,11 +136,11 @@ fn main() {
         "ca": {
             "ca_cert_path": "./dev/tmp/ca.crt",
             "ca_key_path": "./dev/tmp/ca.key",
-            "default_lifetime": { "secs": 1800, "nanos": 0 }
+            "default_lifetime": { "secs": 7200, "nanos": 0 }
         },
         "issuer": {
             "issuer": ISSUER,
-            "audience": AUDIENCE,
+            "audience":  [AUDIENCE],
             "jwks_uri": "http://localhost:8081/jwks.json",
             "workload_identity_claim": "sub",
             "instance_binding_claim": "kubernetes.io/pod/uid",

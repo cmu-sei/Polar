@@ -22,7 +22,7 @@ in  CertIssuer.ServiceConfig::{
         -- token's `audiences` field in the pod spec (or via your
         -- OIDC stub's claims). Every pod that wants to attest must
         -- claim the same value.
-        audience = "polar-cert-issuer.${cluster_name}"
+        audience = ["polar-cert-issuer.${cluster_name}"]
       , jwks_uri = Some "http://localhost:8080/jwks.json"
       }
     , ca = CertIssuer.CaConfig::{

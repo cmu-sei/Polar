@@ -34,7 +34,6 @@ members = [
     "cassini/test/producer",
     "cassini/test/sink",
     "cassini/types",
-    "config-ops",
     "git/common",
     "gitlab/common",
     "gitlab/consume",
@@ -56,19 +55,16 @@ members = [
     "openapi/process",
     "openapi/observe",
     "policy-config",
-    "provenance/linker",
-    "provenance/provenance-common",
-    "provenance/resolver",
+    "resolver",
+    "build-processor",
     "polar-scheduler/common",
     "polar-scheduler/observer",
     "polar-scheduler/processor",
     "polar-scheduler/tests/mock-agent",
     "polar-scheduler/tests/mock-adhoc-agent",
-    "build-orchestrator/core",
-    "build-orchestrator/agent",
-    "build-orchestrator/k8s", "build-orchestrator/processor",
-    "build-orchestrator/podman"
-, "cert-issuer/server","cert-issuer/client", "cert-issuer/common"]
+    "build-processor",
+    "cert-issuer/server","cert-issuer/client", "cert-issuer/common"
+]
 
 [workspace.package]
 version = "1.0.0"

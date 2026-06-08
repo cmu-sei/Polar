@@ -31,7 +31,7 @@ let hours = \(n : Natural) -> seconds (n * 3600)
 let IssuerConfig =
       { Type =
           { issuer : Text
-          , audience : Text
+          , audience : List Text
           , jwks_uri : Optional Text
           , workload_identity_claim : Text
           , instance_binding_claim : Text
@@ -40,13 +40,13 @@ let IssuerConfig =
           , jwks_cache_ttl_max : Duration
           }
       , default =
-          { -- Issuer and audience MUST be set per-environment;
+          { -- Issuer and audience(s) MUST be set per-environment;
             -- there are no sensible defaults. Listed here so the
             -- record-merge syntax doesn't reject configs that
             -- forget to set them — the Rust validator catches the
             -- empty strings at startup.
             issuer = ""
-          , audience = ""
+          , audience = [] : List Text
           , -- jwks_uri is optional in the Rust config (auto-discovery
             -- via OIDC well-known endpoint is intended for v2). For
             -- v1 you should always set this explicitly.

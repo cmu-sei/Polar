@@ -476,12 +476,10 @@ impl GraphControllerActor {
         info!("Using Neo4j database at {neo4j_endpoint}");
 
         let client_cert = std::env::var("GRAPH_CLIENT_CERT").ok();
-        let client_key  = std::env::var("GRAPH_CLIENT_KEY").ok();
+        let client_key = std::env::var("GRAPH_CLIENT_KEY").ok();
         // GRAPH_CA_CERT takes precedence over TLS_CA_CERT for environments
         // that route Neo4j through a proxy with its own CA.
-        let ca_cert = std::env::var("GRAPH_CA_CERT")
-            .ok()
-            .or_else(|| std::env::var("TLS_CA_CERT").ok());
+        let ca_cert = std::env::var("GRAPH_CA_CERT").ok();
 
         let builder = neo4rs::ConfigBuilder::default()
             .uri(neo4j_endpoint)
@@ -537,7 +535,7 @@ impl Actor for GraphControllerActor {
     async fn pre_start(
         &self,
         _myself: ActorRef<Self::Msg>,
-        graph: Self::Arguments,
+        _: Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
         debug!("GraphControllerActor starting");
         match Self::get_neo_config() {

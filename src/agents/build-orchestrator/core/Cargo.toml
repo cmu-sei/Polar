@@ -6,6 +6,7 @@ license.workspace = true
 authors.workspace = true
 
 [dependencies]
+polar.workspace = true
 tokio.workspace = true
 async-trait.workspace = true
 tracing.workspace = true

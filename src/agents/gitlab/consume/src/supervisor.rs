@@ -20,6 +20,7 @@ use common::USER_CONSUMER_TOPIC;
 use common::types::GitlabEnvelope;
 use polar::Supervisor;
 use polar::SupervisorMessage;
+use polar::cassini::TcpClient;
 use polar::get_neo_config;
 use polar::graph::controller::GraphControllerActor;
 use ractor::Actor;
@@ -38,7 +39,7 @@ use tracing::{instrument, trace};
 pub struct ConsumerSupervisor;
 
 pub struct ConsumerSupervisorState {
-    tcp_client: ActorRef<TcpClientMessage>,
+    tcp_client: TcpClient,
     u_consumer: Option<GitlabConsumer>,
 }
 
@@ -153,26 +154,11 @@ impl Actor for ConsumerSupervisor {
     ) -> Result<Self::State, ActorProcessingErr> {
         debug!("{myself:?} starting");
 
-        let events_output = std::sync::Arc::new(OutputPort::default());
-        //subscribe
-        events_output.subscribe(myself.clone(), |event| {
-            Some(SupervisorMessage::ClientEvent { event })
-        });
-
-        let client_config = TCPClientConfig::new()?;
-
-        let (tcp_client, _) = Actor::spawn_linked(
-            Some(BROKER_CLIENT_NAME.to_string()),
-            TcpClientActor,
-            TcpClientArgs {
-                config: client_config,
-                registration_id: None,
-                events_output: Some(events_output),
-                event_handler: None,
-            },
-            myself.clone().into(),
-        )
-        .await?;
+        let tcp_client =
+            TcpClient::spawn(&BROKER_CLIENT_NAME.to_string(), myself.clone(), |event| {
+                Some(SupervisorMessage::ClientEvent { event })
+            })
+            .await?;
 
         let state = ConsumerSupervisorState {
             tcp_client,

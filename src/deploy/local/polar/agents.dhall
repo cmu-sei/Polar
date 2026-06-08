@@ -220,21 +220,6 @@ let kubeAgentServiceAccountToken =
       , type = Some "kubernetes.io/service-account-token"
       }
 
-let buildOrchestratorServiceAccountToken =
-      kubernetes.Secret::{
-      , apiVersion = "v1"
-      , kind       = "Secret"
-      , metadata   = kubernetes.ObjectMeta::{
-        , name      = Some values.buildOrchestrator.secretName
-        , namespace = Some C.polarNamespace
-        , annotations = Some
-          [ { mapKey   = "kubernetes.io/service-account.name"
-            , mapValue = values.buildOrchestrator.serviceAccountName
-            }
-          ]
-        }
-      , type = Some "kubernetes.io/service-account-token"
-      }
 
 -- -------------------------------------------------------------------------
 -- Service accounts
@@ -257,7 +242,6 @@ let gitlabConsumerSA = mkServiceAccount "gitlab-consumer-sa"
 let gitObserverSA    = mkServiceAccount "git-observer-sa"
 let gitConsumerSA    = mkServiceAccount "git-consumer-sa"
 let gitSchedulerSA   = mkServiceAccount "git-scheduler-sa"
-let linkerSA         = mkServiceAccount "linker-sa"
 let resolverSA       = mkServiceAccount "resolver-sa"
 let buildProcessorSA = mkServiceAccount "build-processor-sa"
 let kubeConsumerSA   = mkServiceAccount "kube-consumer-sa"
@@ -544,29 +528,8 @@ let buildProcessorDeployment =
         }
 
 -- -------------------------------------------------------------------------
--- Linker and resolver
+-- resolver
 -- -------------------------------------------------------------------------
-
-let linkerDeployment =
-      withRejectSidecar
-        ( functions.makeDeployment
-            artifactLinkerName
-            kubernetes.PodSpec::{
-            , serviceAccountName = Some "linker-sa"
-            , initContainers     = Some [ makeCertInit values.linker.certClient ]
-            , containers =
-              [ kubernetes.Container::{
-                , name            = provenanceLinkerName
-                , image           = Some values.linker.image
-                , imagePullPolicy = Some values.imagePullPolicy
-                , securityContext = Some dropAllCapSecurityContext
-                , env             = Some (envVars # neo4jEnvVars)
-                , volumeMounts    = Some (baseMounts # neo4jCAVolumeMount)
-                }
-              ]
-            , volumes = Some (agentVolumes # neo4jCAVolume)
-            }
-        )
 
 let resolverVolumes =
       agentVolumes
@@ -618,7 +581,6 @@ in  [ kubernetes.Resource.ClusterRole    kubeAgentClusterRole
     , kubernetes.Resource.Deployment     gitAgentDeployment
     , kubernetes.Resource.Deployment     gitlabAgentDeployment
     , kubernetes.Resource.Deployment     kubeAgentDeployment
-    , kubernetes.Resource.Deployment     linkerDeployment
     , kubernetes.Resource.Deployment     resolverDeployment
     , kubernetes.Resource.RoleBinding    kubeAgentRoleBinding
     , kubernetes.Resource.Secret         gitlabSecret
@@ -634,6 +596,5 @@ in  [ kubernetes.Resource.ClusterRole    kubeAgentClusterRole
     , kubernetes.Resource.ServiceAccount gitlabObserverSA
     , kubernetes.Resource.ServiceAccount kubeAgentServiceAccount
     , kubernetes.Resource.ServiceAccount kubeConsumerSA
-    , kubernetes.Resource.ServiceAccount linkerSA
     , kubernetes.Resource.ServiceAccount resolverSA
     ]

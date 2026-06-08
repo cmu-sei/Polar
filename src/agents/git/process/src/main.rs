@@ -1,8 +1,8 @@
-use cassini_client::TcpClient;
 use cassini_types::ClientEvent;
 use chrono::Utc;
 use git_agent_common::{GIT_REPO_PROCESSING_TOPIC, GitRepositoryMessage};
 use polar::SupervisorMessage;
+use polar::cassini::{CassiniClient, PublishRequest, SubscribeRequest, TcpClient};
 use polar::graph::controller::GraphControllerActor;
 use polar::graph::controller::IntoGraphKey;
 use polar::graph::{
@@ -193,7 +193,7 @@ impl Actor for GitRepoProcessingManager {
         _: (),
     ) -> Result<Self::State, ActorProcessingErr> {
         let tcp_client =
-            polar::spawn_tcp_client(&format!("{GIT_REPO_PROCESSING_TOPIC}.tcp"), myself, |ev| {
+            TcpClient::spawn(&format!("{GIT_REPO_PROCESSING_TOPIC}.tcp"), myself, |ev| {
                 Some(SupervisorMessage::ClientEvent { event: ev })
             })
             .await?;
@@ -237,12 +237,10 @@ impl Actor for GitRepoProcessingManager {
                     // subscribe to topic
 
                     debug!("Subscribing to topic {}", GIT_REPO_PROCESSING_TOPIC);
-                    state
-                        .tcp_client
-                        .cast(cassini_client::TcpClientMessage::Subscribe {
-                            topic: GIT_REPO_PROCESSING_TOPIC.to_string(),
-                            trace_ctx: None,
-                        })?;
+                    state.tcp_client.subscribe(SubscribeRequest {
+                        topic: GIT_REPO_PROCESSING_TOPIC.to_string(),
+                        trace_ctx: None,
+                    })?;
 
                     state.graph_controller = Some(controller);
                 }
