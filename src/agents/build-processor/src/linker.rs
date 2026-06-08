@@ -2,6 +2,8 @@ use chrono::Utc;
 use oci_client::manifest::OciManifest;
 use polar::graph::controller::IntoGraphKey;
 use polar::graph::controller::{GraphControllerMsg, GraphOp, GraphValue, Property, rel};
+use polar::graph::nodes::builds::ArtifactNodeKey;
+
 use polar::{
     ArtifactProducedPayload, BinaryLinkedPayload, ContainerImageCreatedPayload, ProvenanceEvent,
     SbomGraphFragment,
@@ -10,8 +12,6 @@ use ractor::ActorRef;
 use ractor::async_trait;
 use ractor::{Actor, ActorProcessingErr};
 use tracing::{debug, trace, warn};
-
-use crate::ArtifactNodeKey;
 
 pub struct ProvenanceLinker;
 

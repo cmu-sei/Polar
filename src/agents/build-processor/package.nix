@@ -23,7 +23,7 @@ let
 
 in
 {
-  inherit buildProcessor ;
+  inherit buildProcessor;
   buildProcessorImage = processorContainer.image;
   cloneImage         = cloneContainer.image;
 }

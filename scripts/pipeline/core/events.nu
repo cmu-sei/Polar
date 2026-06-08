@@ -189,16 +189,32 @@ export def emit-container-image-created [
     }
 }
 
-# ── Legacy ─────────────────────────────────────────────────────────────────────
-# Retained for callers not yet migrated to the canonical path.
-
-export def emit-build-observed [command: string, working_dir: string, --parent_id: string = ""] {
-    let base = {command: $command, working_dir: $working_dir}
-    emit "build.observed" (
-        if ($parent_id | is-not-empty) { $base | merge {parent_execution_id: $parent_id} } else { $base }
-    )
-}
-
-export def emit-build-completed [exit_code: int, duration_ms: int] {
-    emit "build.completed" {exit_code: $exit_code, duration_ms: $duration_ms}
+# Emit BinaryLinked — a compiled binary linked to its source package and SBOM.
+#
+# The binding_digest is sha256(binary:cargo_toml:cargo_lock:source_tree) —
+# a cryptographic attestation of the build inputs. Recorded for audit;
+# not used for graph structure.
+#
+# Graph edges written by the build processor:
+#   (Binary)-[:BUILT_FROM]->(Package {purl: root_purl})
+#   (Sbom {hash: sbom_content_hash})-[:ATTESTS]->(Binary)
+export def emit-binary-linked [
+    binary_content_hash: string
+    binary_name: string
+    root_purl: string
+    sbom_content_hash: string
+    --binding_digest: string = ""
+]: nothing -> nothing {
+    mut payload = {
+        type: "binary_linked"
+        binary_content_hash: $binary_content_hash
+        binary_name: $binary_name
+        root_purl: $root_purl
+        sbom_content_hash: $sbom_content_hash
+        binding_digest: null
+    }
+    if ($binding_digest | is-not-empty) {
+        $payload = ($payload | upsert binding_digest $binding_digest)
+    }
+    emit-provenance-event $payload
 }

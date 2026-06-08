@@ -44,8 +44,7 @@ let neo4jServiceName = "neo4j"
 let neo4jDNSName     = "${neo4jServiceName}.${C.polarNamespace}.svc.cluster.local"
 
 -- Well-known agent names used for deployment metadata and graph labeling.
-let provenanceLinkerName  = "provenance-linker"
-let provenanceResolverName = "provenance-resolver"
+let OciResolverName = "oci-resolver"
 
 -- Graph config is deployment-specific: the DB name, user, and the
 -- Kubernetes secret that holds the password are all decided by the deployer.
@@ -174,19 +173,10 @@ let gitlabConsumer
       , tls
       }
 
-let linker
-    : Agents.ProvenanceLinker
-    = { name     = provenanceLinkerName
-      , image    = img "polar-linker-agent"
-      , graph    = graphConfig
-      , certClient = defaultCertClientConfig
-      , tls
-      }
-
 let resolver
-    : Agents.ProvenanceResolver
-    = { name     = provenanceResolverName
-      , image    = img "provenance-resolver-agent"
+    : Agents.OciResolver
+    = { name     = OciResolverName
+      , image    = img "oci-resolver"
       , certClient = defaultCertClientConfig
       , tls
       }
@@ -237,21 +227,10 @@ let kubeConsumer
       , tls
       }
 
-let buildOrchestrator
-    : Agents.BuildOrchestrator
-    = { name               = "build-orchestrator"
-      , image              = img "build-orchestrator"
-      , serviceAccountName = "build-orchestrator-sa"
-      , secretName         = "build-orchestrator-sa-token"
-      , config             = ./conf/cyclops.yaml as Text
-      , certClient         = defaultCertClientConfig
-      , tls
-      }
-
 let buildProcessor
     : Agents.BuildProcessor
     = { name     = "build-processor"
-      , image    = img "polar-build-processor"
+      , image    = img "build-processor"
       , graph    = graphConfig
       , certClient = defaultCertClientConfig
       , tls
@@ -266,7 +245,6 @@ in  { imagePullPolicy
     , gitlabConsumer
     , kubeObserver
     , kubeConsumer
-    , linker
     , resolver
     , gitObserver
     , gitConsumer
@@ -278,6 +256,5 @@ in  { imagePullPolicy
     , jaeger
     , jaegerDNSName
     , buildProcessor
-    , buildOrchestrator
     , proxyCACert
     }

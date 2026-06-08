@@ -66,7 +66,7 @@ let
     # build workspace derivation to be given as a default package
     workspacePackages = craneLib.buildPackage (individualCrateArgs // {
       pname = "polar";
-      cargoExtraArgs = "--workspace --locked --exclude logger --exclude policy-config --exclude config-ops";
+      cargoExtraArgs = "--workspace --locked --exclude logger --exclude policy-config ";
       src = workspaceFileset ./.;
     });
 
@@ -95,7 +95,12 @@ let
       crateArgs = individualCrateArgs;
     };
 
-    provenance = import ./provenance/package.nix {
+    buildProcessor = import ./build-processor/package.nix {
+      inherit pkgs craneLib workspaceFileset nix-container-lib inputs system;
+      crateArgs = individualCrateArgs;
+    };
+
+    ociResolver = import ./resolver/package.nix {
       inherit pkgs craneLib workspaceFileset nix-container-lib inputs system;
       crateArgs = individualCrateArgs;
     };
@@ -115,11 +120,6 @@ let
       crateArgs = individualCrateArgs;
     };
 
-    buildOrchestrator = import ./build-orchestrator/package.nix {
-      inherit pkgs craneLib workspaceFileset nix-container-lib inputs system;
-      crateArgs = individualCrateArgs;
-    };
-
     nuInit = import ./nu-init/package.nix {
       inherit pkgs nix-container-lib inputs system;
       certIssuerClient = certIssuer.client;
@@ -131,5 +131,5 @@ let
 
 in
 {
-  inherit workspacePackages gitlabAgent cassini kubeAgent webAgent provenance scheduler jiraAgent gitAgent buildOrchestrator certIssuer nuInit gitServer;
+  inherit workspacePackages gitlabAgent cassini kubeAgent webAgent resolver scheduler jiraAgent gitAgent buildProcessor certIssuer nuInit gitServer;
 }

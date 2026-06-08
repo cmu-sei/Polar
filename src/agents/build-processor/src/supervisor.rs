@@ -1,12 +1,12 @@
 use crate::{
-    PROVENANCE_LIKER_NAME,
     build::{BuildActor, BuildActorArgs},
     linker::{ProvenanceLinker, ProvenanceLinkerArgs},
 };
 use cassini_types::{ClientEvent, WireTraceCtx};
 use neo4rs::Graph;
 use polar::{
-    BUILD_EVENTS_TOPIC, PROVENANCE_LINKER_TOPIC, ProvenanceEvent, RkyvError, SupervisorMessage,
+    BUILD_EVENTS_TOPIC, BUILD_PROCESSOR_NAME, PROVENANCE_LINKER_TOPIC, ProvenanceEvent, RkyvError,
+    SupervisorMessage,
     cassini::{CassiniClient, SubscribeRequest, TcpClient},
     get_neo_config,
     graph::controller::{GraphController, GraphControllerActor},
@@ -81,7 +81,7 @@ impl Actor for BuildProcessorSupervisor {
 
         let broker_client = Arc::new(
             TcpClient::spawn(
-                &format!("{PROVENANCE_LIKER_NAME}.tcp"),
+                &format!("{BUILD_PROCESSOR_NAME}.tcp"),
                 myself.clone(),
                 |event| Some(SupervisorMessage::ClientEvent { event }),
             )
@@ -111,7 +111,7 @@ impl Actor for BuildProcessorSupervisor {
                     // ── Graph controller ───────────────────────────────────────
                     // Owns Neo4j writes for execution lifecycle events.
                     let (controller, _) = Actor::spawn_linked(
-                        Some(format!("{PROVENANCE_LIKER_NAME}.graph.controller")),
+                        Some(format!("{BUILD_PROCESSOR_NAME}.graph.controller")),
                         GraphControllerActor,
                         (),
                         myself.clone().into(),
@@ -123,7 +123,7 @@ impl Actor for BuildProcessorSupervisor {
                     // ── Provenance linker ──────────────────────────────────────
                     // Owns Neo4j writes for artifact domain events.
                     let (build_handler, _) = Actor::spawn_linked(
-                        Some(format!("{PROVENANCE_LIKER_NAME}.build_handler")),
+                        Some(format!("{BUILD_PROCESSOR_NAME}.build_handler")),
                         BuildActor,
                         BuildActorArgs {
                             graph_controller: controller.clone(),
@@ -137,7 +137,7 @@ impl Actor for BuildProcessorSupervisor {
                     // ── Provenance linker ──────────────────────────────────────
                     // Owns Neo4j writes for artifact domain events.
                     let (linker, _) = Actor::spawn_linked(
-                        Some(format!("{PROVENANCE_LIKER_NAME}.linker")),
+                        Some(format!("{BUILD_PROCESSOR_NAME}.linker")),
                         ProvenanceLinker,
                         ProvenanceLinkerArgs {
                             compiler: controller,

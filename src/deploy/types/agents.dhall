@@ -72,7 +72,7 @@ let BuildProcessor = GraphProcessor
 
 let KubeObserver = PolarAgent //\\ WithServiceAccount
 
-let ProvenanceResolver = PolarAgent
+let OciResolver = PolarAgent
 
 let GitlabObserver =
           PolarAgent
@@ -101,12 +101,10 @@ in  { ClientTlsConfig
     , GitlabConsumer
     , KubeObserver
     , KubeConsumer
-    , ProvenanceLinker
-    , ProvenanceResolver
+    , OciResolver
     , StaticCredentialConfig
     , GitObserver
     , GitConsumer
     , GitScheduler
-    , BuildOrchestrator
     , BuildProcessor
     }

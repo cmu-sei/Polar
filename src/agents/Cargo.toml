@@ -34,7 +34,6 @@ members = [
     "cassini/test/producer",
     "cassini/test/sink",
     "cassini/types",
-    "config-ops",
     "git/common",
     "gitlab/common",
     "gitlab/consume",
