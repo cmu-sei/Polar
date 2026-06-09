@@ -4,12 +4,12 @@ The **Build Processor** is the unified graph projection agent for Polar's softwa
 
 ## Responsibilities
 
-This agent owns two domains of graph projection:
-
-**Build execution lifecycle** — projects `BuildJob`, `BuildStage`, and `Vulnerability` nodes from CI pipeline events. Establishes the `BUILT_BY` edge from `GitCommit` to `BuildJob`, `HAS_STAGE` edges to `BuildStage` nodes, and `FOUND_VULNERABILITY` edges to scanner-reported CVEs.
+**Build execution lifecycle** — projects `BuildJob`, `BuildStage`, and `Vulnerability` nodes from CI pipeline events. Establishes the `BUILT_BY` edge from `GitCommit` to `BuildJob`, `HAS_STAGE` edges to `BuildStage` nodes, `FOUND_VULNERABILITY` edges to scanner-reported CVEs, `PRODUCED` edges to `BuildArtifact` nodes, and the `IS` type hierarchy edge to `BuildExecution`.
 
 **Artifact provenance** — projects `Sbom`, `Package`, `Binary`, `ContainerImage`, `OCILayer`, `BuildArtifact`, and `Artifact` nodes from pipeline artifact events. Establishes the full provenance chain:
 ```
+(BuildJob)-[:IS]->(BuildExecution)
+(BuildJob)-[:PRODUCED]->(BuildArtifact)
 (Binary)-[:BUILT_FROM]->(Package)<-[:DESCRIBES]-(Sbom)
 (ContainerImage)-[:HAS_LAYER]->(OCILayer)
 (BuildArtifact)-[:ANALYZED_AS]->(Sbom)
@@ -66,17 +66,17 @@ Nodes projected by this agent:
 | `BuildJob` | `build_id` | This processor |
 | `BuildJobState` | `(build_id, valid_from)` | This processor |
 | `BuildStage` | `(build_id, stage_id)` | This processor |
-| `BuildArtifact` | `digest` | This processor |
+| `BuildExecution` | `type: "BuildExecution"` (singleton) | This processor |
+| `BuildArtifact` | `content_hash` | This processor |
 | `Vulnerability` | `identifier` | This processor |
+| `Artifact` | `type: "Artifact"` (singleton) | This processor |
 | `Sbom` | `artifact_content_hash` | This processor |
 | `Package` | `purl` | This processor |
 | `Binary` | `content_hash` | This processor |
 | `ContainerImage` | `config_digest` | This processor |
 | `OCILayer` | `digest` | This processor |
 | `GitCommit` | `oid` | VCS agent (referenced only) |
-| `BackendJob` | varies by backend | Backend observer (referenced only) |
-
-## Setup
+| `BackendJob` | varies by backend | Backend observer (referenced only) |## Setup
 
 Requires the following environment variables:
 

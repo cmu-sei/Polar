@@ -5,11 +5,11 @@
 @deprecated "Use nushell's std/log module instead"
 @category deprecated
 def log [level: string, msg: string, --component: string = ""] {
-    let ts = (date now | format date "%Y-%m-%dT%H:%M:%S%.3fZ")
+    let ts = date now | format date "%Y-%m-%dT%H:%M:%S%.3fZ"
     print $"($ts) [($level)] ($component) — ($msg)"
 }
 
-export def log-info  [msg: string, --component: string = ""] { log "INFO"  $msg --component $component }
-export def log-warn  [msg: string, --component: string = ""] { log "WARN"  $msg --component $component }
+export def log-info [msg: string, --component: string = ""] { log "INFO" $msg --component $component }
+export def log-warn [msg: string, --component: string = ""] { log "WARN" $msg --component $component }
 export def log-error [msg: string, --component: string = ""] { log "ERROR" $msg --component $component }
 export def log-debug [msg: string, --component: string = ""] { log "DEBUG" $msg --component $component }

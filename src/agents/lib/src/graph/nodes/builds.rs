@@ -19,6 +19,11 @@ use serde::Serialize;
 /// parameter name collisions.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum BuildNodeKey {
+    /// The abstract type node for build executions.
+    /// All BuildJob instances link to this via IS.
+    /// Analogous to the Artifact type node in the artifact domain.
+    BuildExecution,
+
     /// Cannonical state node
     State,
     /// A single Cyclops build execution. This is the linchpin node — it
@@ -51,7 +56,7 @@ pub enum BuildNodeKey {
     /// Digest is the sole primary key — two builds producing the same digest
     /// correctly converge to the same node (reproducible build detection).
     /// The PRODUCED edge carries the relationship back to the BuildJob.
-    BuildArtifact { digest: String },
+    BuildArtifact { content_hash: String },
 
     /// A vulnerability found during a build scan. Keyed on identifier so that
     /// the same CVE/GHSA found across multiple builds converges to one node —
@@ -76,11 +81,11 @@ impl GraphNodeKey for BuildNodeKey {
                 )
             }
 
-            BuildNodeKey::BuildArtifact { digest } => {
-                let dk = format!("{prefix}_digest");
+            BuildNodeKey::BuildArtifact { content_hash } => {
+                let ck = format!("{prefix}_content_hash");
                 (
-                    format!("({prefix}:BuildArtifact {{ digest: ${dk} }})"),
-                    vec![(dk, BoltType::String(digest.clone().into()))],
+                    format!("({prefix}:BuildArtifact {{ content_hash: ${ck} }})"),
+                    vec![(ck, BoltType::String(content_hash.clone().into()))],
                 )
             }
 
@@ -108,6 +113,13 @@ impl GraphNodeKey for BuildNodeKey {
 
                 (format!("({prefix}:{node_label} {{ {prop_str} }})"), params)
             }
+            BuildNodeKey::BuildExecution => (
+                format!("({prefix}:BuildExecution {{type: \"BuildExecution\"}})"),
+                vec![(
+                    format!("{prefix}_type"),
+                    BoltType::String("BuildExecution".into()),
+                )],
+            ),
             BuildNodeKey::BuildJob { build_id } => {
                 let id_k = format!("{prefix}_build_id");
                 (
@@ -212,7 +224,13 @@ pub enum ArtifactNodeKey {
 impl GraphNodeKey for ArtifactNodeKey {
     fn cypher_match(&self, prefix: &str) -> (String, Vec<(String, BoltType)>) {
         match self {
-            Self::Artifact => (format!("({prefix}:Artifact)"), vec![]),
+            Self::Artifact => (
+                format!("({prefix}:Artifact {{type: \"Artifact\"}})"),
+                vec![(
+                    format!("{prefix}_type"),
+                    BoltType::String("Artifact".into()),
+                )],
+            ),
             Self::OCIRegistry { hostname } => (
                 format!("({prefix}:OCIRegistry {{ hostname: ${prefix}_hostname }})"),
                 vec![(format!("{prefix}_hostname"), hostname.clone().into())],

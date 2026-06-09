@@ -35,6 +35,7 @@ def main [] {
     $env.CI_PIPELINE_ID = "smoke-pipeline-1"
     $env.CI_JOB_ID      = "smoke-job-1"
     $env.CI_JOB_URL     = "http://localhost/smoke/job/1"
+    $env.POLAR_BUILD_ID = $build_id
 
     log-info $"smoke test build_id: ($build_id)" --component $COMPONENT
     log-info "cassini daemon assumed running — start manually if needed" --component $COMPONENT

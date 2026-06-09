@@ -1,4 +1,9 @@
-export def process-sboms [files: list<record>, packages: list<record>, artifact_dir: path = "pipeline-out", --component: string = ""]: nothing -> list<record> {
+export def process-sboms [
+    files: list<record>
+    packages: list<record>
+    artifact_dir: path = "pipeline-out"
+    --component: string = ""
+]: nothing -> list<record> {
     # Now read whatever landed in artifact_dir.
     let sbom_files = (
         ls $artifact_dir
@@ -6,7 +11,8 @@ export def process-sboms [files: list<record>, packages: list<record>, artifact_
         | where { ($in.name | path basename | str ends-with ".cdx.json") }
     )
 
-    $sbom_files | each {|f|
+    $sbom_files
+    | each {|f|
             let doc = try { open $f.name } catch {|e|
                 log-warn $"could not parse ($f.name): ($e.msg)" --component $component
                 null
@@ -14,8 +20,8 @@ export def process-sboms [files: list<record>, packages: list<record>, artifact_
             if $doc == null { return null }
             if ($doc.bomFormat? | default "") != "CycloneDX" { return null }
 
-            let filename = ($f.name | path basename)
-            let stem = ($filename | str replace ".cdx.json" "")
+            let filename = $f.name | path basename
+            let stem = $filename | str replace ".cdx.json" ""
             let content_hash = (content-hash-file $f.name)
 
             # Provenance: record that this build stage produced an SBOM artifact.
@@ -31,7 +37,7 @@ export def process-sboms [files: list<record>, packages: list<record>, artifact_
             }
 
             # Return summary for upstream pipeline orchestration.
-            let matched = ($packages | where name == $stem | first)
+            let matched = $packages | where name == $stem | first
             {
                 name: ($matched.name? | default $stem)
                 path: $f.name
@@ -40,7 +46,7 @@ export def process-sboms [files: list<record>, packages: list<record>, artifact_
                 edge_count: ($fragment.edges | length)
             }
         }
-        | where { $in != null }
+    | where { $in != null }
 }
 
 # ===========================================================================
@@ -65,22 +71,27 @@ export def generate-image-sbom [
     output_dir: path         # Where to write the SBOM
     --name: string = ""      # Override the SBOM filename stem (default: derived from tarball)
 ]: nothing -> record {
-    let resolved = ($tarball_path | path expand)
+    let resolved = $tarball_path | path expand
 
     # Resolve through symlinks — nix build outputs are symlinks to /nix/store.
     let real_path = (^readlink -f $resolved | str trim)
 
     if ($real_path | path exists) != true {
-        error make { msg: $"Image tarball not found: ($tarball_path) (resolved to ($real_path))" }
+        error make {msg: $"Image tarball not found: ($tarball_path) (resolved to ($real_path))"}
     }
 
-    let stem = if ($name | is-not-empty) { $name } else { ($tarball_path | path basename | str replace ".tar.gz" "" | str replace ".tar" "") }
+    let stem = if ($name | is-not-empty) { $name } else { (
+        $tarball_path
+        | path basename
+        | str replace ".tar.gz" ""
+        | str replace ".tar" ""
+    ) }
     let sbom_filename = $"($stem).image.cdx.json"
-    let sbom_path = ($output_dir | path join $sbom_filename)
+    let sbom_path = $output_dir | path join $sbom_filename
 
     # Syft is crazy strict on the formats it accepts (vs docker and podman) so it doesn't really like the tar.gz files that nix spits out
     # so, we have to do the unfortunate task of forcing it into an oci format
-    let new_tarball_path = ($"($stem)Image")
+    let new_tarball_path = $"($stem)Image"
 
     log-info "Marshalling nix output tarball to a oci-archive"
     let conversion_result = (
@@ -88,9 +99,13 @@ export def generate-image-sbom [
     )
 
     if $conversion_result.exit_code != 0 {
-        let msg = ($conversion_result.stderr? | default $conversion_result.stdout | str trim)
+        let msg = (
+            $conversion_result.stderr?
+            | default $conversion_result.stdout
+            | str trim
+        )
         log-warn $"skopeo failed to create oci-archive: ($msg)" --component "oci"
-        return { success: false, path: "", name: $stem }
+        return {success: false, path: "", name: $stem}
     }
     log-info $"Generating image SBOM for ($stem)" --component "oci"
 
@@ -99,18 +114,18 @@ export def generate-image-sbom [
     )
 
     if $result.exit_code != 0 {
-        let msg = ($result.stderr? | default $result.stdout | str trim)
+        let msg = $result.stderr? | default $result.stdout | str trim
         log-warn $"syft failed for ($stem): ($msg)" --component "oci"
-        return { success: false, path: "", name: $stem }
+        return {success: false, path: "", name: $stem}
     }
 
     if ($sbom_path | path exists) != true {
         log-warn $"syft produced no output for ($stem)" --component "oci"
-        return { success: false, path: "", name: $stem }
+        return {success: false, path: "", name: $stem}
     }
 
     log-info $"Image SBOM generated: ($sbom_filename)" --component "oci"
-    { success: true, path: $sbom_path, name: $stem }
+    {success: true, path: $sbom_path, name: $stem}
 }
 
 # Extract layer-to-package attribution from a syft-generated CycloneDX SBOM.
@@ -127,13 +142,14 @@ export def generate-image-sbom [
 # The linker agent handles this join after both the syft scan and the
 # manifest resolution have been ingested.
 export def extract-layer-attributions [doc: record]: nothing -> list<record> {
-    let components = ($doc.components? | default [])
+    let components = $doc.components? | default []
 
-    $components | each {|comp|
-        let purl = ($comp.purl? | default "")
+    $components
+    | each {|comp|
+        let purl = $comp.purl? | default ""
         if ($purl | is-empty) { return null }
 
-        let props = ($comp.properties? | default [])
+        let props = $comp.properties? | default []
 
         # Syft uses properties named `syft:location:N:layerID` where N is
         # the location index (a component can appear in multiple locations).
@@ -159,22 +175,18 @@ export def extract-layer-attributions [doc: record]: nothing -> list<record> {
 # Emits:
 #   - artifact.produced (SBOM file was created)
 #   - image-sbom.analyzed (graph fragment + layer attributions)
-export def process-image-sbom [
-    sbom_path: path
-    image_name: string
-    --oci_metadata: record
-]: nothing -> record {
+export def process-image-sbom [sbom_path: path, image_name: string, --oci_metadata: record]: nothing -> record {
     let doc = try { open $sbom_path } catch {|e|
         log-warn $"Could not parse image SBOM ($sbom_path): ($e.msg)" --component "oci"
-        return { success: false }
+        return {success: false}
     }
 
     if ($doc.bomFormat? | default "") != "CycloneDX" {
         log-warn $"($sbom_path) is not CycloneDX format" --component "oci"
-        return { success: false }
+        return {success: false}
     }
 
-    let filename = ($sbom_path | path basename)
+    let filename = $sbom_path | path basename
     let content_hash = (content-hash-file $sbom_path)
 
     # Emit provenance: this pipeline produced this SBOM file.
@@ -220,7 +232,7 @@ export def process-image-sbom [
 # testable in isolation.
 # ---------------------------------------------------------------------------
 export def extract-graph-fragment [doc: record, artifact_content_hash: string]: nothing -> record {
-    let root_component = ($doc.metadata?.component? | default null)
+    let root_component = $doc.metadata?.component? | default null
 
     # The root package identity. This is the crate/binary the SBOM describes.
     # We key on purl because it's the only stable cross-build identifier.

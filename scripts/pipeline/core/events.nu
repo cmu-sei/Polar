@@ -43,29 +43,23 @@ export def emit-execution-started [
 }
 
 export def emit-execution-completed [build_id: string, duration_secs: int]: nothing -> nothing {
-    emit-provenance-event {
-        type: "execution_completed"
-        build_id: $build_id
-        duration_secs: $duration_secs
-    }
+    emit-provenance-event {type: "execution_completed", build_id: $build_id, duration_secs: $duration_secs}
 }
 
-export def emit-execution-failed [
-    build_id: string
-    reason: string
-    --stage: string = ""
-]: nothing -> nothing {
-    mut payload = {type: "execution_failed", build_id: $build_id, reason: $reason, stage: null}
+export def emit-execution-failed [build_id: string, reason: string, --stage: string = ""]: nothing -> nothing {
+    mut payload = {
+        type: "execution_failed"
+        build_id: $build_id
+        reason: $reason
+        stage: null
+    }
     if ($stage | is-not-empty) {
         $payload = ($payload | upsert stage $stage)
     }
     emit-provenance-event $payload
 }
 
-export def emit-execution-cancelled [
-    build_id: string
-    --reason: string = ""
-]: nothing -> nothing {
+export def emit-execution-cancelled [build_id: string, --reason: string = ""]: nothing -> nothing {
     mut payload = {type: "execution_cancelled", build_id: $build_id, reason: null}
     if ($reason | is-not-empty) {
         $payload = ($payload | upsert reason $reason)
@@ -73,11 +67,7 @@ export def emit-execution-cancelled [
     emit-provenance-event $payload
 }
 
-export def emit-stage-started [
-    build_id: string
-    stage_name: string
-    stage_id: string
-]: nothing -> nothing {
+export def emit-stage-started [build_id: string, stage_name: string, stage_id: string]: nothing -> nothing {
     emit-provenance-event {
         type: "stage_started"
         build_id: $build_id
@@ -133,15 +123,13 @@ export def emit-artifact-produced [
     --name: string = ""
     --content_type: string = ""
 ]: nothing -> nothing {
-    mut payload = {
-        type: "artifact_produced"
-        artifact_content_hash: $content_hash
-        artifact_type: $artifact_type
-        name: null
-        content_type: null
-    }
-    if ($name | is-not-empty)         { $payload = ($payload | upsert name $name) }
-    if ($content_type | is-not-empty) { $payload = ($payload | upsert content_type $content_type) }
+    mut payload = {type: "artifact_produced", artifact_content_hash: $content_hash, artifact_type: $artifact_type}
+    if ($name | is-not-empty) { $payload = ($payload | insert name $name) }
+    if ($content_type | is-not-empty) { $payload = ($payload | insert content_type $content_type) }
+    # build_id is optional — present when emitting from within a CI pipeline context,
+    # absent when emitting from an observer agent that has no build correlation
+    let build_id = $env.POLAR_BUILD_ID? | default ""
+    if ($build_id | is-not-empty) { $payload = ($payload | insert build_id $build_id) }
     emit-provenance-event $payload
 }
 
@@ -166,13 +154,13 @@ export def emit-container-image-created [
     image_name: string
     tarball_hash: string
     config_digest: string
-    layers: list
+    layers: list<any>
     --os: string = ""
     --arch: string = ""
     --created: string = ""
     --entrypoint: string = ""
     --cmd: string = ""
-    --repo_tags: list = []
+    --repo_tags: list<any> = []
 ]: nothing -> nothing {
     emit-provenance-event {
         type: "container_image_created"

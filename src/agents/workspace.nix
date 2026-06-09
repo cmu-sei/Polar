@@ -131,5 +131,5 @@ let
 
 in
 {
-  inherit workspacePackages gitlabAgent cassini kubeAgent webAgent resolver scheduler jiraAgent gitAgent buildProcessor certIssuer nuInit gitServer;
+  inherit workspacePackages gitlabAgent cassini kubeAgent webAgent ociResolver scheduler jiraAgent gitAgent buildProcessor certIssuer nuInit gitServer;
 }

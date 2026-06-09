@@ -4,7 +4,7 @@ use polar::{
     graph::{
         controller::{
             GraphController, GraphControllerMsg, GraphOp, GraphValue, IntoGraphKey, Property,
-            rel::BUILT_BY,
+            rel::{BUILT_BY, IS},
         },
         nodes::{builds::BuildNodeKey, git::GitNodeKey},
     },
@@ -130,6 +130,20 @@ pub fn project_event(
                     )],
                 }))?;
             }
+
+            // ── Edge: BuildJob -[:IS]-> BuildExecution ─────────────────────────
+            // Establishes the type hierarchy. BuildExecution is the abstract type
+            // anchor; BuildJob is the instance. Consistent with how the artifact
+            // domain models OCIArtifact -[:IS]-> Artifact.
+            graph.cast(GraphControllerMsg::Op(GraphOp::EnsureEdge {
+                from: BuildNodeKey::BuildJob {
+                    build_id: build_id.clone(),
+                }
+                .into_key(),
+                rel_type: IS.into(),
+                to: BuildNodeKey::BuildExecution.into_key(),
+                props: vec![],
+            }))?;
         }
 
         ProvenanceEvent::StageStarted {
@@ -255,7 +269,7 @@ pub fn project_event(
                     from: vuln_key.into_key(),
                     rel_type: "FOUND_IN".into(),
                     to: BuildNodeKey::BuildArtifact {
-                        digest: artifact_digest.clone(),
+                        content_hash: artifact_digest.clone(),
                     }
                     .into_key(),
                     props: vec![Property(

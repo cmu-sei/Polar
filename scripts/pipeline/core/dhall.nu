@@ -28,8 +28,8 @@ export def render-dhall-dir [dhall_dir: path]: nothing -> list<record> {
 
     $dhall_files | each {|file|
         let src      = $file.name
-        let stem     = ($src | path basename | str replace --regex '\.dhall$' '')
-        let yaml_out = ($dhall_dir | path join $"($stem).yaml")
+        let stem = $src | path basename | str replace --regex '\.dhall$' ''
+        let yaml_out = $dhall_dir | path join $"($stem).yaml"
 
         log-info $"converting: ($src | path basename) -> ($yaml_out | path basename)" --component $DHALL_COMPONENT
 
@@ -53,7 +53,7 @@ export def render-dhall-dir [dhall_dir: path]: nothing -> list<record> {
 # no render because kubectl apply on a half-rendered tree is unpredictable.
 export def render-dhall-root [dhall_root: path]: nothing -> list<record> {
     if not ($dhall_root | path exists) {
-        error make { msg: $"dhall root '($dhall_root)' does not exist" }
+        error make {msg: $"dhall root '($dhall_root)' does not exist"}
     }
 
     let subdirs = (
@@ -67,17 +67,22 @@ export def render-dhall-root [dhall_root: path]: nothing -> list<record> {
     }
 
     let results = ($subdirs | each {|dir|
-        let name = ($dir.name | path basename)
+        let name = $dir.name | path basename
         log-info $"rendering ($name)" --component $DHALL_COMPONENT
         let dir_results = (render-dhall-dir $dir.name)
         log-info $"($name): ($dir_results | length) file(s) rendered" --component $DHALL_COMPONENT
         $dir_results
     } | flatten)
 
-    let failures = ($results | where success == false)
+    let failures = $results | where success == false
     if ($failures | is-not-empty) {
-        let failed_files = ($failures | get src | each { path basename } | str join ", ")
-        error make { msg: $"dhall rendering failed for: ($failed_files)" }
+        let failed_files = (
+            $failures
+            | get src
+            | each { path basename }
+            | str join ", "
+        )
+        error make {msg: $"dhall rendering failed for: ($failed_files)"}
     }
 
     $results

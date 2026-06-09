@@ -3,7 +3,7 @@ use oci_client::manifest::OciManifest;
 use polar::graph::controller::IntoGraphKey;
 use polar::graph::controller::{GraphControllerMsg, GraphOp, GraphValue, Property, rel};
 use polar::graph::nodes::builds::ArtifactNodeKey;
-
+use polar::graph::nodes::builds::BuildNodeKey;
 use polar::{
     ArtifactProducedPayload, BinaryLinkedPayload, ContainerImageCreatedPayload, ProvenanceEvent,
     SbomGraphFragment,
@@ -294,7 +294,7 @@ impl ProvenanceLinker {
             let sbom_k = ArtifactNodeKey::Sbom {
                 artifact_content_hash: payload.artifact_content_hash.clone(),
             };
-            Self::ensure_edge(state, artifact_k, sbom_k, rel::ANALYZED_AS, vec![])?;
+            Self::ensure_edge(state, artifact_k.clone(), sbom_k, rel::ANALYZED_AS, vec![])?;
         } else if payload.artifact_type == "elf-binary" {
             // Binary artifacts get a Binary node, not a generic
             // BuildArtifact. This is what handle_binary_linked
@@ -320,6 +320,26 @@ impl ProvenanceLinker {
             )?;
             Self::ensure_edge(state, ArtifactNodeKey::Artifact, binary_k, rel::IS, vec![])?;
         }
+
+        // ── Edge: BuildJob -[:PRODUCED]-> artifact ─────────────────────────────
+        // Only written when the event carries build_id — pipeline emissions
+        // always have one; observer agent emissions don't.
+        if let Some(ref build_id) = payload.build_id {
+            Self::send_op(
+                state,
+                GraphOp::EnsureEdge {
+                    from: BuildNodeKey::BuildJob {
+                        build_id: build_id.clone(),
+                    }
+                    .into_key(),
+                    rel_type: rel::PRODUCED.to_string(),
+                    to: artifact_k.into_key(),
+                    props: vec![],
+                },
+                "failed to write PRODUCED edge",
+            )?;
+        }
+
         Ok(())
     }
     pub(crate) fn handle_binary_linked(

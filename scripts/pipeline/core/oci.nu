@@ -48,8 +48,8 @@ export def nix-build-image [
             success: false
             link_name: $link_name
             flake_ref: $flake_ref
-            tarball: ""
-            oci_metadata: {success: false}
+            tarball: "", 
+            oci_metadata: { success: false}
         }
     }
 
@@ -61,8 +61,8 @@ export def nix-build-image [
             success: false
             link_name: $link_name
             flake_ref: $flake_ref
-            tarball: ""
-            oci_metadata: {success: false}
+            tarball: "", 
+            oci_metadata: { success: false}
         }
     }
 

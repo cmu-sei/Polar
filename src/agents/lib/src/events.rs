@@ -182,6 +182,8 @@ pub struct ArtifactProducedPayload {
     pub name: String,
     #[serde(default)]
     pub content_type: String,
+    #[serde(default)]
+    pub build_id: Option<String>,
 }
 
 /// Payload for a compiled binary that has been linked to its source package and SBOM.

@@ -157,8 +157,6 @@
 
           ociResolver = polarPkgs.ociResolver.image;
 
-
-
           # ── Scheduler agent ──────────────────────────────────────────────────
           schedulerProcessorImage = polarPkgs.scheduler.processorImage;
           schedulerObserverImage  = polarPkgs.scheduler.observerImage;
