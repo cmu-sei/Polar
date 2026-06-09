@@ -314,6 +314,7 @@ You could argue they're the highest-value exports precisely because they encode 
 in  { makeGraphEnv
     , makeOpaqueSecret
     , makeDeployment
+    , makeSaTokenVolume
     , DockerRegistrySecret
     , mkProxySecret
     , ProxyVolume

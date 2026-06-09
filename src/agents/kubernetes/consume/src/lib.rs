@@ -15,7 +15,6 @@ use polar::{
         },
         nodes::kube::KubeNodeKey,
     },
-    topics::PROVENANCE_DISCOVERY,
 };
 use ractor::{ActorProcessingErr, ActorRef};
 use rkyv::to_bytes;
@@ -496,7 +495,7 @@ impl GraphOperable for Pod {
             }))?;
 
             // provenance side channel
-            let ev = emit_provenance_event(
+            emit_provenance_event(
                 ProvenanceEvent::ImageRefDiscovered { uri: image },
                 tcp_client,
             )?;
@@ -996,6 +995,8 @@ impl GraphOperable for ReplicaSet {
 
 // ---------------------------------------------------------------------------
 // Flux: OCIRepository
+// TODO: Create a node linking this OCI registry to a cannonical reporesentation.
+// Something like - FluxOCIRepostiry -[:RECONCILES_FROM]->(OCIRegistry)
 // ---------------------------------------------------------------------------
 
 impl GraphOperable for OciRepository {

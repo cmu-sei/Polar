@@ -155,7 +155,7 @@
           openApiObserverImage  = polarPkgs.webAgent.observerImage;
           openApiProcessorImage = polarPkgs.webAgent.processorImage;
 
-          ociResolver = polarPkgs.ociResolver.image;
+          ociResolverImage = polarPkgs.ociResolver.resolverImage;
 
           # ── Scheduler agent ──────────────────────────────────────────────────
           schedulerProcessorImage = polarPkgs.scheduler.processorImage;

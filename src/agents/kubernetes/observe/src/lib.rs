@@ -1,4 +1,4 @@
-use cassini_client::TcpClientMessage;
+use cassini_client::{OfflineBehavior, PublishRequest, TcpClientMessage};
 use futures::{StreamExt, TryStreamExt};
 use k8s_openapi::NamespaceResourceScope;
 use k8s_openapi::api::core::v1::Node;
@@ -105,7 +105,7 @@ where
     for obj in list.items {
         let ev = RawKubeEvent {
             kind: kind.to_string(),
-            action: BATCH_PROCESS_ACTION.into(),
+            action: RESOURCE_APPLIED_ACTION.into(),
             object: to_value(&obj)?,
             resource_version: resource_version.clone(),
         };
@@ -306,9 +306,11 @@ where
 async fn emit_event(tcp_client: &TcpClient, ev: RawKubeEvent) -> Result<(), ActorProcessingErr> {
     let payload = to_vec(&ev)?;
     trace!("Emitting event {ev:?}");
-    tcp_client.subscribe(SubscribeRequest {
+    tcp_client.publish(PublishRequest {
         topic: KUBERNETES_CONSUMER.to_string(),
         trace_ctx: None,
+        payload,
+        offline_behavior: OfflineBehavior::default(),
     })?;
 
     Ok(())

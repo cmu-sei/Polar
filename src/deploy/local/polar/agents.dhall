@@ -46,8 +46,7 @@ let ociRegistrySecretValue = env:DOCKER_AUTH_JSON as Text ? "someJson"
 -- Well-known deployment/container names for linker and resolver.
 -- These match the names the graph uses to identify these agents.
 let artifactLinkerName     = "artifact-linker"
-let provenanceLinkerName   = "provenance-linker"
-let provenanceResolverName = "provenance-resolver"
+let OciResolverName = "oci-resolver"
 let registryResolverName   = "oci-registry-resolver"
 
 -- Security context applied to every container. Drop all capabilities,
@@ -560,7 +559,7 @@ let resolverDeployment =
             , initContainers     = Some [ makeCertInit values.resolver.certClient ]
             , containers =
               [ kubernetes.Container::{
-                , name            = provenanceResolverName
+                , name            = OciResolverName
                 , image           = Some values.resolver.image
                 , imagePullPolicy = Some values.imagePullPolicy
                 , securityContext = Some dropAllCapSecurityContext

@@ -8,9 +8,7 @@ use oci_client::{
 };
 use polar::{
     PROVENANCE_LINKER_TOPIC, ProvenanceEvent, Supervisor, SupervisorMessage,
-    async_get_file_as_byte_vec,
     cassini::{CassiniClient, SubscribeRequest, TcpClient},
-    get_web_client,
     topics::PROVENANCE_DISCOVERY,
     try_get_proxy_ca_cert,
 };
@@ -18,25 +16,13 @@ use polar::{
 use ractor::{
     Actor, ActorProcessingErr, ActorRef, SupervisionEvent, async_trait, registry::where_is,
 };
-use reqwest::Client as WebClient;
 use std::str::FromStr;
 use tracing::{debug, error, info, instrument, trace, warn};
+
 pub const BROKER_CLIENT_NAME: &str = "polar.oci.resolver.tcp";
-use cassini_types::WireTraceCtx;
-use serde::Deserialize;
-
 pub const RESOLVER_SUPERVISOR_NAME: &str = "polar.oci.resolver.supervisor";
-#[derive(Debug, serde::Serialize, Deserialize, Clone)]
-pub struct ResolverConfig {
-    pub registries: Vec<RegistryConfig>,
-}
 
-#[derive(Debug, serde::Serialize, Deserialize, Clone)]
-pub struct RegistryConfig {
-    pub name: String,
-    pub url: String,
-    pub client_cert_path: Option<String>,
-}
+use cassini_types::WireTraceCtx;
 
 // --- Supervisor ---
 pub struct ResolverSupervisor;
@@ -44,7 +30,6 @@ pub struct ResolverSupervisor;
 #[derive(Clone)]
 pub struct ResolverSupervisorState {
     tcp_client: TcpClient,
-    config: Option<ResolverConfig>,
     oci_client: Option<OciClient>,
 }
 
@@ -53,7 +38,6 @@ impl Supervisor for ResolverSupervisor {
     fn deserialize_and_dispatch(topic: String, payload: Vec<u8>) {
         match rkyv::from_bytes::<ProvenanceEvent, rkyv::rancor::Error>(&payload) {
             Ok(event) => {
-                //lookup and forward
                 trace!("Looking up actor {topic} and forwarding payload");
                 if let Some(resolver) = where_is(topic.to_string()) {
                     resolver
@@ -75,71 +59,30 @@ impl ResolverSupervisor {
     ) -> Result<(), ActorProcessingErr> {
         let mut certs = Vec::new();
 
-        // load proxy ca certificate
         try_get_proxy_ca_cert().await.inspect(|data| {
-            debug!("Configuring OCI Client with PROXY_CA_CERT");
+            debug!("Configuring OCI client with PROXY_CA_CERT");
             certs.push(Certificate {
                 encoding: CertificateEncoding::Pem,
                 data: data.to_owned(),
             });
         });
 
-        if let Some(config) = &state.config {
-            for registry in &config.registries {
-                if let Some(cert_path) = &registry.client_cert_path {
-                    let data = async_get_file_as_byte_vec(cert_path).await?;
-                    debug!("found certificate for {} at {cert_path}", registry.url);
-                    certs.push(Certificate {
-                        encoding: CertificateEncoding::Pem,
-                        data,
-                    });
-                }
-            }
-        }
-
-        state.oci_client = {
-            if certs.is_empty() {
-                debug!("Initializing OCI client without certificates");
-                OciClient::default()
-            } else {
-                debug!(
-                    "Initializing OCI client with {} extra root certificates",
-                    certs.len()
-                );
-                OciClient::new(ClientConfig {
-                    extra_root_certificates: certs,
-                    ..ClientConfig::default()
-                })
-            }
+        state.oci_client = if certs.is_empty() {
+            debug!("Initializing OCI client without extra certificates");
+            OciClient::default()
+        } else {
+            debug!(
+                "Initializing OCI client with {} extra root certificates",
+                certs.len()
+            );
+            OciClient::new(ClientConfig {
+                extra_root_certificates: certs,
+                ..ClientConfig::default()
+            })
         }
         .into();
 
         Ok(())
-    }
-
-    async fn load_resolver_config(
-        state: &mut ResolverSupervisorState,
-    ) -> Result<(), ActorProcessingErr> {
-        let path =
-            std::env::var("POLAR_RESOLVER_CONFIG").unwrap_or_else(|_| "resolver.json".to_string());
-
-        debug!("Loading configuration from {path}");
-        let bytes = async_get_file_as_byte_vec(&path).await?;
-
-        match serde_json::from_slice::<ResolverConfig>(&bytes) {
-            Ok(config) => {
-                debug!(
-                    "Loaded configuration from {path}: {:?} {}",
-                    config,
-                    serde_json::to_string_pretty(&config).unwrap_or_default()
-                );
-                state.config = config.into();
-                Ok(())
-            }
-            Err(e) => Err(ActorProcessingErr::from(format!(
-                "Failed to load resolver configuration! {e}"
-            ))),
-        }
     }
 }
 
@@ -161,13 +104,10 @@ impl Actor for ResolverSupervisor {
         })
         .await?;
 
-        let state = ResolverSupervisorState {
+        Ok(ResolverSupervisorState {
             tcp_client,
-            config: None,
             oci_client: None,
-        };
-
-        Ok(state)
+        })
     }
 
     async fn post_start(
@@ -188,22 +128,13 @@ impl Actor for ResolverSupervisor {
         match msg {
             SupervisorMessage::ClientEvent { event } => match event {
                 ClientEvent::Registered { .. } => {
-                    let web_client = get_web_client()?;
-
-                    if let Err(e) = Self::load_resolver_config(state).await {
-                        error!("Failed to load resolver configuration. {e}");
-                        return Err(e);
-                    }
-
                     if let Err(e) = Self::build_oci_client(state).await {
-                        error!("Failed to build oci client {e}");
+                        error!("Failed to build OCI client: {e}");
                         return Err(e);
                     }
 
                     let args = ResolverAgentState {
                         cassini_client: state.tcp_client.clone(),
-                        config: state.config.clone().unwrap(),
-                        web_client,
                         oci_client: state.oci_client.clone().unwrap(),
                     };
 
@@ -221,8 +152,6 @@ impl Actor for ResolverSupervisor {
                 }
                 ClientEvent::TransportError { reason } => {
                     error!("Transport error: {reason}");
-                    // TODO: Handle transport errors appropriately
-                    // Ideally we
                     myself.stop(Some(reason))
                 }
                 _ => (),
@@ -261,7 +190,13 @@ pub struct ResolverAgent;
 impl ResolverAgent {
     fn registry_from_image_ref(uri: &str) -> Option<String> {
         let first = uri.split('/').next()?;
-        if first.contains('.') || first.contains(':') {
+        // A hostname must either contain a dot (e.g. "ghcr.io") or a colon
+        // with a port AND a path component (e.g. "localhost:5000/repo").
+        // A bare "name:tag" with no slash in the URI is a Docker Hub short
+        // ref, not a registry hostname.
+        let has_dot = first.contains('.');
+        let has_port = first.contains(':') && uri.contains('/');
+        if has_dot || has_port {
             Some(first.to_string())
         } else {
             None
@@ -274,18 +209,6 @@ impl ResolverAgent {
             .trim_start_matches("https://")
             .trim_start_matches("http://")
             .to_string()
-    }
-
-    /// Pure function: converts a repo name and optional tags into full image URIs.
-    fn discover_images_from_tags(
-        registry_host: &str,
-        repo: &str,
-        tags: Option<Vec<String>>,
-    ) -> Vec<String> {
-        tags.unwrap_or_default()
-            .into_iter()
-            .map(|tag| format!("{}/{}:{}", registry_host, repo, tag))
-            .collect()
     }
 
     fn resolve_registry_auth(reference: &Reference) -> Result<RegistryAuth, ActorProcessingErr> {
@@ -308,22 +231,20 @@ impl ResolverAgent {
                     return Ok(RegistryAuth::Basic(u, p));
                 }
                 Ok(DockerCredential::IdentityToken(_)) => {
-                    // TODO: really? Should we error out here too?
+                    // IdentityToken is not usable for manifest pulls; skip to next candidate.
                     warn!(
-                        "IdentityToken returned for {} — unusable for ORAS. Skipping.",
+                        "IdentityToken returned for {} — not supported. Skipping.",
                         candidate
                     );
                     continue;
                 }
                 Err(CredentialRetrievalError::ConfigNotFound) => {
-                    debug!(
-                        "docker config not found — skipping remaining candidates and using anonymous authentication"
-                    );
+                    debug!("No docker config found — falling back to anonymous authentication");
                     return Ok(RegistryAuth::Anonymous);
                 }
                 Err(CredentialRetrievalError::NoCredentialConfigured) => {
                     debug!(
-                        "No credentials for key {} — using anonymous authentication",
+                        "No credentials configured for {} — falling back to anonymous authentication",
                         candidate
                     );
                     return Ok(RegistryAuth::Anonymous);
@@ -336,23 +257,21 @@ impl ResolverAgent {
         }
 
         warn!(
-            "No usable credentials — falling back to anonymous for {}",
+            "No usable credentials found — falling back to anonymous for {}",
             base
         );
         Ok(RegistryAuth::Anonymous)
     }
 
     fn build_registry_candidates(base: &str) -> Vec<String> {
+        // Only HTTPS variants are generated. Plain HTTP is not supported;
+        // see issue #<TBD> for rationale.
         vec![
             base.to_string(),
             format!("https://{}", base),
-            format!("http://{}", base),
-            format!("{}/", base),
             format!("https://{}/", base),
-            format!("http://{}/", base),
             format!("{}/v1/", base),
             format!("https://{}/v1/", base),
-            format!("http://{}/v1/", base),
         ]
     }
 
@@ -361,24 +280,20 @@ impl ResolverAgent {
         state: &mut ResolverAgentState,
         image_ref: &str,
     ) -> Result<Option<(OciManifest, String)>, ActorProcessingErr> {
-        debug!("attempting to resolve image: {image_ref}");
-        // Parse the image reference, e.g., "ghcr.io/myorg/myimage:latest"
+        // gaurd against unnecessary network calls by looking to see if a registry prefix is present.
+        // images tagged like "polar-nu-init:latest" for instance, which are fine when using Orbstack for example, are valid
+        // and can be used in its local cluster. So when the kubernetes processsor sees this and emits an event, we get exactly that.
+        // To save ourselves the network call, this is an easy add.
+        if Self::registry_from_image_ref(image_ref).is_none() {
+            debug!(
+                "Skipping image ref \"{image_ref}\": no registry component — likely a locally loaded image"
+            );
+            return Ok(None);
+        }
+
+        debug!("Attempting to resolve image: {image_ref}");
         let reference = Reference::from_str(image_ref)?;
-        // TODO: Consider adding a "strict" mode to allow reading from unconfigured registriesq?
-        // if !Self::registry_allowed(&state.config, &reference) {
-        //     debug!("Skipping image from unconfigured registry: {}", image_ref);
-        //     return Ok(None);
-        // }
-
         let auth = Self::resolve_registry_auth(&reference)?;
-
-        // I'm not really sure this is necessary,
-        // not all registreis use Oauth2 and if there are some, we're going to have to figure out a way to tell the agent that it is
-        // so this doesn't get in the way when HTTP basic will work fine
-        // state
-        //     .oci_client
-        //     .auth(&reference, &auth, RegistryOperation::Pull)
-        //     .await?;
 
         match state.oci_client.pull_manifest(&reference, &auth).await {
             Ok(response) => Ok(Some(response)),
@@ -407,22 +322,13 @@ impl ResolverAgent {
         manifest: OciManifest,
         digest: String,
     ) -> Result<(), ActorProcessingErr> {
-        // TODO: WE have an issue open to also represent image layers as nodoes connected to the artifact
-        //  Which would enable extremely powerfyl analysis of the supply chain, but first we have to figure out this serialization problem.
-        // Instead of stripping fields here, we should just reserailize the OCiManifest structure to bytes using serde, then rehydrate it on the other side to enable crawling
-        // of the vector of layers and get additonal data
+        // TODO: Represent image layers as nodes connected to the artifact for supply chain
+        // analysis. Requires resolving the OciManifest serialization — serialize to bytes
+        // with serde, rehydrate on the consumer side to crawl layers for additional data.
 
         if let Some(hostname) = Self::registry_from_image_ref(&uri) {
-            // let event = ProvenanceEvent::OCIRegistryDiscovered {
-            //     hostname: hostname.clone(),
-            // };
-            // Self::forward_event(state, event)?;
-
-            //serialize manifest
-            //
             let manifest_data = serde_json::to_vec(&manifest)?;
 
-            // emit OCIArtifactResolved event
             let event = ProvenanceEvent::OCIArtifactResolved {
                 uri: uri.clone(),
                 digest,
@@ -432,7 +338,6 @@ impl ResolverAgent {
 
             Ok(Self::forward_event(state, event)?)
         } else {
-            // tODO: I'm very interested to see how we'd fail here, considering that by the time we call this fn, we've already resolved it over the web.
             warn!("Could not extract registry hostname from image ref: {uri}");
             Ok(())
         }
@@ -441,9 +346,7 @@ impl ResolverAgent {
 
 pub struct ResolverAgentState {
     pub cassini_client: TcpClient,
-    pub web_client: WebClient,
     pub oci_client: OciClient,
-    pub config: ResolverConfig,
 }
 
 #[async_trait]
@@ -458,7 +361,6 @@ impl Actor for ResolverAgent {
         args: Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
         debug!("{myself:?} starting");
-
         Ok(args)
     }
 
@@ -472,11 +374,6 @@ impl Actor for ResolverAgent {
             topic: PROVENANCE_DISCOVERY.to_string(),
             trace_ctx: WireTraceCtx::from_current_span(),
         })?;
-
-        // // fire-and-forget startup scrape
-        // if let Err(e) = Self::startup_scrape(myself.clone(), state).await {
-        //     warn!("Startup scrape failed: {}", e);
-        // }
 
         Ok(())
     }
@@ -492,7 +389,6 @@ impl Actor for ResolverAgent {
                 match Self::inspect_image(state, &uri).await {
                     Ok(Some((manifest, digest))) => {
                         debug!("Resolved image: \n {manifest:?}");
-
                         Self::emit_oci_resolved_event(state, uri, manifest, digest)?
                     }
                     Ok(None) => {}
@@ -502,7 +398,7 @@ impl Actor for ResolverAgent {
                 }
             }
             ProvenanceEvent::ImageRefDiscovered { uri } => {
-                trace!("Received image ref discovered event");
+                trace!("Received ImageRefDiscovered event");
                 match Self::inspect_image(state, &uri).await {
                     Ok(Some((manifest, digest))) => {
                         debug!("Resolved image: \n {manifest:?}");
@@ -514,7 +410,6 @@ impl Actor for ResolverAgent {
                             digest.clone(),
                         )?;
 
-                        // Emit ImageRefResolved event (unchanged semantics)
                         let media_type = manifest.content_type().to_owned();
                         let event = ProvenanceEvent::ImageRefResolved {
                             uri,
@@ -552,13 +447,19 @@ async fn main() {
     .await
     .expect("Expected to start supervisor");
 
-    handle.await.expect("Expected to finish supervisor");
-    tokio::signal::ctrl_c().await.unwrap();
+    tokio::select! {
+        _ = handle => {
+            debug!("Supervisor exited");
+        }
+        _ = tokio::signal::ctrl_c() => {
+            debug!("Received shutdown signal");
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::{Reference, RegistryConfig, ResolverAgent, ResolverConfig};
+    use crate::{Reference, ResolverAgent};
     use std::str::FromStr;
 
     #[test]
@@ -581,27 +482,6 @@ mod tests {
 
         assert!(candidates.contains(&"example.com".to_string()));
         assert!(candidates.contains(&"https://example.com".to_string()));
-        assert!(candidates.contains(&"example.com/v1/".to_string()));
-    }
-
-    #[test]
-    fn test_discover_images_from_tags() {
-        let uris = ResolverAgent::discover_images_from_tags(
-            "registry.example.com",
-            "foo/bar",
-            Some(vec!["a".into(), "b".into()]),
-        );
-        assert_eq!(
-            uris,
-            vec![
-                "registry.example.com/foo/bar:a",
-                "registry.example.com/foo/bar:b"
-            ]
-        );
-
-        // Handles None tags
-        let uris =
-            ResolverAgent::discover_images_from_tags("registry.example.com", "foo/bar", None);
-        assert!(uris.is_empty());
+        assert!(!candidates.iter().any(|c| c.starts_with("http://")));
     }
 }

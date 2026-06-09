@@ -15,17 +15,11 @@ let
     cargoExtraArgs = "--bin oci-resolver --locked";
     src = workspaceFileset ./.;
   });
-  resolverConfig = pkgs.writeTextFile {
-    name        = "resolver.json";
-    destination = "/resolver.json";
-    text        = builtins.readFile ./resolver.json;
-  };
-
 
   resolverContainer = nix-container-lib.lib.${system}.mkContainer {
     inherit system pkgs inputs;
     configNixPath    = ./container-resolver.nix;
-    extraDerivations = [ resolverBin resolverConfig ];
+    extraDerivations = [ resolverBin ];
   };
 in
 {

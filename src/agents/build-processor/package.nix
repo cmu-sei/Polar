@@ -25,5 +25,4 @@ in
 {
   inherit buildProcessor;
   buildProcessorImage = processorContainer.image;
-  cloneImage         = cloneContainer.image;
 }
