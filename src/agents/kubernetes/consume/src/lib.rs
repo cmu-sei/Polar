@@ -1,14 +1,16 @@
-use cassini_client::{OfflineBehavior, PublishRequest, TcpClientMessage};
+use cassini_client::TcpClientMessage;
 use chrono::Utc;
 use k8s_openapi::api::apps::v1::Deployment;
 use k8s_openapi::api::batch::v1::Job;
 use k8s_openapi::{api::core::v1::Pod, apimachinery::pkg::apis::meta::v1::OwnerReference};
 use kube_common::flux::{kustomization::Kustomization, oci_repositories::OciRepository};
-use polar::cassini::{CassiniClient, TcpClient};
+use neo4rs::BoltType;
+use polar::cassini::TcpClient;
 use polar::emit_provenance_event;
 use polar::graph::controller::IntoGraphKey;
+use polar::graph::nodes::builds::ArtifactNodeKey;
 use polar::{
-    ProvenanceEvent, RkyvError,
+    ProvenanceEvent,
     graph::{
         controller::{
             GraphController, GraphControllerMsg, GraphOp, GraphValue, NULL_FIELD, Property,
@@ -17,7 +19,6 @@ use polar::{
     },
 };
 use ractor::{ActorProcessingErr, ActorRef};
-use rkyv::to_bytes;
 
 pub mod supervisor;
 
@@ -1088,6 +1089,21 @@ impl GraphOperable for OciRepository {
             ],
         }))?;
 
+        // connect to cannonical oci registry of same uri
+        graph.cast(GraphControllerMsg::Op(GraphOp::RawQuery {
+            cypher: "
+                MATCH (state:FluxOCIRepositoryState {digest: $digest})
+                      <-[:TRANSITIONED_TO]-(repo:FluxOCIRepository)
+                MATCH (oci:OCIArtifact {digest: $digest})
+                MERGE (repo)-[:RECONCILED]->(oci)
+            "
+            .into(),
+            params: vec![(
+                "digest".into(),
+                BoltType::String(artifact.digest.clone().into()),
+            )],
+        }))?;
+
         Ok(())
     }
 
@@ -1190,25 +1206,6 @@ impl GraphOperable for Kustomization {
                 .unwrap_or_else(|| namespace.clone());
 
             let source_name = self.spec.source_ref.name.clone();
-
-            // We don't have the OCIRepository's uid here — only its name and
-            // namespace. KubeNodeKey::FluxOciRepository keys by uid, so we
-            // need a name+namespace-based lookup key. Two options:
-            //
-            // A) Add a FluxOciRepositoryRef { name, namespace } variant to
-            //    KubeNodeKey whose cypher_match matches on those properties.
-            //
-            // B) Use GenericOwner { uid: name, kind: "FluxOCIRepository",
-            //    namespace: source_namespace } as a provisional key and rely
-            //    on the graph merge semantics to unify with the uid-keyed node
-            //    once the OCIRepository event arrives.
-            //
-            // Option A is cleaner. Add the variant and its cypher_match arm,
-            // then replace this comment with the edge cast.
-            //
-            // TODO: add KubeNodeKey::FluxOciRepositoryRef { name, namespace }
-            // and implement its cypher_match before enabling this edge.
-            let _ = (source_name, source_namespace); // suppress unused warnings until resolved
         }
 
         // ---- State ----
@@ -1276,6 +1273,25 @@ impl GraphOperable for Kustomization {
             ],
         }))?;
 
+        if let Some(ref revision) = status.last_applied_revision {
+            let digest = revision
+                .split('@')
+                .nth(1)
+                .unwrap_or(revision.as_str())
+                .to_string();
+
+            graph.cast(GraphControllerMsg::Op(GraphOp::RawQuery {
+                cypher: "
+                    MATCH (state:FluxKustomizationState)
+                    WHERE state.last_applied_revision ENDS WITH $digest
+                    MATCH (state)<-[:TRANSITIONED_TO]-(ks:FluxKustomization)
+                    MATCH (oci:OCIArtifact {digest: $digest})
+                    MERGE (ks)-[:DEPLOYED]->(oci)
+                "
+                .into(),
+                params: vec![("digest".into(), BoltType::String(digest.into()))],
+            }))?;
+        }
         Ok(())
     }
 

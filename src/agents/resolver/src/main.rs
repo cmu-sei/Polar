@@ -1,4 +1,4 @@
-use cassini_client::{OfflineBehavior, PublishRequest, TcpClientMessage};
+use cassini_client::{OfflineBehavior, PublishRequest};
 use cassini_types::ClientEvent;
 use oci_client::{
     Client as OciClient, Reference,
@@ -7,9 +7,9 @@ use oci_client::{
     secrets::RegistryAuth,
 };
 use polar::{
-    PROVENANCE_LINKER_TOPIC, ProvenanceEvent, Supervisor, SupervisorMessage,
+    ProvenanceEvent, Supervisor, SupervisorMessage,
     cassini::{CassiniClient, SubscribeRequest, TcpClient},
-    topics::PROVENANCE_DISCOVERY,
+    topics::{PROVENANCE_DISCOVERY, PROVENANCE_EVENTS},
     try_get_proxy_ca_cert,
 };
 
@@ -305,11 +305,10 @@ impl ResolverAgent {
         state: &mut ResolverAgentState,
         event: ProvenanceEvent,
     ) -> Result<(), ActorProcessingErr> {
-        trace!("Forwarding event to {PROVENANCE_LINKER_TOPIC}: {:?}", event);
         let payload = rkyv::to_bytes::<rkyv::rancor::Error>(&event)?;
 
         Ok(state.cassini_client.publish(PublishRequest {
-            topic: PROVENANCE_LINKER_TOPIC.to_string(),
+            topic: PROVENANCE_EVENTS.to_string(),
             payload: payload.into(),
             trace_ctx: WireTraceCtx::from_current_span(),
             offline_behavior: OfflineBehavior::default(),
@@ -322,10 +321,6 @@ impl ResolverAgent {
         manifest: OciManifest,
         digest: String,
     ) -> Result<(), ActorProcessingErr> {
-        // TODO: Represent image layers as nodes connected to the artifact for supply chain
-        // analysis. Requires resolving the OciManifest serialization — serialize to bytes
-        // with serde, rehydrate on the consumer side to crawl layers for additional data.
-
         if let Some(hostname) = Self::registry_from_image_ref(&uri) {
             let manifest_data = serde_json::to_vec(&manifest)?;
 

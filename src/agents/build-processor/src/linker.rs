@@ -319,8 +319,24 @@ impl ProvenanceLinker {
                 "Failed to upsert Binary node",
             )?;
             Self::ensure_edge(state, ArtifactNodeKey::Artifact, binary_k, rel::IS, vec![])?;
+        } else if payload.artifact_type == "oci-image" {
+            Self::send_op(
+                state,
+                GraphOp::EnsureEdge {
+                    from: ArtifactNodeKey::BuildArtifact {
+                        content_hash: payload.artifact_content_hash.clone(),
+                    }
+                    .into_key(),
+                    rel_type: rel::INSTANCE_OF.to_string(),
+                    to: ArtifactNodeKey::OCIArtifact {
+                        digest: payload.artifact_content_hash.clone(),
+                    }
+                    .into_key(),
+                    props: vec![],
+                },
+                "failed to write INSTANCE_OF edge to OCIArtifact",
+            )?;
         }
-
         // ── Edge: BuildJob -[:PRODUCED]-> artifact ─────────────────────────────
         // Only written when the event carries build_id — pipeline emissions
         // always have one; observer agent emissions don't.

@@ -1,7 +1,7 @@
 use crate::projection::project_event;
 use polar::{ProvenanceEvent, graph::controller::GraphController};
 use ractor::{Actor, ActorProcessingErr, ActorRef, async_trait};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, warn};
 /// Actor that owns build execution lifecycle projection.
 ///
 /// Receives [`ProvenanceEvent`] variants for the execution lifecycle —

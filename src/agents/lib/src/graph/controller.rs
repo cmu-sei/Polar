@@ -210,6 +210,22 @@ pub enum GraphOp {
         state_instance_key: Box<dyn GraphNodeKey>,
         state_instance_props: Vec<Property>,
     },
+    /// Execute a raw parameterized Cypher query directly.
+    ///
+    /// Use this when the operation requires property-based lookups that
+    /// cannot be expressed as MERGE patterns on known node keys — for example,
+    /// joining across two subgraphs using a shared digest value.
+    ///
+    /// The caller is responsible for correct Cypher and parameter binding.
+    /// Parameters are passed as (name, BoltType) pairs matching $name
+    /// placeholders in the query string.
+    ///
+    /// This variant bypasses compile_graph_op entirely and executes the
+    /// query string as-is in its own transaction, same as all other ops.
+    RawQuery {
+        cypher: String,
+        params: Vec<(String, BoltType)>,
+    },
 }
 
 // ── GraphControllerMsg ─────────────────────────────────────────────────────────
@@ -399,6 +415,7 @@ pub fn compile_graph_op(op: &GraphOp) -> Query {
 
             (cypher, params)
         }
+        GraphOp::RawQuery { cypher, params } => (cypher.clone(), params.clone()),
     };
 
     let mut q = Query::new(cypher);

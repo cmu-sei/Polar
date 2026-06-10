@@ -1,4 +1,4 @@
-use cassini_client::{OfflineBehavior, PublishRequest, TcpClientMessage};
+use cassini_client::{OfflineBehavior, PublishRequest};
 use futures::{StreamExt, TryStreamExt};
 use k8s_openapi::NamespaceResourceScope;
 use k8s_openapi::api::core::v1::Node;
@@ -10,11 +10,11 @@ use kube::{api::ListParams, runtime::watcher};
 use kube_common::flux::kustomization::Kustomization;
 use kube_common::flux::oci_repositories::OciRepository;
 use kube_common::{
-    BATCH_PROCESS_ACTION, KIND_KUSTOMIZATION, KIND_OCI_REPOSITORY, KUBERNETES_CONSUMER,
-    RESOURCE_APPLIED_ACTION, RESOURCE_DELETED_ACTION, RawKubeEvent,
+    KIND_KUSTOMIZATION, KIND_OCI_REPOSITORY, KUBERNETES_CONSUMER, RESOURCE_APPLIED_ACTION,
+    RESOURCE_DELETED_ACTION, RawKubeEvent,
 };
 
-use polar::cassini::{CassiniClient, SubscribeRequest, TcpClient};
+use polar::cassini::{CassiniClient, TcpClient};
 use ractor::ActorProcessingErr;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -45,14 +45,7 @@ pub struct KubernetesObserverArgs {
     pub namespace: String,
 }
 
-// pub enum WatcherMessage;
-
 pub struct WatcherActor;
-
-// pub struct WatcherState {
-//     watcher: Box<dyn ResourceWatcher>,
-//     tcp_client: ActorRef<TcpClientMessage>,
-// }
 
 /// Performs a full LIST + WATCH lifecycle for a Kubernetes resource.
 ///
@@ -102,6 +95,9 @@ where
         "Discovered k8s {} objects of kind: {kind}.",
         list.items.len()
     );
+
+    // TODO: Send as a batch?
+    // We can push the envelope to the consumer, but there's really no escaping it since we're querying for already deployed resources
     for obj in list.items {
         let ev = RawKubeEvent {
             kind: kind.to_string(),
@@ -171,6 +167,7 @@ where
 
                 emit_event(tcp_client, ev).await?;
             }
+            // TODO: Set up a spike to investigate observing othe event variants like Init, InitApply, InitDone. They represent valid state transitions
             _ => (),
         }
     }

@@ -4,7 +4,6 @@ use cassini_types::ClientEvent;
 use k8s_openapi::api::apps::v1::{Deployment, ReplicaSet};
 use k8s_openapi::api::batch::v1::Job;
 use k8s_openapi::api::core::v1::Pod;
-use kube_common::BATCH_PROCESS_ACTION;
 use kube_common::{
     KIND_KUSTOMIZATION, KIND_OCI_REPOSITORY, RESOURCE_APPLIED_ACTION, RESOURCE_DELETED_ACTION,
     flux::{kustomization::Kustomization, oci_repositories::OciRepository},

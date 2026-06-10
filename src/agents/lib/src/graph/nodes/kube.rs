@@ -88,6 +88,10 @@ pub enum KubeNodeKey {
         uid: String,
         valid_from: String,
     },
+    FluxOciRepositoryRef {
+        name: String,
+        namespace: String,
+    },
 }
 impl GraphNodeKey for KubeNodeKey {
     fn cypher_match(&self, prefix: &str) -> (String, Vec<(String, BoltType)>) {
@@ -316,7 +320,19 @@ impl GraphNodeKey for KubeNodeKey {
                     ],
                 )
             }
-
+            KubeNodeKey::FluxOciRepositoryRef { name, namespace } => {
+                let name_k = format!("{prefix}_name");
+                let ns_k = format!("{prefix}_namespace");
+                (
+                    format!(
+                        "({prefix}:FluxOCIRepository {{ name: ${name_k}, namespace: ${ns_k} }})"
+                    ),
+                    vec![
+                        (name_k, BoltType::String(name.clone().into())),
+                        (ns_k, BoltType::String(namespace.clone().into())),
+                    ],
+                )
+            }
             // ----------------------------------------------------------------
             // Flux kustomize-controller: Kustomization
             //
