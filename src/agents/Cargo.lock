@@ -2123,6 +2123,8 @@ dependencies = [
  "git2",
  "polar",
  "rkyv",
+ "serde",
+ "serde_yaml",
 ]
 
 [[package]]
@@ -2138,6 +2140,7 @@ dependencies = [
  "rkyv",
  "serde",
  "serde_json",
+ "serde_yaml",
  "tempfile",
  "tokio",
  "tracing",
@@ -4679,6 +4682,7 @@ dependencies = [
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",
+ "url",
 ]
 
 [[package]]
@@ -5617,23 +5621,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "91c1b7e4904c873ef0710c1f407dde2e6287de2bebc1bbbf7d430bb7cbffd939"
 dependencies = [
  "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "scheduler"
-version = "1.0.0"
-dependencies = [
- "cassini-client",
- "cassini-types",
- "git-agent-common",
- "neo4rs",
- "polar",
- "ractor",
- "rkyv",
- "testcontainers",
- "testcontainers-modules",
- "tokio",
- "tracing",
 ]
 
 [[package]]

@@ -17,6 +17,26 @@ impl RepoId {
         Self(url.replace("://", "_").replace('/', "_"))
     }
 
+    /// Canonicalize a repo URL for use as a stable identity / config key.
+    /// Lowercases scheme and host (path stays case-sensitive — org/repo names
+    /// on GitHub, GitLab, and Gitea are case-sensitive), strips a trailing
+    /// `.git` suffix and trailing slash.
+    pub fn normalize_repo_url(url: &str) -> String {
+        let mut s = url.trim().trim_end_matches('/').to_string();
+        if let Some(stripped) = s.strip_suffix(".git") {
+            s = stripped.to_string();
+        }
+        match url::Url::parse(&s) {
+            Ok(parsed) => {
+                let scheme = parsed.scheme().to_lowercase();
+                let host = parsed.host_str().unwrap_or_default().to_lowercase();
+                let port = parsed.port().map(|p| format!(":{p}")).unwrap_or_default();
+                format!("{scheme}://{host}{port}{}", parsed.path())
+            }
+            Err(_) => s,
+        }
+    }
+
     pub fn new(url: String) -> Self {
         RepoId(url)
     }

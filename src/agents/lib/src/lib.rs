@@ -35,7 +35,6 @@ pub const TRANSACTION_FAILED_ERROR: &str = "Expected to start a transaction with
 pub const QUERY_COMMIT_FAILED: &str = "Error committing transaction to graph";
 pub const QUERY_RUN_FAILED: &str = "Error running query on the graph.";
 pub const UNEXPECTED_MESSAGE_STR: &str = "Received unexpected message!";
-pub const GIT_REPO_DISCOGERY_TOPIC: &str = "polar.git.repositories";
 pub const BUILD_PROCESSOR_NAME: &str = "polar.builds.processor";
 
 /// The canonical topic for all provenance events.

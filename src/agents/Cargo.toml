@@ -42,7 +42,6 @@ members = [
     "gitlab/schema",
     "git/observe",
     "git/process",
-    "git/scheduler",
     "jira/common",
     "jira/process",
     "jira/observe",

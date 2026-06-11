@@ -1,11 +1,14 @@
 use crate::{
-    GitRepoSupervisor, GitRepoSupervisorArgs, REPO_SUPERVISOR_NAME, RepoSupervisorMessage,
-    SERVICE_NAME,
+    CredentialLookup, GitAgentConfig, GitRepoSupervisor, GitRepoSupervisorArgs,
+    REPO_SUPERVISOR_NAME, RepoObservationConfig, RepoSupervisorMessage, SERVICE_NAME,
 };
-use cassini_client::TcpClientMessage;
 use cassini_types::ClientEvent;
-use git_agent_common::{ConfigurationEvent, GIT_REPO_CONFIG_EVENTS};
-use polar::SupervisorMessage;
+use polar::{
+    GitRepositoryDiscoveredEvent, SupervisorMessage,
+    cassini::{CassiniClient, SubscribeRequest, TcpClient},
+    graph::nodes::git::RepoId,
+    topics::GIT_REPOSITORY_DISCOVERED,
+};
 use ractor::{Actor, ActorProcessingErr, ActorRef, SupervisionEvent, async_trait};
 use rkyv::from_bytes;
 use std::path::PathBuf;
@@ -15,7 +18,8 @@ pub struct RootSupervisor;
 
 pub struct RootSupervisorState {
     repo_supervisor: Option<ActorRef<RepoSupervisorMessage>>,
-    tcp_client: ActorRef<TcpClientMessage>,
+    tcp_client: TcpClient,
+    git_agent_config: GitAgentConfig,
 }
 
 impl RootSupervisor {
@@ -25,15 +29,69 @@ impl RootSupervisor {
         state: &mut RootSupervisorState,
     ) -> Result<(), ActorProcessingErr> {
         debug!("Received message from topic {topic}");
-        if let Ok(ev) = from_bytes::<ConfigurationEvent, rkyv::rancor::Error>(&payload) {
-            if let Some(s) = &state.repo_supervisor {
-                Ok(s.cast(RepoSupervisorMessage::SpawnWorker { config: ev.config })?)
-            } else {
-                Err("Failed to find repo supervisor".into())
+
+        let ev = match from_bytes::<GitRepositoryDiscoveredEvent, rkyv::rancor::Error>(&payload) {
+            Ok(ev) => ev,
+            Err(_) => {
+                warn!("Failed to deserialize discovery event on topic {topic}");
+                return Ok(());
             }
+        };
+
+        let repo_url = match (ev.http_url, ev.ssh_url) {
+            (Some(http), _) => http,
+            (None, Some(_)) => {
+                // Only the HTTP path is supported. The one current producer of
+                // discovery events is hardcoded to send http_url, so this branch
+                // should be unreachable in practice. If you're hitting this,
+                // SSH support needs to be implemented for real.
+                todo!("SSH-only repo discovery is not currently supported")
+            }
+            (None, None) => {
+                warn!(
+                    "Discovery event on topic {topic} had neither http_url nor ssh_url, dropping"
+                );
+                return Ok(());
+            }
+        };
+
+        let normalized = RepoId::normalize_repo_url(&repo_url);
+        let repo_id = RepoId::from_url(&normalized);
+
+        let credentials = match state.git_agent_config.credentials_for_url(&normalized) {
+            CredentialLookup::Configured(c) => Some(c),
+            CredentialLookup::NotConfigured => None,
+            CredentialLookup::Misconfigured => {
+                error!(
+                    "repo {normalized} has a credentials entry with no usable token — check {}",
+                    "POLAR_GIT_AGENT_CONFIG"
+                );
+                None
+            }
+        };
+
+        let config = match credentials {
+            Some(creds) => RepoObservationConfig::new_with_credentials(
+                repo_id,
+                repo_url.clone(),
+                vec!["origin".to_string()],
+                None,
+                vec![],
+                creds,
+            ),
+            None => RepoObservationConfig::new(
+                repo_id,
+                repo_url.clone(),
+                vec!["origin".to_string()],
+                None,
+                vec![],
+            ),
+        };
+
+        if let Some(s) = &state.repo_supervisor {
+            Ok(s.cast(RepoSupervisorMessage::SpawnWorker { config })?)
         } else {
-            warn!("Failed to deserialize event");
-            Ok(())
+            Err("Failed to find repo supervisor".into())
         }
     }
 
@@ -74,8 +132,9 @@ impl RootSupervisor {
 
         state.repo_supervisor = Some(repo_supervisor);
 
-        state.tcp_client.cast(TcpClientMessage::Subscribe {
-            topic: GIT_REPO_CONFIG_EVENTS.to_string(),
+        // subscribe to incoming repo discovery events
+        state.tcp_client.subscribe(SubscribeRequest {
+            topic: GIT_REPOSITORY_DISCOVERED.to_string(),
             trace_ctx: None,
         })?;
 
@@ -96,7 +155,12 @@ impl Actor for RootSupervisor {
     ) -> Result<Self::State, ActorProcessingErr> {
         debug!("{myself:?} starting");
 
-        let tcp_client = polar::spawn_tcp_client(SERVICE_NAME, myself, |event| {
+        let config_path =
+            std::env::var("POLAR_GIT_AGENT_CONFIG").unwrap_or_else(|_| "git.yaml".to_string());
+        let git_agent_config = GitAgentConfig::load(std::path::Path::new(&config_path))
+            .map_err(|e| ActorProcessingErr::from(format!("failed to load {config_path}: {e}")))?;
+
+        let tcp_client = TcpClient::spawn(SERVICE_NAME, myself, |event| {
             Some(SupervisorMessage::ClientEvent { event })
         })
         .await?;
@@ -104,6 +168,7 @@ impl Actor for RootSupervisor {
         Ok(RootSupervisorState {
             tcp_client,
             repo_supervisor: None,
+            git_agent_config,
         })
     }
 
@@ -157,7 +222,7 @@ impl Actor for RootSupervisor {
                 ClientEvent::ControlResponse { .. } => {
                     error!("ControlResponse not implemented!");
                 }
-                _ => warn!("UNEXPECTED_MESSAGE_STR"),
+                _ => warn!("{event:?}"),
             },
         }
         Ok(())

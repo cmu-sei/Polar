@@ -46,4 +46,6 @@ pub const PROVENANCE_DISCOVERY: &str = "polar.provenance.discovery";
 /// The git observer publishes [`GitRepositoryUpdatedEvent`] and
 /// [`GitRepositoryDiscoveredEvent`] here. The git processor and any
 /// agent that triggers on new commits subscribes here.
-pub const GIT_REPOSITORIES: &str = "polar.git.repositories";
+pub const GIT_REPOSITORY_DISCOVERED: &str = "polar.git.repositories.discovery";
+
+pub const GIT_REPOSITORY_EVENTS: &str = "polar.git.repositories.events";

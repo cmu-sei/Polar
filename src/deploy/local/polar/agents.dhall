@@ -141,6 +141,8 @@ let neo4jCAVolumeMount =
         }
       ]
 
+-- TODO: I don't particularly care for this, and am not sure how it made its way in. It makes much more sense to import the certificate by its path
+-- and read it as text. Dhall limits us here but we can work around it by at least setting up the file system prior to the import
 let neo4jBoltCASecret =
       functions.makeOpaqueSecret
         "neo4j-bolt-ca"

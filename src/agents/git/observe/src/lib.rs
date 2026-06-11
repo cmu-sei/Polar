@@ -1,18 +1,211 @@
-use cassini_client::TcpClientMessage;
-use git_agent_common::{GIT_REPO_PROCESSING_TOPIC, GitHttpCredential, GitRepositoryMessage, RepoObservationConfig};
+use cassini_client::{OfflineBehavior, PublishRequest};
+use git_agent_common::GitRepositoryMessage;
 use git2::{Cred, CredentialType, FetchOptions, Oid, RemoteCallbacks, Repository};
+use polar::cassini::{CassiniClient, TcpClient};
 use polar::graph::nodes::git::RepoId;
-use ractor::{Actor, ActorProcessingErr, ActorRef, SupervisionEvent, async_trait};
+use polar::topics::GIT_REPOSITORY_EVENTS;
+use ractor::{Actor, ActorProcessingErr, ActorRef, SpawnErr, SupervisionEvent, async_trait};
 use rkyv::{Archive, Deserialize, Serialize, rancor, to_bytes};
+use serde::Deserialize as SerdeDeserialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tracing::{debug, error, instrument, trace, warn};
-
+use tracing::{debug, error, info, instrument, trace, warn};
 pub const SERVICE_NAME: &str = "polar.git.observer";
 pub const REPO_SUPERVISOR_NAME: &str = "polar.git.observer.repo.supervisor";
 
 pub mod supervisor;
+
+/* ============================
+ * Credentials
+ * ============================
+ */
+
+/// Credentials for authenticating to a git remote over HTTPS.
+///
+/// # Design Notes
+///
+/// Token-based auth (GitHub, GitLab, Gitea, etc.) uses a single secret.
+/// The username field required by HTTP Basic Auth is a protocol artifact —
+/// the server does not validate it. The implementation handles this internally
+/// so callers never need to know or care about the dummy username convention.
+///
+/// Credentials are supplied per-task by the scheduler, not loaded at agent
+/// startup. `None` in `RepoObservationConfig::credentials` means the repo
+/// is public and no authentication is required.
+#[derive(Serialize, Deserialize, Archive, Debug, Clone)]
+pub enum GitHttpCredential {
+    /// Traditional username + password. Both fields are meaningful.
+    UserPass { username: String, password: String },
+
+    /// Token-based auth. The token is the only secret.
+    /// The implementation supplies a conventional dummy username
+    /// (e.g. "oauth2") to satisfy the HTTP Basic Auth protocol requirement.
+    Token {
+        token: String,
+        username: Option<String>,
+    },
+}
+
+impl GitHttpCredential {
+    /// Resolve to a (username, password) pair suitable for git2's
+    /// `Cred::userpass_plaintext`. Callers should not need this directly —
+    /// use `into_git2_cred` instead.
+    pub fn as_userpass(&self) -> (&str, &str) {
+        match self {
+            GitHttpCredential::UserPass { username, password } => (username, password),
+            // "oauth2" is the conventional dummy username for token auth on
+            // GitHub, GitLab, Gitea, and most other forges. The server ignores it.
+            GitHttpCredential::Token { token, username } => {
+                (username.as_deref().unwrap_or("oauth2"), token)
+            }
+        }
+    }
+
+    /// Produce a git2 credential value for use in a RemoteCallbacks handler.
+    pub fn into_git2_cred(&self) -> Result<git2::Cred, git2::Error> {
+        let (username, password) = self.as_userpass();
+        git2::Cred::userpass_plaintext(username, password)
+    }
+}
+
+/// Operator-supplied per-repo credential configuration, loaded from YAML at
+/// agent startup. Keyed by normalized repo URL — see `normalize_repo_url`.
+#[derive(Debug, SerdeDeserialize)]
+pub struct GitAgentConfig {
+    pub repos: std::collections::HashMap<String, RepoConfig>,
+}
+
+#[derive(Debug, SerdeDeserialize)]
+pub struct RepoConfig {
+    pub http: Option<HttpCredentialConfig>,
+}
+
+#[derive(Debug, SerdeDeserialize)]
+pub struct HttpCredentialConfig {
+    pub token: String,
+    #[serde(default)]
+    pub username: Option<String>,
+}
+
+pub enum CredentialLookup {
+    Configured(GitHttpCredential),
+    NotConfigured,
+    /// An entry exists for this repo but contains no usable credential
+    /// (empty token). This is an operator error in the config file —
+    /// log loudly, but proceed as if unconfigured.
+    Misconfigured,
+}
+
+impl GitAgentConfig {
+    pub fn load(path: &std::path::Path) -> Result<Self, std::io::Error> {
+        let raw = std::fs::read_to_string(path)?;
+        let parsed: RawGitAgentConfig = serde_yaml::from_str(&raw)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        let repos = parsed
+            .repos
+            .into_iter()
+            .map(|(k, v)| (RepoId::normalize_repo_url(&k), v))
+            .collect();
+        Ok(GitAgentConfig { repos })
+    }
+
+    pub fn credentials_for_url(&self, normalized_url: &str) -> CredentialLookup {
+        match self.repos.get(normalized_url) {
+            None => CredentialLookup::NotConfigured,
+            Some(RepoConfig { http: None }) => CredentialLookup::NotConfigured,
+            Some(RepoConfig { http: Some(c) }) if c.token.is_empty() => {
+                CredentialLookup::Misconfigured
+            }
+            Some(RepoConfig { http: Some(c) }) => {
+                CredentialLookup::Configured(GitHttpCredential::Token {
+                    token: c.token.clone(),
+                    username: c.username.clone(),
+                })
+            }
+        }
+    }
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct RawGitAgentConfig {
+    repos: std::collections::HashMap<String, RepoConfig>,
+}
+
+/* ============================
+ * Shared types
+ * ============================
+ */
+
+/// Observation policy applied to a repository.
+///
+/// This is *policy*, not state.
+/// It must be supplied externally (scheduler, config, graph).
+///
+/// Credentials are included here so the observer never needs to load
+/// them from the environment or a static file. The scheduler is responsible
+/// for sourcing credentials at dispatch time. `None` means public repo —
+/// attempt unauthenticated access.
+#[derive(Serialize, Deserialize, Archive, Debug, Clone)]
+pub struct RepoObservationConfig {
+    pub repo_id: RepoId,
+    pub repo_url: String,
+    pub remotes: Vec<String>,
+    /// Refs to observe (e.g. "refs/heads/main").
+    /// If empty, caller should supply sensible defaults.
+    pub refs: Vec<String>,
+    /// Maximum number of commits to walk per ref.
+    /// This is a hard safety bound.
+    pub max_depth: usize,
+    /// Optional shallow fetch depth.
+    /// If None, fetch is unshallow / full (incremental).
+    pub shallow_depth: Option<usize>,
+    /// Frequency of observation in seconds.
+    pub frequency: u64,
+    /// Credentials for authenticating to the remote.
+    /// None means public repo — attempt unauthenticated clone/fetch.
+    pub credentials: Option<GitHttpCredential>,
+}
+
+impl RepoObservationConfig {
+    /// Construct with sensible defaults for depth and frequency.
+    ///
+    /// Git repositories can be very large with long histories and infrequent
+    /// updates. The defaults are conservative to avoid hammering remotes.
+    pub fn new(
+        repo_id: RepoId,
+        repo_url: String,
+        remotes: Vec<String>,
+        shallow_depth: Option<usize>,
+        refs: Vec<String>,
+    ) -> Self {
+        Self {
+            repo_id,
+            repo_url,
+            remotes,
+            refs,
+            max_depth: 100,
+            shallow_depth,
+            frequency: 900,
+            credentials: None,
+        }
+    }
+
+    /// Construct with explicit credentials.
+    pub fn new_with_credentials(
+        repo_id: RepoId,
+        repo_url: String,
+        remotes: Vec<String>,
+        shallow_depth: Option<usize>,
+        refs: Vec<String>,
+        credentials: GitHttpCredential,
+    ) -> Self {
+        Self {
+            credentials: Some(credentials),
+            ..Self::new(repo_id, repo_url, remotes, shallow_depth, refs)
+        }
+    }
+}
 
 /* ============================
  * Credential Provider
@@ -113,20 +306,23 @@ pub fn credential_provider_for(
  * ============================
  */
 
-#[instrument]
+#[instrument(skip(client))]
 pub fn send_event(
-    client: ActorRef<TcpClientMessage>,
+    client: TcpClient,
     event: GitRepositoryMessage,
     topic: String,
 ) -> Result<(), ActorProcessingErr> {
+    info!("Forwarding event to topic {topic}");
     let payload = to_bytes::<rancor::Error>(&event)?.to_vec();
-    trace!("Forwarding event {event:?} on topic {topic}");
-    let message = TcpClientMessage::Publish {
+
+    let message = PublishRequest {
         topic,
         payload,
         trace_ctx: None,
+        offline_behavior: OfflineBehavior::default(),
     };
-    Ok(client.send_message(message)?)
+
+    Ok(client.publish(message)?)
 }
 
 /* ============================
@@ -147,22 +343,18 @@ pub struct GitRepoSupervisor;
 pub struct GitRepoSupervisorState {
     cache_root: PathBuf,
     workers: HashMap<RepoId, ActorRef<GitRepoWorkerMsg>>,
-    tcp_client: ActorRef<TcpClientMessage>,
+    tcp_client: TcpClient,
 }
 
 pub struct GitRepoSupervisorArgs {
     cache_root: PathBuf,
-    tcp_client: ActorRef<TcpClientMessage>,
+    tcp_client: TcpClient,
 }
 
 #[derive(Serialize, Deserialize, Archive, Debug)]
 pub enum RepoSupervisorMessage {
-    SpawnWorker {
-        config: RepoObservationConfig,
-    },
-    StopWorker {
-        repo_id: RepoId,
-    },
+    SpawnWorker { config: RepoObservationConfig },
+    StopWorker { repo_id: RepoId },
 }
 
 #[async_trait]
@@ -211,17 +403,29 @@ impl Actor for GitRepoSupervisor {
                     tcp_client: state.tcp_client.clone(),
                 };
 
-                debug!("Starting worker for repo {}", repo_id.to_string());
-
-                let (worker, _) = Actor::spawn_linked(
+                match Actor::spawn_linked(
                     Some(format!("{SERVICE_NAME}.{}.worker", repo_id)),
                     GitRepoWorker,
                     args,
-                    myself.clone().into(),
+                    myself.into(),
                 )
-                .await?;
-
-                state.workers.insert(repo_id, worker);
+                .await
+                {
+                    Ok((worker, _)) => {
+                        state.workers.insert(repo_id, worker);
+                    }
+                    Err(SpawnErr::ActorAlreadyRegistered(name)) => {
+                        debug!("worker {name} already running, ignoring duplicate discovery event");
+                        // Worth a TODO, not a blocker.
+                        // One product question worth a comment-but-not-now: is "ignore the duplicate" actually the right long-term behavior,
+                        // or should a rediscovery event for an already-running repo trigger the existing worker to refresh its config
+                        // (e.g. if credentials changed in git.yaml and the agent got restarted/reloaded,
+                        // or if max_depth/refs changed)? Right now "ignore" is correct and safe for today's test,
+                        // but if discovery events are meant to be re-emitted periodically by the gitlab processor (not just once at first sight),
+                        // silently ignoring them forever means config changes never propagate to already-running workers without a full agent restart.
+                    }
+                    Err(e) => return Err(e.into()),
+                }
             }
             RepoSupervisorMessage::StopWorker { .. } => {
                 todo!("Implement cleanup logic for the filesystem");
@@ -232,18 +436,18 @@ impl Actor for GitRepoSupervisor {
 
     async fn handle_supervisor_evt(
         &self,
-        myself: ActorRef<Self::Msg>,
+        _myself: ActorRef<Self::Msg>,
         event: SupervisionEvent,
-        _state: &mut Self::State,
+        state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match event {
-            SupervisionEvent::ActorFailed(name, reason) => {
-                error!("Actor {name:?} failed! {reason:?}");
-                myself.stop(Some(reason.to_string()));
+            SupervisionEvent::ActorFailed(cell, reason) => {
+                error!("worker {cell:?} failed: {reason:?}");
+                state.workers.retain(|_, w| w.get_id() != cell.get_id());
             }
-            SupervisionEvent::ActorTerminated(name, _state, reason) => {
-                warn!("Actor {name:?} terminated! {reason:?}");
-                myself.stop(reason)
+            SupervisionEvent::ActorTerminated(cell, _, reason) => {
+                warn!("worker {cell:?} terminated: {reason:?}");
+                state.workers.retain(|_, w| w.get_id() != cell.get_id());
             }
             _ => {}
         }
@@ -266,7 +470,7 @@ pub struct GitRepoWorker;
 
 pub struct GitRepoWorkerState {
     config: RepoObservationConfig,
-    tcp_client: ActorRef<TcpClientMessage>,
+    tcp_client: TcpClient,
     repo: Repository,
     last_seen: HashMap<String, Oid>,
     credential_provider: Arc<dyn GitCredentialProvider>,
@@ -275,7 +479,7 @@ pub struct GitRepoWorkerState {
 pub struct GitRepoWorkerArgs {
     config: RepoObservationConfig,
     repo_path: PathBuf,
-    tcp_client: ActorRef<TcpClientMessage>,
+    tcp_client: TcpClient,
     credential_provider: Arc<dyn GitCredentialProvider>,
 }
 
@@ -283,7 +487,7 @@ fn on_commit(
     repo_id: RepoId,
     ref_name: &str,
     commit: &git2::Commit,
-    tcp_client: ActorRef<TcpClientMessage>,
+    tcp_client: TcpClient,
 ) -> Result<(), ActorProcessingErr> {
     debug!("Found commit for ref_name {ref_name} in repo {repo_id:?}");
 
@@ -303,7 +507,7 @@ fn on_commit(
         parents: commit.parent_ids().map(|id| id.to_string()).collect(),
     };
 
-    send_event(tcp_client, event, GIT_REPO_PROCESSING_TOPIC.to_string())?;
+    send_event(tcp_client, event, GIT_REPOSITORY_EVENTS.to_string())?;
     Ok(())
 }
 
@@ -312,7 +516,7 @@ fn emit_ref_update(
     ref_name: &str,
     old: Option<Oid>,
     new: Oid,
-    tcp_client: ActorRef<TcpClientMessage>,
+    tcp_client: TcpClient,
 ) -> Result<(), ActorProcessingErr> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -327,10 +531,33 @@ fn emit_ref_update(
         observed_at: now.to_string(),
     };
 
-    send_event(tcp_client, event, GIT_REPO_PROCESSING_TOPIC.to_string())
+    send_event(tcp_client, event, GIT_REPOSITORY_EVENTS.to_string())
 }
 
 impl GitRepoWorker {
+    fn resolve_default_refs(repo: &Repository) -> Vec<String> {
+        match repo.find_reference("refs/remotes/origin/HEAD") {
+            Ok(head_ref) => match head_ref.symbolic_target() {
+                Some(target) => {
+                    debug!("resolved default ref to {target}");
+                    vec![target.to_string()]
+                }
+                None => {
+                    warn!(
+                        "refs/remotes/origin/HEAD has no symbolic target, falling back to refs/remotes/origin/main"
+                    );
+                    vec!["refs/remotes/origin/main".to_string()]
+                }
+            },
+            Err(e) => {
+                warn!(
+                    "could not read refs/remotes/origin/HEAD ({e}), falling back to refs/remotes/origin/main"
+                );
+                vec!["refs/remotes/origin/main".to_string()]
+            }
+        }
+    }
+
     fn build_remote_callbacks(
         provider: Arc<dyn GitCredentialProvider>,
     ) -> RemoteCallbacks<'static> {
@@ -425,7 +652,6 @@ impl GitRepoWorker {
 
         Ok(newest_seen)
     }
-
     pub fn observe_repository<F>(
         repo: &Repository,
         credential_provider: &Arc<dyn GitCredentialProvider>,
@@ -447,13 +673,22 @@ impl GitRepoWorker {
         for ref_name in &obs_config.refs {
             let reference = match repo.find_reference(ref_name) {
                 Ok(r) => r,
-                Err(_) => continue,
+                Err(e) => {
+                    warn!("ref {ref_name} not found ({e}), skipping");
+                    continue;
+                }
             };
-
             let tip = match reference.target() {
                 Some(t) => t,
-                None => continue,
+                None => {
+                    warn!("ref {ref_name} has no direct target, skipping");
+                    continue;
+                }
             };
+            debug!(
+                "observing {ref_name}: tip={tip}, last_seen={:?}",
+                last_seen.get(ref_name)
+            );
 
             let prev = last_seen.get(ref_name).copied();
 
@@ -488,13 +723,23 @@ impl Actor for GitRepoWorker {
             args.credential_provider.clone(),
             args.config.shallow_depth,
         ) {
-            Ok(repo) => Ok(GitRepoWorkerState {
-                credential_provider: args.credential_provider,
-                config: args.config,
-                tcp_client: args.tcp_client,
-                repo,
-                last_seen: HashMap::new(),
-            }),
+            Ok(repo) => {
+                let mut config = args.config;
+                if config.refs.is_empty() {
+                    config.refs = Self::resolve_default_refs(&repo);
+                    info!(
+                        "no refs configured for {:?}, defaulting to {:?}",
+                        config.repo_id, config.refs
+                    );
+                }
+                Ok(GitRepoWorkerState {
+                    credential_provider: args.credential_provider,
+                    config,
+                    tcp_client: args.tcp_client,
+                    repo,
+                    last_seen: HashMap::new(),
+                })
+            }
             Err(e) => {
                 error!("Failed to initialize repository for observation. {e}");
                 Err(e.into())
@@ -514,7 +759,7 @@ impl Actor for GitRepoWorker {
 
     async fn handle(
         &self,
-        _myself: ActorRef<Self::Msg>,
+        myself: ActorRef<Self::Msg>,
         msg: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
@@ -549,277 +794,13 @@ impl Actor for GitRepoWorker {
                         .ok();
                     },
                 )?;
+
+                myself.send_after(
+                    std::time::Duration::from_secs(state.config.frequency),
+                    || GitRepoWorkerMsg::Observe,
+                );
             }
         }
         Ok(())
-    }
-}
-
-/* ============================
- * Tests
- * ============================
- */
-
-#[cfg(test)]
-mod unittests {
-    use super::*;
-    use git2::{Commit, CredentialType, Oid, Repository};
-    use std::collections::HashMap;
-    use std::sync::Once;
-    use tempfile::TempDir;
-
-    static INIT_LOGGING: Once = Once::new();
-
-    fn init_logging() {
-        INIT_LOGGING.call_once(|| {
-            polar::init_logging(crate::SERVICE_NAME.to_string());
-        });
-    }
-
-    fn dummy_config(refs: Vec<String>) -> RepoObservationConfig {
-        let id = RepoId::from_url("local");
-        RepoObservationConfig::new(id, "local".into(), Vec::new(), Some(100), refs)
-    }
-
-    fn bare_repo() -> (TempDir, Repository) {
-        let dir = tempfile::tempdir().unwrap();
-        let repo = Repository::init_bare(dir.path()).unwrap();
-        (dir, repo)
-    }
-
-    fn noop_provider() -> Arc<dyn GitCredentialProvider> {
-        Arc::new(PublicRepoProvider)
-    }
-
-    fn make_commit(repo: &Repository, message: &str, parents: &[&Commit]) -> Oid {
-        let sig = git2::Signature::now("tester", "tester@example.com").unwrap();
-        let tree_id = repo.treebuilder(None).unwrap().write().unwrap();
-        let tree = repo.find_tree(tree_id).unwrap();
-        repo.commit(None, &sig, &sig, message, &tree, parents)
-            .unwrap()
-    }
-
-    fn linear_history(repo: &Repository, ref_name: &str, count: usize) -> Vec<Oid> {
-        let mut commits = Vec::new();
-        for i in 0..count {
-            let parents = commits
-                .last()
-                .and_then(|oid| repo.find_commit(*oid).ok())
-                .into_iter()
-                .collect::<Vec<_>>();
-            let oid = make_commit(repo, &format!("c{i}"), &parents.iter().collect::<Vec<_>>());
-            commits.push(oid);
-        }
-        repo.reference(ref_name, *commits.last().unwrap(), true, "init")
-            .unwrap();
-        commits
-    }
-
-    // --- GitHttpCredential tests ---
-
-    #[test]
-    fn token_credential_produces_userpass() {
-        let cred = GitHttpCredential::Token {
-            token: "mytoken123".into(),
-        };
-        let (username, password) = cred.as_userpass();
-        assert_eq!(username, "oauth2");
-        assert_eq!(password, "mytoken123");
-    }
-
-    #[test]
-    fn userpass_credential_produces_userpass() {
-        let cred = GitHttpCredential::UserPass {
-            username: "alice".into(),
-            password: "secret".into(),
-        };
-        let (username, password) = cred.as_userpass();
-        assert_eq!(username, "alice");
-        assert_eq!(password, "secret");
-    }
-
-    #[test]
-    fn task_provider_resolves_userpass_credential_type() {
-        let cred = GitHttpCredential::Token {
-            token: "tok".into(),
-        };
-        let provider = TaskCredentialProvider::new(cred);
-        let result = provider.credentials(
-            "https://gitlab.com/group/repo.git",
-            None,
-            CredentialType::USER_PASS_PLAINTEXT,
-        );
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn task_provider_rejects_unsupported_credential_type() {
-        let cred = GitHttpCredential::Token {
-            token: "tok".into(),
-        };
-        let provider = TaskCredentialProvider::new(cred);
-        let result = provider.credentials(
-            "https://gitlab.com/group/repo.git",
-            None,
-            CredentialType::SSH_KEY,
-        );
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn public_repo_provider_always_errors() {
-        let provider = PublicRepoProvider;
-        let result = provider.credentials(
-            "https://github.com/org/public-repo.git",
-            None,
-            CredentialType::USER_PASS_PLAINTEXT,
-        );
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn credential_provider_for_none_returns_public_provider() {
-        let provider = credential_provider_for(None);
-        let result = provider.credentials(
-            "https://github.com/org/repo.git",
-            None,
-            CredentialType::USER_PASS_PLAINTEXT,
-        );
-        // PublicRepoProvider always returns an error — that's correct behavior
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn credential_provider_for_some_returns_task_provider() {
-        let cred = GitHttpCredential::Token {
-            token: "tok".into(),
-        };
-        let provider = credential_provider_for(Some(cred));
-        let result = provider.credentials(
-            "https://gitlab.com/group/repo.git",
-            None,
-            CredentialType::USER_PASS_PLAINTEXT,
-        );
-        assert!(result.is_ok());
-    }
-
-    // --- Walker / observer tests (unchanged from before) ---
-
-    #[test]
-    fn walk_without_last_seen_returns_newest_first() {
-        init_logging();
-        let (_dir, repo) = bare_repo();
-        let commits = linear_history(&repo, "refs/heads/main", 3);
-        let mut seen = Vec::new();
-        GitRepoWorker::walk_commits_incremental(&repo, "refs/heads/main", None, 10, |c| {
-            seen.push(c.id())
-        })
-        .unwrap();
-        assert_eq!(seen, commits.iter().rev().copied().collect::<Vec<_>>());
-    }
-
-    #[test]
-    fn walk_respects_max_depth() {
-        init_logging();
-        let (_dir, repo) = bare_repo();
-        let commits = linear_history(&repo, "refs/heads/main", 5);
-        let mut seen = Vec::new();
-        GitRepoWorker::walk_commits_incremental(&repo, "refs/heads/main", None, 2, |c| {
-            seen.push(c.id())
-        })
-        .unwrap();
-        assert_eq!(seen.len(), 2);
-        assert_eq!(seen[0], commits[4]);
-        assert_eq!(seen[1], commits[3]);
-    }
-
-    #[test]
-    fn walk_nonexistent_ref_errors_cleanly() {
-        init_logging();
-        let (_dir, repo) = bare_repo();
-        let err =
-            GitRepoWorker::walk_commits_incremental(&repo, "refs/heads/nope", None, 10, |_| {})
-                .err()
-                .expect("expected error");
-        assert!(
-            err.message().contains("reference"),
-            "unexpected error: {err:?}"
-        );
-    }
-
-    #[test]
-    fn observe_updates_last_seen_per_ref_independently() {
-        init_logging();
-        let (_dir, repo) = bare_repo();
-        let main_commits = linear_history(&repo, "refs/heads/main", 2);
-        let dev_commits = linear_history(&repo, "refs/heads/dev", 3);
-        let mut last_seen = HashMap::new();
-        let mut seen = Vec::new();
-        let mut refs_seen = HashMap::new();
-        let obs_config = dummy_config(vec!["refs/heads/main".into(), "refs/heads/dev".into()]);
-        let provider = noop_provider();
-        GitRepoWorker::observe_repository(
-            &repo,
-            &provider,
-            &obs_config,
-            &mut last_seen,
-            |r, c| seen.push((r.to_string(), c.id())),
-            |ref_name, old, new| {
-                refs_seen.insert(ref_name.to_string(), (old, new));
-            },
-        )
-        .unwrap();
-        assert_eq!(last_seen["refs/heads/main"], *main_commits.last().unwrap());
-        assert_eq!(last_seen["refs/heads/dev"], *dev_commits.last().unwrap());
-    }
-
-    #[test]
-    fn multiple_refs_do_not_interfere() {
-        init_logging();
-        let (_dir, repo) = bare_repo();
-        let main_commits = linear_history(&repo, "refs/heads/main", 1);
-        let dev_commits = linear_history(&repo, "refs/heads/dev", 1);
-        let mut last_seen = HashMap::from([
-            ("refs/heads/main".into(), main_commits[0]),
-            ("refs/heads/dev".into(), dev_commits[0]),
-        ]);
-        let new_dev = make_commit(
-            &repo,
-            "dev-2",
-            &[&repo.find_commit(dev_commits[0]).unwrap()],
-        );
-        repo.reference("refs/heads/dev", new_dev, true, "update")
-            .unwrap();
-        let config = dummy_config(vec!["refs/heads/dev".into()]);
-        let provider = noop_provider();
-        GitRepoWorker::observe_repository(
-            &repo,
-            &provider,
-            &config,
-            &mut last_seen,
-            |_r, _c| {},
-            |_ref_name, _old, _new| {},
-        )
-        .unwrap();
-        assert_eq!(last_seen["refs/heads/dev"], new_dev);
-        assert_eq!(last_seen["refs/heads/main"], main_commits[0]);
-    }
-
-    #[test]
-    fn empty_repo_is_noop_not_panic() {
-        init_logging();
-        let (_dir, repo) = bare_repo();
-        let mut last_seen = HashMap::new();
-        let config = dummy_config(vec!["refs/heads/main".into()]);
-        let provider = noop_provider();
-        let result = GitRepoWorker::observe_repository(
-            &repo,
-            &provider,
-            &config,
-            &mut last_seen,
-            |_r, _c| {},
-            |_ref_name, _old, _new| {},
-        );
-        assert!(result.is_err() || last_seen.is_empty());
     }
 }
