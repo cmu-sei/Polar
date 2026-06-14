@@ -1,14 +1,12 @@
-use cassini_client::TcpClientMessage;
 use chrono::Utc;
 use k8s_openapi::api::apps::v1::Deployment;
 use k8s_openapi::api::batch::v1::Job;
 use k8s_openapi::{api::core::v1::Pod, apimachinery::pkg::apis::meta::v1::OwnerReference};
 use kube_common::flux::{kustomization::Kustomization, oci_repositories::OciRepository};
 use neo4rs::BoltType;
-use polar::cassini::TcpClient;
+use polar::cassini::{CassiniClient, TcpClient};
 use polar::emit_provenance_event;
 use polar::graph::controller::IntoGraphKey;
-use polar::graph::nodes::builds::ArtifactNodeKey;
 use polar::{
     ProvenanceEvent,
     graph::{
@@ -29,7 +27,7 @@ pub trait GraphOperable {
     fn project_into_graph(
         self,
         graph: &GraphController,
-        tcp_client: &TcpClient,
+        tcp_client: &dyn CassiniClient,
     ) -> Result<(), ActorProcessingErr>;
 
     fn project_delete(self, graph: &GraphController) -> Result<(), ActorProcessingErr>;
@@ -88,7 +86,7 @@ impl GraphOperable for Job {
     fn project_into_graph(
         self,
         graph: &GraphController,
-        _tcp_client: &TcpClient,
+        _tcp_client: &dyn CassiniClient,
     ) -> Result<(), ActorProcessingErr> {
         let uid = self.metadata.uid.clone().unwrap_or_default();
         let name = self.metadata.name.clone().unwrap_or_default();
@@ -220,7 +218,7 @@ impl GraphOperable for Pod {
     fn project_into_graph(
         self,
         graph: &GraphController,
-        tcp_client: &TcpClient,
+        tcp_client: &dyn CassiniClient,
     ) -> Result<(), ActorProcessingErr> {
         let uid = self.metadata.uid.unwrap_or_default();
 
@@ -700,7 +698,7 @@ impl GraphOperable for Deployment {
     fn project_into_graph(
         self,
         graph: &GraphController,
-        _tcp_client: &TcpClient,
+        _tcp_client: &dyn CassiniClient,
     ) -> Result<(), ActorProcessingErr> {
         let _kind = "Deployment";
         let uid = self.metadata.uid.clone().unwrap_or_default();
@@ -886,7 +884,7 @@ impl GraphOperable for ReplicaSet {
     fn project_into_graph(
         self,
         graph: &GraphController,
-        _tcp_client: &TcpClient,
+        _tcp_client: &dyn CassiniClient,
     ) -> Result<(), ActorProcessingErr> {
         let uid = self.metadata.uid.clone().unwrap_or_default();
         let name = self.metadata.name.unwrap_or_default();
@@ -1004,7 +1002,7 @@ impl GraphOperable for OciRepository {
     fn project_into_graph(
         self,
         graph: &GraphController,
-        _tcp_client: &TcpClient,
+        _tcp_client: &dyn CassiniClient,
     ) -> Result<(), ActorProcessingErr> {
         let uid = self.metadata.uid.clone().unwrap_or_default();
         let name = self.metadata.name.clone().unwrap_or_default();
@@ -1140,7 +1138,7 @@ impl GraphOperable for Kustomization {
     fn project_into_graph(
         self,
         graph: &GraphController,
-        _tcp_client: &TcpClient,
+        _tcp_client: &dyn CassiniClient,
     ) -> Result<(), ActorProcessingErr> {
         let uid = self.metadata.uid.clone().unwrap_or_default();
         let name = self.metadata.name.clone().unwrap_or_default();
@@ -1322,12 +1320,12 @@ impl GraphOperable for Kustomization {
 
 pub struct KubeConsumerState {
     pub graph_controller: ActorRef<GraphOp>,
-    pub broker_client: ActorRef<TcpClientMessage>,
+    pub broker_client: TcpClient,
 }
 
 pub struct KubeConsumerArgs {
     pub graph_controller: ActorRef<GraphOp>,
-    pub broker_client: ActorRef<TcpClientMessage>,
+    pub broker_client: TcpClient,
 }
 
 pub struct ResourceConsumerState {

@@ -114,7 +114,7 @@ where
 /// which emits JSON to the same topic.
 pub fn emit_provenance_event(
     ev: ProvenanceEvent,
-    client: &cassini::TcpClient,
+    client: &dyn CassiniClient,
 ) -> Result<(), ActorProcessingErr> {
     let payload = rkyv::to_bytes::<RkyvError>(&ev)?.to_vec();
     let trace_ctx = WireTraceCtx::from_current_span();
