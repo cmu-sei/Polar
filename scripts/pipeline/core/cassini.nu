@@ -148,7 +148,7 @@ def cassini-reachable [socket: string]: nothing -> bool {
 #     paths) case where something is already answering on our derived
 #     socket — see the warning logged in that branch for why we don't kill
 #     a process we can't account for.
-export def start-cassini-daemon [--timeout: int = 30]: nothing -> record {
+export def --env start-cassini-daemon [--timeout: int = 30]: nothing -> record {
     let base = cassini-base-path
     let socket = $"($base).sock"
     let queue = $"($base).queue.jsonl"

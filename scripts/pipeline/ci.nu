@@ -28,10 +28,13 @@
 # Adding a new image = one row in image-manifest. Nothing else changes.
 
 
-use ./core/oci.nu registry-login
+use ./core/oci.nu *
 use ./core/cassini.nu *
 use ./core/logging.nu *
-
+use ./core/events.nu *
+use ./core/cargo.nu workspace-root
+use ./core/hashing.nu *
+use ./core/sbom.nu *
 const COMPONENT = "ci"
 const ELF_BINARY_ARTIFACT = "elf-binary"
 
@@ -273,6 +276,13 @@ def run-static-analysis [ws_manifest: path, artifact_dir: path]: nothing -> tabl
 
 def image-manifest []: nothing -> list<record> {
     [
+
+        {
+            name: "cert-issuer"
+            flake: ".#certIssuerImage"
+            image: "cert-issuer"
+            root_purl: "pkg:cargo/cert-issuer@0.1.0"
+        }
         {
             name: "cassini"
             flake: ".#cassiniImage"
@@ -316,22 +326,16 @@ def image-manifest []: nothing -> list<record> {
             root_purl: ""
         }
         {
-            name: "git-scheduler"
-            flake: ".#gitSchedulerImage"
-            image: "polar-git-scheduler"
-            root_purl: ""
-        }
-        {
             name: "build-processor"
             flake: ".#buildProcessorImage"
             image: "polar-build-processor"
             root_purl: "pkg:cargo/build-processor@0.1.0"
         }
         {
-            name: "resolver"
-            flake: ".#provenanceResolverImage"
-            image: "polar-resolver-agent"
-            root_purl: "pkg:cargo/provenance-resolver@0.1.0"
+            name: "oci-resolver"
+            flake: ".#ociResolverImage"
+            image: "polar-oci-resolver"
+            root_purl: "pkg:cargo/oci-resolver@0.1.0"
         }
     ]
 }
@@ -464,14 +468,22 @@ def process-cargo-sboms [sbom_files: list<record>, packages: list<record>]: noth
 def build-and-link-binaries [
     packages: list<record>
     sbom_lookup: record
+    ws_manifest: path
     artifact_dir: path
     --release
     --target: string = ""
     --filter_package: string = ""
 ]: nothing -> list<record> {
-    let ws_root = (workspace-root)
+    let ws_root = $ws_manifest | path dirname
 
-    mut cargo_args = ["build" "--message-format=json" "--locked" "--quiet"]
+    # --manifest-path makes this independent of cwd. The cargo workspace
+    # lives at src/agents while flake.nix sits at the repo root — Phase 3's
+    # nix build needs to run from the repo root, so this script can't keep
+    # assuming "wherever we were invoked from" is also the cargo workspace
+    # root. Every other cargo invocation in this file already passes
+    # --manifest-path explicitly; this was the one holdout, working only by
+    # coincidence of cwd matching src/agents on every run so far.
+    mut cargo_args = ["build" "--manifest-path" $ws_manifest "--message-format=json" "--locked" "--quiet"]
     if ($filter_package | is-not-empty) { $cargo_args = ($cargo_args | append ["--package" $filter_package]) }
     if $release { $cargo_args = ($cargo_args | append "--release") }
     if ($target | is-not-empty) { $cargo_args = ($cargo_args | append ["--target" $target]) }
@@ -491,49 +503,75 @@ def build-and-link-binaries [
         | where { ($in.target?.kind? | default []) | any {|k| $k == "bin"} }
         | where { ($in.executable? | default null) != null }
         | each {|artifact|
-            let exe         = $artifact.executable
-            let name = $exe | path basename
-            let dest = $artifact_dir | path join $name
-            let binary_hash = (content-hash-file $exe)
+            try {
+                let exe         = $artifact.executable
+                let name = $exe | path basename
+                let dest = $artifact_dir | path join $name
+                let binary_hash = (content-hash-file $exe)
 
-            mv $exe $dest
+                # Cargo "uplifts" unchanged binaries into target/<profile>/<name>
+                # via a hardlink to its internal deps-cache artifact, rather than
+                # a copy, whenever it doesn't need to recompile. If a previous
+                # run already moved this binary into $artifact_dir, the next
+                # `cargo build` recreates target/<profile>/<name> the same cheap
+                # way — leaving $exe and a leftover $dest as two directory
+                # entries for the identical inode. `mv` correctly refuses to
+                # "move" a file onto itself in that case (mv-error-same-file).
+                # Clearing the destination first makes this idempotent: it
+                # only removes one of the two links, the data survives via the
+                # other (the one we're about to rename), and the result is the
+                # same either way — exactly one copy, living at $dest.
+                if ($dest | path exists) {
+                    rm --force $dest
+                }
+                mv $exe $dest
 
-            let pkg_manifest = $artifact.manifest_path? | default ""
-            let pkg = $packages | where manifest_path == $pkg_manifest | first | default null
+                let pkg_manifest = $artifact.manifest_path? | default ""
+                let pkg = $packages | where manifest_path == $pkg_manifest | first | default null
 
-            if $pkg == null {
-                log-warn $"($name): no matching package for manifest ($pkg_manifest)" --component $COMPONENT
-                return null
-            }
+                if $pkg == null {
+                    log-warn $"($name): no matching package for manifest ($pkg_manifest)" --component $COMPONENT
+                    return null
+                }
 
-            emit-artifact-produced $binary_hash $ELF_BINARY_ARTIFACT --name $name
+                emit-artifact-produced $binary_hash $ELF_BINARY_ARTIFACT --name $name
 
-            let sbom_info = $sbom_lookup | get -o $pkg.name | default null
+                let sbom_info = $sbom_lookup | get -o $pkg.name | default null
 
-            if $sbom_info != null {
-                let cargo_toml_hash = (content-hash-file $pkg.manifest_path)
-                let binding = (
-                    [$binary_hash $cargo_toml_hash $cargo_lock_hash $source_tree_hash]
-                    | str join ":"
-                    | hash sha256
-                    | $"sha256:($in)"
-                )
-                # Emit BinaryLinked — ties this binary to its source package and SBOM.
-                # binding_digest = sha256(binary:cargo_toml:cargo_lock:source_tree)
-                # is a cryptographic attestation of the build inputs.
-                emit-binary-linked $binary_hash $name $sbom_info.root_purl $sbom_info.content_hash --binding_digest $binding
-                log-info $"($name) -> ($sbom_info.root_purl)" --component $COMPONENT
-            } else {
-                log-warn $"($name): no SBOM for package ($pkg.name) — binary_linked not emitted" --component $COMPONENT
-            }
+                if $sbom_info != null {
+                    let cargo_toml_hash = (content-hash-file $pkg.manifest_path)
+                    let binding = (
+                        [$binary_hash $cargo_toml_hash $cargo_lock_hash $source_tree_hash]
+                        | str join ":"
+                        | hash sha256
+                        | $"sha256:($in)"
+                    )
+                    # Emit BinaryLinked — ties this binary to its source package and SBOM.
+                    # binding_digest = sha256(binary:cargo_toml:cargo_lock:source_tree)
+                    # is a cryptographic attestation of the build inputs.
+                    emit-binary-linked $binary_hash $name $sbom_info.root_purl $sbom_info.content_hash --binding_digest $binding
+                    log-info $"($name) -> ($sbom_info.root_purl)" --component $COMPONENT
+                } else {
+                    log-warn $"($name): no SBOM for package ($pkg.name) — binary_linked not emitted" --component $COMPONENT
+                }
 
-            {
-                name:              $name
-                path:              $dest
-                binary_hash:       $binary_hash
-                package_name:      $pkg.name
-                root_purl:         ($sbom_info.root_purl?    | default "")
-                sbom_content_hash: ($sbom_info.content_hash? | default "")
+                {
+                    name:              $name
+                    path:              $dest
+                    binary_hash:       $binary_hash
+                    package_name:      $pkg.name
+                    root_purl:         ($sbom_info.root_purl?    | default "")
+                    sbom_content_hash: ($sbom_info.content_hash? | default "")
+                }
+            } catch {|e|
+                # Without this, a single failing artifact aborts the whole
+                # `cargo ... | lines | each ...` pipe — Nushell closes its
+                # read end of cargo's stdout mid-stream, cargo (still writing
+                # JSON for the rest of the workspace) hits EPIPE, and all you
+                # see is cargo's own generic "Broken pipe (os error 32)" on
+                # stderr — which is what's been burying the real cause.
+                log-error $"failed processing artifact ($artifact.executable? | default '<unknown>'): ($e.msg)" --component $COMPONENT
+                null
             }
         }
         | where { $in != null }
@@ -552,10 +590,8 @@ def build-and-link-binaries [
 
 def registry-refs [image_name: string]: nothing -> list<string> {
     mut refs = []
-    let ci_reg = $env.CI_REGISTRY_IMAGE? | default ""
-    let azure_reg = $env.AZURE_REGISTRY? | default ""
+    let ci_reg = $env.POLAR_CI_REGISTRY? | default ""
     if ($ci_reg | is-not-empty) { $refs = ($refs | append $"docker://($ci_reg)/($image_name):{tag}") }
-    if ($azure_reg | is-not-empty) { $refs = ($refs | append $"docker://($azure_reg)/($image_name):{tag}") }
     $refs
 }
 
@@ -678,82 +714,116 @@ def main [
     --skip-build
     --skip-images
 ] {
-    mkdir -v $artifact_dir
+
 
     let ws_root = (workspace-root)
     let ws_manifest = $ws_root | path join "Cargo.toml"
+    let build_id = ($env.POLAR_BUILD_ID? | default (random uuid))
+    let commit_sha = ($env.CI_COMMIT_SHORT_SHA? | default (git rev-parse --short HEAD))
 
-    if not $skip_analysis {
-        let analysis_results = (run-static-analysis $ws_manifest $artifact_dir)
-        let failed = $analysis_results | where exit_code != 0
-        if ($failed | is-not-empty) {
-            let names = $failed | get name | str join ", "
-            if $strict_analysis {
-                error make {msg: $"static analysis failed (strict mode): ($names)"}
-            } else {
-                log-warn $"static analysis non-zero exits: ($names) — continuing \(pass --strict-analysis to abort\)" --component $COMPONENT
+    let daemon = (start-cassini-daemon)
+
+    let result = try {
+
+        let start_time = (date now)
+
+        emit-execution-started $build_id $commit_sha (git branch --show-current) (git config --get remote.origin.url)
+
+        # Start from a clean artifact directory every run. Leftover binaries
+        # from a previous (especially a partial/crashed) run are the precise
+        # precondition for the mv-error-same-file issue handled above — Cargo
+        # will happily re-hardlink a "fresh" binary back into target/<profile>
+        # even though this script already moved the original copy out.
+        rm --force --recursive $artifact_dir
+        mkdir -v $artifact_dir
+
+        if not $skip_analysis {
+            let analysis_results = (run-static-analysis $ws_manifest $artifact_dir)
+            let failed = $analysis_results | where exit_code != 0
+            if ($failed | is-not-empty) {
+                let names = $failed | get name | str join ", "
+                if $strict_analysis {
+                    error make {msg: $"static analysis failed (strict mode): ($names)"}
+                } else {
+                    log-warn $"static analysis non-zero exits: ($names) — continuing \(pass --strict-analysis to abort\)" --component $COMPONENT
+                }
             }
         }
-    }
+        let image_tag = if ($tag | is-not-empty) { $tag } else { ($env.CI_COMMIT_SHORT_SHA? | default "latest") }
+        let packages = (resolve-packages --package $package)
 
-    let cassini_pid = (start-cassini-daemon)
-    let image_tag = if ($tag | is-not-empty) { $tag } else { ($env.CI_COMMIT_SHORT_SHA? | default "latest") }
-    let packages = (resolve-packages --package $package)
+        log-info $"($packages | length) package\(s\) in scope, image tag: ($image_tag)" --component $COMPONENT
 
-    log-info $"($packages | length) package\(s\) in scope, image tag: ($image_tag)" --component $COMPONENT
-
-    # Phase 1 — Cargo SBOMs
-    let sbom_files = (
-        generate-workspace-sboms $packages $ws_manifest $artifact_dir --target $target
-    )
-    let sbom_lookup = (process-cargo-sboms $sbom_files $packages)
-    log-info $"($sbom_files | length) SBOM\(s\) generated and analyzed" --component $COMPONENT
-
-    # Phase 2 — Cargo binaries
-    if not $skip_build {
-        let binaries = (
-            build-and-link-binaries $packages $sbom_lookup $artifact_dir
-                --release
-                --target $target
-                --filter_package $package
+        # Phase 1 — Cargo SBOMs
+        let sbom_files = (
+            generate-workspace-sboms $packages $ws_manifest $artifact_dir --target $target
         )
-        log-info $"($binaries | length) binary\(ies\) built and linked" --component $COMPONENT
-    }
+        let sbom_lookup = (process-cargo-sboms $sbom_files $packages)
+        log-info $"($sbom_files | length) SBOM\(s\) generated and analyzed" --component $COMPONENT
 
-    # Phase 3 — OCI images
-    if not $skip_images {
-        let manifest = if ($filter | is-not-empty) {
-            image-manifest | where { $in.name | str contains $filter }
-        } else {
-            image-manifest
+        # Phase 2 — Cargo binaries
+        if not $skip_build {
+            let binaries = (
+                build-and-link-binaries $packages $sbom_lookup $ws_manifest $artifact_dir
+                    --release
+                    --target $target
+                    --filter_package $package
+            )
+            log-info $"($binaries | length) binary\(ies\) built and linked" --component $COMPONENT
         }
 
-        if ($manifest | is-empty) {
-            log-warn $"no images match filter '($filter)' — skipping Phase 3" --component $COMPONENT
-        } else {
-            if not $skip_upload { login-to-registries }
-            log-info $"building ($manifest | length) image\(s\)" --component $COMPONENT
+        # Phase 3 — OCI images
+        if not $skip_images {
+            let manifest = if ($filter | is-not-empty) {
+                image-manifest | where { $in.name | str contains $filter }
+            } else {
+                image-manifest
+            }
 
-            let results = ($manifest | each {|entry|
-                log-info $"--- ($entry.name) ---" --component $COMPONENT
-                process-image $entry $image_tag --skip-upload=$skip_upload
-            })
+            if ($manifest | is-empty) {
+                log-warn $"no images match filter '($filter)' — skipping Phase 3" --component $COMPONENT
+            } else {
+                if not $skip_upload { login-to-registries }
+                log-info $"building ($manifest | length) image\(s\)" --component $COMPONENT
 
-            let succeeded = $results | where success == true | length
-            let failed = $results | where success == false | length
-            log-info $"($succeeded) image\(s\) succeeded, ($failed) failed" --component $COMPONENT
+                let results = ($manifest | each {|entry|
+                    log-info $"--- ($entry.name) ---" --component $COMPONENT
+                    process-image $entry $image_tag --skip-upload=$skip_upload
+                })
 
-            if $failed > 0 {
-                let failures = (
-                    $results
-                    | where success == false
-                    | get image_name
-                    | str join ", "
-                )
-                log-warn $"failed images: ($failures)" --component $COMPONENT
+                let succeeded = $results | where success == true | length
+                let failed = $results | where success == false | length
+                log-info $"($succeeded) image\(s\) succeeded, ($failed) failed" --component $COMPONENT
+
+                if $failed > 0 {
+                    let failures = (
+                        $results
+                        | where success == false
+                        | get image_name
+                        | str join ", "
+                    )
+                    log-warn $"failed images: ($failures)" --component $COMPONENT
+                }
             }
         }
+
+        let elapsed = (date now) - $start_time
+        let duration_secs = ($elapsed / 1sec | math round)
+        emit-execution-completed $build_id $duration_secs
+        log-info $"pipeline complete \(duration: ($elapsed | format duration 'ms')\)" --component $COMPONENT
+
+        # return null to mark success
+        null
+    } catch {|e|
+        let msg = $e.msg
+        log-error $e.msg --component $COMPONENT
+        emit-execution-failed $build_id $msg
+        $msg
     }
 
-    stop-cassini-daemon $cassini_pid
+    stop-cassini-daemon $daemon
+
+    if $result != null {
+        error make {msg: $result}
+    }
 }
