@@ -1,9 +1,12 @@
+use crate::QueueEntry;
 use crate::{TCPClientConfig, TcpClientActor, TcpClientArgs, TcpClientMessage};
 use anyhow::Result;
 use cassini_types::{ClientEvent, ControlError, ControlOp, ControlResult};
 use clap::{Parser, Subcommand, ValueEnum};
 use ractor::{Actor, ActorProcessingErr, ActorRef, async_trait};
 use serde::{Deserialize, Serialize};
+use std::fs::OpenOptions;
+use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -11,9 +14,6 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::oneshot;
 use tracing::{error, info};
-use std::io::{BufRead, BufReader};
-use std::fs::OpenOptions;
-use crate::QueueEntry;
 // ===== CLI definition =====
 
 /// Default socket path if XDG_RUNTIME_DIR is not set.
@@ -396,7 +396,11 @@ impl Actor for CompletionBridge {
 
 pub struct Session {
     client_ref: ActorRef<TcpClientMessage>,
-    client_handle: tokio::task::JoinHandle<()>,
+    /// JoinHandle for the underlying TcpClientActor's processing task.
+    /// `Option` so the daemon's background-connect path can `take()` it to
+    /// watch for actor termination (see `run_daemon`) while the rest of the
+    /// `Session` continues to live in the daemon's session slot.
+    client_handle: Option<tokio::task::JoinHandle<()>>,
     bridge_handle: BridgeHandle,
     _bridge_actor_handle: tokio::task::JoinHandle<()>,
     registration_id: String,
@@ -421,11 +425,20 @@ impl Session {
         wait_for_event(rx, op_timeout, timeout_msg).await
     }
 
+    /// Takes the underlying actor's JoinHandle, if it hasn't already been
+    /// taken. Used by the daemon to spawn a watcher that shuts the daemon
+    /// down if the TcpClientActor terminates out from under it.
+    pub fn take_client_handle(&mut self) -> Option<tokio::task::JoinHandle<()>> {
+        self.client_handle.take()
+    }
+
     pub async fn disconnect(self) {
         self.client_ref
             .send_message(TcpClientMessage::Disconnect { trace_ctx: None })
             .ok();
-        let _ = self.client_handle.await;
+        if let Some(handle) = self.client_handle {
+            let _ = handle.await;
+        }
     }
 }
 
@@ -567,7 +580,7 @@ pub async fn register(
             info!("Registered. registration_id={id}");
             Ok(Session {
                 client_ref,
-                client_handle,
+                client_handle: Some(client_handle),
                 bridge_handle,
                 _bridge_actor_handle: bridge_actor_handle,
                 registration_id: id,
@@ -655,17 +668,18 @@ async fn handle_ipc_connection(
                         return;
                     }
                 };
-                match s.send_and_await(
-                    TcpClientMessage::Publish {
-                        topic: topic.clone(),
-                        payload,
-                        trace_ctx: None,
-                    },
-                    BridgeMode::Publish,
-                    Duration::from_secs(10),
-                    "Timed out waiting for publish ack",
-                )
-                .await
+                match s
+                    .send_and_await(
+                        TcpClientMessage::Publish {
+                            topic: topic.clone(),
+                            payload,
+                            trace_ctx: None,
+                        },
+                        BridgeMode::Publish,
+                        Duration::from_secs(10),
+                        "Timed out waiting for publish ack",
+                    )
+                    .await
                 {
                     Ok(CompletionEvent::Published { .. }) => IpcResponse::Ok { result: None },
                     Ok(CompletionEvent::TransportError(r)) => {
@@ -677,7 +691,9 @@ async fn handle_ipc_connection(
                             attempts: 0,
                         };
                         if let Err(e) = append_to_queue(&queue_path, &entry).await {
-                            IpcResponse::Error { reason: format!("Transport error and queue failed: {r} / {e}") }
+                            IpcResponse::Error {
+                                reason: format!("Transport error and queue failed: {r} / {e}"),
+                            }
                         } else {
                             IpcResponse::Ok { result: None }
                         }
@@ -710,32 +726,60 @@ async fn handle_ipc_connection(
         IpcRequest::ListSessions { timeout_secs } => {
             let session = session.lock().await;
             match session.as_ref() {
-                Some(s) => handle_control_ipc(s, TcpClientMessage::ListSessions { trace_ctx: None }, timeout_secs, "Timed out waiting for session list").await,
-                None => IpcResponse::Error { reason: "Broker unavailable".to_string() },
+                Some(s) => {
+                    handle_control_ipc(
+                        s,
+                        TcpClientMessage::ListSessions { trace_ctx: None },
+                        timeout_secs,
+                        "Timed out waiting for session list",
+                    )
+                    .await
+                }
+                None => IpcResponse::Error {
+                    reason: "Broker unavailable".to_string(),
+                },
             }
         }
 
         IpcRequest::ListTopics { timeout_secs } => {
             let session = session.lock().await;
             match session.as_ref() {
-                Some(s) => handle_control_ipc(s, TcpClientMessage::ListTopics { trace_ctx: None }, timeout_secs, "Timed out waiting for topic list").await,
-                None => IpcResponse::Error { reason: "Broker unavailable".to_string() },
+                Some(s) => {
+                    handle_control_ipc(
+                        s,
+                        TcpClientMessage::ListTopics { trace_ctx: None },
+                        timeout_secs,
+                        "Timed out waiting for topic list",
+                    )
+                    .await
+                }
+                None => IpcResponse::Error {
+                    reason: "Broker unavailable".to_string(),
+                },
             }
         }
 
-        IpcRequest::GetSession { registration_id, timeout_secs } => {
+        IpcRequest::GetSession {
+            registration_id,
+            timeout_secs,
+        } => {
             let session = session.lock().await;
             match session.as_ref() {
-                Some(s) => handle_control_ipc(
-                    s,
-                    TcpClientMessage::ControlRequest {
-                        op: ControlOp::GetSessionInfo { registration_id },
-                        trace_ctx: None,
-                    },
-                    timeout_secs,
-                    "Timed out waiting for session details",
-                ).await,
-                None => IpcResponse::Error { reason: "Broker unavailable".to_string() },
+                Some(s) => {
+                    handle_control_ipc(
+                        s,
+                        TcpClientMessage::ControlRequest {
+                            op: ControlOp::GetSessionInfo { registration_id },
+                            trace_ctx: None,
+                        },
+                        timeout_secs,
+                        "Timed out waiting for session details",
+                    )
+                    .await
+                }
+                None => IpcResponse::Error {
+                    reason: "Broker unavailable".to_string(),
+                },
             }
         }
     };
@@ -783,6 +827,14 @@ fn resolve_pid_path(socket_path: &PathBuf) -> PathBuf {
     socket_path.with_extension("pid")
 }
 
+/// Derives the path of the daemon's log file from its socket path, the same
+/// way `resolve_pid_path` derives the pidfile path. Used to redirect the
+/// daemonized child's stdout/stderr so that startup failures are no longer
+/// silently swallowed by `Stdio::null()`.
+fn resolve_log_path(socket_path: &PathBuf) -> PathBuf {
+    socket_path.with_extension("log")
+}
+
 pub async fn run_daemon(
     socket_path: PathBuf,
     client_config: Option<TCPClientConfig>,
@@ -790,7 +842,103 @@ pub async fn run_daemon(
     foreground: bool,
     queue_path: PathBuf,
 ) -> Result<()> {
-    // Clean up any stale socket from a previous crash.
+    // Ensure the parent directory exists up front. Both the re-exec's log
+    // file (opened below) and the foreground daemon's socket/pidfile live
+    // in this directory, so it needs to exist before either path proceeds.
+    if let Some(parent) = socket_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    if !foreground {
+        // Fail fast, on the attached terminal, if a daemon is already
+        // running. Deliberately does NOT touch the socket file — stale-socket
+        // removal happens exactly once, in the foreground/daemon path below,
+        // immediately before bind. Doing the removal here too (as before)
+        // was redundant and left a window between "parent removed the old
+        // socket" and "child bound the new one" for another invocation to
+        // race into.
+        if daemon_is_reachable(&socket_path).await {
+            anyhow::bail!(
+                "Daemon already running at {}. Use `cassini status` to inspect it.",
+                socket_path.display()
+            );
+        }
+
+        // Safety: fork() in a tokio runtime is unsound. We exec ourselves with
+        // --foreground instead, which is the correct daemonization approach when
+        // the process is already async. The parent exits immediately after spawning.
+        //
+        // IMPORTANT: do NOT strip --daemon/-d from the re-exec args. The child
+        // needs cli.daemon == true to route into run_daemon at all, and clap's
+        // `requires = "daemon"` constraint on --foreground means a child invoked
+        // with --foreground but without --daemon fails Cli::parse() before main
+        // even runs. Just forward the original args and ensure --foreground is set.
+        let exe = std::env::current_exe()?;
+        let mut child_args: Vec<String> = std::env::args().skip(1).collect();
+        if !child_args.iter().any(|a| a == "--foreground") {
+            child_args.push("--foreground".to_string());
+        }
+
+        // Redirect the child's stdout/stderr to a log file instead of discarding
+        // them. Stdio::null() previously made daemon startup failures (bind
+        // errors, parse errors, panics) completely invisible.
+        //
+        // For local debugging, set CASSINI_DAEMON_LOG_STDOUT=1 (or "true") to
+        // have the daemon inherit this process's stdout/stderr instead of
+        // writing to the log file. init_logging's fmt layer writes to
+        // stdout/stderr by default, so the daemon's tracing output then
+        // streams straight to this terminal — note it keeps streaming even
+        // after this parent process exits, since the child holds its own
+        // copy of the inherited file descriptors.
+        let log_to_stdout = std::env::var("CASSINI_DAEMON_LOG_STDOUT")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+
+        let mut command = std::process::Command::new(exe);
+        command.args(&child_args).stdin(std::process::Stdio::null());
+
+        let log_path = resolve_log_path(&socket_path);
+        if log_to_stdout {
+            command
+                .stdout(std::process::Stdio::inherit())
+                .stderr(std::process::Stdio::inherit());
+        } else {
+            let log_file_out = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&log_path)
+                .map_err(|e| {
+                    anyhow::anyhow!("Failed to open daemon log file {}: {e}", log_path.display())
+                })?;
+            let log_file_err = log_file_out.try_clone().map_err(|e| {
+                anyhow::anyhow!(
+                    "Failed to duplicate daemon log file handle {}: {e}",
+                    log_path.display()
+                )
+            })?;
+            command
+                .stdout(std::process::Stdio::from(log_file_out))
+                .stderr(std::process::Stdio::from(log_file_err));
+        }
+
+        command
+            .spawn()
+            .map_err(|e| anyhow::anyhow!("Failed to spawn daemon process: {e}"))?;
+
+        info!("Daemon started. Socket: {}", socket_path.display());
+        if log_to_stdout {
+            info!("Daemon logs: streaming to this terminal (CASSINI_DAEMON_LOG_STDOUT set)");
+        } else {
+            info!("Daemon log: {}", log_path.display());
+        }
+        return Ok(());
+    }
+
+    // Foreground path — we are the daemon, whether invoked directly via
+    // --daemon --foreground or as the re-exec'd child. This is the only
+    // place stale-socket cleanup happens, and it happens immediately before
+    // bind so the gap between "removed the old socket" and "bound the new
+    // one" is as small as possible.
     if socket_path.exists() {
         if daemon_is_reachable(&socket_path).await {
             anyhow::bail!(
@@ -802,36 +950,6 @@ pub async fn run_daemon(
         std::fs::remove_file(&socket_path)?;
     }
 
-    // Ensure parent directory exists.
-    if let Some(parent) = socket_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-
-    if !foreground {
-        // Safety: fork() in a tokio runtime is unsound. We exec ourselves with
-        // --foreground instead, which is the correct daemonization approach when
-        // the process is already async. The parent exits immediately after spawning.
-        let exe = std::env::current_exe()?;
-        let args: Vec<String> = std::env::args().skip(1).collect();
-        let mut child_args: Vec<String> = args
-            .into_iter()
-            .filter(|a| a != "--daemon" && a != "-d")
-            .collect();
-        child_args.push("--foreground".to_string());
-
-        std::process::Command::new(exe)
-            .args(&child_args)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .map_err(|e| anyhow::anyhow!("Failed to spawn daemon process: {e}"))?;
-
-        info!("Daemon started. Socket: {}", socket_path.display());
-        return Ok(());
-    }
-
-    // Foreground path — we are the daemon.
     let pid_path = resolve_pid_path(&socket_path);
     std::fs::write(&pid_path, std::process::id().to_string())?;
 
@@ -845,11 +963,34 @@ pub async fn run_daemon(
     // Attempt broker connection in background if config is available.
     if let Some(config) = client_config {
         let session_clone = Arc::clone(&session);
+        let socket_path_for_watcher = socket_path.clone();
+        let pid_path_for_watcher = pid_path.clone();
         tokio::spawn(async move {
             match register(config, register_timeout).await {
-                Ok(s) => {
-                    info!("Broker connection established. registration_id={}", s.registration_id);
+                Ok(mut s) => {
+                    info!(
+                        "Broker connection established. registration_id={}",
+                        s.registration_id
+                    );
+
+                    // The session's TcpClientActor can terminate on its own —
+                    // e.g. reconnection exhausts its retries and calls
+                    // myself.stop(). Once that happens every future
+                    // send_and_await on this session fails with ractor's
+                    // "actor terminated" MessagingErr, forever. Rather than
+                    // keep the daemon up serving a permanently-dead session,
+                    // watch for that termination and take the daemon down
+                    // with it so a supervisor can restart into a fresh one.
+                    let client_handle = s.take_client_handle();
                     *session_clone.lock().await = Some(s);
+
+                    if let Some(handle) = client_handle {
+                        let _ = handle.await;
+                        error!("Broker session terminated unexpectedly — shutting down daemon");
+                        let _ = std::fs::remove_file(&socket_path_for_watcher);
+                        let _ = std::fs::remove_file(&pid_path_for_watcher);
+                        std::process::exit(1);
+                    }
                 }
                 Err(e) => {
                     error!("Failed to connect to broker: {e} — daemon will queue messages");

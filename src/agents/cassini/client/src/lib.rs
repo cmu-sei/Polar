@@ -619,9 +619,6 @@ impl TcpClientActor {
         message: ClientMessage,
         state: &mut TcpClientState,
     ) -> Result<(), ActorProcessingErr> {
-        // Get current trace context
-        let trace_ctx = WireTraceCtx::from_current_span();
-
         // NOTE: Broker expects u32 length prefix, NOT u64
         match rkyv::to_bytes::<Error>(&message) {
             Ok(bytes) => {

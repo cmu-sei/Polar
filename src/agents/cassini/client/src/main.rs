@@ -30,13 +30,17 @@ async fn main() -> Result<()> {
     let format = &cli.format;
     let socket_path = resolve_socket_path(cli.socket.as_ref());
 
+    // Initialize tracing for every invocation, not just --daemon. Result
+    // printing (print_control_result, format_ipc_response, etc.) goes through
+    // tracing's info!/error! macros, which are silent no-ops without an
+    // installed subscriber — so e.g. `cassini-client status` previously
+    // printed nothing at all, even on success.
+    cassini_tracing::init_tracing("cassini-cli");
+
     // Load TLS + broker config from env
     // TODO: We default to this approach, but perhaps eventually we want to provide values via CLI/config file?
     // Daemon start path — no subcommand needed.
     if cli.daemon {
-        // Only init tracing in daemon mode.
-        cassini_tracing::init_tracing("cassini-cli");
-
         // Load config optionally — daemon starts regardless of broker availability.
         let client_config = TCPClientConfig::from_cli_or_env(
             cli.broker_addr.clone(),
@@ -47,7 +51,9 @@ async fn main() -> Result<()> {
         );
 
         if client_config.is_none() {
-            eprintln!("Warning: broker config not available — daemon will queue messages until broker is reachable");
+            eprintln!(
+                "Warning: broker config not available — daemon will queue messages until broker is reachable"
+            );
         }
 
         let result = run_daemon(
@@ -152,22 +158,8 @@ async fn main() -> Result<()> {
                 )
                 .await
             }
-            Command::Drain => {
-                drain_queue(
-                    cli.queue.clone(),
-                    client_config,
-                    register_timeout,
-                )
-                .await
-            }
-            Command::Replay { queue } => {
-                drain_queue(
-                    queue,
-                    client_config,
-                    register_timeout,
-                )
-                .await
-            }
+            Command::Drain => drain_queue(cli.queue.clone(), client_config, register_timeout).await,
+            Command::Replay { queue } => drain_queue(queue, client_config, register_timeout).await,
             Command::Status => dispatch_to_daemon(&socket_path, IpcRequest::Status, format).await,
         }
     } else {
@@ -229,24 +221,11 @@ async fn main() -> Result<()> {
             }
             Command::Status => {
                 eprintln!("No daemon running at {}", socket_path.display());
+                shutdown_tracing();
                 std::process::exit(1);
             }
-            Command::Drain => {
-                drain_queue(
-                    cli.queue.clone(),
-                    client_config,
-                    register_timeout,
-                )
-                .await
-            }
-            Command::Replay { queue } => {
-                drain_queue(
-                    queue,
-                    client_config,
-                    register_timeout,
-                )
-                .await
-            }
+            Command::Drain => drain_queue(cli.queue.clone(), client_config, register_timeout).await,
+            Command::Replay { queue } => drain_queue(queue, client_config, register_timeout).await,
         }
     };
 

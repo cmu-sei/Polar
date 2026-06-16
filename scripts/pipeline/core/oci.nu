@@ -48,7 +48,7 @@ export def nix-build-image [
             success: false
             link_name: $link_name
             flake_ref: $flake_ref
-            tarball: "", 
+            tarball: "",
             oci_metadata: { success: false}
         }
     }
@@ -61,7 +61,7 @@ export def nix-build-image [
             success: false
             link_name: $link_name
             flake_ref: $flake_ref
-            tarball: "", 
+            tarball: "",
             oci_metadata: { success: false}
         }
     }
@@ -73,7 +73,7 @@ export def nix-build-image [
     # The build processor can create ContainerImage + OCILayer nodes from
     # this alone, without waiting for a registry push or resolver discovery.
     if ($oci_metadata | get --optional success | default false) {
-        emit-container-image-created
+        ( emit-container-image-created
             $link_name
             $tarball_hash
             $oci_metadata.config_digest
@@ -84,6 +84,7 @@ export def nix-build-image [
             --entrypoint $oci_metadata.entrypoint
             --cmd $oci_metadata.cmd
             --repo_tags ($oci_metadata.repo_tags? | default [])
+        )
         log-info $"($link_name): ($oci_metadata.layers | length) layers, ($oci_metadata.os)/($oci_metadata.arch)" --component oci
     } else {
         log-warn $"($link_name): built successfully but could not extract OCI metadata" --component oci

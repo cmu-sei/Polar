@@ -95,18 +95,18 @@ cert-issuer target='all':
     set -euo pipefail
     case "{{target}}" in
         all)
-            nix build {{_nix_flags}} ".#packages.{{platform}}.certIssuerImage" -o result-cert-issuer
-            nix build {{_nix_flags}} ".#packages.{{platform}}.certClientImage" -o result-cert-client
-            podman load -i result-cert-issuer
-            podman load -i result-cert-client
+            nix build {{_nix_flags}} ".#polarPkgs.certIssuer.server" -o result-cert-issuer-server
+            nix build {{_nix_flags}} ".#polarPkgs.certIssuer.client" -o result-cert-client
+            nix build {{_nix_flags}} ".#polarPkgs.certIssuer.setupBin" -o result-cert-setup-bin
+            nix build {{_nix_flags}} ".#packages.{{platform}}.certIssuerImage" -o result-cert-issuer-image
+            podman load -i result-cert-issuer-image
             ;;
-        server)
+        serverImage)
             nix build {{_nix_flags}} ".#packages.{{platform}}.certIssuerImage" -o result-cert-issuer
             podman load -i result-cert-issuer
             ;;
         client)
-            nix build {{_nix_flags}} ".#packages.{{platform}}.certClientImage" -o result-cert-client
-            podman load -i result-cert-client
+            nix build {{_nix_flags}} ".#polarPkgs.certIssuer.client" -o result-cert-client
             ;;
         *) echo "Unknown target: {{target}}. Use all, server, or client." && exit 1 ;;
     esac

@@ -158,7 +158,7 @@ a trust root. After first run, copy it out of the volume:
 cat ./dev/tmp/ca.crt
 
 # Kubernetes
-kubectl exec -n polar-system deploy/cert-issuer -- cat /etc/cert-issuer/ca.crt
+kubectl exec -n polar deploy/cert-issuer -- cat /path/to/ca.crt
 ```
 
 Distribute it as a ConfigMap mounted into client pods, or via
