@@ -13,6 +13,9 @@ fn resolve_socket_path(override_path: Option<&PathBuf>) -> PathBuf {
     if let Some(p) = override_path {
         return p.clone();
     }
+    if let Ok(env_path) = std::env::var("CASSINI_DAEMON_SOCK") {
+        return PathBuf::from(env_path);
+    }
     if let Ok(runtime) = std::env::var("XDG_RUNTIME_DIR") {
         PathBuf::from(runtime).join("cassini/daemon.sock")
     } else {
