@@ -9,23 +9,12 @@ This document describes the Git ingestion pipeline implemented as a set of coope
 
 The Git subsystem is composed of three primary agents:
 
-1. **Scheduler Agent**
-2. **Git Repository Observer Agent**
-3. **Git Repository Processor Agent**
+- **Git Repository Observer Agent**
+- **Git Repository Processor Agent**
 
 All inter-agent communication occurs over the broker. There are no direct in-process calls between agents.
 
 ### Responsibilities
-
-#### Scheduler Agent
-
-The scheduler reacts to `GitRepositoryDiscovered` events. Upon receiving such an event, it:
-
-* Applies policy (e.g., deduplication, rate limiting, tenancy boundaries).
-* Emits a directive instructing the Git Repository Observer to clone and analyze the repository.
-* Does not perform cloning or repository introspection itself.
-
-It is strictly policy application logic.
 
 #### Git Repository Observer Agent
 
@@ -55,65 +44,6 @@ It performs no Git operations.
 
 ---
 
-## Event Flow
-
-All communication is broker-mediated.
-
-```mermaid
-flowchart LR
-    D[GitRepositoryDiscovered Event] --> S[Scheduler Agent]
-
-    S -->|ObserveRepository Directive| B[(Broker)]
-
-    B --> O[Git Repo Observer Agent]
-
-    O -->|GitCommitDiscovered| B
-    O -->|GitRefDiscovered| B
-
-    B --> P[Git Repo Processor Agent]
-
-    P -->|Cypher| KG[(Knowledge Graph)]
-```
-
----
-
-## Event Model
-
-### Discovery
-
-```rust
-GitRepositoryDiscovered {
-    repository_id: RepositoryId,
-    canonical_url: String, // Option A: scheduler chooses the canonical transport
-}
-```
-
-The scheduler chooses a single canonical URL (e.g., SSH preferred over HTTPS if available). The observer does not perform transport negotiation.
-
-### Observer Output
-
-```rust
-GitCommitDiscovered {
-    repository_id: RepositoryId,
-    commit_sha: String,
-    parents: Vec<String>,
-    author: Signature,
-    committer: Signature,
-    message: String,
-    authored_at: DateTime<Utc>,
-    committed_at: DateTime<Utc>,
-}
-
-GitRefDiscovered {
-    repository_id: RepositoryId,
-    ref_name: String,
-    target: String, // commit SHA
-    kind: RefKind,  // Branch | Tag | Other
-}
-```
-
-These events are immutable, append-only, and designed for replay safety.
-
 ---
 
 ## Design Principles
@@ -135,9 +65,7 @@ Each agent:
 
 All events are durable and replayable. The processor must tolerate reprocessing.
 
-### 4. Canonical Transport Selection
 
-The scheduler selects a single canonical URL before emitting directives. The observer assumes the URL is final and authoritative.
 
 ---
 
@@ -174,35 +102,11 @@ Cache invalidation strategy is currently manual/policy-driven and not automatic.
 
 ## Usage (Stub)
 
-### Running the Scheduler
-
-```bash
-cargo run -p git-scheduler-agent
-```
-
-Expected behavior:
-
-* Subscribes to `GitRepositoryDiscovered`.
-* Emits `ObserveRepository` directives.
-
 ### Running the Observer
 
 **Setup**
 The Git Observer is configured via a JSON file in a similar fashion to many docker-compatible tooling.
-The structure is as follows. 
 
-```json
-{
-  "hosts": {
-    "gitlab.com": {
-      "http": {
-        "username": "username",
-        "token": "token"
-      }
-    }
-  }
-}
-```
 Ensure one of these files exists before running the agent.
 
 ```bash

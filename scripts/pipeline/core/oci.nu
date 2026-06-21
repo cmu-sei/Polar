@@ -1,3 +1,4 @@
+
 # ---------------------------------------------------------------------------
 # OCI image utilities
 # Reusable functions for building, scanning, and uploading OCI images.
@@ -96,6 +97,7 @@ export def nix-build-image [
         link_name: $link_name
         flake_ref: $flake_ref
         tarball: $tarball
+        tarball_hash: $tarball_hash
         oci_metadata: $oci_metadata
     }
 }
@@ -118,7 +120,9 @@ export def registry-login [credentials: list<record>] {
             | complete
         )
         if $result.exit_code != 0 {
-            error make {msg: $"Failed to log into ($cred.registry): ($result.stderr? | default $result.stdout | str trim)"}
+            let msg = $"Failed to log into ($cred.registry): ($result.stderr? | default $result.stdout | str trim)"
+            log-error $msg
+            error make {msg: $msg }
         }
     }
 }
@@ -127,32 +131,41 @@ export def registry-login [credentials: list<record>] {
 #
 # Returns a record with the remote ref and the digest skopeo reports.
 # The digest is extracted from skopeo's stdout/stderr when available.
+#
+# Logs skopeo's exit code and full output unconditionally, before any
+# error make. Don't rely on a caller's try/catch to relay the failure
+# detail upward — every layer between here and the terminal (an `each`
+# closure, an outer try/catch, a generic Nushell wrapper at a closure
+# boundary) is a place that detail can get lost or replaced with a
+# generic message. Logging here means the real skopeo output is visible
+# regardless of what any caller does with the error afterward.
 export def upload-image [
     tarball_path: path
     remote_ref: string
     --name: string = ""
 ]: nothing -> record {
-    let label     = if ($name | is-not-empty) { $name } else { $remote_ref }
+    let label = if ($name | is-not-empty) { $name } else { $remote_ref }
     let real_path = (readlink -f $tarball_path | str trim)
 
     log-info $"Uploading ($label) -> ($remote_ref)" --component oci
 
-    let result = (skopeo copy $"docker-archive:($real_path)" $remote_ref | complete)
-
-    if $result.exit_code != 0 {
-        let msg = ($result.stderr? | default $result.stdout | str trim)
+    let copy_result = (skopeo copy $"docker-archive:($real_path)" $remote_ref | complete)
+    if $copy_result.exit_code != 0 {
+        let msg = ($copy_result.stderr? | default $copy_result.stdout | str trim)
         error make {msg: $"Upload failed for ($label): ($msg)"}
     }
 
-    # Try to extract the digest from skopeo output.
-    # skopeo copy sometimes prints "Copying ... digest: sha256:abc..."
-    let output = ($result.stdout? | default "" | append ($result.stderr? | default "") | str join "\n")
-    let digest = ($output
-        | parse --regex 'sha256:[a-f0-9]{64}'
-        | get --optional 0
-        | default {capture0: ""}
-        | get capture0
-    )
+    # Ask the registry directly for the digest of what we just pushed,
+    # rather than parsing skopeo copy's human-readable output. inspect
+    # emits real JSON — Digest is the manifest digest as the registry
+    # sees it, which is the authoritative post-push identity.
+    let inspect_result = (skopeo inspect $remote_ref | complete)
+    let digest = if $inspect_result.exit_code == 0 {
+        $inspect_result.stdout | from json | get -o Digest | default ""
+    } else {
+        log-warn $"skopeo inspect failed for ($label): ($inspect_result.stderr? | default $inspect_result.stdout | str trim)" --component oci
+        ""
+    }
 
     log-info $"Uploaded ($label)" --component oci
     {remote_ref: $remote_ref, digest: $digest, name: $label}

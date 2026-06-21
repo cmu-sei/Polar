@@ -1,6 +1,8 @@
 # ---------------------------------------------------------------------------
 # Cassini
 # ---------------------------------------------------------------------------
+use logging.nu [log-debug log-error]
+
 export const SUBJECT_PREFIX = "polar.provenance"
 export const BUILD_EVENTS_TOPIC = $"($SUBJECT_PREFIX).events"
 export const CASSINI_SOCK_ENV = "CASSINI_DAEMON_SOCK"
@@ -272,6 +274,7 @@ export def stop-cassini-daemon [daemon: record, --timeout: int = 3]: nothing -> 
 # it is not on this envelope.
 export def emit-provenance-event [payload: record]: nothing -> nothing {
     let json = $payload | to json --raw
+    log-debug $json
     cassini-client publish $BUILD_EVENTS_TOPIC $json
 }
 

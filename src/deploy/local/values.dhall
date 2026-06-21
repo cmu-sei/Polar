@@ -185,7 +185,7 @@ let gitObserver
     : Agents.GitObserver
     = { name     = "git-repo-observer"
       , image    = img "git-observer"
-      , config   = ./conf/git.json as Text
+      , config   = ./conf/git-agent-local.yaml as Text
       , certClient = defaultCertClientConfig
       , tls
       }

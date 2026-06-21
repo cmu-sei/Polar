@@ -223,13 +223,9 @@ pub struct BinaryLinkedPayload {
     Debug, Clone, PartialEq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub struct ContainerImageCreatedPayload {
-    /// Human-readable name (e.g. "cassini", "kube-observer").
     pub image_name: String,
-    /// Content hash of the tarball on disk — image identity before registry push.
     pub tarball_hash: String,
-    /// Digest of the OCI config blob — stable across re-uploads to different registries.
     pub config_digest: String,
-    /// Ordered layer stack with uncompressed diff IDs.
     pub layers: Vec<OciLayerEntry>,
     #[serde(default)]
     pub os: String,
@@ -243,6 +239,12 @@ pub struct ContainerImageCreatedPayload {
     pub cmd: String,
     #[serde(default)]
     pub repo_tags: Vec<String>,
+    /// Post-push registry manifest digest. Absent on the pre-push emission.
+    #[serde(default)]
+    pub digest: Option<String>,
+    /// Post-push remote ref. Absent on the pre-push emission.
+    #[serde(default)]
+    pub uri: Option<String>,
 }
 
 // ── ProvenanceEvent ────────────────────────────────────────────────────────────

@@ -581,6 +581,42 @@ impl ProvenanceLinker {
             payload.config_digest,
         );
 
+        // Post-push enrichment: if this call carries a registry digest, the image
+        // has been pushed. Upsert the OCIArtifact node directly — we already have
+        // every fact (digest, uri, config_digest) from the pipeline itself, no
+        // resolver round-trip needed. This is the canonical join between the
+        // registry-independent ContainerImage and the registry-specific OCIArtifact.
+        if let Some(ref digest) = payload.digest {
+            let oci_key = ArtifactNodeKey::OCIArtifact {
+                digest: digest.clone(),
+            };
+
+            let mut oci_props = vec![Property(
+                "digest".into(),
+                GraphValue::String(digest.clone()),
+            )];
+            if let Some(ref uri) = payload.uri {
+                oci_props.push(Property("uri".into(), GraphValue::String(uri.clone())));
+            }
+
+            Self::upsert_node(
+                state,
+                oci_key.clone(),
+                oci_props,
+                "failed to upsert OCIArtifact from ContainerImageCreated",
+            )?;
+
+            Self::ensure_edge(
+                state,
+                ArtifactNodeKey::Artifact,
+                oci_key.clone(),
+                rel::IS,
+                vec![],
+            )?;
+
+            Self::ensure_edge(state, image_k.clone(), oci_key, rel::INSTANCE_OF, vec![])?;
+        }
+
         Ok(())
     }
 }

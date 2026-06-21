@@ -56,8 +56,6 @@ let CertIssuer =
 
 let GitConsumer = GraphProcessor
 
-let GitScheduler = GraphProcessor
-
 let ProvenanceLinker = GraphProcessor
 
 let KubeConsumer = GraphProcessor
@@ -105,6 +103,5 @@ in  { ClientTlsConfig
     , StaticCredentialConfig
     , GitObserver
     , GitConsumer
-    , GitScheduler
     , BuildProcessor
     }

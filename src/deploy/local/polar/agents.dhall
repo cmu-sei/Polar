@@ -403,21 +403,6 @@ let gitAgentDeployment =
                 )
             , volumeMounts    = Some (baseMounts # neo4jCAVolumeMount)
             }
-          , kubernetes.Container::{
-            , name            = values.gitScheduler.name
-            , image           = Some values.gitScheduler.image
-            , imagePullPolicy = Some values.imagePullPolicy
-            , securityContext = Some dropAllCapSecurityContext
-            , env             = Some
-                ( envVars
-                  # functions.makeGraphEnv
-                      values.neo4jBoltAddr
-                      values.gitScheduler.graph
-                      graphSecretKeySelector
-                      (Some "/etc/neo4j-ca/ca.pem")
-                )
-            , volumeMounts    = Some (baseMounts # neo4jCAVolumeMount)
-            }
           ]
         , volumes = Some
             ( agentVolumes

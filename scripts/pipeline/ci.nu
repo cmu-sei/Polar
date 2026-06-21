@@ -1,3 +1,4 @@
+
 #!/usr/bin/env nu
 # ci.nu — unified Polar build pipeline
 #
@@ -27,7 +28,7 @@
 # All phases share one artifact directory. Phases 1-3 share one Cassini daemon.
 # Adding a new image = one row in image-manifest. Nothing else changes.
 
-
+use ./core/state.nu [init-pipeline-state get-build-id]
 use ./core/oci.nu *
 use ./core/cassini.nu *
 use ./core/logging.nu *
@@ -38,22 +39,10 @@ use ./core/sbom.nu *
 const COMPONENT = "ci"
 const ELF_BINARY_ARTIFACT = "elf-binary"
 
-# Resolve a pkg-config variable for a package, returning "" on failure.
-# PKG_CONFIG_PATH must already be set before calling this.
-def pc-var [pkg: string, var: string]: nothing -> string {
-    try {
-        ^pkg-config --variable $var $pkg | str trim
-    } catch { "" }
-}
 
 # ===========================================================================
 # Phase 0: Static analysis
 # ===========================================================================
-
-def green [msg: string] { $"(ansi green)($msg)(ansi reset)" }
-def red [msg: string] { $"(ansi red)($msg)(ansi reset)" }
-def yellow [msg: string] { $"(ansi yellow)($msg)(ansi reset)" }
-def bold [msg: string] { $"(ansi attr_bold)($msg)(ansi reset)" }
 
 def check-tools [tools: list<string>] {
     let missing = $tools | where {|t| (which $t | is-empty) }
@@ -290,51 +279,39 @@ def image-manifest []: nothing -> list<record> {
             root_purl: "pkg:cargo/cassini@0.1.0"
         }
         {
-            name: "gitlab-observer"
-            flake: ".#gitlabObserverImage"
-            image: "polar-gitlab-observer"
-            root_purl: "pkg:cargo/gitlab-observer@0.1.0"
-        }
-        {
-            name: "gitlab-consumer"
-            flake: ".#gitlabConsumerImage"
-            image: "polar-gitlab-consumer"
-            root_purl: "pkg:cargo/gitlab-consumer@0.1.0"
-        }
-        {
             name: "kube-observer"
             flake: ".#kubeObserverImage"
-            image: "polar-kube-observer"
+            image: "kube-observer"
             root_purl: "pkg:cargo/kube-observer@0.1.0"
         }
         {
             name: "kube-consumer"
             flake: ".#kubeConsumerImage"
-            image: "polar-kube-consumer"
+            image: "kube-consumer"
             root_purl: "pkg:cargo/kube-consumer@0.1.0"
         }
         {
             name: "git-observer"
             flake: ".#gitObserverImage"
-            image: "polar-git-observer"
+            image: "git-observer"
             root_purl: "pkg:cargo/git-repo-observer@0.1.0"
         }
         {
             name: "git-processor"
             flake: ".#gitProcessorImage"
-            image: "polar-git-processor"
+            image: "git-processor"
             root_purl: ""
         }
         {
             name: "build-processor"
             flake: ".#buildProcessorImage"
-            image: "polar-build-processor"
+            image: "build-processor"
             root_purl: "pkg:cargo/build-processor@0.1.0"
         }
         {
             name: "oci-resolver"
             flake: ".#ociResolverImage"
-            image: "polar-oci-resolver"
+            image: "oci-resolver"
             root_purl: "pkg:cargo/oci-resolver@0.1.0"
         }
     ]
@@ -590,8 +567,8 @@ def build-and-link-binaries [
 
 def registry-refs [image_name: string]: nothing -> list<string> {
     mut refs = []
-    let ci_reg = $env.POLAR_CI_REGISTRY? | default ""
-    if ($ci_reg | is-not-empty) { $refs = ($refs | append $"docker://($ci_reg)/($image_name):{tag}") }
+    let ci_reg = $env.CI_REGISTRY? | default ""
+    if ($ci_reg | is-not-empty) { $refs = ($refs | append $"docker://($ci_reg)/polar/($image_name):{tag}") }
     $refs
 }
 
@@ -606,15 +583,7 @@ def login-to-registries [] {
             | append {registry: $ci_reg, username: $ci_user, password: $ci_pass}
         )
     }
-    let acr_user = $env.ACR_USERNAME? | default ""
-    let acr_pass = $env.ACR_TOKEN? | default ""
-    let acr_reg = $env.AZURE_REGISTRY? | default ""
-    if ($acr_user | is-not-empty) and ($acr_reg | is-not-empty) {
-        $creds = (
-            $creds
-            | append {registry: $acr_reg, username: $acr_user, password: $acr_pass}
-        )
-    }
+
     if ($creds | is-not-empty) { registry-login $creds }
 }
 
@@ -637,17 +606,7 @@ def process-image [entry: record, image_tag: string, --skip-upload]: nothing -> 
     build-and-push-image $entry.name $image_tag (registry-refs $entry.image) $build --root_purl $entry.root_purl
 }
 
-# Build → upload → sign for one image.
-#
-# Sequence:
-#   1. skopeo copy tarball to each registry → emits ArtifactProduced with OCI digest
-#   2. cosign sign each pushed digest
-#   3. ContainerImageCreated was already emitted by nix-build-image at build time
-#
-# ContainerImageCreated is emitted by nix-build-image immediately after the
-# nix build completes — before any registry push. That event carries the full
-# layer stack and config digest. The post-push ArtifactProduced here carries
-# the registry manifest digest, which is the content-addressed identity after push.
+
 def build-and-push-image [
     link_name: string
     tag: string
@@ -656,10 +615,14 @@ def build-and-push-image [
     --root_purl: string = ""
 ]: nothing -> record {
     let oci_metadata = $build.oci_metadata
-    let has_oci = $oci_metadata | get -o success | default false
+
+    if ($registries | length) == 0 {
+        log-warn $"No registries configured for ($link_name) — image will not be uploaded anywhere" --component $COMPONENT
+    }
 
     let uploads = ($registries | each {|template|
-        upload-image $build.tarball ($template | str replace "{tag}" $tag) --name $link_name
+        let remote_ref = ($template | str replace "{tag}" $tag)
+        upload-image $build.tarball $remote_ref --name $link_name
     })
 
     for upload in $uploads {
@@ -668,11 +631,23 @@ def build-and-push-image [
             continue
         }
 
-        # ── Post-push ArtifactProduced ─────────────────────────────────────────
-        # Emits the registry manifest digest as a canonical artifact.
-        # This is the content-addressed identity of the image after push —
-        # distinct from the config_digest which is the pre-push identity.
+        # emit an event saying we created a new build artifact
         emit-artifact-produced $upload.digest "oci-image" --name $link_name
+        # then, emit a second message detailing that this artifact was a container image.
+        (
+        emit-container-image-created
+            $link_name
+            $build.tarball_hash
+            $oci_metadata.config_digest
+            $oci_metadata.layers
+            --os $oci_metadata.os
+            --arch $oci_metadata.arch
+            --created $oci_metadata.created
+            --entrypoint $oci_metadata.entrypoint
+            --cmd $oci_metadata.cmd
+            --digest $upload.digest
+            --uri $upload.remote_ref
+        )
 
         # ── Cosign signature ───────────────────────────────────────────────────
         # cosign requires a digest ref: registry.io/org/app@sha256:abc...
@@ -702,6 +677,9 @@ def build-and-push-image [
 # ===========================================================================
 
 def main [
+    build_id: string            # Stable unique ID for this pipeline run.
+                                # In GitLab CI: $CI_PIPELINE_ID or a UUIDv5 derived from it.
+                                # Locally: pass any stable string, e.g. (random uuid) once per session.
     --package(-p): string = ""
     --release(-r)
     --target(-t): string = ""
@@ -714,26 +692,26 @@ def main [
     --skip-build
     --skip-images
 ] {
-
-
     let ws_root = (workspace-root)
     let ws_manifest = $ws_root | path join "Cargo.toml"
-    let build_id = ($env.POLAR_BUILD_ID? | default (random uuid))
-    let commit_sha = ($env.CI_COMMIT_SHORT_SHA? | default (git rev-parse --short HEAD))
+    let commit_sha = ($env.CI_COMMIT_SHA? | default (^git rev-parse HEAD | str trim))
+
+    # Initialize pipeline-scoped singleton state. All emit-* functions that
+    # need build_id (artifact domain events) read it from here rather than
+    # from an env var. This guarantees every event in this pipeline run carries
+    # the same build_id regardless of call depth or module boundaries.
+    init-pipeline-state $build_id
 
     let daemon = (start-cassini-daemon)
 
     let result = try {
-
         let start_time = (date now)
 
-        emit-execution-started $build_id $commit_sha (git branch --show-current) (git config --get remote.origin.url)
+        let ref_name   = (^git branch --show-current | str trim)
+        let repo_url   = (^git config --get remote.origin.url | str trim)
 
-        # Start from a clean artifact directory every run. Leftover binaries
-        # from a previous (especially a partial/crashed) run are the precise
-        # precondition for the mv-error-same-file issue handled above — Cargo
-        # will happily re-hardlink a "fresh" binary back into target/<profile>
-        # even though this script already moved the original copy out.
+        emit-execution-started $commit_sha $ref_name $repo_url
+
         rm --force --recursive $artifact_dir
         mkdir -v $artifact_dir
 
@@ -749,15 +727,21 @@ def main [
                 }
             }
         }
-        let image_tag = if ($tag | is-not-empty) { $tag } else { ($env.CI_COMMIT_SHORT_SHA? | default "latest") }
-        let packages = (resolve-packages --package $package)
 
+        # Use full SHA for image tag when available — short SHA or "latest" as fallback.
+        let image_tag = if ($tag | is-not-empty) {
+            $tag
+        } else {
+            $env.CI_COMMIT_SHORT_SHA? | default ($commit_sha | str substring 0..8) | default "latest"
+        }
+
+        let packages = (resolve-packages --package $package)
         log-info $"($packages | length) package\(s\) in scope, image tag: ($image_tag)" --component $COMPONENT
 
         # Phase 1 — Cargo SBOMs
-        let sbom_files = (
-            generate-workspace-sboms $packages $ws_manifest $artifact_dir --target $target
-        )
+        #
+        #
+        let sbom_files  = (generate-workspace-sboms $packages $ws_manifest $artifact_dir --target $target)
         let sbom_lookup = (process-cargo-sboms $sbom_files $packages)
         log-info $"($sbom_files | length) SBOM\(s\) generated and analyzed" --component $COMPONENT
 
@@ -792,16 +776,11 @@ def main [
                 })
 
                 let succeeded = $results | where success == true | length
-                let failed = $results | where success == false | length
+                let failed    = $results | where success == false | length
                 log-info $"($succeeded) image\(s\) succeeded, ($failed) failed" --component $COMPONENT
 
                 if $failed > 0 {
-                    let failures = (
-                        $results
-                        | where success == false
-                        | get image_name
-                        | str join ", "
-                    )
+                    let failures = ($results | where success == false | get image_name | str join ", ")
                     log-warn $"failed images: ($failures)" --component $COMPONENT
                 }
             }
@@ -809,15 +788,14 @@ def main [
 
         let elapsed = (date now) - $start_time
         let duration_secs = ($elapsed / 1sec | math round)
-        emit-execution-completed $build_id $duration_secs
+        emit-execution-completed $duration_secs
         log-info $"pipeline complete \(duration: ($elapsed | format duration 'ms')\)" --component $COMPONENT
 
-        # return null to mark success
         null
     } catch {|e|
         let msg = $e.msg
-        log-error $e.msg --component $COMPONENT
-        emit-execution-failed $build_id $msg
+        log-error $msg --component $COMPONENT
+        emit-execution-failed $msg
         $msg
     }
 
