@@ -14,6 +14,7 @@ use polar::cassini::CassiniClient;
 use polar::cassini::SubscribeRequest;
 use polar::cassini::TcpClient;
 use polar::graph::controller::{GraphController, GraphControllerActor};
+use polar::health::{HealthCheckActor, HealthCheckArgs, HealthCheckMessage};
 use ractor::Actor;
 use ractor::ActorProcessingErr;
 use ractor::ActorRef;
@@ -26,32 +27,16 @@ use tracing::debug;
 use tracing::error;
 use tracing::info;
 use tracing::warn;
-use polar::health::HealthState;
-use std::time::Duration;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StateFingerprint {
-    /// Canonical serialized state payload.
-    /// Could be JSON, or stable key=value pairs.
     pub signature: String,
-
-    /// The valid_from timestamp used when we emitted it.
     pub valid_from: String,
     pub last_state_node_id: Option<String>,
 }
-// TODO: Impl this?
-// impl StateFingerprint {
-//     /// More compact. Faster comparisons. Cleaner.
-//     pub fn hash_signature(payload: &str) -> String {
-//         let mut hasher = Sha256::new();
-//         hasher.update(payload.as_bytes());
-//         format!("{:x}", hasher.finalize())
-//     }
-// }
 
 #[derive(Default)]
 pub struct ProjectionCache {
-    // key: (kind, uid)
     entries: HashMap<(String, String), StateFingerprint>,
 }
 
@@ -63,7 +48,6 @@ pub enum EmitDecision {
 }
 
 impl ProjectionCache {
-    /// Returns true if this is a new state and should be emitted.
     pub fn should_emit(
         &mut self,
         kind: String,
@@ -77,16 +61,14 @@ impl ProjectionCache {
             Some(existing) if existing.signature == new_signature => EmitDecision::Suppress,
             Some(existing) => {
                 let prev = existing.last_state_node_id.clone();
-
                 self.entries.insert(
                     key,
                     StateFingerprint {
                         signature: new_signature,
                         valid_from,
-                        last_state_node_id: None, // filled after graph write
+                        last_state_node_id: None,
                     },
                 );
-
                 EmitDecision::Emit {
                     previous_state_node_id: prev,
                 }
@@ -100,20 +82,19 @@ impl ProjectionCache {
                         last_state_node_id: None,
                     },
                 );
-
                 EmitDecision::Emit {
                     previous_state_node_id: None,
                 }
             }
         }
     }
+
     pub fn set_last_state_node_id(&mut self, kind: &str, uid: &str, node_id: String) {
         if let Some(entry) = self.entries.get_mut(&(kind.to_string(), uid.to_string())) {
             entry.last_state_node_id = Some(node_id);
         }
     }
 
-    /// Remove from cache on terminal deletion if desired.
     pub fn evict(&mut self, kind: String, uid: &str) {
         self.entries.remove(&(kind, uid.to_string()));
     }
@@ -125,6 +106,7 @@ pub struct ClusterConsumerSupervisorState {
     broker_client: TcpClient,
     graph_controller: Option<GraphController>,
     projection_cache: ProjectionCache,
+    healthcheck: ActorRef<HealthCheckMessage>,
 }
 
 impl ClusterConsumerSupervisor {
@@ -161,10 +143,8 @@ impl ClusterConsumerSupervisor {
         graph_controller: &GraphController,
         tcp_client: &TcpClient,
     ) -> Result<(), ActorProcessingErr> {
-        // 1) Parse the raw message into your RawKubeEvent
         let ev: RawKubeEvent = serde_json::from_slice(&payload)?;
 
-        // TODO: Define constants for these and match on them instead, these literals are also used in the marco calls to define their watchers
         match ev.kind.as_str() {
             "Pod" => Self::handle_event::<Pod>(ev, cache, graph_controller, tcp_client)?,
             "Deployment" => {
@@ -200,11 +180,18 @@ impl Actor for ClusterConsumerSupervisor {
         _args: (),
     ) -> Result<Self::State, ActorProcessingErr> {
         debug!("{myself:?} starting");
-
         info!("Read neo configuration successfully.");
 
-        // Always send a heartbeat to get us started.
-        let _ = myself.send_after(Duration::from_secs(30), || SupervisorMessage::Heartbeat).await;
+        // Spawn the healthcheck actor as a linked child. If it fails, the
+        // supervisor's handle_supervisor_evt will call std::process::exit(1).
+        let (healthcheck, _) = HealthCheckActor::spawn_linked(
+            Some("polar.healthcheck".to_string()),
+            HealthCheckActor,
+            HealthCheckArgs { expects_neo4j: true },
+            myself.get_cell(),
+        )
+        .await
+        .map_err(|e| ActorProcessingErr::from(e))?;
 
         match TcpClient::spawn(BROKER_CLIENT_NAME, myself, |event| {
             Some(SupervisorMessage::ClientEvent { event })
@@ -217,8 +204,9 @@ impl Actor for ClusterConsumerSupervisor {
                 projection_cache: ProjectionCache {
                     entries: HashMap::new(),
                 },
+                healthcheck,
             }),
-            Err(e) => return Err(ActorProcessingErr::from(e)),
+            Err(e) => Err(ActorProcessingErr::from(e)),
         }
     }
 
@@ -232,6 +220,9 @@ impl Actor for ClusterConsumerSupervisor {
             SupervisorMessage::ClientEvent { event } => {
                 match event {
                     ClientEvent::Registered { .. } => {
+                        // Notify healthcheck that Cassini is up
+                        let _ = state.healthcheck.cast(HealthCheckMessage::CassiniConnected);
+
                         match GraphControllerActor::spawn_linked(
                             Some("kubernetes.cluster.graph.controller".to_string()),
                             GraphControllerActor,
@@ -241,17 +232,17 @@ impl Actor for ClusterConsumerSupervisor {
                         .await
                         {
                             Ok((graph_controller, _)) => {
-                                state.graph_controller = Some(graph_controller)
+                                state.graph_controller = Some(graph_controller);
+                                // Notify healthcheck that neo4j is up
+                                let _ = state.healthcheck.cast(HealthCheckMessage::Neo4jConnected);
                             }
                             Err(e) => {
-                                error!("Error initializng graph controller! {e}");
+                                error!("Error initializing graph controller! {e}");
                                 return Err(ActorProcessingErr::from(e));
                             }
                         }
 
                         info!("Subscribing to topics...");
-                        // subscribe
-                        //
                         if let Err(e) = state.broker_client.subscribe(SubscribeRequest {
                             topic: KUBERNETES_CONSUMER.into(),
                             trace_ctx: None,
@@ -276,15 +267,13 @@ impl Actor for ClusterConsumerSupervisor {
                     }
                     ClientEvent::TransportError { reason } => {
                         error!("Transport error occurred! {reason}");
+                        let _ = state.healthcheck.cast(HealthCheckMessage::CassiniDisconnected);
                         myself.stop(Some(reason))
                     }
                     _ => (),
                 }
             }
-            SupervisorMessage::Heartbeat => {
-                HealthState::healthy(true, state.graph_controller.is_some()).write();
-                let _ = myself.send_after(Duration::from_secs(30), || SupervisorMessage::Heartbeat).await;
-            }
+            SupervisorMessage::Heartbeat => {}
         }
         Ok(())
     }
@@ -304,9 +293,7 @@ impl Actor for ClusterConsumerSupervisor {
                 );
             }
             SupervisionEvent::ActorTerminated(actor_cell, _, reason) => {
-                // we no actors start w/o names
                 let actor_name = actor_cell.get_name().unwrap();
-
                 info!(
                     "CONSUMER_SUPERVISOR: {0:?}:{1:?} terminated. {reason:?}",
                     actor_name,
@@ -314,16 +301,16 @@ impl Actor for ClusterConsumerSupervisor {
                 );
             }
             SupervisionEvent::ActorFailed(actor_cell, e) => {
-                // we no actors start w/o names
                 let actor_name = actor_cell.get_name().unwrap();
-
                 error!(
-                    "Consumer_SUPERVISOR: {0:?}:{1:?} failed! {e:?}",
+                    "CONSUMER_SUPERVISOR: {0:?}:{1:?} failed! {e:?}",
                     actor_name,
                     actor_cell.get_id()
                 );
+                // Any child actor failure is fatal — exit so the Job
+                // controller creates a new pod with fresh certs.
+                std::process::exit(1);
             }
-
             SupervisionEvent::ProcessGroupChanged(..) => todo!(),
         }
 

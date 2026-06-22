@@ -31,47 +31,50 @@ let render =
               , kubernetes.VolumeMount::{ name = Constants.neo4jClientCertVolumeName, mountPath = Constants.neo4jClientCertPath, readOnly = Some True }
               , kubernetes.VolumeMount::{ name = "polar-health", mountPath = "/var/run/polar-health" }
               ] # functions.ProxyMount v.proxyCACert
-        in  kubernetes.Deployment::{
-            , metadata = kubernetes.ObjectMeta::{ name = Some v.name, namespace = Some Constants.PolarNamespace, annotations = Some [ Constants.RejectSidecarAnnotation ] }
-            , spec = Some kubernetes.DeploymentSpec::{
-              , selector = kubernetes.LabelSelector::{ matchLabels = Some (toMap { name = v.name }) }
-              , replicas = Some 1
-              , template = kubernetes.PodTemplateSpec::{
-                , metadata = Some kubernetes.ObjectMeta::{ name = Some v.name, labels = Some [ { mapKey = "name", mapValue = v.name } ] }
-                , spec = Some kubernetes.PodSpec::{
-                  , imagePullSecrets = Some v.imagePullSecrets
-                  , volumes          = Some volumes
-                  , initContainers   = Some
-                    [ functions.makeCertClientInitContainer v.certIssuerUrl v.certClientImage v.saTokenAudience
-                    , functions.makeCertInitContainer
-                        "neo4j-cert-client"
-                        v.certIssuerUrl
-                        v.certClientImage
-                        "client"
-                        Constants.neo4jClientCertPath
-                        Constants.neo4jClientCertVolumeName
-                        Constants.neo4jClientSaTokenVolName
-                        "ecdsa-p256"
-                        ([] : List Text)
-                    ]
-                  , containers =
-                    [ kubernetes.Container::{
-                      , name            = v.name
-                      , image           = Some v.image
-                      , imagePullPolicy = Some v.imagePullPolicy
-                      , securityContext = Some Constants.DropAllCapSecurityContext
-                      , env             = Some env
-                      , volumeMounts    = Some mounts
-                      , livenessProbe   = Some kubernetes.Probe::{
-                          , exec                = Some { command = Some [ "polar-healthcheck" ] }
-                          , initialDelaySeconds = Some 150
-                          , periodSeconds       = Some 30
-                          , failureThreshold    = Some 2
-                          , timeoutSeconds      = Some 5
-                          }
+        let podSpec = kubernetes.PodSpec::{
+              , imagePullSecrets = Some v.imagePullSecrets
+              , volumes          = Some volumes
+              , restartPolicy    = Some "Never"
+              , initContainers   = Some
+                [ functions.makeCertClientInitContainer v.certIssuerUrl v.certClientImage v.saTokenAudience
+                , functions.makeCertInitContainer
+                    "neo4j-cert-client"
+                    v.certIssuerUrl
+                    v.certClientImage
+                    "client"
+                    Constants.neo4jClientCertPath
+                    Constants.neo4jClientCertVolumeName
+                    Constants.neo4jClientSaTokenVolName
+                    "ecdsa-p256"
+                    ([] : List Text)
+                ]
+              , containers =
+                [ kubernetes.Container::{
+                  , name            = v.name
+                  , image           = Some v.image
+                  , imagePullPolicy = Some v.imagePullPolicy
+                  , securityContext = Some Constants.DropAllCapSecurityContext
+                  , env             = Some env
+                  , volumeMounts    = Some mounts
+                  , livenessProbe   = Some kubernetes.Probe::{
+                      , exec                = Some { command = Some [ "polar-healthcheck" ] }
+                      , initialDelaySeconds = Some 150
+                      , periodSeconds       = Some 30
+                      , failureThreshold    = Some 2
+                      , timeoutSeconds      = Some 5
                       }
-                    ]
                   }
+                ]
+              }
+        in  kubernetes.Job::{
+            , metadata = kubernetes.ObjectMeta::{ name = Some v.name, namespace = Some Constants.PolarNamespace, annotations = Some [ Constants.RejectSidecarAnnotation ] }
+            , spec = Some kubernetes.JobSpec::{
+              , backoffLimit  = Some 1000000
+              , parallelism   = Some 1
+              , completions   = Some 1
+              , template      = kubernetes.PodTemplateSpec::{
+                , metadata = Some kubernetes.ObjectMeta::{ name = Some v.name, labels = Some [ { mapKey = "name", mapValue = v.name } ] }
+                , spec     = Some podSpec
                 }
               }
             }
