@@ -123,6 +123,7 @@ impl Actor for ProvenanceSupervisor {
     ) -> Result<(), ActorProcessingErr> {
         match msg {
             SupervisorMessage::Heartbeat => {}
+            SupervisorMessage::PrepareShutdown => {}
             SupervisorMessage::ClientEvent { event } => match event {
                 ClientEvent::Registered { .. } => {
                     // subscribe to topic

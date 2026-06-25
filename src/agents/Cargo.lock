@@ -5652,10 +5652,15 @@ name = "polar-health"
 version = "1.0.0"
 dependencies = [
  "ractor",
+ "rand 0.10.1",
+ "rustls 0.23.38",
+ "rustls-webpki 0.103.13",
  "serde",
  "serde_json",
+ "thiserror 1.0.69",
  "tokio",
  "tracing",
+ "webpki-roots",
  "x509-parser 0.16.0",
 ]
 
@@ -5666,6 +5671,21 @@ dependencies = [
  "polar-health",
  "serde_json",
  "x509-parser 0.16.0",
+]
+
+[[package]]
+name = "polar-init"
+version = "1.0.0"
+dependencies = [
+ "cert-client",
+ "cert-issuer-common",
+ "clap",
+ "polar-health",
+ "rustls 0.23.38",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

@@ -185,6 +185,7 @@ impl Actor for ResolverSupervisor {
     ) -> Result<(), ActorProcessingErr> {
         match msg {
             SupervisorMessage::Heartbeat => {}
+            SupervisorMessage::PrepareShutdown => {}
             SupervisorMessage::ClientEvent { event } => match event {
                 ClientEvent::Registered { .. } => {
                     let web_client = get_web_client()?;

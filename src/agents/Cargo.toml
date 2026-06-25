@@ -57,6 +57,7 @@ members = [
     "openapi/observe",
     "polar-health",
     "polar-healthcheck",
+    "polar-init",
     "policy-config",
     "provenance/linker",
     "provenance/provenance-common",
@@ -185,6 +186,7 @@ jira_common = { path = "jira/common" }
 kube-common = { path = "kubernetes/common" }
 polar = { path = "lib" }
 polar-health = { path = "polar-health" }
+polar-init = { path = "polar-init" }
 provenance-common = { path = "provenance/provenance-common" }
 openapi-common = { path = "openapi/common" }
 orchestrator-core = { path = "build-orchestrator/core" }

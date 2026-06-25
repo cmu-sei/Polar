@@ -65,6 +65,7 @@ def main [
     let cert_issuer_url      = $config.cert_issuer_url
     let cert_issuer_audience = $config.cert_issuer_audience
     let cert_client_image    = $config.cert_client_image
+    let polar_init_image      = $config.polar_init_image
 
     # ── Render each chart ─────────────────────────────────────────────────────
     print "Rendering charts..."
@@ -82,7 +83,7 @@ def main [
                 "cert-issuer" => { _placeholder: "" }
                 "cassini"     => { jaegerDNSName: $jaeger_dns_name, certIssuerUrl: $cert_issuer_url, certIssuerAudience: $cert_issuer_audience, certClientImage: $cert_client_image }
                 "gitlab"      => { neo4jBoltAddr: $neo4j_bolt_addr, certIssuerUrl: $cert_issuer_url, certIssuerAudience: $cert_issuer_audience, certClientImage: $cert_client_image }
-                "kube"        => { neo4jBoltAddr: $neo4j_bolt_addr, certIssuerUrl: $cert_issuer_url, certIssuerAudience: $cert_issuer_audience, certClientImage: $cert_client_image }
+                "kube" => { neo4jBoltAddr: $neo4j_bolt_addr, certIssuerUrl: $cert_issuer_url, certIssuerAudience: $cert_issuer_audience, polarInitImage: $polar_init_image }
                 "git"         => { neo4jBoltAddr: $neo4j_bolt_addr, certIssuerUrl: $cert_issuer_url, certIssuerAudience: $cert_issuer_audience, certClientImage: $cert_client_image }
                 "jira"        => { neo4jBoltAddr: $neo4j_bolt_addr, certIssuerUrl: $cert_issuer_url, certIssuerAudience: $cert_issuer_audience, certClientImage: $cert_client_image }
                 "provenance"  => { neo4jBoltAddr: $neo4j_bolt_addr, certIssuerUrl: $cert_issuer_url, certIssuerAudience: $cert_issuer_audience, certClientImage: $cert_client_image }

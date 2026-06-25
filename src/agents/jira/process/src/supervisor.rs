@@ -176,6 +176,7 @@ impl Actor for ConsumerSupervisor {
     ) -> Result<(), ActorProcessingErr> {
         match message {
             SupervisorMessage::Heartbeat => {}
+            SupervisorMessage::PrepareShutdown => {}
             SupervisorMessage::ClientEvent { event } => match event {
                 ClientEvent::Registered { registration_id } => {
                     let args = JiraConsumerArgs {

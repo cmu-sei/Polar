@@ -14,8 +14,10 @@ use polar::cassini::CassiniClient;
 use polar::cassini::SubscribeRequest;
 use polar::cassini::TcpClient;
 use polar::graph::controller::{GraphController, GraphControllerActor};
-use polar::health::{HealthCheckActor, HealthCheckArgs, HealthCheckMessage};
-use ractor::Actor;
+use polar::health::{
+    DepCertEndpoint, HealthCheckActor, HealthCheckArgs, HealthCheckMessage,
+};
+use ractor::{Actor, OutputPort};
 use ractor::ActorProcessingErr;
 use ractor::ActorRef;
 use ractor::SupervisionEvent;
@@ -23,10 +25,13 @@ use ractor::async_trait;
 use serde::de::DeserializeOwned;
 use serde_json::from_value;
 use std::collections::HashMap;
+use std::sync::Arc;
 use tracing::debug;
 use tracing::error;
 use tracing::info;
 use tracing::warn;
+
+const HEALTHCHECK_ACTOR_NAME: &str = "polar.healthcheck";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StateFingerprint {
@@ -182,12 +187,32 @@ impl Actor for ClusterConsumerSupervisor {
         debug!("{myself:?} starting");
         info!("Read neo configuration successfully.");
 
-        // Spawn the healthcheck actor as a linked child. If it fails, the
-        // supervisor's handle_supervisor_evt will call std::process::exit(1).
+        // Build the OutputPort that HealthCheckActor fires when it wants
+        // the supervisor to prepare for shutdown. We subscribe here so
+        // that the message arrives as a SupervisorMessage::PrepareShutdown.
+        let prepare_shutdown_port = Arc::new(OutputPort::<()>::default());
+        prepare_shutdown_port.subscribe(myself.clone(), |()| {
+            Some(SupervisorMessage::PrepareShutdown)
+        });
+
+        // Parse dep cert endpoints for this agent:
+        // kube-consumer depends on Cassini and Neo4j.
+        let dep_cert_endpoints = vec![
+            DepCertEndpoint::parse("cassini-ip-svc.polar.svc.cluster.local:8080:300")
+                .map_err(|e| ActorProcessingErr::from(e))?,
+            DepCertEndpoint::parse("polar-db-svc.polar-graph.svc.cluster.local:7687:300")
+                .map_err(|e| ActorProcessingErr::from(e))?,
+        ];
+
         let (healthcheck, _) = HealthCheckActor::spawn_linked(
-            Some("polar.healthcheck".to_string()),
+            Some(HEALTHCHECK_ACTOR_NAME.to_string()),
             HealthCheckActor,
-            HealthCheckArgs { expects_neo4j: true },
+            HealthCheckArgs {
+                expects_graph: true,
+                rejuvenation_threshold_secs: 300,
+                dep_cert_endpoints,
+                prepare_shutdown_port,
+            },
             myself.get_cell(),
         )
         .await
@@ -217,31 +242,58 @@ impl Actor for ClusterConsumerSupervisor {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
+            SupervisorMessage::PrepareShutdown => {
+                info!("CONSUMER_SUPERVISOR: PrepareShutdown received, unsubscribing from Cassini");
+
+                // Unsubscribe from the topic — no new messages will arrive
+                // after this. Because ractor is sequential, any messages
+                // already in our mailbox ahead of PrepareShutdown have
+                // already been processed.
+                if let Err(e) = state.broker_client.unsubscribe(polar::cassini::UnsubscribeRequest {
+                    topic: KUBERNETES_CONSUMER.to_string(),
+                    trace_ctx: None,
+                }) {
+                    warn!("CONSUMER_SUPERVISOR: unsubscribe failed (continuing): {e}");
+                }
+
+                // Acknowledge to the HealthCheckActor so it can stop cleanly.
+                if let Err(e) = state.healthcheck.cast(HealthCheckMessage::ShutdownAck) {
+                    error!("CONSUMER_SUPERVISOR: failed to send ShutdownAck: {e}");
+                }
+            }
+
             SupervisorMessage::ClientEvent { event } => {
                 match event {
                     ClientEvent::Registered { .. } => {
-                        // Notify healthcheck that Cassini is up
                         let _ = state.healthcheck.cast(HealthCheckMessage::CassiniConnected);
 
-                        match GraphControllerActor::spawn_linked(
-                            Some("kubernetes.cluster.graph.controller".to_string()),
-                            GraphControllerActor,
-                            (),
-                            myself.get_cell(),
-                        )
-                        .await
-                        {
-                            Ok((graph_controller, _)) => {
-                                state.graph_controller = Some(graph_controller);
-                                // Notify healthcheck that neo4j is up
-                                let _ = state.healthcheck.cast(HealthCheckMessage::Neo4jConnected);
+                        // Only spawn graph controller if not already present
+                        if state.graph_controller.is_none() {
+                            match GraphControllerActor::spawn_linked(
+                                Some("kubernetes.cluster.graph.controller".to_string()),
+                                GraphControllerActor,
+                                (),
+                                myself.get_cell(),
+                            )
+                            .await
+                            {
+                                Ok((graph_controller, _)) => {
+                                    state.graph_controller = Some(graph_controller);
+                                    let _ = state
+                                        .healthcheck
+                                        .cast(HealthCheckMessage::GraphConnected);
+                                }
+                                Err(e) => {
+                                    error!("Error initializing graph controller! {e}");
+                                    return Err(ActorProcessingErr::from(e));
+                                }
                             }
-                            Err(e) => {
-                                error!("Error initializing graph controller! {e}");
-                                return Err(ActorProcessingErr::from(e));
-                            }
+                        } else {
+                            // Already have a graph controller — just notify healthcheck
+                            let _ = state.healthcheck.cast(HealthCheckMessage::GraphConnected);
                         }
 
+                        // Always re-subscribe on reconnect
                         info!("Subscribing to topics...");
                         if let Err(e) = state.broker_client.subscribe(SubscribeRequest {
                             topic: KUBERNETES_CONSUMER.into(),
@@ -251,6 +303,7 @@ impl Actor for ClusterConsumerSupervisor {
                             return Err(ActorProcessingErr::from(e.to_string()));
                         }
                     }
+
                     ClientEvent::MessagePublished { topic, payload, .. } => {
                         if let Some(controller) = &state.graph_controller {
                             Self::deserialize_and_dispatch(
@@ -265,14 +318,19 @@ impl Actor for ClusterConsumerSupervisor {
                             myself.stop(None);
                         }
                     }
+
                     ClientEvent::TransportError { reason } => {
                         error!("Transport error occurred! {reason}");
                         let _ = state.healthcheck.cast(HealthCheckMessage::CassiniDisconnected);
-                        myself.stop(Some(reason))
+                        // Don't stop — the TCP client will attempt to reconnect.
+                        // HealthCheckActor tracks the disconnected state and will
+                        // fail if reconnection doesn't happen within the tick interval.
                     }
+
                     _ => (),
                 }
             }
+
             SupervisorMessage::Heartbeat => {}
         }
         Ok(())
@@ -293,15 +351,22 @@ impl Actor for ClusterConsumerSupervisor {
                 );
             }
             SupervisionEvent::ActorTerminated(actor_cell, _, reason) => {
-                let actor_name = actor_cell.get_name().unwrap();
+                let actor_name = actor_cell.get_name().unwrap_or_default();
                 info!(
                     "CONSUMER_SUPERVISOR: {0:?}:{1:?} terminated. {reason:?}",
                     actor_name,
                     actor_cell.get_id()
                 );
+                // Clean termination of the healthcheck actor means the
+                // rejuvenation sequence completed — exit so the Job
+                // controller creates a new pod with fresh certs.
+                if actor_name == HEALTHCHECK_ACTOR_NAME {
+                    info!("CONSUMER_SUPERVISOR: healthcheck actor terminated cleanly, exiting for rejuvenation");
+                    std::process::exit(1);
+                }
             }
             SupervisionEvent::ActorFailed(actor_cell, e) => {
-                let actor_name = actor_cell.get_name().unwrap();
+                let actor_name = actor_cell.get_name().unwrap_or_default();
                 error!(
                     "CONSUMER_SUPERVISOR: {0:?}:{1:?} failed! {e:?}",
                     actor_name,

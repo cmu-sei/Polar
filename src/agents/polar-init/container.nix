@@ -1,6 +1,6 @@
 {
   ai = null;
-  entrypoint = "kube-consumer";
+  entrypoint = "polar-init";
   extraEnv = [
     {
       name = "SSL_CERT_FILE";
@@ -14,16 +14,10 @@
         u.BuildTime;
       value = "/etc/ssl/certs";
     }
-    {
-      name = "POLAR_HEALTH_CERTS";
-      placement = u:
-        u.BuildTime;
-      value = "/etc/tls/certs/cert.pem,/etc/neo4j-client-tls/cert.pem";
-    }
   ];
   mode = u:
     u.Minimal;
-  name = "kube-consumer";
+  name = "polar-init";
   nix = {
     buildUserCount = u:
       u.Dynamic;
@@ -37,15 +31,11 @@
       u.Micro)
     (u:
       u.Custom {
-        name = "polar-healthcheck-bin";
+        name = "polar-init-deps";
         packages = [
-          { attrPath = "default"; flakeInput = "polar-healthcheck"; }
+          { attrPath = "cacert"; flakeInput = null; }
+          { attrPath = "openssl"; flakeInput = null; }
         ];
-      })
-    (u:
-      u.Custom {
-        name = "polar-init-bin";
-        packages = [ { attrPath = "default"; flakeInput = "polar-init"; } ];
       })
   ];
   pipeline = null;

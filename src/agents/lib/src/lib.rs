@@ -55,6 +55,7 @@ pub trait Supervisor {
 pub enum SupervisorMessage {
     ClientEvent { event: ClientEvent },
     Heartbeat,
+    PrepareShutdown,
 }
 
 /// Helper to spawn a TCP client to connect to the message broker, Cassini.

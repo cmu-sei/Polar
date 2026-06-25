@@ -201,6 +201,7 @@ impl Actor for OrchestratorSupervisor {
     ) -> Result<(), ActorProcessingErr> {
         match message {
             SupervisorMessage::Heartbeat => {}
+            SupervisorMessage::PrepareShutdown => {}
             SupervisorMessage::ClientEvent { event } => match event {
                 ClientEvent::Registered { .. } => {
                     info!("Orchestrator successfully initialized");

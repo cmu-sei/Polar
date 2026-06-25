@@ -71,6 +71,7 @@ impl Actor for RootSupervisor {
     ) -> Result<(), ActorProcessingErr> {
         match msg {
             SupervisorMessage::Heartbeat => {}
+            SupervisorMessage::PrepareShutdown => {}
             SupervisorMessage::ClientEvent { event } => match event {
                 ClientEvent::Registered { .. } => {
                     let (graph_controller, _) = GraphControllerActor::spawn_linked(

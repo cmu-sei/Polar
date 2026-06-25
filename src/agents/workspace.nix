@@ -136,7 +136,12 @@ let
       src = workspaceFileset ./.;
     });
 
+    polarInit = import ./polar-init/package.nix {
+      inherit pkgs craneLib workspaceFileset nix-container-lib inputs system;
+      crateArgs = individualCrateArgs;
+    };
+
 in
 {
-  inherit workspacePackages gitlabAgent cassini kubeAgent webAgent provenance scheduler jiraAgent gitAgent buildOrchestrator certIssuer nuInit gitServer healthcheck;
+  inherit workspacePackages gitlabAgent cassini kubeAgent webAgent provenance scheduler jiraAgent gitAgent buildOrchestrator certIssuer nuInit gitServer healthcheck polarInit;
 }

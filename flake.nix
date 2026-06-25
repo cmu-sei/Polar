@@ -64,6 +64,9 @@
             polar-healthcheck = {
               packages.${system}.default = polarPkgs.healthcheck;
             };
+            polar-init = {
+              packages.${system}.default = polarPkgs.polarInit;
+            };
           };
           inherit configNixPath;
         };
@@ -183,6 +186,7 @@
           # ── Infrastructure containers ─────────────────────────────────────────
           nuInitImage = polarPkgs.nuInit.image;
           gitServerImage = polarPkgs.gitServer.image;
+          polarInitImage = polarPkgs.polarInit.image;
         };
 
         devShells.default = container.devShell.overrideAttrs (old: {

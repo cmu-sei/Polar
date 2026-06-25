@@ -18,8 +18,8 @@ use std::fs;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use polar_health::{
-    HealthState, POLAR_HEALTH_CERTS_ENV, POLAR_HEALTH_EXPIRY_SECS_ENV, POLAR_HEALTH_FILE_DEFAULT,
-    POLAR_HEALTH_FILE_ENV, POLAR_HEALTH_STALE_SECS_ENV,
+    HealthState, POLAR_HEALTH_CERTS_ENV, POLAR_HEALTH_EXPIRY_SECS_ENV,
+    POLAR_HEALTH_FILE_DEFAULT, POLAR_HEALTH_FILE_ENV, POLAR_HEALTH_STALE_SECS_ENV, 
 };
 use x509_parser::prelude::*;
 
@@ -96,16 +96,16 @@ fn check_health_file(stale_threshold: u64) -> bool {
                     eprintln!("ERROR: health file is {age}s old (threshold: {stale_threshold}s)");
                     return false;
                 }
-                if state.status != "healthy" {
+                if state.status != polar_health::HealthStatus::Healthy {
                     eprintln!(
-                        "ERROR: agent status is '{}' (cassini={}, neo4j={})",
-                        state.status, state.cassini_connected, state.neo4j_connected
+                        "ERROR: agent status is '{}' (cassini={}, graph={})",
+                        state.status, state.cassini_connected, state.graph_connected
                     );
                     return false;
                 }
                 eprintln!(
-                    "OK: agent healthy, age={age}s, cassini={}, neo4j={}",
-                    state.cassini_connected, state.neo4j_connected
+                    "ERROR: agent status is '{}' (cassini={}, graph={})",
+                    state.status, state.cassini_connected, state.graph_connected
                 );
                 true
             }

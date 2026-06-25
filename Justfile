@@ -76,6 +76,7 @@ build-all:
     nix build {{_nix_flags}} ".#packages.{{platform}}.orchestratorImage"     -o result-build-orchestrator
     nix build {{_nix_flags}} ".#packages.{{platform}}.buildProcessorImage"   -o result-build-processor
     nix build {{_nix_flags}} ".#packages.{{platform}}.nuInitImage"           -o result-nu-init
+    nix build {{_nix_flags}} ".#packages.{{platform}}.polarInitImage"        -o result-polar-init
     nix build {{_nix_flags}} ".#packages.{{platform}}.gitServerImage"        -o result-git-server
 
 # ── Dev container ─────────────────────────────────────────────────────────────
@@ -403,6 +404,11 @@ nu-init:
     nix build {{_nix_flags}} ".#packages.{{platform}}.nuInitImage" -o result-nu-init
     podman load -i result-nu-init
 
+polar-init:
+    echo "Building polar-init container..."
+    nix build {{_nix_flags}} ".#packages.{{platform}}.polarInitImage" -o result-polar-init
+    podman load -i result-polar-init
+
 git-server:
     nix build {{_nix_flags}} ".#packages.{{platform}}.gitServerImage" -o result-git-server-image
     podman load -i result-git-server-image
@@ -725,7 +731,7 @@ ci:
 neo4j-install-certs:
     #!/usr/bin/env bash
     set -euo pipefail
-    AGENT_POD=$(kubectl get pod -n polar -l name=kube-consumer -o jsonpath='{.items[0].metadata.name}')
+    AGENT_POD=$(kubectl get pod -n polar -l name=kube-consumer --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}')
     echo "Fetching certs from $AGENT_POD..."
     kubectl exec -n polar "$AGENT_POD" -c kube-consumer -- cat /etc/neo4j-client-tls/cert.pem > /tmp/neo4j-client-cert.pem
     kubectl exec -n polar "$AGENT_POD" -c kube-consumer -- cat /etc/neo4j-client-tls/key.pem  > /tmp/neo4j-client-key.pem
@@ -866,6 +872,7 @@ cluster-build-all:
     just jira all
     just openapi all
     just nu-init
+    just polar-init
 
 # Build and load all core Polar images into the cluster.
 # All images are loaded directly from nix result symlinks.
@@ -923,6 +930,7 @@ cluster-load-all neo4j_result=_neo4j_result:
     _load ./result-build-orchestrator
     _load ./result-build-processor
     _load ./result-nu-init
+    _load ./result-polar-init
     # Retag to match manifest image references
     _tag docker.io/library/cassini:latest                       docker.io/library/cassini:latest
     _tag docker.io/library/harness-producer:latest              docker.io/library/harness-producer:latest
@@ -947,8 +955,9 @@ cluster-load-all neo4j_result=_neo4j_result:
     _tag docker.io/library/build-processor:latest               docker.io/library/build-processor:latest
     _tag docker.io/library/nix-neo4j:latest                     docker.io/library/neo4j:5.26.2
     _tag docker.io/library/polar-nu-init:latest                 docker.io/library/polar-nu-init:latest
-    _tag docker.io/library/cert-issuer:latest        docker.io/library/cert-issuer:latest
-    _tag docker.io/library/polar-cert-client:latest  docker.io/library/polar-cert-client:latest
+    _tag docker.io/library/cert-issuer:latest                   docker.io/library/cert-issuer:latest
+    _tag docker.io/library/polar-cert-client:latest             docker.io/library/polar-cert-client:latest
+    _tag docker.io/library/polar-init:latest                    docker.io/library/polar-init:latest
     echo "Core images loaded and tagged."
 
 # Render manifests for the local cluster.
