@@ -130,6 +130,11 @@ def apply_manifests [config: record, output_dir: string] {
         let manifest = ($output_dir | path join $filename)
         if ($manifest | path exists) {
             print $"  applying ($filename)..."
+            # Jobs have immutable pod templates — delete before apply if exists
+            let is_job = (open --raw $manifest | str contains "kind: Job")
+            if $is_job {
+                run-external "kubectl" "--kubeconfig" $kubeconfig "delete" "--ignore-not-found" "-f" $manifest
+            }
             run-external "kubectl" "--kubeconfig" $kubeconfig "apply" "-f" $manifest
         } else {
             print $"  skipping ($filename) — not found"
