@@ -874,6 +874,50 @@ cluster-build-all:
     just nu-init
     just polar-init
 
+# Load only the images needed by the local-minimal target:
+# neo4j, cassini, cert-issuer, polar-init, kube observer/consumer, jira observer/processor.
+cluster-load-minimal neo4j_result=_neo4j_result:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    _load() {
+        if [ -e "$1" ]; then
+            echo "Loading $1..."
+            podman exec -i u7s ctr -n k8s.io images import - < "$1"
+        else
+            echo "Skipping $1 (not found)"
+        fi
+    }
+    _tag() {
+        echo "Tagging $1 -> $2"
+        podman exec u7s ctr -n k8s.io images tag "$1" "$2" 2>/dev/null || true
+    }
+    # Infrastructure
+    if [ -n "{{neo4j_result}}" ]; then
+        _load "{{neo4j_result}}"
+    fi
+    # Minimal-target images only
+    _load ./result-cassini-image
+    _load ./result-cert-issuer
+    _load ./result-cert-client
+    _load ./result-polar-init
+    _load ./result-kube-observer
+    _load ./result-kube-consumer
+    _load ./result-jira-observer
+    _load ./result-jira-processor
+    _load ./result-nu-init
+    # Retag to match manifest image references
+    _tag docker.io/library/cassini:latest               docker.io/library/cassini:latest
+    _tag docker.io/library/kube-observer:latest          docker.io/library/kube-observer:latest
+    _tag docker.io/library/kube-consumer:latest          docker.io/library/kube-consumer:latest
+    _tag docker.io/library/jira-observer:latest          docker.io/library/jira-observer:latest
+    _tag docker.io/library/jira-processor:latest         docker.io/library/jira-processor:latest
+    _tag docker.io/library/nix-neo4j:latest              docker.io/library/neo4j:5.26.2
+    _tag docker.io/library/cert-issuer:latest             docker.io/library/cert-issuer:latest
+    _tag docker.io/library/polar-cert-client:latest      docker.io/library/polar-cert-client:latest
+    _tag docker.io/library/polar-init:latest             docker.io/library/polar-init:latest
+    _tag docker.io/library/polar-nu-init:latest          docker.io/library/polar-nu-init:latest
+    echo "Minimal images loaded and tagged."
+
 # Build and load all core Polar images into the cluster.
 # All images are loaded directly from nix result symlinks.
 # Usage: just cluster-load-all

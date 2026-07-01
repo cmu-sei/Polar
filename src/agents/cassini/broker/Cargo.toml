@@ -7,6 +7,7 @@ license.workspace = true
 [dependencies]
 rkyv = { workspace = true }
 polar = { path = "../../lib" }
+polar-health = { workspace = true }
 async-trait.workspace = true
 ractor.workspace = true
 tokio.workspace = true

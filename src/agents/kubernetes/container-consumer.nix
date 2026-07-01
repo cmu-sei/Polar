@@ -42,11 +42,6 @@
           { attrPath = "default"; flakeInput = "polar-healthcheck"; }
         ];
       })
-    (u:
-      u.Custom {
-        name = "polar-init-bin";
-        packages = [ { attrPath = "default"; flakeInput = "polar-init"; } ];
-      })
   ];
   pipeline = null;
   shell = null;

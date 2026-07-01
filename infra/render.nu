@@ -46,6 +46,9 @@ def main [
     print ""
 
     # ── Prepare output directory ───────────────────────────────────────────────
+    if ($output_dir | path exists) {
+        rm -rf $output_dir
+    }
     mkdir $output_dir
 
     # ── Build context record passed to every chart main.nu ────────────────────
@@ -67,6 +70,8 @@ def main [
     let cert_client_image    = $config.cert_client_image
     let polar_init_image      = $config.polar_init_image
 
+    let cassini_shutdown_token = $config.cassini_shutdown_token
+
     # ── Render each chart ─────────────────────────────────────────────────────
     print "Rendering charts..."
     print ""
@@ -81,7 +86,7 @@ def main [
         let chart_context = ($base_context | merge { chart_dir: $chart_dir } | merge (
             match $chart_name {
                 "cert-issuer" => { _placeholder: "" }
-                "cassini"     => { jaegerDNSName: $jaeger_dns_name, certIssuerUrl: $cert_issuer_url, certIssuerAudience: $cert_issuer_audience, certClientImage: $cert_client_image }
+                "cassini" => { jaegerDNSName: $jaeger_dns_name, certIssuerUrl: $cert_issuer_url, certIssuerAudience: $cert_issuer_audience, polarInitImage: $polar_init_image, cassiniShutdownToken: $cassini_shutdown_token }
                 "gitlab"      => { neo4jBoltAddr: $neo4j_bolt_addr, certIssuerUrl: $cert_issuer_url, certIssuerAudience: $cert_issuer_audience, certClientImage: $cert_client_image }
                 "kube" => { neo4jBoltAddr: $neo4j_bolt_addr, certIssuerUrl: $cert_issuer_url, certIssuerAudience: $cert_issuer_audience, polarInitImage: $polar_init_image }
                 "git"         => { neo4jBoltAddr: $neo4j_bolt_addr, certIssuerUrl: $cert_issuer_url, certIssuerAudience: $cert_issuer_audience, certClientImage: $cert_client_image }

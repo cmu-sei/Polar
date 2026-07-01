@@ -23,6 +23,8 @@ let render =
           , oidcIssuerUrl : Text
           , oidcAudience : List Text
           , oidcJwksUri : Optional Text
+          , defaultLifetimeSecs : Natural
+          , serverLifetimeSecs : Natural
           }
         ) ->
         let jwks =
@@ -44,7 +46,14 @@ let render =
                                   , default_lifetime =
                                       JSON.object
                                         ( toMap
-                                            { secs = JSON.natural 3600
+                                            { secs = JSON.natural v.defaultLifetimeSecs
+                                            , nanos = JSON.natural 0
+                                            }
+                                        )
+                                  , server_lifetime =
+                                      JSON.object
+                                        ( toMap
+                                            { secs = JSON.natural v.serverLifetimeSecs
                                             , nanos = JSON.natural 0
                                             }
                                         )

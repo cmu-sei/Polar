@@ -64,9 +64,6 @@
             polar-healthcheck = {
               packages.${system}.default = polarPkgs.healthcheck;
             };
-            polar-init = {
-              packages.${system}.default = polarPkgs.polarInit;
-            };
           };
           inherit configNixPath;
         };

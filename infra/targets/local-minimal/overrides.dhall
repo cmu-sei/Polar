@@ -1,6 +1,7 @@
--- infra/targets/local/overrides.dhall
+-- infra/targets/local-minimal/overrides.dhall
 --
--- Local target value overrides, scoped per chart.
+-- Minimal target value overrides, scoped per chart.
+-- Covers: neo4j, cassini, cert-issuer, jaeger, jira, kube agents.
 -- Each chart's main.nu merges: values.dhall // overrides.<chart>
 
 { namespaces  = {=}
@@ -37,47 +38,10 @@
   , processor = { image = "jira-processor:latest" }
   }
 
-, gitlab =
-  { imagePullSecrets = [] : List { name : Optional Text }
-  , observer = { image = "gitlab-observer:latest" }
-  , consumer = { image = "gitlab-consumer:latest" }
-  }
-
 , kube =
   { imagePullSecrets = [] : List { name : Optional Text }
   , observer = { image = "kube-observer:latest" }
   , consumer = { image = "kube-consumer:latest" }
-  }
-
-, git =
-  { imagePullSecrets = [] : List { name : Optional Text }
-  , observer  = { image = "git-observer:latest" }
-  , consumer  = { image = "git-processor:latest" }
-  , scheduler = { image = "git-scheduler:latest" }
-  }
-
-, provenance =
-  { imagePullSecrets = [] : List { name : Optional Text }
-  , linker   = { image = "provenance-linker:latest" }
-  , resolver = { image = "provenance-resolver:latest" }
-  }
-
-, build =
-  { imagePullSecrets = [] : List { name : Optional Text }
-  , orchestrator = { image = "build-orchestrator:latest" }
-  , processor    = { image = "build-processor:latest" }
-  }
-
-, scheduler =
-  { imagePullSecrets = [] : List { name : Optional Text }
-  , observer  = { image = "scheduler-observer:latest" }
-  , processor = { image = "scheduler-processor:latest" }
-  }
-
-, openapi =
-  { imagePullSecrets = [] : List { name : Optional Text }
-  , observer  = { image = "openapi-observer:latest", openapiEndpoint = "http://localhost:3000/api-docs/openapi.json" }
-  , processor = { image = "openapi-processor:latest" }
   }
 
 , certIssuer =

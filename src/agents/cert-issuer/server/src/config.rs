@@ -73,6 +73,10 @@ pub struct CaConfig {
     pub ca_cert_path: String,
     pub ca_key_path: String,
     pub default_lifetime: Duration,
+
+    /// Lifetime for server certs (e.g. Cassini). Allows long-lived
+    /// infrastructure certs without affecting client cert TTL.
+    pub server_lifetime: Duration,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
