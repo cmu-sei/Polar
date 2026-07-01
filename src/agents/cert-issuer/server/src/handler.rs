@@ -53,6 +53,7 @@ pub struct Handler {
     /// Lifetime for server certs. Typically longer than client certs
     /// to reduce Cassini restart frequency.
     pub server_lifetime: Duration,
+    pub identity_lifetime_overrides: std::collections::HashMap<String, Duration>,
 }
 
 #[derive(Debug)]
@@ -121,13 +122,19 @@ impl Handler {
         // is embedded in the CSR, and the handler has already verified
         // it matches the token. The CA's job is to sign; the
         // verification work is done.
+        let lifetime = self
+            .identity_lifetime_overrides
+            .get(&dns_identity)
+            .copied()
+            .unwrap_or(match request.cert_type {
+                cert_issuer_common::CertType::Server => self.server_lifetime,
+                cert_issuer_common::CertType::Client => self.default_lifetime,
+            });
+
         let ca_request = CaIssueRequest {
             csr_pem: request.csr_pem,
             sans: all_sans,
-            lifetime: match request.cert_type {
-                cert_issuer_common::CertType::Server => self.server_lifetime,
-                cert_issuer_common::CertType::Client => self.default_lifetime,
-            },
+            lifetime,
             cert_type: request.cert_type,
         };
 

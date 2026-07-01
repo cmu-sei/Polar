@@ -22,7 +22,10 @@ def main [context_nuon: string] {
 
     # ConfigMap — config JSON rendered from target OIDC values
     let tmp  = (mktemp --suffix ".dhall")
-    let expr = "let v = " + $merged + " in " + $chart_dir + "/configmap.dhall { name = v.name, port = v.port, caCertPath = v.caCertPath, caKeyPath = v.caKeyPath, oidcIssuerUrl = v.oidcIssuerUrl, oidcAudience = v.oidcAudience, oidcJwksUri = v.oidcJwksUri, defaultLifetimeSecs = v.defaultLifetimeSecs, serverLifetimeSecs = v.serverLifetimeSecs }"
+    let identity_overrides_dhall = ($context.identityLifetimeOverrides
+    | each {|o| $"{ identity = \"($o.identity)\", lifetimeSecs = ($o.lifetimeSecs) }" }
+    | str join ", ")
+    let expr = "let v = " + $merged + " in " + $chart_dir + "/configmap.dhall { name = v.name, port = v.port, caCertPath = v.caCertPath, caKeyPath = v.caKeyPath, oidcIssuerUrl = v.oidcIssuerUrl, oidcAudience = v.oidcAudience, oidcJwksUri = v.oidcJwksUri, defaultLifetimeSecs = v.defaultLifetimeSecs, serverLifetimeSecs = v.serverLifetimeSecs, identityLifetimeOverrides = [ " + $identity_overrides_dhall + " ] }"
     $expr | save --force $tmp
     print $"  rendering configmap.dhall -> cert-issuer-configmap.yaml"
     dhall-to-yaml --file $tmp | save --force ($output_dir | path join "cert-issuer-configmap.yaml")

@@ -71,6 +71,7 @@ def main [
     let polar_init_image      = $config.polar_init_image
 
     let cassini_shutdown_token = $config.cassini_shutdown_token
+    let identity_lifetime_overrides = $config.identity_lifetime_overrides
 
     # ── Render each chart ─────────────────────────────────────────────────────
     print "Rendering charts..."
@@ -85,12 +86,12 @@ def main [
         # Build chart-specific context by extending base context
         let chart_context = ($base_context | merge { chart_dir: $chart_dir } | merge (
             match $chart_name {
-                "cert-issuer" => { _placeholder: "" }
+                "cert-issuer" => { identityLifetimeOverrides: $identity_lifetime_overrides }
                 "cassini" => { jaegerDNSName: $jaeger_dns_name, certIssuerUrl: $cert_issuer_url, certIssuerAudience: $cert_issuer_audience, polarInitImage: $polar_init_image, cassiniShutdownToken: $cassini_shutdown_token }
                 "gitlab"      => { neo4jBoltAddr: $neo4j_bolt_addr, certIssuerUrl: $cert_issuer_url, certIssuerAudience: $cert_issuer_audience, certClientImage: $cert_client_image }
                 "kube" => { neo4jBoltAddr: $neo4j_bolt_addr, certIssuerUrl: $cert_issuer_url, certIssuerAudience: $cert_issuer_audience, polarInitImage: $polar_init_image }
                 "git"         => { neo4jBoltAddr: $neo4j_bolt_addr, certIssuerUrl: $cert_issuer_url, certIssuerAudience: $cert_issuer_audience, certClientImage: $cert_client_image }
-                "jira"        => { neo4jBoltAddr: $neo4j_bolt_addr, certIssuerUrl: $cert_issuer_url, certIssuerAudience: $cert_issuer_audience, certClientImage: $cert_client_image }
+                "jira" => { neo4jBoltAddr: $neo4j_bolt_addr, certIssuerUrl: $cert_issuer_url, certIssuerAudience: $cert_issuer_audience, polarInitImage: $polar_init_image }
                 "provenance"  => { neo4jBoltAddr: $neo4j_bolt_addr, certIssuerUrl: $cert_issuer_url, certIssuerAudience: $cert_issuer_audience, certClientImage: $cert_client_image }
                 "build"       => { neo4jBoltAddr: $neo4j_bolt_addr, certIssuerUrl: $cert_issuer_url, certIssuerAudience: $cert_issuer_audience, certClientImage: $cert_client_image }
                 "scheduler"   => { neo4jBoltAddr: $neo4j_bolt_addr, remoteUrl: $scheduler_remote_url, certIssuerUrl: $cert_issuer_url, certIssuerAudience: $cert_issuer_audience, certClientImage: $cert_client_image }

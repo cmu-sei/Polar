@@ -10,7 +10,7 @@ let render =
           , image            : Text
           , imagePullPolicy  : Text
           , imagePullSecrets : List { name : Optional Text }
-          , certClientImage  : Text
+          , polarInitImage   : Text
           , certIssuerUrl    : Text
           , saTokenAudience  : Text
           , neo4jBoltAddr    : Text
@@ -21,19 +21,15 @@ let render =
               [ Constants.certEmptyDirVolume
               , Constants.saTokenVolume v.saTokenAudience
               , kubernetes.Volume::{ name = Constants.neo4jClientCertVolumeName, emptyDir = Some kubernetes.EmptyDirVolumeSource::{=} }
-              , Constants.saTokenVolume v.saTokenAudience // { name = Constants.neo4jClientSaTokenVolName }
-              , kubernetes.Volume::{ name = "build-orchestrator-config", secret = Some kubernetes.SecretVolumeSource::{ secretName = Some "build-orchestrator-config" } }
               ] # functions.ProxyVolume v.proxyCACert
 
         let env =
               Constants.commonClientEnv
               # functions.makeGraphEnv v.neo4jBoltAddr Constants.graphConfig Constants.graphSecretKeySelector (Some "/etc/neo4j-client-tls/ca.pem")
-              # [ kubernetes.EnvVar::{ name = "ORCHESTRATOR_CONFIG_FILE", value = Some "/etc/cyclops/cyclops.yaml" } ]
 
         let mounts =
               [ Constants.certVolumeMount
               , kubernetes.VolumeMount::{ name = Constants.neo4jClientCertVolumeName, mountPath = Constants.neo4jClientCertPath, readOnly = Some True }
-              , kubernetes.VolumeMount::{ name = "build-orchestrator-config", mountPath = "/etc/cyclops", readOnly = Some True }
               ] # functions.ProxyMount v.proxyCACert
 
         in  kubernetes.Deployment::{
@@ -47,17 +43,19 @@ let render =
                   , imagePullSecrets = Some v.imagePullSecrets
                   , volumes          = Some volumes
                   , initContainers   = Some
-                    [ functions.makeCertClientInitContainer v.certIssuerUrl v.certClientImage v.saTokenAudience
-                    , functions.makeCertInitContainer
-                        "neo4j-cert-client"
+                    [ functions.makePolarInitContainer
+                        v.polarInitImage
+                        v.imagePullPolicy
+                        Constants.saTokenVolumeName
                         v.certIssuerUrl
-                        v.certClientImage
-                        "client"
-                        Constants.neo4jClientCertPath
-                        Constants.neo4jClientCertVolumeName
-                        Constants.neo4jClientSaTokenVolName
-                        "ecdsa-p256"
+                        Constants.saTokenPath
+                        [ kubernetes.VolumeMount::{ name = Constants.certVolumeName,            mountPath = Constants.tlsPath             }
+                        , kubernetes.VolumeMount::{ name = Constants.neo4jClientCertVolumeName, mountPath = Constants.neo4jClientCertPath }
+                        ]
                         ([] : List Text)
+                        [ "client:${Constants.tlsPath}:ecdsa-p256:"
+                        , "client:${Constants.neo4jClientCertPath}:ecdsa-p256:"
+                        ]
                     ]
                   , containers =
                     [ kubernetes.Container::{

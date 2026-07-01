@@ -53,5 +53,7 @@
   , oidcAudience     = ["polar-cert-issuer.local", "polar-cert-issuer-neo4j.local"]
   , oidcJwksUri      = Some "https://kubernetes.default.svc.cluster.local/openid/v1/jwks"
   , serverLifetimeSecs = 43200
+  , identityLifetimeOverrides =
+    [ { identity = "default.polar-graph.serviceaccount.cluster.local", lifetimeSecs = 31536000 } ]
   }
 }

@@ -64,5 +64,8 @@ def main [] {
         cert_client_image     : "polar-cert-client:latest"
         polar_init_image      : "polar-init:latest"
         cassini_shutdown_token : ($env.CASSINI_SHUTDOWN_TOKEN? | default "HEYTHERE")
+        identity_lifetime_overrides : [
+            { identity: "default.polar-graph.serviceaccount.cluster.local", lifetimeSecs: 31536000 }
+        ]
     } | to nuon
 }

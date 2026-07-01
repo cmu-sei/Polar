@@ -10,7 +10,7 @@ let render =
           , image            : Text
           , imagePullPolicy  : Text
           , imagePullSecrets : List { name : Optional Text }
-          , certClientImage  : Text
+          , polarInitImage   : Text
           , certIssuerUrl    : Text
           , saTokenAudience  : Text
           , jiraUrl          : Text
@@ -43,9 +43,28 @@ let render =
                 , metadata = Some kubernetes.ObjectMeta::{ name = Some v.name, labels = Some [ { mapKey = "name", mapValue = v.name } ] }
                 , spec = Some kubernetes.PodSpec::{
                   , imagePullSecrets = Some v.imagePullSecrets
-                  , volumes = Some volumes
-                  , initContainers = Some [ functions.makeCertClientInitContainer v.certIssuerUrl v.certClientImage v.saTokenAudience ]
-                  , containers = [ kubernetes.Container::{ name = v.name, image = Some v.image, imagePullPolicy = Some v.imagePullPolicy, securityContext = Some Constants.DropAllCapSecurityContext, env = Some env, volumeMounts = Some mounts } ]
+                  , volumes          = Some volumes
+                  , initContainers   = Some
+                    [ functions.makePolarInitContainer
+                        v.polarInitImage
+                        v.imagePullPolicy
+                        Constants.saTokenVolumeName
+                        v.certIssuerUrl
+                        Constants.saTokenPath
+                        [ kubernetes.VolumeMount::{ name = Constants.certVolumeName, mountPath = Constants.tlsPath } ]
+                        ([] : List Text)
+                        [ "client:${Constants.tlsPath}:ecdsa-p256:" ]
+                    ]
+                  , containers =
+                    [ kubernetes.Container::{
+                      , name            = v.name
+                      , image           = Some v.image
+                      , imagePullPolicy = Some v.imagePullPolicy
+                      , securityContext = Some Constants.DropAllCapSecurityContext
+                      , env             = Some env
+                      , volumeMounts    = Some mounts
+                      }
+                    ]
                   }
                 }
               }
