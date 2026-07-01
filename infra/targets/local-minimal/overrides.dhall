@@ -34,7 +34,7 @@
 
 , jira =
   { imagePullSecrets = [] : List { name : Optional Text }
-  , observer  = { image = "jira-observer:latest" }
+  , observer  = { image = "jira-observer:latest", jiraUrl = "https://daveman1010220.atlassian.net", jiraEmail = Some "daveman1010220@gmail.com" }
   , processor = { image = "jira-processor:latest" }
   }
 

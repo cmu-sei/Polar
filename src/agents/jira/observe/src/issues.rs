@@ -22,7 +22,7 @@
 */
 use crate::{
     BROKER_CLIENT_NAME, Command, JiraObserverArgs, JiraObserverMessage, JiraObserverState,
-    handle_backoff,
+    handle_backoff, JiraDeployment
 };
 use cassini_client::TcpClientMessage;
 use cassini_types::ClientMessage;
@@ -77,7 +77,8 @@ impl Actor for JiraIssueObserver {
 
         let state = JiraObserverState::new(
             args.jira_url,
-            args.token,
+            args.auth,
+            args.deployment,
             args.web_client,
             args.registration_id,
             Duration::from_secs(args.base_interval),
@@ -104,16 +105,12 @@ impl Actor for JiraIssueObserver {
         match message {
             JiraObserverMessage::Tick(command) => {
                 if let Command::GetIssues(op) = command {
-                    let mut start_at = 0;
                     let max_results = 50;
-                    let query_string = "''";
                     debug!("Staring to query for issues...");
-                    // Load up the fields
                     let field_url = format!("{}/rest/api/2/field", state.jira_url);
                     let field_result = state
-                        .web_client
-                        .get(&field_url)
-                        .bearer_auth(state.token.clone().expect("TOKEN").to_string())
+                        .auth
+                        .apply(state.web_client.get(&field_url))
                         .send()
                         .await?
                         .json::<Vec<JiraField>>()
@@ -123,79 +120,74 @@ impl Actor for JiraIssueObserver {
                         field_map.insert(field.id.to_string(), field);
                     }
 
-                    loop {
-                        let url = format!(
-                            "{}{}?query={}&startAt={}&maxResults={}&expand=changelog",
-                            state.jira_url, op, query_string, start_at, max_results
-                        );
-                        debug!("{}", url.to_string());
-                        let res = state
-                            .web_client
-                            .get(&url)
-                            .bearer_auth(state.token.clone().expect("TOKEN").to_string())
-                            .send()
-                            .await?
-                            .json::<serde_json::Value>()
-                            .await?;
+                    match state.deployment {
+                        JiraDeployment::ServerOrDataCenter => {
+                            // Original v2 offset-based pagination, unchanged.
+                            let mut start_at = 0;
+                            let query_string = "''";
 
-                        let json_data = res["issues"].to_string();
-                        let value: Value = serde_json::from_str(&json_data).unwrap();
+                            loop {
+                                let url = format!(
+                                    "{}{}?query={}&startAt={}&maxResults={}&expand=changelog",
+                                    state.jira_url, op, query_string, start_at, max_results
+                                );
+                                debug!("{}", url.to_string());
+                                let res = state
+                                    .auth
+                                    .apply(state.web_client.get(&url))
+                                    .send()
+                                    .await?
+                                    .json::<serde_json::Value>()
+                                    .await?;
 
-                        if let Some(items) = value.as_array() {
-                            for issue in items {
-                                let mut cloned_issue = issue.clone();
+                                let fetched = publish_issues(&res, &field_map, state)?;
 
-                                // Replace the "customfield_*" with the name
-                                let fields = cloned_issue.get_mut("fields").expect("FIELDS");
-
-                                let mut replacements = vec![];
-                                for (key, value) in fields.as_object().unwrap() {
-                                    if let Some(found_field) = field_map.get(key.as_str()) {
-                                        let new_key = found_field.name.clone();
-                                        replacements.push((new_key.to_string(), value.clone()));
-                                    }
+                                let total = res["total"].as_u64().unwrap_or(0);
+                                if (start_at + max_results) >= total as usize {
+                                    break;
                                 }
-                                for (new_key, value) in replacements {
-                                    fields[new_key] = value;
-                                }
-                                for key in field_map.keys() {
-                                    fields.as_object_mut().unwrap().remove(key);
-                                }
-
-                                let tcp_client = where_is(BROKER_CLIENT_NAME.to_string())
-                                    .expect("Expected to find client");
-                                let wrap = JiraData::Issues(JsonString {
-                                    json: cloned_issue.to_string(),
-                                });
-                                let bytes = rkyv::to_bytes::<Error>(&wrap).unwrap();
-
-                                let msg = ClientMessage::PublishRequest {
-                                    topic: JIRA_ISSUES_CONSUMER_TOPIC.to_string(),
-                                    payload: bytes.to_vec().into(),
-                                    registration_id: state.registration_id.clone(),
-                                    trace_ctx: None,
-                                };
-
-                                // Serialize the inner client message before sending
-                                let payload = rkyv::to_bytes::<rkyv::rancor::Error>(&msg)
-                                    .expect("Failed to serialize ClientMessage::PublishRequest");
-
-                                tcp_client.send_message(TcpClientMessage::Publish {
-                                    topic: JIRA_ISSUES_CONSUMER_TOPIC.to_string(),
-                                    payload: payload.into_vec(),
-                                    trace_ctx: WireTraceCtx::from_current_span(),
-                                })?;
+                                start_at += fetched;
+                                debug!("Loaded {}...", start_at);
                             }
                         }
-                        let fetched = max_results;
-                        let total = res["total"].as_u64().unwrap_or(0);
+                        JiraDeployment::Cloud => {
+                            // Cloud removed /rest/api/2/search (CHANGE-2046). Use
+                            // /rest/api/3/search/jql with cursor-based pagination.
+                            // "project is not EMPTY" is Atlassian's own recommended
+                            // dummy bound for unrestricted searches — Cloud rejects
+                            // fully unbounded JQL queries.
+                            let mut next_page_token: Option<String> = None;
 
-                        if (start_at + fetched) >= total as usize {
-                            break;
+                            loop {
+                                let mut url = format!(
+                                    "{}/rest/api/3/search/jql?jql=project%20is%20not%20EMPTY%20order%20by%20created%20DESC&maxResults={}&expand=changelog",
+                                    state.jira_url, max_results
+                                );
+                                if let Some(token) = &next_page_token {
+                                    url.push_str(&format!("&nextPageToken={}", token));
+                                }
+                                debug!("{}", url.to_string());
+                                let res = state
+                                    .auth
+                                    .apply(state.web_client.get(&url))
+                                    .send()
+                                    .await?
+                                    .json::<serde_json::Value>()
+                                    .await?;
+
+                                publish_issues(&res, &field_map, state)?;
+
+                                let is_last = res["isLast"].as_bool().unwrap_or(true);
+                                if is_last {
+                                    break;
+                                }
+                                next_page_token = res["nextPageToken"].as_str().map(|s| s.to_string());
+                                if next_page_token.is_none() {
+                                    break;
+                                }
+                                debug!("Fetching next page...");
+                            }
                         }
-
-                        start_at += fetched;
-                        debug!("Loaded {}...", start_at);
                     }
                 }
             }
@@ -215,4 +207,60 @@ impl Actor for JiraIssueObserver {
         }
         Ok(())
     }
+}
+
+fn publish_issues(
+    res: &Value,
+    field_map: &HashMap<String, JiraField>,
+    state: &JiraObserverState,
+) -> Result<usize, ActorProcessingErr> {
+    let json_data = res["issues"].to_string();
+    let value: Value = serde_json::from_str(&json_data).unwrap();
+    let mut count = 0;
+
+    if let Some(items) = value.as_array() {
+        for issue in items {
+            let mut cloned_issue = issue.clone();
+            let fields = cloned_issue.get_mut("fields").expect("FIELDS");
+
+            let mut replacements = vec![];
+            for (key, value) in fields.as_object().unwrap() {
+                if let Some(found_field) = field_map.get(key.as_str()) {
+                    let new_key = found_field.name.clone();
+                    replacements.push((new_key.to_string(), value.clone()));
+                }
+            }
+            for (new_key, value) in replacements {
+                fields[new_key] = value;
+            }
+            for key in field_map.keys() {
+                fields.as_object_mut().unwrap().remove(key);
+            }
+
+            let tcp_client =
+                where_is(BROKER_CLIENT_NAME.to_string()).expect("Expected to find client");
+            let wrap = JiraData::Issues(JsonString {
+                json: cloned_issue.to_string(),
+            });
+            let bytes = rkyv::to_bytes::<Error>(&wrap).unwrap();
+
+            let msg = ClientMessage::PublishRequest {
+                topic: JIRA_ISSUES_CONSUMER_TOPIC.to_string(),
+                payload: bytes.to_vec().into(),
+                registration_id: state.registration_id.clone(),
+                trace_ctx: None,
+            };
+
+            let payload = rkyv::to_bytes::<rkyv::rancor::Error>(&msg)
+                .expect("Failed to serialize ClientMessage::PublishRequest");
+
+            tcp_client.send_message(TcpClientMessage::Publish {
+                topic: JIRA_ISSUES_CONSUMER_TOPIC.to_string(),
+                payload: payload.into_vec(),
+                trace_ctx: WireTraceCtx::from_current_span(),
+            })?;
+            count += 1;
+        }
+    }
+    Ok(count)
 }

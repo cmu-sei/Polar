@@ -74,7 +74,8 @@ impl Actor for JiraUserObserver {
 
         let state = JiraObserverState::new(
             args.jira_url,
-            args.token,
+            args.auth,
+            args.deployment,
             args.web_client,
             args.registration_id,
             Duration::from_secs(args.base_interval),
@@ -113,9 +114,8 @@ impl Actor for JiraUserObserver {
                         );
                         debug!("{}", url.to_string());
                         let res = state
-                            .web_client
-                            .get(&url)
-                            .bearer_auth(state.token.clone().expect("TOKEN").to_string())
+                            .auth
+                            .apply(state.web_client.get(&url))
                             .send()
                             .await?
                             .json::<serde_json::Value>()

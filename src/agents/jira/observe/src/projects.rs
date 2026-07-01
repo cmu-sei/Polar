@@ -74,7 +74,8 @@ impl Actor for JiraProjectObserver {
 
         let state = JiraObserverState::new(
             args.jira_url,
-            args.token,
+            args.auth,
+            args.deployment,
             args.web_client,
             args.registration_id,
             Duration::from_secs(args.base_interval),
@@ -104,9 +105,8 @@ impl Actor for JiraProjectObserver {
                     debug!("{}", op.to_string());
 
                     let res = state
-                        .web_client
-                        .get(format!("{}{}", state.jira_url, op))
-                        .bearer_auth(state.token.clone().expect("TOKEN").to_string())
+                        .auth
+                        .apply(state.web_client.get(format!("{}{}", state.jira_url, op)))
                         .send()
                         .await?
                         .json::<Vec<JiraProject>>()

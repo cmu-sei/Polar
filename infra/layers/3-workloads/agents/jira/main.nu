@@ -18,7 +18,7 @@ def main [context_nuon: string] {
     let neo         = ", neo4jBoltAddr = \"" + $neo4j_addr + "\""
 
     let tmp  = (mktemp --suffix ".dhall")
-    let expr = $base + $chart_dir + "/observer.dhall { name = v.observer.name, image = v.observer.image, imagePullPolicy = v.imagePullPolicy, imagePullSecrets = v.imagePullSecrets, jiraUrl = v.observer.jiraUrl" + $cert_args
+    let expr = $base + $chart_dir + "/observer.dhall { name = v.observer.name, image = v.observer.image, imagePullPolicy = v.imagePullPolicy, imagePullSecrets = v.imagePullSecrets, jiraUrl = v.observer.jiraUrl, jiraEmail = v.observer.jiraEmail" + $cert_args
     $expr | save --force $tmp
     print $"  rendering observer.dhall -> jira-observer.yaml"
     dhall-to-yaml --documents --file $tmp | save --force ($output_dir | path join "jira-observer.yaml")

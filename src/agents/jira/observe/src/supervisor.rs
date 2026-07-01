@@ -3,6 +3,8 @@ use crate::JIRA_GROUP_OBSERVER;
 use crate::JIRA_ISSUE_OBSERVER;
 use crate::JIRA_PROJECT_OBSERVER;
 use crate::JIRA_USER_OBSERVER;
+use crate::JiraAuth;
+use crate::JiraDeployment;
 use crate::JiraObserverArgs;
 use crate::groups::JiraGroupObserver;
 use crate::issues::JiraIssueObserver;
@@ -27,8 +29,8 @@ pub struct ObserverSupervisor;
 
 pub struct ObserverSupervisorState {
     pub jira_url: String,
-    pub jira_token: Option<String>,
-    /// base interval that observers will use to query
+    pub auth: JiraAuth,
+    pub deployment: JiraDeployment,
     pub base_interval: u64,
     pub max_backoff_secs: u64,
     pub proxy_ca_cert_file: Option<String>,
@@ -36,7 +38,8 @@ pub struct ObserverSupervisorState {
 
 pub struct ObserverSupervisorArgs {
     pub jira_url: String,
-    pub jira_token: Option<String>,
+    pub auth: JiraAuth,
+    pub deployment: JiraDeployment,
     pub proxy_ca_cert_file: Option<String>,
     pub base_interval: u64,
     pub max_backoff_secs: u64,
@@ -107,7 +110,8 @@ impl Actor for ObserverSupervisor {
             // set up and return state
             Ok(_) => Ok(ObserverSupervisorState {
                 jira_url: args.jira_url.clone(),
-                jira_token: args.jira_token.clone(),
+                auth: args.auth.clone(),
+                deployment: args.deployment,
                 base_interval: args.base_interval,
                 max_backoff_secs: args.max_backoff_secs,
                 proxy_ca_cert_file: args.proxy_ca_cert_file,
@@ -133,7 +137,8 @@ impl Actor for ObserverSupervisor {
                     // set up args for observer actors
                     let args = JiraObserverArgs {
                         jira_url: state.jira_url.clone(),
-                        token: state.jira_token.clone(),
+                        auth: state.auth.clone(),
+                        deployment: state.deployment,
                         registration_id: registration_id.clone(),
                         web_client: ObserverSupervisor::get_client(
                             state.proxy_ca_cert_file.clone(),

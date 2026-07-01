@@ -14,16 +14,24 @@ let render =
           , certIssuerUrl    : Text
           , saTokenAudience  : Text
           , jiraUrl          : Text
+          , jiraEmail        : Optional Text
           , proxyCACert      : Optional Text
           }
       ) ->
         let volumes = [ Constants.certEmptyDirVolume, Constants.saTokenVolume v.saTokenAudience ] # functions.ProxyVolume v.proxyCACert
+        let emailEnv =
+              merge
+                { Some = \(email : Text) -> [ kubernetes.EnvVar::{ name = "JIRA_EMAIL", value = Some email } ]
+                , None = [] : List kubernetes.EnvVar.Type
+                }
+                v.jiraEmail
         let env =
               Constants.commonClientEnv
               # functions.ProxyEnv v.proxyCACert
               # [ kubernetes.EnvVar::{ name = "JIRA_URL", value = Some v.jiraUrl }
                 , kubernetes.EnvVar::{ name = "JIRA_TOKEN", valueFrom = Some kubernetes.EnvVarSource::{ secretKeyRef = Some kubernetes.SecretKeySelector::{ name = Some "jira-secret", key = "token" } } }
                 ]
+              # emailEnv
         let mounts = [ Constants.certVolumeMount ] # functions.ProxyMount v.proxyCACert
 
         in  kubernetes.Deployment::{
