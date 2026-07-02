@@ -106,9 +106,9 @@ impl Actor for ClusterObserverSupervisor {
 
     async fn handle_supervisor_evt(
         &self,
-        _: ActorRef<Self::Msg>,
+        myself: ActorRef<Self::Msg>,
         msg: SupervisionEvent,
-        _: &mut Self::State,
+        state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match msg {
             SupervisionEvent::ActorStarted(_) => (),
@@ -118,6 +118,40 @@ impl Actor for ClusterObserverSupervisor {
                     actor_cell.get_name(),
                     actor_cell.get_id()
                 );
+
+                if actor_cell.get_name().as_deref() == Some(&format!("{TCP_CLIENT_NAME}.tcp")) {
+                    warn!("TCP client terminated; tearing down watcher trees and respawning...");
+
+                    // Stop any existing watcher trees — they hold stale TcpClient
+                    // handles baked in at spawn time and can't publish through a
+                    // dead client. Rather than propagate a fresh handle down
+                    // through several actor layers, we just let the Registered
+                    // handler rebuild them fresh once the new client reconnects.
+                    if let Some(w) = state.namespace_watcher.take() {
+                        w.stop(Some("tcp_client_respawn".to_string()));
+                    }
+                    if let Some(w) = state.oci_repository_watcher.take() {
+                        w.stop(Some("tcp_client_respawn".to_string()));
+                    }
+                    if let Some(w) = state.kustomization_watcher.take() {
+                        w.stop(Some("tcp_client_respawn".to_string()));
+                    }
+
+                    #[allow(deprecated)]
+                    match spawn_tcp_client(TCP_CLIENT_NAME, myself.clone(), |event| {
+                        Some(SupervisorMessage::ClientEvent { event })
+                    })
+                    .await
+                    {
+                        Ok(new_client) => {
+                            info!("TCP client respawned successfully");
+                            state.tcp_client = new_client;
+                        }
+                        Err(e) => {
+                            error!("Failed to respawn TCP client: {e}");
+                        }
+                    }
+                }
             }
             SupervisionEvent::ActorFailed(actor_cell, e) => {
                 warn!(
@@ -143,79 +177,71 @@ impl Actor for ClusterObserverSupervisor {
             SupervisorMessage::PrepareShutdown => {}
             SupervisorMessage::ClientEvent { event } => match event {
                 ClientEvent::Registered { .. } => {
-                    let ns_watcher_state = NamespaceSupervisorState {
-                        tcp_client: state.tcp_client.clone(),
-                        kube_client: state.kube_client.clone(),
-                        supervisors: HashMap::new(),
-                    };
+                    if state.namespace_watcher.is_none() {
+                        let ns_watcher_state = NamespaceSupervisorState {
+                            tcp_client: state.tcp_client.clone(),
+                            kube_client: state.kube_client.clone(),
+                            supervisors: HashMap::new(),
+                        };
 
-                    let (ns_watcher, _) = Actor::spawn_linked(
-                        Some("cluster.nodes".into()),
-                        NamespaceSupervisor,
-                        ns_watcher_state,
-                        myself.clone().into(),
-                    )
-                    .await?;
+                        let (ns_watcher, _) = Actor::spawn_linked(
+                            Some("cluster.nodes".into()),
+                            NamespaceSupervisor,
+                            ns_watcher_state,
+                            myself.clone().into(),
+                        )
+                        .await?;
 
-                    // TODO: We need to start a node watcher too, but it tends to fail for some reason.
-                    // We'll have to investigate.
+                        state.namespace_watcher = Some(ns_watcher);
+                    } else {
+                        debug!("Namespace watcher already running; skipping respawn on reconnect");
+                    }
 
-                    state.namespace_watcher = Some(ns_watcher);
+                    if state.oci_repository_watcher.is_none() {
+                        let oci_watcher_state = GlobalWatcherState {
+                            tcp_client: state.tcp_client.clone(),
+                            kube_client: state.kube_client.clone(),
+                            kind: KIND_OCI_REPOSITORY,
+                        };
 
-                    // ---- Flux: OCIRepository (global) ----
-                    //
-                    // OCIRepository is a cluster-wide concern. Flux may be installed
-                    // in any namespace, so we use a global watcher rather than
-                    // scoping to flux-system. This mirrors the approach taken for
-                    // Node and ClusterRole watchers.
-                    let oci_watcher_state = GlobalWatcherState {
-                        tcp_client: state.tcp_client.clone(),
-                        kube_client: state.kube_client.clone(),
-                        kind: KIND_OCI_REPOSITORY,
-                    };
+                        let (oci_watcher, _) = Actor::spawn_linked(
+                            Some("cluster.flux.ocirepositories".into()),
+                            OciRepositoryWatcher,
+                            oci_watcher_state,
+                            myself.clone().into(),
+                        )
+                        .await?;
 
-                    let (oci_watcher, _) = Actor::spawn_linked(
-                        Some("cluster.flux.ocirepositories".into()),
-                        OciRepositoryWatcher,
-                        oci_watcher_state,
-                        myself.clone().into(),
-                    )
-                    .await?;
+                        state.oci_repository_watcher = Some(oci_watcher);
+                    } else {
+                        debug!("OCIRepository watcher already running; skipping respawn on reconnect");
+                    }
 
-                    state.oci_repository_watcher = Some(oci_watcher);
+                    if state.kustomization_watcher.is_none() {
+                        let ks_watcher_state = GlobalWatcherState {
+                            tcp_client: state.tcp_client.clone(),
+                            kube_client: state.kube_client.clone(),
+                            kind: KIND_KUSTOMIZATION,
+                        };
 
-                    // ---- Flux: Kustomization (global) ----
-                    //
-                    // Same rationale as OCIRepository. Kustomization resources are
-                    // namespaced in the Kubernetes API sense, but we want visibility
-                    // across all namespaces regardless of where Flux is deployed.
-                    let ks_watcher_state = GlobalWatcherState {
-                        tcp_client: state.tcp_client.clone(),
-                        kube_client: state.kube_client.clone(),
-                        kind: KIND_KUSTOMIZATION,
-                    };
+                        let (ks_watcher, _) = Actor::spawn_linked(
+                            Some("cluster.flux.kustomizations".into()),
+                            KustomizationWatcher,
+                            ks_watcher_state,
+                            myself.clone().into(),
+                        )
+                        .await?;
 
-                    let (ks_watcher, _) = Actor::spawn_linked(
-                        Some("cluster.flux.kustomizations".into()),
-                        KustomizationWatcher,
-                        ks_watcher_state,
-                        myself.clone().into(),
-                    )
-                    .await?;
-
-                    state.kustomization_watcher = Some(ks_watcher);
-
-                    /*
-                     * TODO: Consider and start watchers for other CRDs we might want to observe.
-                     * I suspect this will take a great deal of work.
-                     */
+                        state.kustomization_watcher = Some(ks_watcher);
+                    } else {
+                        debug!("Kustomization watcher already running; skipping respawn on reconnect");
+                    }
                 }
                 ClientEvent::MessagePublished { .. } => {
                     todo!("Handle incoming messages")
                 }
                 ClientEvent::TransportError { reason } => {
-                    error!("Transport error occurred! {reason}");
-                    myself.stop(Some(reason))
+                    warn!("Transport error occurred (non-fatal, awaiting reconnect): {reason}");
                 }
                 _ => (),
             },
