@@ -47,7 +47,7 @@ impl Supervisor for ConsumerSupervisor {
                     tracing::warn!("Error forwarding message. {e}");
                 }
             }
-            Err(err) => warn!("Failed to deserialize message: {:?}", err),
+            Err(err) => warn!("Failed to deserialize message on topic '{topic}': {:?}", err),
         }
     }
 }

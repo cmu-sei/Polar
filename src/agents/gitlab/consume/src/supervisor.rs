@@ -22,6 +22,8 @@ use polar::Supervisor;
 use polar::SupervisorMessage;
 use polar::get_neo_config;
 use polar::graph::controller::GraphControllerActor;
+use polar::polar_health::{HealthCheckActor, HealthCheckArgs, HealthCheckMessage, DepCertEndpoint};
+use std::sync::Arc;
 use ractor::Actor;
 use ractor::ActorCell;
 use ractor::ActorProcessingErr;
@@ -40,6 +42,8 @@ pub struct ConsumerSupervisor;
 pub struct ConsumerSupervisorState {
     tcp_client: ActorRef<TcpClientMessage>,
     u_consumer: Option<GitlabConsumer>,
+    #[allow(dead_code)]
+    healthcheck: ActorRef<HealthCheckMessage>,
 }
 
 impl Supervisor for ConsumerSupervisor {
@@ -174,9 +178,39 @@ impl Actor for ConsumerSupervisor {
         )
         .await?;
 
+        let prepare_shutdown_port = Arc::new(OutputPort::<()>::default());
+        prepare_shutdown_port.subscribe(myself.clone(), |()| {
+            Some(SupervisorMessage::PrepareShutdown)
+        });
+
+        let (healthcheck, _) = Actor::spawn_linked(
+            Some("polar.healthcheck".to_string()),
+            HealthCheckActor,
+            HealthCheckArgs {
+                expects_graph: true,
+                rejuvenation_threshold_secs: 300,
+                dep_cert_endpoints: vec![
+                    DepCertEndpoint {
+                        host: "cassini-ip-svc.polar.svc.cluster.local".to_string(),
+                        port: 8080,
+                        min_ttl_secs: 300,
+                    },
+                    DepCertEndpoint {
+                        host: "polar-db-svc.polar-graph.svc.cluster.local".to_string(),
+                        port: 7687,
+                        min_ttl_secs: 300,
+                    },
+                ],
+                prepare_shutdown_port,
+            },
+            myself.clone().into(),
+        )
+        .await?;
+
         let state = ConsumerSupervisorState {
             tcp_client,
             u_consumer: None,
+            healthcheck,
         };
 
         Ok(state)
@@ -190,10 +224,13 @@ impl Actor for ConsumerSupervisor {
     ) -> Result<(), ActorProcessingErr> {
         match message {
             SupervisorMessage::Heartbeat => {}
-            SupervisorMessage::PrepareShutdown => {}
+            SupervisorMessage::PrepareShutdown => {
+                let _ = state.healthcheck.cast(HealthCheckMessage::ShutdownAck);
+            }
             SupervisorMessage::ClientEvent { event } => match event {
                 ClientEvent::Registered { .. } => {
                     info!("Initializing agent.");
+                    let _ = state.healthcheck.cast(HealthCheckMessage::CassiniConnected);
                     match Actor::spawn_linked(
                         Some("polar.gitlab.consumer.graph".to_string()),
                         GraphControllerActor,
@@ -203,12 +240,11 @@ impl Actor for ConsumerSupervisor {
                     .await
                     {
                         Ok((graph_controller, _)) => {
-                            // TODO: I guess technically we could wrap this state in an arc and not have to copy it at all?
+                            let _ = state.healthcheck.cast(HealthCheckMessage::GraphConnected);
                             let c_state = GitlabConsumerState {
                                 graph_controller,
                                 tcp_client: state.tcp_client.clone(),
                             };
-
                             Self::spawn_children(myself.get_cell(), state, c_state).await?;
                         }
                         Err(e) => {
@@ -216,16 +252,16 @@ impl Actor for ConsumerSupervisor {
                             myself.stop(Some(e.to_string()));
                         }
                     }
-
                     info!("Finished initialization. Waiting for messages...");
                 }
                 ClientEvent::MessagePublished { topic, payload, .. } => {
                     ConsumerSupervisor::deserialize_and_dispatch(topic, payload);
                 }
-                ClientEvent::TransportError { .. } => todo!("Handle transport error"),
-                ClientEvent::ControlResponse { .. } => {
-                    // ignore
+                ClientEvent::TransportError { reason } => {
+                    warn!("Transport error occurred (non-fatal, awaiting reconnect): {reason}");
+                    let _ = state.healthcheck.cast(HealthCheckMessage::CassiniDisconnected);
                 }
+                ClientEvent::ControlResponse { .. } => {}
                 _ => (),
             },
         }

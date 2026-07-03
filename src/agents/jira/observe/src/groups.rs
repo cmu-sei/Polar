@@ -123,7 +123,11 @@ impl Actor for JiraGroupObserver {
                             .json::<serde_json::Value>()
                             .await?;
 
-                        let groups: Vec<JiraGroup> = serde_json::from_value(res["groups"].clone())?;
+                        let groups: Vec<JiraGroup> = if res["groups"].is_null() {
+                            Vec::new()
+                        } else {
+                            serde_json::from_value(res["groups"].clone())?
+                        };
                         let total = res["total"].as_u64().unwrap_or(0);
                         let fetched = groups.len();
 
