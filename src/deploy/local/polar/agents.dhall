@@ -25,10 +25,6 @@ let functions  = Polar.functions
 -- They are implementation details of how this deployment wires pods together.
 -- -------------------------------------------------------------------------
 
-let commitSha = env:CI_COMMIT_SHORT_SHA as Text ? "latest"
-
-let nuInitImage = "polar-nu-init:${commitSha}"
-
 let saTokenVolumeName   = C.saTokenVolumeName
 let certVolumeName       = C.certVolumeName
 let initScriptVolumeName = C.initScriptVolumeName
@@ -172,7 +168,7 @@ let neo4jEnvVars =
 let makeCertInit =
       \(cfg : Polar.agents.CertClientConfig.Type) ->
         ( functions.makeNuInitContainer
-            nuInitImage
+            values.nuInitImage
             cfg
             saTokenVolumeName
             certVolumeName

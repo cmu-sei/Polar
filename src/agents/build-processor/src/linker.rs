@@ -337,6 +337,7 @@ impl ProvenanceLinker {
                 "failed to write INSTANCE_OF edge to OCIArtifact",
             )?;
         }
+
         // ── Edge: BuildJob -[:PRODUCED]-> artifact ─────────────────────────────
         // Only written when the event carries build_id — pipeline emissions
         // always have one; observer agent emissions don't.
@@ -372,10 +373,16 @@ impl ProvenanceLinker {
             content_hash: payload.binary_content_hash.clone(),
         };
 
-        let mut props: Vec<Property> = vec![Property(
-            "name".into(),
-            GraphValue::String(payload.binary_name.clone()),
-        )];
+        let mut props: Vec<Property> = vec![
+            Property(
+                "name".into(),
+                GraphValue::String(payload.binary_name.clone()),
+            ),
+            Property(
+                "observed_at".into(),
+                GraphValue::String(Utc::now().to_rfc3339()),
+            ),
+        ];
         if !payload.binding_digest.is_empty() {
             props.push(Property(
                 "binding_digest".into(),
@@ -471,9 +478,9 @@ impl ProvenanceLinker {
             payload.layers.len()
         );
 
-        // 1. Upsert the ContainerImage node keyed on config digest.
-        let image_k = ArtifactNodeKey::ContainerImage {
-            config_digest: payload.config_digest.clone(),
+        // 1. Upsert an OCIArtifact node keyed on config digest.
+        let image_k = ArtifactNodeKey::OCIArtifact {
+            digest: payload.digest.clone(),
         };
 
         let mut props: Vec<Property> = vec![
@@ -485,6 +492,7 @@ impl ProvenanceLinker {
                 "tarball_hash".into(),
                 GraphValue::String(payload.tarball_hash.clone()),
             ),
+            Property("uri".into(), GraphValue::String(payload.uri.clone())),
         ];
         if !payload.os.is_empty() {
             props.push(Property(
@@ -581,42 +589,6 @@ impl ProvenanceLinker {
             payload.config_digest,
         );
 
-        // Post-push enrichment: if this call carries a registry digest, the image
-        // has been pushed. Upsert the OCIArtifact node directly — we already have
-        // every fact (digest, uri, config_digest) from the pipeline itself, no
-        // resolver round-trip needed. This is the canonical join between the
-        // registry-independent ContainerImage and the registry-specific OCIArtifact.
-        if let Some(ref digest) = payload.digest {
-            let oci_key = ArtifactNodeKey::OCIArtifact {
-                digest: digest.clone(),
-            };
-
-            let mut oci_props = vec![Property(
-                "digest".into(),
-                GraphValue::String(digest.clone()),
-            )];
-            if let Some(ref uri) = payload.uri {
-                oci_props.push(Property("uri".into(), GraphValue::String(uri.clone())));
-            }
-
-            Self::upsert_node(
-                state,
-                oci_key.clone(),
-                oci_props,
-                "failed to upsert OCIArtifact from ContainerImageCreated",
-            )?;
-
-            Self::ensure_edge(
-                state,
-                ArtifactNodeKey::Artifact,
-                oci_key.clone(),
-                rel::IS,
-                vec![],
-            )?;
-
-            Self::ensure_edge(state, image_k.clone(), oci_key, rel::INSTANCE_OF, vec![])?;
-        }
-
         Ok(())
     }
 }
@@ -652,6 +624,7 @@ impl Actor for ProvenanceLinker {
                 digest,
                 manifest_data,
                 registry,
+                .. // disregard source ref here
             } => {
                 debug!("OCIArtifact resolved: {uri}");
 
@@ -907,54 +880,6 @@ impl Actor for ProvenanceLinker {
                 }
             }
 
-            ProvenanceEvent::ImageRefResolved {
-                uri,
-                digest,
-                media_type,
-            } => {
-                trace!("ImageRef resolved: {uri}");
-
-                let ref_key = ArtifactNodeKey::ContainerImageRef {
-                    normalized: uri.clone(),
-                };
-
-                Self::upsert_node(
-                    state,
-                    ref_key.clone(),
-                    vec![Property("normalized".into(), GraphValue::String(uri))],
-                    "failed to upsert ContainerImageReference",
-                )?;
-
-                let artifact_key = ArtifactNodeKey::OCIArtifact {
-                    digest: digest.clone(),
-                };
-
-                Self::upsert_node(
-                    state,
-                    artifact_key.clone(),
-                    vec![
-                        Property("digest".into(), GraphValue::String(digest)),
-                        Property("media_type".into(), GraphValue::String(media_type)),
-                    ],
-                    "failed to upsert OCIArtifact from ImageRefResolved",
-                )?;
-
-                // ensure edges between the "Artifat" type node, the OCIartifact itself, and the registry
-                Self::ensure_edge(
-                    state,
-                    ArtifactNodeKey::Artifact,
-                    artifact_key.clone(),
-                    rel::IS,
-                    vec![],
-                )?;
-                Self::ensure_edge(
-                    state,
-                    ref_key.clone(),
-                    artifact_key.clone(),
-                    rel::INSTANCE_OF,
-                    vec![],
-                )?;
-            }
             ProvenanceEvent::OCIRegistryDiscovered { hostname } => {
                 debug!("OCI registry discovered: {hostname}");
 

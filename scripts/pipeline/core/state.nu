@@ -31,6 +31,7 @@ export def init-pipeline-state [build_id: string]: nothing -> nothing {
     stor create --table-name $TABLE --columns {build_id: str}
     stor insert --table-name $TABLE --data-record {build_id: $build_id}
 
+    # create table for o
     log-debug "pipeline state initialized" --component $COMPONENT
 }
 

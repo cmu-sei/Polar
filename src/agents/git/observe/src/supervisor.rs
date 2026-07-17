@@ -4,7 +4,8 @@ use crate::{
 };
 use cassini_types::ClientEvent;
 use polar::{
-    GitRepositoryDiscoveredEvent, SupervisorMessage,
+    GitRepositoryDiscoveredEvent,
+    SupervisorMessage::{self},
     cassini::{CassiniClient, SubscribeRequest, TcpClient},
     graph::nodes::git::RepoId,
     topics::GIT_REPOSITORY_DISCOVERED,
@@ -12,7 +13,7 @@ use polar::{
 use ractor::{Actor, ActorProcessingErr, ActorRef, SupervisionEvent, async_trait};
 use rkyv::from_bytes;
 use std::path::PathBuf;
-use tracing::{debug, error, instrument, warn};
+use tracing::{debug, error, instrument, trace, warn};
 
 pub struct RootSupervisor;
 
@@ -219,10 +220,8 @@ impl Actor for RootSupervisor {
                     error!("Transport error occurred! {reason}");
                     myself.stop(Some(reason))
                 }
-                ClientEvent::ControlResponse { .. } => {
-                    error!("ControlResponse not implemented!");
-                }
-                _ => warn!("{event:?}"),
+                ClientEvent::PublishAcknowledged { .. } => trace!("{event:?}"),
+                _ => (),
             },
         }
         Ok(())

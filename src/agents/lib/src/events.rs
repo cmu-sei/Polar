@@ -21,6 +21,23 @@
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 
+/// Reference enum
+#[derive(Clone, Debug, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum DiscoverySourceRef {
+    KubernetesPodContainer {
+        pod_uid: String,
+        image_id: Option<String>,
+        container_name: String,
+    },
+    OCIRepository {
+        repo_uri: String,
+    }, // artifact was seen being hosted somewhere already, this will let us tie it back
+       // Future variants as new orchestrators are added:
+       // NomadAllocation { alloc_id: String, image_ref: String },
+       // EcsTask { task_arn: String, image_ref: String },
+}
+
 // ── Supporting types ───────────────────────────────────────────────────────────
 
 /// Emitted by Polar when a new commit is detected on a tracked branch or ref.
@@ -165,9 +182,6 @@ pub struct SbomGraphFragment {
 ///
 /// Covers SBOMs, ELF binaries, test reports, scan results, OCI manifest
 /// bundles, and anything else that is content-addressed by file hash.
-/// OCI container images use [`ProvenanceEvent::ContainerImageCreated`] instead,
-/// because they carry richer metadata (layers, config digest, OS/arch) and
-/// have different downstream graph relationships.
 #[derive(
     Debug, Clone, PartialEq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
@@ -239,12 +253,12 @@ pub struct ContainerImageCreatedPayload {
     pub cmd: String,
     #[serde(default)]
     pub repo_tags: Vec<String>,
-    /// Post-push registry manifest digest. Absent on the pre-push emission.
+    /// Post-push registry manifest digest.
     #[serde(default)]
-    pub digest: Option<String>,
+    pub digest: String,
     /// Post-push remote ref. Absent on the pre-push emission.
     #[serde(default)]
-    pub uri: Option<String>,
+    pub uri: String,
 }
 
 // ── ProvenanceEvent ────────────────────────────────────────────────────────────
@@ -300,6 +314,7 @@ pub enum ProvenanceEvent {
         ref_name: String,
         repo_url: String,
         /// None when not reliably available — honest null beats fabricated identity.
+        /// TODO: It's TBD whether this field should be mandatory or not, but eventually, we want to tie a workload identity back to every event..
         triggered_by: Option<String>,
         backend: Option<BackendIdentity>,
     },
@@ -392,14 +407,10 @@ pub enum ProvenanceEvent {
     ///
     /// Triggers the resolver to fetch the manifest and emit
     /// [`ProvenanceEvent::OCIArtifactResolved`].
-    OCIArtifactDiscovered { uri: String },
-
-    /// A container image reference was discovered — in a GitLab pipeline,
-    /// a Kubernetes pod spec, or a registry listing.
-    ///
-    /// Triggers the resolver to dereference the URI and emit
-    /// [`ProvenanceEvent::ImageRefResolved`].
-    ImageRefDiscovered { uri: String },
+    OCIArtifactDiscovered {
+        uri: String,
+        source_ref: DiscoverySourceRef,
+    },
 
     /// A new OCI registry was discovered.
     OCIRegistryDiscovered { hostname: String },
@@ -438,6 +449,7 @@ pub enum ProvenanceEvent {
         digest: String,
         manifest_data: Vec<u8>,
         registry: String,
+        source_ref: DiscoverySourceRef,
     },
 
     /// A previously discovered image reference was resolved to a content-addressed digest.
@@ -445,27 +457,5 @@ pub enum ProvenanceEvent {
         uri: String,
         digest: String,
         media_type: String,
-    },
-
-    // ── Kubernetes observations ────────────────────────────────────────────────
-    // Emitted by the k8s observer agent.
-    // Consumed by the build processor to link workloads to artifacts.
-    /// A pod container was observed using a specific image reference.
-    PodContainerUsesImage {
-        pod_uid: String,
-        container_name: String,
-        image_ref: String,
-    },
-
-    // ── Build discovery ────────────────────────────────────────────────────────
-    /// A build pipeline or job run was discovered by an external observer.
-    ///
-    /// Distinct from [`ProvenanceEvent::ExecutionStarted`] — this comes from
-    /// an observer (e.g. GitLab API polling) rather than from within the
-    /// execution boundary. Less authoritative but useful for systems that are
-    /// not instrumented with the pipeline library.
-    BuildDiscovered {
-        pipeline_id: String,
-        artifact_ids: Vec<String>,
     },
 }

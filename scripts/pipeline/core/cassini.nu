@@ -1,7 +1,7 @@
 # ---------------------------------------------------------------------------
 # Cassini
 # ---------------------------------------------------------------------------
-use logging.nu [log-debug log-error]
+use logging.nu [log-info log-debug log-error]
 
 export const SUBJECT_PREFIX = "polar.provenance"
 export const BUILD_EVENTS_TOPIC = $"($SUBJECT_PREFIX).events"
@@ -253,59 +253,4 @@ export def stop-cassini-daemon [daemon: record, --timeout: int = 3]: nothing -> 
     }
 
     try { job kill $daemon.job_id }
-}
-
-# ---------------------------------------------------------------------------
-# Cassini provenance emission
-#
-# emit-provenance-event: canonical ProvenanceEvent envelope for the unified
-# provenance events topic. All typed emit-* functions in events.nu call this.
-# build_id lives on the variant payload, not on the envelope — only CI pipeline
-# events have a build_id, and not all ProvenanceEvent variants are CI events.
-#
-# emit: legacy envelope retained for agent-specific topics still in use by
-# k8s and GitLab agents. Do not use for new pipeline events.
-# ---------------------------------------------------------------------------
-
-# Emit a canonical ProvenanceEvent to the unified provenance events topic.
-# The payload record must include a `type` field matching a ProvenanceEvent
-# variant name in snake_case, plus all fields for that variant.
-# build_id is carried on the payload itself for variants that have one —
-# it is not on this envelope.
-export def emit-provenance-event [payload: record]: nothing -> nothing {
-    let json = $payload | to json --raw
-    log-debug $json
-    cassini-client publish $BUILD_EVENTS_TOPIC $json
-}
-
-# Legacy envelope — retained for agent-specific topics still consumed by
-# k8s and GitLab agents. Do not use for new pipeline events.
-export def emit [subject_suffix: string, payload: record]: nothing -> nothing {
-    let envelope = {
-        build_id: ($env.POLAR_BUILD_ID? | default "00000000-0000-0000-0000-000000000000")
-        stage_exec_id: (
-            $env.POLAR_STAGE_EXEC_ID?
-            | default "00000000-0000-0000-0000-000000000000"
-        )
-        pipeline_exec_id: (
-            $env.POLAR_PIPELINE_EXEC_ID?
-            | default "00000000-0000-0000-0000-000000000000"
-        )
-        observed_at: (date now | format date "%Y-%m-%dT%H:%M:%S%.fZ")
-        payload: ($payload | merge {type: $subject_suffix})
-    }
-    let json = $envelope | to json --raw
-    cassini-client publish $"($SUBJECT_PREFIX).($subject_suffix)" $json
-}
-
-# Construct the source identity envelope from GitLab CI environment variables.
-# Outside a GitLab CI context these default to null — that's honest.
-# TODO: make system configurable for non-GitLab CI environments.
-def build-origin []: nothing -> record {
-    {
-        system: "gitlab"
-        native_id: ($env.CI_PIPELINE_ID? | default null)
-        native_job_id: ($env.CI_JOB_ID? | default null)
-        native_url: ($env.CI_JOB_URL? | default null)
-    }
 }

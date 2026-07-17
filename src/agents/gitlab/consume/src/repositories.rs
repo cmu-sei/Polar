@@ -22,7 +22,7 @@
 */
 
 use crate::GitlabConsumerState;
-use cassini_client::{OfflineBehavior, PublishRequest, TcpClientMessage};
+use cassini_client::{OfflineBehavior, PublishRequest};
 use cassini_types::WireTraceCtx;
 use common::REPOSITORY_CONSUMER_TOPIC;
 use common::types::{GitlabData, GitlabEnvelope, GitlabPackageFile};
@@ -34,7 +34,7 @@ use polar::graph::{
     controller::{GraphControllerMsg, GraphOp, GraphValue, IntoGraphKey, Property},
     nodes::gitlab::GitlabNodeKey,
 };
-use polar::{PROVENANCE_LINKER_TOPIC, ProvenanceEvent, RkyvError};
+use polar::{DiscoverySourceRef, PROVENANCE_LINKER_TOPIC, ProvenanceEvent, RkyvError};
 use ractor::{Actor, ActorProcessingErr, ActorRef, async_trait};
 use rkyv::to_bytes;
 use tracing::{debug, info};
@@ -143,6 +143,9 @@ impl GitlabRepositoryConsumer {
             polar::emit_provenance_event(
                 ProvenanceEvent::OCIArtifactDiscovered {
                     uri: tag.location.clone(),
+                    source_ref: DiscoverySourceRef::OCIRepository {
+                        repo_uri: tag.location.clone(),
+                    },
                 },
                 tcp_client,
             )?;

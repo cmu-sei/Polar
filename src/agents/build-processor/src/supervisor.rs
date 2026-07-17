@@ -285,8 +285,7 @@ impl BuildProcessorSupervisor {
             | ProvenanceEvent::OCIArtifactResolved { .. }
             | ProvenanceEvent::OCIArtifactCreated { .. }
             | ProvenanceEvent::ImageRefResolved { .. }
-            | ProvenanceEvent::OCIRegistryDiscovered { .. }
-            | ProvenanceEvent::PodContainerUsesImage { .. } => {
+            | ProvenanceEvent::OCIRegistryDiscovered { .. } => {
                 let Some(linker) = &state.linker else {
                     error!("linker not ready — dropping artifact event");
                     return;
@@ -299,17 +298,11 @@ impl BuildProcessorSupervisor {
             // ── Discovery events ───────────────────────────────────────────────
             // These trigger the resolver — log and discard here, the resolver
             // subscribes to PROVENANCE_DISCOVERY_TOPIC independently.
-            ProvenanceEvent::OCIArtifactDiscovered { uri } => {
+            ProvenanceEvent::OCIArtifactDiscovered { uri, .. } => {
                 debug!("OCI artifact discovered: {uri} — resolver will handle");
-            }
-            ProvenanceEvent::ImageRefDiscovered { uri } => {
-                debug!("image ref discovered: {uri} — resolver will handle");
             }
             ProvenanceEvent::ArtifactDiscovered { name, .. } => {
                 debug!("artifact discovered: {name} — no handler yet");
-            }
-            ProvenanceEvent::BuildDiscovered { pipeline_id, .. } => {
-                debug!("build discovered: {pipeline_id} — no handler yet");
             }
 
             ProvenanceEvent::Ignored => {}

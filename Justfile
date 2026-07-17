@@ -233,13 +233,116 @@ jira target='all':
         *) echo "Unknown target: {{target}}. Use all, observer, or processor." && exit 1 ;;
     esac
 
+# ── Local dev PKI / cert-issuer stack ─────────────────────────────────────────
+#
+# One-time bootstrap sequence (run once per CA rotation):
+#
+#   just setup-cert-issuer                    # generates CA, OIDC keypair, JWKS, tokens, config
+#
+# Then, in separate terminals (or tmux panes):
+#
+#   just run-jwks                     # Terminal A: JWKS HTTP server (port 8081)
+#   just run-cert-issuer                   # Terminal B: cert-issuer gRPC server (port 8443)
+#
+# Then issue all three certs and copy Neo4j layout:
+#
+#   just issue-certs                    # issues cassini, neo4j, and agent certs
+#
+# Print env vars for a given workload:
+#
+#   just dev-env cassini
+#   just dev-env agent
+#   just dev-env neo4j
+#
+# Tokens expire after 1h. Refresh without rotating the CA:
+#
+#   just                     # safe to re-run; preserves dev/tmp/
+#
+# Rotate the CA root (invalidates all outstanding certs):
+#
+#   just dev-clean ca && just dev-setup
+
+# Run the one-shot dev environment setup (CA, OIDC keypair, JWKS, tokens, config).
+# Safe to re-run — preserves dev/tmp/. Delete dev/tmp/ explicitly to rotate the CA.
+setup-cert-issuer:
+    cargo run --manifest-path ./src/agents/Cargo.toml --bin cert-issuer-setup
+
+# Start the JWKS HTTP server on port 8081.
+# Run in a dedicated terminal — this is a foreground process.
+# Must be running before dev-issuer starts.
+run-jwks:
+    python3 -m http.server 8081 --directory dev
+
+# Start the cert-issuer on port 8443.
+# Run in a dedicated terminal — this is a foreground process.
+# Requires dev-jwks to be running (issuer fetches JWKS on startup).
+run-cert-issuer:
+    export CERT_ISSUER_CONFIG=dev/config.json
+    cargo run --manifest-path ./src/agents/Cargo.toml --bin cert-issuer
+
+# Issue all three dev certs (cassini server, neo4j server, agent client).
+# Requires both dev-jwks and dev-issuer to be running in separate terminals.
+# Tokens expire after 1h; re-run dev-setup first if they've expired.
+issue-dev-certs:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    # TODO: add healthcheck
+    # Fail fast if the issuer is not reachable rather than producing a confusing TLS error.
+    # if ! curl -sf --max-time 2 http://127.0.0.1:8443 > /dev/null 2>&1; then
+    #     echo "ERROR: cert-issuer not responding on :8443 — run 'just dev-issuer' in another terminal first."
+    #     exit 1
+    # fi
+
+    echo "--- Issuing Cassini server cert ---"
+    cargo run --manifest-path ./src/agents/Cargo.toml --bin cert-client -- \
+        --cert-issuer-url http://127.0.0.1:8443 \
+        --token-path dev/token-cassini \
+        --cert-dir dev/certs/server \
+        --cert-type server \
+        --key-algorithm ecdsa-p256
+
+    echo "--- Issuing Neo4j server cert ---"
+    cargo run --manifest-path ./src/agents/Cargo.toml --bin cert-client -- \
+        --cert-issuer-url http://127.0.0.1:8443 \
+        --token-path dev/token-neo4j \
+        --cert-dir dev/certs/neo4j-server \
+        --cert-type server \
+        --key-algorithm ecdsa-p256 \
+        --extra-san neo4j.polar.svc.cluster.local \
+        --extra-san polar-db-svc.polar.svc.cluster.local
+
+    for p in https bolt; do
+        mkdir -p "dev/certs/neo4j/$p/trusted"
+        cp dev/certs/neo4j-server/cert.pem "dev/certs/neo4j/$p/public.crt"
+        cp dev/certs/neo4j-server/key.pem  "dev/certs/neo4j/$p/private.key"
+        cp dev/certs/neo4j-server/ca.pem   "dev/certs/neo4j/$p/trusted/ca.pem"
+        echo "  populated dev/certs/neo4j/$p/"
+    done
+
+    echo "--- Issuing agent client cert ---"
+    cargo run --manifest-path ./src/agents/Cargo.toml --bin cert-client -- \
+        --cert-issuer-url http://127.0.0.1:8443 \
+        --token-path dev/token-agent \
+        --cert-dir dev/certs/client \
+        --key-algorithm ecdsa-p256
+
+    echo "--- Verifying EKUs ---"
+    for cert in dev/certs/server/cert.pem dev/certs/neo4j-server/cert.pem dev/certs/client/cert.pem; do
+        echo "  $cert:"
+        openssl x509 -in "$cert" -noout -text | grep -A5 'Extended Key Usage' | sed 's/^/    /'
+    done
+
+    echo "Done."
+
+
+
 # ── Git agents ────────────────────────────────────────────────────────────────
 
 # Build git agent images
 # Usage: just git-agents        (all)
 #        just git-agents observer
 #        just git-agents consumer
-#        just git-agents scheduler
 git-agents target='all':
     #!/usr/bin/env bash
     set -euo pipefail
@@ -248,10 +351,8 @@ git-agents target='all':
         all)
             nix build {{_nix_flags}} "$base.observerImage"  -o result-git-observer
             nix build {{_nix_flags}} "$base.processorImage" -o result-git-processor
-            nix build {{_nix_flags}} "$base.schedulerImage" -o result-git-scheduler
             podman load -i result-git-observer
             podman load -i result-git-processor
-            podman load -i result-git-scheduler
             ;;
         observer)
             nix build {{_nix_flags}} "$base.observerImage" -o result-git-observer
@@ -260,10 +361,6 @@ git-agents target='all':
         processor)
             nix build {{_nix_flags}} "$base.processorImage" -o result-git-processor
             podman load -i result-git-processor
-            ;;
-        scheduler)
-            nix build {{_nix_flags}} "$base.schedulerImage" -o result-git-scheduler
-            podman load -i result-git-scheduler
             ;;
         *) echo "Unknown target: {{target}}. Use all, observer, processor, or scheduler." && exit 1 ;;
     esac

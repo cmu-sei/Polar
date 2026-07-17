@@ -49,3 +49,7 @@ pub const PROVENANCE_DISCOVERY: &str = "polar.provenance.discovery";
 pub const GIT_REPOSITORY_DISCOVERED: &str = "polar.git.repositories.discovery";
 
 pub const GIT_REPOSITORY_EVENTS: &str = "polar.git.repositories.events";
+
+// TODO: Replace "cluster" with a cluster id. Chances are we won't get away wtih constants the moment someone wants to observe multiple clusters
+pub const KUBERNETES_RESOURCES_EVENTS: &str = "polar.kubernetes.cluster.resources";
+pub const KUBERNETES_RESOLUTION_EVENTS: &str = "polar.kubernetes.cluster.resolution";

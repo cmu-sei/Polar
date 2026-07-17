@@ -26,8 +26,6 @@ use crate::{
     BackoffReason, Command, GitlabObserverArgs, GitlabObserverMessage, GitlabObserverState,
     MESSAGE_FORWARDING_FAILED, init_observer_state, send_to_broker,
 };
-use cassini_client::TcpClientMessage;
-use cassini_types::WireTraceCtx;
 use common::REPOSITORY_CONSUMER_TOPIC;
 use common::types::{GitlabData, GitlabPackageFile};
 use cynic::{GraphQlResponse, QueryBuilder};
@@ -37,10 +35,9 @@ use gitlab_queries::projects::{
     SingleProjectQueryArguments,
 };
 use gitlab_schema::ContainerRepositoryID;
-use polar::{ProvenanceEvent, topics::PROVENANCE_DISCOVERY};
 use ractor::{Actor, ActorProcessingErr, ActorRef, async_trait};
 use serde_json::from_str;
-use tracing::{debug, error, info, trace, warn};
+use tracing::{debug, error, info, warn};
 
 pub struct GitlabRepositoryObserver;
 
@@ -239,30 +236,6 @@ impl Actor for GitlabRepositoryObserver {
                                                                                 //send tag data
                                                                                 if !tags.is_empty()
                                                                                 {
-                                                                                    // For the record, I'm not a fan of doing this loop. It'll "work" but I wonder if there's a better way.
-                                                                                    //  At time of writing, we iterate all over again to generate cypher.
-                                                                                    for tag in &tags
-                                                                                    {
-                                                                                        // Emit provenance event
-                                                                                        let event = ProvenanceEvent::OCIArtifactDiscovered { uri: tag.location.clone() };
-                                                                                        trace!(
-                                                                                            "Emitting event: {:?}",
-                                                                                            event
-                                                                                        );
-                                                                                        let payload =
-                                                                                            rkyv::to_bytes::<
-                                                                                                rkyv::rancor::Error,
-                                                                                            >(
-                                                                                                &event
-                                                                                            )?;
-
-                                                                                        // OCI artifact discoveries however, are a "claim" that they exist. Gitlab told us a lot, but we still need to verify them.
-                                                                                        state.tcp_client.cast(TcpClientMessage::Publish {
-                                                                                            topic: PROVENANCE_DISCOVERY.to_string(),
-                                                                                            payload: payload.into(),
-                                                                                            trace_ctx: WireTraceCtx::from_current_span(),
-                                                                                        })?;
-                                                                                    }
                                                                                     let data = GitlabData::ContainerRepositoryTags {
                                                                                         repository_id: repository.id.to_string(),
                                                                                         project_id: project.id.to_string(),

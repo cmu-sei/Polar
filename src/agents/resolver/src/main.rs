@@ -2,14 +2,14 @@ use cassini_client::{OfflineBehavior, PublishRequest};
 use cassini_types::ClientEvent;
 use oci_client::{
     Client as OciClient, Reference,
-    client::{Certificate, CertificateEncoding, ClientConfig},
+    client::{Certificate, CertificateEncoding, ClientConfig, ClientProtocol},
     manifest::OciManifest,
     secrets::RegistryAuth,
 };
 use polar::{
-    ProvenanceEvent, Supervisor, SupervisorMessage,
+    DiscoverySourceRef, ProvenanceEvent, Supervisor, SupervisorMessage,
     cassini::{CassiniClient, SubscribeRequest, TcpClient},
-    topics::{PROVENANCE_DISCOVERY, PROVENANCE_EVENTS},
+    topics::{KUBERNETES_RESOLUTION_EVENTS, PROVENANCE_DISCOVERY, PROVENANCE_EVENTS},
     try_get_proxy_ca_cert,
 };
 
@@ -67,9 +67,18 @@ impl ResolverSupervisor {
             });
         });
 
+        // TODO: Specify ClientProtocol explictly based on configuraton.
+        // The oci client code automatically appends "http" or "https" based on
+        // the value of that enum.
+        //
         state.oci_client = if certs.is_empty() {
             debug!("Initializing OCI client without extra certificates");
-            OciClient::default()
+            OciClient::new(ClientConfig {
+                protocol: ClientProtocol::HttpsExcept(vec![
+                    "registry.local-registry.svc.cluster.local:5000".to_string(),
+                ]),
+                ..ClientConfig::default()
+            })
         } else {
             debug!(
                 "Initializing OCI client with {} extra root certificates",
@@ -264,10 +273,12 @@ impl ResolverAgent {
     }
 
     fn build_registry_candidates(base: &str) -> Vec<String> {
-        // Only HTTPS variants are generated. Plain HTTP is not supported;
-        // see issue #<TBD> for rationale.
+        // TODO: Ideally, we wouldn't support http blindly, for clear security reasons, but adding TLS support
+        // brings in a number of issues that we'll have to push the envolope on
+        // So for now, include http to support quick local testing and move on.
         vec![
             base.to_string(),
+            format!("http://{}", base), // TODO: remove this and only add it based on some configuration...
             format!("https://{}", base),
             format!("https://{}/", base),
             format!("{}/v1/", base),
@@ -314,29 +325,6 @@ impl ResolverAgent {
             offline_behavior: OfflineBehavior::default(),
         })?)
     }
-
-    fn emit_oci_resolved_event(
-        state: &mut ResolverAgentState,
-        uri: String,
-        manifest: OciManifest,
-        digest: String,
-    ) -> Result<(), ActorProcessingErr> {
-        if let Some(hostname) = Self::registry_from_image_ref(&uri) {
-            let manifest_data = serde_json::to_vec(&manifest)?;
-
-            let event = ProvenanceEvent::OCIArtifactResolved {
-                uri: uri.clone(),
-                digest,
-                manifest_data,
-                registry: hostname,
-            };
-
-            Ok(Self::forward_event(state, event)?)
-        } else {
-            warn!("Could not extract registry hostname from image ref: {uri}");
-            Ok(())
-        }
-    }
 }
 
 pub struct ResolverAgentState {
@@ -380,38 +368,44 @@ impl Actor for ResolverAgent {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match msg {
-            ProvenanceEvent::OCIArtifactDiscovered { uri } => {
-                match Self::inspect_image(state, &uri).await {
-                    Ok(Some((manifest, digest))) => {
-                        debug!("Resolved image: \n {manifest:?}");
-                        Self::emit_oci_resolved_event(state, uri, manifest, digest)?
-                    }
-                    Ok(None) => {}
-                    Err(e) => {
-                        error!("Failed to resolve image: {uri}, {e}");
-                    }
-                }
-            }
-            ProvenanceEvent::ImageRefDiscovered { uri } => {
-                trace!("Received ImageRefDiscovered event");
+            ProvenanceEvent::OCIArtifactDiscovered { uri, source_ref } => {
                 match Self::inspect_image(state, &uri).await {
                     Ok(Some((manifest, digest))) => {
                         debug!("Resolved image: \n {manifest:?}");
 
-                        Self::emit_oci_resolved_event(
-                            state,
-                            uri.clone(),
-                            manifest.clone(),
-                            digest.clone(),
-                        )?;
+                        if let Some(hostname) = Self::registry_from_image_ref(&uri) {
+                            let manifest_data = serde_json::to_vec(&manifest)?;
 
-                        let media_type = manifest.content_type().to_owned();
-                        let event = ProvenanceEvent::ImageRefResolved {
-                            uri,
-                            digest,
-                            media_type,
-                        };
-                        Self::forward_event(state, event)?;
+                            // construct new event, pass source_ref through
+                            let event = ProvenanceEvent::OCIArtifactResolved {
+                                uri: uri.clone(),
+                                digest,
+                                manifest_data,
+                                registry: hostname,
+                                source_ref: source_ref.clone(),
+                            };
+
+                            // depending on the source of the discovery, forward to appropriate parties
+                            match source_ref {
+                                DiscoverySourceRef::KubernetesPodContainer { .. } => {
+                                    //forward to a k8s consumer
+
+                                    let payload = rkyv::to_bytes::<rkyv::rancor::Error>(&event)?;
+
+                                    state.cassini_client.publish(PublishRequest {
+                                        topic: KUBERNETES_RESOLUTION_EVENTS.to_string(),
+                                        payload: payload.into(),
+                                        trace_ctx: WireTraceCtx::from_current_span(),
+                                        offline_behavior: OfflineBehavior::default(),
+                                    })?;
+                                }
+                                DiscoverySourceRef::OCIRepository { .. } => (),
+                            }
+
+                            Self::forward_event(state, event)?
+                        } else {
+                            warn!("Could not extract registry hostname from image ref: {uri}");
+                        }
                     }
                     Ok(None) => {}
                     Err(e) => {

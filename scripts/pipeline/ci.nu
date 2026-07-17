@@ -265,7 +265,12 @@ def run-static-analysis [ws_manifest: path, artifact_dir: path]: nothing -> tabl
 
 def image-manifest []: nothing -> list<record> {
     [
-
+        {
+            name: "polar-nu-init"
+            flake: ".#nuInitImage"
+            image: "polar-nu-init"
+            root_purl: ""
+        }
         {
             name: "cert-issuer"
             flake: ".#certIssuerImage"
@@ -511,6 +516,9 @@ def build-and-link-binaries [
                     return null
                 }
 
+                # TODO: similarly to how we're moving toward emitting build data as part of ContainerImageCreated events, we should do something similar here,
+                # The semantic meaning of what artifact was produced from a particular build can simply be inferred by the event carrying that artifact's metadata
+                #
                 emit-artifact-produced $binary_hash $ELF_BINARY_ARTIFACT --name $name
 
                 let sbom_info = $sbom_lookup | get -o $pkg.name | default null
@@ -572,19 +580,21 @@ def registry-refs [image_name: string]: nothing -> list<string> {
     $refs
 }
 
-def login-to-registries [] {
-    mut creds = []
+# A helper that would let us login to multiple registires, should we wish to push to other places
+def login-to-registries []: nothing -> nothing {
+    let ci_reg  = $env.CI_REGISTRY? | default ""
     let ci_user = $env.CI_REGISTRY_USER? | default ""
     let ci_pass = $env.CI_REGISTRY_PASSWORD? | default ""
-    let ci_reg = $env.CI_REGISTRY? | default ""
-    if ($ci_user | is-not-empty) and ($ci_reg | is-not-empty) {
-        $creds = (
-            $creds
-            | append {registry: $ci_reg, username: $ci_user, password: $ci_pass}
-        )
+
+    if ($ci_reg | is-empty) or ($ci_user | is-empty) {
+        log-debug "No OCI registry credentials configured, skipping login." --component $COMPONENT
+        return
     }
 
-    if ($creds | is-not-empty) { registry-login $creds }
+    let insecure = ($env.POLAR_REGISTRY_INSECURE? | default "" | is-not-empty)
+    let creds = [{registry: $ci_reg, username: $ci_user, password: $ci_pass, insecure: $insecure}]
+
+    registry-login $creds
 }
 
 def process-image [entry: record, image_tag: string, --skip-upload]: nothing -> record {
@@ -620,9 +630,14 @@ def build-and-push-image [
         log-warn $"No registries configured for ($link_name) — image will not be uploaded anywhere" --component $COMPONENT
     }
 
+    let insecure = ($env.POLAR_REGISTRY_INSECURE? | default "" | is-not-empty)
     let uploads = ($registries | each {|template|
         let remote_ref = ($template | str replace "{tag}" $tag)
-        upload-image $build.tarball $remote_ref --name $link_name
+        if $insecure {
+            upload-image $build.tarball $remote_ref --name $link_name --insecure
+        } else {
+            upload-image $build.tarball $remote_ref --name $link_name
+        }
     })
 
     for upload in $uploads {
@@ -634,6 +649,10 @@ def build-and-push-image [
         # emit an event saying we created a new build artifact
         emit-artifact-produced $upload.digest "oci-image" --name $link_name
         # then, emit a second message detailing that this artifact was a container image.
+
+        # TODO: well, turns out this is pretty stupid. It's fine to treat all images effectively as build artifacts.
+        # So perhaps these payloads could be merged. ContainerImageCreated messages should send build metadata now
+
         (
         emit-container-image-created
             $link_name
@@ -681,7 +700,6 @@ def main [
                                 # In GitLab CI: $CI_PIPELINE_ID or a UUIDv5 derived from it.
                                 # Locally: pass any stable string, e.g. (random uuid) once per session.
     --package(-p): string = ""
-    --release(-r)
     --target(-t): string = ""
     --tag: string = ""
     --filter: string = ""
@@ -739,8 +757,6 @@ def main [
         log-info $"($packages | length) package\(s\) in scope, image tag: ($image_tag)" --component $COMPONENT
 
         # Phase 1 — Cargo SBOMs
-        #
-        #
         let sbom_files  = (generate-workspace-sboms $packages $ws_manifest $artifact_dir --target $target)
         let sbom_lookup = (process-cargo-sboms $sbom_files $packages)
         log-info $"($sbom_files | length) SBOM\(s\) generated and analyzed" --component $COMPONENT
@@ -790,6 +806,7 @@ def main [
         let duration_secs = ($elapsed / 1sec | math round)
         emit-execution-completed $duration_secs
         log-info $"pipeline complete \(duration: ($elapsed | format duration 'ms')\)" --component $COMPONENT
+
 
         null
     } catch {|e|

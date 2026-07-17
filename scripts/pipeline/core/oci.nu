@@ -70,22 +70,7 @@ export def nix-build-image [
     let oci_metadata = (extract-oci-metadata $tarball)
     let tarball_hash = (content-hash-file $tarball)
 
-    # Emit ContainerImageCreated — the earliest possible announcement.
-    # The build processor can create ContainerImage + OCILayer nodes from
-    # this alone, without waiting for a registry push or resolver discovery.
     if ($oci_metadata | get --optional success | default false) {
-        ( emit-container-image-created
-            $link_name
-            $tarball_hash
-            $oci_metadata.config_digest
-            $oci_metadata.layers
-            --os $oci_metadata.os
-            --arch $oci_metadata.arch
-            --created $oci_metadata.created
-            --entrypoint $oci_metadata.entrypoint
-            --cmd $oci_metadata.cmd
-            --repo_tags ($oci_metadata.repo_tags? | default [])
-        )
         log-info $"($link_name): ($oci_metadata.layers | length) layers, ($oci_metadata.os)/($oci_metadata.arch)" --component oci
     } else {
         log-warn $"($link_name): built successfully but could not extract OCI metadata" --component oci
@@ -109,20 +94,18 @@ export def nix-build-image [
 # Log in to one or more OCI registries via skopeo.
 # Takes a list of { registry, username, password } records.
 # Stops on first failure.
-export def registry-login [credentials: list<record>] {
+export def registry-login [credentials: list<record>]: nothing -> nothing {
     for cred in $credentials {
         log-info $"Logging into ($cred.registry)" --component oci
-        let result = (
-            skopeo login
-                --username $cred.username
-                --password $cred.password
-                $cred.registry
-            | complete
-        )
+        mut args = [login --username $cred.username --password $cred.password]
+        if ($cred | get -o insecure | default false) {
+            $args = ($args | append "--tls-verify=false")
+        }
+        $args = ($args | append $cred.registry)
+
+        let result = (skopeo ...$args | complete)
         if $result.exit_code != 0 {
-            let msg = $"Failed to log into ($cred.registry): ($result.stderr? | default $result.stdout | str trim)"
-            log-error $msg
-            error make {msg: $msg }
+            error make {msg: $"Failed to log into ($cred.registry): ($result.stderr? | default $result.stdout | str trim)"}
         }
     }
 }
@@ -143,23 +126,29 @@ export def upload-image [
     tarball_path: path
     remote_ref: string
     --name: string = ""
+    --insecure
 ]: nothing -> record {
     let label = if ($name | is-not-empty) { $name } else { $remote_ref }
     let real_path = (readlink -f $tarball_path | str trim)
-
     log-info $"Uploading ($label) -> ($remote_ref)" --component oci
 
-    let copy_result = (skopeo copy $"docker-archive:($real_path)" $remote_ref | complete)
+    mut copy_args = [copy $"docker-archive:($real_path)" $remote_ref]
+    if $insecure {
+        log-warn "Uploading images to insecure registry!" --component oci
+        $copy_args = ($copy_args | append "--tls-verify=false")
+    }
+
+    let copy_result = (skopeo ...$copy_args | complete)
     if $copy_result.exit_code != 0 {
         let msg = ($copy_result.stderr? | default $copy_result.stdout | str trim)
+        log-error $"skopeo copy failed for ($label): ($msg)" --component oci
         error make {msg: $"Upload failed for ($label): ($msg)"}
     }
 
-    # Ask the registry directly for the digest of what we just pushed,
-    # rather than parsing skopeo copy's human-readable output. inspect
-    # emits real JSON — Digest is the manifest digest as the registry
-    # sees it, which is the authoritative post-push identity.
-    let inspect_result = (skopeo inspect $remote_ref | complete)
+    mut inspect_args = [inspect $remote_ref]
+    if $insecure { $inspect_args = ($inspect_args | append "--tls-verify=false") }
+
+    let inspect_result = (skopeo ...$inspect_args | complete)
     let digest = if $inspect_result.exit_code == 0 {
         $inspect_result.stdout | from json | get -o Digest | default ""
     } else {

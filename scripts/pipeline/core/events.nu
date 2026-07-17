@@ -1,7 +1,6 @@
 
-use cassini.nu [emit, emit-provenance-event]
 use state.nu [get-build-id]
-
+use logging.nu [log-debug]
 export const SUBJECT_PREFIX = "polar.provenance"
 export const BUILD_EVENTS_TOPIC = $"($SUBJECT_PREFIX).events"
 
@@ -13,23 +12,24 @@ export const BUILD_EVENTS_TOPIC = $"($SUBJECT_PREFIX).events"
 # the corresponding ProvenanceEvent variant in polar::events exactly —
 # serde's internally-tagged enum dispatches on the `type` field.
 #
-# build_id is appended unconditionally by the private `emit-provenance-event` wrapper below,
+# build_id is appended unconditionally by the private `emit` wrapper below,
 # not by individual emit-* functions. Every event in this pipeline comes from
 # a build, so build_id is not optional here — call sites never need to think
 # about it. init-pipeline-state must be called once at the top of the
 # pipeline (see state.nu) before any function in this file is used.
 #
-# cassini.nu's emit-provenance-event remains the lower-level transport
+# cassini.nu's emit remains the lower-level transport
 # primitive — it knows how to publish a record, nothing more. This module
 # owns the build_id contract on top of it.
 # ---------------------------------------------------------------------------
 
-# Emit a canonical ProvenanceEvent to the unified provenance events topic.
+# Emit an event to the unified provenance events topic.
 # The payload record must include a `type` field matching a ProvenanceEvent
 # variant name in snake_case, plus all fields for that variant.
 # build_id is carried on the payload itself for variants that have one —
 # it is not on this envelope.
-def emit-provenance-event [payload: record]: nothing -> nothing {
+# TODO: To support more audtiable event logs, append events to a log
+def emit [payload: record]: nothing -> nothing {
     let json = $payload | to json --raw
     log-debug $json
     cassini-client publish $BUILD_EVENTS_TOPIC $json
@@ -47,8 +47,12 @@ export def emit-execution-started [
     repo_url: string
     --triggered_by: string = "" # TODO: Not sure we care for this field, could be useful, could just be noise
 ]: nothing -> nothing {
+
+    let build_id = get-build-id
+
     mut payload = {
         type: "execution_started"
+        build_id: $build_id
         commit_sha: $commit_sha
         ref_name: $ref_name
         repo_url: $repo_url
@@ -58,11 +62,11 @@ export def emit-execution-started [
     if ($triggered_by | is-not-empty) {
         $payload = ($payload | upsert triggered_by $triggered_by)
     }
-    emit-provenance-event $payload
+    emit $payload
 }
 
 export def emit-execution-completed [duration_secs: int]: nothing -> nothing {
-    emit-provenance-event {type: "execution_completed", duration_secs: $duration_secs}
+    emit {type: "execution_completed", duration_secs: $duration_secs}
 }
 
 export def emit-execution-failed [
@@ -73,7 +77,7 @@ export def emit-execution-failed [
     if ($stage | is-not-empty) {
         $payload = ($payload | upsert stage $stage)
     }
-    emit-provenance-event $payload
+    emit $payload
 }
 
 export def emit-execution-cancelled [--reason: string = ""]: nothing -> nothing {
@@ -81,7 +85,7 @@ export def emit-execution-cancelled [--reason: string = ""]: nothing -> nothing 
     if ($reason | is-not-empty) {
         $payload = ($payload | upsert reason $reason)
     }
-    emit-provenance-event $payload
+    emit $payload
 }
 
 export def emit-vulnerability-found [
@@ -98,14 +102,13 @@ export def emit-vulnerability-found [
     if ($in_artifact | is-not-empty) {
         $payload = ($payload | upsert in_artifact $in_artifact)
     }
-    emit-provenance-event $payload
+    emit $payload
 }
 
 # ── Artifact domain ────────────────────────────────────────────────────────────
 #
 # Emit ArtifactProduced — a raw pipeline artifact was produced.
 # Covers SBOMs, ELF binaries, test reports, scan results.
-# Not for OCI container images — use emit-container-image-created instead.
 export def emit-artifact-produced [
     content_hash: string
     artifact_type: string
@@ -116,17 +119,18 @@ export def emit-artifact-produced [
         type: "artifact_produced"
         artifact_content_hash: $content_hash
         artifact_type: $artifact_type
+        build_id: (get-build-id)
     }
     if ($name | is-not-empty)         { $payload = ($payload | insert name $name) }
     if ($content_type | is-not-empty) { $payload = ($payload | insert content_type $content_type) }
-    emit-provenance-event $payload
+    emit $payload
 }
 
 # Emit SbomAnalyzed — SBOM was parsed and its dependency graph extracted.
 # Carries the full graph fragment so the build processor can write Package
 # nodes and DEPENDS_ON edges in one pass.
 export def emit-sbom-analyzed [fragment: record, filename: string]: nothing -> nothing {
-    emit-provenance-event {
+    emit {
         type: "sbom_analyzed"
         filename: $filename
         artifact_content_hash: $fragment.artifact_content_hash
@@ -137,17 +141,11 @@ export def emit-sbom-analyzed [fragment: record, filename: string]: nothing -> n
 }
 
 # Emit ContainerImageCreated — OCI container image built and available as a tarball.
+# TODO: make digest and uri non-optional fields
 #
-# Called twice per image across the pipeline lifecycle:
-#   1. Pre-push, right after nix build — carries config_digest, layers, os/arch/etc.
-#      digest and uri are absent. Creates the ContainerImage node.
-#   2. Post-push, right after a successful registry upload — carries the same
-#      config_digest plus the registry manifest digest and uri. The linker
-#      upserts the OCIArtifact node and writes
-#      ContainerImage -[:INSTANCE_OF]-> OCIArtifact, keyed on config_digest.
-#      No resolver involvement — ci.nu already has every fact needed.
-#
-# config_digest is the stable join key across both calls.
+# Whatever system we're choosing to observe (e.g. Kubernetes, Podman, etc.) should be able to find it later.
+# So even if we don't emit on build, the resolver and build processor will get the connection later and make the
+# graph consistent eventually.
 export def emit-container-image-created [
     image_name: string
     tarball_hash: string
@@ -177,7 +175,7 @@ export def emit-container-image-created [
     }
     if ($digest | is-not-empty) { $payload = ($payload | insert digest $digest) }
     if ($uri | is-not-empty)    { $payload = ($payload | insert uri $uri) }
-    emit-provenance-event $payload
+    emit $payload
 }
 
 # Emit BinaryLinked — a compiled binary linked to its source package and SBOM.
@@ -207,5 +205,5 @@ export def emit-binary-linked [
     if ($binding_digest | is-not-empty) {
         $payload = ($payload | upsert binding_digest $binding_digest)
     }
-    emit-provenance-event $payload
+    emit $payload
 }

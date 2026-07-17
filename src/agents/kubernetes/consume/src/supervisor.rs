@@ -9,11 +9,20 @@ use kube_common::{
     flux::{kustomization::Kustomization, oci_repositories::OciRepository},
 };
 use kube_common::{KUBERNETES_CONSUMER, RawKubeEvent};
+use polar::DiscoverySourceRef;
+use polar::ProvenanceEvent;
+use polar::RkyvError;
 use polar::SupervisorMessage;
 use polar::cassini::CassiniClient;
 use polar::cassini::SubscribeRequest;
 use polar::cassini::TcpClient;
+use polar::graph::controller::GraphControllerMsg;
+use polar::graph::controller::GraphOp;
+use polar::graph::controller::IntoGraphKey;
 use polar::graph::controller::{GraphController, GraphControllerActor};
+use polar::graph::nodes::builds::ArtifactNodeKey;
+use polar::graph::nodes::kube::KubeNodeKey;
+use polar::topics::KUBERNETES_RESOLUTION_EVENTS;
 use ractor::Actor;
 use ractor::ActorProcessingErr;
 use ractor::ActorRef;
@@ -153,33 +162,82 @@ impl ClusterConsumerSupervisor {
     }
 
     fn deserialize_and_dispatch(
-        _topic: String,
+        topic: String,
         payload: Vec<u8>,
         cache: &mut ProjectionCache,
         graph_controller: &GraphController,
         tcp_client: &TcpClient,
     ) -> Result<(), ActorProcessingErr> {
-        // 1) Parse the raw message into your RawKubeEvent
-        let ev: RawKubeEvent = serde_json::from_slice(&payload)?;
+        // determine the topic the mesasge came from, we could've gotten notified of a new resource, or been notified that
+        // some resource we saw was resolved from an external source (like a container image)
+        match topic.as_str() {
+            KUBERNETES_CONSUMER => {
+                // 1) Parse the raw message into your RawKubeEvent
+                let ev: RawKubeEvent = serde_json::from_slice(&payload)?;
 
-        // TODO: Define constants for these and match on them instead, these literals are also used in the marco calls to define their watchers
-        match ev.kind.as_str() {
-            "Pod" => Self::handle_event::<Pod>(ev, cache, graph_controller, tcp_client)?,
-            "Deployment" => {
-                Self::handle_event::<Deployment>(ev, cache, graph_controller, tcp_client)?
+                // TODO: Define constants for these and match on them instead, these literals are also used in the marco calls to define their watchers
+                match ev.kind.as_str() {
+                    "Pod" => Self::handle_event::<Pod>(ev, cache, graph_controller, tcp_client)?,
+                    "Deployment" => {
+                        Self::handle_event::<Deployment>(ev, cache, graph_controller, tcp_client)?
+                    }
+                    "ReplicaSet" => {
+                        Self::handle_event::<ReplicaSet>(ev, cache, graph_controller, tcp_client)?
+                    }
+                    "Job" => Self::handle_event::<Job>(ev, cache, graph_controller, tcp_client)?,
+                    "Node" => todo!("Nodes"),
+                    KIND_OCI_REPOSITORY => Self::handle_event::<OciRepository>(
+                        ev,
+                        cache,
+                        graph_controller,
+                        tcp_client,
+                    )?,
+                    KIND_KUSTOMIZATION => Self::handle_event::<Kustomization>(
+                        ev,
+                        cache,
+                        graph_controller,
+                        tcp_client,
+                    )?,
+                    _ => warn!("Unexpected resource type {}", ev.kind),
+                }
             }
-            "ReplicaSet" => {
-                Self::handle_event::<ReplicaSet>(ev, cache, graph_controller, tcp_client)?
+            KUBERNETES_RESOLUTION_EVENTS => {
+                let ev = rkyv::from_bytes::<ProvenanceEvent, RkyvError>(&payload)?;
+
+                match ev {
+                    ProvenanceEvent::OCIArtifactResolved {
+                        digest, source_ref, ..
+                    } => {
+                        if let DiscoverySourceRef::KubernetesPodContainer {
+                            pod_uid,
+                            container_name,
+                            ..
+                        } = source_ref
+                        {
+                            debug!(
+                                "pod {pod_uid} container {container_name} was resolved with digest {digest}, updating graph"
+                            );
+
+                            let container_k = KubeNodeKey::PodContainer {
+                                pod_uid,
+                                name: container_name,
+                            };
+                            let artifact_k = ArtifactNodeKey::OCIArtifact { digest };
+
+                            let op = GraphOp::EnsureEdge {
+                                from: container_k.into_key(),
+                                to: artifact_k.into_key(),
+                                rel_type: "USES_IMAGE".to_string(),
+                                props: vec![],
+                            };
+
+                            graph_controller.send_message(GraphControllerMsg::Op(op))?;
+                        }
+                    }
+                    _ => (), //ignore all other events
+                }
             }
-            "Job" => Self::handle_event::<Job>(ev, cache, graph_controller, tcp_client)?,
-            "Node" => todo!("Nodes"),
-            KIND_OCI_REPOSITORY => {
-                Self::handle_event::<OciRepository>(ev, cache, graph_controller, tcp_client)?
-            }
-            KIND_KUSTOMIZATION => {
-                Self::handle_event::<Kustomization>(ev, cache, graph_controller, tcp_client)?
-            }
-            _ => warn!("Unexpected resource type {}", ev.kind),
+            _ => (), //ignore unhandled topics for now, we shouldn't see anything else
         }
 
         Ok(())
@@ -248,6 +306,14 @@ impl Actor for ClusterConsumerSupervisor {
                         //
                         if let Err(e) = state.broker_client.subscribe(SubscribeRequest {
                             topic: KUBERNETES_CONSUMER.into(),
+                            trace_ctx: None,
+                        }) {
+                            error!("{e}");
+                            return Err(ActorProcessingErr::from(e.to_string()));
+                        }
+
+                        if let Err(e) = state.broker_client.subscribe(SubscribeRequest {
+                            topic: KUBERNETES_RESOLUTION_EVENTS.into(),
                             trace_ctx: None,
                         }) {
                             error!("{e}");
