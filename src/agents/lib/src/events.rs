@@ -199,7 +199,39 @@ pub struct ArtifactProducedPayload {
     #[serde(default)]
     pub build_id: Option<String>,
 }
+#[derive(
+    Debug, Clone, PartialEq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub struct SecurityAdvisoryFoundPayload {
+    pub build_id: String,
+    pub severity: String,
+    pub identifier: String,
+    /// Content hash of the artifact the vuln was found in, if known at emit time.
+    pub in_artifact: Option<String>,
+    pub kind: Option<String>,
+    pub scanner: Option<String>,
+    pub affected_package: Option<String>,
+    pub cve_id: Option<String>,
+    pub ghsa_id: Option<String>,
+    pub fix_version: Option<String>,
+    pub unaffected_constraint: Option<String>,
+    pub advisory_url: Option<String>,
+}
+#[derive(
+    Debug, Clone, PartialEq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 
+pub struct PackageStatusFoundPayload {
+    pub build_id: String,
+    pub kind: String,
+    pub identifier: String,
+    pub package_name: String,
+    pub package_version: String,
+    pub in_artifact: Option<String>,
+    pub affected_package: Option<String>,
+    pub advisory_url: Option<String>,
+    pub scanner: Option<String>,
+}
 /// Payload for a compiled binary that has been linked to its source package and SBOM.
 ///
 /// The `binding_digest` is a cryptographic attestation:
@@ -358,19 +390,8 @@ pub enum ProvenanceEvent {
         reason: Option<String>,
     },
 
-    /// A vulnerability was found during a build scan.
-    ///
-    /// Keyed on `identifier` so the same CVE/GHSA found across multiple builds
-    /// converges to one `Vulnerability` node. `FOUND_VULNERABILITY` edges on
-    /// `BuildJob` record which builds saw it; `FOUND_IN` links it to the
-    /// specific artifact if the scanner attributed it.
-    VulnerabilityFound {
-        build_id: String,
-        severity: String,
-        identifier: String,
-        /// Content hash of the artifact the vuln was found in, if known at emit time.
-        in_artifact: Option<String>,
-    },
+    SecurityAdvisoryFound(SecurityAdvisoryFoundPayload),
+    PackageStatusFound(PackageStatusFoundPayload),
 
     // ── Artifact domain ────────────────────────────────────────────────────────
     // Emitted by instrumented pipeline stages or Rust agents.
@@ -401,7 +422,10 @@ pub enum ProvenanceEvent {
     /// Currently near no-op — GitLab package registries don't expose enough
     /// metadata to be actionable. Retained for future use when package registry
     /// introspection improves.
-    ArtifactDiscovered { name: String, url: String },
+    ArtifactDiscovered {
+        name: String,
+        url: String,
+    },
 
     /// An OCI artifact was discovered in a registry or pipeline.
     ///
@@ -413,7 +437,9 @@ pub enum ProvenanceEvent {
     },
 
     /// A new OCI registry was discovered.
-    OCIRegistryDiscovered { hostname: String },
+    OCIRegistryDiscovered {
+        hostname: String,
+    },
 
     /// An OCI artifact was created by a build and pushed to a registry.
     ///

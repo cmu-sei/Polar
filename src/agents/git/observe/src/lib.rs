@@ -16,6 +16,10 @@ pub const REPO_SUPERVISOR_NAME: &str = "polar.git.observer.repo.supervisor";
 
 pub mod supervisor;
 
+fn git_time_to_epoch_ms(t: &git2::Time) -> i64 {
+    t.seconds() * 1000
+}
+
 /* ============================
  * Credentials
  * ============================
@@ -502,7 +506,7 @@ fn on_commit(
         repo: repo_id,
         oid: commit.id().to_string(),
         committer: commit.committer().to_string(),
-        time: commit.time().seconds(),
+        time: git_time_to_epoch_ms(&commit.time()), // convert to ms to keep in line with other timestamps
         message: commit.message().unwrap_or_default().to_string(),
         parents: commit.parent_ids().map(|id| id.to_string()).collect(),
     };

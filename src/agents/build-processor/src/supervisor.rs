@@ -265,8 +265,7 @@ impl BuildProcessorSupervisor {
             | ProvenanceEvent::StageCompleted { .. }
             | ProvenanceEvent::ExecutionCompleted { .. }
             | ProvenanceEvent::ExecutionFailed { .. }
-            | ProvenanceEvent::ExecutionCancelled { .. }
-            | ProvenanceEvent::VulnerabilityFound { .. } => {
+            | ProvenanceEvent::ExecutionCancelled { .. } => {
                 let Some(handler) = &state.build_handler else {
                     error!("build handler not ready — dropping lifecycle event");
                     return;
@@ -285,6 +284,8 @@ impl BuildProcessorSupervisor {
             | ProvenanceEvent::OCIArtifactResolved { .. }
             | ProvenanceEvent::OCIArtifactCreated { .. }
             | ProvenanceEvent::ImageRefResolved { .. }
+            | ProvenanceEvent::SecurityAdvisoryFound { .. }
+            | ProvenanceEvent::PackageStatusFound { .. }
             | ProvenanceEvent::OCIRegistryDiscovered { .. } => {
                 let Some(linker) = &state.linker else {
                     error!("linker not ready — dropping artifact event");

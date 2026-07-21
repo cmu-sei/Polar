@@ -23,7 +23,6 @@ pub enum BuildNodeKey {
     /// All BuildJob instances link to this via IS.
     /// Analogous to the Artifact type node in the artifact domain.
     BuildExecution,
-
     /// Cannonical state node
     State,
     /// A single Cyclops build execution. This is the linchpin node — it
@@ -57,12 +56,6 @@ pub enum BuildNodeKey {
     /// correctly converge to the same node (reproducible build detection).
     /// The PRODUCED edge carries the relationship back to the BuildJob.
     BuildArtifact { content_hash: String },
-
-    /// A vulnerability found during a build scan. Keyed on identifier so that
-    /// the same CVE/GHSA found across multiple builds converges to one node —
-    /// the FOUND_VULNERABILITY edge on BuildJob records which builds saw it,
-    /// and FOUND_IN links it to the specific artifact if the scanner attributed it.
-    Vulnerability { identifier: String },
 }
 
 impl GraphNodeKey for BuildNodeKey {
@@ -89,13 +82,6 @@ impl GraphNodeKey for BuildNodeKey {
                 )
             }
 
-            BuildNodeKey::Vulnerability { identifier } => {
-                let ik = format!("{prefix}_identifier");
-                (
-                    format!("({prefix}:Vulnerability {{ identifier: ${ik} }})"),
-                    vec![(ik, BoltType::String(identifier.clone().into()))],
-                )
-            }
             BuildNodeKey::BackendJob {
                 node_label,
                 identity_props,
@@ -163,6 +149,9 @@ pub enum ArtifactNodeKey {
     /// Other typed artifacts are related to it using an :IS
     Artifact,
 
+    // Representation of what a "fidning" is in the general sense as it relates to build artifacts.
+    // Should only have incoming IS relationships
+    Finding,
     OCIRegistry {
         hostname: String,
     },
@@ -219,6 +208,13 @@ pub enum ArtifactNodeKey {
     ContainerImage {
         config_digest: String,
     },
+    SecurityAdvisory {
+        identifier: String,
+    },
+
+    PackageStatus {
+        identifier: String,
+    },
 }
 
 impl GraphNodeKey for ArtifactNodeKey {
@@ -230,6 +226,10 @@ impl GraphNodeKey for ArtifactNodeKey {
                     format!("{prefix}_type"),
                     BoltType::String("Artifact".into()),
                 )],
+            ),
+            Self::Finding => (
+                format!("({prefix}:Finding {{type: \"Finding\"}})"),
+                vec![(format!("{prefix}_type"), BoltType::String("Finding".into()))],
             ),
             Self::OCIRegistry { hostname } => (
                 format!("({prefix}:OCIRegistry {{ hostname: ${prefix}_hostname }})"),
@@ -291,6 +291,20 @@ impl GraphNodeKey for ArtifactNodeKey {
                     BoltType::String(config_digest.clone().into()),
                 )],
             ),
+            Self::SecurityAdvisory { identifier } => {
+                let ik = format!("{prefix}_identifier");
+                (
+                    format!("({prefix}:SecurityAdvisory {{ identifier: ${ik} }})"),
+                    vec![(ik, BoltType::String(identifier.clone().into()))],
+                )
+            }
+            Self::PackageStatus { identifier } => {
+                let ik = format!("{prefix}_identifier");
+                (
+                    format!("({prefix}:PackageStatus {{ identifier: ${ik} }})"),
+                    vec![(ik, BoltType::String(identifier.clone().into()))],
+                )
+            }
         }
     }
 }

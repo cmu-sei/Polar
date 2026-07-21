@@ -1,12 +1,13 @@
 use chrono::Utc;
+use neo4rs::BoltType;
 use oci_client::manifest::OciManifest;
 use polar::graph::controller::IntoGraphKey;
 use polar::graph::controller::{GraphControllerMsg, GraphOp, GraphValue, Property, rel};
 use polar::graph::nodes::builds::ArtifactNodeKey;
 use polar::graph::nodes::builds::BuildNodeKey;
 use polar::{
-    ArtifactProducedPayload, BinaryLinkedPayload, ContainerImageCreatedPayload, ProvenanceEvent,
-    SbomGraphFragment,
+    ArtifactProducedPayload, BinaryLinkedPayload, ContainerImageCreatedPayload, PackageRef,
+    PackageStatusFoundPayload, ProvenanceEvent, SbomGraphFragment, SecurityAdvisoryFoundPayload,
 };
 use ractor::ActorRef;
 use ractor::async_trait;
@@ -69,6 +70,19 @@ impl ProvenanceLinker {
         )
     }
 
+    /// Atomicity note: each RawQuery is one transaction, so each GROUP is now
+    /// atomic (all component nodes, or none). The groups are still separate
+    /// transactions relative to each other — this is group-atomic, not
+    /// SBOM-atomic. Full-SBOM atomicity would require a single multi-statement
+    /// transaction, which is the argument for a typed batch variant later; it is
+    /// deliberately not done here to keep each query eyeball-verifiable.
+    ///
+    /// Label/rel assumptions carried over from the existing code — verify against
+    /// your ArtifactNodeKey::Package cypher_match output:
+    ///   - Package node label is `Package`, MERGE key is `purl`.
+    ///   - Dependency edge rel type is rel::DEPENDS_ON ("DEPENDS_ON").
+    /// If cypher_match renders Package with a different label, the string literals
+    /// below must match it (RawQuery bypasses cypher_match entirely).
     pub(crate) fn handle_sbom_analyzed(
         state: &mut ProvenanceLinkerState,
         fragment: SbomGraphFragment,
@@ -80,7 +94,7 @@ impl ProvenanceLinker {
             fragment.edges.len()
         );
 
-        // 1. Upsert the SBOM document node itself.
+        // ── 1. Sbom node + type/describe edges (singletons, per-op path) ─────────
         let sbom_k = ArtifactNodeKey::Sbom {
             artifact_content_hash: fragment.artifact_content_hash.clone(),
         };
@@ -94,7 +108,6 @@ impl ProvenanceLinker {
             "Failed to upsert SBOM node",
         )?;
 
-        // 2. (Artifact)-[:IS]->(Sbom) — type hierarchy edge.
         Self::ensure_edge(
             state,
             ArtifactNodeKey::Artifact,
@@ -103,127 +116,152 @@ impl ProvenanceLinker {
             vec![],
         )?;
 
-        // 3. Upsert the root package and link the SBOM to it.
-        //    (Sbom)-[:DESCRIBES]->(Package {purl: root})
-        //    The SBOM describes ONE package. Dependencies are linked
-        //    via DEPENDS_ON between Package nodes, not from the SBOM.
         if let Some(ref root) = fragment.root {
             let root_k = ArtifactNodeKey::Package {
                 purl: root.purl.clone(),
             };
-            Self::upsert_node(
-                state,
-                root_k.clone(),
-                vec![
-                    Property("name".into(), GraphValue::String(root.name.clone())),
-                    Property("version".into(), GraphValue::String(root.version.clone())),
-                    Property(
-                        "component_type".into(),
-                        GraphValue::String(root.component_type.clone()),
-                    ),
-                ],
-                "Failed to upsert root package node",
-            )?;
+            // Root node is upserted as part of the batched component set below
+            // (it may or may not also appear in `components`; MERGE dedupes). We
+            // still write the DESCRIBES edge here as a singleton.
             Self::ensure_edge(state, sbom_k.clone(), root_k, rel::DESCRIBES, vec![])?;
         }
 
-        // 4. Upsert all dependency package nodes.
-        //    We do this before edges so every node exists before we
-        //    try to link them. This is idempotent — MERGE won't
-        //    duplicate if the purl already exists from a prior build.
-        for comp in &fragment.components {
-            let comp_k = ArtifactNodeKey::Package {
-                purl: comp.purl.clone(),
-            };
+        // ── 2. Batched Package node upserts (root + all components) ──────────────
+        // One UNWIND over a rows list. Root is folded in so it can't be created as
+        // a bare purl-only stub by the DESCRIBES edge above (MERGE dedupes on purl).
+        //
+        //   UNWIND $rows AS row
+        //   MERGE (p:Package { purl: row.purl })
+        //   SET p.name = row.name,
+        //       p.version = row.version,
+        //       p.component_type = row.component_type
+        {
+            let mut rows: Vec<GraphValue> = Vec::with_capacity(fragment.components.len() + 1);
 
-            Self::upsert_node(
-                state,
-                comp_k,
-                vec![
-                    Property("name".into(), GraphValue::String(comp.name.clone())),
-                    Property("version".into(), GraphValue::String(comp.version.clone())),
-                    Property(
+            let push_pkg = |p: &PackageRef, rows: &mut Vec<GraphValue>| {
+                rows.push(GraphValue::Map(vec![
+                    ("purl".into(), GraphValue::String(p.purl.clone())),
+                    ("name".into(), GraphValue::String(p.name.clone())),
+                    ("version".into(), GraphValue::String(p.version.clone())),
+                    (
                         "component_type".into(),
-                        GraphValue::String(comp.component_type.clone()),
+                        GraphValue::String(p.component_type.clone()),
                     ),
-                ],
-                "Failed to upsert component package node",
-            )?;
-        }
-
-        // 4.5. Link the root package to its direct dependencies.
-        //
-        //      The `edges` list encodes the full tree, but we need to
-        //      guarantee the root is connected to its direct deps even
-        //      if the CycloneDX generator didn't include the root as a
-        //      `ref` in the `dependencies` array. Some generators
-        //      (including cargo-cyclonedx in certain versions) omit it.
-        //
-        //      Strategy: look for an edge where from_ref == root.purl.
-        //      If found, those are the authoritative direct deps.
-        //      If not found, every component is treated as a direct dep
-        //      of the root — a flat fallback that's better than a gap.
-        if let Some(ref root) = fragment.root {
-            let root_k = ArtifactNodeKey::Package {
-                purl: root.purl.clone(),
+                ]));
             };
+            if let Some(ref root) = fragment.root {
+                push_pkg(root, &mut rows);
+            }
+            for comp in &fragment.components {
+                push_pkg(comp, &mut rows);
+            }
 
-            let root_edge = fragment.edges.iter().find(|e| e.from_ref == root.purl);
+            if !rows.is_empty() {
+                let cypher = "\
+                    UNWIND $rows AS row \
+                    MERGE (p:Package { purl: row.purl }) \
+                    SET p.name = row.name, \
+                        p.version = row.version, \
+                        p.component_type = row.component_type"
+                    .to_string();
 
-            match root_edge {
-                Some(edge) => {
-                    // Authoritative: the SBOM's dependency array explicitly
-                    // lists what the root depends on.
-                    for dep_purl in &edge.to_refs {
-                        let dep_k = ArtifactNodeKey::Package {
-                            purl: dep_purl.clone(),
-                        };
-                        Self::ensure_edge(state, root_k.clone(), dep_k, rel::DEPENDS_ON, vec![])?;
-                    }
-                }
-                None => {
-                    // Fallback: no explicit root entry in `dependencies`.
-                    // Treat all components as direct deps of root. This
-                    // loses the transitive/direct distinction but prevents
-                    // an orphaned root node with no outgoing edges.
-                    warn!(
-                        "SBOM {} has no dependency entry for root purl {}, \
-                                 falling back to flat linkage",
-                        fragment.filename, root.purl
-                    );
-                    for comp in &fragment.components {
-                        let comp_k = ArtifactNodeKey::Package {
-                            purl: comp.purl.clone(),
-                        };
-                        Self::ensure_edge(state, root_k.clone(), comp_k, rel::DEPENDS_ON, vec![])?;
-                    }
-                }
+                let params = vec![("rows".to_string(), BoltType::from(GraphValue::List(rows)))];
+                Self::send_op(
+                    state,
+                    GraphOp::RawQuery { cypher, params },
+                    "Failed to batch-upsert package nodes",
+                )?;
             }
         }
 
-        // 5. Write the dependency tree edges.
-        //    These come from CycloneDX's `dependencies` array, which
-        //    encodes the actual graph structure. Each edge says
-        //    "from_ref depends on each of to_refs."
-        //
-        //    This is where the real value is — the old handler couldn't
-        //    do this because it only had the flat component list. Now
-        //    we get the full tree: direct deps, transitive deps, the
-        //    whole thing.
-        for edge in &fragment.edges {
-            let from_k = ArtifactNodeKey::Package {
-                purl: edge.from_ref.clone(),
-            };
-            for to_ref in &edge.to_refs {
-                let to_k = ArtifactNodeKey::Package {
-                    purl: to_ref.clone(),
+        // ── 3. Root → direct-dependency edges (batched) ─────────────────────────
+        // Same fallback logic as before: prefer the authoritative root entry in
+        // `edges`; if absent, treat every component as a direct dep. Difference is
+        // only in expression — the chosen dep purls become one UNWIND row set.
+        if let Some(ref root) = fragment.root {
+            let dep_purls: Vec<String> =
+                match fragment.edges.iter().find(|e| e.from_ref == root.purl) {
+                    Some(edge) => edge.to_refs.clone(),
+                    None => {
+                        warn!(
+                            "SBOM {} has no dependency entry for root purl {}, \
+                         falling back to flat linkage",
+                            fragment.filename, root.purl
+                        );
+                        fragment.components.iter().map(|c| c.purl.clone()).collect()
+                    }
                 };
-                Self::ensure_edge(state, from_k.clone(), to_k, rel::DEPENDS_ON, vec![])?;
+
+            if !dep_purls.is_empty() {
+                // UNWIND $deps AS dep
+                // MERGE (r:Package { purl: $root })
+                // MERGE (d:Package { purl: dep })
+                // MERGE (r)-[:DEPENDS_ON]->(d)
+                let cypher = format!(
+                    "UNWIND $deps AS dep \
+                     MERGE (r:Package {{ purl: $root }}) \
+                     MERGE (d:Package {{ purl: dep }}) \
+                     MERGE (r)-[:{rel}]->(d)",
+                    rel = rel::DEPENDS_ON,
+                );
+                let params = vec![
+                    ("root".to_string(), BoltType::from(root.purl.clone())),
+                    (
+                        "deps".to_string(),
+                        BoltType::from(
+                            dep_purls
+                                .into_iter()
+                                .map(BoltType::from)
+                                .collect::<Vec<_>>(),
+                        ),
+                    ),
+                ];
+                Self::send_op(
+                    state,
+                    GraphOp::RawQuery { cypher, params },
+                    "Failed to batch root dependency edges",
+                )?;
+            }
+        }
+
+        // ── 4. Full dependency tree edges (batched) ─────────────────────────────
+        // Flatten every (from_ref -> to_ref) pair into one row set. Preserves the
+        // exact edges the per-op loop wrote; MERGE on both endpoints keeps it safe
+        // even if a purl wasn't in `components` (same as EnsureEdge did).
+        {
+            let mut pairs: Vec<GraphValue> = Vec::new();
+            for edge in &fragment.edges {
+                for to_ref in &edge.to_refs {
+                    pairs.push(GraphValue::Map(vec![
+                        ("from".into(), GraphValue::String(edge.from_ref.clone())),
+                        ("to".into(), GraphValue::String(to_ref.clone())),
+                    ]));
+                }
+            }
+
+            if !pairs.is_empty() {
+                // UNWIND $pairs AS pair
+                // MERGE (a:Package { purl: pair.from })
+                // MERGE (b:Package { purl: pair.to })
+                // MERGE (a)-[:DEPENDS_ON]->(b)
+                let cypher = format!(
+                    "UNWIND $pairs AS pair \
+                     MERGE (a:Package {{ purl: pair.from }}) \
+                     MERGE (b:Package {{ purl: pair.to }}) \
+                     MERGE (a)-[:{rel}]->(b)",
+                    rel = rel::DEPENDS_ON,
+                );
+                let params = vec![("pairs".to_string(), BoltType::from(GraphValue::List(pairs)))];
+                Self::send_op(
+                    state,
+                    GraphOp::RawQuery { cypher, params },
+                    "Failed to batch dependency tree edges",
+                )?;
             }
         }
 
         debug!(
-            "SbomAnalyzed: wrote {} package nodes + {} dependency edges for {}",
+            "SbomAnalyzed: batched {} package nodes + {} dependency edges for {}",
             fragment.components.len() + fragment.root.iter().count(),
             fragment
                 .edges
@@ -235,7 +273,6 @@ impl ProvenanceLinker {
 
         Ok(())
     }
-
     pub(crate) fn handle_artifact_produced(
         state: &mut ProvenanceLinkerState,
         payload: ArtifactProducedPayload,
@@ -591,6 +628,163 @@ impl ProvenanceLinker {
 
         Ok(())
     }
+
+    /// Project a SecurityAdvisoryFound event as one atomic transaction:
+    ///   MERGE advisory node + SET scalar props
+    ///   MERGE (:Finding) + (advisory)-[:IS]->(:Finding)
+    ///   MERGE (:BuildJob) + (build)-[:REPORTED]->(advisory), SET edge time
+    ///   [only if affected_package present]
+    ///     MERGE (:Package) + (advisory)-[:AFFECTS]->(package), SET edge time
+    pub(crate) fn handle_security_advisory_found(
+        state: &mut ProvenanceLinkerState,
+        p: SecurityAdvisoryFoundPayload,
+    ) -> Result<(), ActorProcessingErr> {
+        trace!(
+            "Processing SecurityAdvisoryFound: {identifier} ({severity})",
+            identifier = p.identifier,
+            severity = p.severity,
+        );
+
+        let observed_at = Utc::now().to_rfc3339();
+
+        // Params always present. Scalars only — no nested maps.
+        let mut params: Vec<(String, BoltType)> = vec![
+            ("identifier".into(), p.identifier.clone().into()),
+            ("build_id".into(), p.build_id.into()),
+            ("observed_at".into(), observed_at.into()),
+            ("severity".into(), p.severity.into()),
+            // kind is ALWAYS written — defaulted, never omitted.
+            (
+                "kind".into(),
+                p.kind.unwrap_or_else(|| "vulnerability".into()).into(),
+            ),
+        ];
+
+        // Advisory node SET clause: identifier is the MERGE key; severity and
+        // kind are always set; the rest are appended only when present so we
+        // never write literal nulls.
+        let mut advisory_sets: Vec<&str> = vec!["a.severity = $severity", "a.kind = $kind"];
+        for (field, value) in [
+            ("scanner", p.scanner),
+            ("cve_id", p.cve_id),
+            ("ghsa_id", p.ghsa_id),
+            // NB: fix_version carries a semver CONSTRAINT (">=x"), not a
+            // concrete version — name matches the wire field.
+            ("fix_version", p.fix_version),
+            ("unaffected_constraint", p.unaffected_constraint),
+            ("advisory_url", p.advisory_url),
+        ] {
+            if let Some(v) = value {
+                params.push((field.to_string(), v.into()));
+                advisory_sets.push(match field {
+                    "scanner" => "a.scanner = $scanner",
+                    "cve_id" => "a.cve_id = $cve_id",
+                    "ghsa_id" => "a.ghsa_id = $ghsa_id",
+                    "fix_version" => "a.fix_version = $fix_version",
+                    "unaffected_constraint" => "a.unaffected_constraint = $unaffected_constraint",
+                    "advisory_url" => "a.advisory_url = $advisory_url",
+                    _ => unreachable!(),
+                });
+            }
+        }
+
+        let mut cypher = format!(
+            "MERGE (a:SecurityAdvisory {{ identifier: $identifier }}) \
+              SET {sets} \
+              MERGE (f:Finding {{ type: \"Finding\" }}) \
+              MERGE (a)-[:IS]->(f) \
+              MERGE (j:BuildJob {{ build_id: $build_id }}) \
+              MERGE (j)-[rep:REPORTED]->(a) \
+              SET rep.at = $observed_at",
+            sets = advisory_sets.join(", "),
+        );
+
+        // Conditional AFFECTS edge — appended only for resolved findings, so we
+        // never MERGE a Package with a null purl. Timestamp via post-MERGE SET.
+        if let Some(purl) = p.affected_package {
+            cypher.push_str(
+                " MERGE (pkg:Package { purl: $affected_purl }) \
+                   MERGE (a)-[aff:AFFECTS]->(pkg) \
+                   SET aff.at = $observed_at",
+            );
+            params.push(("affected_purl".into(), purl.into()));
+        }
+
+        Self::send_op(
+            state,
+            GraphOp::RawQuery { cypher, params },
+            "Failed to project SecurityAdvisoryFound",
+        )
+    }
+
+    /// Project a PackageStatusFound event as one atomic transaction. Same shape
+    /// as the advisory but the package edge is CONCERNS (not AFFECTS) — a
+    /// maintenance-status fact is not an active exploitable flaw. No severity;
+    /// kind here is non-optional on the payload and is a real discriminant
+    /// (unmaintained, etc.), so it's always set directly.
+    pub(crate) fn handle_package_status_found(
+        state: &mut ProvenanceLinkerState,
+        p: PackageStatusFoundPayload,
+    ) -> Result<(), ActorProcessingErr> {
+        trace!(
+            "Processing PackageStatusFound: {identifier} ({kind})",
+            identifier = p.identifier,
+            kind = p.kind,
+        );
+
+        let observed_at = Utc::now().to_rfc3339();
+
+        let mut params: Vec<(String, BoltType)> = vec![
+            ("identifier".into(), p.identifier.clone().into()),
+            ("build_id".into(), p.build_id.into()),
+            ("observed_at".into(), observed_at.into()),
+            ("kind".into(), p.kind.into()),
+            ("package_name".into(), p.package_name.into()),
+            ("package_version".into(), p.package_version.into()),
+        ];
+
+        let mut status_sets: Vec<&str> = vec![
+            "s.kind = $kind",
+            "s.package_name = $package_name",
+            "s.package_version = $package_version",
+        ];
+        for (field, value) in [("scanner", p.scanner), ("advisory_url", p.advisory_url)] {
+            if let Some(v) = value {
+                params.push((field.to_string(), v.into()));
+                status_sets.push(match field {
+                    "scanner" => "s.scanner = $scanner",
+                    "advisory_url" => "s.advisory_url = $advisory_url",
+                    _ => unreachable!(),
+                });
+            }
+        }
+
+        let mut cypher = format!(
+            "MERGE (s:PackageStatus {{ identifier: $identifier }}) \
+              SET {sets} \
+              MERGE (f:Finding {{ type: \"Finding\" }}) \
+              MERGE (s)-[:IS]->(f) \
+              MERGE (j:BuildJob {{ build_id: $build_id }}) \
+              MERGE (j)-[rep:REPORTED]->(s) \
+              SET rep.at = $observed_at",
+            sets = status_sets.join(", "),
+        );
+
+        if let Some(purl) = p.affected_package {
+            cypher.push_str(
+                " MERGE (pkg:Package { purl: $affected_purl }) \
+                   MERGE (s)-[con:CONCERNS]->(pkg) \
+                   SET con.at = $observed_at",
+            );
+            params.push(("affected_purl".into(), purl.into()));
+        }
+
+        Self::send_op(
+            state,
+            GraphOp::RawQuery { cypher, params },
+            "Failed to project PackageStatusFound",
+        )
+    }
 }
 
 #[async_trait]
@@ -910,6 +1104,12 @@ impl Actor for ProvenanceLinker {
             ProvenanceEvent::ContainerImageCreated(e) => {
                 debug!("Container Image created");
                 Self::handle_container_image_created(state, e)?;
+            }
+            ProvenanceEvent::SecurityAdvisoryFound(e) => {
+                Self::handle_security_advisory_found(state, e)?;
+            }
+            ProvenanceEvent::PackageStatusFound(e) => {
+                Self::handle_package_status_found(state, e)?;
             }
             _ => warn!("unexpected linker command {message:?}"),
         }

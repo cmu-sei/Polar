@@ -1,4 +1,5 @@
 
+
 #!/usr/bin/env nu
 # ci.nu — unified Polar build pipeline
 #
@@ -14,6 +15,12 @@
 #     cargo-cyclonedx generates a CycloneDX SBOM per workspace member,
 #     each is parsed into a graph fragment and emitted as sbom_analyzed.
 #
+#   Phase 1.5 — Vulnerability scanning
+#     cargo-audit runs against the workspace Cargo.lock. Findings resolve
+#     against the purls Phase 1 just recorded in sbom_packages — never
+#     reconstructed by hand — and emit as SecurityAdvisory or PackageStatus
+#     events depending on kind (see scanning.nu).
+#
 #   Phase 2 — Cargo binaries
 #     cargo build --message-format=json produces ELF artifacts; each binary
 #     is linked back to its Phase 1 SBOM via a cryptographic binding digest.
@@ -28,7 +35,12 @@
 # All phases share one artifact directory. Phases 1-3 share one Cassini daemon.
 # Adding a new image = one row in image-manifest. Nothing else changes.
 
-use ./core/state.nu [init-pipeline-state get-build-id]
+use ./core/state.nu [
+    init-pipeline-state get-build-id
+    record-sbom record-sbom-package get-sbom-info check-manifest-purl
+    lookup-package-purl get-all-sbom-packages
+    record-tarball-hash get-tarball-hash assert-sbom-state-populated
+]
 use ./core/oci.nu *
 use ./core/cassini.nu *
 use ./core/logging.nu *
@@ -36,6 +48,7 @@ use ./core/events.nu *
 use ./core/cargo.nu workspace-root
 use ./core/hashing.nu *
 use ./core/sbom.nu *
+use ./core/scanning.nu [run-cargo-audit]
 const COMPONENT = "ci"
 const ELF_BINARY_ARTIFACT = "elf-binary"
 
@@ -329,6 +342,7 @@ def image-manifest []: nothing -> list<record> {
 def resolve-packages [--package(-p): string = ""]: nothing -> list<record> {
     let ws_root = (workspace-root)
     let manifest = $ws_root | path join "Cargo.toml"
+    #TODO: Handle potential external error here
     let meta = (
         cargo metadata --manifest-path $manifest --format-version 1 --no-deps
         | from json
@@ -385,16 +399,15 @@ def generate-workspace-sboms [
         if ($src | path expand) == ($dest | path expand) { continue }
         mv --force $src $dest
     }
-    let collected = (
+    (
         ls $artifact_dir
         | where type == file
         | where { ($in.name | path basename | str ends-with ".cdx.json") }
     )
-    $collected
 }
 
-def process-cargo-sboms [sbom_files: list<record>, packages: list<record>]: nothing -> record {
-    mut sbom_lookup = {}
+
+def process-cargo-sboms [sbom_files: list<record>, packages: list<record>]: nothing -> nothing {
 
     for f in $sbom_files {
         let doc = try { open $f.name } catch {|e|
@@ -432,15 +445,14 @@ def process-cargo-sboms [sbom_files: list<record>, packages: list<record>]: noth
             ""
         }
 
-        $sbom_lookup = ($sbom_lookup | insert $stem {
-            content_hash:    $content_hash
-            root_purl:       $root_purl
-            component_count: ($fragment.components | length)
-            edge_count:      ($fragment.edges | length)
-        })
-    }
+        # Root-level lookup: Phase 2 binary linking + Phase 3 purl cross-check.
+        record-sbom $stem $content_hash $root_purl ($fragment.components | length) ($fragment.edges | length)
 
-    $sbom_lookup
+        # Full component closure: vulnerability -> package attribution (#217).
+        for c in ($fragment.components | uniq) {
+            record-sbom-package ($c.name | default "") ($c.version | default "") ($c.purl | default "") $content_hash
+        }
+    }
 }
 
 # ===========================================================================
@@ -449,7 +461,6 @@ def process-cargo-sboms [sbom_files: list<record>, packages: list<record>]: noth
 
 def build-and-link-binaries [
     packages: list<record>
-    sbom_lookup: record
     ws_manifest: path
     artifact_dir: path
     --release
@@ -521,7 +532,7 @@ def build-and-link-binaries [
                 #
                 emit-artifact-produced $binary_hash $ELF_BINARY_ARTIFACT --name $name
 
-                let sbom_info = $sbom_lookup | get -o $pkg.name | default null
+                let sbom_info = (get-sbom-info $pkg.name)
 
                 if $sbom_info != null {
                     let cargo_toml_hash = (content-hash-file $pkg.manifest_path)
@@ -598,6 +609,16 @@ def login-to-registries []: nothing -> nothing {
 }
 
 def process-image [entry: record, image_tag: string, --skip-upload]: nothing -> record {
+    # Cross-validate the manifest's hardcoded root_purl against what Phase 1
+    # actually analyzed. Static image-manifest purls drift silently on the
+    # first crate version bump; this makes that loud.
+    let chk = (check-manifest-purl $entry.root_purl)
+    if $chk.status == "version_drift" {
+        log-warn $"($entry.name): manifest pins ($chk.manifest_purl) but this run analyzed ($chk.analyzed_purl) — image-manifest is stale" --component $COMPONENT
+    } else if $chk.status == "absent" {
+        log-warn $"($entry.name): manifest root_purl ($chk.manifest_purl) was never analyzed this run" --component $COMPONENT
+    }
+
     let build = (nix-build-image $entry.flake $entry.name)
     if not $build.success {
         return {
@@ -606,6 +627,13 @@ def process-image [entry: record, image_tag: string, --skip-upload]: nothing -> 
             uploads: []
         }
     }
+
+    # Decouple the tarball hash from the return-record contract. Ideally this
+    # write lives inside nix-build-image next to content-hash-file; recorded
+    # here it still trusts $build once, but the guard in build-and-push-image
+    # turns any miss into a loud failure instead of a silent null.
+    record-tarball-hash $entry.name $build.tarball_hash
+
     if $skip_upload {
         return {
             success: true
@@ -626,6 +654,13 @@ def build-and-push-image [
 ]: nothing -> record {
     let oci_metadata = $build.oci_metadata
 
+    # Load-bearing: emit-container-image-created needs the tarball hash. Pull it
+    # from stor (recorded in process-image) rather than $build, and fail loudly
+    # if absent — the regression guard #231 asks for.
+    let tarball_hash = (get-tarball-hash $link_name)
+    if ($tarball_hash | is-empty) {
+        error make {msg: $"no tarball hash recorded for ($link_name) — record-tarball-hash did not run"}
+    }
     if ($registries | length) == 0 {
         log-warn $"No registries configured for ($link_name) — image will not be uploaded anywhere" --component $COMPONENT
     }
@@ -656,7 +691,7 @@ def build-and-push-image [
         (
         emit-container-image-created
             $link_name
-            $build.tarball_hash
+            $tarball_hash
             $oci_metadata.config_digest
             $oci_metadata.layers
             --os $oci_metadata.os
@@ -709,6 +744,8 @@ def main [
     --strict-analysis
     --skip-build
     --skip-images
+    --skip-audit
+    --audit-offline
 ] {
     let ws_root = (workspace-root)
     let ws_manifest = $ws_root | path join "Cargo.toml"
@@ -757,14 +794,25 @@ def main [
         log-info $"($packages | length) package\(s\) in scope, image tag: ($image_tag)" --component $COMPONENT
 
         # Phase 1 — Cargo SBOMs
-        let sbom_files  = (generate-workspace-sboms $packages $ws_manifest $artifact_dir --target $target)
-        let sbom_lookup = (process-cargo-sboms $sbom_files $packages)
+        let sbom_files = (generate-workspace-sboms $packages $ws_manifest $artifact_dir --target $target)
+        process-cargo-sboms $sbom_files $packages
         log-info $"($sbom_files | length) SBOM\(s\) generated and analyzed" --component $COMPONENT
+
+        # Phase 1.5 — Vulnerability scanning
+        # Depends on sbom_packages populated above — resolves findings against
+        # the purls Phase 1 just recorded, never reconstructs one by hand.
+        if not $skip_audit {
+            let findings = (
+                run-cargo-audit ($ws_root | path join "Cargo.lock") --offline=$audit_offline
+            )
+            let unresolved = ($findings | where {|f| ($f.affected_package | default "" | is-empty) } | length)
+            log-info $"($findings | length) finding\(s\) from cargo-audit \(($unresolved) unresolved against SBOM\)" --component $COMPONENT
+        }
 
         # Phase 2 — Cargo binaries
         if not $skip_build {
             let binaries = (
-                build-and-link-binaries $packages $sbom_lookup $ws_manifest $artifact_dir
+                build-and-link-binaries $packages $ws_manifest $artifact_dir
                     --release
                     --target $target
                     --filter_package $package
@@ -783,6 +831,10 @@ def main [
             if ($manifest | is-empty) {
                 log-warn $"no images match filter '($filter)' — skipping Phase 3" --component $COMPONENT
             } else {
+                # Refuse image work if Phase 1 produced no SBOM state — turns a
+                # downstream null into an immediate, diagnosable stop.
+                assert-sbom-state-populated
+
                 if not $skip_upload { login-to-registries }
                 log-info $"building ($manifest | length) image\(s\)" --component $COMPONENT
 

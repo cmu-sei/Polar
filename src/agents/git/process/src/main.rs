@@ -62,7 +62,7 @@ impl GitRepoProcessingManager {
                         Property("committer".into(), GraphValue::String(committer)),
                         Property(
                             "observed_at".into(),
-                            GraphValue::String(Utc::now().to_rfc3339()),
+                            GraphValue::I64(Utc::now().timestamp_millis()),
                         ),
                     ],
                 }))?;

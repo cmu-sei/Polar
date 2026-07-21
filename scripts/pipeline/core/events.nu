@@ -1,4 +1,5 @@
 
+
 use state.nu [get-build-id]
 use logging.nu [log-debug]
 export const SUBJECT_PREFIX = "polar.provenance"
@@ -88,19 +89,81 @@ export def emit-execution-cancelled [--reason: string = ""]: nothing -> nothing 
     emit $payload
 }
 
-export def emit-vulnerability-found [
+# Emit VulnerabilityFound — a SecurityAdvisory-shaped finding from a scanner:
+# cargo-audit's `vulnerability`, `unsound`, and `notice` kinds. Each of these
+# has a real identified issue with an advisory ID and description, as
+# opposed to a package-state fact like `unmaintained` (see
+# emit-package-status-found below, PackageStatus in the graph — deliberately
+# not this).
+#
+# Graph edges written by the build processor (once implemented — see the
+# Finding-model spike):
+#   (SecurityAdvisory {identifier})-[:IS]->(Finding)
+#   (SecurityAdvisory {identifier})-[:AFFECTS]->(Package {purl: affected_package})
+#
+# `kind` defaults to omitted rather than "vulnerability" here, matching every
+# other optional field's omit-when-empty convention — the Rust side decides
+# how to interpret an absent kind (almost certainly "vulnerability", for
+# backward compatibility with anything emitted before this field existed).
+export def emit-security-advisory [
     severity: string
     identifier: string
     --in_artifact: string = ""
+    --scanner: string = ""
+    --kind: string = ""                # vulnerability | unsound | notice
+    --affected_package: string = ""    # canonical purl, sourced from the SBOM
+    --cve_id: string = ""
+    --ghsa_id: string = ""
+    --fix_version: string = ""         # NB: often a semver constraint (">=X"), not a concrete version
+    --unaffected_constraint: string = ""
+    --advisory_url: string = ""
+]: nothing -> nothing {
+    mut payload = { type: "security_advisory_found", build_id: (get-build-id), severity: $severity, identifier: $identifier }
+    for kv in [
+        [in_artifact $in_artifact] [scanner $scanner] [kind $kind]
+        [affected_package $affected_package] [cve_id $cve_id] [ghsa_id $ghsa_id]
+        [fix_version $fix_version] [unaffected_constraint $unaffected_constraint]
+        [advisory_url $advisory_url]
+    ] {
+        if ($kv.1 | is-not-empty) { $payload = ($payload | insert $kv.0 $kv.1) }
+    }
+    emit $payload
+}
+
+# Emit PackageStatusFound — a state-of-being fact about a package, not a
+# discrete flaw: cargo-audit's `unmaintained` kind today. `yanked` will need
+# its own call shape when it's built (no advisory id exists for it — see the
+# Finding-model spike's Non-Goals), so this signature is intentionally NOT
+# generalized to cover it yet.
+#
+# Graph edges written by the build processor (once implemented):
+#   (PackageStatus {identifier})-[:IS]->(Finding)
+#   (PackageStatus {identifier})-[:CONCERNS]->(Package {purl: affected_package})
+# CONCERNS, not AFFECTS — "affects" implies an active exploitable flaw, which
+# a maintenance-status signal is not.
+export def emit-package-status-found [
+    kind: string             # "unmaintained" today
+    identifier: string       # RUSTSEC advisory id backing this status claim
+    package_name: string
+    package_version: string
+    --in_artifact: string = ""
+    --affected_package: string = ""    # canonical purl, sourced from the SBOM
+    --advisory_url: string = ""
+    --scanner: string = ""
 ]: nothing -> nothing {
     mut payload = {
-        type: "vulnerability_found"
-        severity: $severity
+        type: "package_status_found"
+        build_id: (get-build-id)
+        kind: $kind
         identifier: $identifier
-        in_artifact: null
+        package_name: $package_name
+        package_version: $package_version
     }
-    if ($in_artifact | is-not-empty) {
-        $payload = ($payload | upsert in_artifact $in_artifact)
+    for kv in [
+        [in_artifact $in_artifact] [affected_package $affected_package]
+        [advisory_url $advisory_url] [scanner $scanner]
+    ] {
+        if ($kv.1 | is-not-empty) { $payload = ($payload | insert $kv.0 $kv.1) }
     }
     emit $payload
 }

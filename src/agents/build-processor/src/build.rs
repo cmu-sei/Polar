@@ -61,8 +61,7 @@ impl Actor for BuildActor {
             | ProvenanceEvent::StageCompleted { .. }
             | ProvenanceEvent::ExecutionCompleted { .. }
             | ProvenanceEvent::ExecutionFailed { .. }
-            | ProvenanceEvent::ExecutionCancelled { .. }
-            | ProvenanceEvent::VulnerabilityFound { .. } => {
+            | ProvenanceEvent::ExecutionCancelled { .. } => {
                 if let Err(e) = project_event(&message, &state.graph_controller) {
                     error!(error = %e, "graph projection failed");
                 }

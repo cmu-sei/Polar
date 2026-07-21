@@ -6,7 +6,8 @@ use polar::{
             GraphController, GraphControllerMsg, GraphOp, GraphValue, IntoGraphKey, Property,
             rel::{BUILT_BY, IS},
         },
-        nodes::{builds::BuildNodeKey, git::GitNodeKey},
+        nodes::builds::BuildNodeKey,
+        nodes::git::GitNodeKey,
     },
 };
 use ractor::ActorProcessingErr;
@@ -18,9 +19,6 @@ use tracing::error;
 ///
 /// Handles only execution lifecycle variants — `ExecutionStarted`, `StageStarted`,
 /// `StageCompleted`, `ExecutionCompleted`, `ExecutionFailed`, `ExecutionCancelled`,
-/// `VulnerabilityFound`. All other variants are routed to the linker by the
-/// supervisor before reaching this function and must never appear here.
-///
 /// The processor is intentionally stateless — each event is projected
 /// independently. Operations use MERGE semantics and are idempotent:
 /// replaying events from the broker produces the same graph state.
@@ -31,9 +29,10 @@ use tracing::error;
 /// when the CI system reported the event occurred.
 ///
 /// Node ownership rules:
-/// - `BuildJob`, `BuildStage`, `Vulnerability`: owned by this processor, freely upserted.
-/// - `GitCommit`, `BackendJob`: foreign — referenced only via `EnsureEdge`.
-///   The authoritative agent owns their properties.
+/// - `BuildJob`, `BuildStage`, `SecurityAdvisory`, `PackageStatus`: owned by
+///   this processor, freely upserted.
+/// - `GitCommit`, `BackendJob`, `Package`: foreign — referenced only via
+///   `EnsureEdge`. The authoritative agent owns their properties.
 pub fn project_event(
     event: &ProvenanceEvent,
     graph: &GraphController,
@@ -219,67 +218,6 @@ pub fn project_event(
                 ],
             }))?;
         }
-
-        ProvenanceEvent::VulnerabilityFound {
-            build_id,
-            severity,
-            identifier,
-            in_artifact,
-        } => {
-            // ── Upsert the Vulnerability node ──────────────────────────────────
-            // Keyed on identifier — CVE IDs, GHSA IDs, or whatever the scanner
-            // emits. Multiple builds finding the same vuln converge to one node,
-            // which is correct for tracking vuln spread across builds.
-            let vuln_key = BuildNodeKey::Vulnerability {
-                identifier: identifier.clone(),
-            };
-
-            graph.cast(GraphControllerMsg::Op(GraphOp::UpsertNode {
-                key: vuln_key.clone().into_key(),
-                props: vec![
-                    Property("identifier".into(), GraphValue::String(identifier.clone())),
-                    Property("severity".into(), GraphValue::String(severity.clone())),
-                    Property(
-                        "observed_at".into(),
-                        GraphValue::String(observed_str.clone()),
-                    ),
-                ],
-            }))?;
-
-            // ── Edge: BuildJob -[:FOUND_VULNERABILITY]-> Vulnerability ─────────
-            graph.cast(GraphControllerMsg::Op(GraphOp::EnsureEdge {
-                from: BuildNodeKey::BuildJob {
-                    build_id: build_id.clone(),
-                }
-                .into_key(),
-                rel_type: "FOUND_VULNERABILITY".into(),
-                to: vuln_key.clone().into_key(),
-                props: vec![Property(
-                    "at".into(),
-                    GraphValue::String(observed_str.clone()),
-                )],
-            }))?;
-
-            // ── Edge: Vulnerability -[:FOUND_IN]-> BuildArtifact ──────────────
-            // Only written when the scanner can attribute the vuln to a specific
-            // artifact. If in_artifact is None the vuln is linked to the build
-            // only — honest representation of what the scanner reported.
-            if let Some(artifact_digest) = in_artifact {
-                graph.cast(GraphControllerMsg::Op(GraphOp::EnsureEdge {
-                    from: vuln_key.into_key(),
-                    rel_type: "FOUND_IN".into(),
-                    to: BuildNodeKey::BuildArtifact {
-                        content_hash: artifact_digest.clone(),
-                    }
-                    .into_key(),
-                    props: vec![Property(
-                        "at".into(),
-                        GraphValue::String(observed_str.clone()),
-                    )],
-                }))?;
-            }
-        }
-
         ProvenanceEvent::ExecutionCompleted {
             build_id,
             duration_secs,
