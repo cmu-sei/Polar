@@ -134,9 +134,25 @@ impl ProvenanceLinker {
         //   MERGE (p:Package { purl: row.purl })
         //   SET p.name = row.name,
         //       p.version = row.version,
-        //       p.component_type = row.component_type
+        //       p.component_type = row.component_type,
+        //       p.license = row.license,
+        //       p.source = row.source
+        //
+        // license/source are intrinsic to a specific (name, version) — unlike
+        // `scope` (which is relative to a specific SBOM and would need to live
+        // on an edge, not here) — so they're correctly Package node properties.
+        // Both are Option<String> on PackageRef; absent values become
+        // GraphValue::Null via the same From<GraphValue> for BoltType path the
+        // rest of this map already goes through, not a separate construction.
         {
             let mut rows: Vec<GraphValue> = Vec::with_capacity(fragment.components.len() + 1);
+
+            let opt_str = |v: &Option<String>| -> GraphValue {
+                match v {
+                    Some(s) => GraphValue::String(s.clone()),
+                    None => GraphValue::Null,
+                }
+            };
 
             let push_pkg = |p: &PackageRef, rows: &mut Vec<GraphValue>| {
                 rows.push(GraphValue::Map(vec![
@@ -147,6 +163,8 @@ impl ProvenanceLinker {
                         "component_type".into(),
                         GraphValue::String(p.component_type.clone()),
                     ),
+                    ("license".into(), opt_str(&p.license)),
+                    ("source".into(), opt_str(&p.source)),
                 ]));
             };
             if let Some(ref root) = fragment.root {
@@ -162,7 +180,9 @@ impl ProvenanceLinker {
                     MERGE (p:Package { purl: row.purl }) \
                     SET p.name = row.name, \
                         p.version = row.version, \
-                        p.component_type = row.component_type"
+                        p.component_type = row.component_type, \
+                        p.license = row.license, \
+                        p.source = row.source"
                     .to_string();
 
                 let params = vec![("rows".to_string(), BoltType::from(GraphValue::List(rows)))];
@@ -630,11 +650,12 @@ impl ProvenanceLinker {
     }
 
     /// Project a SecurityAdvisoryFound event as one atomic transaction:
-    ///   MERGE advisory node + SET scalar props
+    ///   MERGE advisory node + SET props
     ///   MERGE (:Finding) + (advisory)-[:IS]->(:Finding)
-    ///   MERGE (:BuildJob) + (build)-[:REPORTED]->(advisory), SET edge time
+    ///   MERGE (:BuildJob) + (build)-[:REPORTED]->(advisory)
     ///   [only if affected_package present]
-    ///     MERGE (:Package) + (advisory)-[:AFFECTS]->(package), SET edge time
+    ///     MERGE (:Package) + (advisory)-[:AFFECTS]->(package)
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn handle_security_advisory_found(
         state: &mut ProvenanceLinkerState,
         p: SecurityAdvisoryFoundPayload,
@@ -645,67 +666,59 @@ impl ProvenanceLinker {
             severity = p.severity,
         );
 
-        let observed_at = Utc::now().to_rfc3339();
+        // Base query: advisory node, its Finding type edge, and the BuildJob
+        // that reported it. `SET a += $props` overwrites only the keys we
+        // supply — identifier is also the MERGE key so it's stable.
+        let mut cypher = String::from(
+            "MERGE (a:SecurityAdvisory { identifier: $identifier }) \
+                SET a += $props \
+                MERGE (f:Finding { type: \"Finding\" }) \
+                MERGE (a)-[:IS]->(f) \
+                MERGE (j:BuildJob { build_id: $build_id }) \
+                MERGE (j)-[:REPORTED { at: $observed_at }]->(a)",
+        );
 
-        // Params always present. Scalars only — no nested maps.
-        let mut params: Vec<(String, BoltType)> = vec![
+        // Property map SET onto the advisory node. Only non-null fields are
+        // included, so absent optionals don't write literal nulls. `severity`
+        // and `identifier` always present.
+        let mut props: Vec<(String, BoltType)> = vec![
             ("identifier".into(), p.identifier.clone().into()),
-            ("build_id".into(), p.build_id.into()),
-            ("observed_at".into(), observed_at.into()),
             ("severity".into(), p.severity.into()),
-            // kind is ALWAYS written — defaulted, never omitted.
-            (
-                "kind".into(),
-                p.kind.unwrap_or_else(|| "vulnerability".into()).into(),
-            ),
         ];
-
-        // Advisory node SET clause: identifier is the MERGE key; severity and
-        // kind are always set; the rest are appended only when present so we
-        // never write literal nulls.
-        let mut advisory_sets: Vec<&str> = vec!["a.severity = $severity", "a.kind = $kind"];
-        for (field, value) in [
+        // NB: fix_version carries a semver CONSTRAINT (">=x"), not a concrete
+        // version — stored under this name to match the wire field.
+        for (k, v) in [
+            ("kind", p.kind),
             ("scanner", p.scanner),
             ("cve_id", p.cve_id),
             ("ghsa_id", p.ghsa_id),
-            // NB: fix_version carries a semver CONSTRAINT (">=x"), not a
-            // concrete version — name matches the wire field.
             ("fix_version", p.fix_version),
             ("unaffected_constraint", p.unaffected_constraint),
             ("advisory_url", p.advisory_url),
         ] {
-            if let Some(v) = value {
-                params.push((field.to_string(), v.into()));
-                advisory_sets.push(match field {
-                    "scanner" => "a.scanner = $scanner",
-                    "cve_id" => "a.cve_id = $cve_id",
-                    "ghsa_id" => "a.ghsa_id = $ghsa_id",
-                    "fix_version" => "a.fix_version = $fix_version",
-                    "unaffected_constraint" => "a.unaffected_constraint = $unaffected_constraint",
-                    "advisory_url" => "a.advisory_url = $advisory_url",
-                    _ => unreachable!(),
-                });
+            if let Some(val) = v {
+                props.push((k.into(), val.into()));
             }
         }
 
-        let mut cypher = format!(
-            "MERGE (a:SecurityAdvisory {{ identifier: $identifier }}) \
-              SET {sets} \
-              MERGE (f:Finding {{ type: \"Finding\" }}) \
-              MERGE (a)-[:IS]->(f) \
-              MERGE (j:BuildJob {{ build_id: $build_id }}) \
-              MERGE (j)-[rep:REPORTED]->(a) \
-              SET rep.at = $observed_at",
-            sets = advisory_sets.join(", "),
-        );
+        let mut params: Vec<(String, BoltType)> = vec![
+            ("identifier".into(), p.identifier.into()),
+            ("build_id".into(), p.build_id.into()),
+            ("observed_at".into(), Utc::now().to_rfc3339().into()),
+            (
+                "props".into(),
+                BoltType::Map(props.into_iter().map(|(k, v)| (k.into(), v)).collect()),
+            ),
+        ];
 
-        // Conditional AFFECTS edge — appended only for resolved findings, so we
-        // never MERGE a Package with a null purl. Timestamp via post-MERGE SET.
+        // Conditionally append the AFFECTS edge. Built as a string fragment
+        // rather than written with a null purl — MERGE (:Package { purl: null })
+        // would create or match a garbage node. Only fires when the scanner's
+        // (name, version) resolved to a real SBOM purl in scanning.nu.
         if let Some(purl) = p.affected_package {
             cypher.push_str(
-                " MERGE (pkg:Package { purl: $affected_purl }) \
-                   MERGE (a)-[aff:AFFECTS]->(pkg) \
-                   SET aff.at = $observed_at",
+                " MERGE (p:Package { purl: $affected_purl }) \
+                     MERGE (a)-[:AFFECTS { at: $observed_at }]->(p)",
             );
             params.push(("affected_purl".into(), purl.into()));
         }
@@ -718,10 +731,8 @@ impl ProvenanceLinker {
     }
 
     /// Project a PackageStatusFound event as one atomic transaction. Same shape
-    /// as the advisory but the package edge is CONCERNS (not AFFECTS) — a
-    /// maintenance-status fact is not an active exploitable flaw. No severity;
-    /// kind here is non-optional on the payload and is a real discriminant
-    /// (unmaintained, etc.), so it's always set directly.
+    /// as the advisory, but the package edge is CONCERNS (not AFFECTS) — a
+    /// maintenance-status fact is not an active exploitable flaw. No severity.
     pub(crate) fn handle_package_status_found(
         state: &mut ProvenanceLinkerState,
         p: PackageStatusFoundPayload,
@@ -729,52 +740,44 @@ impl ProvenanceLinker {
         trace!(
             "Processing PackageStatusFound: {identifier} ({kind})",
             identifier = p.identifier,
-            kind = p.kind,
+            kind = p.kind
         );
 
-        let observed_at = Utc::now().to_rfc3339();
+        let mut cypher = String::from(
+            "MERGE (s:PackageStatus { identifier: $identifier }) \
+                SET s += $props \
+                MERGE (f:Finding { type: \"Finding\" }) \
+                MERGE (s)-[:IS]->(f) \
+                MERGE (j:BuildJob { build_id: $build_id }) \
+                MERGE (j)-[:REPORTED { at: $observed_at }]->(s)",
+        );
 
-        let mut params: Vec<(String, BoltType)> = vec![
+        let mut props: Vec<(String, BoltType)> = vec![
             ("identifier".into(), p.identifier.clone().into()),
-            ("build_id".into(), p.build_id.into()),
-            ("observed_at".into(), observed_at.into()),
             ("kind".into(), p.kind.into()),
             ("package_name".into(), p.package_name.into()),
             ("package_version".into(), p.package_version.into()),
         ];
-
-        let mut status_sets: Vec<&str> = vec![
-            "s.kind = $kind",
-            "s.package_name = $package_name",
-            "s.package_version = $package_version",
-        ];
-        for (field, value) in [("scanner", p.scanner), ("advisory_url", p.advisory_url)] {
-            if let Some(v) = value {
-                params.push((field.to_string(), v.into()));
-                status_sets.push(match field {
-                    "scanner" => "s.scanner = $scanner",
-                    "advisory_url" => "s.advisory_url = $advisory_url",
-                    _ => unreachable!(),
-                });
+        for (k, v) in [("scanner", p.scanner), ("advisory_url", p.advisory_url)] {
+            if let Some(val) = v {
+                props.push((k.into(), val.into()));
             }
         }
 
-        let mut cypher = format!(
-            "MERGE (s:PackageStatus {{ identifier: $identifier }}) \
-              SET {sets} \
-              MERGE (f:Finding {{ type: \"Finding\" }}) \
-              MERGE (s)-[:IS]->(f) \
-              MERGE (j:BuildJob {{ build_id: $build_id }}) \
-              MERGE (j)-[rep:REPORTED]->(s) \
-              SET rep.at = $observed_at",
-            sets = status_sets.join(", "),
-        );
+        let mut params: Vec<(String, BoltType)> = vec![
+            ("identifier".into(), p.identifier.into()),
+            ("build_id".into(), p.build_id.into()),
+            ("observed_at".into(), Utc::now().to_rfc3339().into()),
+            (
+                "props".into(),
+                BoltType::Map(props.into_iter().map(|(k, v)| (k.into(), v)).collect()),
+            ),
+        ];
 
         if let Some(purl) = p.affected_package {
             cypher.push_str(
-                " MERGE (pkg:Package { purl: $affected_purl }) \
-                   MERGE (s)-[con:CONCERNS]->(pkg) \
-                   SET con.at = $observed_at",
+                " MERGE (p:Package { purl: $affected_purl }) \
+                     MERGE (s)-[:CONCERNS { at: $observed_at }]->(p)",
             );
             params.push(("affected_purl".into(), purl.into()));
         }

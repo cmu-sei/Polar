@@ -136,6 +136,21 @@ pub struct PackageRef {
     pub name: String,
     pub version: String,
     pub component_type: String,
+    /// SPDX license expression or name, normalized from CycloneDX's
+    /// `licenses` array (handles both the `expression` form and individual
+    /// `license.{id,name}` entries, joined when more than one is present).
+    /// `None` when the component declares no license — real and common,
+    /// not a parse failure.
+    pub license: Option<String>,
+    /// Best-effort dependency source classification, derived from the
+    /// purl's own qualifiers rather than a separate CycloneDX field — no
+    /// such field exists. Confirmed cargo-cyclonedx encodes a `vcs_url`
+    /// purl qualifier for git-sourced dependencies; defaults to a registry
+    /// classification otherwise. NOT verified against a real path-sourced
+    /// (workspace-internal) dependency — check that case by hand before
+    /// trusting this field for anything load-bearing involving your own
+    /// crates.
+    pub source: Option<String>,
 }
 
 /// A dependency edge from the CycloneDX `dependencies` array.

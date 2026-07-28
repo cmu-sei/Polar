@@ -1,5 +1,3 @@
-
-
 use state.nu [get-build-id]
 use logging.nu [log-debug]
 export const SUBJECT_PREFIX = "polar.provenance"
@@ -48,7 +46,6 @@ export def emit-execution-started [
     repo_url: string
     --triggered_by: string = "" # TODO: Not sure we care for this field, could be useful, could just be noise
 ]: nothing -> nothing {
-
     let build_id = get-build-id
 
     mut payload = {
@@ -70,10 +67,7 @@ export def emit-execution-completed [duration_secs: int]: nothing -> nothing {
     emit {type: "execution_completed", duration_secs: $duration_secs}
 }
 
-export def emit-execution-failed [
-    reason: string
-    --stage: string = ""
-]: nothing -> nothing {
+export def emit-execution-failed [reason: string, --stage: string = ""]: nothing -> nothing {
     mut payload = {type: "execution_failed", reason: $reason, stage: null}
     if ($stage | is-not-empty) {
         $payload = ($payload | upsert stage $stage)
@@ -118,11 +112,21 @@ export def emit-security-advisory [
     --unaffected_constraint: string = ""
     --advisory_url: string = ""
 ]: nothing -> nothing {
-    mut payload = { type: "security_advisory_found", build_id: (get-build-id), severity: $severity, identifier: $identifier }
+    mut payload = {
+        type: "security_advisory_found"
+        build_id: (get-build-id)
+        severity: $severity
+        identifier: $identifier
+    }
     for kv in [
-        [in_artifact $in_artifact] [scanner $scanner] [kind $kind]
-        [affected_package $affected_package] [cve_id $cve_id] [ghsa_id $ghsa_id]
-        [fix_version $fix_version] [unaffected_constraint $unaffected_constraint]
+        [in_artifact $in_artifact]
+        [scanner $scanner]
+        [kind $kind]
+        [affected_package $affected_package]
+        [cve_id $cve_id]
+        [ghsa_id $ghsa_id]
+        [fix_version $fix_version]
+        [unaffected_constraint $unaffected_constraint]
         [advisory_url $advisory_url]
     ] {
         if ($kv.1 | is-not-empty) { $payload = ($payload | insert $kv.0 $kv.1) }
@@ -160,8 +164,10 @@ export def emit-package-status-found [
         package_version: $package_version
     }
     for kv in [
-        [in_artifact $in_artifact] [affected_package $affected_package]
-        [advisory_url $advisory_url] [scanner $scanner]
+        [in_artifact $in_artifact]
+        [affected_package $affected_package]
+        [advisory_url $advisory_url]
+        [scanner $scanner]
     ] {
         if ($kv.1 | is-not-empty) { $payload = ($payload | insert $kv.0 $kv.1) }
     }
@@ -184,7 +190,7 @@ export def emit-artifact-produced [
         artifact_type: $artifact_type
         build_id: (get-build-id)
     }
-    if ($name | is-not-empty)         { $payload = ($payload | insert name $name) }
+    if ($name | is-not-empty) { $payload = ($payload | insert name $name) }
     if ($content_type | is-not-empty) { $payload = ($payload | insert content_type $content_type) }
     emit $payload
 }
@@ -237,7 +243,7 @@ export def emit-container-image-created [
         repo_tags: $repo_tags
     }
     if ($digest | is-not-empty) { $payload = ($payload | insert digest $digest) }
-    if ($uri | is-not-empty)    { $payload = ($payload | insert uri $uri) }
+    if ($uri | is-not-empty) { $payload = ($payload | insert uri $uri) }
     emit $payload
 }
 

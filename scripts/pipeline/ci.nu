@@ -1,5 +1,4 @@
 
-
 #!/usr/bin/env nu
 # ci.nu — unified Polar build pipeline
 #
@@ -16,7 +15,8 @@
 #     each is parsed into a graph fragment and emitted as sbom_analyzed.
 #
 #   Phase 1.5 — Vulnerability scanning
-#     cargo-audit runs against the workspace Cargo.lock. Findings resolve
+#     cargo-deny (via `check advisories --audit-compatible-output`) runs
+#     against the workspace. Findings resolve
 #     against the purls Phase 1 just recorded in sbom_packages — never
 #     reconstructed by hand — and emit as SecurityAdvisory or PackageStatus
 #     events depending on kind (see scanning.nu).
@@ -48,7 +48,7 @@ use ./core/events.nu *
 use ./core/cargo.nu workspace-root
 use ./core/hashing.nu *
 use ./core/sbom.nu *
-use ./core/scanning.nu [run-cargo-audit]
+use ./core/scanning.nu [run-vulnerability-scan]
 const COMPONENT = "ci"
 const ELF_BINARY_ARTIFACT = "elf-binary"
 
@@ -342,7 +342,6 @@ def image-manifest []: nothing -> list<record> {
 def resolve-packages [--package(-p): string = ""]: nothing -> list<record> {
     let ws_root = (workspace-root)
     let manifest = $ws_root | path join "Cargo.toml"
-    #TODO: Handle potential external error here
     let meta = (
         cargo metadata --manifest-path $manifest --format-version 1 --no-deps
         | from json
@@ -399,11 +398,12 @@ def generate-workspace-sboms [
         if ($src | path expand) == ($dest | path expand) { continue }
         mv --force $src $dest
     }
-    (
+    let collected = (
         ls $artifact_dir
         | where type == file
         | where { ($in.name | path basename | str ends-with ".cdx.json") }
     )
+    $collected
 }
 
 
@@ -801,12 +801,15 @@ def main [
         # Phase 1.5 — Vulnerability scanning
         # Depends on sbom_packages populated above — resolves findings against
         # the purls Phase 1 just recorded, never reconstructs one by hand.
+        # cargo-deny operates via --manifest-path, so $ws_manifest is passed
+        # directly — no need to construct a separate Cargo.lock path the way
+        # cargo-audit's --file flag once required.
         if not $skip_audit {
             let findings = (
-                run-cargo-audit ($ws_root | path join "Cargo.lock") --offline=$audit_offline
+                run-vulnerability-scan $ws_manifest
             )
             let unresolved = ($findings | where {|f| ($f.affected_package | default "" | is-empty) } | length)
-            log-info $"($findings | length) finding\(s\) from cargo-audit \(($unresolved) unresolved against SBOM\)" --component $COMPONENT
+            log-info $"($findings | length) finding\(s\) from vulnerability scan \(($unresolved) unresolved against SBOM\)" --component $COMPONENT
         }
 
         # Phase 2 — Cargo binaries

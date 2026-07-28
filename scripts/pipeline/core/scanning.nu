@@ -33,7 +33,7 @@
 #   use ./core/scanning.nu *
 #   ...
 #   process-cargo-sboms $sbom_files $packages
-#   let audit_findings = (run-cargo-audit ($ws_manifest | path dirname | path join "Cargo.lock") --offline)
+#   let scan_findings = (run-vulnerability-scan $ws_manifest --offline=$audit_offline)
 # ---------------------------------------------------------------------------
 
 use logging.nu *
@@ -216,8 +216,17 @@ def normalize-audit-entry [entry: record, index: table, default_kind: string]: n
 }
 
 export def parse-cargo-audit [report: record, index: table]: nothing -> list<record> {
+    # cargo-deny's --audit-compatible-output puts findings as a BARE LIST
+    # directly under `vulnerabilities` — no {found, count, list} wrapper the
+    # way cargo-audit itself shapes it. Confirmed against a real capture.
+    # Empirically a single JSON document as long as exactly one advisory
+    # database is configured (the default) — cargo-deny's own docs note
+    # output becomes one JSON object PER configured database if more than
+    # one is added to deny.toml's [advisories] db-urls, which this parser
+    # does not handle. If a second database is ever configured, this needs
+    # revisiting (multi-document parse), not a silent re-use.
     let vuln_findings = (
-        $report.vulnerabilities?.list? | default []
+        $report.vulnerabilities? | default []
         | each {|v| normalize-audit-entry $v $index "vulnerability" }
     )
 
@@ -240,12 +249,40 @@ export def parse-cargo-audit [report: record, index: table]: nothing -> list<rec
 
 
 # ---------------------------------------------------------------------------
-# Effectful: run cargo-audit, normalize, resolve, emit.
+# Effectful: run the vulnerability scan, normalize, resolve, emit.
 #
-#   lockfile   path to the workspace Cargo.lock (cargo-audit audits the LOCK
-#              file, not a manifest — the #217 sketch's --manifest-path is wrong)
-#   --db-path  advisory-db location (for hermetic/offline runs)
-#   --offline  pass --no-fetch so cargo-audit won't try to update the db
+# As of the Tier 1 consolidation, this shells out to `cargo deny check
+# advisories --audit-compatible-output`, not `cargo-audit` directly.
+# cargo-deny's advisories check is built on the same `rustsec` crate
+# cargo-audit uses, and --audit-compatible-output reshapes its JSON to match
+# cargo-audit's own report structure closely enough that parse-cargo-audit
+# needed exactly one change (the vulnerabilities-is-a-bare-list fix above) —
+# confirmed against a real captured run, not assumed. parse-cargo-audit keeps
+# its name because it parses "the audit-compatible shape," which is the
+# format's own name regardless of which binary produced it.
+#
+#   manifest_path  path to the workspace Cargo.toml — cargo-deny operates via
+#                  --manifest-path, not a direct lockfile argument the way
+#                  cargo-audit's --file did.
+#   --offline      maps to cargo-deny's --disable-fetch (confirmed flag name;
+#                  cargo-audit's old --no-fetch does not exist here). There is
+#                  no CLI --db-path equivalent — cargo-deny's advisory-db
+#                  location is a deny.toml [advisories] concern, not a
+#                  per-invocation flag, so that parameter is gone. Point
+#                  deny.toml's db-path at a vendored clone for hermetic runs.
+#
+# Known information loss from the swap, not a bug: cargo-audit's JSON carries
+# a `database` block (advisory-db commit / last-updated). cargo-deny's
+# --audit-compatible-output has no equivalent field — confirmed absent from a
+# real capture. The log line below will report "unknown" for db freshness
+# going forward; if that fact matters later (see the ScanContext proposal),
+# it has to come from reading cargo-deny's local advisory-db git clone
+# directly, not from this tool's own output.
+#
+# --exclude-dev is deliberately NOT passed. Passing it would narrow
+# cargo-deny's scope below what cargo-audit used to see, making the
+# SBOM-vs-scanner dependency-scope divergence worse, not better — the
+# opposite of where this pipeline is headed on scope.
 #
 # The resolution index is pulled from state.nu's sbom_packages table
 # (get-all-sbom-packages), so this must run after process-cargo-sboms has
@@ -258,43 +295,41 @@ export def parse-cargo-audit [report: record, index: table]: nothing -> list<rec
 #
 # Returns the normalized findings (for pipeline summaries / assertions).
 # ---------------------------------------------------------------------------
-export def run-cargo-audit [
-    lockfile: path
-    --db-path: string = ""
-    --offline
+export def run-vulnerability-scan [
+    manifest_path: path
 ]: nothing -> list<record> {
-    if ($lockfile | path exists) != true {
-        log-warn $"cargo-audit: lockfile not found at ($lockfile) — skipping" --component $COMPONENT
+    if not ($manifest_path | path exists) {
+        log-warn $"vulnerability scan: manifest not found at ($manifest_path) — skipping" --component $COMPONENT
         return []
     }
 
     let index = (get-all-sbom-packages)
     if ($index | is-empty) {
-        log-warn "cargo-audit: sbom_packages is empty — did process-cargo-sboms run first in this process? all findings will link to the build only" --component $COMPONENT
+        log-warn "vulnerability scan: sbom_packages is empty — did process-cargo-sboms run first in this process? all findings will link to the build only" --component $COMPONENT
     }
 
-    # NOTE: flag drift across cargo-audit versions — if yours rejects `--json`,
-    # it wants `-f json` / `--format json`. Kept in one place for easy change.
-    mut args = [audit --json --file $lockfile]
-    if ($db_path | is-not-empty) { $args = ($args | append [--db $db_path]) }
-    if $offline                  { $args = ($args | append [--no-fetch]) }
+    let args = [
+        deny --manifest-path $manifest_path
+        --format json
+        check advisories
+        --audit-compatible-output
+    ]
 
     log-info $"running: cargo ($args | str join ' ')" --component $COMPONENT
     let res = (^cargo ...$args | complete)
 
-    # cargo-audit exits 0 when clean and non-zero when it FINDS vulns — that is
-    # not a failure. The reliable success signal is parseable JSON on stdout.
-    # A parse failure means the run itself broke: stale/missing advisory db,
-    # no network without --offline, or a bad flag.
+    # cargo-deny, like cargo-audit before it, exits non-zero when it FINDS
+    # advisories — that's the success path, not a failure. Parseable JSON on
+    # stdout is the reliable success signal.
     let report = try { $res.stdout | from json } catch {
         let msg = ($res.stderr | default $res.stdout | str trim)
-        log-warn $"cargo-audit produced no parseable JSON \(exit ($res.exit_code)\): ($msg)" --component $COMPONENT
+        log-warn $"cargo-deny produced no parseable JSON (exit ($res.exit_code)): ($msg)" --component $COMPONENT
         return []
     }
 
-    # A scan is only as meaningful as the advisory DB it ran against.
-    let db_updated = ($report.database?.["last-updated"]? | default "unknown")
-    log-info $"cargo-audit: advisory db last updated ($db_updated), auditing ($report.lockfile?.dependency-count? | default '?') locked deps" --component $COMPONENT
+    let dep_count = ($report.lockfile.dependency-count | default '?')
+
+    log-info $"vulnerability scan: auditing ($dep_count) locked deps \(advisory db freshness unavailable from cargo-deny's output\)" --component $COMPONENT
 
     # Entries with no advisory (currently: yanked crates) can't be linked to
     # a RUSTSEC id and are dropped by parse-cargo-audit. Surface what was
@@ -310,14 +345,12 @@ export def run-cargo-audit [
         let has_package = ($f.affected_package | default "" | is-not-empty)
         if not $has_package {
             # Unresolved = the vulnerable crate isn't in the SBOM closure.
-            # Almost always a dependency-scope mismatch (cargo-audit sees
-            # dev/build deps that cargo-cyclonedx didn't emit). Emitted with
-            # no affected_package and no in_artifact — there is currently no
+            # Almost always a dependency-scope mismatch. Emitted with no
+            # affected_package and no in_artifact — there is currently no
             # build-artifact content hash threaded into this function to link
-            # against, so despite the name, this is NOT actually linked to
-            # anything in the graph yet. Worth deciding: either thread a
-            # lockfile content hash in here as in_artifact, or accept these
-            # findings surface only via log output until resolved.
+            # against, so despite appearances, this is NOT actually linked to
+            # anything in the graph yet. Still an open decision from before
+            # the Tier 1 swap, unaffected by it.
             log-warn $"($f.identifier): ($f.package_name)@($f.package_version) not in SBOM closure — no package or artifact link will be emitted" --component $COMPONENT
         }
 
@@ -338,7 +371,7 @@ export def run-cargo-audit [
 
     let linked = ($findings | where {|f| ($f.affected_package | default "" | is-not-empty) } | length)
     let by_kind = ($findings | group-by kind | transpose kind entries | each {|k| $"($k.kind)=($k.entries | length)" } | str join ", ")
-    log-info $"cargo-audit: ($findings | length) finding\(s\) \(($by_kind)\), ($linked) linked to SBOM package\(s\)" --component $COMPONENT
+    log-info $"vulnerability scan: ($findings | length) finding\(s\) \(($by_kind)\), ($linked) linked to SBOM package\(s\)" --component $COMPONENT
 
     $findings
 }

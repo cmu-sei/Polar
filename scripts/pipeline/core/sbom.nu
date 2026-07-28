@@ -1,3 +1,4 @@
+
 export def process-sboms [
     files: list<record>
     packages: list<record>
@@ -231,6 +232,54 @@ export def process-image-sbom [sbom_path: path, image_name: string, --oci_metada
 # No side effects, no emissions. Separating this from emit makes it
 # testable in isolation.
 # ---------------------------------------------------------------------------
+# Normalize a CycloneDX component's `licenses` array into a single string.
+# Per spec, each entry is EITHER an `expression` (a full SPDX expression like
+# "MIT OR Apache-2.0", covering however many licenses apply) OR a
+# `license.{id,name}` pair (a single named license). Multiple entries in
+# `licenses` can occur; joined with ", " here rather than trying to compose
+# exact AND/OR SPDX semantics across entries, which is genuinely ambiguous
+# without knowing the generator's intent — this is a readable capture, not
+# a machine-evaluable SPDX expression. Null when the component declares no
+# license, which is real and common — not treated as a parse failure.
+def normalize-license [comp: record]: nothing -> any {
+    let entries = ($comp.licenses? | default [])
+    if ($entries | is-empty) { return null }
+
+    let parts = ($entries | each {|l|
+        let expr = ($l.expression? | default "")
+        if ($expr | is-not-empty) {
+            $expr
+        } else {
+            let id = ($l.license?.id? | default "")
+            let name = ($l.license?.name? | default "")
+            if ($id | is-not-empty) { $id } else if ($name | is-not-empty) { $name } else { "" }
+        }
+    } | where { ($in | is-not-empty) })
+
+    if ($parts | is-empty) { null } else { $parts | str join ", " }
+}
+
+# Best-effort dependency source classification, derived from purl qualifiers
+# rather than a separate CycloneDX field — cargo-cyclonedx has no direct
+# equivalent to cargo-audit's `package.source` string. Confirmed: a `vcs_url`
+# purl qualifier marks a git-sourced dependency. Everything else defaults to
+# a registry classification, which is correct for the overwhelming majority
+# (crates.io) but NOT verified against a real path-sourced dependency — your
+# own workspace crates depending on each other are exactly that case, and
+# exactly the one this function is least trustworthy for. Check by hand
+# against a real SBOM containing one before relying on this distinction for
+# your own crates specifically.
+def derive-source [purl: string]: nothing -> any {
+    if ($purl | is-empty) { return null }
+    if ($purl | str contains "vcs_url=") {
+        "git"
+    } else if ($purl | str starts-with "pkg:cargo/") {
+        "registry"
+    } else {
+        null
+    }
+}
+
 export def extract-graph-fragment [doc: record, artifact_content_hash: string]: nothing -> record {
     let root_component = $doc.metadata?.component? | default null
 
@@ -243,21 +292,32 @@ export def extract-graph-fragment [doc: record, artifact_content_hash: string]: 
             name: ($root_component.name? | default "")
             version: ($root_component.version? | default "")
             component_type: ($root_component.type? | default "application")
+            license: (normalize-license $root_component)
+            source: (derive-source ($root_component.purl? | default ""))
         }
     } else {
         null
     }
 
-    # Flat node list. We only extract identity fields — no license text,
-    # no external references, no tool metadata. Those belong in the SBOM
-    # document (which you can always re-fetch from object storage by
-    # content hash), not in the graph merge payload.
+    # This originally extracted only identity fields, on the reasoning that
+    # descriptive metadata (license, external references, tool info) belonged
+    # in the re-fetchable SBOM document, not the graph merge payload — a
+    # reasonable position when the graph's job was strictly dependency-graph
+    # / supply-chain modeling. That's no longer the whole job: this pipeline
+    # now tracks static-analysis findings as first-class facts, and license
+    # is exactly that kind of attribute — cheap, static per (name, version),
+    # and queried relationally ("which shipped binaries transitively depend
+    # on a GPL-family crate") in a way that re-fetching N SBOM files can't
+    # support. `license` and `source` are captured for that reason; nothing
+    # else (external references, tool metadata) changed — still out of scope.
     let components = ($doc.components? | default [] | each {|c|
         {
             purl: ($c.purl? | default "")
             name: ($c.name? | default "")
             version: ($c.version? | default "")
             component_type: ($c.type? | default "library")
+            license: (normalize-license $c)
+            source: (derive-source ($c.purl? | default ""))
         }
     } | where { ($in.purl | is-not-empty) or ($in.name | is-not-empty) })
 
