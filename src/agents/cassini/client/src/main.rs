@@ -112,19 +112,23 @@ async fn main() -> Result<()> {
                 payload,
                 publish_timeout,
             } => {
-                let payload_b64 = base64::Engine::encode(
-                    &base64::engine::general_purpose::STANDARD,
-                    payload.as_bytes(),
-                );
-                dispatch_to_daemon(
-                    &socket_path,
-                    IpcRequest::Publish {
-                        topic,
-                        payload_b64,
-                        timeout_secs: publish_timeout,
-                    },
-                    format,
-                )
+                async {
+                    let payload_bytes = resolve_publish_payload(payload).await?;
+                    let payload_b64 = base64::Engine::encode(
+                        &base64::engine::general_purpose::STANDARD,
+                        &payload_bytes,
+                    );
+                    dispatch_to_daemon(
+                        &socket_path,
+                        IpcRequest::Publish {
+                            topic,
+                            payload_b64,
+                            timeout_secs: publish_timeout,
+                        },
+                        format,
+                    )
+                    .await
+                }
                 .await
             }
             Command::ListSessions { timeout } => {
@@ -173,14 +177,18 @@ async fn main() -> Result<()> {
                 payload,
                 publish_timeout,
             } => {
-                run_publish_direct(
-                    client_config.clone(),
-                    topic,
-                    payload,
-                    register_timeout,
-                    Duration::from_secs(publish_timeout),
-                    format,
-                )
+                async {
+                    let payload_bytes = resolve_publish_payload(payload).await?;
+                    run_publish_direct(
+                        client_config.clone(),
+                        topic,
+                        payload_bytes,
+                        register_timeout,
+                        Duration::from_secs(publish_timeout),
+                        format,
+                    )
+                    .await
+                }
                 .await
             }
             Command::ListSessions { timeout } => {

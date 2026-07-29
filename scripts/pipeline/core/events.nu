@@ -27,11 +27,10 @@ export const BUILD_EVENTS_TOPIC = $"($SUBJECT_PREFIX).events"
 # variant name in snake_case, plus all fields for that variant.
 # build_id is carried on the payload itself for variants that have one —
 # it is not on this envelope.
-# TODO: To support more audtiable event logs, append events to a log
 def emit [payload: record]: nothing -> nothing {
-    let json = $payload | to json --raw
+    let json = ($payload | to json --raw)
     log-debug $json
-    cassini-client publish $BUILD_EVENTS_TOPIC $json
+    $json | cassini-client publish $BUILD_EVENTS_TOPIC
 }
 
 # ── Execution lifecycle ────────────────────────────────────────────────────────
@@ -64,24 +63,28 @@ export def emit-execution-started [
 }
 
 export def emit-execution-completed [duration_secs: int]: nothing -> nothing {
-    emit {type: "execution_completed", duration_secs: $duration_secs}
+    emit {type: "execution_completed", build_id: (get-build-id), duration_secs: $duration_secs}
 }
 
 export def emit-execution-failed [reason: string, --stage: string = ""]: nothing -> nothing {
-    mut payload = {type: "execution_failed", reason: $reason, stage: null}
+    mut payload = {
+        build_id: (get-build-id),
+        type: "execution_failed", reason: $reason, stage: null}
     if ($stage | is-not-empty) {
         $payload = ($payload | upsert stage $stage)
     }
     emit $payload
 }
 
-export def emit-execution-cancelled [--reason: string = ""]: nothing -> nothing {
-    mut payload = {type: "execution_cancelled", reason: null}
-    if ($reason | is-not-empty) {
-        $payload = ($payload | upsert reason $reason)
-    }
-    emit $payload
-}
+# TODO: Until we figure out how to capture SIGTERM and SIGKILL in nushell, we don't really have a great way to fire this off.
+# It might be nice for CI systems that are able to do it for us
+# export def emit-execution-cancelled [--reason: string = ""]: nothing -> nothing {
+#     mut payload = {type: "execution_cancelled", reason: null}
+#     if ($reason | is-not-empty) {
+#         $payload = ($payload | upsert reason $reason)
+#     }
+#     emit $payload
+# }
 
 # Emit VulnerabilityFound — a SecurityAdvisory-shaped finding from a scanner:
 # cargo-audit's `vulnerability`, `unsound`, and `notice` kinds. Each of these

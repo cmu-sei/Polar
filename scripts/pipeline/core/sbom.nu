@@ -330,12 +330,10 @@ export def extract-graph-fragment [doc: record, artifact_content_hash: string]: 
     # useful for "what packages exist in this build" queries, just
     # not for "what depends on what" traversals.
     let edges = ($doc.dependencies? | default [] | each {|dep|
-
-        let edge = {
+        {
             from_ref: ($dep.ref? | default "")
             to_refs: ($dep.dependsOn? | default [])
         }
-
     } | where { ($in.from_ref | is-not-empty) and ($in.to_refs | length) > 0 })
 
     {

@@ -89,10 +89,18 @@ pub enum OutputFormat {
 
 #[derive(Subcommand)]
 pub enum Command {
-    /// Publish a message to a topic
+    /// Publish a message to a topic. `payload` is optional — when omitted,
+    /// the payload is read from stdin instead. This exists because a
+    /// payload passed as a CLI argument has to survive execve()'s argument
+    /// vector construction before this binary's main() ever runs; Linux
+    /// caps any single argument around 128KB (MAX_ARG_STRLEN) well below
+    /// the ~2MB aggregate ARG_MAX, and a real SbomAnalyzed payload can
+    /// exceed that routinely. Reading from stdin has no such ceiling.
+    /// `payload` is kept as a positional for quick manual/interactive use
+    /// with small messages.
     Publish {
         topic: String,
-        payload: String,
+        payload: Option<String>,
         #[arg(long, default_value = "10")]
         publish_timeout: u64,
     },
@@ -1058,10 +1066,26 @@ pub async fn dispatch_to_daemon(
 
 // ===== Command handlers (direct connect path) =====
 
+/// Resolve a Publish command's payload: from the CLI argument if given
+/// (small/manual use), or from stdin otherwise. Shared by both the
+/// daemon-IPC and direct-connect dispatch paths in main.rs, so there's one
+/// place implementing "how does the payload get into this process" rather
+/// than two copies that could drift.
+pub async fn resolve_publish_payload(payload: Option<String>) -> Result<Vec<u8>> {
+    match payload {
+        Some(s) => Ok(s.into_bytes()),
+        None => {
+            let mut buf = Vec::new();
+            tokio::io::stdin().read_to_end(&mut buf).await?;
+            Ok(buf)
+        }
+    }
+}
+
 pub async fn run_publish_direct(
     client_config: TCPClientConfig,
     topic: String,
-    payload: String,
+    payload: Vec<u8>,
     register_timeout: Duration,
     publish_timeout: Duration,
     format: &OutputFormat,
@@ -1072,7 +1096,7 @@ pub async fn run_publish_direct(
         .send_and_await(
             TcpClientMessage::Publish {
                 topic,
-                payload: payload.into_bytes(),
+                payload,
                 trace_ctx: None,
             },
             BridgeMode::Publish,
