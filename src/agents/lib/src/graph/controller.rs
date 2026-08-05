@@ -425,6 +425,22 @@ pub async fn handle_op(graph: &Graph, op: &GraphOp) -> Result<(), ActorProcessin
     trace!("transaction committed");
     Ok(())
 }
+
+// ── GraphSignal ────────────────────────────────────────────────────────────
+
+/// Signals the GraphController emits about real connectivity — distinct
+/// from GraphConnected in HealthCheckMessage (which only means "the actor
+/// spawned"). neo4rs::Graph::connect only builds pool config; it does not
+/// handshake or authenticate, so actor-spawn success guarantees nothing
+/// about actual reachability.
+#[derive(Debug, Clone)]
+pub enum GraphSignal {
+    /// A real operation against Neo4j succeeded — canary or app-level write.
+    Available,
+    /// A real operation against Neo4j failed. Carries a short reason.
+    OpFailed(String),
+}
+
 // ── GraphController actor ──────────────────────────────────────────────────────
 
 /// The unified graph controller actor.
@@ -524,32 +540,67 @@ impl GraphControllerActor {
     }
 }
 
+pub struct GraphControllerArgs {
+    pub signal_port: std::sync::Arc<ractor::OutputPort<GraphSignal>>,
+}
+
 pub struct GraphControllerState {
     pub graph: Graph,
+    pub signal_port: std::sync::Arc<ractor::OutputPort<GraphSignal>>,
 }
 
 #[async_trait]
 impl Actor for GraphControllerActor {
     type Msg = GraphControllerMsg;
     type State = GraphControllerState;
-    type Arguments = ();
+    type Arguments = GraphControllerArgs;
 
     async fn pre_start(
         &self,
         _myself: ActorRef<Self::Msg>,
-        graph: Self::Arguments,
+        args: Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
         debug!("GraphControllerActor starting");
         match Self::get_neo_config() {
             Ok(conf) => match Graph::connect(conf) {
-                Ok(graph) => Ok(GraphControllerState { graph }),
+                Ok(graph) => Ok(GraphControllerState {
+                    graph,
+                    signal_port: args.signal_port,
+                }),
                 Err(e) => {
                     error!("Failed to set up graph connection. {e}");
-                    return Err(ActorProcessingErr::from(e));
+                    Err(ActorProcessingErr::from(e))
                 }
             },
             Err(e) => Err(e),
         }
+    }
+
+    async fn post_start(
+        &self,
+        _myself: ActorRef<Self::Msg>,
+        state: &mut Self::State,
+    ) -> Result<(), ActorProcessingErr> {
+        // Canary: "RETURN 1" can only fail on auth/connectivity, never on
+        // data content — this is what actually proves the graph is
+        // reachable, as opposed to pre_start's pool config succeeding.
+        //
+        // NOTE: verify the exact neo4rs API for a one-shot query against
+        // this pinned fork version (rc.8) before relying on this — it may
+        // need to go through start_txn()/run()/commit() like handle_op does,
+        // rather than a direct .execute() call.
+        match state.graph.execute(Query::new("RETURN 1".to_string())).await {
+            Ok(_) => {
+                info!("GraphControllerActor: canary query succeeded, graph available");
+                state.signal_port.send(GraphSignal::Available);
+            }
+            Err(e) => {
+                let reason = format!("canary query failed: {e}");
+                error!("GraphControllerActor: {reason}");
+                state.signal_port.send(GraphSignal::OpFailed(reason));
+            }
+        }
+        Ok(())
     }
 
     async fn handle(
@@ -559,11 +610,16 @@ impl Actor for GraphControllerActor {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
-            GraphControllerMsg::Op(op) => {
-                if let Err(e) = handle_op(&state.graph, &op).await {
-                    error!("Failed to handle graph operation. {e}");
+            GraphControllerMsg::Op(op) => match handle_op(&state.graph, &op).await {
+                Ok(()) => {
+                    state.signal_port.send(GraphSignal::Available);
                 }
-            }
+                Err(e) => {
+                    let reason = format!("{e}");
+                    error!("Failed to handle graph operation. {reason}");
+                    state.signal_port.send(GraphSignal::OpFailed(reason));
+                }
+            },
         }
         Ok(())
     }

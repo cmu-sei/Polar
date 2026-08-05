@@ -12,6 +12,11 @@
 //!     OutputPort<()> to prepare for shutdown.
 //!   - On receiving ShutdownAck from supervisor, stops itself cleanly.
 //!     Supervisor handles ActorTerminated for the healthcheck actor by exiting.
+//!   - Graph availability deadline: for agents that expect a graph connection,
+//!     tracks time since the last real (canary or app-level) successful graph
+//!     operation. If that exceeds graph_deadline_secs -- whether the graph
+//!     never became available at all, or was available and then went dark --
+//!     the actor fails itself, which the supervisor treats as fatal.
 
 use ractor::{Actor, ActorProcessingErr, ActorRef, OutputPort, async_trait};
 use serde::{Deserialize, Serialize};
@@ -31,10 +36,22 @@ pub const POLAR_HEALTH_CERTS_ENV: &str = "POLAR_HEALTH_CERTS";
 pub const POLAR_HEALTH_EXPIRY_SECS_ENV: &str = "POLAR_HEALTH_EXPIRY_SECS";
 pub const POLAR_HEALTH_STALE_SECS_ENV: &str = "POLAR_HEALTH_STALE_SECS";
 pub const POLAR_HEALTH_TICK_SECS_ENV: &str = "POLAR_HEALTH_TICK_SECS";
+pub const POLAR_HEALTH_DEP_ENDPOINTS_ENV: &str = "POLAR_HEALTH_DEP_ENDPOINTS";
+pub const POLAR_HEALTH_REJUVENATION_SECS_ENV: &str = "POLAR_HEALTH_REJUVENATION_SECS";
+pub const POLAR_HEALTH_GRAPH_DEADLINE_SECS_ENV: &str = "POLAR_HEALTH_GRAPH_DEADLINE_SECS";
 
 pub const DEFAULT_EXPIRY_THRESHOLD_SECS: i64 = 60;
 pub const DEFAULT_TICK_SECS: u64 = 30;
 pub const DEFAULT_REJUVENATION_THRESHOLD_SECS: i64 = 300;
+/// Jitter window width in seconds. Must comfortably exceed DEFAULT_TICK_SECS
+/// (and any agent's configured tick_secs) or jitter effectively rounds up to
+/// the next tick boundary and every agent in WaitingForDeps at the same time
+/// fires within one tick of each other -- a thundering herd on cert-issuer.
+pub const DEFAULT_JITTER_WINDOW_SECS: u64 = 180;
+/// How long a graph-expecting agent may go without a real successful graph
+/// operation (canary or app-level write) before HealthCheckActor fails itself.
+/// Covers both "never connected" and "was connected, then went dark."
+pub const DEFAULT_GRAPH_DEADLINE_SECS: u64 = 120;
 
 // ---------------------------------------------------------------------------
 // HealthStatus — typed status enum
@@ -370,10 +387,18 @@ pub enum HealthCheckMessage {
     CassiniConnected,
     /// Cassini connection lost or rejected.
     CassiniDisconnected,
-    /// Graph database connection established.
+    /// Graph controller actor spawned. Does NOT imply successful auth or
+    /// connectivity — neo4rs::Graph::connect only builds pool config, it
+    /// does not handshake. Use GraphAvailable for real connectivity.
     GraphConnected,
     /// Graph database connection lost.
     GraphDisconnected,
+    /// A real operation (canary or application write) against Neo4j
+    /// succeeded. This is what actually proves the graph is reachable.
+    GraphAvailable,
+    /// A real operation against Neo4j failed. Carries a short reason,
+    /// logged but not immediately fatal — see graph_deadline_secs.
+    GraphOpFailed(String),
     /// Internal periodic tick — do not send externally.
     Tick,
     /// Sent by the supervisor after it has handled PrepareShutdown.
@@ -428,6 +453,14 @@ pub struct HealthCheckActorState {
     pub dep_cert_endpoints: Vec<DepCertEndpoint>,
     pub rejuvenation_phase: RejuvenationPhase,
     pub prepare_shutdown_port: Arc<OutputPort<()>>,
+    /// Seconds an expects_graph agent may go without a real graph success
+    /// before HealthCheckActor fails itself.
+    pub graph_deadline_secs: u64,
+    /// Unix timestamp of the last GraphAvailable. None if never seen.
+    pub last_graph_success_secs: Option<u64>,
+    /// Unix timestamp this actor started — anchors the deadline for the
+    /// "never succeeded even once" case.
+    pub actor_start_secs: u64,
 }
 
 impl HealthCheckActorState {
@@ -495,6 +528,9 @@ impl HealthCheckActorState {
     }
 
     /// Returns `true` if all required connections are established.
+    /// Note: uses graph_connected (actor spawned), not graph availability.
+    /// Graph availability is tracked separately via last_graph_success_secs
+    /// and enforced by the deadline check in Tick.
     fn connections_healthy(&self) -> bool {
         if !self.cassini_connected {
             return false;
@@ -508,28 +544,70 @@ impl HealthCheckActorState {
     /// Returns `true` if all dep cert endpoints have healthy TTLs.
     /// Logs warnings for any that fail; does not short-circuit so all
     /// failures are visible in a single tick.
-    fn deps_healthy(&self) -> bool {
+    ///
+    /// check_ttl() does blocking network + TLS handshake I/O (up to ~5s per
+    /// endpoint via its read/write timeouts). We run it via spawn_blocking
+    /// so it doesn't hold up whatever thread this tick is running on.
+    async fn deps_healthy(&self) -> bool {
         if self.dep_cert_endpoints.is_empty() {
             return true;
         }
 
         let mut all_healthy = true;
         for dep in &self.dep_cert_endpoints {
-            match dep.check_ttl() {
-                Ok(remaining) => {
-                    tracing::debug!(
-                        "dep cert {}:{} healthy, {remaining}s remaining",
-                        dep.host,
-                        dep.port
-                    );
+            let dep = dep.clone();
+            let result = tokio::task::spawn_blocking(move || dep.check_ttl()).await;
+
+            match result {
+                Ok(Ok(remaining)) => {
+                    tracing::debug!("dep cert healthy, {remaining}s remaining");
                 }
-                Err(reason) => {
+                Ok(Err(reason)) => {
                     tracing::warn!("healthcheck: dep cert unhealthy: {reason}");
+                    all_healthy = false;
+                }
+                Err(join_err) => {
+                    tracing::warn!(
+                        "healthcheck: dep cert check task panicked or was cancelled: {join_err}"
+                    );
                     all_healthy = false;
                 }
             }
         }
         all_healthy
+    }
+
+    /// Checks the graph availability deadline for expects_graph agents.
+    /// Returns `Err` describing the violation if the deadline has been
+    /// exceeded, whether the graph never became available or went dark
+    /// after previously succeeding.
+    fn check_graph_deadline(&self) -> Result<(), String> {
+        if !self.expects_graph {
+            return Ok(());
+        }
+
+        let now = HealthState::now();
+        match self.last_graph_success_secs {
+            Some(last_success) => {
+                let elapsed = now.saturating_sub(last_success);
+                if elapsed > self.graph_deadline_secs {
+                    return Err(format!(
+                        "graph unavailable for {elapsed}s (deadline: {}s)",
+                        self.graph_deadline_secs
+                    ));
+                }
+            }
+            None => {
+                let elapsed = now.saturating_sub(self.actor_start_secs);
+                if elapsed > self.graph_deadline_secs {
+                    return Err(format!(
+                        "graph never became available within {elapsed}s (deadline: {}s)",
+                        self.graph_deadline_secs
+                    ));
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -558,6 +636,26 @@ impl Actor for HealthCheckActor {
             .map(String::from)
             .collect();
 
+        // Dep cert endpoints: prefer the env var (comma-separated host:port:ttl
+        // triples) so this is a Dhall/config change per agent, not a Rust code
+        // change. Fall back to whatever the caller passed in HealthCheckArgs,
+        // so existing call sites that haven't migrated their Dhall yet still work.
+        let dep_cert_endpoints = match std::env::var(POLAR_HEALTH_DEP_ENDPOINTS_ENV) {
+            Ok(raw) if !raw.trim().is_empty() => raw
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(DepCertEndpoint::parse)
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(ActorProcessingErr::from)?,
+            _ => args.dep_cert_endpoints,
+        };
+
+        let rejuvenation_threshold_secs = std::env::var(POLAR_HEALTH_REJUVENATION_SECS_ENV)
+            .ok()
+            .and_then(|s| s.parse::<i64>().ok())
+            .unwrap_or(args.rejuvenation_threshold_secs);
+
         let expiry_threshold_secs = std::env::var(POLAR_HEALTH_EXPIRY_SECS_ENV)
             .ok()
             .and_then(|s| s.parse::<i64>().ok())
@@ -568,16 +666,21 @@ impl Actor for HealthCheckActor {
             .and_then(|s| s.parse::<u64>().ok())
             .unwrap_or(DEFAULT_TICK_SECS);
 
+        let graph_deadline_secs = std::env::var(POLAR_HEALTH_GRAPH_DEADLINE_SECS_ENV)
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(DEFAULT_GRAPH_DEADLINE_SECS);
+
         if expiry_threshold_secs <= 0 {
             return Err(ActorProcessingErr::from(format!(
                 "POLAR_HEALTH_EXPIRY_SECS must be positive, got {expiry_threshold_secs}"
             )));
         }
 
-        if args.rejuvenation_threshold_secs <= expiry_threshold_secs {
+        if rejuvenation_threshold_secs <= expiry_threshold_secs {
             return Err(ActorProcessingErr::from(format!(
                 "rejuvenation_threshold_secs ({}) must be greater than expiry_threshold_secs ({})",
-                args.rejuvenation_threshold_secs, expiry_threshold_secs
+                rejuvenation_threshold_secs, expiry_threshold_secs
             )));
         }
 
@@ -586,12 +689,15 @@ impl Actor for HealthCheckActor {
             graph_connected: false,
             expects_graph: args.expects_graph,
             expiry_threshold_secs,
-            rejuvenation_threshold_secs: args.rejuvenation_threshold_secs,
+            rejuvenation_threshold_secs,
             tick_secs,
             cert_paths,
-            dep_cert_endpoints: args.dep_cert_endpoints,
+            dep_cert_endpoints,
             rejuvenation_phase: RejuvenationPhase::Normal,
             prepare_shutdown_port: args.prepare_shutdown_port,
+            graph_deadline_secs,
+            last_graph_success_secs: None,
+            actor_start_secs: HealthState::now(),
         })
     }
 
@@ -624,7 +730,7 @@ impl Actor for HealthCheckActor {
 
             HealthCheckMessage::GraphConnected => {
                 state.graph_connected = true;
-                tracing::debug!("healthcheck: graph connected");
+                tracing::debug!("healthcheck: graph connected (actor spawned; not yet verified)");
             }
 
             HealthCheckMessage::GraphDisconnected => {
@@ -636,6 +742,20 @@ impl Actor for HealthCheckActor {
                 // Don't fail — allow reconnection to recover.
             }
 
+            HealthCheckMessage::GraphAvailable => {
+                state.graph_connected = true;
+                state.last_graph_success_secs = Some(HealthState::now());
+                tracing::debug!("healthcheck: graph available (real op succeeded)");
+            }
+
+            HealthCheckMessage::GraphOpFailed(reason) => {
+                tracing::warn!("healthcheck: graph op failed: {reason}");
+                HealthState::unhealthy(state.cassini_connected, state.graph_connected).write();
+                // Don't fail immediately — a single failed op could be
+                // transient. check_graph_deadline (run every Tick) is what
+                // decides whether this has gone on too long.
+            }
+
             HealthCheckMessage::ShutdownAck => {
                 tracing::info!(
                     "healthcheck: received ShutdownAck from supervisor, stopping cleanly"
@@ -645,8 +765,9 @@ impl Actor for HealthCheckActor {
 
             HealthCheckMessage::Tick => {
                 // ----------------------------------------------------------------
-                // Hard deadline check — own certs at or within expiry threshold.
-                // Always checked regardless of rejuvenation phase.
+                // Hard deadline checks — own certs and, for expects_graph
+                // agents, graph availability. Always checked regardless of
+                // rejuvenation phase.
                 // ----------------------------------------------------------------
                 if let Err(reason) = state.check_certs() {
                     tracing::error!("healthcheck: cert check failed (hard deadline): {reason}");
@@ -655,6 +776,12 @@ impl Actor for HealthCheckActor {
                         state.graph_connected,
                     )
                     .write();
+                    return Err(ActorProcessingErr::from(reason));
+                }
+
+                if let Err(reason) = state.check_graph_deadline() {
+                    tracing::error!("healthcheck: {reason}");
+                    HealthState::unhealthy(state.cassini_connected, false).write();
                     return Err(ActorProcessingErr::from(reason));
                 }
 
@@ -676,7 +803,7 @@ impl Actor for HealthCheckActor {
                                 state.graph_connected,
                             )
                             .write();
-                            // Don't fail — reschedule tick and wait for reconnection.
+                            // Don't fail — reschedule tick and wait for recovery.
                             let _ = myself
                                 .send_after(
                                     Duration::from_secs(state.tick_secs),
@@ -725,16 +852,24 @@ impl Actor for HealthCheckActor {
                     // Rejuvenation: waiting for dep certs to be healthy
                     // ------------------------------------------------------------
                     RejuvenationPhase::WaitingForDeps => {
-                        if state.deps_healthy() {
-                            // Choose jitter: 0–9 seconds (uniform)
-                            let jitter_secs = u64::from(rand::random::<u8>()) % 10;
+                        if state.deps_healthy().await {
+                            // Jitter window must dominate tick_secs, or every
+                            // agent that enters this phase around the same
+                            // time (e.g. after a shared cert-issuer rotation)
+                            // fires within one tick of each other regardless
+                            // of the jitter value chosen -- a thundering herd
+                            // on cert-issuer. DEFAULT_JITTER_WINDOW_SECS (180s)
+                            // comfortably exceeds the default 30s tick.
+                            let jitter_secs =
+                                u64::from(rand::random::<u32>()) % DEFAULT_JITTER_WINDOW_SECS;
                             let fire_at_secs = HealthState::now()
                                 .checked_add(jitter_secs)
                                 .unwrap_or(HealthState::now());
 
                             tracing::info!(
-                                "healthcheck: deps healthy, jitter {jitter_secs}s, \
-                                 will signal shutdown at t={fire_at_secs}"
+                                "healthcheck: deps healthy, jitter {jitter_secs}s (window {}s), \
+                                 will signal shutdown at t={fire_at_secs}",
+                                DEFAULT_JITTER_WINDOW_SECS
                             );
                             state.rejuvenation_phase =
                                 RejuvenationPhase::Jittering { fire_at_secs };
@@ -763,7 +898,7 @@ impl Actor for HealthCheckActor {
                             );
                             state.prepare_shutdown_port.send(());
                             state.rejuvenation_phase = RejuvenationPhase::WaitingForAck;
-                            // Reschedule tick only to catch hard deadline while waiting
+                            // Reschedule tick only to catch hard deadlines while waiting
                             let _ = myself
                                 .send_after(
                                     Duration::from_secs(state.tick_secs),
@@ -788,7 +923,7 @@ impl Actor for HealthCheckActor {
                     // Rejuvenation: waiting for supervisor ShutdownAck
                     // ------------------------------------------------------------
                     RejuvenationPhase::WaitingForAck => {
-                        // Nothing to do except reschedule tick to catch hard deadline.
+                        // Nothing to do except reschedule tick to catch hard deadlines.
                         tracing::debug!(
                             "healthcheck: waiting for ShutdownAck from supervisor"
                         );

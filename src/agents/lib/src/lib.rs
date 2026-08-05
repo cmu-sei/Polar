@@ -56,6 +56,19 @@ pub enum SupervisorMessage {
     ClientEvent { event: ClientEvent },
     Heartbeat,
     PrepareShutdown,
+    /// Graph controller availability/failure signal, translated from
+    /// polar::graph::GraphSignal via an OutputPort subscription in
+    /// supervisors that hold a graph controller.
+    GraphSignal(crate::graph::controller::GraphSignal),
+    /// Self-scheduled via send_after after a fatal ActorFailed/ActorTerminated
+    /// event. Gives the actor's normal mailbox loop a bounded window to keep
+    /// logging any in-flight messages (which can no longer be processed into
+    /// the graph, since whatever failed is presumably why we're exiting)
+    /// before the process actually exits.
+    /// TODO: once Cassini supports a durable, registration-id-independent
+    /// dead-letter queue, publish drained messages there instead of only
+    /// logging them.
+    ForceExit,
 }
 
 /// Helper to spawn a TCP client to connect to the message broker, Cassini.

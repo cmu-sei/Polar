@@ -160,7 +160,9 @@ impl Actor for RootSupervisor {
                     error!("ControlResponse not implemented!");
                 }
                 _ => warn!("UNEXPECTED_MESSAGE_STR"),
-            },
+            }
+            SupervisorMessage::GraphSignal(_) => {}
+            SupervisorMessage::ForceExit => {}
         }
         Ok(())
     }

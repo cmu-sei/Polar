@@ -8,11 +8,13 @@ use kube::ResourceExt;
 use kube::runtime::{watcher, watcher::Event};
 use kube::{Api, Client, api::ListParams};
 use kube_common::{KIND_KUSTOMIZATION, KIND_OCI_REPOSITORY};
+use polar::health::{DepCertEndpoint, HealthCheckActor, HealthCheckArgs, HealthCheckMessage};
 use polar::{SupervisorMessage, spawn_tcp_client};
 use ractor::concurrency::Duration;
-use ractor::{Actor, ActorProcessingErr, ActorRef, SupervisionEvent, async_trait};
+use ractor::{Actor, ActorProcessingErr, ActorRef, OutputPort, SupervisionEvent, async_trait};
 use serde_json::to_value;
 use std::collections::HashMap;
+use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 use tracing::{instrument, trace};
 
@@ -23,6 +25,8 @@ use crate::{
 use futures::{StreamExt, TryStreamExt};
 use kube_common::{RESOURCE_APPLIED_ACTION, RESOURCE_DELETED_ACTION, RawKubeEvent};
 
+const HEALTHCHECK_ACTOR_NAME: &str = "polar.healthcheck";
+
 // TODO: establish what kind of messages these receive
 pub type NamespaceWatcherMap = HashMap<String, ActorRef<()>>;
 pub type Watcher = ActorRef<WatcherMsg>;
@@ -32,6 +36,7 @@ pub struct ClusterObserverSupervisor;
 pub struct ClusterObserverSupervisorState {
     kube_client: kube::Client,
     tcp_client: ActorRef<TcpClientMessage>,
+    healthcheck: ActorRef<HealthCheckMessage>,
     #[allow(dead_code)]
     node_watcher: Option<Watcher>,
     namespace_watcher: Option<Watcher>,
@@ -45,6 +50,7 @@ impl ClusterObserverSupervisor {
     pub async fn init(
         kube_config: Config,
         myself: ActorRef<SupervisorMessage>,
+        healthcheck: ActorRef<HealthCheckMessage>,
     ) -> Result<ClusterObserverSupervisorState, ActorProcessingErr> {
         // try to create a client and auth with the kube api
         match Client::try_from(kube_config) {
@@ -59,6 +65,7 @@ impl ClusterObserverSupervisor {
                 Ok(ClusterObserverSupervisorState {
                     kube_client,
                     tcp_client,
+                    healthcheck,
                     namespace_watcher: None,
                     node_watcher: None,
                     oci_repository_watcher: None,
@@ -84,16 +91,43 @@ impl Actor for ClusterObserverSupervisor {
         // Read Kubernetes credentials and other data from the environment
         info!("{myself:?} starting");
 
+        // Build the OutputPort that HealthCheckActor fires when it wants
+        // the supervisor to prepare for shutdown.
+        let prepare_shutdown_port = Arc::new(OutputPort::<()>::default());
+        prepare_shutdown_port.subscribe(myself.clone(), |()| {
+            Some(SupervisorMessage::PrepareShutdown)
+        });
+
+        // Observers only depend on Cassini -- no graph dependency, unlike consumers.
+        let dep_cert_endpoints = vec![
+            DepCertEndpoint::parse("cassini-ip-svc.polar.svc.cluster.local:8080:300")
+                .map_err(|e| ActorProcessingErr::from(e))?,
+        ];
+
+        let (healthcheck, _) = HealthCheckActor::spawn_linked(
+            Some(HEALTHCHECK_ACTOR_NAME.to_string()),
+            HealthCheckActor,
+            HealthCheckArgs {
+                expects_graph: false,
+                rejuvenation_threshold_secs: 300,
+                dep_cert_endpoints,
+                prepare_shutdown_port,
+            },
+            myself.get_cell(),
+        )
+        .await
+        .map_err(|e| ActorProcessingErr::from(e))?;
+
         // detect deployed environment, otherwise, try to infer configuration from the environment
         if let Ok(kube_config) = kube::Config::incluster() {
             info!("Attempting to infer kube configuration from pod environment...");
-            match ClusterObserverSupervisor::init(kube_config, myself).await {
+            match ClusterObserverSupervisor::init(kube_config, myself, healthcheck).await {
                 Ok(state) => Ok(state),
                 Err(e) => Err(ActorProcessingErr::from(e)),
             }
         } else if let Ok(kube_config) = kube::Config::infer().await {
             info!("Attempting to infer kube configuration from local environment...");
-            match ClusterObserverSupervisor::init(kube_config, myself).await {
+            match ClusterObserverSupervisor::init(kube_config, myself, healthcheck).await {
                 Ok(state) => Ok(state),
                 Err(e) => Err(ActorProcessingErr::from(e)),
             }
@@ -113,13 +147,24 @@ impl Actor for ClusterObserverSupervisor {
         match msg {
             SupervisionEvent::ActorStarted(_) => (),
             SupervisionEvent::ActorTerminated(actor_cell, _, reason) => {
+                let actor_name = actor_cell.get_name().unwrap_or_default();
                 info!(
                     "CLUSTER_SUPERVISOR: {0:?}:{1:?} terminated. {reason:?}",
-                    actor_cell.get_name(),
+                    actor_name,
                     actor_cell.get_id()
                 );
 
-                if actor_cell.get_name().as_deref() == Some(&format!("{TCP_CLIENT_NAME}.tcp")) {
+                // Clean termination of the healthcheck actor means the
+                // rejuvenation sequence completed -- exit so the Job
+                // controller creates a new pod with fresh certs.
+                if actor_name == HEALTHCHECK_ACTOR_NAME {
+                    info!(
+                        "CLUSTER_SUPERVISOR: healthcheck actor terminated cleanly, exiting for rejuvenation"
+                    );
+                    std::process::exit(1);
+                }
+
+                if actor_name == format!("{TCP_CLIENT_NAME}.tcp") {
                     warn!("TCP client terminated; tearing down watcher trees and respawning...");
 
                     // Stop any existing watcher trees — they hold stale TcpClient
@@ -159,6 +204,15 @@ impl Actor for ClusterObserverSupervisor {
                     actor_cell.get_name(),
                     actor_cell.get_id()
                 );
+                // Any child actor failure is fatal -- exit so the Job
+                // controller creates a new pod. This is a deliberately blunt
+                // fail-fast policy for now: we want a visible Job restart
+                // event as the signal something needs investigating, rather
+                // than silently degrading. Finer-grained resilience (e.g.
+                // per-watcher restart without a full pod cycle) can be added
+                // later if warranted, and should route through the logging
+                // agent / OTel trace once that's wired up.
+                std::process::exit(1);
             }
             SupervisionEvent::ProcessGroupChanged(..) => todo!(),
         }
@@ -174,9 +228,21 @@ impl Actor for ClusterObserverSupervisor {
     ) -> Result<(), ActorProcessingErr> {
         match message {
             SupervisorMessage::Heartbeat => {}
-            SupervisorMessage::PrepareShutdown => {}
+            SupervisorMessage::PrepareShutdown => {
+                info!("CLUSTER_OBSERVER_SUPERVISOR: PrepareShutdown received");
+
+                // Observers only publish -- there's no subscription to unwind
+                // and no discrete queue to drain (the k8s watch streams are
+                // continuous and the actor mailbox already serializes work
+                // one event at a time). Ack immediately.
+                if let Err(e) = state.healthcheck.cast(HealthCheckMessage::ShutdownAck) {
+                    error!("CLUSTER_OBSERVER_SUPERVISOR: failed to send ShutdownAck: {e}");
+                }
+            }
             SupervisorMessage::ClientEvent { event } => match event {
                 ClientEvent::Registered { .. } => {
+                    let _ = state.healthcheck.cast(HealthCheckMessage::CassiniConnected);
+
                     if state.namespace_watcher.is_none() {
                         let ns_watcher_state = NamespaceSupervisorState {
                             tcp_client: state.tcp_client.clone(),
@@ -242,9 +308,12 @@ impl Actor for ClusterObserverSupervisor {
                 }
                 ClientEvent::TransportError { reason } => {
                     warn!("Transport error occurred (non-fatal, awaiting reconnect): {reason}");
+                    let _ = state.healthcheck.cast(HealthCheckMessage::CassiniDisconnected);
                 }
                 _ => (),
-            },
+            }
+            SupervisorMessage::GraphSignal(_) => {}
+            SupervisorMessage::ForceExit => {}
         }
         Ok(())
     }

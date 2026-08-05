@@ -197,7 +197,9 @@ impl Actor for ObserverSupervisor {
                 }
                 ClientEvent::TransportError { reason: _ } => todo!(),
                 _ => (),
-            },
+            }
+            SupervisorMessage::GraphSignal(_) => {}
+            SupervisorMessage::ForceExit => {}
         }
         Ok(())
     }

@@ -226,7 +226,9 @@ impl Actor for RootSupervisor {
                     myself.stop(Some(reason))
                 }
                 _ => warn!("{UNEXPECTED_MESSAGE_STR}"),
-            },
+            }
+            SupervisorMessage::GraphSignal(_) => {}
+            SupervisorMessage::ForceExit => {}
         }
         Ok(())
     }

@@ -148,10 +148,14 @@ impl Actor for ProvenanceSupervisor {
                         trace_ctx: WireTraceCtx::from_current_span(),
                     })?;
 
+                    let graph_signal_port = std::sync::Arc::new(ractor::OutputPort::<polar::graph::controller::GraphSignal>::default());
+                    graph_signal_port.subscribe(myself.clone(), |signal| {
+                        Some(SupervisorMessage::GraphSignal(signal))
+                    });
                     let (compiler, _) = Actor::spawn_linked(
                         Some("linker.graph.controller".to_string()),
                         GraphControllerActor,
-                        (),
+                        polar::graph::controller::GraphControllerArgs { signal_port: graph_signal_port },
                         myself.clone().into(),
                     )
                     .await?;
@@ -177,7 +181,9 @@ impl Actor for ProvenanceSupervisor {
                 }
 
                 _ => (),
-            },
+            }
+            SupervisorMessage::GraphSignal(_) => {}
+            SupervisorMessage::ForceExit => {}
         }
         Ok(())
     }

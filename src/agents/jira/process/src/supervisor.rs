@@ -236,7 +236,9 @@ impl Actor for ConsumerSupervisor {
                 ClientEvent::TransportError { reason: _ } => todo!(),
 
                 _ => (),
-            },
+            }
+            SupervisorMessage::GraphSignal(_) => {}
+            SupervisorMessage::ForceExit => {}
         }
         Ok(())
     }

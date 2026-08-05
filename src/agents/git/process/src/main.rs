@@ -228,10 +228,14 @@ impl Actor for GitRepoProcessingManager {
                 ClientEvent::Registered { .. } => {
                     // get graph connection
 
+                    let graph_signal_port = std::sync::Arc::new(ractor::OutputPort::<polar::graph::controller::GraphSignal>::default());
+                    graph_signal_port.subscribe(myself.clone(), |signal| {
+                        Some(SupervisorMessage::GraphSignal(signal))
+                    });
                     let (controller, _) = Actor::spawn_linked(
                         Some("linker.graph.controller".to_string()),
                         GraphControllerActor,
-                        (),
+                        polar::graph::controller::GraphControllerArgs { signal_port: graph_signal_port },
                         myself.get_cell(),
                     )
                     .await?;
@@ -259,7 +263,9 @@ impl Actor for GitRepoProcessingManager {
                     error!("ControlResponse not implemented here!");
                 }
                 _ => warn!("UNEXPECTED_MESSAGE_STR"),
-            },
+            }
+            SupervisorMessage::GraphSignal(_) => {}
+            SupervisorMessage::ForceExit => {}
         }
         Ok(())
     }

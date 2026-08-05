@@ -117,6 +117,8 @@ impl Actor for ObserverSupervisor {
                     _ => (),
                 }
             }
+            SupervisorMessage::GraphSignal(_) => {}
+            SupervisorMessage::ForceExit => {}
         }
 
         Ok(())

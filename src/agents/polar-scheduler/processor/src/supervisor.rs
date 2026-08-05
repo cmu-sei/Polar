@@ -74,10 +74,14 @@ impl Actor for RootSupervisor {
             SupervisorMessage::PrepareShutdown => {}
             SupervisorMessage::ClientEvent { event } => match event {
                 ClientEvent::Registered { .. } => {
+                    let graph_signal_port = std::sync::Arc::new(ractor::OutputPort::<polar::graph::controller::GraphSignal>::default());
+                    graph_signal_port.subscribe(myself.clone(), |signal| {
+                        Some(SupervisorMessage::GraphSignal(signal))
+                    });
                     let (graph_controller, _) = GraphControllerActor::spawn_linked(
                         Some(format!("{}.graph_controller", SERVICE_NAME)),
                         GraphControllerActor,
-                        (),
+                        polar::graph::controller::GraphControllerArgs { signal_port: graph_signal_port },
                         myself.get_cell(),
                     )
                     .await?;
@@ -150,7 +154,9 @@ impl Actor for RootSupervisor {
                     myself.stop(Some(reason));
                 }
                 _ => {}
-            },
+            }
+            SupervisorMessage::GraphSignal(_) => {}
+            SupervisorMessage::ForceExit => {}
         }
         Ok(())
     }

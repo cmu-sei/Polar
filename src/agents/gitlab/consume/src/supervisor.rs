@@ -231,10 +231,15 @@ impl Actor for ConsumerSupervisor {
                 ClientEvent::Registered { .. } => {
                     info!("Initializing agent.");
                     let _ = state.healthcheck.cast(HealthCheckMessage::CassiniConnected);
+
+                    let graph_signal_port = std::sync::Arc::new(ractor::OutputPort::<polar::graph::controller::GraphSignal>::default());
+                    graph_signal_port.subscribe(myself.clone(), |signal| {
+                        Some(SupervisorMessage::GraphSignal(signal))
+                    });
                     match Actor::spawn_linked(
                         Some("polar.gitlab.consumer.graph".to_string()),
                         GraphControllerActor,
-                        (),
+                        polar::graph::controller::GraphControllerArgs { signal_port: graph_signal_port },
                         myself.get_cell(),
                     )
                     .await
@@ -263,7 +268,9 @@ impl Actor for ConsumerSupervisor {
                 }
                 ClientEvent::ControlResponse { .. } => {}
                 _ => (),
-            },
+            }
+            SupervisorMessage::GraphSignal(_) => {}
+            SupervisorMessage::ForceExit => {}
         }
         Ok(())
     }

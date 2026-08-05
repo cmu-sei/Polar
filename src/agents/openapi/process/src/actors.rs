@@ -128,7 +128,9 @@ impl Actor for ConsumerSupervisor {
                     }
                 }
                 _ => todo!(),
-            },
+            }
+            SupervisorMessage::GraphSignal(_) => {}
+            SupervisorMessage::ForceExit => {}
         }
 
         Ok(())

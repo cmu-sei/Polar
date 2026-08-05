@@ -328,10 +328,14 @@ impl Actor for BuildProcessorSupervisor {
                 ClientEvent::Registered { .. } => {
                     info!("Cassini client registered — connecting to Neo4j");
 
+                    let graph_signal_port = std::sync::Arc::new(ractor::OutputPort::<polar::graph::controller::GraphSignal>::default());
+                    graph_signal_port.subscribe(myself.clone(), |signal| {
+                        Some(SupervisorMessage::GraphSignal(signal))
+                    });
                     state.graph_controller = Actor::spawn_linked(
                         Some("cyclops.processor.graph.controller".to_string()),
                         GraphControllerActor,
-                        (),
+                        polar::graph::controller::GraphControllerArgs { signal_port: graph_signal_port },
                         myself.clone().into(),
                     )
                     .await?
@@ -392,7 +396,9 @@ impl Actor for BuildProcessorSupervisor {
                 }
 
                 _ => {}
-            },
+            }
+            SupervisorMessage::GraphSignal(_) => {}
+            SupervisorMessage::ForceExit => {}
         }
 
         Ok(())

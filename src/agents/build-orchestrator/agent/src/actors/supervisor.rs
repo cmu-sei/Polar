@@ -219,7 +219,9 @@ impl Actor for OrchestratorSupervisor {
                     myself.stop(Some(reason))
                 }
                 _ => (),
-            },
+            }
+            SupervisorMessage::GraphSignal(_) => {}
+            SupervisorMessage::ForceExit => {}
         }
         Ok(())
     }
