@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::time::Duration;
 
 use crate::BROKER_CLIENT_NAME;
@@ -16,6 +17,7 @@ use jira_common::JIRA_ISSUES_CONSUMER_TOPIC;
 use jira_common::JIRA_PROJECTS_CONSUMER_TOPIC;
 use jira_common::JIRA_USERS_CONSUMER_TOPIC;
 use jira_common::types::JiraData;
+use polar::health::{DepCertEndpoint, HealthCheckActor, HealthCheckArgs, HealthCheckMessage};
 use polar::{Supervisor, SupervisorMessage};
 use ractor::Actor;
 use ractor::ActorProcessingErr;
@@ -32,10 +34,15 @@ use tracing::error;
 use tracing::info;
 use tracing::warn;
 
+const HEALTHCHECK_ACTOR_NAME: &str = "polar.healthcheck";
+const DRAIN_WINDOW_SECS: u64 = 5;
+
 pub struct ConsumerSupervisor;
 
 pub struct ConsumerSupervisorState {
     graph_config: neo4rs::Config,
+    healthcheck: ActorRef<HealthCheckMessage>,
+    draining: bool,
 }
 impl Supervisor for ConsumerSupervisor {
     fn deserialize_and_dispatch(topic: String, payload: Vec<u8>) {
@@ -140,6 +147,42 @@ impl Actor for ConsumerSupervisor {
     ) -> Result<Self::State, ActorProcessingErr> {
         debug!("{myself:?} starting");
 
+        let prepare_shutdown_port = Arc::new(OutputPort::<()>::default());
+        prepare_shutdown_port.subscribe(myself.clone(), |()| {
+            Some(SupervisorMessage::PrepareShutdown)
+        });
+
+        // NOTE: expects_graph is false here even though this agent's child
+        // actors (JiraProjectConsumer, JiraIssueConsumer, etc.) do write to
+        // Neo4j -- they manage their own graph connections independently via
+        // graph_config in their args, not through a GraphControllerActor
+        // this supervisor spawns. There is currently no signal path from
+        // those children back to this supervisor's healthcheck, so graph
+        // availability (GraphAvailable/GraphOpFailed) is NOT tracked for
+        // this agent yet. Cert rejuvenation still applies. Wiring real graph
+        // availability tracking here requires touching the child consumer
+        // actors themselves -- tracked as follow-up, not done in this pass.
+        let dep_cert_endpoints = vec![
+            DepCertEndpoint::parse("cassini-ip-svc.polar.svc.cluster.local:8080:300")
+                .map_err(|e| ActorProcessingErr::from(e))?,
+            DepCertEndpoint::parse("polar-db-svc.polar-graph.svc.cluster.local:7687:300")
+                .map_err(|e| ActorProcessingErr::from(e))?,
+        ];
+
+        let (healthcheck, _) = HealthCheckActor::spawn_linked(
+            Some(HEALTHCHECK_ACTOR_NAME.to_string()),
+            HealthCheckActor,
+            HealthCheckArgs {
+                expects_graph: false,
+                rejuvenation_threshold_secs: 300,
+                dep_cert_endpoints,
+                prepare_shutdown_port,
+            },
+            myself.get_cell(),
+        )
+        .await
+        .map_err(|e| ActorProcessingErr::from(e))?;
+
         let events_output = std::sync::Arc::new(OutputPort::default());
 
         events_output.subscribe(myself.clone(), |event| {
@@ -163,6 +206,8 @@ impl Actor for ConsumerSupervisor {
 
         let state = ConsumerSupervisorState {
             graph_config: get_neo_config(),
+            healthcheck,
+            draining: false,
         };
 
         Ok(state)
@@ -172,13 +217,25 @@ impl Actor for ConsumerSupervisor {
         &self,
         myself: ActorRef<Self::Msg>,
         message: Self::Msg,
-        _: &mut Self::State,
+        state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
             SupervisorMessage::Heartbeat => {}
-            SupervisorMessage::PrepareShutdown => {}
+            SupervisorMessage::PrepareShutdown => {
+                info!("CONSUMER_SUPERVISOR: PrepareShutdown received");
+                if let Err(e) = state.healthcheck.cast(HealthCheckMessage::ShutdownAck) {
+                    error!("CONSUMER_SUPERVISOR: failed to send ShutdownAck: {e}");
+                }
+            }
+            SupervisorMessage::GraphSignal(_) => {}
+            SupervisorMessage::ForceExit => {
+                warn!("CONSUMER_SUPERVISOR: drain window elapsed, exiting now");
+                std::process::exit(1);
+            }
             SupervisorMessage::ClientEvent { event } => match event {
                 ClientEvent::Registered { registration_id } => {
+                    let _ = state.healthcheck.cast(HealthCheckMessage::CassiniConnected);
+
                     let args = JiraConsumerArgs {
                         registration_id,
                         graph_config: get_neo_config(),
@@ -231,14 +288,23 @@ impl Actor for ConsumerSupervisor {
                     }
                 }
                 ClientEvent::MessagePublished { topic, payload, .. } => {
-                    ConsumerSupervisor::deserialize_and_dispatch(topic, payload);
+                    if state.draining {
+                        warn!(
+                            "CONSUMER_SUPERVISOR: draining -- logging message on topic '{topic}' \
+                             ({} bytes) instead of dispatching; will be lost on exit",
+                            payload.len()
+                        );
+                        // TODO: publish to dead-letter queue once Cassini supports one.
+                    } else {
+                        ConsumerSupervisor::deserialize_and_dispatch(topic, payload);
+                    }
                 }
-                ClientEvent::TransportError { reason: _ } => todo!(),
-
+                ClientEvent::TransportError { reason } => {
+                    warn!("Transport error occurred (non-fatal, awaiting reconnect): {reason}");
+                    let _ = state.healthcheck.cast(HealthCheckMessage::CassiniDisconnected);
+                }
                 _ => (),
-            }
-            SupervisorMessage::GraphSignal(_) => {}
-            SupervisorMessage::ForceExit => {}
+            },
         }
         Ok(())
     }
@@ -258,14 +324,34 @@ impl Actor for ConsumerSupervisor {
                 );
             }
             SupervisionEvent::ActorTerminated(actor_cell, _, reason) => {
-                // we no actors start w/o names
-                let actor_name = actor_cell.get_name().unwrap();
+                let actor_name = actor_cell.get_name().unwrap_or_default();
 
                 info!(
                     "CONSUMER_SUPERVISOR: {0:?}:{1:?} terminated. {reason:?}",
                     actor_name,
                     actor_cell.get_id()
                 );
+
+                // Clean termination of the healthcheck actor means the
+                // rejuvenation sequence completed -- exit via the bounded
+                // drain window, same as every other agent today. Any other
+                // actor terminating (a data consumer child) keeps the
+                // existing backoff-restart recovery path, unchanged.
+                if actor_name == HEALTHCHECK_ACTOR_NAME {
+                    if !state.draining {
+                        state.draining = true;
+                        info!(
+                            "CONSUMER_SUPERVISOR: healthcheck actor terminated cleanly, \
+                             entering drain window before exiting for rejuvenation"
+                        );
+                        let _ = myself
+                            .send_after(ractor::concurrency::Duration::from_secs(DRAIN_WINDOW_SECS), || {
+                                SupervisorMessage::ForceExit
+                            })
+                            .await;
+                    }
+                    return Ok(());
+                }
 
                 match ConsumerSupervisor::restart_actor(
                     actor_name.clone(),
@@ -284,14 +370,35 @@ impl Actor for ConsumerSupervisor {
                 }
             }
             SupervisionEvent::ActorFailed(actor_cell, e) => {
-                // we no actors start w/o names
-                let actor_name = actor_cell.get_name().unwrap();
+                let actor_name = actor_cell.get_name().unwrap_or_default();
 
                 warn!(
                     "Consumer_SUPERVISOR: {0:?}:{1:?} failed! {e:?}",
                     actor_name,
                     actor_cell.get_id()
                 );
+
+                // A healthcheck actor failure (e.g. hard cert-expiry
+                // deadline, or -- once wired -- a graph-availability
+                // deadline) is fatal: drain and exit, same as every other
+                // agent. A data consumer child failing keeps the existing
+                // backoff-restart recovery path.
+                if actor_name == HEALTHCHECK_ACTOR_NAME {
+                    if !state.draining {
+                        state.draining = true;
+                        warn!(
+                            "CONSUMER_SUPERVISOR: entering drain window before exit; \
+                             any messages that arrive will be logged, not dispatched"
+                        );
+                        let _ = myself
+                            .send_after(ractor::concurrency::Duration::from_secs(DRAIN_WINDOW_SECS), || {
+                                SupervisorMessage::ForceExit
+                            })
+                            .await;
+                    }
+                    return Ok(());
+                }
+
                 match ConsumerSupervisor::restart_actor(
                     actor_name.clone(),
                     myself.clone(),

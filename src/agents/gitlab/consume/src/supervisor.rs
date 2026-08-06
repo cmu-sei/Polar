@@ -44,6 +44,7 @@ pub struct ConsumerSupervisorState {
     u_consumer: Option<GitlabConsumer>,
     #[allow(dead_code)]
     healthcheck: ActorRef<HealthCheckMessage>,
+    draining: bool,
 }
 
 impl Supervisor for ConsumerSupervisor {
@@ -211,6 +212,7 @@ impl Actor for ConsumerSupervisor {
             tcp_client,
             u_consumer: None,
             healthcheck,
+            draining: false,
         };
 
         Ok(state)
@@ -260,7 +262,16 @@ impl Actor for ConsumerSupervisor {
                     info!("Finished initialization. Waiting for messages...");
                 }
                 ClientEvent::MessagePublished { topic, payload, .. } => {
-                    ConsumerSupervisor::deserialize_and_dispatch(topic, payload);
+                    if state.draining {
+                        warn!(
+                            "CONSUMER_SUPERVISOR: draining -- logging message on topic '{topic}' \
+                             ({} bytes) instead of dispatching; will be lost on exit",
+                            payload.len()
+                        );
+                        // TODO: publish to dead-letter queue once Cassini supports one.
+                    } else {
+                        ConsumerSupervisor::deserialize_and_dispatch(topic, payload);
+                    }
                 }
                 ClientEvent::TransportError { reason } => {
                     warn!("Transport error occurred (non-fatal, awaiting reconnect): {reason}");
@@ -269,17 +280,27 @@ impl Actor for ConsumerSupervisor {
                 ClientEvent::ControlResponse { .. } => {}
                 _ => (),
             }
-            SupervisorMessage::GraphSignal(_) => {}
-            SupervisorMessage::ForceExit => {}
+            SupervisorMessage::GraphSignal(signal) => match signal {
+                polar::graph::controller::GraphSignal::Available => {
+                    let _ = state.healthcheck.cast(HealthCheckMessage::GraphAvailable);
+                }
+                polar::graph::controller::GraphSignal::OpFailed(reason) => {
+                    let _ = state.healthcheck.cast(HealthCheckMessage::GraphOpFailed(reason));
+                }
+            },
+            SupervisorMessage::ForceExit => {
+                warn!("CONSUMER_SUPERVISOR: drain window elapsed, exiting now");
+                std::process::exit(1);
+            }
         }
         Ok(())
     }
 
     async fn handle_supervisor_evt(
         &self,
-        _myself: ActorRef<Self::Msg>,
+        myself: ActorRef<Self::Msg>,
         msg: SupervisionEvent,
-        _state: &mut Self::State,
+        state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match msg {
             SupervisionEvent::ActorStarted(actor_cell) => {
@@ -290,29 +311,50 @@ impl Actor for ConsumerSupervisor {
                 );
             }
             SupervisionEvent::ActorTerminated(actor_cell, _, reason) => {
-                // we no actors start w/o names
-                let actor_name = actor_cell.get_name();
-
+                let actor_name = actor_cell.get_name().unwrap_or_default();
                 warn!(
                     "CONSUMER_SUPERVISOR: {0:?}:{1:?} terminated. {reason:?}",
                     actor_name,
                     actor_cell.get_id()
                 );
+                // Clean termination of the healthcheck actor means the
+                // rejuvenation sequence completed -- enter the bounded drain
+                // window rather than running forever with no exit trigger.
+                if actor_name == "polar.healthcheck" && !state.draining {
+                    state.draining = true;
+                    info!(
+                        "CONSUMER_SUPERVISOR: healthcheck actor terminated cleanly, \
+                         entering drain window before exiting for rejuvenation"
+                    );
+                    let _ = myself
+                        .send_after(ractor::concurrency::Duration::from_secs(5), || {
+                            SupervisorMessage::ForceExit
+                        })
+                        .await;
+                }
             }
             SupervisionEvent::ActorFailed(actor_cell, e) => {
-                // we no actors start w/o names
                 let actor_name = actor_cell.get_name();
-
                 error!(
                     "Consumer_SUPERVISOR: {0:?}:{1:?} failed! {e:?}",
                     actor_name,
                     actor_cell.get_id()
                 );
+                if !state.draining {
+                    state.draining = true;
+                    warn!(
+                        "CONSUMER_SUPERVISOR: entering drain window before exit; \
+                         any messages that arrive will be logged, not dispatched"
+                    );
+                    let _ = myself
+                        .send_after(ractor::concurrency::Duration::from_secs(5), || {
+                            SupervisorMessage::ForceExit
+                        })
+                        .await;
+                }
             }
-
             SupervisionEvent::ProcessGroupChanged(..) => todo!(),
         }
-
         Ok(())
     }
 }

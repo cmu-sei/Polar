@@ -3,23 +3,26 @@ use orchestrator_core::{
     events::{BuildEvent, EventPayload},
     types::subjects::BUILD_EVENTS_TOPIC,
 };
+use polar::health::{DepCertEndpoint, HealthCheckActor, HealthCheckArgs, HealthCheckMessage};
 use polar::{
     RkyvError, SupervisorMessage,
     cassini::{CassiniClient, SubscribeRequest},
     get_neo_config,
     graph::{
         controller::{
-            GraphController, GraphControllerActor, GraphControllerMsg, GraphOp, GraphValue,
-            IntoGraphKey, Property, rel::BUILT_BY,
+            GraphController, GraphControllerActor, GraphControllerMsg, GraphOp, GraphSignal,
+            GraphValue, IntoGraphKey, Property, rel::BUILT_BY,
         },
         nodes::{builds::BuildNodeKey, git::GitNodeKey},
     },
 };
-use ractor::{Actor, ActorProcessingErr, ActorRef, SupervisionEvent, async_trait};
+use ractor::{Actor, ActorProcessingErr, ActorRef, OutputPort, SupervisionEvent, async_trait};
 use rkyv::from_bytes;
 use std::sync::Arc;
-use tokio::time::error;
 use tracing::{debug, error, info, warn};
+
+const HEALTHCHECK_ACTOR_NAME: &str = "polar.healthcheck";
+const DRAIN_WINDOW_SECS: u64 = 5;
 
 // ── Event projection ───────────────────────────────────────────────────────────
 
@@ -282,6 +285,8 @@ pub struct BuildProcessorState {
     graph_config: neo4rs::Config,
     tcp_client: Arc<dyn CassiniClient>,
     graph_controller: Option<GraphController>,
+    healthcheck: ActorRef<HealthCheckMessage>,
+    draining: bool,
 }
 
 #[async_trait]
@@ -296,6 +301,32 @@ impl Actor for BuildProcessorSupervisor {
         _args: (),
     ) -> Result<Self::State, ActorProcessingErr> {
         debug!("BuildProcessorSupervisor starting");
+
+        let prepare_shutdown_port = Arc::new(OutputPort::<()>::default());
+        prepare_shutdown_port.subscribe(myself.clone(), |()| {
+            Some(SupervisorMessage::PrepareShutdown)
+        });
+
+        let dep_cert_endpoints = vec![
+            DepCertEndpoint::parse("cassini-ip-svc.polar.svc.cluster.local:8080:300")
+                .map_err(|e| ActorProcessingErr::from(e))?,
+            DepCertEndpoint::parse("polar-db-svc.polar-graph.svc.cluster.local:7687:300")
+                .map_err(|e| ActorProcessingErr::from(e))?,
+        ];
+
+        let (healthcheck, _) = HealthCheckActor::spawn_linked(
+            Some(HEALTHCHECK_ACTOR_NAME.to_string()),
+            HealthCheckActor,
+            HealthCheckArgs {
+                expects_graph: true,
+                rejuvenation_threshold_secs: 300,
+                dep_cert_endpoints,
+                prepare_shutdown_port,
+            },
+            myself.get_cell(),
+        )
+        .await
+        .map_err(|e| ActorProcessingErr::from(e))?;
 
         debug!("Loading graph database configuration");
         let graph_config = get_neo_config()?;
@@ -312,6 +343,8 @@ impl Actor for BuildProcessorSupervisor {
             graph_config,
             tcp_client: Arc::new(tcp_client),
             graph_controller: None,
+            healthcheck,
+            draining: false,
         })
     }
 
@@ -323,12 +356,30 @@ impl Actor for BuildProcessorSupervisor {
     ) -> Result<(), ActorProcessingErr> {
         match message {
             SupervisorMessage::Heartbeat => {}
-            SupervisorMessage::PrepareShutdown => {}
+            SupervisorMessage::PrepareShutdown => {
+                info!("PrepareShutdown received");
+                if let Err(e) = state.healthcheck.cast(HealthCheckMessage::ShutdownAck) {
+                    error!("failed to send ShutdownAck: {e}");
+                }
+            }
+            SupervisorMessage::GraphSignal(signal) => match signal {
+                GraphSignal::Available => {
+                    let _ = state.healthcheck.cast(HealthCheckMessage::GraphAvailable);
+                }
+                GraphSignal::OpFailed(reason) => {
+                    let _ = state.healthcheck.cast(HealthCheckMessage::GraphOpFailed(reason));
+                }
+            },
+            SupervisorMessage::ForceExit => {
+                warn!("drain window elapsed, exiting now");
+                std::process::exit(1);
+            }
             SupervisorMessage::ClientEvent { event } => match event {
                 ClientEvent::Registered { .. } => {
                     info!("Cassini client registered — connecting to Neo4j");
+                    let _ = state.healthcheck.cast(HealthCheckMessage::CassiniConnected);
 
-                    let graph_signal_port = std::sync::Arc::new(ractor::OutputPort::<polar::graph::controller::GraphSignal>::default());
+                    let graph_signal_port = Arc::new(OutputPort::<GraphSignal>::default());
                     graph_signal_port.subscribe(myself.clone(), |signal| {
                         Some(SupervisorMessage::GraphSignal(signal))
                     });
@@ -341,6 +392,7 @@ impl Actor for BuildProcessorSupervisor {
                     .await?
                     .0
                     .into();
+                    let _ = state.healthcheck.cast(HealthCheckMessage::GraphConnected);
 
                     if let Err(e) = state.tcp_client.subscribe(SubscribeRequest {
                         topic: BUILD_EVENTS_TOPIC.to_string(),
@@ -352,13 +404,20 @@ impl Actor for BuildProcessorSupervisor {
                 }
 
                 ClientEvent::MessagePublished { topic, payload, .. } => {
+                    if state.draining {
+                        warn!(
+                            "draining -- logging message on topic '{topic}' \
+                             ({} bytes) instead of projecting; will be lost on exit",
+                            payload.len()
+                        );
+                        return Ok(());
+                    }
                     let Some(controller) = &state.graph_controller else {
                         error!("received message before graph controller was ready");
                         myself.stop(None);
                         return Ok(());
                     };
 
-                    // Deserialize the BuildEvent from rkyv bytes.
                     let event = match from_bytes::<BuildEvent, RkyvError>(&payload) {
                         Ok(e) => e,
                         Err(e) => {
@@ -390,15 +449,15 @@ impl Actor for BuildProcessorSupervisor {
                     }
                 }
 
+                // BUG FIX: was `myself.stop(Some(reason))` -- silent exit-0,
+                // Job marks Completed, no restart, no visible failure.
                 ClientEvent::TransportError { reason } => {
-                    error!("Transport error: {reason}");
-                    myself.stop(Some(reason));
+                    warn!("Transport error occurred (non-fatal, awaiting reconnect): {reason}");
+                    let _ = state.healthcheck.cast(HealthCheckMessage::CassiniDisconnected);
                 }
 
                 _ => {}
-            }
-            SupervisorMessage::GraphSignal(_) => {}
-            SupervisorMessage::ForceExit => {}
+            },
         }
 
         Ok(())
@@ -406,23 +465,43 @@ impl Actor for BuildProcessorSupervisor {
 
     async fn handle_supervisor_evt(
         &self,
-        _myself: ActorRef<Self::Msg>,
+        myself: ActorRef<Self::Msg>,
         msg: SupervisionEvent,
-        _state: &mut Self::State,
+        state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match msg {
             SupervisionEvent::ActorStarted(cell) => {
                 info!("child actor started: {:?}", cell.get_name());
             }
             SupervisionEvent::ActorTerminated(cell, _, reason) => {
+                let actor_name = cell.get_name().unwrap_or_default();
                 info!(
                     "child actor terminated: {:?} reason: {:?}",
-                    cell.get_name(),
+                    actor_name,
                     reason
                 );
+                if actor_name == HEALTHCHECK_ACTOR_NAME && !state.draining {
+                    state.draining = true;
+                    info!("entering drain window before exiting for rejuvenation");
+                    let _ = myself
+                        .send_after(ractor::concurrency::Duration::from_secs(DRAIN_WINDOW_SECS), || {
+                            SupervisorMessage::ForceExit
+                        })
+                        .await;
+                }
             }
             SupervisionEvent::ActorFailed(cell, e) => {
                 error!("child actor failed: {:?} error: {:?}", cell.get_name(), e);
+                // BUG FIX: previously logged only, no exit trigger at all.
+                if !state.draining {
+                    state.draining = true;
+                    warn!("entering drain window before exit");
+                    let _ = myself
+                        .send_after(ractor::concurrency::Duration::from_secs(DRAIN_WINDOW_SECS), || {
+                            SupervisorMessage::ForceExit
+                        })
+                        .await;
+                }
             }
             SupervisionEvent::ProcessGroupChanged(..) => {}
         }

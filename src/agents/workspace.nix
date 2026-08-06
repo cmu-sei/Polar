@@ -83,6 +83,7 @@ let
     gitlabAgent = import (workspaceRoot + /gitlab/package.nix) {
       inherit pkgs craneLib workspaceFileset nix-container-lib inputs system;
       crateArgs = individualCrateArgs;
+      healthcheckDrv = healthcheck;
     };
 
     kubeAgent = import ./kubernetes/package.nix {
@@ -94,31 +95,37 @@ let
     webAgent = import ./openapi/package.nix {
       inherit pkgs craneLib workspaceFileset nix-container-lib inputs system;
       crateArgs = individualCrateArgs;
+      healthcheckDrv = healthcheck;
     };
 
     provenance = import ./provenance/package.nix {
       inherit pkgs craneLib workspaceFileset nix-container-lib inputs system;
       crateArgs = individualCrateArgs;
+      healthcheckDrv = healthcheck;
     };
 
     scheduler = import ./polar-scheduler/package.nix {
       inherit pkgs craneLib workspaceFileset nix-container-lib inputs system;
       crateArgs = individualCrateArgs;
+      healthcheckDrv = healthcheck;
     };
 
     jiraAgent = import ./jira/package.nix {
       inherit pkgs craneLib workspaceFileset nix-container-lib inputs system;
       crateArgs = individualCrateArgs;
+      healthcheckDrv = healthcheck;
     };
 
     gitAgent = import ./git/package.nix {
       inherit pkgs craneLib workspaceFileset nix-container-lib inputs system;
       crateArgs = individualCrateArgs;
+      healthcheckDrv = healthcheck;
     };
 
     buildOrchestrator = import ./build-orchestrator/package.nix {
       inherit pkgs craneLib workspaceFileset nix-container-lib inputs system;
       crateArgs = individualCrateArgs;
+      healthcheckDrv = healthcheck;
     };
 
     nuInit = import ./nu-init/package.nix {

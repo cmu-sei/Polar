@@ -6,6 +6,7 @@
 , nix-container-lib
 , inputs
 , system
+, healthcheckDrv
 , ...
 }:
 let
@@ -27,14 +28,22 @@ let
     text        = builtins.readFile ./resolver/resolver.json;
   };
 
+  healthcheckInputs = inputs // {
+    polar-healthcheck = {
+      packages.${system}.default = healthcheckDrv;
+    };
+  };
+
   linkerContainer = nix-container-lib.lib.${system}.mkContainer {
-    inherit system pkgs inputs;
+    inherit system pkgs;
+    inputs = healthcheckInputs;
     configNixPath    = ./container-linker.nix;
     extraDerivations = [ linkerBin ];
   };
 
   resolverContainer = nix-container-lib.lib.${system}.mkContainer {
-    inherit system pkgs inputs;
+    inherit system pkgs;
+    inputs = healthcheckInputs;
     configNixPath    = ./container-resolver.nix;
     extraDerivations = [ resolverBin resolverConfig ];
   };

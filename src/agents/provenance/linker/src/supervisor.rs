@@ -6,23 +6,29 @@ use cassini_types::ClientEvent;
 use cassini_types::WireTraceCtx;
 use neo4rs::Graph;
 use polar::cassini::SubscribeRequest;
-use polar::graph::controller::GraphControllerActor;
+use polar::graph::controller::{GraphControllerActor, GraphSignal};
+use polar::health::{DepCertEndpoint, HealthCheckActor, HealthCheckArgs, HealthCheckMessage};
 use polar::{
     ARTIFACT_PRODUCED_SUFFIX, BUILDS_TOPIC_PREFIX, BuildEvent, PROVENANCE_LINKER_TOPIC,
     ProvenanceEvent, SBOM_RESOLVED_SUFFIX, SupervisorMessage,
     cassini::{CassiniClient, TcpClient},
     get_neo_config,
 };
-use ractor::{Actor, ActorProcessingErr, ActorRef, SupervisionEvent, async_trait};
+use ractor::{Actor, ActorProcessingErr, ActorRef, OutputPort, SupervisionEvent, async_trait};
 use std::sync::Arc;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 use tracing::{error, instrument};
+
+const HEALTHCHECK_ACTOR_NAME: &str = "polar.healthcheck";
+const DRAIN_WINDOW_SECS: u64 = 5;
 
 // === Supervisor state ===
 pub struct ProvenanceSupervisorState {
     pub graph: Graph,
     pub broker_client: Arc<dyn CassiniClient>,
     pub linker: Option<ActorRef<ProvenanceEvent>>,
+    pub healthcheck: ActorRef<HealthCheckMessage>,
+    pub draining: bool,
 }
 
 // === Supervisor definition ===
@@ -38,21 +44,11 @@ impl ProvenanceSupervisor {
     ) {
         debug!("Received message on topic {topic}");
 
-        /// ---------------------------------------------------------------------------
-        /// rkyv is the hot path (Rust agents). JSON via BuildEvent is the cold
-        /// path (nushell stages). The topic is available for logging/metrics but
-        /// is NOT used as a deserialization discriminant — serde's tagged enum
-        /// handles that.
-        /// ---------------------------------------------------------------------------
         pub fn try_deserialize(payload: &[u8]) -> Option<ProvenanceEvent> {
-            // Hot path: Rust agents serialize ProvenanceEvent directly with rkyv.
-            // Zero-copy deserialize — no allocation, no JSON parsing overhead.
             if let Ok(event) = rkyv::from_bytes::<ProvenanceEvent, rkyv::rancor::Error>(payload) {
                 return Some(event);
             }
 
-            // Cold path: nushell pipeline stages emit JSON-wrapped BuildEvents.
-            // Parse JSON, then map the typed payload into the domain enum.
             match BuildEvent::from_bytes(payload) {
                 Ok(e) => {
                     let (_ctx, event) = e.into_provenance_event();
@@ -83,11 +79,36 @@ impl Actor for ProvenanceSupervisor {
         myself: ActorRef<Self::Msg>,
         _: (),
     ) -> Result<Self::State, ActorProcessingErr> {
-        // get graph connection
+        // --- NEW: healthcheck wiring ---
+        let prepare_shutdown_port = Arc::new(OutputPort::<()>::default());
+        prepare_shutdown_port.subscribe(myself.clone(), |()| {
+            Some(SupervisorMessage::PrepareShutdown)
+        });
+
+        let dep_cert_endpoints = vec![
+            DepCertEndpoint::parse("cassini-ip-svc.polar.svc.cluster.local:8080:300")
+                .map_err(|e| ActorProcessingErr::from(e))?,
+            DepCertEndpoint::parse("polar-db-svc.polar-graph.svc.cluster.local:7687:300")
+                .map_err(|e| ActorProcessingErr::from(e))?,
+        ];
+
+        let (healthcheck, _) = HealthCheckActor::spawn_linked(
+            Some(HEALTHCHECK_ACTOR_NAME.to_string()),
+            HealthCheckActor,
+            HealthCheckArgs {
+                expects_graph: true,
+                rejuvenation_threshold_secs: 300,
+                dep_cert_endpoints,
+                prepare_shutdown_port,
+            },
+            myself.get_cell(),
+        )
+        .await
+        .map_err(|e| ActorProcessingErr::from(e))?;
+        // --- end NEW ---
 
         let graph = neo4rs::Graph::connect(get_neo_config()?)?;
 
-        // spawn a cassini client
         let broker_client = Arc::new(
             TcpClient::spawn(
                 "polar.artifacts.linker.supervisor.tcp",
@@ -101,6 +122,8 @@ impl Actor for ProvenanceSupervisor {
             graph,
             broker_client,
             linker: None,
+            healthcheck,
+            draining: false,
         };
 
         Ok(s)
@@ -123,11 +146,32 @@ impl Actor for ProvenanceSupervisor {
     ) -> Result<(), ActorProcessingErr> {
         match msg {
             SupervisorMessage::Heartbeat => {}
-            SupervisorMessage::PrepareShutdown => {}
+            // --- NEW ---
+            SupervisorMessage::PrepareShutdown => {
+                info!("PrepareShutdown received");
+                if let Err(e) = state.healthcheck.cast(HealthCheckMessage::ShutdownAck) {
+                    error!("failed to send ShutdownAck: {e}");
+                }
+            }
+            SupervisorMessage::GraphSignal(signal) => match signal {
+                GraphSignal::Available => {
+                    let _ = state.healthcheck.cast(HealthCheckMessage::GraphAvailable);
+                }
+                GraphSignal::OpFailed(reason) => {
+                    let _ = state.healthcheck.cast(HealthCheckMessage::GraphOpFailed(reason));
+                }
+            },
+            SupervisorMessage::ForceExit => {
+                warn!("drain window elapsed, exiting now");
+                std::process::exit(1);
+            }
+            // --- end NEW ---
             SupervisorMessage::ClientEvent { event } => match event {
                 ClientEvent::Registered { .. } => {
-                    // subscribe to topic
-                    //
+                    // --- NEW ---
+                    let _ = state.healthcheck.cast(HealthCheckMessage::CassiniConnected);
+                    // --- end NEW ---
+
                     debug!("Subscribing to topic {}", PROVENANCE_LINKER_TOPIC);
                     state.broker_client.subscribe(SubscribeRequest {
                         topic: PROVENANCE_LINKER_TOPIC.to_string(),
@@ -148,7 +192,7 @@ impl Actor for ProvenanceSupervisor {
                         trace_ctx: WireTraceCtx::from_current_span(),
                     })?;
 
-                    let graph_signal_port = std::sync::Arc::new(ractor::OutputPort::<polar::graph::controller::GraphSignal>::default());
+                    let graph_signal_port = Arc::new(OutputPort::<GraphSignal>::default());
                     graph_signal_port.subscribe(myself.clone(), |signal| {
                         Some(SupervisorMessage::GraphSignal(signal))
                     });
@@ -159,6 +203,9 @@ impl Actor for ProvenanceSupervisor {
                         myself.clone().into(),
                     )
                     .await?;
+                    // --- NEW ---
+                    let _ = state.healthcheck.cast(HealthCheckMessage::GraphConnected);
+                    // --- end NEW ---
 
                     let linker_args = ProvenanceLinkerArgs { compiler };
 
@@ -173,17 +220,27 @@ impl Actor for ProvenanceSupervisor {
                     state.linker = Some(linker);
                 }
                 ClientEvent::MessagePublished { topic, payload, .. } => {
-                    Self::deserialize_and_dispatch(topic, payload, state)
+                    // --- NEW: drain guard ---
+                    if state.draining {
+                        warn!(
+                            "draining -- logging message on topic '{topic}' \
+                             ({} bytes) instead of dispatching; will be lost on exit",
+                            payload.len()
+                        );
+                    } else {
+                        Self::deserialize_and_dispatch(topic, payload, state)
+                    }
+                    // --- end NEW ---
                 }
+                // BUG FIX: was `myself.stop(Some(reason))` -- silent exit-0,
+                // Job marks Completed, no restart, no visible failure.
                 ClientEvent::TransportError { reason } => {
-                    error!("Transport error: {reason}");
-                    myself.stop(Some(reason))
+                    warn!("Transport error occurred (non-fatal, awaiting reconnect): {reason}");
+                    let _ = state.healthcheck.cast(HealthCheckMessage::CassiniDisconnected);
                 }
 
                 _ => (),
-            }
-            SupervisorMessage::GraphSignal(_) => {}
-            SupervisorMessage::ForceExit => {}
+            },
         }
         Ok(())
     }
@@ -192,18 +249,51 @@ impl Actor for ProvenanceSupervisor {
         &self,
         myself: ActorRef<Self::Msg>,
         event: SupervisionEvent,
-        _state: &mut Self::State,
+        state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match event {
+            // BUG FIX: was `todo!("Implement some restart logic for the linker")`
+            // -- a live panic on any child actor failure, including the
+            // graph controller itself. Now routes through the same bounded
+            // drain-and-exit path as every other agent.
             SupervisionEvent::ActorFailed(name, err) => {
                 error!("Actor {name:?} failed! {err:?}");
-                // TODO: The only condition for crash or failure here should be if the DB goes down, in which case,
-                // we should consider how much we care about dropping messages.
-                todo!("Implement some restart logic for the linker");
+                if !state.draining {
+                    state.draining = true;
+                    warn!("entering drain window before exit");
+                    let _ = myself
+                        .send_after(ractor::concurrency::Duration::from_secs(DRAIN_WINDOW_SECS), || {
+                            SupervisorMessage::ForceExit
+                        })
+                        .await;
+                }
             }
             SupervisionEvent::ActorTerminated(name, _state, reason) => {
-                error!("Actor {name:?} failed! {reason:?}");
-                myself.stop(reason)
+                let actor_name = name.get_name().unwrap_or_default();
+                warn!("Actor {name:?} terminated! {reason:?}");
+                // --- NEW ---
+                if actor_name == HEALTHCHECK_ACTOR_NAME && !state.draining {
+                    state.draining = true;
+                    info!("entering drain window before exiting for rejuvenation");
+                    let _ = myself
+                        .send_after(ractor::concurrency::Duration::from_secs(DRAIN_WINDOW_SECS), || {
+                            SupervisorMessage::ForceExit
+                        })
+                        .await;
+                } else if !state.draining {
+                    // BUG FIX: was `myself.stop(reason)` unconditionally --
+                    // silent exit-0 under Job for any non-healthcheck actor
+                    // termination too (e.g. linker or graph controller
+                    // stopping cleanly for some other reason).
+                    state.draining = true;
+                    warn!("entering drain window before exit");
+                    let _ = myself
+                        .send_after(ractor::concurrency::Duration::from_secs(DRAIN_WINDOW_SECS), || {
+                            SupervisorMessage::ForceExit
+                        })
+                        .await;
+                }
+                // --- end NEW ---
             }
             SupervisionEvent::ActorStarted(actor) => {
                 debug!("Actor {actor:?} started!");

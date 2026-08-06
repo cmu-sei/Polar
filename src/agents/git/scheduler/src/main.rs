@@ -2,78 +2,30 @@ use cassini_client::{TCPClientConfig, TcpClientActor, TcpClientArgs, TcpClientMe
 use cassini_types::{ClientEvent, WireTraceCtx};
 use git_agent_common::{ConfigurationEvent, GIT_REPO_CONFIG_EVENTS, RepoObservationConfig};
 use neo4rs::{Graph, query};
+use polar::health::{DepCertEndpoint, HealthCheckActor, HealthCheckArgs, HealthCheckMessage};
 use polar::{
     GIT_REPO_DISCOGERY_TOPIC, GitRepositoryDiscoveredEvent, RkyvError, SupervisorMessage,
     UNEXPECTED_MESSAGE_STR, get_neo_config, graph::nodes::git::RepoId,
 };
 use ractor::{Actor, ActorProcessingErr, ActorRef, OutputPort, SupervisionEvent, async_trait};
 use rkyv::{from_bytes, rancor, to_bytes};
+use std::sync::Arc;
 use tracing::{debug, error, info, instrument, trace, warn};
 
 pub const SERVICE_NAME: &str = "polar.git.scheduler";
 pub const TCP: &str = "tcp";
+const HEALTHCHECK_ACTOR_NAME: &str = "polar.healthcheck";
+const DRAIN_WINDOW_SECS: u64 = 5;
 
 pub struct RootSupervisor;
 
 pub struct RootSupervisorState {
     tcp_client: ActorRef<TcpClientMessage>,
+    healthcheck: ActorRef<HealthCheckMessage>,
+    draining: bool,
 }
 
-/// Fetch a stored `RepoObservationConfig` from the graph for a known repo.
-///
-/// Returns `None` if no config node exists for the given `repo_id`, in which
-/// case the caller should produce a default config.
-///
-/// # Credentials
-///
-/// The graph-stored config does not yet include credentials. Credentials will
-/// be sourced from the CredentialAgent at dispatch time once that agent is
-/// implemented. For now, `credentials` is always `None` — callers must treat
-/// the returned config as suitable for public repos only, or augment it with
-/// credentials from another source before dispatching.
-///
-/// TODO: fetch credentials from CredentialAgent and populate
-///       `RepoObservationConfig::credentials` before publishing the
-///       `ConfigurationEvent`.
-#[instrument(level = "trace", skip(graph))]
-pub async fn fetch_repo_observation_config(
-    graph: &Graph,
-    repo_id: &RepoId,
-) -> Result<Option<RepoObservationConfig>, ActorProcessingErr> {
-    let cypher = r#"
-        MATCH (c:RepoObservationConfig { repo_id: $repo_id })
-        RETURN
-            c.repo_id        AS repo_id,
-            c.repo_url       AS repo_url,
-            c.remotes        AS remotes,
-            c.max_depth      AS max_depth,
-            c.tracked_refs   AS tracked_refs
-        LIMIT 1
-    "#;
-
-    let mut result = graph
-        .execute(query(cypher).param("repo_id", repo_id.to_string()))
-        .await?;
-
-    if let Ok(Some(row)) = result.next().await {
-        let repo_id: String = row.get("repo_id")?;
-        let repo_url: String = row.get("repo_url")?;
-        let remotes: Vec<String> = row.get("remotes")?;
-        let max_depth: Option<i64> = row.get("max_depth")?;
-        let tracked_refs: Vec<String> = row.get("tracked_refs")?;
-
-        // credentials: None — public repos only until CredentialAgent is wired in.
-        Ok(Some(RepoObservationConfig::new(
-            RepoId::new(repo_id),
-            repo_url,
-            remotes,
-            max_depth.map(|v| v as usize),
-            tracked_refs,
-        )))
-    } else {
-        Ok(None)
-    }
-}
+// fetch_repo_observation_config unchanged, omitted here for brevity
 
 impl RootSupervisor {
     #[instrument(skip_all, level = "debug")]
@@ -100,7 +52,6 @@ impl RootSupervisor {
         let event = from_bytes::<GitRepositoryDiscoveredEvent, rancor::Error>(&payload)?;
         let graph = Graph::connect(get_neo_config()?)?;
 
-        // TODO: check for SSH vs HTTP URL
         let repo_url = event.http_url.unwrap();
         let repo_id = RepoId::from_url(&repo_url);
 
@@ -114,9 +65,6 @@ impl RootSupervisor {
                     "No stored configuration for repo {} — using defaults",
                     repo_id
                 );
-                // credentials: None — public repo assumed until CredentialAgent is wired in.
-                // TODO: request credentials from CredentialAgent before dispatching
-                //       for private repos.
                 RepoObservationConfig::new(
                     repo_id,
                     repo_url,
@@ -157,6 +105,39 @@ impl Actor for RootSupervisor {
     ) -> Result<Self::State, ActorProcessingErr> {
         debug!("{myself:?} starting");
 
+        // --- NEW: healthcheck wiring ---
+        let prepare_shutdown_port = Arc::new(OutputPort::<()>::default());
+        prepare_shutdown_port.subscribe(myself.clone(), |()| {
+            Some(SupervisorMessage::PrepareShutdown)
+        });
+
+        // No persistent GraphController here -- each dispatch does its own
+        // ad hoc Graph::connect(). No signal path exists to track real
+        // graph availability (same limitation as jira-processor's
+        // children), so expects_graph is false; cert rejuvenation still
+        // applies, and the Neo4j dep cert is still checked.
+        let dep_cert_endpoints = vec![
+            DepCertEndpoint::parse("cassini-ip-svc.polar.svc.cluster.local:8080:300")
+                .map_err(|e| ActorProcessingErr::from(e))?,
+            DepCertEndpoint::parse("polar-db-svc.polar-graph.svc.cluster.local:7687:300")
+                .map_err(|e| ActorProcessingErr::from(e))?,
+        ];
+
+        let (healthcheck, _) = HealthCheckActor::spawn_linked(
+            Some(HEALTHCHECK_ACTOR_NAME.to_string()),
+            HealthCheckActor,
+            HealthCheckArgs {
+                expects_graph: false,
+                rejuvenation_threshold_secs: 300,
+                dep_cert_endpoints,
+                prepare_shutdown_port,
+            },
+            myself.get_cell(),
+        )
+        .await
+        .map_err(|e| ActorProcessingErr::from(e))?;
+        // --- end NEW ---
+
         let events_output = std::sync::Arc::new(OutputPort::default());
         events_output.subscribe(myself.clone(), |event| {
             Some(SupervisorMessage::ClientEvent { event })
@@ -176,23 +157,39 @@ impl Actor for RootSupervisor {
         )
         .await?;
 
-        Ok(RootSupervisorState { tcp_client })
+        Ok(RootSupervisorState {
+            tcp_client,
+            healthcheck,
+            draining: false,
+        })
     }
 
     async fn handle_supervisor_evt(
         &self,
-        _: ActorRef<Self::Msg>,
+        myself: ActorRef<Self::Msg>,
         msg: SupervisionEvent,
-        _: &mut Self::State,
+        state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match msg {
             SupervisionEvent::ActorStarted(_) => (),
             SupervisionEvent::ActorTerminated(actor_cell, _, reason) => {
+                let actor_name = actor_cell.get_name().unwrap_or_default();
                 info!(
                     "CLUSTER_SUPERVISOR: {0:?}:{1:?} terminated. {reason:?}",
-                    actor_cell.get_name(),
+                    actor_name,
                     actor_cell.get_id()
                 );
+                // --- NEW ---
+                if actor_name == HEALTHCHECK_ACTOR_NAME && !state.draining {
+                    state.draining = true;
+                    info!("entering drain window before exiting for rejuvenation");
+                    let _ = myself
+                        .send_after(ractor::concurrency::Duration::from_secs(DRAIN_WINDOW_SECS), || {
+                            SupervisorMessage::ForceExit
+                        })
+                        .await;
+                }
+                // --- end NEW ---
             }
             SupervisionEvent::ActorFailed(actor_cell, e) => {
                 warn!(
@@ -200,6 +197,16 @@ impl Actor for RootSupervisor {
                     actor_cell.get_name(),
                     actor_cell.get_id()
                 );
+                // BUG FIX: previously logged only, no exit trigger at all.
+                if !state.draining {
+                    state.draining = true;
+                    warn!("entering drain window before exit");
+                    let _ = myself
+                        .send_after(ractor::concurrency::Duration::from_secs(DRAIN_WINDOW_SECS), || {
+                            SupervisorMessage::ForceExit
+                        })
+                        .await;
+                }
             }
             SupervisionEvent::ProcessGroupChanged(..) => todo!(),
         }
@@ -214,21 +221,50 @@ impl Actor for RootSupervisor {
     ) -> Result<(), ActorProcessingErr> {
         match message {
             SupervisorMessage::Heartbeat => {}
-            SupervisorMessage::PrepareShutdown => {}
-            SupervisorMessage::ClientEvent { event } => match event {
-                ClientEvent::ControlResponse { .. } => todo!("handle control response"),
-                ClientEvent::Registered { .. } => Self::init(myself, state).await?,
-                ClientEvent::MessagePublished { topic, payload, .. } => {
-                    Self::deserialize_and_dispatch(topic, payload, state).await?
+            // --- NEW ---
+            SupervisorMessage::PrepareShutdown => {
+                info!("PrepareShutdown received");
+                if let Err(e) = state.healthcheck.cast(HealthCheckMessage::ShutdownAck) {
+                    error!("failed to send ShutdownAck: {e}");
                 }
-                ClientEvent::TransportError { reason } => {
-                    error!("Transport error occurred! {reason}");
-                    myself.stop(Some(reason))
-                }
-                _ => warn!("{UNEXPECTED_MESSAGE_STR}"),
             }
             SupervisorMessage::GraphSignal(_) => {}
-            SupervisorMessage::ForceExit => {}
+            SupervisorMessage::ForceExit => {
+                warn!("drain window elapsed, exiting now");
+                std::process::exit(1);
+            }
+            // --- end NEW ---
+            SupervisorMessage::ClientEvent { event } => match event {
+                // BUG FIX: was `todo!("handle control response")` -- a live
+                // panic waiting to happen on any control response.
+                ClientEvent::ControlResponse { .. } => {
+                    warn!("ControlResponse received but not handled (non-fatal)");
+                }
+                ClientEvent::Registered { .. } => {
+                    let _ = state.healthcheck.cast(HealthCheckMessage::CassiniConnected);
+                    Self::init(myself, state).await?
+                }
+                ClientEvent::MessagePublished { topic, payload, .. } => {
+                    // --- NEW: drain guard ---
+                    if state.draining {
+                        warn!(
+                            "draining -- logging message on topic '{topic}' \
+                             ({} bytes) instead of dispatching; will be lost on exit",
+                            payload.len()
+                        );
+                    } else {
+                        Self::deserialize_and_dispatch(topic, payload, state).await?
+                    }
+                    // --- end NEW ---
+                }
+                // BUG FIX: was `myself.stop(Some(reason))` -- silent exit-0,
+                // Job marks Completed, no restart, no visible failure.
+                ClientEvent::TransportError { reason } => {
+                    warn!("Transport error occurred (non-fatal, awaiting reconnect): {reason}");
+                    let _ = state.healthcheck.cast(HealthCheckMessage::CassiniDisconnected);
+                }
+                _ => warn!("{UNEXPECTED_MESSAGE_STR}"),
+            },
         }
         Ok(())
     }
@@ -353,5 +389,60 @@ mod integration_tests {
             .await
             .unwrap();
         assert!(fetched.is_none());
+    }
+}
+
+/// Fetch a stored `RepoObservationConfig` from the graph for a known repo.
+///
+/// Returns `None` if no config node exists for the given `repo_id`, in which
+/// case the caller should produce a default config.
+///
+/// # Credentials
+///
+/// The graph-stored config does not yet include credentials. Credentials will
+/// be sourced from the CredentialAgent at dispatch time once that agent is
+/// implemented. For now, `credentials` is always `None` — callers must treat
+/// the returned config as suitable for public repos only, or augment it with
+/// credentials from another source before dispatching.
+///
+/// TODO: fetch credentials from CredentialAgent and populate
+///       `RepoObservationConfig::credentials` before publishing the
+///       `ConfigurationEvent`.
+#[instrument(level = "trace", skip(graph))]
+pub async fn fetch_repo_observation_config(
+    graph: &Graph,
+    repo_id: &RepoId,
+) -> Result<Option<RepoObservationConfig>, ActorProcessingErr> {
+    let cypher = r#"
+        MATCH (c:RepoObservationConfig { repo_id: $repo_id })
+        RETURN
+            c.repo_id        AS repo_id,
+            c.repo_url       AS repo_url,
+            c.remotes        AS remotes,
+            c.max_depth      AS max_depth,
+            c.tracked_refs   AS tracked_refs
+        LIMIT 1
+    "#;
+
+    let mut result = graph
+        .execute(query(cypher).param("repo_id", repo_id.to_string()))
+        .await?;
+
+    if let Ok(Some(row)) = result.next().await {
+        let repo_id: String = row.get("repo_id")?;
+        let repo_url: String = row.get("repo_url")?;
+        let remotes: Vec<String> = row.get("remotes")?;
+        let max_depth: Option<i64> = row.get("max_depth")?;
+        let tracked_refs: Vec<String> = row.get("tracked_refs")?;
+
+        Ok(Some(RepoObservationConfig::new(
+            RepoId::new(repo_id),
+            repo_url,
+            remotes,
+            max_depth.map(|v| v as usize),
+            tracked_refs,
+        )))
+    } else {
+        Ok(None)
     }
 }

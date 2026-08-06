@@ -24,7 +24,12 @@ let
   });
 
   observerContainer = nix-container-lib.lib.${system}.mkContainer {
-    inherit system pkgs inputs;
+    inherit system pkgs;
+    inputs = inputs // {
+      polar-healthcheck = {
+        packages.${system}.default = healthcheckDrv;
+      };
+    };
     configNixPath    = ./container-observer.nix;
     extraDerivations = [ observer ];
   };

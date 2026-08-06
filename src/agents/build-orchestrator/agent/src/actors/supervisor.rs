@@ -6,14 +6,19 @@ use crate::client::StorageClient;
 use cassini_types::ClientEvent;
 use orchestrator_core::{backend::BuildBackend, types::BuildRequest};
 use polar::cassini::{CassiniClient, TcpClient};
+use polar::health::{DepCertEndpoint, HealthCheckActor, HealthCheckArgs, HealthCheckMessage};
 use polar::{GitRepositoryUpdatedEvent, RkyvError, SupervisorMessage};
-use ractor::{Actor, ActorProcessingErr, ActorRef};
+use ractor::{Actor, ActorProcessingErr, ActorRef, OutputPort};
 use rkyv::from_bytes;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 use uuid::Uuid;
+
+const HEALTHCHECK_ACTOR_NAME: &str = "polar.healthcheck";
+const BUILD_REGISTRY_ACTOR_NAME: &str = "build-registry";
+const DRAIN_WINDOW_SECS: u64 = 5;
 
 #[derive(Debug, thiserror::Error)]
 pub enum EventConversionError {
@@ -40,6 +45,8 @@ pub struct SupervisorState {
     registry: ActorRef<RegistryMessage>,
     config: Arc<crate::config::OrchestratorConfig>,
     tcp_client: Arc<dyn CassiniClient>,
+    healthcheck: ActorRef<HealthCheckMessage>,
+    draining: bool,
 }
 
 impl OrchestratorSupervisor {
@@ -58,22 +65,16 @@ impl OrchestratorSupervisor {
         state: &mut SupervisorState,
         event: &GitRepositoryUpdatedEvent,
     ) -> Result<BuildRequest, EventConversionError> {
-        // Validate event_id first — a missing ID means we can't deduplicate.
         if event.event_id.trim().is_empty() {
             return Err(EventConversionError::EmptyEventId);
         }
 
-        // Validate commit SHA — must be exactly 40 lowercase hex chars.
-        // The orchestrator passes this directly to git checkout inside the
-        // init container. A bad SHA fails the clone, not the submission,
-        // which produces a confusing failure mode.
         if !Self::is_valid_sha(&event.commit_sha) {
             return Err(EventConversionError::InvalidCommitSha(
                 event.commit_sha.clone(),
             ));
         }
 
-        // Resolve clone URL — prefer HTTP, fall back to SSH.
         let repo_url = event
             .http_url
             .as_deref()
@@ -82,9 +83,6 @@ impl OrchestratorSupervisor {
             .ok_or(EventConversionError::NoCloneUrl)?
             .to_string();
 
-        // Forward informational fields as metadata so Polar can correlate
-        // build records with branch activity without the orchestrator needing
-        // to understand the semantics of each field.
         let mut metadata = HashMap::new();
         metadata.insert("event_id".to_string(), event.event_id.clone());
         if let Some(ref git_ref) = event.git_ref {
@@ -126,15 +124,7 @@ impl OrchestratorSupervisor {
         _topic: String,
         payload: Vec<u8>,
     ) -> Result<(), ActorProcessingErr> {
-        // TODO: Deserialize repository updated event.
-        // let ev: CyclopsEvent = serde_json::from_slice(&payload)?;
         let event = from_bytes::<GitRepositoryUpdatedEvent, RkyvError>(&payload)?;
-
-        // TODO: check if we're already handling this event, if we are, just ignore it
-        // if !self.deduplicator.check_and_record(&event.event_id) {
-        //     tracing::debug!(event_id = %event.event_id, "duplicate event dropped");
-        //     return Ok(());
-        // }
 
         match Self::build_request_from_event(state, &event) {
             Ok(request) => {
@@ -164,18 +154,43 @@ impl Actor for OrchestratorSupervisor {
     ) -> Result<Self::State, ActorProcessingErr> {
         tracing::info!("OrchestratorSupervisor starting");
 
-        // spawn a cassini client
+        let prepare_shutdown_port = Arc::new(OutputPort::<()>::default());
+        prepare_shutdown_port.subscribe(myself.clone(), |()| {
+            Some(SupervisorMessage::PrepareShutdown)
+        });
+
+        // No graph controller is spawned in this supervisor. If
+        // BuildJobActor touches Neo4j independently (unconfirmed --
+        // build_job.rs not reviewed as part of this pass), graph
+        // availability tracking would need to be added there separately,
+        // same limitation as jira-processor's children.
+        let dep_cert_endpoints = vec![
+            DepCertEndpoint::parse("cassini-ip-svc.polar.svc.cluster.local:8080:300")
+                .map_err(|e| ActorProcessingErr::from(e))?,
+        ];
+
+        let (healthcheck, _) = HealthCheckActor::spawn_linked(
+            Some(HEALTHCHECK_ACTOR_NAME.to_string()),
+            HealthCheckActor,
+            HealthCheckArgs {
+                expects_graph: false,
+                rejuvenation_threshold_secs: 300,
+                dep_cert_endpoints,
+                prepare_shutdown_port,
+            },
+            myself.get_cell(),
+        )
+        .await
+        .map_err(|e| ActorProcessingErr::from(e))?;
+
         let tcp_client =
             TcpClient::spawn("polar.cyclops.supervisor.tcp", myself.clone(), |event| {
                 Some(SupervisorMessage::ClientEvent { event })
             })
             .await?;
 
-        //
-        //
-        // Spawn the registry as a child of this supervisor.
         let (registry, _) = Actor::spawn_linked(
-            Some("build-registry".to_string()),
+            Some(BUILD_REGISTRY_ACTOR_NAME.to_string()),
             BuildRegistryActor,
             (),
             myself.get_cell(),
@@ -190,6 +205,8 @@ impl Actor for OrchestratorSupervisor {
             registry,
             config: args.config,
             tcp_client: Arc::new(tcp_client),
+            healthcheck,
+            draining: false,
         })
     }
 
@@ -201,54 +218,105 @@ impl Actor for OrchestratorSupervisor {
     ) -> Result<(), ActorProcessingErr> {
         match message {
             SupervisorMessage::Heartbeat => {}
-            SupervisorMessage::PrepareShutdown => {}
+            SupervisorMessage::PrepareShutdown => {
+                info!("PrepareShutdown received");
+                if let Err(e) = state.healthcheck.cast(HealthCheckMessage::ShutdownAck) {
+                    error!("failed to send ShutdownAck: {e}");
+                }
+            }
+            SupervisorMessage::GraphSignal(_) => {}
+            SupervisorMessage::ForceExit => {
+                warn!("drain window elapsed, exiting now");
+                std::process::exit(1);
+            }
             SupervisorMessage::ClientEvent { event } => match event {
                 ClientEvent::Registered { .. } => {
+                    let _ = state.healthcheck.cast(HealthCheckMessage::CassiniConnected);
                     info!("Orchestrator successfully initialized");
                 }
                 ClientEvent::MessagePublished { topic, payload, .. } => {
+                    if state.draining {
+                        warn!(
+                            "draining -- logging message on topic '{topic}' \
+                             ({} bytes) instead of dispatching; will be lost on exit",
+                            payload.len()
+                        );
+                        return Ok(());
+                    }
                     if let Err(e) =
                         Self::deserialize_and_dispatch(&self, myself, state, topic, payload).await
                     {
                         error!("Failed to handle new message. {e}");
-                        // TODO: handle
                     }
                 }
+                // BUG FIX: was `myself.stop(Some(reason))` -- silent exit-0,
+                // Job marks Completed, no restart, no visible failure.
                 ClientEvent::TransportError { reason } => {
-                    error!("Transport error occurred! {reason}");
-                    myself.stop(Some(reason))
+                    warn!("Transport error occurred (non-fatal, awaiting reconnect): {reason}");
+                    let _ = state.healthcheck.cast(HealthCheckMessage::CassiniDisconnected);
                 }
                 _ => (),
-            }
-            SupervisorMessage::GraphSignal(_) => {}
-            SupervisorMessage::ForceExit => {}
+            },
         }
         Ok(())
     }
 
     async fn handle_supervisor_evt(
         &self,
-        _myself: ActorRef<Self::Msg>,
+        myself: ActorRef<Self::Msg>,
         event: ractor::SupervisionEvent,
-        _state: &mut Self::State,
+        state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match event {
             ractor::SupervisionEvent::ActorTerminated(actor, _, reason) => {
+                let actor_name = actor.get_name().unwrap_or_default();
                 tracing::info!(
-                    actor = ?actor.get_name(),
+                    actor = ?actor_name,
                     reason = ?reason,
                     "child actor terminated"
                 );
+                if actor_name == HEALTHCHECK_ACTOR_NAME && !state.draining {
+                    state.draining = true;
+                    info!("entering drain window before exiting for rejuvenation");
+                    let _ = myself
+                        .send_after(ractor::concurrency::Duration::from_secs(DRAIN_WINDOW_SECS), || {
+                            SupervisorMessage::ForceExit
+                        })
+                        .await;
+                }
             }
             ractor::SupervisionEvent::ActorFailed(actor, error) => {
+                let actor_name = actor.get_name().unwrap_or_default();
                 tracing::error!(
-                    actor = ?actor.get_name(),
+                    actor = ?actor_name,
                     error = %error,
-                    "child actor failed — build job will be marked failed via registry"
+                    "child actor failed"
                 );
-                // The registry actor dying is a fatal condition for the supervisor.
-                // Individual build job actor failures are expected (they stop themselves
-                // on terminal states) and do not require supervisor intervention.
+
+                // BUG FIX: the comment here previously stated "the registry
+                // actor dying is a fatal condition for the supervisor," but
+                // nothing in the code actually checked which actor failed
+                // or acted on that -- every failure, including the
+                // registry's, was just logged. Now the documented intent
+                // is actually enforced: registry (or healthcheck) failure
+                // drains and exits; individual build job actor failures
+                // remain expected/non-fatal, matching the original comment.
+                if actor_name == HEALTHCHECK_ACTOR_NAME || actor_name == BUILD_REGISTRY_ACTOR_NAME {
+                    if !state.draining {
+                        state.draining = true;
+                        warn!("entering drain window before exit ({actor_name} failed)");
+                        let _ = myself
+                            .send_after(ractor::concurrency::Duration::from_secs(DRAIN_WINDOW_SECS), || {
+                                SupervisorMessage::ForceExit
+                            })
+                            .await;
+                    }
+                } else {
+                    tracing::info!(
+                        actor = ?actor_name,
+                        "build job actor failure is expected; build marked failed via registry, no supervisor action"
+                    );
+                }
             }
             _ => {}
         }
@@ -272,8 +340,6 @@ impl OrchestratorSupervisor {
             "received build request"
         );
 
-        // Insert into the registry before spawning the actor so there is never
-        // a window where the actor exists but has no registry record.
         state
             .registry
             .send_message(RegistryMessage::Insert(request.clone()))?;

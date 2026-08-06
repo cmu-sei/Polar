@@ -6,6 +6,7 @@
 , nix-container-lib
 , inputs
 , system
+, healthcheckDrv
 , ...
 }:
 let
@@ -27,20 +28,29 @@ let
     src = workspaceFileset ./git/scheduler;
   });
 
+  healthcheckInputs = inputs // {
+    polar-healthcheck = {
+      packages.${system}.default = healthcheckDrv;
+    };
+  };
+
   observerContainer = nix-container-lib.lib.${system}.mkContainer {
-    inherit system pkgs inputs;
+    inherit system pkgs;
+    inputs = healthcheckInputs;
     configNixPath    = ./container-observer.nix;
     extraDerivations = [ observer ];
   };
 
   consumerContainer = nix-container-lib.lib.${system}.mkContainer {
-    inherit system pkgs inputs;
+    inherit system pkgs;
+    inputs = healthcheckInputs;
     configNixPath    = ./container-consumer.nix;
     extraDerivations = [ consumer ];
   };
 
   schedulerContainer = nix-container-lib.lib.${system}.mkContainer {
-    inherit system pkgs inputs;
+    inherit system pkgs;
+    inputs = healthcheckInputs;
     configNixPath    = ./container-scheduler.nix;
     extraDerivations = [ scheduler ];
   };

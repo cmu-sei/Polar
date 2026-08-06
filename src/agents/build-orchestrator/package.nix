@@ -6,6 +6,7 @@
 , nix-container-lib
 , inputs
 , system
+, healthcheckDrv
 , ...
 }:
 let
@@ -84,14 +85,22 @@ let
     '';
   };
 
+  healthcheckInputs = inputs // {
+    polar-healthcheck = {
+      packages.${system}.default = healthcheckDrv;
+    };
+  };
+
   orchestratorContainer = nix-container-lib.lib.${system}.mkContainer {
-    inherit system pkgs inputs;
+    inherit system pkgs;
+    inputs = healthcheckInputs;
     configNixPath    = ./container-orchestrator.nix;
     extraDerivations = [ orchestrator ];
   };
 
   processorContainer = nix-container-lib.lib.${system}.mkContainer {
-    inherit system pkgs inputs;
+    inherit system pkgs;
+    inputs = healthcheckInputs;
     configNixPath    = ./container-processor.nix;
     extraDerivations = [ buildProcessor ];
   };

@@ -6,6 +6,7 @@
 , nix-container-lib
 , inputs
 , system
+, healthcheckDrv
 , ...
 }:
 let
@@ -21,14 +22,22 @@ let
     src = workspaceFileset ./openapi/process;
   });
 
+  healthcheckInputs = inputs // {
+    polar-healthcheck = {
+      packages.${system}.default = healthcheckDrv;
+    };
+  };
+
   observerContainer = nix-container-lib.lib.${system}.mkContainer {
-    inherit system pkgs inputs;
+    inherit system pkgs;
+    inputs = healthcheckInputs;
     configNixPath    = ./container-observer.nix;
     extraDerivations = [ observer ];
   };
 
   processorContainer = nix-container-lib.lib.${system}.mkContainer {
-    inherit system pkgs inputs;
+    inherit system pkgs;
+    inputs = healthcheckInputs;
     configNixPath    = ./container-processor.nix;
     extraDerivations = [ processor ];
   };

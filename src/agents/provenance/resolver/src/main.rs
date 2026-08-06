@@ -7,6 +7,7 @@ use oci_client::{
     manifest::OciManifest,
     secrets::RegistryAuth,
 };
+use polar::health::{DepCertEndpoint, HealthCheckActor, HealthCheckArgs, HealthCheckMessage};
 use polar::{
     PROVENANCE_DISCOVERY_TOPIC, PROVENANCE_LINKER_TOPIC, ProvenanceEvent, Supervisor,
     SupervisorMessage, async_get_file_as_byte_vec, get_web_client, spawn_tcp_client,
@@ -15,12 +16,15 @@ use polar::{
 use provenance_common::RESOLVER_SUPERVISOR_NAME;
 use provenance_resolver::classifier;
 use ractor::{
-    Actor, ActorProcessingErr, ActorRef, SupervisionEvent, async_trait, registry::where_is,
+    Actor, ActorProcessingErr, ActorRef, OutputPort, SupervisionEvent, async_trait, registry::where_is,
 };
 use reqwest::Client as WebClient;
 use std::str::FromStr;
+use std::sync::Arc;
 use tracing::{debug, error, info, instrument, trace, warn};
 pub const BROKER_CLIENT_NAME: &str = "polar.provenance.resolver.tcp";
+const HEALTHCHECK_ACTOR_NAME: &str = "polar.healthcheck";
+const DRAIN_WINDOW_SECS: u64 = 5;
 use cassini_types::WireTraceCtx;
 use serde::Deserialize;
 
@@ -39,11 +43,12 @@ pub struct RegistryConfig {
 // --- Supervisor ---
 pub struct ResolverSupervisor;
 
-#[derive(Clone)]
 pub struct ResolverSupervisorState {
     tcp_client: ActorRef<TcpClientMessage>,
     config: Option<ResolverConfig>,
     oci_client: Option<OciClient>,
+    healthcheck: ActorRef<HealthCheckMessage>,
+    draining: bool,
 }
 
 impl Supervisor for ResolverSupervisor {
@@ -51,7 +56,6 @@ impl Supervisor for ResolverSupervisor {
     fn deserialize_and_dispatch(topic: String, payload: Vec<u8>) {
         match rkyv::from_bytes::<ProvenanceEvent, rkyv::rancor::Error>(&payload) {
             Ok(event) => {
-                //lookup and forward
                 trace!("Looking up actor {topic} and forwarding payload");
                 if let Some(resolver) = where_is(topic.to_string()) {
                     resolver
@@ -73,7 +77,6 @@ impl ResolverSupervisor {
     ) -> Result<(), ActorProcessingErr> {
         let mut certs = Vec::new();
 
-        // load proxy ca certificate
         try_get_proxy_ca_cert().await.inspect(|data| {
             debug!("Configuring OCI Client with PROXY_CA_CERT");
             certs.push(Certificate {
@@ -154,6 +157,34 @@ impl Actor for ResolverSupervisor {
     ) -> Result<Self::State, ActorProcessingErr> {
         debug!("{myself:?} starting");
 
+        // --- NEW: healthcheck wiring ---
+        let prepare_shutdown_port = Arc::new(OutputPort::<()>::default());
+        prepare_shutdown_port.subscribe(myself.clone(), |()| {
+            Some(SupervisorMessage::PrepareShutdown)
+        });
+
+        // This agent never touches the graph -- resolves OCI artifacts and
+        // forwards ProvenanceEvents to the linker via Cassini.
+        let dep_cert_endpoints = vec![
+            DepCertEndpoint::parse("cassini-ip-svc.polar.svc.cluster.local:8080:300")
+                .map_err(|e| ActorProcessingErr::from(e))?,
+        ];
+
+        let (healthcheck, _) = HealthCheckActor::spawn_linked(
+            Some(HEALTHCHECK_ACTOR_NAME.to_string()),
+            HealthCheckActor,
+            HealthCheckArgs {
+                expects_graph: false,
+                rejuvenation_threshold_secs: 300,
+                dep_cert_endpoints,
+                prepare_shutdown_port,
+            },
+            myself.get_cell(),
+        )
+        .await
+        .map_err(|e| ActorProcessingErr::from(e))?;
+        // --- end NEW ---
+
         let tcp_client = spawn_tcp_client(BROKER_CLIENT_NAME, myself, |ev| {
             Some(SupervisorMessage::ClientEvent { event: ev })
         })
@@ -163,6 +194,8 @@ impl Actor for ResolverSupervisor {
             tcp_client,
             config: None,
             oci_client: None,
+            healthcheck,
+            draining: false,
         };
 
         Ok(state)
@@ -185,9 +218,24 @@ impl Actor for ResolverSupervisor {
     ) -> Result<(), ActorProcessingErr> {
         match msg {
             SupervisorMessage::Heartbeat => {}
-            SupervisorMessage::PrepareShutdown => {}
+            // --- NEW ---
+            SupervisorMessage::PrepareShutdown => {
+                info!("PrepareShutdown received");
+                if let Err(e) = state.healthcheck.cast(HealthCheckMessage::ShutdownAck) {
+                    error!("failed to send ShutdownAck: {e}");
+                }
+            }
+            SupervisorMessage::GraphSignal(_) => {}
+            SupervisorMessage::ForceExit => {
+                warn!("drain window elapsed, exiting now");
+                std::process::exit(1);
+            }
+            // --- end NEW ---
             SupervisorMessage::ClientEvent { event } => match event {
                 ClientEvent::Registered { .. } => {
+                    // --- NEW ---
+                    let _ = state.healthcheck.cast(HealthCheckMessage::CassiniConnected);
+                    // --- end NEW ---
                     let web_client = get_web_client()?;
 
                     let (classifier, _) = Actor::spawn_linked(
@@ -230,18 +278,25 @@ impl Actor for ResolverSupervisor {
                     .inspect_err(|e| error!("Failed to spawn resolver agent: {e:?}"))?;
                 }
                 ClientEvent::MessagePublished { topic, payload, .. } => {
-                    Self::deserialize_and_dispatch(topic, payload)
+                    // --- NEW: drain guard ---
+                    if state.draining {
+                        warn!(
+                            "draining -- logging message on topic '{topic}' \
+                             ({} bytes) instead of dispatching; will be lost on exit",
+                            payload.len()
+                        );
+                    } else {
+                        Self::deserialize_and_dispatch(topic, payload)
+                    }
+                    // --- end NEW ---
                 }
+                // BUG FIX: was `myself.stop(Some(reason))` -- silent exit-0.
                 ClientEvent::TransportError { reason } => {
-                    error!("Transport error: {reason}");
-                    // TODO: Handle transport errors appropriately
-                    // Ideally we
-                    myself.stop(Some(reason))
+                    warn!("Transport error occurred (non-fatal, awaiting reconnect): {reason}");
+                    let _ = state.healthcheck.cast(HealthCheckMessage::CassiniDisconnected);
                 }
                 _ => (),
-            }
-            SupervisorMessage::GraphSignal(_) => {}
-            SupervisorMessage::ForceExit => {}
+            },
         }
         Ok(())
     }
@@ -250,16 +305,46 @@ impl Actor for ResolverSupervisor {
         &self,
         myself: ActorRef<Self::Msg>,
         event: SupervisionEvent,
-        _state: &mut Self::State,
+        state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match event {
             SupervisionEvent::ActorFailed(name, reason) => {
                 error!("Actor {name:?} failed! {reason:?}");
-                myself.stop(Some(reason.to_string()));
+                // BUG FIX: was `myself.stop(Some(reason.to_string()))` --
+                // silent exit-0 under Job.
+                if !state.draining {
+                    state.draining = true;
+                    warn!("entering drain window before exit");
+                    let _ = myself
+                        .send_after(ractor::concurrency::Duration::from_secs(DRAIN_WINDOW_SECS), || {
+                            SupervisorMessage::ForceExit
+                        })
+                        .await;
+                }
             }
             SupervisionEvent::ActorTerminated(name, _state, reason) => {
+                let actor_name = name.get_name().unwrap_or_default();
                 warn!("Actor {name:?} terminated! {reason:?}");
-                myself.stop(reason)
+                // --- NEW ---
+                if actor_name == HEALTHCHECK_ACTOR_NAME && !state.draining {
+                    state.draining = true;
+                    info!("entering drain window before exiting for rejuvenation");
+                    let _ = myself
+                        .send_after(ractor::concurrency::Duration::from_secs(DRAIN_WINDOW_SECS), || {
+                            SupervisorMessage::ForceExit
+                        })
+                        .await;
+                } else if !state.draining {
+                    // BUG FIX: was `myself.stop(reason)` unconditionally.
+                    state.draining = true;
+                    warn!("entering drain window before exit");
+                    let _ = myself
+                        .send_after(ractor::concurrency::Duration::from_secs(DRAIN_WINDOW_SECS), || {
+                            SupervisorMessage::ForceExit
+                        })
+                        .await;
+                }
+                // --- end NEW ---
             }
             SupervisionEvent::ActorStarted(actor) => {
                 debug!("{actor:?} started!");
@@ -580,7 +665,12 @@ async fn main() {
     .expect("Expected to start supervisor");
 
     handle.await.expect("Expected to finish supervisor");
-    tokio::signal::ctrl_c().await.unwrap();
+    // BUG FIX: removed `tokio::signal::ctrl_c().await.unwrap();` which
+    // previously sat here. It's unreachable in any intended exit path
+    // (ForceExit calls std::process::exit(1) directly, bypassing main()
+    // entirely) and would have hung the process forever waiting for a
+    // Ctrl+C signal that never arrives in a container, in the one case
+    // where the supervisor stopped WITHOUT going through process::exit.
 }
 
 #[cfg(test)]

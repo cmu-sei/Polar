@@ -3,18 +3,24 @@ use crate::types::ProcessorMsg;
 use cassini_client::{TCPClientConfig, TcpClientActor, TcpClientArgs, TcpClientMessage};
 use cassini_types::ClientEvent;
 use polar::SupervisorMessage;
-use polar::graph::controller::GraphControllerActor;
+use polar::graph::controller::{GraphControllerActor, GraphSignal};
+use polar::health::{DepCertEndpoint, HealthCheckActor, HealthCheckArgs, HealthCheckMessage};
 use polar_scheduler_common::{AdhocAgentAnnouncement, GitScheduleChange};
 use ractor::{Actor, ActorProcessingErr, ActorRef, OutputPort, SupervisionEvent, async_trait};
+use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 
 pub const SERVICE_NAME: &str = "polar.scheduler";
+const HEALTHCHECK_ACTOR_NAME: &str = "polar.healthcheck";
+const DRAIN_WINDOW_SECS: u64 = 5;
 
 pub struct RootSupervisor;
 
 pub struct RootSupervisorState {
     tcp_client: ActorRef<TcpClientMessage>,
     processor: Option<ActorRef<ProcessorMsg>>,
+    healthcheck: ActorRef<HealthCheckMessage>,
+    draining: bool,
 }
 
 #[async_trait]
@@ -29,6 +35,32 @@ impl Actor for RootSupervisor {
         _: (),
     ) -> Result<Self::State, ActorProcessingErr> {
         debug!("RootSupervisor starting");
+
+        let prepare_shutdown_port = Arc::new(OutputPort::<()>::default());
+        prepare_shutdown_port.subscribe(myself.clone(), |()| {
+            Some(SupervisorMessage::PrepareShutdown)
+        });
+
+        let dep_cert_endpoints = vec![
+            DepCertEndpoint::parse("cassini-ip-svc.polar.svc.cluster.local:8080:300")
+                .map_err(|e| ActorProcessingErr::from(e))?,
+            DepCertEndpoint::parse("polar-db-svc.polar-graph.svc.cluster.local:7687:300")
+                .map_err(|e| ActorProcessingErr::from(e))?,
+        ];
+
+        let (healthcheck, _) = HealthCheckActor::spawn_linked(
+            Some(HEALTHCHECK_ACTOR_NAME.to_string()),
+            HealthCheckActor,
+            HealthCheckArgs {
+                expects_graph: true,
+                rejuvenation_threshold_secs: 300,
+                dep_cert_endpoints,
+                prepare_shutdown_port,
+            },
+            myself.get_cell(),
+        )
+        .await
+        .map_err(|e| ActorProcessingErr::from(e))?;
 
         let events_output = std::sync::Arc::new(OutputPort::default());
         events_output.subscribe(myself.clone(), |event| {
@@ -52,6 +84,8 @@ impl Actor for RootSupervisor {
         Ok(RootSupervisorState {
             tcp_client,
             processor: None,
+            healthcheck,
+            draining: false,
         })
     }
 
@@ -71,10 +105,28 @@ impl Actor for RootSupervisor {
     ) -> Result<(), ActorProcessingErr> {
         match msg {
             SupervisorMessage::Heartbeat => {}
-            SupervisorMessage::PrepareShutdown => {}
+            SupervisorMessage::PrepareShutdown => {
+                info!("PrepareShutdown received");
+                if let Err(e) = state.healthcheck.cast(HealthCheckMessage::ShutdownAck) {
+                    error!("failed to send ShutdownAck: {e}");
+                }
+            }
+            SupervisorMessage::GraphSignal(signal) => match signal {
+                GraphSignal::Available => {
+                    let _ = state.healthcheck.cast(HealthCheckMessage::GraphAvailable);
+                }
+                GraphSignal::OpFailed(reason) => {
+                    let _ = state.healthcheck.cast(HealthCheckMessage::GraphOpFailed(reason));
+                }
+            },
+            SupervisorMessage::ForceExit => {
+                warn!("drain window elapsed, exiting now");
+                std::process::exit(1);
+            }
             SupervisorMessage::ClientEvent { event } => match event {
                 ClientEvent::Registered { .. } => {
-                    let graph_signal_port = std::sync::Arc::new(ractor::OutputPort::<polar::graph::controller::GraphSignal>::default());
+                    let _ = state.healthcheck.cast(HealthCheckMessage::CassiniConnected);
+                    let graph_signal_port = std::sync::Arc::new(ractor::OutputPort::<GraphSignal>::default());
                     graph_signal_port.subscribe(myself.clone(), |signal| {
                         Some(SupervisorMessage::GraphSignal(signal))
                     });
@@ -85,6 +137,7 @@ impl Actor for RootSupervisor {
                         myself.get_cell(),
                     )
                     .await?;
+                    let _ = state.healthcheck.cast(HealthCheckMessage::GraphConnected);
 
                     let (processor, _) = Actor::spawn_linked(
                         Some(format!("{}.processor", SERVICE_NAME)),
@@ -109,6 +162,14 @@ impl Actor for RootSupervisor {
                     })?;
                 }
                 ClientEvent::MessagePublished { topic, payload, .. } => {
+                    if state.draining {
+                        warn!(
+                            "draining -- logging message on topic '{topic}' \
+                             ({} bytes) instead of dispatching; will be lost on exit",
+                            payload.len()
+                        );
+                        return Ok(());
+                    }
                     if let Some(p) = &state.processor {
                         info!("Received message on topic: {}", topic);
                         if topic == "scheduler.in" {
@@ -149,23 +210,23 @@ impl Actor for RootSupervisor {
                         warn!("Message received but processor not yet spawned");
                     }
                 }
+                // BUG FIX: was `myself.stop(Some(reason))` -- silent exit-0,
+                // Job marks Completed, no restart, no visible failure.
                 ClientEvent::TransportError { reason } => {
-                    error!("Transport error: {}", reason);
-                    myself.stop(Some(reason));
+                    warn!("Transport error occurred (non-fatal, awaiting reconnect): {reason}");
+                    let _ = state.healthcheck.cast(HealthCheckMessage::CassiniDisconnected);
                 }
                 _ => {}
-            }
-            SupervisorMessage::GraphSignal(_) => {}
-            SupervisorMessage::ForceExit => {}
+            },
         }
         Ok(())
     }
 
     async fn handle_supervisor_evt(
         &self,
-        _myself: ActorRef<Self::Msg>,
+        myself: ActorRef<Self::Msg>,
         event: SupervisionEvent,
-        _state: &mut Self::State,
+        state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match event {
             SupervisionEvent::ActorFailed(actor_cell, err) => {
@@ -173,12 +234,31 @@ impl Actor for RootSupervisor {
                     .get_name()
                     .unwrap_or_else(|| "unknown".to_string());
                 error!("Actor {} failed: {:?}", name_str, err);
+                // BUG FIX: previously logged only, no exit trigger at all.
+                if !state.draining {
+                    state.draining = true;
+                    warn!("entering drain window before exit");
+                    let _ = myself
+                        .send_after(ractor::concurrency::Duration::from_secs(DRAIN_WINDOW_SECS), || {
+                            SupervisorMessage::ForceExit
+                        })
+                        .await;
+                }
             }
             SupervisionEvent::ActorTerminated(actor_cell, _, reason) => {
                 let name_str = actor_cell
                     .get_name()
                     .unwrap_or_else(|| "unknown".to_string());
                 warn!("Actor {} terminated: {:?}", name_str, reason);
+                if name_str == HEALTHCHECK_ACTOR_NAME && !state.draining {
+                    state.draining = true;
+                    info!("entering drain window before exiting for rejuvenation");
+                    let _ = myself
+                        .send_after(ractor::concurrency::Duration::from_secs(DRAIN_WINDOW_SECS), || {
+                            SupervisorMessage::ForceExit
+                        })
+                        .await;
+                }
             }
             _ => {}
         }

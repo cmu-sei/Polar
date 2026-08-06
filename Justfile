@@ -731,10 +731,27 @@ ci:
 neo4j-install-certs:
     #!/usr/bin/env bash
     set -euo pipefail
-    AGENT_POD=$(kubectl get pod -n polar -l name=kube-consumer --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}')
-    echo "Fetching certs from $AGENT_POD..."
-    kubectl exec -n polar "$AGENT_POD" -c kube-consumer -- cat /etc/neo4j-client-tls/cert.pem > /tmp/neo4j-client-cert.pem
-    kubectl exec -n polar "$AGENT_POD" -c kube-consumer -- cat /etc/neo4j-client-tls/key.pem  > /tmp/neo4j-client-key.pem
+    echo "Waiting for a Running Neo4j-client pod..."
+    AGENT_POD=""
+    AGENT_CONTAINER=""
+    for i in $(seq 1 30); do
+        for LABEL in kube-consumer jira-processor build-processor git-repo-consumer polar-gitlab-consumer artifact-linker polar-scheduler; do
+            CANDIDATE=$(kubectl get pod -n polar -l name="$LABEL" --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+            if [ -n "$CANDIDATE" ]; then
+                AGENT_POD="$CANDIDATE"
+                AGENT_CONTAINER="$LABEL"
+                break 2
+            fi
+        done
+        sleep 2
+    done
+    if [ -z "$AGENT_POD" ]; then
+        echo "ERROR: no Running Neo4j-client pod found after 60s" >&2
+        exit 1
+    fi
+    echo "Fetching certs from $AGENT_POD (container: $AGENT_CONTAINER)..."
+    kubectl exec -n polar "$AGENT_POD" -c "$AGENT_CONTAINER" -- cat /etc/neo4j-client-tls/cert.pem > /tmp/neo4j-client-cert.pem
+    kubectl exec -n polar "$AGENT_POD" -c "$AGENT_CONTAINER" -- cat /etc/neo4j-client-tls/key.pem  > /tmp/neo4j-client-key.pem
     kubectl exec -n polar-graph polar-neo4j-0 -- cat /var/lib/neo4j/certificates/https/trusted/ca.pem > /tmp/neo4j-ca.pem
     echo "Bundling PKCS12..."
     openssl pkcs12 -export \
