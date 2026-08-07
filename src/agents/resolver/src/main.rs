@@ -273,6 +273,11 @@ impl ResolverAgent {
     }
 
     fn build_registry_candidates(base: &str) -> Vec<String> {
+        // Intentionally no http:// candidate here: registry credential lookups
+        // must not silently fall back to a cleartext transport. If a genuine
+        // need for an HTTP-only registry (e.g. local dev) comes up, gate it
+        // behind explicit configuration rather than adding it back
+        // unconditionally. See #218.
         vec![
             base.to_string(),
             format!("https://{}", base),
