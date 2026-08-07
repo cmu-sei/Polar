@@ -27,6 +27,8 @@ use common::types::{GitlabData, GitlabEnvelope};
 use gitlab_queries::groups::{GroupData, GroupMember};
 use gitlab_queries::projects::ProjectCoreFragment;
 use gitlab_queries::runners::CiRunnerIdFragment;
+use polar::cassini::CassiniClient;
+use polar::cassini::SubscribeRequest;
 use polar::graph::{
     controller::{
         GraphController, GraphControllerMsg, GraphOp, GraphValue, IntoGraphKey, Property,
@@ -243,13 +245,10 @@ impl Actor for GitlabGroupConsumer {
         state: Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
         // fire off subscribe message
-        state
-            .tcp_client
-            .cast(cassini_client::TcpClientMessage::Subscribe {
-                topic: GROUPS_CONSUMER_TOPIC.to_string(),
-                trace_ctx: None,
-            })?;
-
+        state.tcp_client.subscribe(SubscribeRequest {
+            topic: GROUPS_CONSUMER_TOPIC.to_string(),
+            trace_ctx: None,
+        })?;
         debug!("{myself:?} starting");
         Ok(state)
     }

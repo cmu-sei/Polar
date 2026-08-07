@@ -13,6 +13,9 @@ fn resolve_socket_path(override_path: Option<&PathBuf>) -> PathBuf {
     if let Some(p) = override_path {
         return p.clone();
     }
+    if let Ok(env_path) = std::env::var("CASSINI_DAEMON_SOCK") {
+        return PathBuf::from(env_path);
+    }
     if let Ok(runtime) = std::env::var("XDG_RUNTIME_DIR") {
         PathBuf::from(runtime).join("cassini/daemon.sock")
     } else {
@@ -30,13 +33,17 @@ async fn main() -> Result<()> {
     let format = &cli.format;
     let socket_path = resolve_socket_path(cli.socket.as_ref());
 
+    // Initialize tracing for every invocation, not just --daemon. Result
+    // printing (print_control_result, format_ipc_response, etc.) goes through
+    // tracing's info!/error! macros, which are silent no-ops without an
+    // installed subscriber — so e.g. `cassini-client status` previously
+    // printed nothing at all, even on success.
+    cassini_tracing::init_tracing("cassini-cli");
+
     // Load TLS + broker config from env
     // TODO: We default to this approach, but perhaps eventually we want to provide values via CLI/config file?
     // Daemon start path — no subcommand needed.
     if cli.daemon {
-        // Only init tracing in daemon mode.
-        cassini_tracing::init_tracing("cassini-cli");
-
         // Load config optionally — daemon starts regardless of broker availability.
         let client_config = TCPClientConfig::from_cli_or_env(
             cli.broker_addr.clone(),
@@ -47,7 +54,9 @@ async fn main() -> Result<()> {
         );
 
         if client_config.is_none() {
-            eprintln!("Warning: broker config not available — daemon will queue messages until broker is reachable");
+            eprintln!(
+                "Warning: broker config not available — daemon will queue messages until broker is reachable"
+            );
         }
 
         let result = run_daemon(
@@ -103,19 +112,23 @@ async fn main() -> Result<()> {
                 payload,
                 publish_timeout,
             } => {
-                let payload_b64 = base64::Engine::encode(
-                    &base64::engine::general_purpose::STANDARD,
-                    payload.as_bytes(),
-                );
-                dispatch_to_daemon(
-                    &socket_path,
-                    IpcRequest::Publish {
-                        topic,
-                        payload_b64,
-                        timeout_secs: publish_timeout,
-                    },
-                    format,
-                )
+                async {
+                    let payload_bytes = resolve_publish_payload(payload).await?;
+                    let payload_b64 = base64::Engine::encode(
+                        &base64::engine::general_purpose::STANDARD,
+                        &payload_bytes,
+                    );
+                    dispatch_to_daemon(
+                        &socket_path,
+                        IpcRequest::Publish {
+                            topic,
+                            payload_b64,
+                            timeout_secs: publish_timeout,
+                        },
+                        format,
+                    )
+                    .await
+                }
                 .await
             }
             Command::ListSessions { timeout } => {
@@ -152,22 +165,8 @@ async fn main() -> Result<()> {
                 )
                 .await
             }
-            Command::Drain => {
-                drain_queue(
-                    cli.queue.clone(),
-                    client_config,
-                    register_timeout,
-                )
-                .await
-            }
-            Command::Replay { queue } => {
-                drain_queue(
-                    queue,
-                    client_config,
-                    register_timeout,
-                )
-                .await
-            }
+            Command::Drain => drain_queue(cli.queue.clone(), client_config, register_timeout).await,
+            Command::Replay { queue } => drain_queue(queue, client_config, register_timeout).await,
             Command::Status => dispatch_to_daemon(&socket_path, IpcRequest::Status, format).await,
         }
     } else {
@@ -178,14 +177,18 @@ async fn main() -> Result<()> {
                 payload,
                 publish_timeout,
             } => {
-                run_publish_direct(
-                    client_config.clone(),
-                    topic,
-                    payload,
-                    register_timeout,
-                    Duration::from_secs(publish_timeout),
-                    format,
-                )
+                async {
+                    let payload_bytes = resolve_publish_payload(payload).await?;
+                    run_publish_direct(
+                        client_config.clone(),
+                        topic,
+                        payload_bytes,
+                        register_timeout,
+                        Duration::from_secs(publish_timeout),
+                        format,
+                    )
+                    .await
+                }
                 .await
             }
             Command::ListSessions { timeout } => {
@@ -229,24 +232,11 @@ async fn main() -> Result<()> {
             }
             Command::Status => {
                 eprintln!("No daemon running at {}", socket_path.display());
+                shutdown_tracing();
                 std::process::exit(1);
             }
-            Command::Drain => {
-                drain_queue(
-                    cli.queue.clone(),
-                    client_config,
-                    register_timeout,
-                )
-                .await
-            }
-            Command::Replay { queue } => {
-                drain_queue(
-                    queue,
-                    client_config,
-                    register_timeout,
-                )
-                .await
-            }
+            Command::Drain => drain_queue(cli.queue.clone(), client_config, register_timeout).await,
+            Command::Replay { queue } => drain_queue(queue, client_config, register_timeout).await,
         }
     };
 

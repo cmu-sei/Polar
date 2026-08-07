@@ -8,7 +8,6 @@ use crate::projects::GitlabProjectConsumer;
 use crate::repositories::GitlabRepositoryConsumer;
 use crate::runners::GitlabRunnerConsumer;
 use crate::users::GitlabUserConsumer;
-use cassini_client::*;
 use cassini_types::ClientEvent;
 use common::GROUPS_CONSUMER_TOPIC;
 use common::METADATA_CONSUMER_TOPIC;
@@ -20,7 +19,7 @@ use common::USER_CONSUMER_TOPIC;
 use common::types::GitlabEnvelope;
 use polar::Supervisor;
 use polar::SupervisorMessage;
-use polar::get_neo_config;
+use polar::cassini::TcpClient;
 use polar::graph::controller::GraphControllerActor;
 use polar::polar_health::{HealthCheckActor, HealthCheckArgs, HealthCheckMessage, DepCertEndpoint};
 use std::sync::Arc;
@@ -28,7 +27,6 @@ use ractor::Actor;
 use ractor::ActorCell;
 use ractor::ActorProcessingErr;
 use ractor::ActorRef;
-use ractor::OutputPort;
 use ractor::SupervisionEvent;
 use ractor::async_trait;
 use tracing::debug;
@@ -36,11 +34,12 @@ use tracing::error;
 use tracing::info;
 use tracing::warn;
 use tracing::{instrument, trace};
+use ractor::OutputPort;
 
 pub struct ConsumerSupervisor;
 
 pub struct ConsumerSupervisorState {
-    tcp_client: ActorRef<TcpClientMessage>,
+    tcp_client: TcpClient,
     u_consumer: Option<GitlabConsumer>,
     #[allow(dead_code)]
     healthcheck: ActorRef<HealthCheckMessage>,
@@ -158,26 +157,11 @@ impl Actor for ConsumerSupervisor {
     ) -> Result<Self::State, ActorProcessingErr> {
         debug!("{myself:?} starting");
 
-        let events_output = std::sync::Arc::new(OutputPort::default());
-        //subscribe
-        events_output.subscribe(myself.clone(), |event| {
-            Some(SupervisorMessage::ClientEvent { event })
-        });
-
-        let client_config = TCPClientConfig::new()?;
-
-        let (tcp_client, _) = Actor::spawn_linked(
-            Some(BROKER_CLIENT_NAME.to_string()),
-            TcpClientActor,
-            TcpClientArgs {
-                config: client_config,
-                registration_id: None,
-                events_output: Some(events_output),
-                event_handler: None,
-            },
-            myself.clone().into(),
-        )
-        .await?;
+        let tcp_client =
+            TcpClient::spawn(&BROKER_CLIENT_NAME.to_string(), myself.clone(), |event| {
+                Some(SupervisorMessage::ClientEvent { event })
+            })
+            .await?;
 
         let prepare_shutdown_port = Arc::new(OutputPort::<()>::default());
         prepare_shutdown_port.subscribe(myself.clone(), |()| {

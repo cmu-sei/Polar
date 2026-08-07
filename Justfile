@@ -64,8 +64,7 @@ build-all:
     nix build {{_nix_flags}} ".#packages.{{platform}}.kubeConsumerImage"     -o result-kube-consumer
     nix build {{_nix_flags}} ".#packages.{{platform}}.openApiObserverImage"  -o result-openapi-observer
     nix build {{_nix_flags}} ".#packages.{{platform}}.openApiProcessorImage" -o result-openapi-processor
-    nix build {{_nix_flags}} ".#packages.{{platform}}.provenanceLinkerImage" -o result-provenance-linker
-    nix build {{_nix_flags}} ".#packages.{{platform}}.provenanceResolverImage" -o result-provenance-resolver
+    nix build {{_nix_flags}} ".#packages.{{platform}}.polarPkgs.ociResolver.resolverImage" -o result-resolver
     nix build {{_nix_flags}} ".#packages.{{platform}}.schedulerProcessorImage" -o result-scheduler-processor
     nix build {{_nix_flags}} ".#packages.{{platform}}.schedulerObserverImage"  -o result-scheduler-observer
     nix build {{_nix_flags}} ".#packages.{{platform}}.jiraObserverImage"     -o result-jira-observer
@@ -73,7 +72,6 @@ build-all:
     nix build {{_nix_flags}} ".#packages.{{platform}}.gitObserverImage"      -o result-git-observer
     nix build {{_nix_flags}} ".#packages.{{platform}}.gitProcessorImage"     -o result-git-processor
     nix build {{_nix_flags}} ".#packages.{{platform}}.gitSchedulerImage"     -o result-git-scheduler
-    nix build {{_nix_flags}} ".#packages.{{platform}}.orchestratorImage"     -o result-build-orchestrator
     nix build {{_nix_flags}} ".#packages.{{platform}}.buildProcessorImage"   -o result-build-processor
     nix build {{_nix_flags}} ".#packages.{{platform}}.nuInitImage"           -o result-nu-init
     nix build {{_nix_flags}} ".#packages.{{platform}}.polarInitImage"        -o result-polar-init
@@ -96,18 +94,18 @@ cert-issuer target='all':
     set -euo pipefail
     case "{{target}}" in
         all)
-            nix build {{_nix_flags}} ".#packages.{{platform}}.certIssuerImage" -o result-cert-issuer
-            nix build {{_nix_flags}} ".#packages.{{platform}}.certClientImage" -o result-cert-client
-            podman load -i result-cert-issuer
-            podman load -i result-cert-client
+            nix build {{_nix_flags}} ".#polarPkgs.certIssuer.server" -o result-cert-issuer-server
+            nix build {{_nix_flags}} ".#polarPkgs.certIssuer.clientImage" -o result-cert-client
+            nix build {{_nix_flags}} ".#polarPkgs.certIssuer.setupBin" -o result-cert-setup-bin
+            nix build {{_nix_flags}} ".#packages.{{platform}}.certIssuerImage" -o result-cert-issuer-image
+            podman load -i result-cert-issuer-image
             ;;
-        server)
+        serverImage)
             nix build {{_nix_flags}} ".#packages.{{platform}}.certIssuerImage" -o result-cert-issuer
             podman load -i result-cert-issuer
             ;;
         client)
-            nix build {{_nix_flags}} ".#packages.{{platform}}.certClientImage" -o result-cert-client
-            podman load -i result-cert-client
+            nix build {{_nix_flags}} ".#polarPkgs.certIssuer.clientImage" -o result-cert-client
             ;;
         *) echo "Unknown target: {{target}}. Use all, server, or client." && exit 1 ;;
     esac
@@ -234,13 +232,116 @@ jira target='all':
         *) echo "Unknown target: {{target}}. Use all, observer, or processor." && exit 1 ;;
     esac
 
+# ── Local dev PKI / cert-issuer stack ─────────────────────────────────────────
+#
+# One-time bootstrap sequence (run once per CA rotation):
+#
+#   just setup-cert-issuer                    # generates CA, OIDC keypair, JWKS, tokens, config
+#
+# Then, in separate terminals (or tmux panes):
+#
+#   just run-jwks                     # Terminal A: JWKS HTTP server (port 8081)
+#   just run-cert-issuer                   # Terminal B: cert-issuer gRPC server (port 8443)
+#
+# Then issue all three certs and copy Neo4j layout:
+#
+#   just issue-certs                    # issues cassini, neo4j, and agent certs
+#
+# Print env vars for a given workload:
+#
+#   just dev-env cassini
+#   just dev-env agent
+#   just dev-env neo4j
+#
+# Tokens expire after 1h. Refresh without rotating the CA:
+#
+#   just                     # safe to re-run; preserves dev/tmp/
+#
+# Rotate the CA root (invalidates all outstanding certs):
+#
+#   just dev-clean ca && just dev-setup
+
+# Run the one-shot dev environment setup (CA, OIDC keypair, JWKS, tokens, config).
+# Safe to re-run — preserves dev/tmp/. Delete dev/tmp/ explicitly to rotate the CA.
+setup-cert-issuer:
+    cargo run --manifest-path ./src/agents/Cargo.toml --bin cert-issuer-setup
+
+# Start the JWKS HTTP server on port 8081.
+# Run in a dedicated terminal — this is a foreground process.
+# Must be running before dev-issuer starts.
+run-jwks:
+    python3 -m http.server 8081 --directory dev
+
+# Start the cert-issuer on port 8443.
+# Run in a dedicated terminal — this is a foreground process.
+# Requires dev-jwks to be running (issuer fetches JWKS on startup).
+run-cert-issuer:
+    export CERT_ISSUER_CONFIG=dev/config.json
+    cargo run --manifest-path ./src/agents/Cargo.toml --bin cert-issuer
+
+# Issue all three dev certs (cassini server, neo4j server, agent client).
+# Requires both dev-jwks and dev-issuer to be running in separate terminals.
+# Tokens expire after 1h; re-run dev-setup first if they've expired.
+issue-dev-certs:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    # TODO: add healthcheck
+    # Fail fast if the issuer is not reachable rather than producing a confusing TLS error.
+    # if ! curl -sf --max-time 2 http://127.0.0.1:8443 > /dev/null 2>&1; then
+    #     echo "ERROR: cert-issuer not responding on :8443 — run 'just dev-issuer' in another terminal first."
+    #     exit 1
+    # fi
+
+    echo "--- Issuing Cassini server cert ---"
+    cargo run --manifest-path ./src/agents/Cargo.toml --bin cert-client -- \
+        --cert-issuer-url http://127.0.0.1:8443 \
+        --token-path dev/token-cassini \
+        --cert-dir dev/certs/server \
+        --cert-type server \
+        --key-algorithm ecdsa-p256
+
+    echo "--- Issuing Neo4j server cert ---"
+    cargo run --manifest-path ./src/agents/Cargo.toml --bin cert-client -- \
+        --cert-issuer-url http://127.0.0.1:8443 \
+        --token-path dev/token-neo4j \
+        --cert-dir dev/certs/neo4j-server \
+        --cert-type server \
+        --key-algorithm ecdsa-p256 \
+        --extra-san neo4j.polar.svc.cluster.local \
+        --extra-san polar-db-svc.polar.svc.cluster.local
+
+    for p in https bolt; do
+        mkdir -p "dev/certs/neo4j/$p/trusted"
+        cp dev/certs/neo4j-server/cert.pem "dev/certs/neo4j/$p/public.crt"
+        cp dev/certs/neo4j-server/key.pem  "dev/certs/neo4j/$p/private.key"
+        cp dev/certs/neo4j-server/ca.pem   "dev/certs/neo4j/$p/trusted/ca.pem"
+        echo "  populated dev/certs/neo4j/$p/"
+    done
+
+    echo "--- Issuing agent client cert ---"
+    cargo run --manifest-path ./src/agents/Cargo.toml --bin cert-client -- \
+        --cert-issuer-url http://127.0.0.1:8443 \
+        --token-path dev/token-agent \
+        --cert-dir dev/certs/client \
+        --key-algorithm ecdsa-p256
+
+    echo "--- Verifying EKUs ---"
+    for cert in dev/certs/server/cert.pem dev/certs/neo4j-server/cert.pem dev/certs/client/cert.pem; do
+        echo "  $cert:"
+        openssl x509 -in "$cert" -noout -text | grep -A5 'Extended Key Usage' | sed 's/^/    /'
+    done
+
+    echo "Done."
+
+
+
 # ── Git agents ────────────────────────────────────────────────────────────────
 
 # Build git agent images
 # Usage: just git-agents        (all)
 #        just git-agents observer
 #        just git-agents consumer
-#        just git-agents scheduler
 git-agents target='all':
     #!/usr/bin/env bash
     set -euo pipefail
@@ -249,10 +350,8 @@ git-agents target='all':
         all)
             nix build {{_nix_flags}} "$base.observerImage"  -o result-git-observer
             nix build {{_nix_flags}} "$base.processorImage" -o result-git-processor
-            nix build {{_nix_flags}} "$base.schedulerImage" -o result-git-scheduler
             podman load -i result-git-observer
             podman load -i result-git-processor
-            podman load -i result-git-scheduler
             ;;
         observer)
             nix build {{_nix_flags}} "$base.observerImage" -o result-git-observer
@@ -262,11 +361,33 @@ git-agents target='all':
             nix build {{_nix_flags}} "$base.processorImage" -o result-git-processor
             podman load -i result-git-processor
             ;;
-        scheduler)
-            nix build {{_nix_flags}} "$base.schedulerImage" -o result-git-scheduler
-            podman load -i result-git-scheduler
-            ;;
         *) echo "Unknown target: {{target}}. Use all, observer, processor, or scheduler." && exit 1 ;;
+    esac
+
+# ── Build processor + resolver ──────────────────────────────────────────────
+# Build the consolidated build-processor and resolver images.
+# Usage: just build-agents           (all)
+#        just build-agents processor
+#        just build-agents resolver
+build-agents target='all':
+    #!/usr/bin/env bash
+    set -euo pipefail
+    case "{{target}}" in
+        all)
+            nix build {{_nix_flags}} ".#packages.{{platform}}.buildProcessorImage" -o result-build-processor
+            nix build {{_nix_flags}} ".#packages.{{platform}}.polarPkgs.ociResolver.resolverImage" -o result-resolver
+            podman load -i result-build-processor
+            podman load -i result-resolver
+            ;;
+        processor)
+            nix build {{_nix_flags}} ".#packages.{{platform}}.buildProcessorImage" -o result-build-processor
+            podman load -i result-build-processor
+            ;;
+        resolver)
+            nix build {{_nix_flags}} ".#packages.{{platform}}.polarPkgs.ociResolver.resolverImage" -o result-resolver
+            podman load -i result-resolver
+            ;;
+        *) echo "Unknown target: {{target}}. Use all, processor, or resolver." && exit 1 ;;
     esac
 
 # ── OpenAPI agents ────────────────────────────────────────────────────────────
@@ -297,34 +418,6 @@ openapi target='all':
         *) echo "Unknown target: {{target}}. Use all, observer, or processor." && exit 1 ;;
     esac
 
-# ── Provenance agents ─────────────────────────────────────────────────────────
-
-# Build provenance agent images
-# Usage: just provenance        (all)
-#        just provenance linker
-#        just provenance resolver
-provenance target='all':
-    #!/usr/bin/env bash
-    set -euo pipefail
-    base=".#packages.{{platform}}.polarPkgs.provenance"
-    case "{{target}}" in
-        all)
-            nix build {{_nix_flags}} "$base.linkerImage"   -o result-provenance-linker
-            nix build {{_nix_flags}} "$base.resolverImage" -o result-provenance-resolver
-            podman load -i result-provenance-linker
-            podman load -i result-provenance-resolver
-            ;;
-        linker)
-            nix build {{_nix_flags}} "$base.linkerImage" -o result-provenance-linker
-            podman load -i result-provenance-linker
-            ;;
-        resolver)
-            nix build {{_nix_flags}} "$base.resolverImage" -o result-provenance-resolver
-            podman load -i result-provenance-resolver
-            ;;
-        *) echo "Unknown target: {{target}}. Use all, linker, or resolver." && exit 1 ;;
-    esac
-
 # ── Scheduler agents ──────────────────────────────────────────────────────────
 
 # Build scheduler agent images
@@ -352,40 +445,6 @@ scheduler target='all':
             ;;
         *) echo "Unknown target: {{target}}. Use all, processor, or observer." && exit 1 ;;
     esac
-
-# ── Build orchestrator ────────────────────────────────────────────────────────
-
-# Build orchestrator images
-# Usage: just orchestrator          (all)
-#        just orchestrator agent
-#        just orchestrator clone
-orchestrator target='all':
-    #!/usr/bin/env bash
-    set -euo pipefail
-    base=".#packages.{{platform}}.polarPkgs.buildOrchestrator"
-    case "{{target}}" in
-        all)
-            nix build {{_nix_flags}} "$base.orchestratorImage"  -o result-build-orchestrator
-            nix build {{_nix_flags}} "$base.cloneImage"         -o result-clone-image
-            nix build {{_nix_flags}} "$base.buildProcessorImage" -o result-build-processor
-            podman load -i result-build-orchestrator
-            podman load -i result-clone-image
-            podman load -i result-build-processor
-            ;;
-        agent)
-            nix build {{_nix_flags}} "$base.orchestratorImage" -o result-build-orchestrator
-            podman load -i result-build-orchestrator
-            ;;
-        clone)
-            nix build {{_nix_flags}} "$base.cloneImage" -o result-clone-image
-            podman load -i result-clone-image
-            ;;
-        processor)
-                    nix build {{_nix_flags}} "$base.buildProcessorImage" -o result-build-processor
-                    podman load -i result-build-processor
-                    ;;
-                *) echo "Unknown target: {{target}}. Use all, agent, clone, or processor." && exit 1 ;;
-            esac
 
 # ── Workspace binaries ────────────────────────────────────────────────────────
 
@@ -883,11 +942,10 @@ cluster-build-all:
     just gitlab all
     just kube all
     just scheduler all
-    just orchestrator all
-    just provenance all
     just git-agents all
     just jira all
     just openapi all
+    just build-agents all
     just nu-init
     just polar-init
 
@@ -972,7 +1030,6 @@ cluster-load-all neo4j_result=_neo4j_result:
     _load ./result-cert-client
     _load ./result-harness-producer
     _load ./result-harness-sink
-    _load ./result-clone-image
     _load ./result-gitlab-observer
     _load ./result-gitlab-consumer
     _load ./result-kube-observer
@@ -984,11 +1041,9 @@ cluster-load-all neo4j_result=_neo4j_result:
     _load ./result-jira-processor
     _load ./result-openapi-observer
     _load ./result-openapi-processor
+    _load ./result-resolver
     _load ./result-scheduler-observer
     _load ./result-scheduler-processor
-    _load ./result-provenance-linker
-    _load ./result-provenance-resolver
-    _load ./result-build-orchestrator
     _load ./result-build-processor
     _load ./result-nu-init
     _load ./result-polar-init
@@ -996,7 +1051,6 @@ cluster-load-all neo4j_result=_neo4j_result:
     _tag docker.io/library/cassini:latest                       docker.io/library/cassini:latest
     _tag docker.io/library/harness-producer:latest              docker.io/library/harness-producer:latest
     _tag docker.io/library/harness-sink:latest                  docker.io/library/harness-sink:latest
-    _tag docker.io/library/cyclops/git-clone:latest             docker.io/library/cyclops/git-clone:latest
     _tag docker.io/library/gitlab-observer:latest               docker.io/library/gitlab-observer:latest
     _tag docker.io/library/gitlab-consumer:latest               docker.io/library/gitlab-consumer:latest
     _tag docker.io/library/kube-observer:latest                 docker.io/library/kube-observer:latest
@@ -1010,10 +1064,8 @@ cluster-load-all neo4j_result=_neo4j_result:
     _tag docker.io/library/openapi-processor:latest             docker.io/library/openapi-processor:latest
     _tag docker.io/library/scheduler-observer:latest            docker.io/library/scheduler-observer:latest
     _tag docker.io/library/scheduler-processor:latest           docker.io/library/scheduler-processor:latest
-    _tag docker.io/library/provenance-linker:latest             docker.io/library/provenance-linker:latest
-    _tag docker.io/library/provenance-resolver:latest           docker.io/library/provenance-resolver:latest
-    _tag docker.io/library/build-orchestrator:latest            docker.io/library/build-orchestrator:latest
     _tag docker.io/library/build-processor:latest               docker.io/library/build-processor:latest
+    _tag docker.io/library/oci-resolver:latest                  docker.io/library/oci-resolver:latest
     _tag docker.io/library/nix-neo4j:latest                     docker.io/library/neo4j:5.26.2
     _tag docker.io/library/polar-nu-init:latest                 docker.io/library/polar-nu-init:latest
     _tag docker.io/library/cert-issuer:latest                   docker.io/library/cert-issuer:latest
@@ -1155,13 +1207,7 @@ kind-load-all neo4j_result='':
     load ./result-scheduler-processor
     load ./result-scheduler-observer
 
-    # Build orchestrator
-    just orchestrator all
-    load ./result-orchestrator-image
-    load ./result-build-processor-image
-    load ./result-clone-image
-
-    echo "Core images loaded. Agent images (gitlab, kube, git, web, provenance) load on demand:"
+    echo "Core images loaded. Agent images (gitlab, kube, git, web) load on demand:"
     echo "  just kind-load-agents gitlab"
     echo "  just kind-load-agents kube"
     echo "  etc."
@@ -1171,7 +1217,6 @@ kind-load-all neo4j_result='':
 #        just kind-load-agents kube
 #        just kind-load-agents git
 #        just kind-load-agents web
-#        just kind-load-agents provenance
 #        just kind-load-agents all
 kind-load-agents agent='all':
     #!/usr/bin/env bash
@@ -1199,19 +1244,13 @@ kind-load-agents agent='all':
             load ./result-openapi-observer
             load ./result-openapi-processor
             ;;
-        provenance)
-            just provenance all
-            load ./result-provenance-linker
-            load ./result-provenance-resolver
-            ;;
         all)
             just kind-load-agents gitlab
             just kind-load-agents kube
             just kind-load-agents git
             just kind-load-agents web
-            just kind-load-agents provenance
             ;;
-        *) echo "Unknown agent: {{agent}}. Use gitlab, kube, git, web, provenance, or all." && exit 1 ;;
+        *) echo "Unknown agent: {{agent}}. Use gitlab, kube, git, web, or all." && exit 1 ;;
     esac
 
 # Render Dhall manifests for local kind deployment.

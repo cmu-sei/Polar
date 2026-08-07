@@ -17,14 +17,14 @@ let
   client = craneLib.buildPackage (crateArgs // {
     pname = "cert-client";
     cargoExtraArgs = "--bin cert-client --locked";
-    src = workspaceFileset ./cert-issuer/init;
+    src = workspaceFileset ./cert-issuer/client;
     doCheck = false;
   });
 
   setupBin = craneLib.buildPackage (crateArgs // {
     pname = "cert-issuer-setup";
     cargoExtraArgs = "--bin cert-issuer-setup --locked";
-    src = workspaceFileset ./cert-issuer/init;
+    src = workspaceFileset ./cert-issuer/client;
     doCheck = false;
   });
 

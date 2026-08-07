@@ -66,7 +66,7 @@ let
     # build workspace derivation to be given as a default package
     workspacePackages = craneLib.buildPackage (individualCrateArgs // {
       pname = "polar";
-      cargoExtraArgs = "--workspace --locked --exclude logger --exclude policy-config --exclude config-ops";
+      cargoExtraArgs = "--workspace --locked --exclude logger --exclude policy-config ";
       src = workspaceFileset ./.;
     });
 
@@ -98,7 +98,13 @@ let
       healthcheckDrv = healthcheck;
     };
 
-    provenance = import ./provenance/package.nix {
+    buildProcessor = import ./build-processor/package.nix {
+      inherit pkgs craneLib workspaceFileset nix-container-lib inputs system;
+      crateArgs = individualCrateArgs;
+      healthcheckDrv = healthcheck;
+    };
+
+    ociResolver = import ./resolver/package.nix {
       inherit pkgs craneLib workspaceFileset nix-container-lib inputs system;
       crateArgs = individualCrateArgs;
       healthcheckDrv = healthcheck;
@@ -117,12 +123,6 @@ let
     };
 
     gitAgent = import ./git/package.nix {
-      inherit pkgs craneLib workspaceFileset nix-container-lib inputs system;
-      crateArgs = individualCrateArgs;
-      healthcheckDrv = healthcheck;
-    };
-
-    buildOrchestrator = import ./build-orchestrator/package.nix {
       inherit pkgs craneLib workspaceFileset nix-container-lib inputs system;
       crateArgs = individualCrateArgs;
       healthcheckDrv = healthcheck;
@@ -147,8 +147,7 @@ let
       inherit pkgs craneLib workspaceFileset nix-container-lib inputs system;
       crateArgs = individualCrateArgs;
     };
-
 in
 {
-  inherit workspacePackages gitlabAgent cassini kubeAgent webAgent provenance scheduler jiraAgent gitAgent buildOrchestrator certIssuer nuInit gitServer healthcheck polarInit;
+    inherit workspacePackages gitlabAgent cassini kubeAgent webAgent ociResolver scheduler jiraAgent gitAgent buildProcessor certIssuer nuInit gitServer polarInit;
 }

@@ -1,0 +1,12 @@
+---
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: OCIRepository
+metadata:
+  name: polar-test
+  namespace: flux-system
+spec:
+  insecure: true
+  interval: "1m"
+  ref:
+    tag: latest
+  url: oci://registry.local-registry.svc.cluster.local:5000/manifests/polar

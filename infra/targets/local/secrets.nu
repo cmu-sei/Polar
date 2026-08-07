@@ -152,14 +152,6 @@ def main [target_dir: string, repo_root: string] {
         kubectl_upsert_secret "oci-registry-auth" "polar" ["oci-registry-auth={}"]
     }
 
-    # build-orchestrator-config — cyclops.yaml as a secret
-    let cyclops_yaml = ($target_dir | path join "conf/cyclops.yaml")
-    if ($cyclops_yaml | path exists) {
-        kubectl_upsert_secret "build-orchestrator-config" "polar" [] [$"cyclops.yaml=($cyclops_yaml)"]
-    } else {
-        print $"    WARNING: cyclops.yaml not found at ($cyclops_yaml) — build-orchestrator will not start"
-    }
-
     # git-config — StaticCredentialConfig JSON for the git observer
     let git_config = ($target_dir | path join "conf/git.json")
     if ($git_config | path exists) {

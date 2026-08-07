@@ -56,8 +56,6 @@ let CertIssuer =
 
 let GitConsumer = GraphProcessor
 
-let GitScheduler = GraphProcessor
-
 let ProvenanceLinker = GraphProcessor
 
 let KubeConsumer = GraphProcessor
@@ -72,7 +70,7 @@ let BuildProcessor = GraphProcessor
 
 let KubeObserver = PolarAgent //\\ WithServiceAccount
 
-let ProvenanceResolver = PolarAgent
+let OciResolver = PolarAgent
 
 let GitlabObserver =
           PolarAgent
@@ -101,12 +99,9 @@ in  { ClientTlsConfig
     , GitlabConsumer
     , KubeObserver
     , KubeConsumer
-    , ProvenanceLinker
-    , ProvenanceResolver
+    , OciResolver
     , StaticCredentialConfig
     , GitObserver
     , GitConsumer
-    , GitScheduler
-    , BuildOrchestrator
     , BuildProcessor
     }

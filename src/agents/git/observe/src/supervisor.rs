@@ -1,17 +1,17 @@
 use crate::{
-    GitRepoSupervisor, GitRepoSupervisorArgs, REPO_SUPERVISOR_NAME, RepoSupervisorMessage,
-    SERVICE_NAME,
+    GitAgentConfig, GitRepoSupervisor, GitRepoSupervisorArgs, REPO_SUPERVISOR_NAME,
+    RepoSupervisorMessage, SERVICE_NAME,
 };
-use cassini_client::TcpClientMessage;
-use cassini_types::ClientEvent;
 use git_agent_common::{ConfigurationEvent, GIT_REPO_CONFIG_EVENTS};
+use cassini_types::ClientEvent;
 use polar::SupervisorMessage;
+use polar::cassini::TcpClient;
+use polar::cassini::CassiniClient;
 use polar::health::{DepCertEndpoint, HealthCheckActor, HealthCheckArgs, HealthCheckMessage};
 use ractor::{Actor, ActorProcessingErr, ActorRef, OutputPort, SupervisionEvent, async_trait};
 use rkyv::from_bytes;
-use std::path::PathBuf;
 use std::sync::Arc;
-use tracing::{debug, error, info, instrument, warn};
+use tracing::{debug, error, info, instrument, trace, warn};
 
 const HEALTHCHECK_ACTOR_NAME: &str = "polar.healthcheck";
 const DRAIN_WINDOW_SECS: u64 = 5;
@@ -19,8 +19,10 @@ const DRAIN_WINDOW_SECS: u64 = 5;
 pub struct RootSupervisor;
 
 pub struct RootSupervisorState {
+    tcp_client: TcpClient,
     repo_supervisor: Option<ActorRef<RepoSupervisorMessage>>,
-    tcp_client: ActorRef<TcpClientMessage>,
+    git_agent_config: GitAgentConfig,
+    cache_root: std::path::PathBuf,
     healthcheck: ActorRef<HealthCheckMessage>,
     draining: bool,
 }
@@ -49,31 +51,12 @@ impl RootSupervisor {
         myself: ActorRef<SupervisorMessage>,
         state: &mut RootSupervisorState,
     ) -> Result<(), ActorProcessingErr> {
-        let cache_root = match std::env::var("POLAR_CACHE_ROOT") {
-            Ok(path) => {
-                debug!("Using cache root at {}", path);
-                PathBuf::from(path)
-            }
-            Err(_) => {
-                let default_dir = ".polar/cache";
-                debug!(
-                    "No POLAR_CACHE_ROOT set, using default cache directory {}",
-                    default_dir
-                );
-                if let Ok(current_dir) = std::env::current_dir() {
-                    current_dir.join(default_dir)
-                } else {
-                    return Err(ActorProcessingErr::from("Failed to determine cache root"));
-                }
-            }
-        };
-
         let (repo_supervisor, _) = Actor::spawn_linked(
             Some(REPO_SUPERVISOR_NAME.to_string()),
             GitRepoSupervisor,
             GitRepoSupervisorArgs {
                 tcp_client: state.tcp_client.clone(),
-                cache_root,
+                cache_root: state.cache_root.clone(),
             },
             myself.into(),
         )
@@ -81,7 +64,7 @@ impl RootSupervisor {
 
         state.repo_supervisor = Some(repo_supervisor);
 
-        state.tcp_client.cast(TcpClientMessage::Subscribe {
+        state.tcp_client.subscribe(polar::cassini::SubscribeRequest {
             topic: GIT_REPO_CONFIG_EVENTS.to_string(),
             trace_ctx: None,
         })?;
@@ -103,13 +86,11 @@ impl Actor for RootSupervisor {
     ) -> Result<Self::State, ActorProcessingErr> {
         debug!("{myself:?} starting");
 
-        // --- NEW: healthcheck wiring ---
         let prepare_shutdown_port = Arc::new(OutputPort::<()>::default());
         prepare_shutdown_port.subscribe(myself.clone(), |()| {
             Some(SupervisorMessage::PrepareShutdown)
         });
 
-        // Observer -- Cassini-only, no graph dependency.
         let dep_cert_endpoints = vec![
             DepCertEndpoint::parse("cassini-ip-svc.polar.svc.cluster.local:8080:300")
                 .map_err(|e| ActorProcessingErr::from(e))?,
@@ -128,9 +109,36 @@ impl Actor for RootSupervisor {
         )
         .await
         .map_err(|e| ActorProcessingErr::from(e))?;
-        // --- end NEW ---
 
-        let tcp_client = polar::spawn_tcp_client(SERVICE_NAME, myself, |event| {
+        // Startup validation: fail fast if the credential config is
+        // missing/malformed. NOTE: not currently threaded into
+        // deserialize_and_dispatch's RepoObservationConfig forwarding --
+        // worth confirming with whoever wrote GitAgentConfig whether
+        // per-repo credential injection happens elsewhere (inside
+        // GitRepoSupervisor or its workers) or is still a TODO.
+        let config_path =
+            std::env::var("POLAR_GIT_AGENT_CONFIG").unwrap_or_else(|_| "git.yaml".to_string());
+        let git_agent_config = GitAgentConfig::load(std::path::Path::new(&config_path))
+            .map_err(|e| ActorProcessingErr::from(format!("failed to load {config_path}: {e}")))?;
+
+        let cache_root = match std::env::var("POLAR_CACHE_ROOT") {
+            Ok(path) => {
+                debug!("Using cache root at {}", path);
+                std::path::PathBuf::from(path)
+            }
+            Err(_) => {
+                let default_dir = ".polar/cache";
+                debug!(
+                    "No POLAR_CACHE_ROOT set, using default cache directory {}",
+                    default_dir
+                );
+                std::env::current_dir()
+                    .map(|d| d.join(default_dir))
+                    .map_err(|_| ActorProcessingErr::from("Failed to determine cache root"))?
+            }
+        };
+
+        let tcp_client = TcpClient::spawn(SERVICE_NAME, myself, |event| {
             Some(SupervisorMessage::ClientEvent { event })
         })
         .await?;
@@ -138,6 +146,8 @@ impl Actor for RootSupervisor {
         Ok(RootSupervisorState {
             tcp_client,
             repo_supervisor: None,
+            git_agent_config,
+            cache_root,
             healthcheck,
             draining: false,
         })
@@ -158,20 +168,15 @@ impl Actor for RootSupervisor {
                     actor_name,
                     actor_cell.get_id()
                 );
-
-                // --- NEW: exit on clean healthcheck termination (rejuvenation) ---
                 if actor_name == HEALTHCHECK_ACTOR_NAME && !state.draining {
                     state.draining = true;
-                    info!(
-                        "entering drain window before exiting for rejuvenation"
-                    );
+                    info!("entering drain window before exiting for rejuvenation");
                     let _ = myself
                         .send_after(ractor::concurrency::Duration::from_secs(DRAIN_WINDOW_SECS), || {
                             SupervisorMessage::ForceExit
                         })
                         .await;
                 }
-                // --- end NEW ---
             }
             SupervisionEvent::ActorFailed(actor_cell, e) => {
                 error!(
@@ -179,11 +184,6 @@ impl Actor for RootSupervisor {
                     actor_cell.get_name(),
                     actor_cell.get_id()
                 );
-
-                // BUG FIX: previously this only logged an error with no
-                // further action -- the pod would keep running indefinitely
-                // in a broken state after any child actor failure (e.g.
-                // repo_supervisor), with nothing to trigger a Job restart.
                 if !state.draining {
                     state.draining = true;
                     warn!("entering drain window before exit");
@@ -207,7 +207,6 @@ impl Actor for RootSupervisor {
     ) -> Result<(), ActorProcessingErr> {
         match message {
             SupervisorMessage::Heartbeat => {}
-            // --- NEW: real PrepareShutdown handling (was a no-op) ---
             SupervisorMessage::PrepareShutdown => {
                 info!("PrepareShutdown received");
                 if let Err(e) = state.healthcheck.cast(HealthCheckMessage::ShutdownAck) {
@@ -219,18 +218,14 @@ impl Actor for RootSupervisor {
                 warn!("drain window elapsed, exiting now");
                 std::process::exit(1);
             }
-            // --- end NEW ---
             SupervisorMessage::ClientEvent { event } => match event {
                 ClientEvent::Registered { .. } => {
-                    // --- NEW ---
                     let _ = state.healthcheck.cast(HealthCheckMessage::CassiniConnected);
-                    // --- end NEW ---
                     if let Err(e) = Self::init(myself.clone(), state).await {
                         myself.stop(Some(e.to_string()));
                     }
                 }
                 ClientEvent::MessagePublished { topic, payload, .. } => {
-                    // --- NEW: drain guard ---
                     if state.draining {
                         warn!(
                             "draining -- logging message on topic '{topic}' \
@@ -240,22 +235,13 @@ impl Actor for RootSupervisor {
                     } else {
                         Self::deserialize_and_dispatch(topic, payload, state)?
                     }
-                    // --- end NEW ---
                 }
-                // BUG FIX: was `myself.stop(Some(reason))`, which stops the
-                // actor cleanly -- main() then returns normally and the
-                // process exits 0. Under a Job with completions=1, an
-                // exit-0 pod is marked Completed and never retried, so a
-                // transient transport blip would silently and permanently
-                // end this agent with no restart and no visible failure.
                 ClientEvent::TransportError { reason } => {
                     warn!("Transport error occurred (non-fatal, awaiting reconnect): {reason}");
                     let _ = state.healthcheck.cast(HealthCheckMessage::CassiniDisconnected);
                 }
-                ClientEvent::ControlResponse { .. } => {
-                    error!("ControlResponse not implemented!");
-                }
-                _ => warn!("UNEXPECTED_MESSAGE_STR"),
+                ClientEvent::PublishAcknowledged { .. } => trace!("{event:?}"),
+                _ => (),
             },
         }
         Ok(())

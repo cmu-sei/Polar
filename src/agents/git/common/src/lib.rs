@@ -10,54 +10,6 @@ pub const GIT_REPO_PROCESSING_TOPIC: &str = "polar.git.processor";
  * ============================
  */
 
-/// Credentials for authenticating to a git remote over HTTPS.
-///
-/// # Design Notes
-///
-/// Token-based auth (GitHub, GitLab, Gitea, etc.) uses a single secret.
-/// The username field required by HTTP Basic Auth is a protocol artifact —
-/// the server does not validate it. The implementation handles this internally
-/// so callers never need to know or care about the dummy username convention.
-///
-/// Credentials are supplied per-task by the scheduler, not loaded at agent
-/// startup. `None` in `RepoObservationConfig::credentials` means the repo
-/// is public and no authentication is required.
-#[derive(Serialize, Deserialize, Archive, Debug, Clone)]
-pub enum GitHttpCredential {
-    /// Traditional username + password. Both fields are meaningful.
-    UserPass {
-        username: String,
-        password: String,
-    },
-
-    /// Token-based auth. The token is the only secret.
-    /// The implementation supplies a conventional dummy username
-    /// (e.g. "oauth2") to satisfy the HTTP Basic Auth protocol requirement.
-    Token {
-        token: String,
-    },
-}
-
-impl GitHttpCredential {
-    /// Resolve to a (username, password) pair suitable for git2's
-    /// `Cred::userpass_plaintext`. Callers should not need this directly —
-    /// use `into_git2_cred` instead.
-    pub fn as_userpass(&self) -> (&str, &str) {
-        match self {
-            GitHttpCredential::UserPass { username, password } => (username, password),
-            // "oauth2" is the conventional dummy username for token auth on
-            // GitHub, GitLab, Gitea, and most other forges. The server ignores it.
-            GitHttpCredential::Token { token } => ("oauth2", token),
-        }
-    }
-
-    /// Produce a git2 credential value for use in a RemoteCallbacks handler.
-    pub fn into_git2_cred(&self) -> Result<git2::Cred, git2::Error> {
-        let (username, password) = self.as_userpass();
-        git2::Cred::userpass_plaintext(username, password)
-    }
-}
-
 /* ============================
  * Shared types
  * ============================
@@ -129,6 +81,33 @@ impl RepoObservationConfig {
         Self {
             credentials: Some(credentials),
             ..Self::new(repo_id, repo_url, remotes, shallow_depth, refs)
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Archive, Debug, Clone)]
+pub enum GitHttpCredential {
+    /// Traditional username + password. Both fields are meaningful.
+    UserPass { username: String, password: String },
+
+    /// Token-based auth. The token is the only secret.
+    /// The implementation supplies a conventional dummy username
+    /// (e.g. "oauth2") to satisfy the HTTP Basic Auth protocol requirement.
+    Token {
+        token: String,
+        username: Option<String>,
+    },
+}
+
+impl GitHttpCredential {
+    pub fn into_git2_cred(self) -> Result<git2::Cred, git2::Error> {
+        match self {
+            GitHttpCredential::UserPass { username, password } => {
+                git2::Cred::userpass_plaintext(&username, &password)
+            }
+            GitHttpCredential::Token { token, username } => {
+                git2::Cred::userpass_plaintext(username.as_deref().unwrap_or("oauth2"), &token)
+            }
         }
     }
 }

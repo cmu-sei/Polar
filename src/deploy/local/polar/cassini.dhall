@@ -19,9 +19,7 @@ let cassini = values.cassini
 -- Deployment-local constants
 -- -------------------------------------------------------------------------
 
-let commitSha = env:CI_COMMIT_SHORT_SHA as Text ? "latest"
-
-let nuInitImage = "polar-nu-init:${commitSha}"
+let nuInitImage = values.nuInitImage
 
 let saTokenVolumeName   = C.saTokenVolumeName
 let certVolumeName       = C.certVolumeName

@@ -1,8 +1,8 @@
-use cassini_client::TcpClient;
 use cassini_types::ClientEvent;
 use chrono::Utc;
-use git_agent_common::{GIT_REPO_PROCESSING_TOPIC, GitRepositoryMessage};
+use git_agent_common::GitRepositoryMessage;
 use polar::SupervisorMessage;
+use polar::cassini::{CassiniClient, SubscribeRequest, TcpClient};
 use polar::graph::controller::GraphControllerActor;
 use polar::graph::controller::IntoGraphKey;
 use polar::graph::{
@@ -10,6 +10,7 @@ use polar::graph::{
     nodes::git::GitNodeKey,
 };
 use polar::health::{DepCertEndpoint, HealthCheckActor, HealthCheckArgs, HealthCheckMessage};
+use polar::topics::GIT_REPOSITORY_EVENTS;
 use ractor::async_trait;
 use ractor::{Actor, ActorProcessingErr, ActorRef, OutputPort, SupervisionEvent};
 use rkyv::rancor;
@@ -18,6 +19,8 @@ use tracing::{debug, error, info, trace, warn};
 
 const HEALTHCHECK_ACTOR_NAME: &str = "polar.healthcheck";
 const DRAIN_WINDOW_SECS: u64 = 5;
+
+const SERVICE_NAME: &str = "git.repositories.processor";
 
 pub struct GitRepoProcessingManagerState {
     pub tcp_client: TcpClient,
@@ -64,7 +67,7 @@ impl GitRepoProcessingManager {
                         Property("committer".into(), GraphValue::String(committer)),
                         Property(
                             "observed_at".into(),
-                            GraphValue::String(Utc::now().to_rfc3339()),
+                            GraphValue::I64(Utc::now().timestamp_millis()),
                         ),
                     ],
                 }))?;
@@ -196,7 +199,6 @@ impl Actor for GitRepoProcessingManager {
         prepare_shutdown_port.subscribe(myself.clone(), |()| {
             Some(SupervisorMessage::PrepareShutdown)
         });
-
         // This supervisor owns a GraphControllerActor directly (unlike
         // jira-processor, where children manage their own graph
         // connections), so real GraphAvailable/GraphOpFailed tracking
@@ -207,7 +209,6 @@ impl Actor for GitRepoProcessingManager {
             DepCertEndpoint::parse("polar-db-svc.polar-graph.svc.cluster.local:7687:300")
                 .map_err(|e| ActorProcessingErr::from(e))?,
         ];
-
         let (healthcheck, _) = HealthCheckActor::spawn_linked(
             Some(HEALTHCHECK_ACTOR_NAME.to_string()),
             HealthCheckActor,
@@ -222,20 +223,16 @@ impl Actor for GitRepoProcessingManager {
         .await
         .map_err(|e| ActorProcessingErr::from(e))?;
         // --- end NEW ---
-
-        let tcp_client =
-            polar::spawn_tcp_client(&format!("{GIT_REPO_PROCESSING_TOPIC}.tcp"), myself, |ev| {
-                Some(SupervisorMessage::ClientEvent { event: ev })
-            })
-            .await?;
-
+        let tcp_client = TcpClient::spawn(&format!("{SERVICE_NAME}.tcp"), myself, |ev| {
+            Some(SupervisorMessage::ClientEvent { event: ev })
+        })
+        .await?;
         let s = GitRepoProcessingManagerState {
             tcp_client,
             graph_controller: None,
             healthcheck,
             draining: false,
         };
-
         Ok(s)
     }
 
@@ -292,15 +289,11 @@ impl Actor for GitRepoProcessingManager {
                         myself.get_cell(),
                     )
                     .await?;
-
-                    debug!("Subscribing to topic {}", GIT_REPO_PROCESSING_TOPIC);
-                    state
-                        .tcp_client
-                        .cast(cassini_client::TcpClientMessage::Subscribe {
-                            topic: GIT_REPO_PROCESSING_TOPIC.to_string(),
-                            trace_ctx: None,
-                        })?;
-
+                    // subscribe to topic
+                    state.tcp_client.subscribe(SubscribeRequest {
+                        topic: GIT_REPOSITORY_EVENTS.to_string(),
+                        trace_ctx: None,
+                    })?;
                     state.graph_controller = Some(controller);
                 }
                 ClientEvent::MessagePublished { topic, payload, .. } => {
@@ -383,10 +376,10 @@ impl Actor for GitRepoProcessingManager {
 
 #[tokio::main]
 async fn main() {
-    polar::init_logging(GIT_REPO_PROCESSING_TOPIC.to_string());
+    polar::init_logging(SERVICE_NAME.to_string());
 
     let (_agent, handle) = Actor::spawn(
-        Some(format!("{GIT_REPO_PROCESSING_TOPIC}.supervisor")),
+        Some(format!("{SERVICE_NAME}.supervisor")),
         GitRepoProcessingManager,
         (),
     )

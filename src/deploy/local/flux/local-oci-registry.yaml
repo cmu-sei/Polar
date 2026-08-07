@@ -1,0 +1,57 @@
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: local-registry
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: registry
+  name: registry
+  namespace: local-registry
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: registry
+  template:
+    metadata:
+      labels:
+        app: registry
+    spec:
+      containers:
+        - env:
+            - name: REGISTRY_AUTH
+              value: ''
+            - name: REGISTRY_STORAGE_DELETE_ENABLED
+              value: 'true'
+          image: registry:2
+          name: registry
+          ports:
+            - containerPort: 5000
+              name: registry
+          readinessProbe:
+            httpGet:
+              path: /v2/
+              port: 5000
+            initialDelaySeconds: 2
+            periodSeconds: 5
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app: registry
+  name: registry
+  namespace: local-registry
+spec:
+  ports:
+    - name: registry
+      nodePort: 31500
+      port: 5000
+      targetPort: 5000
+  selector:
+    app: registry
+  type: NodePort

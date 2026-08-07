@@ -25,10 +25,6 @@ let functions  = Polar.functions
 -- They are implementation details of how this deployment wires pods together.
 -- -------------------------------------------------------------------------
 
-let commitSha = env:CI_COMMIT_SHORT_SHA as Text ? "latest"
-
-let nuInitImage = "polar-nu-init:${commitSha}"
-
 let saTokenVolumeName   = C.saTokenVolumeName
 let certVolumeName       = C.certVolumeName
 let initScriptVolumeName = C.initScriptVolumeName
@@ -46,8 +42,7 @@ let ociRegistrySecretValue = env:DOCKER_AUTH_JSON as Text ? "someJson"
 -- Well-known deployment/container names for linker and resolver.
 -- These match the names the graph uses to identify these agents.
 let artifactLinkerName     = "artifact-linker"
-let provenanceLinkerName   = "provenance-linker"
-let provenanceResolverName = "provenance-resolver"
+let OciResolverName = "oci-resolver"
 let registryResolverName   = "oci-registry-resolver"
 
 -- Security context applied to every container. Drop all capabilities,
@@ -142,6 +137,8 @@ let neo4jCAVolumeMount =
         }
       ]
 
+-- TODO: I don't particularly care for this, and am not sure how it made its way in. It makes much more sense to import the certificate by its path
+-- and read it as text. Dhall limits us here but we can work around it by at least setting up the file system prior to the import
 let neo4jBoltCASecret =
       functions.makeOpaqueSecret
         "neo4j-bolt-ca"
@@ -171,7 +168,7 @@ let neo4jEnvVars =
 let makeCertInit =
       \(cfg : Polar.agents.CertClientConfig.Type) ->
         ( functions.makeNuInitContainer
-            nuInitImage
+            values.nuInitImage
             cfg
             saTokenVolumeName
             certVolumeName
@@ -220,21 +217,6 @@ let kubeAgentServiceAccountToken =
       , type = Some "kubernetes.io/service-account-token"
       }
 
-let buildOrchestratorServiceAccountToken =
-      kubernetes.Secret::{
-      , apiVersion = "v1"
-      , kind       = "Secret"
-      , metadata   = kubernetes.ObjectMeta::{
-        , name      = Some values.buildOrchestrator.secretName
-        , namespace = Some C.polarNamespace
-        , annotations = Some
-          [ { mapKey   = "kubernetes.io/service-account.name"
-            , mapValue = values.buildOrchestrator.serviceAccountName
-            }
-          ]
-        }
-      , type = Some "kubernetes.io/service-account-token"
-      }
 
 -- -------------------------------------------------------------------------
 -- Service accounts
@@ -257,7 +239,6 @@ let gitlabConsumerSA = mkServiceAccount "gitlab-consumer-sa"
 let gitObserverSA    = mkServiceAccount "git-observer-sa"
 let gitConsumerSA    = mkServiceAccount "git-consumer-sa"
 let gitSchedulerSA   = mkServiceAccount "git-scheduler-sa"
-let linkerSA         = mkServiceAccount "linker-sa"
 let resolverSA       = mkServiceAccount "resolver-sa"
 let buildProcessorSA = mkServiceAccount "build-processor-sa"
 let kubeConsumerSA   = mkServiceAccount "kube-consumer-sa"
@@ -418,21 +399,6 @@ let gitAgentDeployment =
                 )
             , volumeMounts    = Some (baseMounts # neo4jCAVolumeMount)
             }
-          , kubernetes.Container::{
-            , name            = values.gitScheduler.name
-            , image           = Some values.gitScheduler.image
-            , imagePullPolicy = Some values.imagePullPolicy
-            , securityContext = Some dropAllCapSecurityContext
-            , env             = Some
-                ( envVars
-                  # functions.makeGraphEnv
-                      values.neo4jBoltAddr
-                      values.gitScheduler.graph
-                      graphSecretKeySelector
-                      (Some "/etc/neo4j-ca/ca.pem")
-                )
-            , volumeMounts    = Some (baseMounts # neo4jCAVolumeMount)
-            }
           ]
         , volumes = Some
             ( agentVolumes
@@ -544,29 +510,8 @@ let buildProcessorDeployment =
         }
 
 -- -------------------------------------------------------------------------
--- Linker and resolver
+-- resolver
 -- -------------------------------------------------------------------------
-
-let linkerDeployment =
-      withRejectSidecar
-        ( functions.makeDeployment
-            artifactLinkerName
-            kubernetes.PodSpec::{
-            , serviceAccountName = Some "linker-sa"
-            , initContainers     = Some [ makeCertInit values.linker.certClient ]
-            , containers =
-              [ kubernetes.Container::{
-                , name            = provenanceLinkerName
-                , image           = Some values.linker.image
-                , imagePullPolicy = Some values.imagePullPolicy
-                , securityContext = Some dropAllCapSecurityContext
-                , env             = Some (envVars # neo4jEnvVars)
-                , volumeMounts    = Some (baseMounts # neo4jCAVolumeMount)
-                }
-              ]
-            , volumes = Some (agentVolumes # neo4jCAVolume)
-            }
-        )
 
 let resolverVolumes =
       agentVolumes
@@ -597,7 +542,7 @@ let resolverDeployment =
             , initContainers     = Some [ makeCertInit values.resolver.certClient ]
             , containers =
               [ kubernetes.Container::{
-                , name            = provenanceResolverName
+                , name            = OciResolverName
                 , image           = Some values.resolver.image
                 , imagePullPolicy = Some values.imagePullPolicy
                 , securityContext = Some dropAllCapSecurityContext
@@ -618,7 +563,6 @@ in  [ kubernetes.Resource.ClusterRole    kubeAgentClusterRole
     , kubernetes.Resource.Deployment     gitAgentDeployment
     , kubernetes.Resource.Deployment     gitlabAgentDeployment
     , kubernetes.Resource.Deployment     kubeAgentDeployment
-    , kubernetes.Resource.Deployment     linkerDeployment
     , kubernetes.Resource.Deployment     resolverDeployment
     , kubernetes.Resource.RoleBinding    kubeAgentRoleBinding
     , kubernetes.Resource.Secret         gitlabSecret
@@ -634,6 +578,5 @@ in  [ kubernetes.Resource.ClusterRole    kubeAgentClusterRole
     , kubernetes.Resource.ServiceAccount gitlabObserverSA
     , kubernetes.Resource.ServiceAccount kubeAgentServiceAccount
     , kubernetes.Resource.ServiceAccount kubeConsumerSA
-    , kubernetes.Resource.ServiceAccount linkerSA
     , kubernetes.Resource.ServiceAccount resolverSA
     ]

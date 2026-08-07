@@ -8,3 +8,5 @@ license.workspace = true
 git2.workspace = true
 rkyv = { workspace = true }
 polar.workspace = true
+serde_yaml.workspace = true
+serde.workspace = true

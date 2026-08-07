@@ -28,10 +28,7 @@ let configContent =
 -- -------------------------------------------------------------------------
 -- Deployment-local constants
 -- -------------------------------------------------------------------------
-
-let commitSha = env:CI_COMMIT_SHORT_SHA as Text ? "latest"
-
-let nuInitImage = "polar-nu-init:${commitSha}"
+let nuInitImage = values.nuInitImage
 
 let certTokenExpiry = 3600
 

@@ -1,4 +1,3 @@
-use cassini_client::{TcpClient, TcpClientMessage};
 use cassini_types::ClientEvent;
 use k8s_openapi::api::apps::v1::{Deployment, ReplicaSet};
 use k8s_openapi::api::batch::v1::Job;
@@ -9,14 +8,15 @@ use kube::runtime::{watcher, watcher::Event};
 use kube::{Api, Client, api::ListParams};
 use kube_common::{KIND_KUSTOMIZATION, KIND_OCI_REPOSITORY};
 use polar::health::{DepCertEndpoint, HealthCheckActor, HealthCheckArgs, HealthCheckMessage};
-use polar::{SupervisorMessage, spawn_tcp_client};
-use ractor::concurrency::Duration;
 use ractor::{Actor, ActorProcessingErr, ActorRef, OutputPort, SupervisionEvent, async_trait};
+use ractor::concurrency::Duration;
 use serde_json::to_value;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 use tracing::{instrument, trace};
+use polar::cassini::TcpClient;
+use polar::SupervisorMessage;
 
 use crate::{
     GlobalWatcherState, KustomizationWatcher, NamespacedWatcherState, OciRepositoryWatcher,
@@ -35,7 +35,7 @@ pub struct ClusterObserverSupervisor;
 
 pub struct ClusterObserverSupervisorState {
     kube_client: kube::Client,
-    tcp_client: ActorRef<TcpClientMessage>,
+    tcp_client: TcpClient,
     healthcheck: ActorRef<HealthCheckMessage>,
     #[allow(dead_code)]
     node_watcher: Option<Watcher>,
@@ -57,7 +57,7 @@ impl ClusterObserverSupervisor {
             Ok(kube_client) => {
                 debug!("Kubernetes client initialized");
 
-                let tcp_client = spawn_tcp_client(TCP_CLIENT_NAME, myself, |event| {
+                let tcp_client = TcpClient::spawn(TCP_CLIENT_NAME, myself, |event| {
                     Some(SupervisorMessage::ClientEvent { event })
                 })
                 .await?;
@@ -182,8 +182,7 @@ impl Actor for ClusterObserverSupervisor {
                         w.stop(Some("tcp_client_respawn".to_string()));
                     }
 
-                    #[allow(deprecated)]
-                    match spawn_tcp_client(TCP_CLIENT_NAME, myself.clone(), |event| {
+                    match TcpClient::spawn(TCP_CLIENT_NAME, myself.clone(), |event| {
                         Some(SupervisorMessage::ClientEvent { event })
                     })
                     .await

@@ -22,15 +22,18 @@
 */
 
 use crate::GitlabConsumerState;
-use cassini_client::TcpClientMessage;
+
 use common::{
     USER_CONSUMER_TOPIC,
     types::{GitlabData, GitlabEnvelope},
 };
 use gitlab_queries::{projects::ProjectMember, users::UserCoreFragment};
-use polar::graph::{
-    controller::{GraphControllerMsg, GraphOp, GraphValue, IntoGraphKey, Property},
-    nodes::gitlab::GitlabNodeKey,
+use polar::{
+    cassini::{CassiniClient, SubscribeRequest},
+    graph::{
+        controller::{GraphControllerMsg, GraphOp, GraphValue, IntoGraphKey, Property},
+        nodes::gitlab::GitlabNodeKey,
+    },
 };
 use ractor::{Actor, ActorProcessingErr, ActorRef, async_trait};
 use tracing::{debug, info};
@@ -221,7 +224,7 @@ impl Actor for GitlabUserConsumer {
         state: Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
         // fire off subscribe message
-        state.tcp_client.cast(TcpClientMessage::Subscribe {
+        state.tcp_client.subscribe(SubscribeRequest {
             topic: USER_CONSUMER_TOPIC.to_string(),
             trace_ctx: None,
         })?;

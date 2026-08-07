@@ -22,18 +22,19 @@
 */
 
 use crate::GitlabConsumerState;
-use cassini_client::{TcpClient, TcpClientMessage};
+use cassini_client::{OfflineBehavior, PublishRequest};
 use cassini_types::WireTraceCtx;
 use common::REPOSITORY_CONSUMER_TOPIC;
 use common::types::{GitlabData, GitlabEnvelope, GitlabPackageFile};
 use gitlab_queries::projects::{ContainerRepository, ContainerRepositoryTag, Package};
 
+use polar::cassini::{CassiniClient, SubscribeRequest, TcpClient};
 use polar::graph::controller::GraphController;
 use polar::graph::{
     controller::{GraphControllerMsg, GraphOp, GraphValue, IntoGraphKey, Property},
     nodes::gitlab::GitlabNodeKey,
 };
-use polar::{PROVENANCE_LINKER_TOPIC, ProvenanceEvent, RkyvError};
+use polar::{DiscoverySourceRef, PROVENANCE_LINKER_TOPIC, ProvenanceEvent, RkyvError};
 use ractor::{Actor, ActorProcessingErr, ActorRef, async_trait};
 use rkyv::to_bytes;
 use tracing::{debug, info};
@@ -116,10 +117,11 @@ impl GitlabRepositoryConsumer {
 
             let payload = to_bytes::<RkyvError>(&ev)?.to_vec();
 
-            tcp_client.cast(TcpClientMessage::Publish {
+            tcp_client.publish(PublishRequest {
                 topic: PROVENANCE_LINKER_TOPIC.to_string(),
                 payload,
                 trace_ctx: WireTraceCtx::from_current_span(),
+                offline_behavior: OfflineBehavior::default(),
             })?;
         }
 
@@ -141,6 +143,9 @@ impl GitlabRepositoryConsumer {
             polar::emit_provenance_event(
                 ProvenanceEvent::OCIArtifactDiscovered {
                     uri: tag.location.clone(),
+                    source_ref: DiscoverySourceRef::OCIRepository {
+                        repo_uri: tag.location.clone(),
+                    },
                 },
                 tcp_client,
             )?;
@@ -316,12 +321,10 @@ impl Actor for GitlabRepositoryConsumer {
         state: Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
         // fire off subscribe message
-        state
-            .tcp_client
-            .cast(cassini_client::TcpClientMessage::Subscribe {
-                topic: REPOSITORY_CONSUMER_TOPIC.to_string(),
-                trace_ctx: None,
-            })?;
+        state.tcp_client.subscribe(SubscribeRequest {
+            topic: REPOSITORY_CONSUMER_TOPIC.to_string(),
+            trace_ctx: None,
+        })?;
 
         debug!("{myself:?} starting");
         Ok(state)

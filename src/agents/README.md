@@ -63,9 +63,6 @@ It is possible to build individual or multiple components at a time. Below are s
 
 ```sh
 
-# Generate TLS Certificates, you need this to get run the broker and any agents.
-nix build .#tlsCerts -o certs
-
 # build the entire cargo workspace
 nix build -o polar
 
@@ -73,22 +70,7 @@ nix build -o polar
 nix build .#polarPkgs.gitlabObserver.observer -o gitlab-observer
 nix build .#polarPkgs.gitlabConsumer.consumer -o gitlab-consumer
 
-
 ```
-
-## Manual Steps
-
-### mTlS Setup
-If you can't or won't use `nix`, SSL files will need to be generated for the agents manually, or, you will have to provide your own certificates. This project formally used rabbitmq as it's message broker and one of its tools [tls-gen](https://github.com/rabbitmq/tls-gen), to create our self signed certificate files for testing. Developers can do so as well.
-
-There are instructions in the `basic` directory in that repo for how to do so, but here are the basics:
-   1. Clone the repo and change into the `basic` directory
-   2. Run `make CN=polar` to generate the basic certificates.
-   3. Copy the contents of the created `results` directory to somewhere the they can be easily found.
-   For example,
-   `
-      1. `mkdir $PROJECT_ROOT/conf/gitlab_compose/ssl`
-      2. `cp results/* $PROJECT_ROOT/conf/certs`
 
 ## Running Unit and Integration Tests
 

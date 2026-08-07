@@ -34,8 +34,8 @@ def main [] {
             ($layers | path join "3-workloads/agents/kube/main.nu")
             ($layers | path join "3-workloads/agents/git/main.nu")
             ($layers | path join "3-workloads/agents/jira/main.nu")
-            ($layers | path join "3-workloads/agents/provenance/main.nu")
-            ($layers | path join "3-workloads/agents/build/main.nu")
+            ($layers | path join "3-workloads/agents/build-processor/main.nu")
+            ($layers | path join "3-workloads/agents/resolver/main.nu")
             ($layers | path join "3-workloads/agents/scheduler/main.nu")
             ($layers | path join "3-workloads/agents/openapi/main.nu")
         ]
@@ -56,7 +56,6 @@ def main [] {
             "cassini.yaml"
             "jaeger.yaml"
             "kube-agent-rbac.yaml"
-            "build-agent-rbac.yaml"
             "gitlab-observer.yaml"
             "gitlab-consumer.yaml"
             "kube-observer.yaml"
@@ -66,10 +65,8 @@ def main [] {
             "git-scheduler.yaml"
             "jira-observer.yaml"
             "jira-processor.yaml"
-            "provenance-linker.yaml"
-            "provenance-resolver.yaml"
-            "build-orchestrator.yaml"
             "build-processor.yaml"
+            "resolver.yaml"
             "scheduler-observer.yaml"
             "scheduler-processor.yaml"
             "openapi-observer.yaml"

@@ -72,6 +72,8 @@ pub async fn subscribe_to_topic(
     })
 }
 
+// TODO: remove, graph controllers have their own internal copy of this
+#[deprecated]
 pub fn get_neo_config() -> Config {
     let database_name = std::env::var("GRAPH_DB")
         .expect("Expected to get a neo4j database. GRAPH_DB variable not set.");

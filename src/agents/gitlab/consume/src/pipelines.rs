@@ -22,8 +22,6 @@
 */
 
 use crate::GitlabConsumerState;
-use cassini_client::TcpClient;
-use cassini_client::TcpClientMessage;
 use chrono::Utc;
 use common::PIPELINE_CONSUMER_TOPIC;
 use common::types::GitlabData;
@@ -31,6 +29,9 @@ use common::types::GitlabEnvelope;
 use gitlab_queries::projects::CiJobArtifact;
 use gitlab_queries::projects::GitlabCiJob;
 use polar::ProvenanceEvent;
+use polar::cassini::CassiniClient;
+use polar::cassini::SubscribeRequest;
+use polar::cassini::TcpClient;
 use polar::graph::controller::GraphController;
 use polar::graph::{
     controller::{GraphControllerMsg, GraphOp, GraphValue, IntoGraphKey, Property},
@@ -317,7 +318,7 @@ impl Actor for GitlabPipelineConsumer {
         state: GitlabConsumerState,
     ) -> Result<Self::State, ActorProcessingErr> {
         // fire off subscribe message
-        state.tcp_client.cast(TcpClientMessage::Subscribe {
+        state.tcp_client.subscribe(SubscribeRequest {
             topic: PIPELINE_CONSUMER_TOPIC.to_string(),
             trace_ctx: None,
         })?;

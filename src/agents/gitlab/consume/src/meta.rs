@@ -1,14 +1,16 @@
 use crate::{GitlabConsumerState, UNKNOWN_FILED};
-use cassini_client::TcpClientMessage;
 use common::{
     METADATA_CONSUMER_TOPIC,
     types::{GitlabData, GitlabEnvelope},
 };
 use gitlab_queries::LicenseHistoryEntry;
 
-use polar::graph::{
-    controller::{GraphControllerMsg, GraphOp, GraphValue, IntoGraphKey, Property},
-    nodes::gitlab::GitlabNodeKey,
+use polar::{
+    cassini::{CassiniClient, SubscribeRequest},
+    graph::{
+        controller::{GraphControllerMsg, GraphOp, GraphValue, IntoGraphKey, Property},
+        nodes::gitlab::GitlabNodeKey,
+    },
 };
 use ractor::{Actor, ActorProcessingErr, ActorRef};
 use tracing::debug;
@@ -88,7 +90,7 @@ impl Actor for MetaConsumer {
         state: Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
         debug!("{myself:?} starting, connecting to broker");
-        state.tcp_client.cast(TcpClientMessage::Subscribe {
+        state.tcp_client.subscribe(SubscribeRequest {
             topic: METADATA_CONSUMER_TOPIC.to_string(),
             trace_ctx: None,
         })?;

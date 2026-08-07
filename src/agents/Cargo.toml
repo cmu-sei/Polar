@@ -34,13 +34,14 @@ members = [
     "cassini/test/producer",
     "cassini/test/sink",
     "cassini/types",
-    "config-ops",
     "git/common",
     "gitlab/common",
     "gitlab/consume",
     "gitlab/observe",
     "gitlab/query",
     "gitlab/schema",
+    "git/observe",
+    "git/process",
     "git/observe",
     "git/process",
     "git/scheduler",
@@ -59,19 +60,16 @@ members = [
     "polar-healthcheck",
     "polar-init",
     "policy-config",
-    "provenance/linker",
-    "provenance/provenance-common",
-    "provenance/resolver",
+    "resolver",
+    "build-processor",
     "polar-scheduler/common",
     "polar-scheduler/observer",
     "polar-scheduler/processor",
     "polar-scheduler/tests/mock-agent",
     "polar-scheduler/tests/mock-adhoc-agent",
-    "build-orchestrator/core",
-    "build-orchestrator/agent",
-    "build-orchestrator/k8s", "build-orchestrator/processor",
-    "build-orchestrator/podman"
-, "cert-issuer/server","cert-issuer/client", "cert-issuer/common"]
+    "build-processor",
+    "cert-issuer/server","cert-issuer/client", "cert-issuer/common"
+]
 
 [workspace.package]
 version = "1.0.0"
@@ -187,11 +185,7 @@ kube-common = { path = "kubernetes/common" }
 polar = { path = "lib" }
 polar-health = { path = "polar-health" }
 polar-init = { path = "polar-init" }
-provenance-common = { path = "provenance/provenance-common" }
 openapi-common = { path = "openapi/common" }
-orchestrator-core = { path = "build-orchestrator/core" }
-orchestrator-backend-k8s = { path = "build-orchestrator/k8s" }
-orchestrator-backend-podman = { path = "build-orchestrator/podman" }
 time = { version = "0.3.47", features = ["serde"]}
 wiremock = "0.6"
 x509-parser = { version = "0.16", features = ["verify"]}

@@ -1,6 +1,6 @@
 use async_trait::async_trait;
+pub use cassini_client::{MessageQueue, OfflineBehavior, PublishRequest, QueueEntry};
 use cassini_client::{TCPClientConfig, TcpClientActor, TcpClientArgs, TcpClientMessage};
-pub use cassini_client::{QueueEntry, MessageQueue, OfflineBehavior, PublishRequest};
 use cassini_types::{ClientEvent, ControlOp, WireTraceCtx};
 use ractor::{Actor, ActorProcessingErr, ActorRef, OutputPort};
 
@@ -133,7 +133,8 @@ impl CassiniClient for TcpClient {
                             timestamp: chrono::Utc::now().to_rfc3339(),
                             attempts: 0,
                         };
-                        queue.append(&entry)
+                        queue
+                            .append(&entry)
                             .map_err(|e| CassiniClientError::Serialization(e.to_string()))
                     } else {
                         Err(CassiniClientError::BrokerUnavailable)

@@ -22,9 +22,11 @@
 */
 
 use crate::{GitlabConsumerState, UNKNOWN_FILED};
-use cassini_client::{TcpClient, TcpClientMessage};
+use cassini_client::{OfflineBehavior, PublishRequest};
+use polar::cassini::{CassiniClient, SubscribeRequest, TcpClient};
+use polar::topics::GIT_REPOSITORY_DISCOVERED;
 use polar::{
-    GIT_REPO_DISCOGERY_TOPIC, GitRepositoryDiscoveredEvent,
+    GitRepositoryDiscoveredEvent,
     graph::{
         controller::{
             GraphController, GraphControllerMsg, GraphOp, GraphValue, IntoGraphKey, Property,
@@ -108,6 +110,8 @@ impl GitlabProjectConsumer {
         Ok(())
     }
 
+    // TODO: Make fn part of the public std library
+    // TODO: remove gitlab project as part of signature, just take optional urls and construct the event
     fn emit_repo_discovered(
         tcp_client: &TcpClient,
         project: &Project,
@@ -123,10 +127,11 @@ impl GitlabProjectConsumer {
 
         let payload = to_bytes::<rkyv::rancor::Error>(&event)?.to_vec();
         trace!("emitting event {event:?}");
-        tcp_client.cast(TcpClientMessage::Publish {
-            topic: GIT_REPO_DISCOGERY_TOPIC.to_string(),
+        tcp_client.publish(PublishRequest {
+            topic: GIT_REPOSITORY_DISCOVERED.to_string(),
             payload,
             trace_ctx: None,
+            offline_behavior: OfflineBehavior::default(),
         })?;
 
         Ok(())
@@ -146,7 +151,7 @@ impl Actor for GitlabProjectConsumer {
     ) -> Result<Self::State, ActorProcessingErr> {
         debug!("{myself:?} starting");
 
-        state.tcp_client.cast(TcpClientMessage::Subscribe {
+        state.tcp_client.subscribe(SubscribeRequest {
             topic: PROJECTS_CONSUMER_TOPIC.to_string(),
             trace_ctx: None,
         })?;

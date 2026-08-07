@@ -158,9 +158,7 @@
           openApiObserverImage  = polarPkgs.webAgent.observerImage;
           openApiProcessorImage = polarPkgs.webAgent.processorImage;
 
-          # ── Provenance agent ─────────────────────────────────────────────────
-          provenanceLinkerImage   = polarPkgs.provenance.linkerImage;
-          provenanceResolverImage = polarPkgs.provenance.resolverImage;
+          ociResolverImage = polarPkgs.ociResolver.resolverImage;
 
           # ── Scheduler agent ──────────────────────────────────────────────────
           schedulerProcessorImage = polarPkgs.scheduler.processorImage;
@@ -175,9 +173,7 @@
           gitProcessorImage    = polarPkgs.gitAgent.processorImage;
           gitSchedulerImage    = polarPkgs.gitAgent.schedulerImage;
 
-          # ── Build orchestrator ───────────────────────────────────────────────
-          orchestratorImage    = polarPkgs.buildOrchestrator.orchestratorImage;
-          buildProcessorImage  = polarPkgs.buildOrchestrator.buildProcessorImage;
+          buildProcessorImage  = polarPkgs.buildProcessor.buildProcessorImage;
           cloneImage           = polarPkgs.buildOrchestrator.cloneImage;
 
           # ── Infrastructure containers ─────────────────────────────────────────

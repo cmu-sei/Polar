@@ -4,9 +4,10 @@ use git_agent_common::{ConfigurationEvent, GIT_REPO_CONFIG_EVENTS, RepoObservati
 use neo4rs::{Graph, query};
 use polar::health::{DepCertEndpoint, HealthCheckActor, HealthCheckArgs, HealthCheckMessage};
 use polar::{
-    GIT_REPO_DISCOGERY_TOPIC, GitRepositoryDiscoveredEvent, RkyvError, SupervisorMessage,
+    GitRepositoryDiscoveredEvent, RkyvError, SupervisorMessage,
     UNEXPECTED_MESSAGE_STR, get_neo_config, graph::nodes::git::RepoId,
 };
+use polar::topics::GIT_REPOSITORY_DISCOVERED;
 use ractor::{Actor, ActorProcessingErr, ActorRef, OutputPort, SupervisionEvent, async_trait};
 use rkyv::{from_bytes, rancor, to_bytes};
 use std::sync::Arc;
@@ -35,7 +36,7 @@ impl RootSupervisor {
     ) -> Result<(), ActorProcessingErr> {
         debug!("{myself:?} initializing");
         state.tcp_client.cast(TcpClientMessage::Subscribe {
-            topic: GIT_REPO_DISCOGERY_TOPIC.to_string(),
+            topic: GIT_REPOSITORY_DISCOVERED.to_string(),
             trace_ctx: None,
         })?;
         Ok(())

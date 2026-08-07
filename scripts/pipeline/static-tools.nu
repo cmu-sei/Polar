@@ -18,7 +18,7 @@
 # The shebang above requires `nu` on PATH. In the dev container, `nu` is
 # provided by the Nix environment — no additional configuration needed.
 
-use pipeline/core.nu
+use ./core
 
 const COMPONENT = "polar-static-analysis"
 # ---------------------------------------------------------------------------

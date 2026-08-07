@@ -11,7 +11,7 @@ use cassini_types::{
 use ractor::{
     Actor, ActorProcessingErr, ActorRef, SupervisionEvent, async_trait, registry::where_is,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, hash_map::Entry};
 use std::sync::Arc;
 use tracing::{debug, error, info, trace, trace_span, warn};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
@@ -140,9 +140,20 @@ impl Actor for SessionManager {
                 state.listener_mgr = Some(listener_mgr);
                 debug!("SessionManager received listener manager ref");
             }
-            _ => {
-                warn!(?message, "Received unexpected message");
+            BrokerMessage::DisconnectRequest {
+                registration_id, ..
+            } => {
+                if let Some(registration_id) = registration_id {
+                    match state.sessions.entry(registration_id) {
+                        Entry::Occupied(entry) => {
+                            entry.remove();
+                        }
+                        Entry::Vacant(_) => (),
+                    }
+                }
             }
+
+            _ => (),
         }
 
         Ok(())

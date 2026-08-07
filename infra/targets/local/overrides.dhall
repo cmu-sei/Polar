@@ -56,16 +56,14 @@
   , scheduler = { image = "git-scheduler:latest" }
   }
 
-, provenance =
+, build-processor =
   { imagePullSecrets = [] : List { name : Optional Text }
-  , linker   = { image = "provenance-linker:latest" }
-  , resolver = { image = "provenance-resolver:latest" }
+  , processor = { image = "build-processor:latest" }
   }
 
-, build =
+, resolver =
   { imagePullSecrets = [] : List { name : Optional Text }
-  , orchestrator = { image = "build-orchestrator:latest" }
-  , processor    = { image = "build-processor:latest" }
+  , resolver = { image = "oci-resolver:latest" }
   }
 
 , scheduler =
