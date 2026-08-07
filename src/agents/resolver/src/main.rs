@@ -356,12 +356,13 @@ impl ResolverAgent {
     }
 
     fn build_registry_candidates(base: &str) -> Vec<String> {
-        // TODO: Ideally, we wouldn't support http blindly, for clear security reasons, but adding TLS support
-        // brings in a number of issues that we'll have to push the envolope on
-        // So for now, include http to support quick local testing and move on.
+        // Intentionally no http:// candidate here: registry credential lookups
+        // must not silently fall back to a cleartext transport. If a genuine
+        // need for an HTTP-only registry (e.g. local dev) comes up, gate it
+        // behind explicit configuration rather than adding it back
+        // unconditionally. See #218.
         vec![
             base.to_string(),
-            format!("http://{}", base), // TODO: remove this and only add it based on some configuration...
             format!("https://{}", base),
             format!("https://{}/", base),
             format!("{}/v1/", base),
@@ -531,8 +532,7 @@ async fn main() {
 
 #[cfg(test)]
 mod tests {
-    use crate::{Reference, ResolverAgent};
-    use std::str::FromStr;
+    use crate::ResolverAgent;
 
     #[test]
     fn normalize_registry_host_variants() {
@@ -549,7 +549,7 @@ mod tests {
     }
 
     #[test]
-    fn build_registry_candidates_contains_expected_variants() {
+    fn build_registry_candidates_excludes_http() {
         let candidates = ResolverAgent::build_registry_candidates("example.com");
 
         assert!(candidates.contains(&"example.com".to_string()));
