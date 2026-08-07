@@ -120,9 +120,9 @@ log = "0.4.29"                                            # used in jira/observe
 notify = "7"
 neo4rs = { version = "0.9.0-rc.8", git = "https://github.com/neo4j-labs/neo4rs", tag = "v0.9.0-rc.8" }
 oci-client = "0.15.0"                                     # used in resolver
-opentelemetry = "0.31.0"
-opentelemetry-otlp = "0.31.0"
-opentelemetry_sdk = "0.31.0"
+opentelemetry = "0.32.0"
+opentelemetry-otlp = "0.32.0"
+opentelemetry_sdk = "0.32.1"
 parse_link_header = "0.4"
 proptest = "1.10.0"                                       # only in policy-config dev, but ok
 ractor = { version = "0.15.10", features = ["async-trait"] }
@@ -150,7 +150,7 @@ tokio-rustls = "0.26.4"
 tokio-util = {version = "0.7.18", features = ["compat"]}
 tracing = "0.1.44"
 tracing-glog = "0.4.1"
-tracing-opentelemetry = "0.32.1"
+tracing-opentelemetry = "0.33.0"
 tracing-subscriber = { version = "0.3.22", features = ["std", "env-filter"] }
 url = "2.5.8"
 urlencoding = "2.1.3"
