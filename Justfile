@@ -468,6 +468,11 @@ polar-init:
     nix build {{_nix_flags}} ".#packages.{{platform}}.polarInitImage" -o result-polar-init
     podman load -i result-polar-init
 
+ace:
+    echo "Building ace container..."
+    nix build {{_nix_flags}} ".#packages.{{platform}}.aceImage" -o result-ace
+    podman load -i result-ace
+
 git-server:
     nix build {{_nix_flags}} ".#packages.{{platform}}.gitServerImage" -o result-git-server-image
     podman load -i result-git-server-image
@@ -948,6 +953,7 @@ cluster-build-all:
     just build-agents all
     just nu-init
     just polar-init
+    just ace
 
 # Load only the images needed by the local-minimal target:
 # neo4j, cassini, cert-issuer, polar-init, kube observer/consumer, jira observer/processor.
@@ -976,6 +982,7 @@ cluster-load-minimal neo4j_result=_neo4j_result:
     _load ./result-cert-client
     _load ./result-polar-init
     _load ./result-kube-observer
+    _load ./result-ace
     _load ./result-kube-consumer
     _load ./result-jira-observer
     _load ./result-jira-processor
@@ -990,6 +997,7 @@ cluster-load-minimal neo4j_result=_neo4j_result:
     _tag docker.io/library/cert-issuer:latest             docker.io/library/cert-issuer:latest
     _tag docker.io/library/polar-cert-client:latest      docker.io/library/polar-cert-client:latest
     _tag docker.io/library/polar-init:latest             docker.io/library/polar-init:latest
+    _tag docker.io/library/ace-viz:latest         docker.io/library/ace-viz:latest
     _tag docker.io/library/polar-nu-init:latest          docker.io/library/polar-nu-init:latest
     echo "Minimal images loaded and tagged."
 
@@ -1047,6 +1055,7 @@ cluster-load-all neo4j_result=_neo4j_result:
     _load ./result-build-processor
     _load ./result-nu-init
     _load ./result-polar-init
+    _load ./result-ace
     # Retag to match manifest image references
     _tag docker.io/library/cassini:latest                       docker.io/library/cassini:latest
     _tag docker.io/library/harness-producer:latest              docker.io/library/harness-producer:latest
@@ -1071,6 +1080,7 @@ cluster-load-all neo4j_result=_neo4j_result:
     _tag docker.io/library/cert-issuer:latest                   docker.io/library/cert-issuer:latest
     _tag docker.io/library/polar-cert-client:latest             docker.io/library/polar-cert-client:latest
     _tag docker.io/library/polar-init:latest                    docker.io/library/polar-init:latest
+    _tag docker.io/library/ace-viz:latest                        docker.io/library/ace-viz:latest
     echo "Core images loaded and tagged."
 
 # Render manifests for the local cluster.

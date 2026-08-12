@@ -82,6 +82,7 @@ pub struct HealthState {
     pub status: HealthStatus,
     /// Unix timestamp (seconds) when this state was written.
     pub timestamp: u64,
+    #[serde(default)]
     pub cassini_connected: bool,
     pub graph_connected: bool,
 }

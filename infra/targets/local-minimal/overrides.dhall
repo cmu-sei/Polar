@@ -13,6 +13,10 @@
   , serviceType = "NodePort"
   }
 
+, ace =
+  { imagePullSecrets = [] : List { name : Optional Text }
+  }
+
 , neo4j =
   { image              = "nix-neo4j:latest"
   , certIssuerUrl      = "http://cert-issuer.polar.svc.cluster.local:8443"

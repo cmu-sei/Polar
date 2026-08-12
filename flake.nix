@@ -28,9 +28,22 @@
     nix-container-lib.url = "github:daveman1010221/nix-container-lib";
     nix-container-lib.inputs.nixpkgs.follows      = "nixpkgs";
     nix-container-lib.inputs.flake-utils.follows  = "flake-utils";
+
+    pyproject-nix.url = "github:pyproject-nix/pyproject.nix";
+    pyproject-nix.inputs.nixpkgs.follows = "nixpkgs";
+
+    uv2nix.url = "github:pyproject-nix/uv2nix";
+    uv2nix.inputs.nixpkgs.follows = "nixpkgs";
+    uv2nix.inputs.pyproject-nix.follows = "pyproject-nix";
+
+    pyproject-build-systems.url = "github:pyproject-nix/build-system-pkgs";
+    pyproject-build-systems.inputs.nixpkgs.follows = "nixpkgs";
+    pyproject-build-systems.inputs.pyproject-nix.follows = "pyproject-nix";
+    pyproject-build-systems.inputs.uv2nix.follows = "uv2nix";
   };
   outputs = { self, nixpkgs, crane, rust-overlay, flake-utils, advisory-db,
-            myNeovimOverlay, staticanalysis, dotacat, nix-container-lib, ... }@inputs:
+            myNeovimOverlay, staticanalysis, dotacat, nix-container-lib,
+            pyproject-nix, uv2nix, pyproject-build-systems, ... }@inputs:
     flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = import nixpkgs {
@@ -100,6 +113,15 @@
 
         containerPkgs = import ./src/containers/workspace.nix {
           inherit pkgs lib nix-container-lib inputs system;
+        };
+
+        # ── ACE dashboard (Python, uv2nix, nix-container-lib) ──────────────────
+        acePkgs = import ./src/ace/package.nix {
+          inherit pkgs lib system pyproject-nix uv2nix pyproject-build-systems nix-container-lib;
+          inputs = {
+            inherit staticanalysis dotacat myNeovimOverlay rust-overlay;
+          };
+          healthcheckDrv = polarPkgs.healthcheck;
         };
 
         commitMsgHooksPkg = import ./src/git-hooks/package.nix {
@@ -180,6 +202,9 @@
           nuInitImage = polarPkgs.nuInit.image;
           gitServerImage = polarPkgs.gitServer.image;
           polarInitImage = polarPkgs.polarInit.image;
+
+          # ── ACE dashboard ────────────────────────────────────────────────────
+          aceImage = acePkgs.image;
         };
 
         devShells.default = container.devShell.overrideAttrs (old: {

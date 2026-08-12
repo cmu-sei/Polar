@@ -1,0 +1,90 @@
+/* Dropdown input box (stay dark) */
+.Select-control {
+    background-color: #E2E8F0 !important;
+    color: #1E293B !important;
+    border-color: white !important;
+}
+
+/* Open dropdown menu background */
+.Select-menu-outer {
+    background-color: white !important;
+    color: black !important;
+}
+
+.Select-value-label{
+	color: #1E293B !important;
+}
+
+/* Individual options in dropdown */
+.Select-option {
+    background-color: white !important;
+    color: black !important;
+}
+
+/* Hover/selected option */
+.Select-option.is-focused {
+    background-color: #3B82F6 !important;
+    color: black !important;
+}
+
+.Select-option.is-selected {
+    background-color: #E2E8F0 !important;
+    color: black !important;
+}
+
+/* Outer wrapper */
+.DateInput {
+    background-color: #E2E8F0;
+    border-radius: 6px;
+    width: 100%;
+}
+
+/* The actual text input inside the datepicker */
+.DateInput_input {
+    background-color: #E2E8F0;
+    color: #1E293B;          /* dark text so it's readable on light bg */
+    font-size: 14px;
+    border: 1px solid white;
+    border-radius: 6px;
+    height: 42px;
+    line-height: 42px;
+    padding: 0 10px;
+    width: 100%;
+    box-sizing: border-box;
+}
+
+/* Remove the default blue focus underline */
+.DateInput_input__focused {
+    outline: none;
+    border: 1px solid #81A1C1;  /* optional: subtle highlight on focus */
+}
+
+/* The calendar icon button */
+.SingleDatePickerInput_calendarIcon {
+    background-color: #E2E8F0;
+    padding: 0 8px;
+}
+
+/* Selected date circle */
+.CalendarDay__selected,
+.CalendarDay__selected:active,
+.CalendarDay__selected:hover {
+    background-color: #3B82F6;  /* swap in your accent color */
+    border-color: #3B82F6;
+    color: white;
+}
+
+/* Hover state on unselected days */
+.CalendarDay__default:hover {
+    background-color: #CBD5E1;
+    border-color: #CBD5E1;
+    color: #1E293B;
+}
+
+/* Today's date highlight (optional) */
+.CalendarDay__today {
+    background-color: #E2E8F0;
+    border-color: #81A1C1;
+    color: #1E293B;
+    font-weight: bold;
+}

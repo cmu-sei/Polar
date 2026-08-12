@@ -47,3 +47,15 @@ user.sops.yaml
 src/deploy/local/conf/*.json
 src/deploy/local/conf/*.yaml
 src/deploy/local/conf/*.yml
+
+# Python (src/ace)
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+.venv/
+env/
+venv/
+*.pkl
+*.pickle

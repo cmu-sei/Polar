@@ -27,6 +27,7 @@ def main [] {
             ($layers | path join "1-platform/infra/storage/main.nu")
             ($layers | path join "2-services/cert-issuer/main.nu")
             ($layers | path join "2-services/jaeger/main.nu")
+            ($layers | path join "2-services/ace/main.nu")
             ($layers | path join "2-services/neo4j/main.nu")
             ($layers | path join "2-services/cassini/main.nu")
             ($layers | path join "3-workloads/agents/kube/main.nu")
@@ -48,6 +49,8 @@ def main [] {
             "neo4j-statefulset.yaml"
             "cassini.yaml"
             "jaeger.yaml"
+            "ace-rbac.yaml"
+            "ace.yaml"
             "kube-agent-rbac.yaml"
             "kube-observer.yaml"
             "kube-consumer.yaml"
@@ -66,6 +69,7 @@ def main [] {
         cassini_shutdown_token : ($env.CASSINI_SHUTDOWN_TOKEN? | default "HEYTHERE")
         identity_lifetime_overrides : [
             { identity: "default.polar-graph.serviceaccount.cluster.local", lifetimeSecs: 31536000 }
+            { identity: "ace.polar.serviceaccount.cluster.local", lifetimeSecs: 31536000 }
         ]
     } | to nuon
 }
