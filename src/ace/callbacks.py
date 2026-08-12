@@ -17,7 +17,7 @@ import time
 
 # === App-Specific Modules ===
 from utils.figures import build_figure_pi_display, build_figure_pi_display_initial
-from utils.dropdown_utils import assemble_pi_selection_initial, assemble_pi_selection_training
+from utils.dropdown_utils import assemble_pi_selection_initial, assemble_pi_selection_training, assemble_dropdown_selection
 from utils.restraints_check import get_earliest_and_latest_date, get_projection_start_date
 
 # ── New pipeline (replaces team_projections + projections_beta calls) ─────────
@@ -443,6 +443,18 @@ def register_callbacks(app):
     # -------------------------------------------------------------------------
     # Shared / App-level
     # -------------------------------------------------------------------------
+
+    @app.callback(
+        Output("team-dropdown", "options"),
+        Input("team-refresh-interval", "n_intervals"),
+    )
+    def refresh_team_options(_n_intervals):
+        try:
+            teams = assemble_dropdown_selection()
+        except Exception as e:
+            print(f"WARN: failed to refresh team list: {e}")
+            return no_update
+        return [{"label": t, "value": t} for t in teams]
 
     @app.callback(
         Output("advanced-collapse", "is_open"),

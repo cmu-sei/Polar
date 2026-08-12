@@ -228,7 +228,12 @@ def create_layout(pi_training_options, team_options, pi_display_options):
                                                     value=team_options[-2] if team_options else None,
                                                     multi=False,
                                                     style=dropdown_style
-                                                )
+                                                ),
+                                                dcc.Interval(
+                                                    id="team-refresh-interval",
+                                                    interval=5 * 60 * 1000,
+                                                    n_intervals=0,
+                                                ),
                                             ], style={"width": "70%", "padding": "0 10px", "minWidth": "250px"})
                                         ], style={"display": "flex", "flexWrap": "wrap", "gap": "15px", "marginBottom": "10px"}),
 
