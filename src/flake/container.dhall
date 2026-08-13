@@ -35,14 +35,20 @@ let polarExtras =
     , Lib.nixpkgs "dropbear"
     ]
 
+let pythonDev =
+  Lib.customLayer "python-dev"
+    [ Lib.flakePackage "ace-python-env" "default"
+    ]
+
 -- ---------------------------------------------------------------------------
 -- Project-specific environment variables.
 -- BuildTime: arch-independent, no store paths — safe for config.Env.
 -- ---------------------------------------------------------------------------
 let polarEnv : List Lib.EnvVar =
-  [ Lib.buildEnv "GRAPH_DB"       "neo4j"
-  , Lib.buildEnv "GRAPH_ENDPOINT" "bolt://127.0.0.1:7687"
-  , Lib.buildEnv "GRAPH_USER"     "neo4j"
+  [ Lib.startEnv "GRAPH_DB"           "neo4j"
+  , Lib.startEnv "GRAPH_ENDPOINT"     "bolt+s://localhost:7687"
+  , Lib.startEnv "GRAPH_USER"         "neo4j"
+  , Lib.startEnv "POLAR_HEALTH_FILE"  "/tmp/polar-health/polar-health.json"
   ]
 
 -- ---------------------------------------------------------------------------
@@ -53,7 +59,8 @@ in defaults.devContainer //
   { name = "polar-dev"
 
   , packageLayers =
-      [ Lib.PackageLayer.Micro
+      [ pythonDev
+      , Lib.PackageLayer.Micro
       , Lib.PackageLayer.Core
       , Lib.PackageLayer.InteractiveDev
       , Lib.PackageLayer.RustToolchain

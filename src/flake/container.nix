@@ -2,14 +2,20 @@
   ai = null;
   entrypoint = null;
   extraEnv = [
-    { name = "GRAPH_DB"; placement = u: u.BuildTime; value = "neo4j"; }
+    { name = "GRAPH_DB"; placement = u: u.StartTime; value = "neo4j"; }
     {
       name = "GRAPH_ENDPOINT";
       placement = u:
-        u.BuildTime;
-      value = "bolt://127.0.0.1:7687";
+        u.StartTime;
+      value = "bolt+s://localhost:7687";
     }
-    { name = "GRAPH_USER"; placement = u: u.BuildTime; value = "neo4j"; }
+    { name = "GRAPH_USER"; placement = u: u.StartTime; value = "neo4j"; }
+    {
+      name = "POLAR_HEALTH_FILE";
+      placement = u:
+        u.StartTime;
+      value = "/tmp/polar-health/polar-health.json";
+    }
   ];
   mode = u:
     u.Dev;
@@ -23,6 +29,11 @@
     trustedUsers = [ "root" ];
   };
   packageLayers = [
+    (u:
+      u.Custom {
+        name = "python-dev";
+        packages = [ { attrPath = "default"; flakeInput = "ace-python-env"; } ];
+      })
     (u:
       u.Micro)
     (u:

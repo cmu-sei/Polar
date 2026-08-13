@@ -1,5 +1,6 @@
 use neo4rs::{BoltNull, BoltType, Graph, Query};
 use ractor::{Actor, ActorProcessingErr, ActorRef, async_trait};
+use ractor::concurrency::Duration;
 use serde::{Deserialize, Serialize};
 use std::fmt::Debug;
 use tracing::{debug, error, info, instrument, trace};
@@ -237,6 +238,7 @@ pub enum GraphOp {
 /// `GraphOp` regardless of which node key vocabulary it uses.
 pub enum GraphControllerMsg {
     Op(GraphOp),
+    Tick,
 }
 
 // ── Compiler ───────────────────────────────────────────────────────────────────
@@ -593,17 +595,12 @@ impl Actor for GraphControllerActor {
 
     async fn post_start(
         &self,
-        _myself: ActorRef<Self::Msg>,
+        myself: ActorRef<Self::Msg>,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         // Canary: "RETURN 1" can only fail on auth/connectivity, never on
         // data content — this is what actually proves the graph is
         // reachable, as opposed to pre_start's pool config succeeding.
-        //
-        // NOTE: verify the exact neo4rs API for a one-shot query against
-        // this pinned fork version (rc.8) before relying on this — it may
-        // need to go through start_txn()/run()/commit() like handle_op does,
-        // rather than a direct .execute() call.
         match state.graph.execute(Query::new("RETURN 1".to_string())).await {
             Ok(_) => {
                 info!("GraphControllerActor: canary query succeeded, graph available");
@@ -615,6 +612,17 @@ impl Actor for GraphControllerActor {
                 state.signal_port.send(GraphSignal::OpFailed(reason));
             }
         }
+
+        // The canary above only proves reachability at startup. Without a
+        // recurring re-check, GraphSignal::Available only ever fires again
+        // as a side effect of a real caller-initiated write succeeding --
+        // on a quiet consumer with no new events to write, the healthcheck
+        // deadline clock never resets and the actor self-exits on a
+        // perfectly healthy graph, purely from idleness. Re-arm on a fixed
+        // interval, well under the healthcheck deadline (120s default),
+        // so idle time alone can never trip it.
+        let _ = myself.send_interval(Duration::from_secs(30), || GraphControllerMsg::Tick);
+
         Ok(())
     }
 
@@ -635,6 +643,18 @@ impl Actor for GraphControllerActor {
                     state.signal_port.send(GraphSignal::OpFailed(reason));
                 }
             },
+            GraphControllerMsg::Tick => {
+                match state.graph.execute(Query::new("RETURN 1".to_string())).await {
+                    Ok(_) => {
+                        state.signal_port.send(GraphSignal::Available);
+                    }
+                    Err(e) => {
+                        let reason = format!("canary tick failed: {e}");
+                        error!("GraphControllerActor: {reason}");
+                        state.signal_port.send(GraphSignal::OpFailed(reason));
+                    }
+                }
+            }
         }
         Ok(())
     }

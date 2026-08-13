@@ -77,6 +77,9 @@
             polar-healthcheck = {
               packages.${system}.default = polarPkgs.healthcheck;
             };
+            ace-python-env = {
+              packages.${system}.default = acePkgs.venvNoCheck;
+            };
           };
           inherit configNixPath;
         };
@@ -209,10 +212,6 @@
 
         devShells.default = container.devShell.overrideAttrs (old: {
           shellHook = old.shellHook + ''
-            export GRAPH_DB="neo4j"
-            export GRAPH_ENDPOINT="bolt://127.0.0.1:7687"
-            export GRAPH_USER="neo4j"
-
             export BIND_ADDR="127.0.0.1:8080"
             export CASSINI_BIND_ADDR="$BIND_ADDR"
             export BROKER_ADDR="$BIND_ADDR"

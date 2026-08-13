@@ -337,7 +337,33 @@ impl Actor for ClusterConsumerSupervisor {
             },
 
             SupervisorMessage::ForceExit => {
-                warn!("CONSUMER_SUPERVISOR: drain window elapsed, exiting now");
+                warn!("CONSUMER_SUPERVISOR: drain window elapsed, beginning graceful shutdown");
+
+                if let Some(controller) = state.graph_controller.take() {
+                    warn!(
+                        "CONSUMER_SUPERVISOR: stopping graph controller and waiting for any \
+                         in-flight write to complete before exiting"
+                    );
+                    match controller
+                        .stop_and_wait(
+                            Some("supervisor shutting down".into()),
+                            Some(Duration::from_secs(30)),
+                        )
+                        .await
+                    {
+                        Ok(()) => {
+                            info!("CONSUMER_SUPERVISOR: graph controller stopped cleanly");
+                        }
+                        Err(e) => {
+                            error!(
+                                "CONSUMER_SUPERVISOR: graph controller did not stop cleanly \
+                                 within 30s, exiting anyway: {e:?}"
+                            );
+                        }
+                    }
+                }
+
+                warn!("CONSUMER_SUPERVISOR: exiting now");
                 std::process::exit(1);
             }
 

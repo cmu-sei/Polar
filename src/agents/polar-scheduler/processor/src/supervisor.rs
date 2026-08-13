@@ -3,10 +3,11 @@ use crate::types::ProcessorMsg;
 use cassini_client::{TCPClientConfig, TcpClientActor, TcpClientArgs, TcpClientMessage};
 use cassini_types::ClientEvent;
 use polar::SupervisorMessage;
-use polar::graph::controller::{GraphControllerActor, GraphSignal};
+use polar::graph::controller::{GraphControllerMsg, GraphControllerActor, GraphSignal};
 use polar::health::{DepCertEndpoint, HealthCheckActor, HealthCheckArgs, HealthCheckMessage};
 use polar_scheduler_common::{AdhocAgentAnnouncement, GitScheduleChange};
 use ractor::{Actor, ActorProcessingErr, ActorRef, OutputPort, SupervisionEvent, async_trait};
+use ractor::concurrency::Duration;
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 
@@ -19,6 +20,7 @@ pub struct RootSupervisor;
 pub struct RootSupervisorState {
     tcp_client: ActorRef<TcpClientMessage>,
     processor: Option<ActorRef<ProcessorMsg>>,
+    graph_controller: Option<ActorRef<GraphControllerMsg>>,
     healthcheck: ActorRef<HealthCheckMessage>,
     draining: bool,
 }
@@ -84,6 +86,7 @@ impl Actor for RootSupervisor {
         Ok(RootSupervisorState {
             tcp_client,
             processor: None,
+            graph_controller: None,
             healthcheck,
             draining: false,
         })
@@ -120,7 +123,28 @@ impl Actor for RootSupervisor {
                 }
             },
             SupervisorMessage::ForceExit => {
-                warn!("drain window elapsed, exiting now");
+                warn!("drain window elapsed, beginning graceful shutdown");
+
+                if let Some(controller) = state.graph_controller.take() {
+                    warn!(
+                        "stopping graph controller and waiting for any in-flight \
+                         write to complete before exiting"
+                    );
+                    match controller
+                        .stop_and_wait(
+                            Some("supervisor shutting down".into()),
+                            Some(Duration::from_secs(30)),
+                        )
+                        .await
+                    {
+                        Ok(()) => info!("graph controller stopped cleanly"),
+                        Err(e) => error!(
+                            "graph controller did not stop cleanly within 30s, exiting anyway: {e:?}"
+                        ),
+                    }
+                }
+
+                warn!("exiting now");
                 std::process::exit(1);
             }
             SupervisorMessage::ClientEvent { event } => match event {
@@ -137,6 +161,7 @@ impl Actor for RootSupervisor {
                         myself.get_cell(),
                     )
                     .await?;
+                    state.graph_controller = Some(graph_controller.clone());
                     let _ = state.healthcheck.cast(HealthCheckMessage::GraphConnected);
 
                     let (processor, _) = Actor::spawn_linked(

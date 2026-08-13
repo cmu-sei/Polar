@@ -20,12 +20,13 @@ use common::types::GitlabEnvelope;
 use polar::Supervisor;
 use polar::SupervisorMessage;
 use polar::cassini::TcpClient;
-use polar::graph::controller::GraphControllerActor;
+use polar::graph::controller::{GraphControllerActor, GraphControllerMsg};
 use polar::polar_health::{HealthCheckActor, HealthCheckArgs, HealthCheckMessage, DepCertEndpoint};
 use std::sync::Arc;
 use ractor::Actor;
 use ractor::ActorCell;
 use ractor::ActorProcessingErr;
+use ractor::concurrency::Duration;
 use ractor::ActorRef;
 use ractor::SupervisionEvent;
 use ractor::async_trait;
@@ -41,6 +42,7 @@ pub struct ConsumerSupervisor;
 pub struct ConsumerSupervisorState {
     tcp_client: TcpClient,
     u_consumer: Option<GitlabConsumer>,
+    graph_controller: Option<ActorRef<GraphControllerMsg>>,
     #[allow(dead_code)]
     healthcheck: ActorRef<HealthCheckMessage>,
     draining: bool,
@@ -195,6 +197,7 @@ impl Actor for ConsumerSupervisor {
         let state = ConsumerSupervisorState {
             tcp_client,
             u_consumer: None,
+            graph_controller: None,
             healthcheck,
             draining: false,
         };
@@ -232,6 +235,7 @@ impl Actor for ConsumerSupervisor {
                     {
                         Ok((graph_controller, _)) => {
                             let _ = state.healthcheck.cast(HealthCheckMessage::GraphConnected);
+                            state.graph_controller = Some(graph_controller.clone());
                             let c_state = GitlabConsumerState {
                                 graph_controller,
                                 tcp_client: state.tcp_client.clone(),
@@ -273,7 +277,28 @@ impl Actor for ConsumerSupervisor {
                 }
             },
             SupervisorMessage::ForceExit => {
-                warn!("CONSUMER_SUPERVISOR: drain window elapsed, exiting now");
+                warn!("CONSUMER_SUPERVISOR: drain window elapsed, beginning graceful shutdown");
+
+                if let Some(controller) = state.graph_controller.take() {
+                    warn!(
+                        "CONSUMER_SUPERVISOR: stopping graph controller and waiting for any \
+                         in-flight write to complete before exiting"
+                    );
+                    match controller
+                        .stop_and_wait(
+                            Some("supervisor shutting down".into()),
+                            Some(Duration::from_secs(30)),
+                        )
+                        .await
+                    {
+                        Ok(()) => info!("CONSUMER_SUPERVISOR: graph controller stopped cleanly"),
+                        Err(e) => error!(
+                            "CONSUMER_SUPERVISOR: graph controller did not stop cleanly within 30s, exiting anyway: {e:?}"
+                        ),
+                    }
+                }
+
+                warn!("CONSUMER_SUPERVISOR: exiting now");
                 std::process::exit(1);
             }
         }

@@ -14,6 +14,7 @@ use polar::{
 };
 use ractor::{Actor, ActorProcessingErr, ActorRef, OutputPort, SupervisionEvent, async_trait};
 use std::sync::Arc;
+use ractor::concurrency::Duration;
 use tracing::{debug, error, info, instrument, warn};
 
 const HEALTHCHECK_ACTOR_NAME: &str = "polar.healthcheck";
@@ -252,7 +253,28 @@ impl Actor for BuildProcessorSupervisor {
                 }
             },
             SupervisorMessage::ForceExit => {
-                warn!("drain window elapsed, exiting now");
+                warn!("drain window elapsed, beginning graceful shutdown");
+
+                if let Some(controller) = state.graph_controller.take() {
+                    warn!(
+                        "stopping graph controller and waiting for any in-flight \
+                         write to complete before exiting"
+                    );
+                    match controller
+                        .stop_and_wait(
+                            Some("supervisor shutting down".into()),
+                            Some(Duration::from_secs(30)),
+                        )
+                        .await
+                    {
+                        Ok(()) => info!("graph controller stopped cleanly"),
+                        Err(e) => error!(
+                            "graph controller did not stop cleanly within 30s, exiting anyway: {e:?}"
+                        ),
+                    }
+                }
+
+                warn!("exiting now");
                 std::process::exit(1);
             }
         }
