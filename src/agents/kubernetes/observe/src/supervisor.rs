@@ -1,4 +1,3 @@
-use cassini_client::TcpClientMessage;
 use cassini_types::ClientEvent;
 use k8s_openapi::api::apps::v1::{Deployment, ReplicaSet};
 use k8s_openapi::api::batch::v1::Job;

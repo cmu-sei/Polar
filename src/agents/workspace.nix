@@ -56,6 +56,7 @@ let
       ./Cargo.toml
       ./Cargo.lock
       ./gitlab/schema/src/gitlab.graphql
+      ./resolver/config/default.yaml
     ]);
 
     workspaceFileset = crate: lib.fileset.toSource {

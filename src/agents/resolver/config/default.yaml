@@ -1,0 +1,19 @@
+auth:
+  anonymousFallback: true
+http:
+  connectTimeoutMs: 5000
+  readTimeoutMs: 30000
+  userAgent: polar-oci-resolver
+mirrors:
+  - mirror: localhost:31500
+    upstream: registry.local-registry.svc.cluster.local:5000
+registry:
+  defaultNamespace: library
+  defaultRegistry: docker.io
+  unqualifiedRefs: qualify
+tls:
+  exclusiveTrustStore: false
+  extraRootCertificates: []
+  mode: https-except
+  plaintextHosts:
+    - localhost:31500

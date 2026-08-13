@@ -135,7 +135,7 @@ export def upload-image [
     mut copy_args = [copy $"docker-archive:($real_path)" $remote_ref]
     if $insecure {
         log-warn "Uploading images to insecure registry!" --component oci
-        $copy_args = ($copy_args | append "--tls-verify=false")
+        $copy_args = ($copy_args | append "--dest-tls-verify=false")
     }
 
     let copy_result = (skopeo ...$copy_args | complete)

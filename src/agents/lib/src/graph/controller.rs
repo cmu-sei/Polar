@@ -203,7 +203,7 @@ pub enum GraphOp {
     /// 2. Upsert the immutable state instance node (this specific observation)
     /// 3. Link resource → state instance via TRANSITIONED_TO (history)
     /// 4. Link state instance → state type via OF_TYPE (taxonomy)
-    /// 5. Replace the HAS_STATE pointer on the resource (current state)
+    /// 5. Repoint to the unvarying singleton node.
     UpdateState {
         resource_key: Box<dyn GraphNodeKey>,
         state_type_key: Box<dyn GraphNodeKey>,

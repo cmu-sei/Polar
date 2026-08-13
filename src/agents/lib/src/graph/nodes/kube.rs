@@ -132,7 +132,7 @@ impl GraphNodeKey for KubeNodeKey {
                 let valid_k = format!("{prefix}_valid_from");
                 (
                     format!(
-                        "({prefix}:DeploymentState {{ deployment_uid: ${uid_k}, valid_from: ${valid_k} }}"
+                        "({prefix}:DeploymentState {{ deployment_uid: ${uid_k}, valid_from: ${valid_k} }})"
                     ),
                     vec![
                         (uid_k, BoltType::String(uid.to_string().into())),
@@ -152,7 +152,7 @@ impl GraphNodeKey for KubeNodeKey {
                 let valid_k = format!("{prefix}_valid_from");
                 (
                     format!(
-                        "({prefix}:ReplicaSetState {{ deployment_uid: ${uid_k}, valid_from: ${valid_k} }}"
+                        "({prefix}:ReplicaSetState {{ deployment_uid: ${uid_k}, valid_from: ${valid_k} }})"
                     ),
                     vec![
                         (uid_k, BoltType::String(uid.to_string().into())),

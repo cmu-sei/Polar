@@ -137,14 +137,6 @@ let neo4jCAVolumeMount =
         }
       ]
 
--- TODO: I don't particularly care for this, and am not sure how it made its way in. It makes much more sense to import the certificate by its path
--- and read it as text. Dhall limits us here but we can work around it by at least setting up the file system prior to the import
-let neo4jBoltCASecret =
-      functions.makeOpaqueSecret
-        "neo4j-bolt-ca"
-        "ca.pem"
-        (env:NEO4J_TLS_CA_CERT_CONTENT as Text)
-
 let neo4jEnvVars =
       [ kubernetes.EnvVar::{ name = "GRAPH_ENDPOINT", value = Some values.neo4jBoltAddr }
       , kubernetes.EnvVar::{ name = "GRAPH_DB",       value = Some values.neo4j.hostName }
@@ -568,7 +560,6 @@ in  [ kubernetes.Resource.ClusterRole    kubeAgentClusterRole
     , kubernetes.Resource.Secret         gitlabSecret
     , kubernetes.Resource.Secret         gitObserverSecret
     , kubernetes.Resource.Secret         kubeAgentServiceAccountToken
-    , kubernetes.Resource.Secret         neo4jBoltCASecret
     , kubernetes.Resource.Secret         resolverSecret
     , kubernetes.Resource.ServiceAccount buildProcessorSA
     , kubernetes.Resource.ServiceAccount gitConsumerSA

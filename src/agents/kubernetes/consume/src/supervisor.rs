@@ -185,7 +185,6 @@ impl ClusterConsumerSupervisor {
                         Self::handle_event::<ReplicaSet>(ev, cache, graph_controller, tcp_client)?
                     }
                     "Job" => Self::handle_event::<Job>(ev, cache, graph_controller, tcp_client)?,
-                    "Node" => todo!("Nodes"),
                     KIND_OCI_REPOSITORY => Self::handle_event::<OciRepository>(
                         ev,
                         cache,

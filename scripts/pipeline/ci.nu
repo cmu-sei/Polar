@@ -278,12 +278,12 @@ def run-static-analysis [ws_manifest: path, artifact_dir: path]: nothing -> tabl
 
 def image-manifest []: nothing -> list<record> {
     [
-        {
-            name: "polar-nu-init"
-            flake: ".#nuInitImage"
-            image: "polar-nu-init"
-            root_purl: ""
-        }
+        # {
+        #     name: "polar-nu-init"
+        #     flake: ".#nuInitImage"
+        #     image: "polar-nu-init"
+        #     root_purl: ""
+        # }
         {
             name: "cert-issuer"
             flake: ".#certIssuerImage"
@@ -630,7 +630,7 @@ def process-image [entry: record, image_tag: string, --skip-upload]: nothing -> 
 
     # Decouple the tarball hash from the return-record contract. Ideally this
     # write lives inside nix-build-image next to content-hash-file; recorded
-    # here it still trusts $build once, but the guard in build-and-push-image
+    # here it still trusts $build once, but the guard inpush-image
     # turns any miss into a loud failure instead of a silent null.
     record-tarball-hash $entry.name $build.tarball_hash
 
@@ -641,11 +641,11 @@ def process-image [entry: record, image_tag: string, --skip-upload]: nothing -> 
             uploads: []
         }
     }
-    build-and-push-image $entry.name $image_tag (registry-refs $entry.image) $build --root_purl $entry.root_purl
+    push-image $entry.name $image_tag (registry-refs $entry.image) $build --root_purl $entry.root_purl
 }
 
 
-def build-and-push-image [
+def push-image [
     link_name: string
     tag: string
     registries: list<string>
