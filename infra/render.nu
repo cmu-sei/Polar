@@ -46,6 +46,9 @@ def main [
     print ""
 
     # ── Prepare output directory ───────────────────────────────────────────────
+    if ($output_dir | path exists) {
+        rm -rf $output_dir
+    }
     mkdir $output_dir
 
     # ── Build context record passed to every chart main.nu ────────────────────
@@ -65,6 +68,10 @@ def main [
     let cert_issuer_url      = $config.cert_issuer_url
     let cert_issuer_audience = $config.cert_issuer_audience
     let cert_client_image    = $config.cert_client_image
+    let polar_init_image      = $config.polar_init_image
+
+    let cassini_shutdown_token = $config.cassini_shutdown_token
+    let identity_lifetime_overrides = $config.identity_lifetime_overrides
 
     # ── Render each chart ─────────────────────────────────────────────────────
     print "Rendering charts..."
@@ -79,16 +86,16 @@ def main [
         # Build chart-specific context by extending base context
         let chart_context = ($base_context | merge { chart_dir: $chart_dir } | merge (
             match $chart_name {
-                "cert-issuer" => { _placeholder: "" }
-                "cassini"     => { jaegerDNSName: $jaeger_dns_name, certIssuerUrl: $cert_issuer_url, certIssuerAudience: $cert_issuer_audience, certClientImage: $cert_client_image }
-                "gitlab"      => { neo4jBoltAddr: $neo4j_bolt_addr, certIssuerUrl: $cert_issuer_url, certIssuerAudience: $cert_issuer_audience, certClientImage: $cert_client_image }
-                "kube"        => { neo4jBoltAddr: $neo4j_bolt_addr, certIssuerUrl: $cert_issuer_url, certIssuerAudience: $cert_issuer_audience, certClientImage: $cert_client_image }
-                "git"         => { neo4jBoltAddr: $neo4j_bolt_addr, certIssuerUrl: $cert_issuer_url, certIssuerAudience: $cert_issuer_audience, certClientImage: $cert_client_image }
-                "jira"        => { neo4jBoltAddr: $neo4j_bolt_addr, certIssuerUrl: $cert_issuer_url, certIssuerAudience: $cert_issuer_audience, certClientImage: $cert_client_image }
-                "provenance"  => { neo4jBoltAddr: $neo4j_bolt_addr, certIssuerUrl: $cert_issuer_url, certIssuerAudience: $cert_issuer_audience, certClientImage: $cert_client_image }
-                "build"       => { neo4jBoltAddr: $neo4j_bolt_addr, certIssuerUrl: $cert_issuer_url, certIssuerAudience: $cert_issuer_audience, certClientImage: $cert_client_image }
-                "scheduler"   => { neo4jBoltAddr: $neo4j_bolt_addr, remoteUrl: $scheduler_remote_url, certIssuerUrl: $cert_issuer_url, certIssuerAudience: $cert_issuer_audience, certClientImage: $cert_client_image }
-                "openapi"     => { neo4jBoltAddr: $neo4j_bolt_addr, certIssuerUrl: $cert_issuer_url, certIssuerAudience: $cert_issuer_audience, certClientImage: $cert_client_image }
+                "cert-issuer" => { identityLifetimeOverrides: $identity_lifetime_overrides }
+                "cassini" => { jaegerDNSName: $jaeger_dns_name, certIssuerUrl: $cert_issuer_url, certIssuerAudience: $cert_issuer_audience, polarInitImage: $polar_init_image, cassiniShutdownToken: $cassini_shutdown_token }
+                "gitlab" => { neo4jBoltAddr: $neo4j_bolt_addr, certIssuerUrl: $cert_issuer_url, certIssuerAudience: $cert_issuer_audience, polarInitImage: $polar_init_image }
+                "kube" => { neo4jBoltAddr: $neo4j_bolt_addr, certIssuerUrl: $cert_issuer_url, certIssuerAudience: $cert_issuer_audience, polarInitImage: $polar_init_image }
+                "jira" => { neo4jBoltAddr: $neo4j_bolt_addr, certIssuerUrl: $cert_issuer_url, certIssuerAudience: $cert_issuer_audience, polarInitImage: $polar_init_image }
+                "git"         => { neo4jBoltAddr: $neo4j_bolt_addr, certIssuerUrl: $cert_issuer_url, certIssuerAudience: $cert_issuer_audience, polarInitImage: $polar_init_image }
+                "build-processor" => { neo4jBoltAddr: $neo4j_bolt_addr, certIssuerUrl: $cert_issuer_url, certIssuerAudience: $cert_issuer_audience, polarInitImage: $polar_init_image }
+                "resolver"        => { certIssuerUrl: $cert_issuer_url, certIssuerAudience: $cert_issuer_audience, polarInitImage: $polar_init_image }
+                "scheduler"   => { neo4jBoltAddr: $neo4j_bolt_addr, remoteUrl: $scheduler_remote_url, certIssuerUrl: $cert_issuer_url, certIssuerAudience: $cert_issuer_audience, polarInitImage: $polar_init_image }
+                "openapi"     => { neo4jBoltAddr: $neo4j_bolt_addr, certIssuerUrl: $cert_issuer_url, certIssuerAudience: $cert_issuer_audience, polarInitImage: $polar_init_image }
                 _             => { _placeholder: "" }
             }
         ))
@@ -129,6 +136,11 @@ def apply_manifests [config: record, output_dir: string] {
         let manifest = ($output_dir | path join $filename)
         if ($manifest | path exists) {
             print $"  applying ($filename)..."
+            # Jobs have immutable pod templates — delete before apply if exists
+            let is_job = (open --raw $manifest | str contains "kind: Job")
+            if $is_job {
+                run-external "kubectl" "--kubeconfig" $kubeconfig "delete" "--ignore-not-found" "-f" $manifest
+            }
             run-external "kubectl" "--kubeconfig" $kubeconfig "apply" "-f" $manifest
         } else {
             print $"  skipping ($filename) — not found"
@@ -154,7 +166,7 @@ def apply_manifests [config: record, output_dir: string] {
     print ""
     print "  waiting 5s for SA token controller..."
     sleep 5sec
-    for filename in ["kube-agent-rbac.yaml", "build-agent-rbac.yaml"] {
+    for filename in ["kube-agent-rbac.yaml"] {
         do $apply $filename
     }
 

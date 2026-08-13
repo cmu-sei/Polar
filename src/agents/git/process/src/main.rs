@@ -6,20 +6,27 @@ use polar::cassini::{CassiniClient, SubscribeRequest, TcpClient};
 use polar::graph::controller::GraphControllerActor;
 use polar::graph::controller::IntoGraphKey;
 use polar::graph::{
-    controller::{GraphController, GraphControllerMsg, GraphOp, GraphValue, Property, rel},
+    controller::{GraphController, GraphControllerMsg, GraphOp, GraphSignal, GraphValue, Property, rel},
     nodes::git::GitNodeKey,
 };
+use polar::health::{DepCertEndpoint, HealthCheckActor, HealthCheckArgs, HealthCheckMessage};
 use polar::topics::GIT_REPOSITORY_EVENTS;
 use ractor::async_trait;
-use ractor::{Actor, ActorProcessingErr, ActorRef, SupervisionEvent};
+use ractor::{Actor, ActorProcessingErr, ActorRef, OutputPort, SupervisionEvent};
 use rkyv::rancor;
-use tracing::{debug, error, trace, warn};
+use std::sync::Arc;
+use tracing::{debug, error, info, trace, warn};
+
+const HEALTHCHECK_ACTOR_NAME: &str = "polar.healthcheck";
+const DRAIN_WINDOW_SECS: u64 = 5;
 
 const SERVICE_NAME: &str = "git.repositories.processor";
 
 pub struct GitRepoProcessingManagerState {
     pub tcp_client: TcpClient,
     pub graph_controller: Option<ActorRef<GraphControllerMsg>>,
+    pub healthcheck: ActorRef<HealthCheckMessage>,
+    pub draining: bool,
 }
 
 // === Supervisor definition ===
@@ -48,12 +55,10 @@ impl GitRepoProcessingManager {
                 };
                 let commit_key = GitNodeKey::Commit { oid: oid.clone() };
 
-                // Ensure repo exists
                 graph_controller.cast(GraphControllerMsg::Op(GraphOp::UpsertNode {
                     key: repo_key.clone().into_key(),
                     props: vec![],
                 }))?;
-                // Ensure commit exists with metadata
                 graph_controller.cast(GraphControllerMsg::Op(GraphOp::UpsertNode {
                     key: commit_key.clone().into_key(),
                     props: vec![
@@ -66,7 +71,6 @@ impl GitRepoProcessingManager {
                         ),
                     ],
                 }))?;
-                // Repository contains commit
                 graph_controller.cast(GraphControllerMsg::Op(GraphOp::EnsureEdge {
                     from: repo_key.clone().into_key(),
                     to: commit_key.clone().into_key(),
@@ -74,7 +78,6 @@ impl GitRepoProcessingManager {
                     props: vec![],
                 }))?;
 
-                // Parent edges (guard against self-referential edges)
                 for parent_oid in parents {
                     if parent_oid == oid {
                         trace!("Skipping self-parent edge for commit {}", oid);
@@ -120,25 +123,21 @@ impl GitRepoProcessingManager {
                     repo_id: repo.clone(),
                 };
 
-                // Ensure repo exists
                 graph_controller.cast(GraphControllerMsg::Op(GraphOp::UpsertNode {
                     key: repo_key.into_key(),
                     props: vec![],
                 }))?;
 
-                // Ensure ref exists
                 graph_controller.cast(GraphControllerMsg::Op(GraphOp::UpsertNode {
                     key: ref_key.clone().into_key(),
                     props: vec![],
                 }))?;
 
-                // Ensure commit exists (it may not have been observed yet)
                 graph_controller.cast(GraphControllerMsg::Op(GraphOp::UpsertNode {
                     key: commit_key.clone().into_key(),
                     props: vec![],
                 }))?;
 
-                // Connect ref to commit with timestamp
                 graph_controller.cast(GraphControllerMsg::Op(GraphOp::EnsureEdge {
                     from: ref_key.into_key(),
                     to: commit_key.into_key(),
@@ -195,16 +194,45 @@ impl Actor for GitRepoProcessingManager {
         myself: ActorRef<Self::Msg>,
         _: (),
     ) -> Result<Self::State, ActorProcessingErr> {
+        // --- NEW: healthcheck wiring ---
+        let prepare_shutdown_port = Arc::new(OutputPort::<()>::default());
+        prepare_shutdown_port.subscribe(myself.clone(), |()| {
+            Some(SupervisorMessage::PrepareShutdown)
+        });
+        // This supervisor owns a GraphControllerActor directly (unlike
+        // jira-processor, where children manage their own graph
+        // connections), so real GraphAvailable/GraphOpFailed tracking
+        // applies here.
+        let dep_cert_endpoints = vec![
+            DepCertEndpoint::parse("cassini-ip-svc.polar.svc.cluster.local:8080:300")
+                .map_err(|e| ActorProcessingErr::from(e))?,
+            DepCertEndpoint::parse("polar-db-svc.polar-graph.svc.cluster.local:7687:300")
+                .map_err(|e| ActorProcessingErr::from(e))?,
+        ];
+        let (healthcheck, _) = HealthCheckActor::spawn_linked(
+            Some(HEALTHCHECK_ACTOR_NAME.to_string()),
+            HealthCheckActor,
+            HealthCheckArgs {
+                expects_graph: true,
+                rejuvenation_threshold_secs: 300,
+                dep_cert_endpoints,
+                prepare_shutdown_port,
+            },
+            myself.get_cell(),
+        )
+        .await
+        .map_err(|e| ActorProcessingErr::from(e))?;
+        // --- end NEW ---
         let tcp_client = TcpClient::spawn(&format!("{SERVICE_NAME}.tcp"), myself, |ev| {
             Some(SupervisorMessage::ClientEvent { event: ev })
         })
         .await?;
-
         let s = GitRepoProcessingManagerState {
             tcp_client,
             graph_controller: None,
+            healthcheck,
+            draining: false,
         };
-
         Ok(s)
     }
 
@@ -224,33 +252,68 @@ impl Actor for GitRepoProcessingManager {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match msg {
+            SupervisorMessage::Heartbeat => {}
+            // --- NEW ---
+            SupervisorMessage::PrepareShutdown => {
+                info!("PrepareShutdown received");
+                if let Err(e) = state.healthcheck.cast(HealthCheckMessage::ShutdownAck) {
+                    error!("failed to send ShutdownAck: {e}");
+                }
+            }
+            SupervisorMessage::GraphSignal(signal) => match signal {
+                GraphSignal::Available => {
+                    let _ = state.healthcheck.cast(HealthCheckMessage::GraphAvailable);
+                }
+                GraphSignal::OpFailed(reason) => {
+                    let _ = state.healthcheck.cast(HealthCheckMessage::GraphOpFailed(reason));
+                }
+            },
+            SupervisorMessage::ForceExit => {
+                warn!("drain window elapsed, exiting now");
+                std::process::exit(1);
+            }
+            // --- end NEW ---
             SupervisorMessage::ClientEvent { event } => match event {
                 ClientEvent::Registered { .. } => {
-                    // get graph connection
-
+                    // --- NEW ---
+                    let _ = state.healthcheck.cast(HealthCheckMessage::CassiniConnected);
+                    let graph_signal_port = Arc::new(OutputPort::<GraphSignal>::default());
+                    graph_signal_port.subscribe(myself.clone(), |signal| {
+                        Some(SupervisorMessage::GraphSignal(signal))
+                    });
+                    // --- end NEW ---
                     let (controller, _) = Actor::spawn_linked(
-                        Some("linker.graph.controller".to_string()),
+                        Some("git.process.graph.controller".to_string()), // BUG FIX: was "linker.graph.controller" -- copy-pasted from provenance/linker, wrong actor name for this agent
                         GraphControllerActor,
-                        (),
+                        polar::graph::controller::GraphControllerArgs { signal_port: graph_signal_port },
                         myself.get_cell(),
                     )
                     .await?;
-
                     // subscribe to topic
-
                     state.tcp_client.subscribe(SubscribeRequest {
                         topic: GIT_REPOSITORY_EVENTS.to_string(),
                         trace_ctx: None,
                     })?;
-
                     state.graph_controller = Some(controller);
                 }
                 ClientEvent::MessagePublished { topic, payload, .. } => {
-                    Self::deserialize_and_dispatch(topic, payload, state)?
+                    // --- NEW: drain guard ---
+                    if state.draining {
+                        warn!(
+                            "draining -- logging message on topic '{topic}' \
+                             ({} bytes) instead of dispatching; will be lost on exit",
+                            payload.len()
+                        );
+                    } else {
+                        Self::deserialize_and_dispatch(topic, payload, state)?
+                    }
+                    // --- end NEW ---
                 }
+                // BUG FIX: was `myself.stop(Some(reason))` -- silent exit-0,
+                // Job marks Completed, no restart, no visible failure.
                 ClientEvent::TransportError { reason } => {
-                    error!("Transport error: {reason}");
-                    myself.stop(Some(reason))
+                    warn!("Transport error occurred (non-fatal, awaiting reconnect): {reason}");
+                    let _ = state.healthcheck.cast(HealthCheckMessage::CassiniDisconnected);
                 }
                 ClientEvent::ControlResponse { .. } => {
                     error!("ControlResponse not implemented here!");
@@ -263,19 +326,44 @@ impl Actor for GitRepoProcessingManager {
 
     async fn handle_supervisor_evt(
         &self,
-        _myself: ActorRef<Self::Msg>,
+        myself: ActorRef<Self::Msg>,
         event: SupervisionEvent,
-        _state: &mut Self::State,
+        state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match event {
-            SupervisionEvent::ActorFailed(name, err) => {
-                error!("Actor {name:?} failed! {err:?}");
-                // TODO: The only condition for crash or failure here should be if the DB goes down, in which case,
-                // we should consider how much we care about dropping messages.
-                todo!("Implement some restart logic");
+            // BUG FIX: was `todo!("Implement some restart logic")` -- a live
+            // panic on any child actor failure (including the graph
+            // controller itself). Now routes through the same bounded
+            // drain-and-exit path as every other agent, so the Job
+            // controller can actually restart with fresh init/certs instead
+            // of the process panicking uncontrolled.
+            SupervisionEvent::ActorFailed(actor_cell, err) => {
+                error!("Actor {actor_cell:?} failed! {err:?}");
+                let actor_name = actor_cell.get_name().unwrap_or_default();
+                if !state.draining {
+                    state.draining = true;
+                    warn!("entering drain window before exit ({actor_name} failed)");
+                    let _ = myself
+                        .send_after(ractor::concurrency::Duration::from_secs(DRAIN_WINDOW_SECS), || {
+                            SupervisorMessage::ForceExit
+                        })
+                        .await;
+                }
             }
-            SupervisionEvent::ActorTerminated(name, _state, reason) => {
-                warn!("Actor {name:?} stopped! {reason:?}");
+            SupervisionEvent::ActorTerminated(actor_cell, _state, reason) => {
+                warn!("Actor {actor_cell:?} stopped! {reason:?}");
+                let actor_name = actor_cell.get_name().unwrap_or_default();
+                // --- NEW: exit on clean healthcheck termination ---
+                if actor_name == HEALTHCHECK_ACTOR_NAME && !state.draining {
+                    state.draining = true;
+                    info!("entering drain window before exiting for rejuvenation");
+                    let _ = myself
+                        .send_after(ractor::concurrency::Duration::from_secs(DRAIN_WINDOW_SECS), || {
+                            SupervisorMessage::ForceExit
+                        })
+                        .await;
+                }
+                // --- end NEW ---
             }
             SupervisionEvent::ActorStarted(actor) => {
                 debug!("Actor {actor:?} started!");

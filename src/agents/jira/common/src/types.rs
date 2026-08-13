@@ -105,7 +105,7 @@ pub struct JiraItemHistory {
 #[derive(Deserialize, Serialize, Archive, SerdeDeserialize, SerdeSerialize, Clone, Debug)]
 pub struct JiraHistory {
     pub id: String,
-    pub author: JiraAuthor,
+    pub author: Option<JiraAuthor>,
     pub created: String,
     pub items: Vec<JiraItemHistory>,
 }
@@ -204,21 +204,16 @@ pub struct JiraIssue {
     pub changelog: JiraIssueChangeLog,
 }
 
-#[derive(
-    Debug, Serialize, Deserialize, serde::Deserialize, serde::Serialize, Archive, Clone, Default,
-)]
+#[derive(Debug, Serialize, Deserialize, SerdeDeserialize, SerdeSerialize, Archive, Clone, Default)]
 pub struct IdString(pub String);
 
-#[derive(
-    Debug, Serialize, Deserialize, serde::Deserialize, serde::Serialize, Archive, Clone, Default,
-)]
+#[derive(Debug, Serialize, Deserialize, SerdeDeserialize, SerdeSerialize, Archive, Clone, Default)]
 pub struct JsonString {
     pub json: String,
 }
-
 /// This enum mostly serves as a way to inform the deserializer what datatype to map the bytes into.
 /// The underlying byte vector contains a message meant for some consumer on a given topic
-#[derive(Serialize, Deserialize, Archive, SerdeDeserialize, SerdeSerialize, Debug)]
+#[derive(Serialize, Deserialize, Archive, serde::Deserialize, serde::Serialize, Debug)]
 pub enum JiraData {
     Projects(Vec<JiraProject>),
     Groups(Vec<JiraGroup>),

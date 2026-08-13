@@ -1,26 +1,30 @@
 use crate::{
-    CredentialLookup, GitAgentConfig, GitRepoSupervisor, GitRepoSupervisorArgs,
-    REPO_SUPERVISOR_NAME, RepoObservationConfig, RepoSupervisorMessage, SERVICE_NAME,
+    GitAgentConfig, GitRepoSupervisor, GitRepoSupervisorArgs, REPO_SUPERVISOR_NAME,
+    RepoSupervisorMessage, SERVICE_NAME,
 };
+use git_agent_common::{ConfigurationEvent, GIT_REPO_CONFIG_EVENTS};
 use cassini_types::ClientEvent;
-use polar::{
-    GitRepositoryDiscoveredEvent,
-    SupervisorMessage::{self},
-    cassini::{CassiniClient, SubscribeRequest, TcpClient},
-    graph::nodes::git::RepoId,
-    topics::GIT_REPOSITORY_DISCOVERED,
-};
-use ractor::{Actor, ActorProcessingErr, ActorRef, SupervisionEvent, async_trait};
+use polar::SupervisorMessage;
+use polar::cassini::TcpClient;
+use polar::cassini::CassiniClient;
+use polar::health::{DepCertEndpoint, HealthCheckActor, HealthCheckArgs, HealthCheckMessage};
+use ractor::{Actor, ActorProcessingErr, ActorRef, OutputPort, SupervisionEvent, async_trait};
 use rkyv::from_bytes;
-use std::path::PathBuf;
-use tracing::{debug, error, instrument, trace, warn};
+use std::sync::Arc;
+use tracing::{debug, error, info, instrument, trace, warn};
+
+const HEALTHCHECK_ACTOR_NAME: &str = "polar.healthcheck";
+const DRAIN_WINDOW_SECS: u64 = 5;
 
 pub struct RootSupervisor;
 
 pub struct RootSupervisorState {
-    repo_supervisor: Option<ActorRef<RepoSupervisorMessage>>,
     tcp_client: TcpClient,
+    repo_supervisor: Option<ActorRef<RepoSupervisorMessage>>,
     git_agent_config: GitAgentConfig,
+    cache_root: std::path::PathBuf,
+    healthcheck: ActorRef<HealthCheckMessage>,
+    draining: bool,
 }
 
 impl RootSupervisor {
@@ -30,69 +34,15 @@ impl RootSupervisor {
         state: &mut RootSupervisorState,
     ) -> Result<(), ActorProcessingErr> {
         debug!("Received message from topic {topic}");
-
-        let ev = match from_bytes::<GitRepositoryDiscoveredEvent, rkyv::rancor::Error>(&payload) {
-            Ok(ev) => ev,
-            Err(_) => {
-                warn!("Failed to deserialize discovery event on topic {topic}");
-                return Ok(());
+        if let Ok(ev) = from_bytes::<ConfigurationEvent, rkyv::rancor::Error>(&payload) {
+            if let Some(s) = &state.repo_supervisor {
+                Ok(s.cast(RepoSupervisorMessage::SpawnWorker { config: ev.config })?)
+            } else {
+                Err("Failed to find repo supervisor".into())
             }
-        };
-
-        let repo_url = match (ev.http_url, ev.ssh_url) {
-            (Some(http), _) => http,
-            (None, Some(_)) => {
-                // Only the HTTP path is supported. The one current producer of
-                // discovery events is hardcoded to send http_url, so this branch
-                // should be unreachable in practice. If you're hitting this,
-                // SSH support needs to be implemented for real.
-                todo!("SSH-only repo discovery is not currently supported")
-            }
-            (None, None) => {
-                warn!(
-                    "Discovery event on topic {topic} had neither http_url nor ssh_url, dropping"
-                );
-                return Ok(());
-            }
-        };
-
-        let normalized = RepoId::normalize_repo_url(&repo_url);
-        let repo_id = RepoId::from_url(&normalized);
-
-        let credentials = match state.git_agent_config.credentials_for_url(&normalized) {
-            CredentialLookup::Configured(c) => Some(c),
-            CredentialLookup::NotConfigured => None,
-            CredentialLookup::Misconfigured => {
-                error!(
-                    "repo {normalized} has a credentials entry with no usable token — check {}",
-                    "POLAR_GIT_AGENT_CONFIG"
-                );
-                None
-            }
-        };
-
-        let config = match credentials {
-            Some(creds) => RepoObservationConfig::new_with_credentials(
-                repo_id,
-                repo_url.clone(),
-                vec!["origin".to_string()],
-                None,
-                vec![],
-                creds,
-            ),
-            None => RepoObservationConfig::new(
-                repo_id,
-                repo_url.clone(),
-                vec!["origin".to_string()],
-                None,
-                vec![],
-            ),
-        };
-
-        if let Some(s) = &state.repo_supervisor {
-            Ok(s.cast(RepoSupervisorMessage::SpawnWorker { config })?)
         } else {
-            Err("Failed to find repo supervisor".into())
+            warn!("Failed to deserialize event");
+            Ok(())
         }
     }
 
@@ -101,31 +51,12 @@ impl RootSupervisor {
         myself: ActorRef<SupervisorMessage>,
         state: &mut RootSupervisorState,
     ) -> Result<(), ActorProcessingErr> {
-        let cache_root = match std::env::var("POLAR_CACHE_ROOT") {
-            Ok(path) => {
-                debug!("Using cache root at {}", path);
-                PathBuf::from(path)
-            }
-            Err(_) => {
-                let default_dir = ".polar/cache";
-                debug!(
-                    "No POLAR_CACHE_ROOT set, using default cache directory {}",
-                    default_dir
-                );
-                if let Ok(current_dir) = std::env::current_dir() {
-                    current_dir.join(default_dir)
-                } else {
-                    return Err(ActorProcessingErr::from("Failed to determine cache root"));
-                }
-            }
-        };
-
         let (repo_supervisor, _) = Actor::spawn_linked(
             Some(REPO_SUPERVISOR_NAME.to_string()),
             GitRepoSupervisor,
             GitRepoSupervisorArgs {
                 tcp_client: state.tcp_client.clone(),
-                cache_root,
+                cache_root: state.cache_root.clone(),
             },
             myself.into(),
         )
@@ -133,9 +64,8 @@ impl RootSupervisor {
 
         state.repo_supervisor = Some(repo_supervisor);
 
-        // subscribe to incoming repo discovery events
-        state.tcp_client.subscribe(SubscribeRequest {
-            topic: GIT_REPOSITORY_DISCOVERED.to_string(),
+        state.tcp_client.subscribe(polar::cassini::SubscribeRequest {
+            topic: GIT_REPO_CONFIG_EVENTS.to_string(),
             trace_ctx: None,
         })?;
 
@@ -156,10 +86,57 @@ impl Actor for RootSupervisor {
     ) -> Result<Self::State, ActorProcessingErr> {
         debug!("{myself:?} starting");
 
+        let prepare_shutdown_port = Arc::new(OutputPort::<()>::default());
+        prepare_shutdown_port.subscribe(myself.clone(), |()| {
+            Some(SupervisorMessage::PrepareShutdown)
+        });
+
+        let dep_cert_endpoints = vec![
+            DepCertEndpoint::parse("cassini-ip-svc.polar.svc.cluster.local:8080:300")
+                .map_err(|e| ActorProcessingErr::from(e))?,
+        ];
+
+        let (healthcheck, _) = HealthCheckActor::spawn_linked(
+            Some(HEALTHCHECK_ACTOR_NAME.to_string()),
+            HealthCheckActor,
+            HealthCheckArgs {
+                expects_graph: false,
+                rejuvenation_threshold_secs: 300,
+                dep_cert_endpoints,
+                prepare_shutdown_port,
+            },
+            myself.get_cell(),
+        )
+        .await
+        .map_err(|e| ActorProcessingErr::from(e))?;
+
+        // Startup validation: fail fast if the credential config is
+        // missing/malformed. NOTE: not currently threaded into
+        // deserialize_and_dispatch's RepoObservationConfig forwarding --
+        // worth confirming with whoever wrote GitAgentConfig whether
+        // per-repo credential injection happens elsewhere (inside
+        // GitRepoSupervisor or its workers) or is still a TODO.
         let config_path =
             std::env::var("POLAR_GIT_AGENT_CONFIG").unwrap_or_else(|_| "git.yaml".to_string());
         let git_agent_config = GitAgentConfig::load(std::path::Path::new(&config_path))
             .map_err(|e| ActorProcessingErr::from(format!("failed to load {config_path}: {e}")))?;
+
+        let cache_root = match std::env::var("POLAR_CACHE_ROOT") {
+            Ok(path) => {
+                debug!("Using cache root at {}", path);
+                std::path::PathBuf::from(path)
+            }
+            Err(_) => {
+                let default_dir = ".polar/cache";
+                debug!(
+                    "No POLAR_CACHE_ROOT set, using default cache directory {}",
+                    default_dir
+                );
+                std::env::current_dir()
+                    .map(|d| d.join(default_dir))
+                    .map_err(|_| ActorProcessingErr::from("Failed to determine cache root"))?
+            }
+        };
 
         let tcp_client = TcpClient::spawn(SERVICE_NAME, myself, |event| {
             Some(SupervisorMessage::ClientEvent { event })
@@ -170,23 +147,36 @@ impl Actor for RootSupervisor {
             tcp_client,
             repo_supervisor: None,
             git_agent_config,
+            cache_root,
+            healthcheck,
+            draining: false,
         })
     }
 
     async fn handle_supervisor_evt(
         &self,
-        _: ActorRef<Self::Msg>,
+        myself: ActorRef<Self::Msg>,
         msg: SupervisionEvent,
-        _: &mut Self::State,
+        state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match msg {
             SupervisionEvent::ActorStarted(_) => (),
             SupervisionEvent::ActorTerminated(actor_cell, _, reason) => {
+                let actor_name = actor_cell.get_name().unwrap_or_default();
                 debug!(
                     "{0:?}:{1:?} terminated. {reason:?}",
-                    actor_cell.get_name(),
+                    actor_name,
                     actor_cell.get_id()
                 );
+                if actor_name == HEALTHCHECK_ACTOR_NAME && !state.draining {
+                    state.draining = true;
+                    info!("entering drain window before exiting for rejuvenation");
+                    let _ = myself
+                        .send_after(ractor::concurrency::Duration::from_secs(DRAIN_WINDOW_SECS), || {
+                            SupervisorMessage::ForceExit
+                        })
+                        .await;
+                }
             }
             SupervisionEvent::ActorFailed(actor_cell, e) => {
                 error!(
@@ -194,6 +184,15 @@ impl Actor for RootSupervisor {
                     actor_cell.get_name(),
                     actor_cell.get_id()
                 );
+                if !state.draining {
+                    state.draining = true;
+                    warn!("entering drain window before exit");
+                    let _ = myself
+                        .send_after(ractor::concurrency::Duration::from_secs(DRAIN_WINDOW_SECS), || {
+                            SupervisorMessage::ForceExit
+                        })
+                        .await;
+                }
             }
             SupervisionEvent::ProcessGroupChanged(..) => todo!(),
         }
@@ -207,18 +206,39 @@ impl Actor for RootSupervisor {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
+            SupervisorMessage::Heartbeat => {}
+            SupervisorMessage::PrepareShutdown => {
+                info!("PrepareShutdown received");
+                if let Err(e) = state.healthcheck.cast(HealthCheckMessage::ShutdownAck) {
+                    error!("failed to send ShutdownAck: {e}");
+                }
+            }
+            SupervisorMessage::GraphSignal(_) => {}
+            SupervisorMessage::ForceExit => {
+                warn!("drain window elapsed, exiting now");
+                std::process::exit(1);
+            }
             SupervisorMessage::ClientEvent { event } => match event {
                 ClientEvent::Registered { .. } => {
+                    let _ = state.healthcheck.cast(HealthCheckMessage::CassiniConnected);
                     if let Err(e) = Self::init(myself.clone(), state).await {
                         myself.stop(Some(e.to_string()));
                     }
                 }
                 ClientEvent::MessagePublished { topic, payload, .. } => {
-                    Self::deserialize_and_dispatch(topic, payload, state)?
+                    if state.draining {
+                        warn!(
+                            "draining -- logging message on topic '{topic}' \
+                             ({} bytes) instead of dispatching; will be lost on exit",
+                            payload.len()
+                        );
+                    } else {
+                        Self::deserialize_and_dispatch(topic, payload, state)?
+                    }
                 }
                 ClientEvent::TransportError { reason } => {
-                    error!("Transport error occurred! {reason}");
-                    myself.stop(Some(reason))
+                    warn!("Transport error occurred (non-fatal, awaiting reconnect): {reason}");
+                    let _ = state.healthcheck.cast(HealthCheckMessage::CassiniDisconnected);
                 }
                 ClientEvent::PublishAcknowledged { .. } => trace!("{event:?}"),
                 _ => (),

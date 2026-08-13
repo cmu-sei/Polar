@@ -6,8 +6,10 @@
 , nix-container-lib
 , inputs
 , system
+, healthcheckDrv
 , ...
 }:
+
 let
   observer = craneLib.buildPackage (crateArgs // {
     pname = "kube-observer";
@@ -22,13 +24,23 @@ let
   });
 
   observerContainer = nix-container-lib.lib.${system}.mkContainer {
-    inherit system pkgs inputs;
+    inherit system pkgs;
+    inputs = inputs // {
+      polar-healthcheck = {
+        packages.${system}.default = healthcheckDrv;
+      };
+    };
     configNixPath    = ./container-observer.nix;
     extraDerivations = [ observer ];
   };
 
   consumerContainer = nix-container-lib.lib.${system}.mkContainer {
-    inherit system pkgs inputs;
+    inherit system pkgs;
+    inputs = inputs // {
+      polar-healthcheck = {
+        packages.${system}.default = healthcheckDrv;
+      };
+    };
     configNixPath    = ./container-consumer.nix;
     extraDerivations = [ consumer ];
   };

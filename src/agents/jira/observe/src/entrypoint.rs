@@ -33,21 +33,20 @@ const JIRA_OBSERVER_SUPERVISOR: &str = "jira.supervisor.observer";
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     init_logging(JIRA_OBSERVER_SUPERVISOR.to_string());
-
     let jira_url = env::var("JIRA_URL").expect("Expected to find a value for JIRA_URL. Please provide a valid url to a jira server, ex 'http://hostname/jira'.");
     let jira_token = env::var("JIRA_TOKEN").expect("Expected to find a value for JIRA_TOKEN.");
-    // Helpful for looking at services behind a proxy
+    let auth = JiraAuth::from_env(jira_token);
+    let deployment = JiraDeployment::from_env(&jira_url);
     let proxy_ca_cert_file = env::var("PROXY_CA_CERT").ok();
-
     let args = supervisor::ObserverSupervisorArgs {
         jira_url,
-        jira_token: Some(jira_token),
+        auth,
+        deployment,
         proxy_ca_cert_file,
         // TODO: read these from configuration
-        base_interval: 300,
+        base_interval: 1800,
         max_backoff_secs: 6000,
     };
-
     match Actor::spawn(
         Some(JIRA_OBSERVER_SUPERVISOR.to_string()),
         supervisor::ObserverSupervisor,
@@ -60,6 +59,5 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
         Err(e) => error!("{e}"),
     }
-
     Ok(())
 }

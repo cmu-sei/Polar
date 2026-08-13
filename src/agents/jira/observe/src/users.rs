@@ -32,7 +32,7 @@ use jira_common::types::{JiraData, JiraUser};
 use ractor::{Actor, ActorProcessingErr, ActorRef, async_trait, registry::where_is};
 use rkyv::rancor::Error;
 use std::time::Duration;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 pub struct JiraUserObserver;
 
@@ -74,7 +74,8 @@ impl Actor for JiraUserObserver {
 
         let state = JiraObserverState::new(
             args.jira_url,
-            args.token,
+            args.auth,
+            args.deployment,
             args.web_client,
             args.registration_id,
             Duration::from_secs(args.base_interval),
@@ -113,15 +114,20 @@ impl Actor for JiraUserObserver {
                         );
                         debug!("{}", url.to_string());
                         let res = state
-                            .web_client
-                            .get(&url)
-                            .bearer_auth(state.token.clone().expect("TOKEN").to_string())
+                            .auth
+                            .apply(state.web_client.get(&url))
                             .send()
                             .await?
                             .json::<serde_json::Value>()
                             .await?;
 
-                        let users: Vec<JiraUser> = serde_json::from_value(res["users"].clone())?;
+                        warn!("RAW user picker response: {}", res);  // TEMP diagnostic
+
+                        let users: Vec<JiraUser> = if res["users"].is_null() {
+                            Vec::new()
+                        } else {
+                            serde_json::from_value(res["users"].clone())?
+                        };
                         let total = res["total"].as_u64().unwrap_or(0);
                         let fetched = users.len();
 

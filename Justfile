@@ -64,8 +64,7 @@ build-all:
     nix build {{_nix_flags}} ".#packages.{{platform}}.kubeConsumerImage"     -o result-kube-consumer
     nix build {{_nix_flags}} ".#packages.{{platform}}.openApiObserverImage"  -o result-openapi-observer
     nix build {{_nix_flags}} ".#packages.{{platform}}.openApiProcessorImage" -o result-openapi-processor
-    nix build {{_nix_flags}} ".#packages.{{platform}}.provenanceLinkerImage" -o result-provenance-linker
-    nix build {{_nix_flags}} ".#packages.{{platform}}.provenanceResolverImage" -o result-provenance-resolver
+    nix build {{_nix_flags}} ".#packages.{{platform}}.polarPkgs.ociResolver.resolverImage" -o result-resolver
     nix build {{_nix_flags}} ".#packages.{{platform}}.schedulerProcessorImage" -o result-scheduler-processor
     nix build {{_nix_flags}} ".#packages.{{platform}}.schedulerObserverImage"  -o result-scheduler-observer
     nix build {{_nix_flags}} ".#packages.{{platform}}.jiraObserverImage"     -o result-jira-observer
@@ -73,9 +72,9 @@ build-all:
     nix build {{_nix_flags}} ".#packages.{{platform}}.gitObserverImage"      -o result-git-observer
     nix build {{_nix_flags}} ".#packages.{{platform}}.gitProcessorImage"     -o result-git-processor
     nix build {{_nix_flags}} ".#packages.{{platform}}.gitSchedulerImage"     -o result-git-scheduler
-    nix build {{_nix_flags}} ".#packages.{{platform}}.orchestratorImage"     -o result-build-orchestrator
     nix build {{_nix_flags}} ".#packages.{{platform}}.buildProcessorImage"   -o result-build-processor
     nix build {{_nix_flags}} ".#packages.{{platform}}.nuInitImage"           -o result-nu-init
+    nix build {{_nix_flags}} ".#packages.{{platform}}.polarInitImage"        -o result-polar-init
     nix build {{_nix_flags}} ".#packages.{{platform}}.gitServerImage"        -o result-git-server
 
 # ── Dev container ─────────────────────────────────────────────────────────────
@@ -96,7 +95,7 @@ cert-issuer target='all':
     case "{{target}}" in
         all)
             nix build {{_nix_flags}} ".#polarPkgs.certIssuer.server" -o result-cert-issuer-server
-            nix build {{_nix_flags}} ".#polarPkgs.certIssuer.client" -o result-cert-client
+            nix build {{_nix_flags}} ".#polarPkgs.certIssuer.clientImage" -o result-cert-client
             nix build {{_nix_flags}} ".#polarPkgs.certIssuer.setupBin" -o result-cert-setup-bin
             nix build {{_nix_flags}} ".#packages.{{platform}}.certIssuerImage" -o result-cert-issuer-image
             podman load -i result-cert-issuer-image
@@ -106,7 +105,7 @@ cert-issuer target='all':
             podman load -i result-cert-issuer
             ;;
         client)
-            nix build {{_nix_flags}} ".#polarPkgs.certIssuer.client" -o result-cert-client
+            nix build {{_nix_flags}} ".#polarPkgs.certIssuer.clientImage" -o result-cert-client
             ;;
         *) echo "Unknown target: {{target}}. Use all, server, or client." && exit 1 ;;
     esac
@@ -365,6 +364,32 @@ git-agents target='all':
         *) echo "Unknown target: {{target}}. Use all, observer, processor, or scheduler." && exit 1 ;;
     esac
 
+# ── Build processor + resolver ──────────────────────────────────────────────
+# Build the consolidated build-processor and resolver images.
+# Usage: just build-agents           (all)
+#        just build-agents processor
+#        just build-agents resolver
+build-agents target='all':
+    #!/usr/bin/env bash
+    set -euo pipefail
+    case "{{target}}" in
+        all)
+            nix build {{_nix_flags}} ".#packages.{{platform}}.buildProcessorImage" -o result-build-processor
+            nix build {{_nix_flags}} ".#packages.{{platform}}.polarPkgs.ociResolver.resolverImage" -o result-resolver
+            podman load -i result-build-processor
+            podman load -i result-resolver
+            ;;
+        processor)
+            nix build {{_nix_flags}} ".#packages.{{platform}}.buildProcessorImage" -o result-build-processor
+            podman load -i result-build-processor
+            ;;
+        resolver)
+            nix build {{_nix_flags}} ".#packages.{{platform}}.polarPkgs.ociResolver.resolverImage" -o result-resolver
+            podman load -i result-resolver
+            ;;
+        *) echo "Unknown target: {{target}}. Use all, processor, or resolver." && exit 1 ;;
+    esac
+
 # ── OpenAPI agents ────────────────────────────────────────────────────────────
 
 # Build openapi agent images
@@ -391,34 +416,6 @@ openapi target='all':
             podman load -i result-openapi-processor
             ;;
         *) echo "Unknown target: {{target}}. Use all, observer, or processor." && exit 1 ;;
-    esac
-
-# ── Provenance agents ─────────────────────────────────────────────────────────
-
-# Build provenance agent images
-# Usage: just provenance        (all)
-#        just provenance linker
-#        just provenance resolver
-provenance target='all':
-    #!/usr/bin/env bash
-    set -euo pipefail
-    base=".#packages.{{platform}}.polarPkgs.provenance"
-    case "{{target}}" in
-        all)
-            nix build {{_nix_flags}} "$base.linkerImage"   -o result-provenance-linker
-            nix build {{_nix_flags}} "$base.resolverImage" -o result-provenance-resolver
-            podman load -i result-provenance-linker
-            podman load -i result-provenance-resolver
-            ;;
-        linker)
-            nix build {{_nix_flags}} "$base.linkerImage" -o result-provenance-linker
-            podman load -i result-provenance-linker
-            ;;
-        resolver)
-            nix build {{_nix_flags}} "$base.resolverImage" -o result-provenance-resolver
-            podman load -i result-provenance-resolver
-            ;;
-        *) echo "Unknown target: {{target}}. Use all, linker, or resolver." && exit 1 ;;
     esac
 
 # ── Scheduler agents ──────────────────────────────────────────────────────────
@@ -449,40 +446,6 @@ scheduler target='all':
         *) echo "Unknown target: {{target}}. Use all, processor, or observer." && exit 1 ;;
     esac
 
-# ── Build orchestrator ────────────────────────────────────────────────────────
-
-# Build orchestrator images
-# Usage: just orchestrator          (all)
-#        just orchestrator agent
-#        just orchestrator clone
-orchestrator target='all':
-    #!/usr/bin/env bash
-    set -euo pipefail
-    base=".#packages.{{platform}}.polarPkgs.buildOrchestrator"
-    case "{{target}}" in
-        all)
-            nix build {{_nix_flags}} "$base.orchestratorImage"  -o result-build-orchestrator
-            nix build {{_nix_flags}} "$base.cloneImage"         -o result-clone-image
-            nix build {{_nix_flags}} "$base.buildProcessorImage" -o result-build-processor
-            podman load -i result-build-orchestrator
-            podman load -i result-clone-image
-            podman load -i result-build-processor
-            ;;
-        agent)
-            nix build {{_nix_flags}} "$base.orchestratorImage" -o result-build-orchestrator
-            podman load -i result-build-orchestrator
-            ;;
-        clone)
-            nix build {{_nix_flags}} "$base.cloneImage" -o result-clone-image
-            podman load -i result-clone-image
-            ;;
-        processor)
-                    nix build {{_nix_flags}} "$base.buildProcessorImage" -o result-build-processor
-                    podman load -i result-build-processor
-                    ;;
-                *) echo "Unknown target: {{target}}. Use all, agent, clone, or processor." && exit 1 ;;
-            esac
-
 # ── Workspace binaries ────────────────────────────────────────────────────────
 
 # Build all workspace binaries
@@ -499,6 +462,11 @@ nu-init:
     echo "Building nu-init container..."
     nix build {{_nix_flags}} ".#packages.{{platform}}.nuInitImage" -o result-nu-init
     podman load -i result-nu-init
+
+polar-init:
+    echo "Building polar-init container..."
+    nix build {{_nix_flags}} ".#packages.{{platform}}.polarInitImage" -o result-polar-init
+    podman load -i result-polar-init
 
 git-server:
     nix build {{_nix_flags}} ".#packages.{{platform}}.gitServerImage" -o result-git-server-image
@@ -816,6 +784,93 @@ ci:
         polar-dev:0.1.0 \
         bash -c "start.sh; chmod +x scripts/gitlab-ci.sh; chmod +x scripts/static-tools.sh; scripts/gitlab-ci.sh"
 
+# Install neo4j mTLS client cert into the browser's NSS certificate store.
+# Fetches fresh certs from the running cluster and imports into Librewolf.
+# Usage: just neo4j-install-certs
+neo4j-install-certs:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    echo "Waiting for a Running Neo4j-client pod..."
+    AGENT_POD=""
+    AGENT_CONTAINER=""
+    for i in $(seq 1 30); do
+        for LABEL in kube-consumer jira-processor build-processor git-repo-consumer polar-gitlab-consumer artifact-linker polar-scheduler; do
+            CANDIDATE=$(kubectl get pod -n polar -l name="$LABEL" --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+            if [ -n "$CANDIDATE" ]; then
+                AGENT_POD="$CANDIDATE"
+                AGENT_CONTAINER="$LABEL"
+                break 2
+            fi
+        done
+        sleep 2
+    done
+    if [ -z "$AGENT_POD" ]; then
+        echo "ERROR: no Running Neo4j-client pod found after 60s" >&2
+        exit 1
+    fi
+    echo "Fetching certs from $AGENT_POD (container: $AGENT_CONTAINER)..."
+    kubectl exec -n polar "$AGENT_POD" -c "$AGENT_CONTAINER" -- cat /etc/neo4j-client-tls/cert.pem > /tmp/neo4j-client-cert.pem
+    kubectl exec -n polar "$AGENT_POD" -c "$AGENT_CONTAINER" -- cat /etc/neo4j-client-tls/key.pem  > /tmp/neo4j-client-key.pem
+    kubectl exec -n polar-graph polar-neo4j-0 -- cat /var/lib/neo4j/certificates/https/trusted/ca.pem > /tmp/neo4j-ca.pem
+    echo "Bundling PKCS12..."
+    openssl pkcs12 -export \
+        -out /tmp/neo4j-client.p12 \
+        -inkey /tmp/neo4j-client-key.pem \
+        -in /tmp/neo4j-client-cert.pem \
+        -certfile /tmp/neo4j-ca.pem \
+        -name "Polar Neo4j Client" \
+        -passout pass:changeit
+    NSS_DB=~/.librewolf/$(ls ~/.librewolf/ | head -1)
+    echo "Importing into Librewolf NSS db at $NSS_DB..."
+    nix-shell -p nssTools --run "pk12util -i /tmp/neo4j-client.p12 -d '$NSS_DB' -W changeit"
+    nix-shell -p nssTools --run "certutil -M -n 'Polar Internal CA' -t 'CT,,' -d '$NSS_DB'"
+    echo "Done. Port-forward and browse to https://localhost:7473"
+
+# Load a neo4j dump file into the cluster database.
+# Scales down neo4j, runs a loader pod as root, chowns the data, scales back up,
+# and resets the neo4j password to match the cluster secret.
+# Usage: just neo4j-load-dump ~/Documents/projects/jira.5.26.26.neo4j.dump
+neo4j-load-dump dump_path:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ ! -f "{{dump_path}}" ]; then
+        echo "ERROR: dump file not found: {{dump_path}}"
+        exit 1
+    fi
+    NEO4J_PASSWORD=$(kubectl get secret -n polar-graph neo4j-secret -o jsonpath='{.data.secret}' | base64 -d | cut -d'/' -f2)
+    echo "Scaling neo4j down..."
+    kubectl scale statefulset -n polar-graph polar-neo4j --replicas=0
+    kubectl wait --for=delete pod/polar-neo4j-0 -n polar-graph --timeout=120s 2>/dev/null || true
+    echo "Launching loader pod..."
+    kubectl run -n polar-graph neo4j-loader \
+        --image=neo4j:5.26.2 \
+        --restart=Never \
+        --overrides='{"spec":{"securityContext":{"runAsUser":0,"runAsGroup":0},"volumes":[{"name":"data","persistentVolumeClaim":{"claimName":"polar-db-data"}},{"name":"logs","persistentVolumeClaim":{"claimName":"polar-db-logs"}}],"containers":[{"name":"neo4j-loader","image":"neo4j:5.26.2","command":["/bin/sh","-c","sleep 3600"],"volumeMounts":[{"name":"data","mountPath":"/var/lib/neo4j/data"},{"name":"logs","mountPath":"/var/lib/neo4j/logs"}]}]}}'
+    kubectl wait --for=condition=Ready pod/neo4j-loader -n polar-graph --timeout=60s
+    echo "Copying dump file..."
+    cat "{{dump_path}}" | kubectl exec -i -n polar-graph neo4j-loader -- /bin/sh -c 'cat > /var/lib/neo4j/data/neo4j.dump'
+    echo "Loading dump..."
+    kubectl exec -n polar-graph neo4j-loader -- /bin/sh -c \
+        'mkdir -p /var/lib/neo4j/tmp && NEO4J_HOME=/var/lib/neo4j NEO4J_CONF=/var/lib/neo4j/conf JAVA_TOOL_OPTIONS="-Djava.io.tmpdir=/var/lib/neo4j/tmp" /nix/store/qbds1qr8sf5qkzz8cady90bwhcnw05xf-neo4j-community-src-2025.8.0/opt/neo4j/bin/neo4j-admin database load neo4j --from-path=/var/lib/neo4j/data --overwrite-destination=true'
+    echo "Fixing ownership..."
+    kubectl exec -n polar-graph neo4j-loader -- /bin/sh -c 'chown -R 7474:7474 /var/lib/neo4j/data && rm /var/lib/neo4j/data/neo4j.dump'
+    echo "Cleaning up loader pod..."
+    kubectl delete pod -n polar-graph neo4j-loader
+    echo "Scaling neo4j back up..."
+    kubectl scale statefulset -n polar-graph polar-neo4j --replicas=1
+    echo "Waiting for neo4j to be ready..."
+    kubectl wait --for=condition=Ready pod/polar-neo4j-0 -n polar-graph --timeout=180s
+    echo "Waiting for neo4j to finish initializing..."
+    sleep 15
+    echo "Resetting neo4j password..."
+    kubectl exec -n polar-graph polar-neo4j-0 -- /nix/store/qbds1qr8sf5qkzz8cady90bwhcnw05xf-neo4j-community-src-2025.8.0/opt/neo4j/bin/cypher-shell \
+        -u neo4j -p neo4j \
+        "ALTER USER neo4j SET PASSWORD '$NEO4J_PASSWORD' CHANGE NOT REQUIRED" || \
+    kubectl exec -n polar-graph polar-neo4j-0 -- /nix/store/qbds1qr8sf5qkzz8cady90bwhcnw05xf-neo4j-community-src-2025.8.0/opt/neo4j/bin/cypher-shell \
+        -u neo4j -p "$NEO4J_PASSWORD" \
+        "ALTER USER neo4j SET PASSWORD '$NEO4J_PASSWORD' CHANGE NOT REQUIRED"
+    echo "Done. Run 'just neo4j-install-certs' to update browser certs."
+
 # ── nix-usernetes (local cluster) ────────────────────────────────────────────
 #
 # Full cluster startup sequence:
@@ -887,12 +942,56 @@ cluster-build-all:
     just gitlab all
     just kube all
     just scheduler all
-    just orchestrator all
-    just provenance all
     just git-agents all
     just jira all
     just openapi all
+    just build-agents all
     just nu-init
+    just polar-init
+
+# Load only the images needed by the local-minimal target:
+# neo4j, cassini, cert-issuer, polar-init, kube observer/consumer, jira observer/processor.
+cluster-load-minimal neo4j_result=_neo4j_result:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    _load() {
+        if [ -e "$1" ]; then
+            echo "Loading $1..."
+            podman exec -i u7s ctr -n k8s.io images import - < "$1"
+        else
+            echo "Skipping $1 (not found)"
+        fi
+    }
+    _tag() {
+        echo "Tagging $1 -> $2"
+        podman exec u7s ctr -n k8s.io images tag "$1" "$2" 2>/dev/null || true
+    }
+    # Infrastructure
+    if [ -n "{{neo4j_result}}" ]; then
+        _load "{{neo4j_result}}"
+    fi
+    # Minimal-target images only
+    _load ./result-cassini-image
+    _load ./result-cert-issuer
+    _load ./result-cert-client
+    _load ./result-polar-init
+    _load ./result-kube-observer
+    _load ./result-kube-consumer
+    _load ./result-jira-observer
+    _load ./result-jira-processor
+    _load ./result-nu-init
+    # Retag to match manifest image references
+    _tag docker.io/library/cassini:latest               docker.io/library/cassini:latest
+    _tag docker.io/library/kube-observer:latest          docker.io/library/kube-observer:latest
+    _tag docker.io/library/kube-consumer:latest          docker.io/library/kube-consumer:latest
+    _tag docker.io/library/jira-observer:latest          docker.io/library/jira-observer:latest
+    _tag docker.io/library/jira-processor:latest         docker.io/library/jira-processor:latest
+    _tag docker.io/library/nix-neo4j:latest              docker.io/library/neo4j:5.26.2
+    _tag docker.io/library/cert-issuer:latest             docker.io/library/cert-issuer:latest
+    _tag docker.io/library/polar-cert-client:latest      docker.io/library/polar-cert-client:latest
+    _tag docker.io/library/polar-init:latest             docker.io/library/polar-init:latest
+    _tag docker.io/library/polar-nu-init:latest          docker.io/library/polar-nu-init:latest
+    echo "Minimal images loaded and tagged."
 
 # Build and load all core Polar images into the cluster.
 # All images are loaded directly from nix result symlinks.
@@ -931,7 +1030,6 @@ cluster-load-all neo4j_result=_neo4j_result:
     _load ./result-cert-client
     _load ./result-harness-producer
     _load ./result-harness-sink
-    _load ./result-clone-image
     _load ./result-gitlab-observer
     _load ./result-gitlab-consumer
     _load ./result-kube-observer
@@ -943,18 +1041,16 @@ cluster-load-all neo4j_result=_neo4j_result:
     _load ./result-jira-processor
     _load ./result-openapi-observer
     _load ./result-openapi-processor
+    _load ./result-resolver
     _load ./result-scheduler-observer
     _load ./result-scheduler-processor
-    _load ./result-provenance-linker
-    _load ./result-provenance-resolver
-    _load ./result-build-orchestrator
     _load ./result-build-processor
     _load ./result-nu-init
+    _load ./result-polar-init
     # Retag to match manifest image references
     _tag docker.io/library/cassini:latest                       docker.io/library/cassini:latest
     _tag docker.io/library/harness-producer:latest              docker.io/library/harness-producer:latest
     _tag docker.io/library/harness-sink:latest                  docker.io/library/harness-sink:latest
-    _tag docker.io/library/cyclops/git-clone:latest             docker.io/library/cyclops/git-clone:latest
     _tag docker.io/library/gitlab-observer:latest               docker.io/library/gitlab-observer:latest
     _tag docker.io/library/gitlab-consumer:latest               docker.io/library/gitlab-consumer:latest
     _tag docker.io/library/kube-observer:latest                 docker.io/library/kube-observer:latest
@@ -968,14 +1064,13 @@ cluster-load-all neo4j_result=_neo4j_result:
     _tag docker.io/library/openapi-processor:latest             docker.io/library/openapi-processor:latest
     _tag docker.io/library/scheduler-observer:latest            docker.io/library/scheduler-observer:latest
     _tag docker.io/library/scheduler-processor:latest           docker.io/library/scheduler-processor:latest
-    _tag docker.io/library/provenance-linker:latest             docker.io/library/provenance-linker:latest
-    _tag docker.io/library/provenance-resolver:latest           docker.io/library/provenance-resolver:latest
-    _tag docker.io/library/build-orchestrator:latest            docker.io/library/build-orchestrator:latest
     _tag docker.io/library/build-processor:latest               docker.io/library/build-processor:latest
+    _tag docker.io/library/oci-resolver:latest                  docker.io/library/oci-resolver:latest
     _tag docker.io/library/nix-neo4j:latest                     docker.io/library/neo4j:5.26.2
     _tag docker.io/library/polar-nu-init:latest                 docker.io/library/polar-nu-init:latest
-    _tag docker.io/library/cert-issuer:latest        docker.io/library/cert-issuer:latest
-    _tag docker.io/library/polar-cert-client:latest  docker.io/library/polar-cert-client:latest
+    _tag docker.io/library/cert-issuer:latest                   docker.io/library/cert-issuer:latest
+    _tag docker.io/library/polar-cert-client:latest             docker.io/library/polar-cert-client:latest
+    _tag docker.io/library/polar-init:latest                    docker.io/library/polar-init:latest
     echo "Core images loaded and tagged."
 
 # Render manifests for the local cluster.
@@ -1112,13 +1207,7 @@ kind-load-all neo4j_result='':
     load ./result-scheduler-processor
     load ./result-scheduler-observer
 
-    # Build orchestrator
-    just orchestrator all
-    load ./result-orchestrator-image
-    load ./result-build-processor-image
-    load ./result-clone-image
-
-    echo "Core images loaded. Agent images (gitlab, kube, git, web, provenance) load on demand:"
+    echo "Core images loaded. Agent images (gitlab, kube, git, web) load on demand:"
     echo "  just kind-load-agents gitlab"
     echo "  just kind-load-agents kube"
     echo "  etc."
@@ -1128,7 +1217,6 @@ kind-load-all neo4j_result='':
 #        just kind-load-agents kube
 #        just kind-load-agents git
 #        just kind-load-agents web
-#        just kind-load-agents provenance
 #        just kind-load-agents all
 kind-load-agents agent='all':
     #!/usr/bin/env bash
@@ -1156,19 +1244,13 @@ kind-load-agents agent='all':
             load ./result-openapi-observer
             load ./result-openapi-processor
             ;;
-        provenance)
-            just provenance all
-            load ./result-provenance-linker
-            load ./result-provenance-resolver
-            ;;
         all)
             just kind-load-agents gitlab
             just kind-load-agents kube
             just kind-load-agents git
             just kind-load-agents web
-            just kind-load-agents provenance
             ;;
-        *) echo "Unknown agent: {{agent}}. Use gitlab, kube, git, web, provenance, or all." && exit 1 ;;
+        *) echo "Unknown agent: {{agent}}. Use gitlab, kube, git, web, or all." && exit 1 ;;
     esac
 
 # Render Dhall manifests for local kind deployment.

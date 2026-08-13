@@ -9,11 +9,15 @@ use polar::{
     SupervisorMessage,
     cassini::{CassiniClient, SubscribeRequest, TcpClient},
     get_neo_config,
-    graph::controller::{GraphController, GraphControllerActor},
+    graph::controller::{GraphController, GraphControllerActor, GraphSignal},
+    health::{DepCertEndpoint, HealthCheckActor, HealthCheckArgs, HealthCheckMessage},
 };
-use ractor::{Actor, ActorProcessingErr, ActorRef, SupervisionEvent, async_trait};
+use ractor::{Actor, ActorProcessingErr, ActorRef, OutputPort, SupervisionEvent, async_trait};
 use std::sync::Arc;
 use tracing::{debug, error, info, instrument, warn};
+
+const HEALTHCHECK_ACTOR_NAME: &str = "polar.healthcheck";
+const DRAIN_WINDOW_SECS: u64 = 5;
 
 // ── State ──────────────────────────────────────────────────────────────────────
 
@@ -26,6 +30,8 @@ pub struct BuildProcessorState {
     pub linker: Option<ActorRef<ProvenanceEvent>>,
     /// Linker actor for artifact domain projection (Sbom, Package, ContainerImage, etc.)
     pub build_handler: Option<ActorRef<ProvenanceEvent>>,
+    healthcheck: ActorRef<HealthCheckMessage>,
+    draining: bool,
 }
 
 // ── Supervisor ─────────────────────────────────────────────────────────────────
@@ -77,6 +83,35 @@ impl Actor for BuildProcessorSupervisor {
     ) -> Result<Self::State, ActorProcessingErr> {
         debug!("BuildProcessorSupervisor starting");
 
+        let prepare_shutdown_port = Arc::new(OutputPort::<()>::default());
+        prepare_shutdown_port.subscribe(myself.clone(), |()| {
+            Some(SupervisorMessage::PrepareShutdown)
+        });
+
+        // This supervisor owns a GraphControllerActor directly (via
+        // BuildActor/ProvenanceLinker, both writing through it), so real
+        // GraphAvailable/GraphOpFailed tracking applies here.
+        let dep_cert_endpoints = vec![
+            DepCertEndpoint::parse("cassini-ip-svc.polar.svc.cluster.local:8080:300")
+                .map_err(|e| ActorProcessingErr::from(e))?,
+            DepCertEndpoint::parse("polar-db-svc.polar-graph.svc.cluster.local:7687:300")
+                .map_err(|e| ActorProcessingErr::from(e))?,
+        ];
+
+        let (healthcheck, _) = HealthCheckActor::spawn_linked(
+            Some(HEALTHCHECK_ACTOR_NAME.to_string()),
+            HealthCheckActor,
+            HealthCheckArgs {
+                expects_graph: true,
+                rejuvenation_threshold_secs: 300,
+                dep_cert_endpoints,
+                prepare_shutdown_port,
+            },
+            myself.get_cell(),
+        )
+        .await
+        .map_err(|e| ActorProcessingErr::from(e))?;
+
         let graph = neo4rs::Graph::connect(get_neo_config()?)?;
 
         let broker_client = Arc::new(
@@ -94,6 +129,8 @@ impl Actor for BuildProcessorSupervisor {
             graph_controller: None,
             linker: None,
             build_handler: None,
+            healthcheck,
+            draining: false,
         })
     }
 
@@ -107,21 +144,32 @@ impl Actor for BuildProcessorSupervisor {
             SupervisorMessage::ClientEvent { event } => match event {
                 ClientEvent::Registered { .. } => {
                     info!("Cassini client registered — spawning child actors and subscribing");
+                    let _ = state.healthcheck.cast(HealthCheckMessage::CassiniConnected);
 
                     // ── Graph controller ───────────────────────────────────────
                     // Owns Neo4j writes for execution lifecycle events.
+                    // BUG FIX: signal_port was previously a throwaway
+                    // OutputPort with nothing subscribed to it — every
+                    // GraphSignal fired by the controller was silently
+                    // discarded. Now routed into SupervisorMessage::GraphSignal.
+                    let graph_signal_port = Arc::new(OutputPort::<GraphSignal>::default());
+                    graph_signal_port.subscribe(myself.clone(), |signal| {
+                        Some(SupervisorMessage::GraphSignal(signal))
+                    });
                     let (controller, _) = Actor::spawn_linked(
                         Some(format!("{BUILD_PROCESSOR_NAME}.graph.controller")),
                         GraphControllerActor,
-                        (),
+                        polar::graph::controller::GraphControllerArgs {
+                            signal_port: graph_signal_port,
+                        },
                         myself.clone().into(),
                     )
                     .await?;
 
                     state.graph_controller = Some(controller.clone().into());
+                    let _ = state.healthcheck.cast(HealthCheckMessage::GraphConnected);
 
-                    // ── Provenance linker ──────────────────────────────────────
-                    // Owns Neo4j writes for artifact domain events.
+                    // ── Build handler ───────────────────────────────────────────
                     let (build_handler, _) = Actor::spawn_linked(
                         Some(format!("{BUILD_PROCESSOR_NAME}.build_handler")),
                         BuildActor,
@@ -168,16 +216,45 @@ impl Actor for BuildProcessorSupervisor {
                 }
 
                 ClientEvent::MessagePublished { topic, payload, .. } => {
-                    Self::deserialize_and_dispatch(topic, payload, state);
+                    if state.draining {
+                        warn!(
+                            "draining -- logging message on topic '{topic}' \
+                             ({} bytes) instead of dispatching; will be lost on exit",
+                            payload.len()
+                        );
+                    } else {
+                        Self::deserialize_and_dispatch(topic, payload, state);
+                    }
                 }
 
+                // BUG FIX: was `myself.stop(Some(reason))` -- silent exit-0,
+                // Job marks Completed, no restart, no visible failure.
                 ClientEvent::TransportError { reason } => {
-                    error!("Transport error: {reason}");
-                    myself.stop(Some(reason));
+                    warn!("Transport error occurred (non-fatal, awaiting reconnect): {reason}");
+                    let _ = state.healthcheck.cast(HealthCheckMessage::CassiniDisconnected);
                 }
 
                 _ => {}
             },
+            SupervisorMessage::Heartbeat => {}
+            SupervisorMessage::PrepareShutdown => {
+                info!("PrepareShutdown received");
+                if let Err(e) = state.healthcheck.cast(HealthCheckMessage::ShutdownAck) {
+                    error!("failed to send ShutdownAck: {e}");
+                }
+            }
+            SupervisorMessage::GraphSignal(signal) => match signal {
+                GraphSignal::Available => {
+                    let _ = state.healthcheck.cast(HealthCheckMessage::GraphAvailable);
+                }
+                GraphSignal::OpFailed(reason) => {
+                    let _ = state.healthcheck.cast(HealthCheckMessage::GraphOpFailed(reason));
+                }
+            },
+            SupervisorMessage::ForceExit => {
+                warn!("drain window elapsed, exiting now");
+                std::process::exit(1);
+            }
         }
 
         Ok(())
@@ -185,27 +262,48 @@ impl Actor for BuildProcessorSupervisor {
 
     async fn handle_supervisor_evt(
         &self,
-        _myself: ActorRef<Self::Msg>,
+        myself: ActorRef<Self::Msg>,
         event: SupervisionEvent,
-        _state: &mut Self::State,
+        state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match event {
             SupervisionEvent::ActorStarted(cell) => {
                 info!("child actor started: {:?}", cell.get_name());
             }
             SupervisionEvent::ActorTerminated(cell, _, reason) => {
+                let actor_name = cell.get_name().unwrap_or_default();
                 // Child termination is logged but does not stop the supervisor.
                 // The graph can be rebuilt from the broker log.
                 error!(
                     "child actor terminated: {:?} reason: {:?}",
-                    cell.get_name(),
-                    reason
+                    actor_name, reason
                 );
+                if actor_name == HEALTHCHECK_ACTOR_NAME && !state.draining {
+                    state.draining = true;
+                    info!("entering drain window before exiting for rejuvenation");
+                    let _ = myself
+                        .send_after(ractor::concurrency::Duration::from_secs(DRAIN_WINDOW_SECS), || {
+                            SupervisorMessage::ForceExit
+                        })
+                        .await;
+                }
             }
             SupervisionEvent::ActorFailed(cell, e) => {
-                error!("child actor failed: {:?} error: {:?}", cell.get_name(), e);
+                let actor_name = cell.get_name().unwrap_or_default();
+                error!("child actor failed: {:?} error: {:?}", actor_name, e);
                 // TODO: implement selective restart — graph controller and linker
                 // should restart on failure; broker client failure should stop the agent.
+                if actor_name == HEALTHCHECK_ACTOR_NAME {
+                    if !state.draining {
+                        state.draining = true;
+                        warn!("entering drain window before exit ({actor_name} failed)");
+                        let _ = myself
+                            .send_after(ractor::concurrency::Duration::from_secs(DRAIN_WINDOW_SECS), || {
+                                SupervisorMessage::ForceExit
+                            })
+                            .await;
+                    }
+                }
             }
             SupervisionEvent::ProcessGroupChanged(..) => {}
         }

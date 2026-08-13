@@ -7,18 +7,26 @@ use crate::{
     subscriber::{SubscriberManager, SubscriberManagerArgs},
     topic::{TopicManager, TopicManagerArgs},
 };
-use cassini_types::{BrokerMessage, ShutdownPhase};
-use ractor::concurrency::Duration;
-use ractor::{Actor, ActorProcessingErr, ActorRef, SupervisionEvent, async_trait};
-use tracing::{debug, error, info, trace, trace_span, warn};
-use tracing_opentelemetry::OpenTelemetrySpanExt;
 
+use cassini_tracing::shutdown_tracing;
 use cassini_tracing::try_set_parent_otel;
+
+use cassini_types::{BrokerMessage, ShutdownPhase};
 use cassini_types::ControlOp;
 use cassini_types::DisconnectReason;
+
+use polar_health::{HealthCheckActor, HealthCheckArgs, HealthCheckMessage};
+
+use ractor::{Actor, ActorProcessingErr, ActorRef, SupervisionEvent, async_trait};
+use ractor::concurrency::Duration;
+use ractor::OutputPort;
+
 use std::env;
 use std::sync::Arc;
+
 use tokio_util::sync::CancellationToken;
+use tracing::{debug, error, info, trace, trace_span, warn};
+use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 // ============================== Broker Supervisor Actor Definition ============================== //
 
@@ -31,6 +39,11 @@ pub struct BrokerState {
     topic_mgr: Option<ActorRef<BrokerMessage>>,
     subscriber_mgr: Option<ActorRef<BrokerMessage>>,
     control_mgr: Option<ActorRef<BrokerMessage>>,
+
+    /// Held to keep the HealthCheckActor alive. Communication is via OutputPort.
+    #[allow(dead_code)]
+    healthcheck: ActorRef<HealthCheckMessage>,
+
     is_shutting_down: bool,
 }
 
@@ -103,16 +116,26 @@ impl Actor for Broker {
                     "Worker started"
                 );
             }
+
             SupervisionEvent::ActorTerminated(actor_cell, _, _reason) => {
-                // Don't claim we restart if we don't.
+                let span = trace_span!("cassini.broker.supervision_event.terminated");
+                let _g = span.enter();
+
                 warn!(
                     worker_name = ?actor_cell.get_name(),
                     worker_id = ?actor_cell.get_id(),
                     "Worker terminated (no restart strategy implemented here)"
                 );
 
-                // Remove the terminated manager from state if it's one of our core managers
                 if let Some(name) = actor_cell.get_name() {
+                    // Healthcheck actor terminating cleanly means rejuvenation
+                    // sequence completed — flush traces and exit for Job restart.
+                    if name == "cassini.healthcheck" {
+                        info!("HealthCheckActor terminated cleanly — rejuvenation complete, exiting");
+                        shutdown_tracing();
+                        std::process::exit(1);
+                    }
+
                     match name.as_str() {
                         crate::LISTENER_MANAGER_NAME => {
                             state.listener_mgr = None;
@@ -138,7 +161,6 @@ impl Actor for Broker {
                     }
                 }
 
-                // Check if all managers have terminated during shutdown
                 if state.is_shutting_down {
                     self.check_shutdown_completion(myself.clone(), state)
                         .await?;
@@ -153,7 +175,9 @@ impl Actor for Broker {
                     error = %e,
                     "Worker failed; stopping broker"
                 );
-                myself.stop(Some("ACTOR_FAILED".to_string()));
+                shutdown_tracing();
+                // Exit code 1 — unexpected failure, distinct from graceful rejuvenation (2).
+                std::process::exit(1);
             }
 
             SupervisionEvent::ProcessGroupChanged(_) => (),
@@ -172,6 +196,43 @@ impl Actor for Broker {
         let _g = span.enter();
 
         debug!(actor = ?myself, "Broker starting");
+
+        // Build the OutputPort that HealthCheckActor fires when it wants
+        // to initiate the graceful shutdown sequence. We convert the ()
+        // signal into a PrepareForShutdown message with the auth token.
+        let prepare_shutdown_port = Arc::new(OutputPort::<()>::default());
+        let shutdown_token = args.shutdown_auth_token.clone();
+        prepare_shutdown_port.subscribe(myself.clone(), move |()| {
+            Some(BrokerMessage::PrepareForShutdown {
+                auth_token: shutdown_token.clone(),
+            })
+        });
+
+        let (healthcheck, _) = HealthCheckActor::spawn_linked(
+            Some("cassini.healthcheck".to_string()),
+            HealthCheckActor,
+            HealthCheckArgs {
+                expects_graph: false,
+                // 12-hour rejuvenation threshold — Cassini uses long-lived certs
+                // to minimize disruption to connected agents.
+                rejuvenation_threshold_secs: 300,
+                // No dep cert endpoints — cert-issuer is HTTP only.
+                // Availability is proven implicitly by successful cert issuance.
+                dep_cert_endpoints: vec![],
+                prepare_shutdown_port,
+            },
+            myself.get_cell(),
+        )
+        .await
+        .map_err(|e| {
+            error!(error = ?e, "Broker startup failed: HealthCheckActor failed to start");
+            ActorProcessingErr::from(e)
+        })?;
+
+        // Cassini doesn't connect to itself, so manually signal CassiniConnected
+        // to kick off the tick loop. This is the equivalent of the Registered
+        // event that agent supervisors receive when they connect to Cassini.
+        let _ = healthcheck.cast(HealthCheckMessage::CassiniConnected);
 
         // Create SessionManager without listener manager (will set later)
         let (session_mgr, _) = Actor::spawn_linked(
@@ -282,6 +343,7 @@ impl Actor for Broker {
             topic_mgr: Some(topic_mgr),
             subscriber_mgr: Some(subscriber_mgr),
             control_mgr: Some(control_mgr),
+            healthcheck,
             is_shutting_down: false,
         })
     }

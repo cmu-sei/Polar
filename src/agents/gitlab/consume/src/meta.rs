@@ -1,5 +1,4 @@
 use crate::{GitlabConsumerState, UNKNOWN_FILED};
-use cassini_client::TcpClientMessage;
 use common::{
     METADATA_CONSUMER_TOPIC,
     types::{GitlabData, GitlabEnvelope},

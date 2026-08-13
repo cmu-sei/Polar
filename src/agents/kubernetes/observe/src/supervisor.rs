@@ -7,13 +7,16 @@ use kube::ResourceExt;
 use kube::runtime::{watcher, watcher::Event};
 use kube::{Api, Client, api::ListParams};
 use kube_common::{KIND_KUSTOMIZATION, KIND_OCI_REPOSITORY};
-use polar::{SupervisorMessage, cassini::TcpClient};
+use polar::health::{DepCertEndpoint, HealthCheckActor, HealthCheckArgs, HealthCheckMessage};
+use ractor::{Actor, ActorProcessingErr, ActorRef, OutputPort, SupervisionEvent, async_trait};
 use ractor::concurrency::Duration;
-use ractor::{Actor, ActorProcessingErr, ActorRef, SupervisionEvent, async_trait};
 use serde_json::to_value;
 use std::collections::HashMap;
+use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 use tracing::{instrument, trace};
+use polar::cassini::TcpClient;
+use polar::SupervisorMessage;
 
 use crate::{
     GlobalWatcherState, KustomizationWatcher, NamespacedWatcherState, OciRepositoryWatcher,
@@ -21,6 +24,8 @@ use crate::{
 };
 use futures::{StreamExt, TryStreamExt};
 use kube_common::{RESOURCE_APPLIED_ACTION, RESOURCE_DELETED_ACTION, RawKubeEvent};
+
+const HEALTHCHECK_ACTOR_NAME: &str = "polar.healthcheck";
 
 // TODO: establish what kind of messages these receive
 pub type NamespaceWatcherMap = HashMap<String, ActorRef<()>>;
@@ -31,6 +36,7 @@ pub struct ClusterObserverSupervisor;
 pub struct ClusterObserverSupervisorState {
     kube_client: kube::Client,
     tcp_client: TcpClient,
+    healthcheck: ActorRef<HealthCheckMessage>,
     #[allow(dead_code)]
     node_watcher: Option<Watcher>,
     namespace_watcher: Option<Watcher>,
@@ -44,6 +50,7 @@ impl ClusterObserverSupervisor {
     pub async fn init(
         kube_config: Config,
         myself: ActorRef<SupervisorMessage>,
+        healthcheck: ActorRef<HealthCheckMessage>,
     ) -> Result<ClusterObserverSupervisorState, ActorProcessingErr> {
         // try to create a client and auth with the kube api
         match Client::try_from(kube_config) {
@@ -58,6 +65,7 @@ impl ClusterObserverSupervisor {
                 Ok(ClusterObserverSupervisorState {
                     kube_client,
                     tcp_client,
+                    healthcheck,
                     namespace_watcher: None,
                     node_watcher: None,
                     oci_repository_watcher: None,
@@ -83,16 +91,43 @@ impl Actor for ClusterObserverSupervisor {
         // Read Kubernetes credentials and other data from the environment
         info!("{myself:?} starting");
 
+        // Build the OutputPort that HealthCheckActor fires when it wants
+        // the supervisor to prepare for shutdown.
+        let prepare_shutdown_port = Arc::new(OutputPort::<()>::default());
+        prepare_shutdown_port.subscribe(myself.clone(), |()| {
+            Some(SupervisorMessage::PrepareShutdown)
+        });
+
+        // Observers only depend on Cassini -- no graph dependency, unlike consumers.
+        let dep_cert_endpoints = vec![
+            DepCertEndpoint::parse("cassini-ip-svc.polar.svc.cluster.local:8080:300")
+                .map_err(|e| ActorProcessingErr::from(e))?,
+        ];
+
+        let (healthcheck, _) = HealthCheckActor::spawn_linked(
+            Some(HEALTHCHECK_ACTOR_NAME.to_string()),
+            HealthCheckActor,
+            HealthCheckArgs {
+                expects_graph: false,
+                rejuvenation_threshold_secs: 300,
+                dep_cert_endpoints,
+                prepare_shutdown_port,
+            },
+            myself.get_cell(),
+        )
+        .await
+        .map_err(|e| ActorProcessingErr::from(e))?;
+
         // detect deployed environment, otherwise, try to infer configuration from the environment
         if let Ok(kube_config) = kube::Config::incluster() {
             info!("Attempting to infer kube configuration from pod environment...");
-            match ClusterObserverSupervisor::init(kube_config, myself).await {
+            match ClusterObserverSupervisor::init(kube_config, myself, healthcheck).await {
                 Ok(state) => Ok(state),
                 Err(e) => Err(ActorProcessingErr::from(e)),
             }
         } else if let Ok(kube_config) = kube::Config::infer().await {
             info!("Attempting to infer kube configuration from local environment...");
-            match ClusterObserverSupervisor::init(kube_config, myself).await {
+            match ClusterObserverSupervisor::init(kube_config, myself, healthcheck).await {
                 Ok(state) => Ok(state),
                 Err(e) => Err(ActorProcessingErr::from(e)),
             }
@@ -105,18 +140,62 @@ impl Actor for ClusterObserverSupervisor {
 
     async fn handle_supervisor_evt(
         &self,
-        _: ActorRef<Self::Msg>,
+        myself: ActorRef<Self::Msg>,
         msg: SupervisionEvent,
-        _: &mut Self::State,
+        state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match msg {
             SupervisionEvent::ActorStarted(_) => (),
             SupervisionEvent::ActorTerminated(actor_cell, _, reason) => {
+                let actor_name = actor_cell.get_name().unwrap_or_default();
                 info!(
                     "CLUSTER_SUPERVISOR: {0:?}:{1:?} terminated. {reason:?}",
-                    actor_cell.get_name(),
+                    actor_name,
                     actor_cell.get_id()
                 );
+
+                // Clean termination of the healthcheck actor means the
+                // rejuvenation sequence completed -- exit so the Job
+                // controller creates a new pod with fresh certs.
+                if actor_name == HEALTHCHECK_ACTOR_NAME {
+                    info!(
+                        "CLUSTER_SUPERVISOR: healthcheck actor terminated cleanly, exiting for rejuvenation"
+                    );
+                    std::process::exit(1);
+                }
+
+                if actor_name == format!("{TCP_CLIENT_NAME}.tcp") {
+                    warn!("TCP client terminated; tearing down watcher trees and respawning...");
+
+                    // Stop any existing watcher trees — they hold stale TcpClient
+                    // handles baked in at spawn time and can't publish through a
+                    // dead client. Rather than propagate a fresh handle down
+                    // through several actor layers, we just let the Registered
+                    // handler rebuild them fresh once the new client reconnects.
+                    if let Some(w) = state.namespace_watcher.take() {
+                        w.stop(Some("tcp_client_respawn".to_string()));
+                    }
+                    if let Some(w) = state.oci_repository_watcher.take() {
+                        w.stop(Some("tcp_client_respawn".to_string()));
+                    }
+                    if let Some(w) = state.kustomization_watcher.take() {
+                        w.stop(Some("tcp_client_respawn".to_string()));
+                    }
+
+                    match TcpClient::spawn(TCP_CLIENT_NAME, myself.clone(), |event| {
+                        Some(SupervisorMessage::ClientEvent { event })
+                    })
+                    .await
+                    {
+                        Ok(new_client) => {
+                            info!("TCP client respawned successfully");
+                            state.tcp_client = new_client;
+                        }
+                        Err(e) => {
+                            error!("Failed to respawn TCP client: {e}");
+                        }
+                    }
+                }
             }
             SupervisionEvent::ActorFailed(actor_cell, e) => {
                 warn!(
@@ -124,6 +203,15 @@ impl Actor for ClusterObserverSupervisor {
                     actor_cell.get_name(),
                     actor_cell.get_id()
                 );
+                // Any child actor failure is fatal -- exit so the Job
+                // controller creates a new pod. This is a deliberately blunt
+                // fail-fast policy for now: we want a visible Job restart
+                // event as the signal something needs investigating, rather
+                // than silently degrading. Finer-grained resilience (e.g.
+                // per-watcher restart without a full pod cycle) can be added
+                // later if warranted, and should route through the logging
+                // agent / OTel trace once that's wired up.
+                std::process::exit(1);
             }
             SupervisionEvent::ProcessGroupChanged(..) => todo!(),
         }
@@ -138,84 +226,93 @@ impl Actor for ClusterObserverSupervisor {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
+            SupervisorMessage::Heartbeat => {}
+            SupervisorMessage::PrepareShutdown => {
+                info!("CLUSTER_OBSERVER_SUPERVISOR: PrepareShutdown received");
+
+                // Observers only publish -- there's no subscription to unwind
+                // and no discrete queue to drain (the k8s watch streams are
+                // continuous and the actor mailbox already serializes work
+                // one event at a time). Ack immediately.
+                if let Err(e) = state.healthcheck.cast(HealthCheckMessage::ShutdownAck) {
+                    error!("CLUSTER_OBSERVER_SUPERVISOR: failed to send ShutdownAck: {e}");
+                }
+            }
             SupervisorMessage::ClientEvent { event } => match event {
                 ClientEvent::Registered { .. } => {
-                    let ns_watcher_state = NamespaceSupervisorState {
-                        tcp_client: state.tcp_client.clone(),
-                        kube_client: state.kube_client.clone(),
-                        supervisors: HashMap::new(),
-                    };
+                    let _ = state.healthcheck.cast(HealthCheckMessage::CassiniConnected);
 
-                    let (ns_watcher, _) = Actor::spawn_linked(
-                        Some("cluster.nodes".into()),
-                        NamespaceSupervisor,
-                        ns_watcher_state,
-                        myself.clone().into(),
-                    )
-                    .await?;
+                    if state.namespace_watcher.is_none() {
+                        let ns_watcher_state = NamespaceSupervisorState {
+                            tcp_client: state.tcp_client.clone(),
+                            kube_client: state.kube_client.clone(),
+                            supervisors: HashMap::new(),
+                        };
 
-                    // TODO: We need to start a node watcher too, but it tends to fail for some reason.
-                    // We'll have to investigate.
+                        let (ns_watcher, _) = Actor::spawn_linked(
+                            Some("cluster.nodes".into()),
+                            NamespaceSupervisor,
+                            ns_watcher_state,
+                            myself.clone().into(),
+                        )
+                        .await?;
 
-                    state.namespace_watcher = Some(ns_watcher);
+                        state.namespace_watcher = Some(ns_watcher);
+                    } else {
+                        debug!("Namespace watcher already running; skipping respawn on reconnect");
+                    }
 
-                    // ---- Flux: OCIRepository (global) ----
-                    //
-                    // OCIRepository is a cluster-wide concern. Flux may be installed
-                    // in any namespace, so we use a global watcher rather than
-                    // scoping to flux-system. This mirrors the approach taken for
-                    // Node and ClusterRole watchers.
-                    let oci_watcher_state = GlobalWatcherState {
-                        tcp_client: state.tcp_client.clone(),
-                        kube_client: state.kube_client.clone(),
-                        kind: KIND_OCI_REPOSITORY,
-                    };
+                    if state.oci_repository_watcher.is_none() {
+                        let oci_watcher_state = GlobalWatcherState {
+                            tcp_client: state.tcp_client.clone(),
+                            kube_client: state.kube_client.clone(),
+                            kind: KIND_OCI_REPOSITORY,
+                        };
 
-                    let (oci_watcher, _) = Actor::spawn_linked(
-                        Some("cluster.flux.ocirepositories".into()),
-                        OciRepositoryWatcher,
-                        oci_watcher_state,
-                        myself.clone().into(),
-                    )
-                    .await?;
+                        let (oci_watcher, _) = Actor::spawn_linked(
+                            Some("cluster.flux.ocirepositories".into()),
+                            OciRepositoryWatcher,
+                            oci_watcher_state,
+                            myself.clone().into(),
+                        )
+                        .await?;
 
-                    state.oci_repository_watcher = Some(oci_watcher);
+                        state.oci_repository_watcher = Some(oci_watcher);
+                    } else {
+                        debug!("OCIRepository watcher already running; skipping respawn on reconnect");
+                    }
 
-                    // ---- Flux: Kustomization (global) ----
-                    //
-                    // Same rationale as OCIRepository. Kustomization resources are
-                    // namespaced in the Kubernetes API sense, but we want visibility
-                    // across all namespaces regardless of where Flux is deployed.
-                    let ks_watcher_state = GlobalWatcherState {
-                        tcp_client: state.tcp_client.clone(),
-                        kube_client: state.kube_client.clone(),
-                        kind: KIND_KUSTOMIZATION,
-                    };
+                    if state.kustomization_watcher.is_none() {
+                        let ks_watcher_state = GlobalWatcherState {
+                            tcp_client: state.tcp_client.clone(),
+                            kube_client: state.kube_client.clone(),
+                            kind: KIND_KUSTOMIZATION,
+                        };
 
-                    let (ks_watcher, _) = Actor::spawn_linked(
-                        Some("cluster.flux.kustomizations".into()),
-                        KustomizationWatcher,
-                        ks_watcher_state,
-                        myself.clone().into(),
-                    )
-                    .await?;
+                        let (ks_watcher, _) = Actor::spawn_linked(
+                            Some("cluster.flux.kustomizations".into()),
+                            KustomizationWatcher,
+                            ks_watcher_state,
+                            myself.clone().into(),
+                        )
+                        .await?;
 
-                    state.kustomization_watcher = Some(ks_watcher);
-
-                    /*
-                     * TODO: Consider and start watchers for other CRDs we might want to observe.
-                     * I suspect this will take a great deal of work.
-                     */
+                        state.kustomization_watcher = Some(ks_watcher);
+                    } else {
+                        debug!("Kustomization watcher already running; skipping respawn on reconnect");
+                    }
                 }
                 ClientEvent::MessagePublished { .. } => {
                     todo!("Handle incoming messages")
                 }
                 ClientEvent::TransportError { reason } => {
-                    error!("Transport error occurred! {reason}");
-                    myself.stop(Some(reason))
+                    warn!("Transport error occurred (non-fatal, awaiting reconnect): {reason}");
+                    let _ = state.healthcheck.cast(HealthCheckMessage::CassiniDisconnected);
                 }
                 _ => (),
-            },
+            }
+            SupervisorMessage::GraphSignal(_) => {}
+            SupervisorMessage::ForceExit => {}
         }
         Ok(())
     }

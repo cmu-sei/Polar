@@ -29,6 +29,7 @@ use ractor::async_trait;
 use std::env;
 use tracing::debug;
 use tracing::error;
+use tracing::warn;
 
 pub struct ObserverSupervisor;
 
@@ -108,6 +109,8 @@ impl Actor for ObserverSupervisor {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
+            SupervisorMessage::Heartbeat => {}
+            SupervisorMessage::PrepareShutdown => {}
             SupervisorMessage::ClientEvent { event } => {
                 match event {
                     ClientEvent::Registered { registration_id } => {
@@ -191,17 +194,16 @@ impl Actor for ObserverSupervisor {
                     }
                     ClientEvent::MessagePublished { .. } => {
                         todo!("Deserialize and dispatch message from the queue");
-                        // TODO: We haven't yet figured out what kind of messages observer supervisors will receive yet, but when we do
-                        // this is what we'll call
-                        // ObserverSupervisor::deserialize_and_dispatch(topic, payload)
                     }
-                    ClientEvent::TransportError { .. } => {
-                        todo!("Handle client transport error")
+                    ClientEvent::TransportError { reason } => {
+                        warn!("Transport error occurred (non-fatal, awaiting reconnect): {reason}");
                     }
                     ClientEvent::ControlResponse { .. } => {}
                     _ => (),
                 }
             }
+            SupervisorMessage::GraphSignal(_) => {}
+            SupervisorMessage::ForceExit => {}
         }
         Ok(())
     }

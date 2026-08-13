@@ -8,18 +8,24 @@ use neo4rs::Graph;
 use neo4rs::Query;
 use polar::Supervisor;
 use polar::SupervisorMessage;
+use polar::health::{DepCertEndpoint, HealthCheckActor, HealthCheckArgs, HealthCheckMessage};
 use ractor::Actor;
 use ractor::ActorProcessingErr;
 use ractor::ActorRef;
 use ractor::OutputPort;
 use ractor::SupervisionEvent;
 use ractor::async_trait;
+use std::sync::Arc;
 use tracing::debug;
+use tracing::error;
 use tracing::info;
 use tracing::warn;
 use utoipa::openapi::Deprecated;
 use utoipa::openapi::OpenApi;
 use openapi_common::AppData;
+
+const HEALTHCHECK_ACTOR_NAME: &str = "polar.healthcheck";
+const DRAIN_WINDOW_SECS: u64 = 5;
 
 /// The supervisor for our consumer actors
 pub struct ConsumerSupervisor;
@@ -27,6 +33,8 @@ pub struct ConsumerSupervisor;
 pub struct ConsumerSupervisorState {
     cassini_client: ActorRef<TcpClientMessage>,
     consumer_agent: Option<ActorRef<AppData>>,
+    healthcheck: ActorRef<HealthCheckMessage>,
+    draining: bool,
 }
 
 pub struct ConsumerSupervisorArgs;
@@ -59,10 +67,41 @@ impl Actor for ConsumerSupervisor {
     ) -> Result<Self::State, ActorProcessingErr> {
         debug!("{myself:?} starting");
 
-        // define an output port for the actor to subscribe to
+        // --- NEW: healthcheck wiring ---
+        let prepare_shutdown_port = Arc::new(OutputPort::<()>::default());
+        prepare_shutdown_port.subscribe(myself.clone(), |()| {
+            Some(SupervisorMessage::PrepareShutdown)
+        });
+
+        // ApiConsumer manages its own ad hoc Graph::connect() (like
+        // jira-processor's children) rather than this supervisor owning a
+        // shared GraphControllerActor -- no signal path exists yet to track
+        // real graph availability. expects_graph is false for now; cert
+        // rejuvenation still applies, Neo4j dep cert still checked.
+        let dep_cert_endpoints = vec![
+            DepCertEndpoint::parse("cassini-ip-svc.polar.svc.cluster.local:8080:300")
+                .map_err(|e| ActorProcessingErr::from(e))?,
+            DepCertEndpoint::parse("polar-db-svc.polar-graph.svc.cluster.local:7687:300")
+                .map_err(|e| ActorProcessingErr::from(e))?,
+        ];
+
+        let (healthcheck, _) = HealthCheckActor::spawn_linked(
+            Some(HEALTHCHECK_ACTOR_NAME.to_string()),
+            HealthCheckActor,
+            HealthCheckArgs {
+                expects_graph: false,
+                rejuvenation_threshold_secs: 300,
+                dep_cert_endpoints,
+                prepare_shutdown_port,
+            },
+            myself.get_cell(),
+        )
+        .await
+        .map_err(|e| ActorProcessingErr::from(e))?;
+        // --- end NEW ---
+
         let events_output = std::sync::Arc::new(OutputPort::default());
 
-        // subscribe self to this port
         events_output.subscribe(myself.clone(), |event| {
             Some(SupervisorMessage::ClientEvent { event })
         });
@@ -85,6 +124,8 @@ impl Actor for ConsumerSupervisor {
             Ok((client, _)) => Ok(ConsumerSupervisorState {
                 cassini_client: client,
                 consumer_agent: None,
+                healthcheck,
+                draining: false,
             }),
             Err(e) => Err(ActorProcessingErr::from(e)),
         }
@@ -97,8 +138,25 @@ impl Actor for ConsumerSupervisor {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
+            SupervisorMessage::Heartbeat => {}
+            // --- NEW ---
+            SupervisorMessage::PrepareShutdown => {
+                info!("PrepareShutdown received");
+                if let Err(e) = state.healthcheck.cast(HealthCheckMessage::ShutdownAck) {
+                    error!("failed to send ShutdownAck: {e}");
+                }
+            }
+            SupervisorMessage::GraphSignal(_) => {}
+            SupervisorMessage::ForceExit => {
+                warn!("drain window elapsed, exiting now");
+                std::process::exit(1);
+            }
+            // --- end NEW ---
             SupervisorMessage::ClientEvent { event } => match event {
                 ClientEvent::Registered { .. } => {
+                    // --- NEW ---
+                    let _ = state.healthcheck.cast(HealthCheckMessage::CassiniConnected);
+                    // --- end NEW ---
                     match Actor::spawn_linked(
                         Some(OPENAPI_PROCESSOR_NAME.to_string()),
                         ApiConsumer,
@@ -125,7 +183,29 @@ impl Actor for ConsumerSupervisor {
                         Err(e) => return Err(ActorProcessingErr::from(e)),
                     }
                 }
-                _ => todo!(),
+                // BUG FIX: was `_ => todo!()`, which caught BOTH
+                // MessagePublished and TransportError. This meant every
+                // incoming message on the subscribed topic panicked --
+                // deserialize_and_dispatch (implemented via the Supervisor
+                // trait above) was never actually called anywhere. This
+                // agent likely has never successfully processed a real
+                // message. Now correctly wired.
+                ClientEvent::MessagePublished { topic, payload, .. } => {
+                    if state.draining {
+                        warn!(
+                            "draining -- logging message on topic '{topic}' \
+                             ({} bytes) instead of dispatching; will be lost on exit",
+                            payload.len()
+                        );
+                    } else {
+                        ConsumerSupervisor::deserialize_and_dispatch(topic, payload);
+                    }
+                }
+                ClientEvent::TransportError { reason } => {
+                    warn!("Transport error occurred (non-fatal, awaiting reconnect): {reason}");
+                    let _ = state.healthcheck.cast(HealthCheckMessage::CassiniDisconnected);
+                }
+                _ => (),
             },
         }
 
@@ -134,9 +214,9 @@ impl Actor for ConsumerSupervisor {
 
     async fn handle_supervisor_evt(
         &self,
-        _myself: ActorRef<Self::Msg>,
+        myself: ActorRef<Self::Msg>,
         msg: SupervisionEvent,
-        _: &mut Self::State,
+        state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match msg {
             SupervisionEvent::ActorStarted(actor_cell) => {
@@ -147,11 +227,23 @@ impl Actor for ConsumerSupervisor {
                 );
             }
             SupervisionEvent::ActorTerminated(actor_cell, _, reason) => {
+                let actor_name = actor_cell.get_name().unwrap_or_default();
                 info!(
                     "CONSUMER_SUPERVISOR: {0:?}:{1:?} terminated. {reason:?}",
-                    actor_cell.get_name(),
+                    actor_name,
                     actor_cell.get_id()
                 );
+                // --- NEW ---
+                if actor_name == HEALTHCHECK_ACTOR_NAME && !state.draining {
+                    state.draining = true;
+                    info!("entering drain window before exiting for rejuvenation");
+                    let _ = myself
+                        .send_after(ractor::concurrency::Duration::from_secs(DRAIN_WINDOW_SECS), || {
+                            SupervisorMessage::ForceExit
+                        })
+                        .await;
+                }
+                // --- end NEW ---
             }
             SupervisionEvent::ActorFailed(actor_cell, e) => {
                 warn!(
@@ -159,6 +251,20 @@ impl Actor for ConsumerSupervisor {
                     actor_cell.get_name(),
                     actor_cell.get_id()
                 );
+                // BUG FIX: previously logged only. ApiConsumer's Neo4j
+                // queries use .expect() extensively (start_txn, run,
+                // commit) -- any transaction failure panics the actor,
+                // which previously left the pod running with a dead
+                // consumer and no exit trigger.
+                if !state.draining {
+                    state.draining = true;
+                    warn!("entering drain window before exit");
+                    let _ = myself
+                        .send_after(ractor::concurrency::Duration::from_secs(DRAIN_WINDOW_SECS), || {
+                            SupervisorMessage::ForceExit
+                        })
+                        .await;
+                }
             }
             SupervisionEvent::ProcessGroupChanged(..) => todo!(),
         }
@@ -186,7 +292,6 @@ impl Actor for ApiConsumer {
     ) -> Result<Self::State, ActorProcessingErr> {
         let config = polar::get_neo_config()?;
 
-        //load neo config and connect to graph db
         match neo4rs::Graph::connect(config) {
             Ok(graph) => Ok(ApiConsumerState { graph }),
             Err(e) => Err(e.into()),
@@ -211,8 +316,6 @@ impl Actor for ApiConsumer {
                 let spec = serde_json::from_str::<OpenApi>(&json)
                     .expect("Expected to deserialize JSON string");
 
-                // decompose the api spec, create a node for the application itself, and nodes for each endpoint,
-                // which should have relationships to their operations.
                 let query = format!(
                     "MERGE (o:Application {{ \
                     openapi_version: \"{}\", \
@@ -233,7 +336,6 @@ impl Actor for ApiConsumer {
                     .run(Query::new(query))
                     .await
                     .expect("Could not execute query on neo4j graph");
-                //iterate through paths
                 for (endpoint, path) in spec.paths.paths.iter() {
                     debug!("found endpoint \"{endpoint}\"");
 
@@ -295,7 +397,6 @@ impl Actor for ApiConsumer {
                             .await
                             .expect("Could not execute query on neo4j graph");
 
-                        //draw relationship back to app node
                         operation_query = format!(
                             "MATCH (a:Application) WHERE a.title = '{}' with a MATCH (e:Endpoint) WHERE e.operationId = '{}' WITH a,e MERGE (a)-[:hasEndpoint]->(e) ",
                             spec.info.title,

@@ -33,7 +33,7 @@
 
 , jira =
   { imagePullSecrets = [] : List { name : Optional Text }
-  , observer  = { image = "jira-observer:latest" }
+  , observer  = { image = "jira-observer:latest", jiraUrl = "https://daveman1010220.atlassian.net", jiraEmail = Some "daveman1010220@gmail.com" }
   , processor = { image = "jira-processor:latest" }
   }
 
@@ -56,16 +56,14 @@
   , scheduler = { image = "git-scheduler:latest" }
   }
 
-, provenance =
+, build-processor =
   { imagePullSecrets = [] : List { name : Optional Text }
-  , linker   = { image = "provenance-linker:latest" }
-  , resolver = { image = "provenance-resolver:latest" }
+  , processor = { image = "build-processor:latest" }
   }
 
-, build =
+, resolver =
   { imagePullSecrets = [] : List { name : Optional Text }
-  , orchestrator = { image = "build-orchestrator:latest" }
-  , processor    = { image = "build-processor:latest" }
+  , resolver = { image = "oci-resolver:latest" }
   }
 
 , scheduler =
@@ -81,11 +79,13 @@
   }
 
 , certIssuer =
-  { image           = "cert-issuer:latest"
-  , certClientImage = "polar-cert-client:latest"
+  { image            = "cert-issuer:latest"
+  , certClientImage  = "polar-cert-client:latest"
+  , polarInitImage   = "polar-init:latest"
   , imagePullSecrets = [] : List { name : Optional Text }
-  , oidcIssuerUrl   = "https://kubernetes.default.svc.cluster.local"
-  , oidcAudience    = ["polar-cert-issuer.local", "polar-cert-issuer-neo4j.local"]
-  , oidcJwksUri     = Some "https://kubernetes.default.svc.cluster.local/openid/v1/jwks"
+  , oidcIssuerUrl    = "https://kubernetes.default.svc.cluster.local"
+  , oidcAudience     = ["polar-cert-issuer.local", "polar-cert-issuer-neo4j.local"]
+  , oidcJwksUri      = Some "https://kubernetes.default.svc.cluster.local/openid/v1/jwks"
+  , serverLifetimeSecs = 43200
   }
 }

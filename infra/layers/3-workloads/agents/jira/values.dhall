@@ -17,6 +17,7 @@ in  { name            = "jira-agents"
       { name    = "jira-observer"
       , image   = "jira-observer:latest"
       , jiraUrl = "https://jira.example.com"
+      , jiraEmail = None Text
       }
 
     , processor =

@@ -23,6 +23,9 @@ let render =
           , oidcIssuerUrl : Text
           , oidcAudience : List Text
           , oidcJwksUri : Optional Text
+          , defaultLifetimeSecs : Natural
+          , serverLifetimeSecs : Natural
+          , identityLifetimeOverrides : List { identity : Text, lifetimeSecs : Natural }
           }
         ) ->
         let jwks =
@@ -44,9 +47,34 @@ let render =
                                   , default_lifetime =
                                       JSON.object
                                         ( toMap
-                                            { secs = JSON.natural 3600
+                                            { secs = JSON.natural v.defaultLifetimeSecs
                                             , nanos = JSON.natural 0
                                             }
+                                        )
+                                  , server_lifetime =
+                                      JSON.object
+                                        ( toMap
+                                            { secs = JSON.natural v.serverLifetimeSecs
+                                            , nanos = JSON.natural 0
+                                            }
+                                        )
+                                  , identity_lifetime_overrides =
+                                      JSON.object
+                                        ( Prelude.List.map
+                                            { identity : Text, lifetimeSecs : Natural }
+                                            { mapKey : Text, mapValue : JSON.Type }
+                                            ( \(o : { identity : Text, lifetimeSecs : Natural }) ->
+                                                { mapKey = o.identity
+                                                , mapValue =
+                                                    JSON.object
+                                                      ( toMap
+                                                          { secs = JSON.natural o.lifetimeSecs
+                                                          , nanos = JSON.natural 0
+                                                          }
+                                                      )
+                                                }
+                                            )
+                                            v.identityLifetimeOverrides
                                         )
                                   }
                               )

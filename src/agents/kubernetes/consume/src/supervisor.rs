@@ -16,49 +16,41 @@ use polar::SupervisorMessage;
 use polar::cassini::CassiniClient;
 use polar::cassini::SubscribeRequest;
 use polar::cassini::TcpClient;
-use polar::graph::controller::GraphControllerMsg;
-use polar::graph::controller::GraphOp;
-use polar::graph::controller::IntoGraphKey;
-use polar::graph::controller::{GraphController, GraphControllerActor};
+use polar::graph::controller::{
+    GraphController, GraphControllerActor, GraphControllerArgs, GraphControllerMsg, GraphOp,
+    GraphSignal, IntoGraphKey,
+};
 use polar::graph::nodes::builds::ArtifactNodeKey;
 use polar::graph::nodes::kube::KubeNodeKey;
+use polar::health::{DepCertEndpoint, HealthCheckActor, HealthCheckArgs, HealthCheckMessage};
 use polar::topics::KUBERNETES_RESOLUTION_EVENTS;
-use ractor::Actor;
+use ractor::{Actor, OutputPort};
 use ractor::ActorProcessingErr;
 use ractor::ActorRef;
 use ractor::SupervisionEvent;
 use ractor::async_trait;
+use ractor::concurrency::Duration;
 use serde::de::DeserializeOwned;
 use serde_json::from_value;
 use std::collections::HashMap;
+use std::sync::Arc;
 use tracing::debug;
 use tracing::error;
 use tracing::info;
 use tracing::warn;
 
+const HEALTHCHECK_ACTOR_NAME: &str = "polar.healthcheck";
+const DRAIN_WINDOW_SECS: u64 = 5;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StateFingerprint {
-    /// Canonical serialized state payload.
-    /// Could be JSON, or stable key=value pairs.
     pub signature: String,
-
-    /// The valid_from timestamp used when we emitted it.
     pub valid_from: String,
     pub last_state_node_id: Option<String>,
 }
-// TODO: Impl this?
-// impl StateFingerprint {
-//     /// More compact. Faster comparisons. Cleaner.
-//     pub fn hash_signature(payload: &str) -> String {
-//         let mut hasher = Sha256::new();
-//         hasher.update(payload.as_bytes());
-//         format!("{:x}", hasher.finalize())
-//     }
-// }
 
 #[derive(Default)]
 pub struct ProjectionCache {
-    // key: (kind, uid)
     entries: HashMap<(String, String), StateFingerprint>,
 }
 
@@ -70,7 +62,6 @@ pub enum EmitDecision {
 }
 
 impl ProjectionCache {
-    /// Returns true if this is a new state and should be emitted.
     pub fn should_emit(
         &mut self,
         kind: String,
@@ -84,16 +75,14 @@ impl ProjectionCache {
             Some(existing) if existing.signature == new_signature => EmitDecision::Suppress,
             Some(existing) => {
                 let prev = existing.last_state_node_id.clone();
-
                 self.entries.insert(
                     key,
                     StateFingerprint {
                         signature: new_signature,
                         valid_from,
-                        last_state_node_id: None, // filled after graph write
+                        last_state_node_id: None,
                     },
                 );
-
                 EmitDecision::Emit {
                     previous_state_node_id: prev,
                 }
@@ -107,20 +96,19 @@ impl ProjectionCache {
                         last_state_node_id: None,
                     },
                 );
-
                 EmitDecision::Emit {
                     previous_state_node_id: None,
                 }
             }
         }
     }
+
     pub fn set_last_state_node_id(&mut self, kind: &str, uid: &str, node_id: String) {
         if let Some(entry) = self.entries.get_mut(&(kind.to_string(), uid.to_string())) {
             entry.last_state_node_id = Some(node_id);
         }
     }
 
-    /// Remove from cache on terminal deletion if desired.
     pub fn evict(&mut self, kind: String, uid: &str) {
         self.entries.remove(&(kind, uid.to_string()));
     }
@@ -132,6 +120,12 @@ pub struct ClusterConsumerSupervisorState {
     broker_client: TcpClient,
     graph_controller: Option<GraphController>,
     projection_cache: ProjectionCache,
+    healthcheck: ActorRef<HealthCheckMessage>,
+    /// Set true once a fatal failure has triggered the bounded drain window.
+    /// While true, incoming messages are logged instead of processed, since
+    /// whatever failed (likely the graph controller) can't be trusted, and
+    /// we're exiting shortly regardless.
+    draining: bool,
 }
 
 impl ClusterConsumerSupervisor {
@@ -202,7 +196,6 @@ impl ClusterConsumerSupervisor {
             }
             KUBERNETES_RESOLUTION_EVENTS => {
                 let ev = rkyv::from_bytes::<ProvenanceEvent, RkyvError>(&payload)?;
-
                 match ev {
                     ProvenanceEvent::OCIArtifactResolved {
                         digest, source_ref, ..
@@ -216,20 +209,17 @@ impl ClusterConsumerSupervisor {
                             debug!(
                                 "pod {pod_uid} container {container_name} was resolved with digest {digest}, updating graph"
                             );
-
                             let container_k = KubeNodeKey::PodContainer {
                                 pod_uid,
                                 name: container_name,
                             };
                             let artifact_k = ArtifactNodeKey::OCIArtifact { digest };
-
                             let op = GraphOp::EnsureEdge {
                                 from: container_k.into_key(),
                                 to: artifact_k.into_key(),
                                 rel_type: "USES_IMAGE".to_string(),
                                 props: vec![],
                             };
-
                             graph_controller.send_message(GraphControllerMsg::Op(op))?;
                         }
                     }
@@ -238,7 +228,6 @@ impl ClusterConsumerSupervisor {
             }
             _ => (), //ignore unhandled topics for now, we shouldn't see anything else
         }
-
         Ok(())
     }
 }
@@ -255,8 +244,46 @@ impl Actor for ClusterConsumerSupervisor {
         _args: (),
     ) -> Result<Self::State, ActorProcessingErr> {
         debug!("{myself:?} starting");
-
         info!("Read neo configuration successfully.");
+
+        // Build the OutputPort that HealthCheckActor fires when it wants
+        // the supervisor to prepare for shutdown. We subscribe here so
+        // that the message arrives as a SupervisorMessage::PrepareShutdown.
+        let prepare_shutdown_port = Arc::new(OutputPort::<()>::default());
+        prepare_shutdown_port.subscribe(myself.clone(), |()| {
+            Some(SupervisorMessage::PrepareShutdown)
+        });
+
+        // Build the OutputPort that GraphControllerActor fires on every
+        // real op's outcome (canary at spawn, and every subsequent write).
+        let graph_signal_port = Arc::new(OutputPort::<GraphSignal>::default());
+        graph_signal_port.subscribe(myself.clone(), |signal| {
+            Some(SupervisorMessage::GraphSignal(signal))
+        });
+
+        // Parse dep cert endpoints for this agent:
+        // kube-consumer depends on Cassini and Neo4j.
+        let dep_cert_endpoints = vec![
+            DepCertEndpoint::parse("cassini-ip-svc.polar.svc.cluster.local:8080:300")
+                .map_err(|e| ActorProcessingErr::from(e))?,
+            DepCertEndpoint::parse("polar-db-svc.polar-graph.svc.cluster.local:7687:300")
+                .map_err(|e| ActorProcessingErr::from(e))?,
+        ];
+
+        let (healthcheck, _) = HealthCheckActor::spawn_linked(
+            Some(HEALTHCHECK_ACTOR_NAME.to_string()),
+            HealthCheckActor,
+            HealthCheckArgs {
+                expects_graph: true,
+                rejuvenation_threshold_secs: 300,
+                dep_cert_endpoints,
+                prepare_shutdown_port,
+            },
+            myself.get_cell(),
+        )
+        .await
+        .map_err(|e| ActorProcessingErr::from(e))?;
+
         match TcpClient::spawn(BROKER_CLIENT_NAME, myself, |event| {
             Some(SupervisorMessage::ClientEvent { event })
         })
@@ -268,8 +295,10 @@ impl Actor for ClusterConsumerSupervisor {
                 projection_cache: ProjectionCache {
                     entries: HashMap::new(),
                 },
+                healthcheck,
+                draining: false,
             }),
-            Err(e) => return Err(ActorProcessingErr::from(e)),
+            Err(e) => Err(ActorProcessingErr::from(e)),
         }
     }
 
@@ -280,29 +309,72 @@ impl Actor for ClusterConsumerSupervisor {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
+            SupervisorMessage::PrepareShutdown => {
+                info!("CONSUMER_SUPERVISOR: PrepareShutdown received, unsubscribing from Cassini");
+
+                if let Err(e) = state.broker_client.unsubscribe(polar::cassini::UnsubscribeRequest {
+                    topic: KUBERNETES_CONSUMER.to_string(),
+                    trace_ctx: None,
+                }) {
+                    warn!("CONSUMER_SUPERVISOR: unsubscribe failed (continuing): {e}");
+                }
+
+                if let Err(e) = state.healthcheck.cast(HealthCheckMessage::ShutdownAck) {
+                    error!("CONSUMER_SUPERVISOR: failed to send ShutdownAck: {e}");
+                }
+            }
+
+            SupervisorMessage::GraphSignal(signal) => match signal {
+                GraphSignal::Available => {
+                    let _ = state.healthcheck.cast(HealthCheckMessage::GraphAvailable);
+                }
+                GraphSignal::OpFailed(reason) => {
+                    let _ = state
+                        .healthcheck
+                        .cast(HealthCheckMessage::GraphOpFailed(reason));
+                }
+            },
+
+            SupervisorMessage::ForceExit => {
+                warn!("CONSUMER_SUPERVISOR: drain window elapsed, exiting now");
+                std::process::exit(1);
+            }
+
             SupervisorMessage::ClientEvent { event } => {
                 match event {
                     ClientEvent::Registered { .. } => {
-                        match GraphControllerActor::spawn_linked(
-                            Some("kubernetes.cluster.graph.controller".to_string()),
-                            GraphControllerActor,
-                            (),
-                            myself.get_cell(),
-                        )
-                        .await
-                        {
-                            Ok((graph_controller, _)) => {
-                                state.graph_controller = Some(graph_controller)
+                        let _ = state.healthcheck.cast(HealthCheckMessage::CassiniConnected);
+
+                        if state.graph_controller.is_none() {
+                            let graph_signal_port = Arc::new(OutputPort::<GraphSignal>::default());
+                            graph_signal_port.subscribe(myself.clone(), |signal| {
+                                Some(SupervisorMessage::GraphSignal(signal))
+                            });
+
+                            match GraphControllerActor::spawn_linked(
+                                Some("kubernetes.cluster.graph.controller".to_string()),
+                                GraphControllerActor,
+                                GraphControllerArgs { signal_port: graph_signal_port },
+                                myself.get_cell(),
+                            )
+                            .await
+                            {
+                                Ok((graph_controller, _)) => {
+                                    state.graph_controller = Some(graph_controller);
+                                    let _ = state
+                                        .healthcheck
+                                        .cast(HealthCheckMessage::GraphConnected);
+                                }
+                                Err(e) => {
+                                    error!("Error initializing graph controller! {e}");
+                                    return Err(ActorProcessingErr::from(e));
+                                }
                             }
-                            Err(e) => {
-                                error!("Error initializng graph controller! {e}");
-                                return Err(ActorProcessingErr::from(e));
-                            }
+                        } else {
+                            let _ = state.healthcheck.cast(HealthCheckMessage::GraphConnected);
                         }
 
                         info!("Subscribing to topics...");
-                        // subscribe
-                        //
                         if let Err(e) = state.broker_client.subscribe(SubscribeRequest {
                             topic: KUBERNETES_CONSUMER.into(),
                             trace_ctx: None,
@@ -319,8 +391,17 @@ impl Actor for ClusterConsumerSupervisor {
                             return Err(ActorProcessingErr::from(e.to_string()));
                         }
                     }
+
                     ClientEvent::MessagePublished { topic, payload, .. } => {
-                        if let Some(controller) = &state.graph_controller {
+                        if state.draining {
+                            warn!(
+                                "CONSUMER_SUPERVISOR: draining -- logging message on topic \
+                                 '{topic}' ({} bytes) instead of processing; will be lost on exit",
+                                payload.len()
+                            );
+                            // TODO: publish to dead-letter queue once Cassini
+                            // supports one, instead of only logging.
+                        } else if let Some(controller) = &state.graph_controller {
                             Self::deserialize_and_dispatch(
                                 topic,
                                 payload,
@@ -333,22 +414,26 @@ impl Actor for ClusterConsumerSupervisor {
                             myself.stop(None);
                         }
                     }
+
                     ClientEvent::TransportError { reason } => {
                         error!("Transport error occurred! {reason}");
-                        myself.stop(Some(reason))
+                        let _ = state.healthcheck.cast(HealthCheckMessage::CassiniDisconnected);
                     }
+
                     _ => (),
                 }
             }
+
+            SupervisorMessage::Heartbeat => {}
         }
         Ok(())
     }
 
     async fn handle_supervisor_evt(
         &self,
-        _myself: ActorRef<Self::Msg>,
+        myself: ActorRef<Self::Msg>,
         msg: SupervisionEvent,
-        _state: &mut Self::State,
+        state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match msg {
             SupervisionEvent::ActorStarted(actor_cell) => {
@@ -359,26 +444,53 @@ impl Actor for ClusterConsumerSupervisor {
                 );
             }
             SupervisionEvent::ActorTerminated(actor_cell, _, reason) => {
-                // we no actors start w/o names
-                let actor_name = actor_cell.get_name().unwrap();
-
+                let actor_name = actor_cell.get_name().unwrap_or_default();
                 info!(
                     "CONSUMER_SUPERVISOR: {0:?}:{1:?} terminated. {reason:?}",
                     actor_name,
                     actor_cell.get_id()
                 );
+                // Clean termination of the healthcheck actor means the
+                // rejuvenation sequence completed -- begin the same bounded
+                // drain window as a hard failure, rather than exiting
+                // immediately, so any messages still arriving get logged.
+                if actor_name == HEALTHCHECK_ACTOR_NAME && !state.draining {
+                    state.draining = true;
+                    info!(
+                        "CONSUMER_SUPERVISOR: healthcheck actor terminated cleanly, \
+                         entering drain window before exiting for rejuvenation"
+                    );
+                    let _ = myself
+                        .send_after(Duration::from_secs(DRAIN_WINDOW_SECS), || {
+                            SupervisorMessage::ForceExit
+                        })
+                        .await;
+                }
             }
             SupervisionEvent::ActorFailed(actor_cell, e) => {
-                // we no actors start w/o names
-                let actor_name = actor_cell.get_name().unwrap();
-
+                let actor_name = actor_cell.get_name().unwrap_or_default();
                 error!(
-                    "Consumer_SUPERVISOR: {0:?}:{1:?} failed! {e:?}",
+                    "CONSUMER_SUPERVISOR: {0:?}:{1:?} failed! {e:?}",
                     actor_name,
                     actor_cell.get_id()
                 );
+                // Any child actor failure is fatal, but don't exit
+                // immediately -- give the mailbox loop a bounded window to
+                // keep logging any in-flight messages (handle() branches on
+                // state.draining above) before ForceExit actually exits.
+                if !state.draining {
+                    state.draining = true;
+                    warn!(
+                        "CONSUMER_SUPERVISOR: entering drain window before exit; \
+                         any messages that arrive will be logged, not processed"
+                    );
+                    let _ = myself
+                        .send_after(Duration::from_secs(DRAIN_WINDOW_SECS), || {
+                            SupervisorMessage::ForceExit
+                        })
+                        .await;
+                }
             }
-
             SupervisionEvent::ProcessGroupChanged(..) => todo!(),
         }
 

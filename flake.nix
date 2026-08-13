@@ -61,6 +61,9 @@
             cassini-client = {
               packages.${system}.default = polarPkgs.cassini.client;
             };
+            polar-healthcheck = {
+              packages.${system}.default = polarPkgs.healthcheck;
+            };
           };
           inherit configNixPath;
         };
@@ -176,6 +179,7 @@
           # ── Infrastructure containers ─────────────────────────────────────────
           nuInitImage = polarPkgs.nuInit.image;
           gitServerImage = polarPkgs.gitServer.image;
+          polarInitImage = polarPkgs.polarInit.image;
         };
 
         devShells.default = container.devShell.overrideAttrs (old: {

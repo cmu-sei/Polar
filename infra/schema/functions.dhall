@@ -4,7 +4,7 @@ let kubernetes =
 
 let Constants =
       ./constants.dhall
-        sha256:83837b5e87d39846c41a7ae549d5c65b2c2c8a058c6841b28ed1b746f4c976f2
+        sha256:c196abeb0e44d0376a6bd58954ef24b32f392340053a6354cc568202aad80bb6
 
 let Agents =
       ./agents.dhall
@@ -238,6 +238,35 @@ let makeCertServerInitContainer =
           "ecdsa-p256"
           extraSans
 
+let makePolarInitContainer =
+      \(polarInitImage : Text) ->
+      \(imagePullPolicy : Text) ->
+      \(saTokenVolName : Text) ->
+      \(certIssuerUrl : Text) ->
+      \(tokenPath : Text) ->
+      \(extraMounts : List kubernetes.VolumeMount.Type) ->
+      \(depCerts : List Text) ->
+      \(certs : List Text) ->
+        kubernetes.Container::{
+        , name            = "polar-init"
+        , image           = Some polarInitImage
+        , imagePullPolicy = Some imagePullPolicy
+        , command         = Some [ "polar-init" ]
+        , securityContext = Some Constants.DropAllCapSecurityContext
+        , env = Some
+          [ kubernetes.EnvVar::{ name = "POLAR_INIT_CERT_ISSUER_URL", value = Some certIssuerUrl }
+          , kubernetes.EnvVar::{ name = "POLAR_INIT_TOKEN_PATH",      value = Some tokenPath      }
+          ]
+        , args = Some
+          (   Prelude.List.concatMap Text Text (\(d : Text) -> ["--check-dep-cert", d]) depCerts
+            # Prelude.List.concatMap Text Text (\(c : Text) -> ["--cert", c]) certs
+          )
+        , volumeMounts = Some
+          (   [ kubernetes.VolumeMount::{ name = saTokenVolName, mountPath = "/workspace" } ]
+            # extraMounts
+          )
+        }
+
 in  { makeGraphEnv
     , makeOpaqueSecret
     , makeDeployment
@@ -250,4 +279,5 @@ in  { makeGraphEnv
     , makeCertClientInitContainer
     , makeCertServerInitContainer
     , makeCertInitContainer
+    , makePolarInitContainer
     }

@@ -92,6 +92,8 @@ async fn main() -> Result<()> {
         validator: Arc::new(validator),
         ca: Arc::new(ca),
         default_lifetime: config.ca.default_lifetime,
+        server_lifetime: config.ca.server_lifetime,
+        identity_lifetime_overrides: config.ca.identity_lifetime_overrides.clone(),
     });
 
     // ---- Server ----

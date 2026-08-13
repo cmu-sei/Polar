@@ -74,7 +74,8 @@ impl Actor for JiraGroupObserver {
 
         let state = JiraObserverState::new(
             args.jira_url,
-            args.token,
+            args.auth,
+            args.deployment,
             args.web_client,
             args.registration_id,
             Duration::from_secs(args.base_interval),
@@ -115,15 +116,18 @@ impl Actor for JiraGroupObserver {
                         );
 
                         let res = state
-                            .web_client
-                            .get(&url)
-                            .bearer_auth(state.token.clone().expect("TOKEN").to_string())
+                            .auth
+                            .apply(state.web_client.get(&url))
                             .send()
                             .await?
                             .json::<serde_json::Value>()
                             .await?;
-
-                        let groups: Vec<JiraGroup> = serde_json::from_value(res["groups"].clone())?;
+                        debug!("Group Data {}", res["groups"].to_string());
+                        let groups: Vec<JiraGroup> = if res["groups"].is_null() {
+                            Vec::new()
+                        } else {
+                            serde_json::from_value(res["groups"].clone())?
+                        };
                         let total = res["total"].as_u64().unwrap_or(0);
                         let fetched = groups.len();
 

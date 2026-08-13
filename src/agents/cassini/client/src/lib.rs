@@ -310,6 +310,11 @@ pub enum TcpClientMessage {
         reader: Option<ReadHalf<TlsStream<TcpStream>>>,
         writer: Arc<Mutex<BufWriter<WriteHalf<TlsStream<TcpStream>>>>>,
     },
+    /// Sent when the broker rejects a session-resume attempt (e.g. after
+    /// a broker restart/rejuvenation cleared its session table). Forces
+    /// a transition back to Unregistered and a fresh registration,
+    /// rather than retrying the same now-invalid registration_id forever.
+    SessionInvalidated,
 }
 
 type TlsWriter = Option<Arc<Mutex<BufWriter<WriteHalf<TlsStream<TcpStream>>>>>>;
@@ -533,6 +538,15 @@ impl TcpClientActor {
                                                 try_set_parent_wire(&span, trace_ctx);
                                                 let _g = span.enter();
                                                 warn!("Received error from broker: {error}");
+
+                                                // A session-mismatch response means the broker has no record of
+                                                // our registration_id (e.g. it restarted/rejuvenated). Resuming
+                                                // is impossible; force a fresh registration instead of retrying
+                                                // the same rejected request forever.
+                                                if error.contains("session mismatch") {
+                                                    warn!("Session no longer valid on broker; re-registering fresh");
+                                                    let _ = myself.send_message(TcpClientMessage::SessionInvalidated);
+                                                }
                                             }
                                             ClientMessage::PublishRequestAck { topic, trace_ctx } => {
                                                 let span = trace_span!("client.handle_publish_ack");
@@ -1154,6 +1168,13 @@ impl Actor for TcpClientActor {
             (_, TcpClientMessage::Reconnected { reader, writer }) => {
                 self.handle_reconnected(myself, state, reader, writer)
                     .await?
+            }
+
+            // ---- SessionInvalidated (always handled) ----
+            (_, TcpClientMessage::SessionInvalidated) => {
+                warn!("Resetting registration state and re-registering");
+                state.registration = RegistrationState::Unregistered;
+                self.handle_register_unregistered(myself, state).await?
             }
 
             // ---- Reconnect (only when registered) ----

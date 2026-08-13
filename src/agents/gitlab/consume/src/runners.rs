@@ -25,7 +25,7 @@ use crate::GitlabConsumerState;
 use common::RUNNERS_CONSUMER_TOPIC;
 use common::types::{GitlabData, GitlabEnvelope};
 use gitlab_queries::runners::CiRunner;
-use polar::cassini::{CassiniClient, SubscribeRequest, TcpClient};
+use polar::cassini::{CassiniClient, SubscribeRequest};
 use polar::graph::{
     controller::{GraphControllerMsg, GraphOp, GraphValue, IntoGraphKey, Property},
     nodes::gitlab::GitlabNodeKey,

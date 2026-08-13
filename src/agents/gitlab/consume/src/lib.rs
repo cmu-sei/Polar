@@ -22,7 +22,6 @@
 */
 
 use common::types::GitlabEnvelope;
-use neo4rs::BoltType;
 use polar::cassini::TcpClient;
 use polar::graph::controller::GraphController;
 use ractor::ActorRef;

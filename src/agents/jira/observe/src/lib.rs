@@ -30,6 +30,7 @@ pub mod users;
 use parse_link_header::parse_with_rel;
 use ractor::concurrency::Duration;
 use rand::RngExt;
+use reqwest::RequestBuilder;
 use reqwest::Client;
 use reqwest::Error;
 use reqwest::Method;
@@ -49,12 +50,81 @@ pub const BACKOFF_RECEIVED_LOG: &str = "{myself:?} received backoff message...";
 pub const TOKEN_EXPIRED_BACKOFF_LOG: &str = "{myself:?} stopping due to bad credentials";
 pub const MESSAGE_FORWARDING_FAILED: &str = "Expected to forward a message to self.";
 
+/// Authentication mode for the Jira REST API.
+///
+/// - `Basic` is what Atlassian Cloud expects: HTTP Basic Auth with the
+///   account email as username and an API token as password.
+/// - `Bearer` covers on-prem / Server / Data Center deployments (and
+///   Cloud OAuth 2.0 3LO access tokens), which use a plain
+///   `Authorization: Bearer <token>` header. This preserves today's
+///   behavior for existing on-prem deployments.
+#[derive(Clone)]
+pub enum JiraAuth {
+    Basic { email: String, token: String },
+    Bearer { token: String },
+}
+
+impl JiraAuth {
+    /// Resolve auth mode from environment. JIRA_EMAIL present => Basic
+    /// (Cloud-style). JIRA_EMAIL absent => Bearer (on-prem/Server/DC-style).
+    pub fn from_env(token: String) -> Self {
+        match std::env::var("JIRA_EMAIL").ok() {
+            Some(email) if !email.is_empty() => JiraAuth::Basic { email, token },
+            _ => JiraAuth::Bearer { token },
+        }
+    }
+
+    /// Apply this auth mode to a reqwest RequestBuilder.
+    pub fn apply(&self, req: RequestBuilder) -> RequestBuilder {
+        match self {
+            JiraAuth::Basic { email, token } => req.basic_auth(email, Some(token)),
+            JiraAuth::Bearer { token } => req.bearer_auth(token),
+        }
+    }
+}
+
+/// Which Jira deployment type this observer is talking to. Determines
+/// which search API and pagination model to use — Cloud removed the
+/// classic /rest/api/2/search endpoint (see
+/// https://developer.atlassian.com/changelog/#CHANGE-2046) in favor of
+/// /rest/api/3/search/jql with cursor-based pagination, while
+/// Server/Data Center still uses the v2 endpoint with startAt/total
+/// offset pagination.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum JiraDeployment {
+    Cloud,
+    ServerOrDataCenter,
+}
+
+impl JiraDeployment {
+    /// Resolve deployment type from environment. Defaults to
+    /// ServerOrDataCenter (today's existing behavior) unless explicitly
+    /// overridden with JIRA_DEPLOYMENT=cloud, or the URL itself looks
+    /// like an Atlassian-hosted Cloud site (*.atlassian.net).
+    pub fn from_env(jira_url: &str) -> Self {
+        match std::env::var("JIRA_DEPLOYMENT").ok().as_deref() {
+            Some(v) if v.eq_ignore_ascii_case("cloud") => JiraDeployment::Cloud,
+            Some(v) if v.eq_ignore_ascii_case("server") || v.eq_ignore_ascii_case("datacenter") => {
+                JiraDeployment::ServerOrDataCenter
+            }
+            _ => {
+                if jira_url.contains(".atlassian.net") {
+                    JiraDeployment::Cloud
+                } else {
+                    JiraDeployment::ServerOrDataCenter
+                }
+            }
+        }
+    }
+}
+
 /// General state for all jira observers
 pub struct JiraObserverState {
     /// Endpoint of Jira instance
     pub jira_url: String,
-    /// Token for authentication
-    pub token: Option<String>,
+    /// Auth mode + credentials for the Jira REST API
+    pub auth: JiraAuth,
+    pub deployment: JiraDeployment,
     /// HTTP client
     pub web_client: Client,
     /// ID of the agent's session with the broker
@@ -75,21 +145,22 @@ impl JiraObserverState {
     /// Create a new JiraObserverState
     pub fn new(
         jira_url: String,
-        token: Option<String>,
+        auth: JiraAuth,
+        deployment: JiraDeployment,
         web_client: Client,
         registration_id: String,
         base_interval: Duration,
         max_backoff: Duration,
     ) -> Self {
-        // state
         JiraObserverState {
             jira_url,
-            token,
+            auth,
+            deployment,
             web_client,
             registration_id,
             max_backoff,
             base_interval,
-            backoff_interval: base_interval, // start with the base interval
+            backoff_interval: base_interval,
             failed_attempts: 0,
             task_handle: None,
         }
@@ -118,7 +189,8 @@ impl JiraObserverState {
 #[derive(Clone)]
 pub struct JiraObserverArgs {
     pub jira_url: String,
-    pub token: Option<String>,
+    pub auth: JiraAuth,
+    pub deployment: JiraDeployment,
     pub registration_id: String,
     pub web_client: Client,
     pub max_backoff: u64,

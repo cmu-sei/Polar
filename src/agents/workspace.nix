@@ -84,41 +84,49 @@ let
     gitlabAgent = import (workspaceRoot + /gitlab/package.nix) {
       inherit pkgs craneLib workspaceFileset nix-container-lib inputs system;
       crateArgs = individualCrateArgs;
+      healthcheckDrv = healthcheck;
     };
 
     kubeAgent = import ./kubernetes/package.nix {
       inherit pkgs craneLib workspaceFileset nix-container-lib inputs system;
       crateArgs = individualCrateArgs;
+      healthcheckDrv = healthcheck;
     };
 
     webAgent = import ./openapi/package.nix {
       inherit pkgs craneLib workspaceFileset nix-container-lib inputs system;
       crateArgs = individualCrateArgs;
+      healthcheckDrv = healthcheck;
     };
 
     buildProcessor = import ./build-processor/package.nix {
       inherit pkgs craneLib workspaceFileset nix-container-lib inputs system;
       crateArgs = individualCrateArgs;
+      healthcheckDrv = healthcheck;
     };
 
     ociResolver = import ./resolver/package.nix {
       inherit pkgs craneLib workspaceFileset nix-container-lib inputs system;
       crateArgs = individualCrateArgs;
+      healthcheckDrv = healthcheck;
     };
 
     scheduler = import ./polar-scheduler/package.nix {
       inherit pkgs craneLib workspaceFileset nix-container-lib inputs system;
       crateArgs = individualCrateArgs;
+      healthcheckDrv = healthcheck;
     };
 
     jiraAgent = import ./jira/package.nix {
       inherit pkgs craneLib workspaceFileset nix-container-lib inputs system;
       crateArgs = individualCrateArgs;
+      healthcheckDrv = healthcheck;
     };
 
     gitAgent = import ./git/package.nix {
       inherit pkgs craneLib workspaceFileset nix-container-lib inputs system;
       crateArgs = individualCrateArgs;
+      healthcheckDrv = healthcheck;
     };
 
     nuInit = import ./nu-init/package.nix {
@@ -130,7 +138,17 @@ let
       inherit pkgs nix-container-lib inputs system;
     };
 
+    healthcheck = craneLib.buildPackage (individualCrateArgs // {
+      pname = "polar-healthcheck";
+      cargoExtraArgs = "--package polar-healthcheck --locked";
+      src = workspaceFileset ./.;
+    });
+
+    polarInit = import ./polar-init/package.nix {
+      inherit pkgs craneLib workspaceFileset nix-container-lib inputs system;
+      crateArgs = individualCrateArgs;
+    };
 in
 {
-  inherit workspacePackages gitlabAgent cassini kubeAgent webAgent ociResolver scheduler jiraAgent gitAgent buildProcessor certIssuer nuInit gitServer;
+    inherit workspacePackages gitlabAgent cassini kubeAgent webAgent ociResolver scheduler jiraAgent gitAgent buildProcessor certIssuer nuInit gitServer polarInit;
 }

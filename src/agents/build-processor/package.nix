@@ -1,4 +1,4 @@
-# src/agents/build-orchestrator/package.nix
+# src/agents/build-processor/package.nix
 { pkgs
 , craneLib
 , crateArgs
@@ -6,6 +6,7 @@
 , nix-container-lib
 , inputs
 , system
+, healthcheckDrv
 , ...
 }:
 let
@@ -15,8 +16,15 @@ let
     doCheck        = false;
   });
 
+  healthcheckInputs = inputs // {
+    polar-healthcheck = {
+      packages.${system}.default = healthcheckDrv;
+    };
+  };
+
   processorContainer = nix-container-lib.lib.${system}.mkContainer {
-    inherit system pkgs inputs;
+    inherit system pkgs;
+    inputs = healthcheckInputs;
     configNixPath    = ./container-processor.nix;
     extraDerivations = [ buildProcessor ];
   };

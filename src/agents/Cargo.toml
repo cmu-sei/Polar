@@ -42,6 +42,9 @@ members = [
     "gitlab/schema",
     "git/observe",
     "git/process",
+    "git/observe",
+    "git/process",
+    "git/scheduler",
     "jira/common",
     "jira/process",
     "jira/observe",
@@ -53,6 +56,9 @@ members = [
     "openapi/common",
     "openapi/process",
     "openapi/observe",
+    "polar-health",
+    "polar-healthcheck",
+    "polar-init",
     "policy-config",
     "resolver",
     "build-processor",
@@ -114,9 +120,9 @@ log = "0.4.29"                                            # used in jira/observe
 notify = "7"
 neo4rs = { version = "0.9.0-rc.8", git = "https://github.com/neo4j-labs/neo4rs", tag = "v0.9.0-rc.8" }
 oci-client = "0.15.0"                                     # used in resolver
-opentelemetry = "0.31.0"
-opentelemetry-otlp = "0.31.0"
-opentelemetry_sdk = "0.31.0"
+opentelemetry = "0.32.0"
+opentelemetry-otlp = "0.32.0"
+opentelemetry_sdk = "0.32.1"
 parse_link_header = "0.4"
 proptest = "1.10.0"                                       # only in policy-config dev, but ok
 ractor = { version = "0.15.10", features = ["async-trait"] }
@@ -144,7 +150,7 @@ tokio-rustls = "0.26.4"
 tokio-util = {version = "0.7.18", features = ["compat"]}
 tracing = "0.1.44"
 tracing-glog = "0.4.1"
-tracing-opentelemetry = "0.32.1"
+tracing-opentelemetry = "0.33.0"
 tracing-subscriber = { version = "0.3.22", features = ["std", "env-filter"] }
 url = "2.5.8"
 urlencoding = "2.1.3"
@@ -177,11 +183,9 @@ harness-common = { path = "cassini/test/common" }
 jira_common = { path = "jira/common" }
 kube-common = { path = "kubernetes/common" }
 polar = { path = "lib" }
-provenance-common = { path = "provenance/provenance-common" }
+polar-health = { path = "polar-health" }
+polar-init = { path = "polar-init" }
 openapi-common = { path = "openapi/common" }
-orchestrator-core = { path = "build-orchestrator/core" }
-orchestrator-backend-k8s = { path = "build-orchestrator/k8s" }
-orchestrator-backend-podman = { path = "build-orchestrator/podman" }
 time = { version = "0.3.47", features = ["serde"]}
 wiremock = "0.6"
 x509-parser = { version = "0.16", features = ["verify"]}

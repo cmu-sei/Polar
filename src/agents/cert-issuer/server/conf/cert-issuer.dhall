@@ -80,6 +80,8 @@ let CaConfig =
           { ca_cert_path : Text
           , ca_key_path : Text
           , default_lifetime : Duration
+          , server_lifetime : Duration
+          , identity_lifetime_overrides : List { mapKey : Text, mapValue : Duration }
           }
       , default =
           { -- Paths to the CA's self-signed cert and PKCS#8 PEM
@@ -92,6 +94,10 @@ let CaConfig =
           , -- 1 hour matches the v1 spec recommendation. Workload
             -- certs renew via init-container restart at expiry.
             default_lifetime = hours 1
+            -- Server certs default to same as client certs.
+            -- Override per-target for long-lived infrastructure certs.
+          , server_lifetime = hours 1
+          , identity_lifetime_overrides = [] : List { mapKey : Text, mapValue : Duration }
           }
       }
 

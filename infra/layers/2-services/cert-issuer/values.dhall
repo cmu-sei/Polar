@@ -17,4 +17,6 @@ in  { name             = "cert-issuer"
     , oidcIssuerUrl    = ""
     , oidcAudience     = [] : List Text
     , oidcJwksUri      = None Text
+    , defaultLifetimeSecs = 3600
+    , serverLifetimeSecs  = 3600
     }

@@ -34,8 +34,8 @@ def main [] {
             ($layers | path join "3-workloads/agents/kube/main.nu")
             ($layers | path join "3-workloads/agents/git/main.nu")
             ($layers | path join "3-workloads/agents/jira/main.nu")
-            ($layers | path join "3-workloads/agents/provenance/main.nu")
-            ($layers | path join "3-workloads/agents/build/main.nu")
+            ($layers | path join "3-workloads/agents/build-processor/main.nu")
+            ($layers | path join "3-workloads/agents/resolver/main.nu")
             ($layers | path join "3-workloads/agents/scheduler/main.nu")
             ($layers | path join "3-workloads/agents/openapi/main.nu")
         ]
@@ -56,7 +56,6 @@ def main [] {
             "cassini.yaml"
             "jaeger.yaml"
             "kube-agent-rbac.yaml"
-            "build-agent-rbac.yaml"
             "gitlab-observer.yaml"
             "gitlab-consumer.yaml"
             "kube-observer.yaml"
@@ -66,10 +65,8 @@ def main [] {
             "git-scheduler.yaml"
             "jira-observer.yaml"
             "jira-processor.yaml"
-            "provenance-linker.yaml"
-            "provenance-resolver.yaml"
-            "build-orchestrator.yaml"
             "build-processor.yaml"
+            "resolver.yaml"
             "scheduler-observer.yaml"
             "scheduler-processor.yaml"
             "openapi-observer.yaml"
@@ -79,9 +76,14 @@ def main [] {
         neo4j_bolt_addr       : "bolt+s://polar-db-svc.polar-graph.svc.cluster.local:7687"
         jaeger_dns_name       : "http://jaeger-svc.polar.svc.cluster.local:16686/v1/traces"
         scheduler_remote_url  : ($env.POLAR_SCHEDULER_REMOTE_URL? | default "https://github.com/daveman1010221/polar-schedules.git")
+        cassini_shutdown_token : ($env.CASSINI_SHUTDOWN_TOKEN? | default "HEYTHERE")
+        identity_lifetime_overrides : [
+            { identity: "default.polar-graph.serviceaccount.cluster.local", lifetimeSecs: 31536000 }
+        ]
         enable_tls            : true
         cert_issuer_url       : "http://cert-issuer.polar.svc.cluster.local:8443"
         cert_issuer_audience  : "polar-cert-issuer.local"
         cert_client_image     : "polar-cert-client:latest"
+        polar_init_image      : "polar-init:latest"
     } | to nuon
 }
