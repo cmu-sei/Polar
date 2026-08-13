@@ -131,18 +131,21 @@ def _run_simulation_initial(
     except Exception as e:
         import traceback
         traceback.print_exc()
-        return None, None, 0.0, 0.0, None, None
+        return None, None, None, None, 0.0, 0.0, None, None
 
     total_sp = float(combined_df["baseline_sp"].max())
     if total_sp == 0:
         print("[Simulation] total_sp is 0 — no story points found.")
-        return None, None, 0.0, 0.0, None, None
+        return None, None, None, None, 0.0, 0.0, None, None
 
     # ── 2. Weighted PERT velocity from historical training increments ──────────
     #
     # recency_decay=0.5 → most-recent PI weight 1.0, each prior PI * 0.5.
     # Set recency_decay=0.0 to treat all training PIs equally.
 
+    if not training_increments:
+        print("[Simulation] no training increments selected/available — no data.")
+        return None, None, None, None, 0.0, 0.0, None, None
 
     training_df = return_stats_df(
         team,
@@ -164,7 +167,7 @@ def _run_simulation_initial(
         )
     except ValueError as e:
         print(f"[Simulation] build_projections failed: {e}")
-        return None, None, 0.0, 0.0, None, None
+        return None, None, None, None, 0.0, 0.0, None, None
 
     # ── 4. Compute completion % and likelihood at the target date ─────────────
     completion_percentage = 0.0
@@ -279,6 +282,9 @@ def _run_simulation(
     # recency_decay=0.5 → most-recent PI weight 1.0, each prior PI * 0.5.
     # Set recency_decay=0.0 to treat all training PIs equally.
 
+    if not training_increments:
+        print("[Simulation] no training increments selected/available — no data.")
+        return None, None, 0.0, 0.0, None, None
 
     training_df = return_stats_df(
         team,

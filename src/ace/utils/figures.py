@@ -1,7 +1,7 @@
 import plotly.graph_objects as go
 import polars as pl
 import numpy as np
-from datetime import date as _date, timedelta as _td
+from datetime import date as _date, datetime as _datetime, timedelta as _td
 import time
 import inspect
 
@@ -53,11 +53,9 @@ def build_figure_pi_display(df: pl.DataFrame, todays_date=None, proj_comp_date=N
 
     # ── 1b) Truncate based on today's date ────────────────────────────────────
     if todays_date is not None:
-        from datetime import date, datetime
-
         if isinstance(todays_date, str):
-            todays_date = datetime.strptime(todays_date, "%Y-%m-%d").date()
-        elif isinstance(todays_date, datetime):
+            todays_date = _datetime.strptime(todays_date, "%Y-%m-%d").date()
+        elif isinstance(todays_date, _datetime):
             todays_date = todays_date.date()
 
         is_actual     = pl.col("group") == "Actual"
@@ -82,8 +80,8 @@ def build_figure_pi_display(df: pl.DataFrame, todays_date=None, proj_comp_date=N
 
         df = pl.concat([actual_df, projection_df, other_df]).sort("Dates")
 
-    pdf     = df.to_pandas()
-    grouped = {name: gdf for name, gdf in pdf.groupby("group", sort=False)}
+    # ── Polars-native grouping (replaces pandas to_pandas()/groupby) ───────────
+    grouped = {name: gdf for (name,), gdf in df.group_by("group", maintain_order=True)}
     fig     = go.Figure()
 
     # ── 2) Shaded projection band ─────────────────────────────────────────────
@@ -91,14 +89,15 @@ def build_figure_pi_display(df: pl.DataFrame, todays_date=None, proj_comp_date=N
     p95_df = grouped.get("projection_95")
 
     if p05_df is not None and p95_df is not None:
-        p05_s  = p05_df.set_index("Dates")["Percent Complete"]
-        p95_s  = p95_df.set_index("Dates")["Percent Complete"]
-        common = p05_s.index.intersection(p95_s.index)
+        common_df = (
+            p05_df.join(p95_df, on="Dates", how="inner", suffix="_p95")
+            .sort("Dates")
+        )
 
-        if len(common):
-            p05_vals = p05_s.loc[common].to_numpy()
-            p95_vals = p95_s.loc[common].to_numpy()
-            dates_np = common.to_numpy()
+        if common_df.height:
+            dates_np = common_df["Dates"].to_numpy()
+            p05_vals = common_df["Percent Complete"].to_numpy()
+            p95_vals = common_df["Percent Complete_p95"].to_numpy()
 
             x_poly = np.concatenate([dates_np, dates_np[::-1]]).tolist()
             y_poly = np.concatenate([p05_vals, p95_vals[::-1]]).tolist()
@@ -128,8 +127,8 @@ def build_figure_pi_display(df: pl.DataFrame, todays_date=None, proj_comp_date=N
         is_proj = group_name == "projection_median"
 
         fig.add_trace(go.Scatter(
-            x=group_df["Dates"],
-            y=group_df["Percent Complete"],
+            x=group_df["Dates"].to_list(),
+            y=group_df["Percent Complete"].to_list(),
             name=display,
             mode="lines",
             line=dict(
@@ -152,7 +151,7 @@ def build_figure_pi_display(df: pl.DataFrame, todays_date=None, proj_comp_date=N
     actual_max     = float(actual_pct.max())   if actual_pct   is not None else 0.0
     baseline_max   = float(baseline_pct.max()) if baseline_pct is not None else 0.0
     projection_max = float(projection_50_pct.max()) if projection_50_pct is not None else 0.0
-    plot_max       = float(pdf["Percent Complete"].max())
+    plot_max       = float(df.select(pl.col("Percent Complete").max()).item())
 
     td_str = str(todays_date) if todays_date is not None else None 
     comp_str = str(proj_comp_date) if proj_comp_date is not None else None
@@ -161,29 +160,34 @@ def build_figure_pi_display(df: pl.DataFrame, todays_date=None, proj_comp_date=N
     pi_beg_str = None
     if baseline_pct is not None:
         baseline_df = grouped["Baseline"]
-        pi_beg_str  = str(
-            baseline_df.loc[baseline_df["Percent Complete"] == 0.0, "Dates"]
-            .max()
+        pi_beg_val = (
+            baseline_df.filter(pl.col("Percent Complete") == 0.0)
+            .select(pl.col("Dates").max())
+            .item()
         )
+        pi_beg_str = str(pi_beg_val) if pi_beg_val is not None else None
 
     # First date where Baseline hits its maximum value → PI end
     pi_end_str = None
     if baseline_pct is not None:
         baseline_df = grouped["Baseline"]
-        pi_end_str  = str(
-            baseline_df.loc[baseline_df["Percent Complete"] == baseline_max, "Dates"]
-            .min()
+        pi_end_val = (
+            baseline_df.filter(pl.col("Percent Complete") == baseline_max)
+            .select(pl.col("Dates").min())
+            .item()
         )
+        pi_end_str = str(pi_end_val) if pi_end_val is not None else None
 
     projection_end_str = None
     if projection_50_pct is not None: 
         projection_50_df = grouped["projection_median"]
-        projection_end_str = str(
-            projection_50_df.loc[projection_50_df["Percent Complete"] == projection_max, "Dates"]
-            .min()
+        projection_end_val = (
+            projection_50_df.filter(pl.col("Percent Complete") == projection_max)
+            .select(pl.col("Dates").min())
+            .item()
         )
+        projection_end_str = str(projection_end_val) if projection_end_val is not None else None
 
-        
     # ── Compute x-axis bounds ─────────────────────────────────────────────────
 
     # Start 1 week before PI beginning
@@ -365,11 +369,9 @@ def build_figure_pi_display_initial(df: pl.DataFrame, todays_date=None, proj_com
 
     # ── 1b) Truncate based on today's date ────────────────────────────────────
     if todays_date is not None:
-        from datetime import date, datetime
-
         if isinstance(todays_date, str):
-            todays_date = datetime.strptime(todays_date, "%Y-%m-%d").date()
-        elif isinstance(todays_date, datetime):
+            todays_date = _datetime.strptime(todays_date, "%Y-%m-%d").date()
+        elif isinstance(todays_date, _datetime):
             todays_date = todays_date.date()
 
         is_actual     = pl.col("group") == "Actual"
@@ -394,8 +396,8 @@ def build_figure_pi_display_initial(df: pl.DataFrame, todays_date=None, proj_com
 
         df = pl.concat([actual_df, projection_df, other_df]).sort("Dates")
 
-    pdf     = df.to_pandas()
-    grouped = {name: gdf for name, gdf in pdf.groupby("group", sort=False)}
+    # ── Polars-native grouping (replaces pandas to_pandas()/groupby) ───────────
+    grouped = {name: gdf for (name,), gdf in df.group_by("group", maintain_order=True)}
     fig     = go.Figure()
 
     # ── 2) Shaded projection band ─────────────────────────────────────────────
@@ -403,14 +405,15 @@ def build_figure_pi_display_initial(df: pl.DataFrame, todays_date=None, proj_com
     p95_df = grouped.get("projection_95")
 
     if p05_df is not None and p95_df is not None:
-        p05_s  = p05_df.set_index("Dates")["Percent Complete"]
-        p95_s  = p95_df.set_index("Dates")["Percent Complete"]
-        common = p05_s.index.intersection(p95_s.index)
+        common_df = (
+            p05_df.join(p95_df, on="Dates", how="inner", suffix="_p95")
+            .sort("Dates")
+        )
 
-        if len(common):
-            p05_vals = p05_s.loc[common].to_numpy()
-            p95_vals = p95_s.loc[common].to_numpy()
-            dates_np = common.to_numpy()
+        if common_df.height:
+            dates_np = common_df["Dates"].to_numpy()
+            p05_vals = common_df["Percent Complete"].to_numpy()
+            p95_vals = common_df["Percent Complete_p95"].to_numpy()
 
             x_poly = np.concatenate([dates_np, dates_np[::-1]]).tolist()
             y_poly = np.concatenate([p05_vals, p95_vals[::-1]]).tolist()
@@ -440,8 +443,8 @@ def build_figure_pi_display_initial(df: pl.DataFrame, todays_date=None, proj_com
         is_proj = group_name == "projection_median"
 
         fig.add_trace(go.Scatter(
-            x=group_df["Dates"],
-            y=group_df["Percent Complete"],
+            x=group_df["Dates"].to_list(),
+            y=group_df["Percent Complete"].to_list(),
             name=display,
             mode="lines",
             line=dict(
@@ -464,7 +467,7 @@ def build_figure_pi_display_initial(df: pl.DataFrame, todays_date=None, proj_com
     actual_max     = float(actual_pct.max())   if actual_pct   is not None else 0.0
     baseline_max   = float(baseline_pct.max()) if baseline_pct is not None else 0.0
     projection_max = float(projection_50_pct.max()) if projection_50_pct is not None else 0.0
-    plot_max       = float(pdf["Percent Complete"].max())
+    plot_max       = float(df.select(pl.col("Percent Complete").max()).item())
 
     td_str = str(todays_date) if todays_date is not None else None 
     comp_str = str(proj_comp_date) if proj_comp_date is not None else None
@@ -473,27 +476,34 @@ def build_figure_pi_display_initial(df: pl.DataFrame, todays_date=None, proj_com
     pi_beg_str = None
     if baseline_pct is not None:
         baseline_df = grouped["Baseline"]
-        pi_beg_str  = str(
-            baseline_df.loc[baseline_df["Percent Complete"] == 0.0, "Dates"]
-            .max()
+        pi_beg_val = (
+            baseline_df.filter(pl.col("Percent Complete") == 0.0)
+            .select(pl.col("Dates").max())
+            .item()
         )
+        pi_beg_str = str(pi_beg_val) if pi_beg_val is not None else None
 
     # First date where Baseline hits its maximum value → PI end
     pi_end_str = None
     if baseline_pct is not None:
         baseline_df = grouped["Baseline"]
-        pi_end_str  = str(
-            baseline_df.loc[baseline_df["Percent Complete"] == baseline_max, "Dates"]
-            .min()
+        pi_end_val = (
+            baseline_df.filter(pl.col("Percent Complete") == baseline_max)
+            .select(pl.col("Dates").min())
+            .item()
         )
+        pi_end_str = str(pi_end_val) if pi_end_val is not None else None
 
     projection_end_str = None
     if projection_50_pct is not None: 
         projection_50_df = grouped["projection_median"]
-        projection_end_str = str(
-            projection_50_df.loc[projection_50_df["Percent Complete"] == projection_max, "Dates"]
-            .min()
+        projection_end_val = (
+            projection_50_df.filter(pl.col("Percent Complete") == projection_max)
+            .select(pl.col("Dates").min())
+            .item()
         )
+        projection_end_str = str(projection_end_val) if projection_end_val is not None else None
+
         
     # ── Compute x-axis bounds ─────────────────────────────────────────────────
 
@@ -636,21 +646,19 @@ def build_figure_pi_display_initial(df: pl.DataFrame, todays_date=None, proj_com
         parsed_wip_dates = []
         for wd in wip_dates:
             if isinstance(wd, str):
-                parsed_wip_dates.append(_date.strptime(wd, "%Y-%m-%d").date())
+                parsed_wip_dates.append(_datetime.strptime(wd, "%Y-%m-%d").date())
             elif isinstance(wd, _date):
-                parsed_wip_dates.append(wd.date())
+                parsed_wip_dates.append(wd)
             else:
                 parsed_wip_dates.append(wd)
 
-        # wip_df["Dates"] are pandas Timestamps after to_pandas(); normalize to date for matching
-        wip_df_dates_as_date = wip_df["Dates"].dt.date
-        mask = wip_df_dates_as_date.isin(parsed_wip_dates)
-        marker_points = wip_df.loc[mask]
+        # Dates column is already pl.Date -- no pandas Timestamp normalization needed
+        marker_points = wip_df.filter(pl.col("Dates").is_in(parsed_wip_dates))
 
-        if not marker_points.empty:
+        if marker_points.height > 0:
             wip_fig.add_trace(go.Scatter(
-                x=marker_points["Dates"],
-                y=marker_points["Percent Complete"],
+                x=marker_points["Dates"].to_list(),
+                y=marker_points["Percent Complete"].to_list(),
                 name="WIP marker",
                 mode="markers",
                 marker=dict(
@@ -671,25 +679,23 @@ def build_figure_pi_display_initial(df: pl.DataFrame, todays_date=None, proj_com
     if sprint_dates and "Baseline" in grouped:
         sprint_df = grouped["Baseline"]
 
-        # Normalize wip_dates to date objects for comparison
+        # Normalize sprint_dates to date objects for comparison
         parsed_sprint_dates = []
         for wd in sprint_dates:
             if isinstance(wd, str):
-                parsed_sprint_dates.append(_date.strptime(wd, "%Y-%m-%d").date())
+                parsed_sprint_dates.append(_datetime.strptime(wd, "%Y-%m-%d").date())
             elif isinstance(wd, _date):
-                parsed_sprint_dates.append(wd.date())
+                parsed_sprint_dates.append(wd)
             else:
                 parsed_sprint_dates.append(wd)
 
-        # wip_df["Dates"] are pandas Timestamps after to_pandas(); normalize to date for matching
-        sprint_df_dates_as_date = sprint_df["Dates"].dt.date
-        mask = sprint_df_dates_as_date.isin(parsed_sprint_dates)
-        marker_points = sprint_df.loc[mask]
+        # Dates column is already pl.Date -- no pandas Timestamp normalization needed
+        marker_points = sprint_df.filter(pl.col("Dates").is_in(parsed_sprint_dates))
 
-        if not marker_points.empty:
+        if marker_points.height > 0:
             sprint_fig.add_trace(go.Scatter(
-                x=marker_points["Dates"],
-                y=marker_points["Percent Complete"],
+                x=marker_points["Dates"].to_list(),
+                y=marker_points["Percent Complete"].to_list(),
                 name="Sprint Excess marker",
                 mode="markers",
                 marker=dict(
