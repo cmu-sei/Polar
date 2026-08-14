@@ -14,11 +14,7 @@ def main [] {
         target_dir : $target_dir
         output_dir : ($repo_root | path join "manifests")
 
-        required_env : [
-            "NEO4J_TLS_CA_CERT_CONTENT"
-            "NEO4J_TLS_SERVER_CERT_CONTENT"
-            "NEO4J_TLS_SERVER_KEY_CONTENT"
-        ]
+        required_env : []
 
         overrides : ($target_dir | path join "overrides.dhall")
 
@@ -64,8 +60,8 @@ def main [] {
         enable_tls            : true
         cert_issuer_url       : "http://cert-issuer.polar.svc.cluster.local:8443"
         cert_issuer_audience  : "polar-cert-issuer.local"
-        cert_client_image     : "polar-cert-client:latest"
-        polar_init_image      : "polar-init:latest"
+        cert_client_image     : "10.0.2.2:5000/polar-cert-client:latest"
+        polar_init_image      : "10.0.2.2:5000/polar-init:latest"
         cassini_shutdown_token : ($env.CASSINI_SHUTDOWN_TOKEN? | default "HEYTHERE")
         identity_lifetime_overrides : [
             { identity: "default.polar-graph.serviceaccount.cluster.local", lifetimeSecs: 31536000 }

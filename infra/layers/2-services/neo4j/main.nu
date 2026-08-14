@@ -80,6 +80,7 @@ def main [context_nuon: string] {
         + ", volumes            = v.volumes"
         + ", certIssuerUrl      = v.certIssuerUrl"
         + ", certClientImage    = v.certClientImage"
+        + ", nuInitImage        = v.nuInitImage"
         + ", certIssuerAudience = v.certIssuerAudience"
         + ", neo4jSans          = v.neo4jSans"
         + "}"

@@ -27,6 +27,7 @@ let render =
           , configVolume        : Text
           , certIssuerUrl       : Text
           , certClientImage     : Text
+          , nuInitImage          : Text
           , certIssuerAudience  : Text
           , neo4jSans           : List Text
           , ports               : { http : Natural, https : Natural, bolt : Natural }
@@ -146,7 +147,7 @@ let render =
                     [ Functions.makeCertServerInitContainer v.certIssuerUrl v.certClientImage v.neo4jSans
                     , kubernetes.Container::{
                       , name            = "neo4j-init"
-                      , image           = Some "polar-nu-init:latest"
+                      , image           = Some v.nuInitImage
                       , imagePullPolicy = Some v.imagePullPolicy
                       , securityContext = Some kubernetes.SecurityContext::{
                         , runAsUser    = Some 0

@@ -15,6 +15,7 @@
 , configVolume       = "neo4j-config-copy"
 , certIssuerUrl      = ""
 , certClientImage    = "polar-cert-client:latest"
+, nuInitImage        = "polar-nu-init:latest"
 , certIssuerAudience = ""
 , neo4jSans          = [] : List Text
 , ports =

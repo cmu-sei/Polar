@@ -15,9 +15,6 @@ def main [] {
         output_dir : ($repo_root | path join "manifests")
 
         required_env : [
-            "NEO4J_TLS_CA_CERT_CONTENT"
-            "NEO4J_TLS_SERVER_CERT_CONTENT"
-            "NEO4J_TLS_SERVER_KEY_CONTENT"
             "POLAR_SCHEDULER_REMOTE_URL"
         ]
 

@@ -207,7 +207,6 @@ calling external tools) and returns a single typed record:
   env: {                        # Required environment variables, validated before render
     NEO4J_AUTH: "required"
     GRAPH_PASSWORD: "required"
-    NEO4J_TLS_CA_CERT_CONTENT: "required"
     # ...
   }
   overrides: "targets/local/overrides.dhall"

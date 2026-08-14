@@ -240,7 +240,8 @@
             echo "  export KUBECONFIG=\$(pwd)/kubeconfig"
             echo "  cd ~/Documents/projects/Polar"
             echo "  just cluster-install-cert-manager"
-            echo "  just cluster-render && just cluster-apply-storage && just cluster-load-all && just cluster-apply"
+            echo "  just cluster-build-all && just cluster-load-all"
+            echo "  nu infra/render.nu local-minimal --apply"
             echo ""
             export SOPS_AGE_BINARY=$(which rage)
             export SOPS_AGE_SSH_PRIVATE_KEY_FILE=~/.ssh/id_github

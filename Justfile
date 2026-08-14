@@ -570,10 +570,6 @@ run-dev-container:
         -p 2222:2223 \
         localhost/polar-dev:latest
 
-# Start the local docker-compose stack
-run-compose:
-    podman compose -f src/conf/docker-compose.yml up -d
-
 # ── Inside container: LLM server ──────────────────────────────────────────────
 
 # Start Qwen3-Coder-30B (AMD ROCm) — recommended
@@ -878,7 +874,8 @@ neo4j-load-dump dump_path:
 
 # ── nix-usernetes (local cluster) ────────────────────────────────────────────
 #
-# Full cluster startup sequence:
+# Full cluster startup sequence (for developers using nix-usernetes locally;
+# users bringing their own cluster should skip this section entirely):
 #
 #   cd ~/Documents/projects/nix-usernetes
 #   just load-node-image   # after every nix build
@@ -886,43 +883,22 @@ neo4j-load-dump dump_path:
 #   export KUBECONFIG=$(pwd)/kubeconfig
 #
 #   cd ~/Documents/projects/Polar
-#   just cluster-install-cert-manager
-#   just cluster-render && just cluster-apply-storage && just cluster-load-all && just cluster-apply
+#   just cluster-build-all && just cluster-load-all
+#   nu infra/render.nu local-minimal --apply
 
 _u7s_dir      := env_var('HOME') + "/Documents/projects/nix-usernetes"
 _u7s_kubeconf := _u7s_dir + "/kubeconfig"
-
-# Start the local cluster
-cluster-up:
-    just -f {{_u7s_dir}}/Justfile up
-
-# Stop the local cluster
-cluster-down:
-    just -f {{_u7s_dir}}/Justfile down
-
-# Initialize the cluster (first time only)
-cluster-init:
-    just -f {{_u7s_dir}}/Justfile init
-
-# Install cert-manager into the cluster. Required before deploying Polar.
-# cert-manager is a Polar concern — not permanent cluster infrastructure.
-cluster-install-cert-manager:
-    just -f {{_u7s_dir}}/Justfile install-cert-manager
 
 # Wipe all cluster state
 cluster-reset:
     just -f {{_u7s_dir}}/Justfile reset
 
-# Show cluster status
+# Show cluster status. Respects whatever KUBECONFIG is already set.
 cluster-status:
-    KUBECONFIG={{_u7s_kubeconf}} kubectl get nodes
-    KUBECONFIG={{_u7s_kubeconf}} kubectl get pods -A
+    kubectl get nodes
+    kubectl get pods -A
 
-# Open a shell inside the cluster node
-cluster-shell:
-    podman exec -it u7s bash
-
-# Switch kubectl context to local cluster
+# Print nix-usernetes kubeconfig export command (dev convenience only).
 cluster-ctx:
     @echo "Run: export KUBECONFIG={{_u7s_kubeconf}}"
 
@@ -939,6 +915,22 @@ cluster-load image:
     fi
 
 _neo4j_result := env_var('HOME') + "/Documents/projects/nix-neo4j/result-neo4j-image"
+_registry_host := "localhost"
+_registry_port := "5000"
+_registry_gateway := "10.0.2.2"   # how u7s reaches the host registry (slirp4netns gateway)
+
+# Start a local OCI registry for image distribution. Works with any
+# Kubernetes cluster (u7s, kind, k3d, a real cluster) -- push here from
+# the host, and configure your cluster's node(s) to pull from wherever
+# this registry is reachable on their end.
+registry-up:
+    podman run -d --name polar-registry -p {{_registry_port}}:{{_registry_port}} docker.io/library/registry:2 2>/dev/null || echo "Container 'polar-registry' already running."
+
+registry-down:
+    podman rm -f polar-registry
+
+registry-status:
+    curl -sf http://{{_registry_host}}:{{_registry_port}}/v2/ && echo "registry reachable"
 
 # Build all images needed for cluster deployment with correct result symlink names
 cluster-build-all:
@@ -957,344 +949,87 @@ cluster-build-all:
 
 # Load only the images needed by the local-minimal target:
 # neo4j, cassini, cert-issuer, polar-init, kube observer/consumer, jira observer/processor.
-cluster-load-minimal neo4j_result=_neo4j_result:
+# Pushes to the local registry (see registry-up) rather than importing
+# directly into a specific cluster's containerd -- works with any
+# Kubernetes distribution, not just u7s.
+cluster-load-minimal neo4j_result=_neo4j_result: registry-up cluster-load-provisioner
     #!/usr/bin/env bash
     set -euo pipefail
-    _load() {
+    _push() {
         if [ -e "$1" ]; then
-            echo "Loading $1..."
-            podman exec -i u7s ctr -n k8s.io images import - < "$1"
+            echo "Pushing $1 -> {{_registry_host}}:{{_registry_port}}/$2"
+            skopeo copy "docker-archive:$1" "docker://{{_registry_host}}:{{_registry_port}}/$2" --dest-tls-verify=false
         else
             echo "Skipping $1 (not found)"
         fi
     }
-    _tag() {
-        echo "Tagging $1 -> $2"
-        podman exec u7s ctr -n k8s.io images tag "$1" "$2" 2>/dev/null || true
-    }
     # Infrastructure
     if [ -n "{{neo4j_result}}" ]; then
-        _load "{{neo4j_result}}"
+        _push "{{neo4j_result}}" "neo4j:5.26.2"
     fi
     # Minimal-target images only
-    _load ./result-cassini-image
-    _load ./result-cert-issuer
-    _load ./result-cert-client
-    _load ./result-polar-init
-    _load ./result-kube-observer
-    _load ./result-ace
-    _load ./result-kube-consumer
-    _load ./result-jira-observer
-    _load ./result-jira-processor
-    _load ./result-nu-init
-    # Retag to match manifest image references
-    _tag docker.io/library/cassini:latest               docker.io/library/cassini:latest
-    _tag docker.io/library/kube-observer:latest          docker.io/library/kube-observer:latest
-    _tag docker.io/library/kube-consumer:latest          docker.io/library/kube-consumer:latest
-    _tag docker.io/library/jira-observer:latest          docker.io/library/jira-observer:latest
-    _tag docker.io/library/jira-processor:latest         docker.io/library/jira-processor:latest
-    _tag docker.io/library/nix-neo4j:latest              docker.io/library/neo4j:5.26.2
-    _tag docker.io/library/cert-issuer:latest             docker.io/library/cert-issuer:latest
-    _tag docker.io/library/polar-cert-client:latest      docker.io/library/polar-cert-client:latest
-    _tag docker.io/library/polar-init:latest             docker.io/library/polar-init:latest
-    _tag docker.io/library/ace-viz:latest         docker.io/library/ace-viz:latest
-    _tag docker.io/library/polar-nu-init:latest          docker.io/library/polar-nu-init:latest
-    echo "Minimal images loaded and tagged."
+    _push ./result-cassini-image  "cassini:latest"
+    _push ./result-cert-issuer    "cert-issuer:latest"
+    _push ./result-cert-client    "polar-cert-client:latest"
+    _push ./result-polar-init     "polar-init:latest"
+    _push ./result-kube-observer  "kube-observer:latest"
+    _push ./result-ace            "ace-viz:latest"
+    _push ./result-kube-consumer  "kube-consumer:latest"
+    _push ./result-jira-observer  "jira-observer:latest"
+    _push ./result-jira-processor "jira-processor:latest"
+    _push ./result-nu-init        "polar-nu-init:latest"
+    echo "Minimal images pushed to {{_registry_host}}:{{_registry_port}}."
 
 # Build and load all core Polar images into the cluster.
 # All images are loaded directly from nix result symlinks.
 # Usage: just cluster-load-all
 #        just cluster-load-all neo4j_result=../nix-neo4j/result-neo4j-image
-cluster-load-all neo4j_result=_neo4j_result:
+cluster-load-all neo4j_result=_neo4j_result: registry-up cluster-load-provisioner
     #!/usr/bin/env bash
     set -euo pipefail
-    _load() {
+    _push() {
         if [ -e "$1" ]; then
-            echo "Loading $1..."
-            podman exec -i u7s ctr -n k8s.io images import - < "$1"
+            echo "Pushing $1 -> {{_registry_host}}:{{_registry_port}}/$2"
+            skopeo copy "docker-archive:$1" "docker://{{_registry_host}}:{{_registry_port}}/$2" --dest-tls-verify=false
         else
             echo "Skipping $1 (not found)"
         fi
     }
-    _tag() {
-        echo "Tagging $1 -> $2"
-        podman exec u7s ctr -n k8s.io images tag "$1" "$2" 2>/dev/null || true
-    }
-    _load_podman() {
-        echo "Loading $1 from podman..."
-        if ! podman image exists "$1" 2>/dev/null; then
-            echo "Pulling $1..."
-            podman pull "$1"
-        fi
-        podman save "$1" | podman exec -i u7s ctr -n k8s.io images import -
-    }
     # Infrastructure
     if [ -n "{{neo4j_result}}" ]; then
-        _load "{{neo4j_result}}"
+        _push "{{neo4j_result}}" "neo4j:5.26.2"
     fi
     # Polar images — all from nix result symlinks
-    _load ./result-cassini-image
-    _load ./result-cert-issuer
-    _load ./result-cert-client
-    _load ./result-harness-producer
-    _load ./result-harness-sink
-    _load ./result-gitlab-observer
-    _load ./result-gitlab-consumer
-    _load ./result-kube-observer
-    _load ./result-kube-consumer
-    _load ./result-git-observer
-    _load ./result-git-processor
-    _load ./result-git-scheduler
-    _load ./result-jira-observer
-    _load ./result-jira-processor
-    _load ./result-openapi-observer
-    _load ./result-openapi-processor
-    _load ./result-resolver
-    _load ./result-scheduler-observer
-    _load ./result-scheduler-processor
-    _load ./result-build-processor
-    _load ./result-nu-init
-    _load ./result-polar-init
-    _load ./result-ace
-    # Retag to match manifest image references
-    _tag docker.io/library/cassini:latest                       docker.io/library/cassini:latest
-    _tag docker.io/library/harness-producer:latest              docker.io/library/harness-producer:latest
-    _tag docker.io/library/harness-sink:latest                  docker.io/library/harness-sink:latest
-    _tag docker.io/library/gitlab-observer:latest               docker.io/library/gitlab-observer:latest
-    _tag docker.io/library/gitlab-consumer:latest               docker.io/library/gitlab-consumer:latest
-    _tag docker.io/library/kube-observer:latest                 docker.io/library/kube-observer:latest
-    _tag docker.io/library/kube-consumer:latest                 docker.io/library/kube-consumer:latest
-    _tag docker.io/library/git-observer:latest                  docker.io/library/git-observer:latest
-    _tag docker.io/library/git-processor:latest                 docker.io/library/git-processor:latest
-    _tag docker.io/library/git-scheduler:latest                 docker.io/library/git-scheduler:latest
-    _tag docker.io/library/jira-observer:latest                 docker.io/library/jira-observer:latest
-    _tag docker.io/library/jira-processor:latest                docker.io/library/jira-processor:latest
-    _tag docker.io/library/openapi-observer:latest              docker.io/library/openapi-observer:latest
-    _tag docker.io/library/openapi-processor:latest             docker.io/library/openapi-processor:latest
-    _tag docker.io/library/scheduler-observer:latest            docker.io/library/scheduler-observer:latest
-    _tag docker.io/library/scheduler-processor:latest           docker.io/library/scheduler-processor:latest
-    _tag docker.io/library/build-processor:latest               docker.io/library/build-processor:latest
-    _tag docker.io/library/oci-resolver:latest                  docker.io/library/oci-resolver:latest
-    _tag docker.io/library/nix-neo4j:latest                     docker.io/library/neo4j:5.26.2
-    _tag docker.io/library/polar-nu-init:latest                 docker.io/library/polar-nu-init:latest
-    _tag docker.io/library/cert-issuer:latest                   docker.io/library/cert-issuer:latest
-    _tag docker.io/library/polar-cert-client:latest             docker.io/library/polar-cert-client:latest
-    _tag docker.io/library/polar-init:latest                    docker.io/library/polar-init:latest
-    _tag docker.io/library/ace-viz:latest                        docker.io/library/ace-viz:latest
-    echo "Core images loaded and tagged."
+    _push ./result-cassini-image       "cassini:latest"
+    _push ./result-cert-issuer         "cert-issuer:latest"
+    _push ./result-cert-client         "polar-cert-client:latest"
+    _push ./result-harness-producer    "harness-producer:latest"
+    _push ./result-harness-sink        "harness-sink:latest"
+    _push ./result-gitlab-observer     "gitlab-observer:latest"
+    _push ./result-gitlab-consumer     "gitlab-consumer:latest"
+    _push ./result-kube-observer       "kube-observer:latest"
+    _push ./result-kube-consumer       "kube-consumer:latest"
+    _push ./result-git-observer        "git-observer:latest"
+    _push ./result-git-processor       "git-processor:latest"
+    _push ./result-git-scheduler       "git-scheduler:latest"
+    _push ./result-jira-observer       "jira-observer:latest"
+    _push ./result-jira-processor      "jira-processor:latest"
+    _push ./result-openapi-observer    "openapi-observer:latest"
+    _push ./result-openapi-processor   "openapi-processor:latest"
+    _push ./result-resolver            "oci-resolver:latest"
+    _push ./result-scheduler-observer  "scheduler-observer:latest"
+    _push ./result-scheduler-processor "scheduler-processor:latest"
+    _push ./result-build-processor     "build-processor:latest"
+    _push ./result-nu-init             "polar-nu-init:latest"
+    _push ./result-polar-init          "polar-init:latest"
+    _push ./result-ace                 "ace-viz:latest"
+    echo "Core images pushed to {{_registry_host}}:{{_registry_port}}."
 
-# Render manifests for the local cluster.
-# Writes values-active.dhall to select the local values file before rendering.
-# See scripts/render-manifests.sh for the dhall-to-yaml invocation.
-cluster-render:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    if [ ! -f src/deploy/local/conf/git.json ]; then
-        echo "ERROR: src/deploy/local/conf/git.json missing. Copy from git.json.example and fill in credentials."
-        exit 1
-    fi
-    for var in NEO4J_TLS_CA_CERT_CONTENT NEO4J_TLS_SERVER_CERT_CONTENT NEO4J_TLS_SERVER_KEY_CONTENT; do
-        if [ -z "${!var:-}" ]; then
-            echo "ERROR: $var is not set. Source example.env and fill in the TLS values."
-            exit 1
-        fi
-    done
-    echo './values.local.dhall' > src/deploy/local/values-active.dhall
-    bash scripts/render-manifests.sh src/deploy/local manifests
-
-# Pull and load the local-path provisioner image into the cluster
+# Pull and push the local-path provisioner image to the local registry.
 cluster-load-provisioner:
     #!/usr/bin/env bash
     set -euo pipefail
     img="docker.io/rancher/local-path-provisioner:v0.0.35"
-    if ! podman image exists "$img" 2>/dev/null; then
-        echo "Pulling $img..."
-        podman pull "$img"
-    fi
-    echo "Loading $img into cluster..."
-    podman save "$img" | podman exec -i u7s ctr -n k8s.io images import -
-    echo "Done."
-
-# Apply storage infrastructure (local-path provisioner + managed-csi StorageClass)
-cluster-apply-storage: cluster-load-provisioner
-    #!/usr/bin/env bash
-    set -euo pipefail
-    KUBECONFIG={{_u7s_kubeconf}} kubectl apply -f src/deploy/local/pki/local-path-provisioner.yaml
-    KUBECONFIG={{_u7s_kubeconf}} kubectl apply -f manifests/storage.yaml
-
-# Apply all rendered Polar manifests to the local cluster.
-# Order matters: namespaces and storage must exist before dependent resources.
-# Apply all rendered Polar manifests to the local cluster.
-cluster-apply:
-    nu infra/render.nu local --apply
-
-# ── kind (local cluster) ──────────────────────────────────────────────────────
-
-_kind_cluster  := "polar"
-_kind_config   := "src/conf/kind-cluster.yaml"
-_deploy_local  := "src/deploy/local"
-_manifests_out := "manifests-local"
-
-# Create the local kind cluster (idempotent)
-kind-up:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    if kind get clusters 2>/dev/null | grep -qx "{{_kind_cluster}}"; then
-        echo "Cluster '{{_kind_cluster}}' already exists — skipping."
-    else
-        echo "Creating kind cluster '{{_kind_cluster}}'..."
-        kind create cluster --name {{_kind_cluster}} --config {{_kind_config}}
-    fi
-    kubectl cluster-info --context kind-{{_kind_cluster}}
-
-# Tear down the local kind cluster
-kind-down:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    if kind get clusters 2>/dev/null | grep -qx "{{_kind_cluster}}"; then
-        kind delete cluster --name {{_kind_cluster}}
-    else
-        echo "No cluster '{{_kind_cluster}}' — nothing to do."
-    fi
-
-# Switch kubectl context to the local kind cluster
-kind-ctx:
-    kubectl config use-context kind-{{_kind_cluster}}
-
-# Show cluster health at a glance
-kind-status:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    echo "=== kind clusters ==="
-    kind get clusters
-    echo ""
-    echo "=== nodes ==="
-    kubectl get nodes --context kind-{{_kind_cluster}}
-    echo ""
-    echo "=== pods (all namespaces) ==="
-    kubectl get pods -A --context kind-{{_kind_cluster}}
-
-# Load an image into kind — accepts either a nix result path or a podman image name.
-# Usage: just kind-load ./result-cassini-image
-#        just kind-load cassini:latest
-kind-load image:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    if [ -e "{{image}}" ]; then
-        echo "Loading nix result '{{image}}' into kind cluster '{{_kind_cluster}}'..."
-        kind load image-archive {{image}} --name {{_kind_cluster}}
-    else
-        echo "Loading podman image '{{image}}' into kind cluster '{{_kind_cluster}}'..."
-        podman save {{image}} | kind load image-archive /dev/stdin --name {{_kind_cluster}}
-    fi
-
-# Build and load all core Polar images into kind (skips podman entirely).
-# Requires: kind-up, and nix-neo4j result-neo4j-image available at NEO4J_IMAGE_PATH.
-# Usage: just kind-load-all
-#        just NEO4J_IMAGE_PATH=~/projects/nix-neo4j/result-neo4j-image kind-load-all
-kind-load-all neo4j_result='':
-    #!/usr/bin/env bash
-    set -euo pipefail
-
-    load() { just kind-load "$1"; }
-
-    # Infrastructure
-    if [ -n "{{neo4j_result}}" ]; then
-        load "{{neo4j_result}}"
-    else
-        echo "Skipping neo4j — pass neo4j_result=<path> to include it."
-        echo "  e.g. just kind-load-all neo4j_result=../nix-neo4j/result-neo4j-image"
-    fi
-
-    # Cassini
-    just cassini all
-    load ./result-cassini-image
-    load ./result-cassini-producer-image
-    load ./result-cassini-sink-image
-
-    # Scheduler
-    just scheduler all
-    load ./result-scheduler-processor
-    load ./result-scheduler-observer
-
-    echo "Core images loaded. Agent images (gitlab, kube, git, web) load on demand:"
-    echo "  just kind-load-agents gitlab"
-    echo "  just kind-load-agents kube"
-    echo "  etc."
-
-# Build and load a specific agent pair (or all agents) into kind.
-# Usage: just kind-load-agents gitlab
-#        just kind-load-agents kube
-#        just kind-load-agents git
-#        just kind-load-agents web
-#        just kind-load-agents all
-kind-load-agents agent='all':
-    #!/usr/bin/env bash
-    set -euo pipefail
-    load() { just kind-load "$1"; }
-    case "{{agent}}" in
-        gitlab)
-            just gitlab all
-            load ./result-gitlab-observer
-            load ./result-gitlab-consumer
-            ;;
-        kube)
-            just kube all
-            load ./result-kube-observer
-            load ./result-kube-consumer
-            ;;
-        git)
-            just git-agents all
-            load ./result-git-observer
-            load ./result-git-consumer
-            load ./result-git-scheduler
-            ;;
-        web)
-            just web all
-            load ./result-openapi-observer
-            load ./result-openapi-processor
-            ;;
-        all)
-            just kind-load-agents gitlab
-            just kind-load-agents kube
-            just kind-load-agents git
-            just kind-load-agents web
-            ;;
-        *) echo "Unknown agent: {{agent}}. Use gitlab, kube, git, web, or all." && exit 1 ;;
-    esac
-
-# Render Dhall manifests for local kind deployment.
-# Output goes to _manifests_out (gitignored, rebuilt on demand).
-kind-render:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    echo "Rendering manifests from {{_deploy_local}} -> {{_manifests_out}}..."
-    rm -rf {{_manifests_out}}
-    bash scripts/render-manifests.sh {{_deploy_local}} {{_manifests_out}}
-    echo "Rendered manifests in {{_manifests_out}}/"
-
-# Apply rendered manifests to the local kind cluster.
-kind-apply:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    if [ ! -d "{{_manifests_out}}" ]; then
-        echo "No manifests found — run 'just kind-render' first."
-        exit 1
-    fi
-    kubectl apply -R -f {{_manifests_out}} --context kind-{{_kind_cluster}}
-
-# Render and apply in one step.
-kind-deploy: kind-render kind-apply
-
-# Port-forward core services to localhost (runs in foreground — use a separate pane).
-# Jaeger UI, Neo4j browser, and Cassini are forwarded.
-# Note: kind's extraPortMappings already handle these for NodePort services;
-# this target is for ClusterIP services or when you want explicit control.
-kind-forward:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    echo "Forwarding services (Ctrl-C to stop all)..."
-    kubectl port-forward -n polar     svc/cassini-ip-svc  8080:8080 --context kind-{{_kind_cluster}} &
-    kubectl port-forward -n polar     svc/jaeger-svc     16686:16686 4317:4317 4318:4318 --context kind-{{_kind_cluster}} &
-    kubectl port-forward -n polar-db  svc/polar-db-svc    7474:7474 7687:7687 --context kind-{{_kind_cluster}} &
-    wait
+    echo "Pushing $img -> {{_registry_host}}:{{_registry_port}}/local-path-provisioner:v0.0.35"
+    skopeo copy "docker://$img" "docker://{{_registry_host}}:{{_registry_port}}/local-path-provisioner:v0.0.35" --dest-tls-verify=false
+    skopeo copy "docker://docker.io/library/busybox:latest" "docker://{{_registry_host}}:{{_registry_port}}/busybox:latest" --dest-tls-verify=false
