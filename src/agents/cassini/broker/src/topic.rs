@@ -11,6 +11,8 @@ use tracing::{debug, error, info, trace, trace_span, warn};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 pub const TOPIC_ADD_FAILED_TXT: &str = "Failed to add topic \"{topic}!\"";
+const QUEUE_TICK_SECS: u64 = 60;
+const QUEUE_STALE_AFTER_SECS: u64 = QUEUE_TICK_SECS * 3; // ~3 minutes
 
 // ============================== Topic Supervisor definition ============================== //
 /// Our supervisor for managing topics and their message queues
@@ -109,8 +111,8 @@ impl TopicManager {
                         Ok(subscriber_ref) => {
                             // Attach subscriber to topic
                             if let Err(e) = topic_actor.cast(BrokerMessage::AddSubscriber {
+                                registration_id: registration_id.clone(),
                                 subscriber_ref,
-                                // Preserve tracing into the add-subscriber/dequeue path.
                                 trace_ctx: trace_ctx.clone(),
                             }) {
                                 warn!(
@@ -523,9 +525,9 @@ impl TopicManager {
 struct TopicAgent;
 
 struct TopicAgentState {
-    subscribers: Vec<ActorRef<BrokerMessage>>,
-    queue: VecDeque<Arc<Vec<u8>>>, // Changed from VecDeque<Vec<u8>>
-    flushing: bool,                // whether we are in flush phase
+    subscribers: HashMap<String, ActorRef<BrokerMessage>>,
+    queue: VecDeque<(std::time::Instant, Arc<Vec<u8>>)>,
+    flushing: bool,
 }
 
 #[async_trait]
@@ -540,7 +542,7 @@ impl Actor for TopicAgent {
         _args: (),
     ) -> Result<Self::State, ActorProcessingErr> {
         Ok(TopicAgentState {
-            subscribers: Vec::new(),
+            subscribers: HashMap::new(),
             queue: VecDeque::new(),
             flushing: false,
         })
@@ -552,6 +554,10 @@ impl Actor for TopicAgent {
         _state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         debug!("{myself:?} Started");
+        let _ = myself.send_interval(
+            std::time::Duration::from_secs(QUEUE_TICK_SECS),
+            || BrokerMessage::QueueExpiryTick,
+        );
         Ok(())
     }
 
@@ -589,10 +595,11 @@ impl Actor for TopicAgent {
                 .await?;
             }
             BrokerMessage::AddSubscriber {
+                registration_id,
                 subscriber_ref,
                 trace_ctx,
             } => {
-                self.handle_add_subscriber(myself.clone(), state, subscriber_ref, trace_ctx)
+                self.handle_add_subscriber(myself.clone(), state, registration_id, subscriber_ref, trace_ctx)
                     .await?;
             }
             BrokerMessage::UnsubscribeRequest {
@@ -608,6 +615,9 @@ impl Actor for TopicAgent {
                     trace_ctx,
                 )
                 .await?;
+            }
+            BrokerMessage::QueueExpiryTick => {
+                self.handle_queue_expiry_tick(myself.clone(), state).await?;
             }
             _ => (),
         }
@@ -639,16 +649,15 @@ impl TopicAgent {
         // Actually, during shutdown, there are no active subscribers (they are terminated in phase 4).
         // But phase 3 (flush) happens before phase 4 (terminate subscribers). So subscribers might still exist.
         // We must attempt to deliver all queued messages to existing subscribers.
-        while let Some(msg) = state.queue.pop_front() {
+        while let Some((_queued_at, msg)) = state.queue.pop_front() {
             if state.subscribers.is_empty() {
-                // No one to deliver to; we discard the message (but log it).
                 warn!(
                     "Discarding queued message on topic {} during flush: no subscribers",
                     myself.get_name().unwrap_or_default()
                 );
                 continue;
             }
-            for subscriber in &state.subscribers {
+            for subscriber in state.subscribers.values() {
                 if let Err(e) = subscriber.send_message(BrokerMessage::PublishResponse {
                     topic: myself.get_name().unwrap_or_default(),
                     payload: msg.clone(),
@@ -698,43 +707,23 @@ impl TopicAgent {
             topic = %topic,
             payload_len = payload.len()
         );
-
-        // If we are in flush phase, we should still accept publishes? Actually no,
-        // the TopicManager rejects new publishes during shutdown. But if we are here,
-        // it's because the message was already accepted before shutdown.
         try_set_parent_otel(&span, trace_ctx);
         let _g = span.enter();
-
         trace!("Topic agent received publish request for \"{topic}\"");
 
-        // alert subscribers
         if !state.subscribers.is_empty() {
-            // If we are in flush phase, we still deliver normally.
-            for subscriber in &state.subscribers {
-                // Clone payload for each subscriber
-                let send_result = if state.flushing {
-                    // During flush, we may want to be more aggressive, but it's the same.
-                    subscriber.send_message(BrokerMessage::PublishResponse {
-                        topic: topic.clone(),
-                        payload: payload.clone(),
-                        result: Ok(()),
-                        trace_ctx: Some(span.context()),
-                    })
-                } else {
-                    subscriber.send_message(BrokerMessage::PublishResponse {
-                        topic: topic.clone(),
-                        payload: payload.clone(),
-                        result: Ok(()),
-                        trace_ctx: Some(span.context()),
-                    })
-                };
-                if let Err(e) = send_result {
+            for subscriber in state.subscribers.values() {
+                if let Err(e) = subscriber.send_message(BrokerMessage::PublishResponse {
+                    topic: topic.clone(),
+                    payload: payload.clone(),
+                    result: Ok(()),
+                    trace_ctx: Some(span.context()),
+                }) {
                     warn!("{PUBLISH_REQ_FAILED_TXT}: {e}")
                 }
             }
         } else {
-            // No subscribers, queue the message
-            state.queue.push_back(payload.clone());
+            state.queue.push_back((std::time::Instant::now(), payload.clone()));
             info!(
                 "{}",
                 format!(
@@ -745,7 +734,6 @@ impl TopicAgent {
             );
         }
 
-        // send ACK to the session that made the request (using reply_to)
         if let Some(session) = reply_to {
             if let Err(e) = session.send_message(BrokerMessage::PublishRequestAck {
                 topic: topic.clone(),
@@ -763,32 +751,32 @@ impl TopicAgent {
         &self,
         myself: ActorRef<BrokerMessage>,
         state: &mut TopicAgentState,
+        registration_id: String,
         subscriber_ref: ActorRef<BrokerMessage>,
         trace_ctx: Option<opentelemetry::Context>,
     ) -> Result<(), ActorProcessingErr> {
-        // If we are in flush phase and already delivered all queued messages, we may still get new subscribers?
-        // During shutdown, we shouldn't get new subscriptions, but just in case, we still add them.
         if state.flushing {
             debug!("Adding subscriber during flush phase");
         }
-
-        let span = trace_span!("cassini.topic_agent.add_subscriber");
+        let span = trace_span!("cassini.topic_agent.add_subscriber", %registration_id);
         try_set_parent_otel(&span, trace_ctx);
         let _g = span.enter();
-
         trace!("Received subscribe session directive");
 
-        state.subscribers.push(subscriber_ref.clone());
+        // registration_id is the key -- inserting for an already-present
+        // registration replaces the old entry rather than accumulating a
+        // second, stale ActorRef alongside it. This is the fix for the
+        // structural one-to-many mismatch between TopicAgent's own
+        // tracking and SubscriberManager's already-enforced one-to-one
+        // (registration_id, topic) -> SubscriberAgent relationship.
+        state.subscribers.insert(registration_id, subscriber_ref.clone());
 
         // Drain queued messages now that someone is listening.
-        // This is the normal drain, not the shutdown flush.
-        while let Some(msg) = state.queue.pop_front() {
-            // if this were to fail, user probably unsubscribed while we were dequeuing
-            // It should be ok to ignore this case.
+        while let Some((_queued_at, msg)) = state.queue.pop_front() {
             subscriber_ref
                 .send_message(BrokerMessage::PublishResponse {
                     topic: myself.get_name().unwrap(),
-                    payload: msg.clone(),
+                    payload: msg,
                     result: Ok(()),
                     trace_ctx: Some(span.context()),
                 })
@@ -800,7 +788,7 @@ impl TopicAgent {
     async fn handle_unsubscribe_request(
         &self,
         _myself: ActorRef<BrokerMessage>,
-        _state: &mut TopicAgentState,
+        state: &mut TopicAgentState,
         registration_id: String,
         topic: String,
         trace_ctx: Option<opentelemetry::Context>,
@@ -809,8 +797,46 @@ impl TopicAgent {
         try_set_parent_otel(&span, trace_ctx);
         let _g = span.enter();
 
-        trace!("topic actor received unsubscribe request.");
-        // Original implementation had no logic here; we keep it empty.
+        if state.subscribers.remove(&registration_id).is_some() {
+            trace!("Removed subscriber for registration {registration_id}");
+        } else {
+            trace!("No subscriber for registration {registration_id} on this topic (already gone)");
+        }
+        Ok(())
+    }
+
+    /// Drop messages that have sat in this topic's zero-subscriber queue
+    /// for too long. Messages are pushed in arrival order, so the oldest
+    /// is always at the front -- once we hit one that isn't stale yet,
+    /// everything behind it is guaranteed not stale either.
+    ///
+    /// We deliberately don't persist these to disk; that's a real,
+    /// separate future capability, not something to improvise here. For
+    /// now: log clearly, then drop, so an abandoned topic doesn't hold
+    /// memory forever.
+    async fn handle_queue_expiry_tick(
+        &self,
+        myself: ActorRef<BrokerMessage>,
+        state: &mut TopicAgentState,
+    ) -> Result<(), ActorProcessingErr> {
+        let threshold = std::time::Duration::from_secs(QUEUE_STALE_AFTER_SECS);
+        let mut dropped = 0usize;
+
+        while let Some((queued_at, _)) = state.queue.front() {
+            if queued_at.elapsed() < threshold {
+                break;
+            }
+            state.queue.pop_front();
+            dropped += 1;
+        }
+
+        if dropped > 0 {
+            warn!(
+                "Dropped {dropped} stale message(s) on topic \"{0:?}\" -- no subscriber \
+                 appeared within {QUEUE_STALE_AFTER_SECS}s of the oldest message arriving",
+                myself.get_name()
+            );
+        }
         Ok(())
     }
 }

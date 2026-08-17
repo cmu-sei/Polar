@@ -137,6 +137,7 @@ pub enum BrokerMessage {
         reply: RpcReplyPort<Result<ActorRef<BrokerMessage>, ActorProcessingErr>>,
     },
     AddSubscriber {
+        registration_id: String,
         subscriber_ref: ActorRef<BrokerMessage>,
         trace_ctx: Option<opentelemetry::Context>,
     },
@@ -240,6 +241,18 @@ pub enum BrokerMessage {
     SetListenerManager {
         listener_mgr: ActorRef<BrokerMessage>,
     },
+    /// Internal message for SubscriberManager to receive its topic manager ref.
+    SetTopicManagerRef {
+        topic_mgr: ActorRef<BrokerMessage>,
+    },
+    /// Internal message for SessionManager to receive its subscriber manager ref.
+    SetSubscriberManagerRef {
+        subscriber_mgr: ActorRef<BrokerMessage>,
+    },
+    /// Periodic self-tick for a TopicAgent to check its own queue for
+    /// messages that have been waiting too long with no subscriber to
+    /// receive them.
+    QueueExpiryTick,
 }
 
 impl BrokerMessage {

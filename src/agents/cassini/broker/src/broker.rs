@@ -291,6 +291,13 @@ impl Actor for Broker {
             ActorProcessingErr::from(e)
         })?;
 
+        // Wire the subscriber manager ref into session_mgr now that it
+        // exists -- SessionManager is spawned before SubscriberManager, so
+        // it can't receive this at construction time.
+        let _ = session_mgr.send_message(BrokerMessage::SetSubscriberManagerRef {
+            subscriber_mgr: subscriber_mgr.clone(),
+        });
+
         let topic_mgr_args = TopicManagerArgs {
             topics: None,
             subscriber_mgr: Some(subscriber_mgr.clone()),
@@ -307,6 +314,13 @@ impl Actor for Broker {
             error!(error = ?e, "Broker startup failed: TopicManager failed to start");
             ActorProcessingErr::from(e)
         })?;
+
+        // Wire the topic manager ref into subscriber_mgr now that it exists
+        // -- SubscriberManager is spawned before TopicManager, so it can't
+        // receive this at construction time.
+        let _ = subscriber_mgr.send_message(BrokerMessage::SetTopicManagerRef {
+            topic_mgr: topic_mgr.clone(),
+        });
 
         let control_mgr_args = ControlManagerState {
             topic_mgr: topic_mgr.clone(),

@@ -29,14 +29,20 @@ struct Session {
 }
 
 pub struct SessionManagerState {
-    /// Map of registration_id to Session ActorRefs
     sessions: HashMap<String, Session>,
     broker: ActorRef<BrokerMessage>,
     listener_mgr: Option<ActorRef<BrokerMessage>>,
-
+    /// Reference to the subscriber manager; initially None, set via
+    /// SetSubscriberManagerRef once SubscriberManager exists (SessionManager
+    /// is spawned before it). Used to continue the layered disconnect flow
+    /// (Listener -> Session -> Subscriber -> Topic) -- without this, a
+    /// session ending from a real socket disconnect never reaches
+    /// SubscriberManager at all, and every subscription it owned leaks
+    /// forever with no reachable cleanup path.
+    subscriber_mgr: Option<ActorRef<BrokerMessage>>,
     is_shutting_down: bool,
     drain_phase_active: bool,
-    drain_completion_notified: bool, // Prevent duplicate signals
+    drain_completion_notified: bool,
     total_pending_publishes: usize,
     pub pending_drain_count: usize,
 }
@@ -48,12 +54,6 @@ pub struct SessionManagerArgs {
 }
 
 // ============================== SessionManager Actor ============================== //
-
-#[derive(Debug)]
-pub struct SetTopicManagerRef(pub ActorRef<BrokerMessage>);
-
-#[derive(Debug)]
-pub struct SetListenerManagerActorRef(pub ActorRef<BrokerMessage>);
 
 #[async_trait]
 impl Actor for SessionManager {
@@ -70,6 +70,7 @@ impl Actor for SessionManager {
         Ok(SessionManagerState {
             broker: args.broker,
             listener_mgr: args.listener_mgr,
+            subscriber_mgr: None,
             sessions: HashMap::new(),
             is_shutting_down: false,
             drain_phase_active: false,
@@ -140,15 +141,39 @@ impl Actor for SessionManager {
                 state.listener_mgr = Some(listener_mgr);
                 debug!("SessionManager received listener manager ref");
             }
+            BrokerMessage::SetSubscriberManagerRef { subscriber_mgr } => {
+                state.subscriber_mgr = Some(subscriber_mgr);
+                debug!("SessionManager received subscriber manager ref");
+            }
             BrokerMessage::DisconnectRequest {
-                registration_id, ..
+                client_id,
+                registration_id,
+                reason,
+                trace_ctx,
             } => {
                 if let Some(registration_id) = registration_id {
-                    match state.sessions.entry(registration_id) {
+                    match state.sessions.entry(registration_id.clone()) {
                         Entry::Occupied(entry) => {
                             entry.remove();
                         }
                         Entry::Vacant(_) => (),
+                    }
+
+                    // Continue the layered flow (Listener -> Session ->
+                    // Subscriber -> Topic). Without this, SubscriberManager
+                    // never learns a session ended, and its
+                    // handle_disconnect_request/forget_subscriptions logic
+                    // -- already correct -- is unreachable from a real
+                    // socket disconnect.
+                    if let Some(subscriber_mgr) = &state.subscriber_mgr {
+                        let _ = subscriber_mgr.send_message(BrokerMessage::DisconnectRequest {
+                            client_id,
+                            registration_id: Some(registration_id),
+                            reason,
+                            trace_ctx,
+                        });
+                    } else {
+                        warn!("SessionManager: subscriber_mgr not set, cannot forward disconnect");
                     }
                 }
             }
@@ -613,22 +638,6 @@ impl Actor for SessionAgent {
                     registration_id,
                     topic,
                     result,
-                    trace_ctx,
-                )
-                .await?;
-            }
-            BrokerMessage::DisconnectRequest {
-                reason,
-                client_id,
-                registration_id,
-                trace_ctx,
-            } => {
-                self.handle_disconnect_request(
-                    myself.clone(),
-                    state,
-                    reason,
-                    client_id,
-                    registration_id,
                     trace_ctx,
                 )
                 .await?;

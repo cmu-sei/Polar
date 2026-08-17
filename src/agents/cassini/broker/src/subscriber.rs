@@ -23,13 +23,18 @@ pub const SUBSCRIBER_NOT_FOUND_TXT: &str = "Subscriber not found!";
 pub struct SubscriberManager;
 
 pub struct SubscriberManagerArgs {
-    /// Reference to the session manager, used to forward unsubscribe acknowledgments.
     pub session_mgr: ActorRef<BrokerMessage>,
 }
 
 pub struct SubscriberManagerState {
     subscribers: HashMap<String, ActorRef<BrokerMessage>>,
     session_mgr: ActorRef<BrokerMessage>,
+    /// Reference to the topic manager; initially None, will be set via
+    /// SetTopicManagerRef once TopicManager exists (SubscriberManager is
+    /// spawned before TopicManager, so it can't be passed at construction
+    /// time). Used to forward UnsubscribeRequest when a subscription ends,
+    /// whether via explicit unsubscribe or the subscriber dying.
+    topic_mgr: Option<ActorRef<BrokerMessage>>,
     is_shutting_down: bool,
 }
 
@@ -50,6 +55,7 @@ impl Actor for SubscriberManager {
         Ok(SubscriberManagerState {
             subscribers: HashMap::new(),
             session_mgr: args.session_mgr,
+            topic_mgr: None,
             is_shutting_down: false,
         })
     }
