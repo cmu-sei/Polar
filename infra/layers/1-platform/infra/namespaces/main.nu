@@ -2,7 +2,7 @@
 # infra/layers/1-platform/infra/namespaces/main.nu
 #
 # Chart entrypoint for namespace definitions.
-# Renders: polar and polar-db namespaces.
+# Renders: polar, polar-graph, and polar-auth namespaces.
 # Applied first in every target — all other resources depend on these.
 #
 # Called by render.nu with a context record:

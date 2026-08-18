@@ -9,5 +9,5 @@
 , imagePullSecrets = [] : List { name : Optional Text }
 , serviceAccountName = "ace"
 , serviceType      = "ClusterIP"
-, port             = 8080
+, port             = 8050
 }

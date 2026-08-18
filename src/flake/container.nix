@@ -62,6 +62,7 @@
           { attrPath = "dhall-json"; flakeInput = null; }
           { attrPath = "dhall-nix"; flakeInput = null; }
           { attrPath = "dropbear"; flakeInput = null; }
+          { attrPath = "mermaid-cli"; flakeInput = null; }
         ];
       })
   ];

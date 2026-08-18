@@ -1,0 +1,15 @@
+{
+  "theme": "base",
+  "themeVariables": {
+    "primaryColor": "#ebdbb2",
+    "primaryTextColor": "#3c3836",
+    "background": "#fbf1c7",
+    "tertiaryColor": "#f2e5bc",
+    "clusterBkg": "#f2e5bc",
+    "clusterBorder": "#bdae93",
+    "fontFamily": "monospace",
+    "lineColor": "#7c6f64",
+    "labelTextColor": "#3c3836",
+    "edgeLabelBackground": "transparent"
+  }
+}

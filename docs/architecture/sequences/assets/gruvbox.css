@@ -1,0 +1,115 @@
+/* === Gruvbox Mermaid Theme (Light Variant) === */
+
+:root {
+  --gruvbox-bg: #fbf1c7;
+  --gruvbox-bg-alt: #f2e5bc;
+  --gruvbox-fg: #3c3836;
+  --gruvbox-accent: #bdae93;
+  --gruvbox-line: #7c6f64;
+}
+
+/* === Global Diagram Styling === */
+rect, polygon {
+  rx: 6px;
+  ry: 6px;
+}
+
+.label text,
+.nodeLabel {
+  fill: var(--gruvbox-fg) !important;
+  font-family: monospace;
+  font-size: 13px;
+}
+
+.edgePath path {
+  stroke-width: 2.4px;
+  stroke-linecap: round;
+  stroke: var(--gruvbox-line);
+}
+
+/* === Edge Labels (Fixed Rendering Issues) === */
+.edgeLabel > rect {
+  fill: transparent !important;
+  stroke: none !important;
+  opacity: 0 !important;
+  pointer-events: none !important;
+}
+
+.edgeLabel foreignObject div {
+  background-color: var(--gruvbox-bg-alt) !important;
+  color: var(--gruvbox-fg) !important;
+  font-family: monospace;
+  font-size: 12px;
+  font-weight: 500;
+  border-radius: 6px;
+  padding: 2px 6px;
+  box-shadow: 0 0 0.5px var(--gruvbox-accent);
+  white-space: nowrap;
+}
+
+.edgeLabel {
+  overflow: visible !important;
+}
+
+path.edgePath[stroke-dasharray] {
+  stroke-dasharray: 4, 4;
+  opacity: 0.85;
+}
+
+/* === Subgraph Styling === */
+.cluster {
+  fill: var(--gruvbox-bg-alt);
+  stroke: var(--gruvbox-accent);
+  stroke-width: 1.2px;
+  rx: 8px;
+  ry: 8px;
+}
+
+/* === Node Type Coloring (inherits from classDef) === */
+.node rect,
+.node polygon {
+  stroke-width: 1.2px;
+}
+
+.node.polar rect {
+  fill: #689d6a !important;
+  stroke: #427b58 !important;
+  color: #fbf1c7;
+}
+
+.node.ace rect {
+  fill: #d79921 !important;
+  stroke: #b57614 !important;
+  color: #282828;
+}
+
+.node.rules rect {
+  fill: #458588 !important;
+  stroke: #076678 !important;
+  color: #fbf1c7;
+}
+
+/* === Title Styling === */
+text[font-size="20px"],
+text:has(tspan:contains("ACE Rules")) {
+  font-weight: 700;
+  fill: var(--gruvbox-fg);
+}
+
+/* --- Forcefully remove duplicate yellow background under edge labels --- */
+g.edgeLabel rect,
+g.label rect,
+.edgeLabel rect {
+  fill: #d3869b !important;
+  stroke: none !important;
+  opacity: 0 !important;
+}
+
+.edgeLabel foreignObject div {
+  background-color: #f2e5bc !important; /* Gruvbox light beige */
+  color: #3c3836 !important;
+  border-radius: 6px;
+  padding: 2px 6px;
+  box-shadow: 0 0 0.5px #bdae93;
+  white-space: nowrap;
+}

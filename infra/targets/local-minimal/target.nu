@@ -25,6 +25,8 @@ def main [] {
             ($layers | path join "2-services/jaeger/main.nu")
             ($layers | path join "2-services/ace/main.nu")
             ($layers | path join "2-services/neo4j/main.nu")
+            ($layers | path join "2-services/postgres/main.nu")
+            ($layers | path join "2-services/keycloak/main.nu")
             ($layers | path join "2-services/cassini/main.nu")
             ($layers | path join "3-workloads/agents/kube/main.nu")
             ($layers | path join "3-workloads/agents/jira/main.nu")
@@ -43,6 +45,11 @@ def main [] {
             "neo4j-pvcs.yaml"
             "neo4j-service.yaml"
             "neo4j-statefulset.yaml"
+            "postgres-pvc.yaml"
+            "postgres-service.yaml"
+            "postgres-statefulset.yaml"
+            "keycloak-service.yaml"
+            "keycloak-deployment.yaml"
             "cassini.yaml"
             "jaeger.yaml"
             "ace-rbac.yaml"

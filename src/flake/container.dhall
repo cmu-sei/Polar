@@ -33,6 +33,7 @@ let polarExtras =
     , Lib.nixpkgs "dhall-json"
     , Lib.nixpkgs "dhall-nix"
     , Lib.nixpkgs "dropbear"
+    , Lib.nixpkgs "mermaid-cli"
     ]
 
 let pythonDev =

@@ -1,0 +1,40 @@
+/* Participant boxes */
+.actor {
+  fill: #f2e5bc !important;
+  stroke: #bdae93 !important;
+  stroke-width: 1px;
+  rx: 6;
+  ry: 6;
+}
+
+text.actor {
+  font-weight: 700 !important; /* bold actor labels */
+  fill: #3c3836 !important;
+}
+
+/* Messages */
+.messageLine0,
+.messageLine1 {
+  stroke-width: 1.5px !important;
+  stroke: #7c6f64 !important;
+}
+
+/* Notes */
+.note {
+  fill: #d3869b !important;
+  stroke: #bdae93 !important;
+  rx: 6;
+  ry: 6;
+  font-style: italic;
+  font-weight: 500;
+}
+
+/* Lifelines */
+.actor-line {
+  stroke: #d5c4a1 !important;
+}
+
+/* Arrows */
+.marker {
+  fill: #7c6f64 !important;
+}

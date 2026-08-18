@@ -898,6 +898,32 @@ cluster-status:
     kubectl get nodes
     kubectl get pods -A
 
+
+# Start detached, auto-restarting port-forwards for local dev (neo4j
+# browser/bolt, keycloak admin console, ace dashboard). Fully detached via
+# setsid -- survives terminal close, does not appear in `jobs`. Logs go to
+# /tmp/pf-*.log; stop with `just port-forwards-down`.
+port-forwards-up:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    start_pf() {
+        local ns="$1" svc="$2" ports="$3" logfile="$4"
+        setsid bash -c "while true; do kubectl port-forward -n $ns svc/$svc $ports > $logfile 2>&1; sleep 1; done" < /dev/null > /dev/null 2>&1 &
+        disown
+    }
+    start_pf polar-graph polar-db-svc "7473:7473 7687:7687" /tmp/pf-neo4j.log
+    start_pf polar-auth  keycloak-svc "8080:8080"            /tmp/pf-keycloak.log
+    start_pf polar       ace-svc      "8050:8050"             /tmp/pf-ace.log
+    echo "Port-forwards started (neo4j: 7473/7687, keycloak: 8080, ace: 8050)."
+    echo "Logs: /tmp/pf-neo4j.log /tmp/pf-keycloak.log /tmp/pf-ace.log"
+
+# Stop all detached port-forwards started by port-forwards-up.
+port-forwards-down:
+    #!/usr/bin/env bash
+    pkill -f "port-forward -n polar-graph svc/polar-db-svc" 2>/dev/null || true
+    pkill -f "port-forward -n polar-auth svc/keycloak-svc" 2>/dev/null || true
+    pkill -f "port-forward -n polar svc/ace-svc" 2>/dev/null || true
+    echo "Port-forwards stopped."
 # Print nix-usernetes kubeconfig export command (dev convenience only).
 cluster-ctx:
     @echo "Run: export KUBECONFIG={{_u7s_kubeconf}}"

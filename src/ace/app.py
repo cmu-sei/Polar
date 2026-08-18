@@ -64,6 +64,6 @@ register_callbacks(app)
 # ------------ Run Server ------------
 if __name__ == "__main__":
     host = os.getenv("DASH_HOST", "0.0.0.0")
-    port = int(os.getenv("DASH_PORT", "8080"))
+    port = int(os.getenv("DASH_PORT", "8050"))
     debug = os.getenv("DASH_DEBUG_MODE", "False").lower() in ("1", "true", "yes")
     app.run(host = host, port = port, debug = debug)

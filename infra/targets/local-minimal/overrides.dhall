@@ -19,7 +19,7 @@ in
 , storage     = {=}
 , certManager = {=}
 , jaeger =
-  { image       = "cr.jaegertracing.io/jaegertracing/jaeger:2.13.0"
+  { image       = registry ++ "jaeger:2.13.0"
   , serviceType = "NodePort"
   }
 , ace =
@@ -64,5 +64,11 @@ in
   , serverLifetimeSecs = 43200
   , identityLifetimeOverrides =
     [ { identity = "default.polar-graph.serviceaccount.cluster.local", lifetimeSecs = 31536000 } ]
+  }
+, postgres =
+  { image = registry ++ "postgres:16"
+  }
+, keycloak =
+  { image = registry ++ "keycloak:26.7.1"
   }
 }

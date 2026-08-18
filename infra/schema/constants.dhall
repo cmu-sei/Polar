@@ -19,6 +19,7 @@ let Agents =
 let PolarNamespace = "polar"
 
 let GraphNamespace = "polar-graph"
+let AuthNamespace  = "polar-auth"
 
 let tlsPath = "/etc/tls/certs"
 
@@ -173,6 +174,7 @@ let commonClientEnv =
 
 in  { PolarNamespace
     , GraphNamespace
+    , AuthNamespace
     , tlsPath
     , mtls
     , certIssuerUrl

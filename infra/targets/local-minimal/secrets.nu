@@ -141,6 +141,29 @@ def main [target_dir: string, repo_root: string] {
     }
 
     print ""
+
+    # -- polar-auth namespace ------------------------------------------------
+    print "  [polar-auth]"
+
+    let keycloak_admin_user = ($secrets | get -o keycloak_admin_user | default "admin")
+    let keycloak_admin_password = ($secrets | get -o keycloak_admin_password | default "")
+    if ($keycloak_admin_password | is-not-empty) {
+        kubectl_upsert_secret "keycloak-admin-secret" "polar-auth" [
+            $"username=($keycloak_admin_user)"
+            $"password=($keycloak_admin_password)"
+        ]
+    } else {
+        print "    WARNING: keycloak_admin_password not set -- skipping keycloak-admin-secret"
+    }
+
+    let keycloak_db_password = ($secrets | get -o keycloak_db_password | default "")
+    if ($keycloak_db_password | is-not-empty) {
+        kubectl_upsert_secret "keycloak-db-secret" "polar-auth" [$"password=($keycloak_db_password)"]
+    } else {
+        print "    WARNING: keycloak_db_password not set -- skipping keycloak-db-secret"
+    }
+
+    print ""
     print "  secrets: done"
     print ""
 }
