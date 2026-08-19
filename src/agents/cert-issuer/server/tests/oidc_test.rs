@@ -55,7 +55,7 @@ fn test_issuer_config() -> IssuerConfig {
 fn validator_with_default_jwks() -> (Validator, Arc<FakeJwksSource>) {
     let jwks = jwks_doc(&[jwk_for(TEST_KID, primary_keypair())]);
     let source = Arc::new(FakeJwksSource::new(jwks));
-    let validator = Validator::with_jwks_source(test_issuer_config(), source.clone());
+    let validator = Validator::with_jwks_source(vec![test_issuer_config()], source.clone());
     (validator, source)
 }
 
@@ -394,7 +394,7 @@ async fn jwks_cache_clamps_ttl_to_configured_max() {
     // max, and observing a refetch.
     let jwks = jwks_doc(&[jwk_for(TEST_KID, primary_keypair())]);
     let source = Arc::new(FakeJwksSource::new(jwks).with_max_age(Some(Duration::from_secs(86400))));
-    let validator = Validator::with_jwks_source(test_issuer_config(), source.clone());
+    let validator = Validator::with_jwks_source(vec![test_issuer_config()], source.clone());
     let token = mint_default_token();
 
     validator.validate(&token).await.expect("first validates");
@@ -423,7 +423,7 @@ async fn jwks_cache_clamps_ttl_to_configured_min() {
     // 5s but well short of our 30s min, and observing no refetch.
     let jwks = jwks_doc(&[jwk_for(TEST_KID, primary_keypair())]);
     let source = Arc::new(FakeJwksSource::new(jwks).with_max_age(Some(Duration::from_secs(5))));
-    let validator = Validator::with_jwks_source(test_issuer_config(), source.clone());
+    let validator = Validator::with_jwks_source(vec![test_issuer_config()], source.clone());
     let token = mint_default_token();
 
     validator.validate(&token).await.expect("first validates");

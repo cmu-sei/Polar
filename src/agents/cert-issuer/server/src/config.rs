@@ -1,8 +1,10 @@
 //! Configuration loaded at startup.
 //!
 //! `IssuerConfig` is written generically (issuer URL, audience, claim
-//! paths) even though v1 only configures one Kubernetes issuer. v2's
-//! multi-issuer support becomes a config change rather than a refactor.
+//! paths). `ServiceConfig.issuers` holds one or more of them; the
+//! validator selects which to use per-request by the token's own
+//! (unverified, pre-signature) `iss` claim. See oidc.rs's Validator
+//! for the selection logic.
 //!
 //! # Validation philosophy
 //!
@@ -89,7 +91,12 @@ pub struct CaConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServiceConfig {
     pub bind_addr: String,
-    pub issuer: IssuerConfig,
+    /// Every issuer this instance trusts. v1 configured exactly one
+    /// (Kubernetes); v2 supports any number, selected per-request by
+    /// the token's own (unverified, pre-signature-check) `iss` claim.
+    /// See oidc.rs's Validator for the selection logic -- this is just
+    /// the config surface.
+    pub issuers: Vec<IssuerConfig>,
     pub ca: CaConfig,
 }
 
@@ -99,59 +106,83 @@ impl ServiceConfig {
     ///
     /// The order of checks is deliberate: we check the most
     /// security-critical invariants first (forbidden algorithms,
-    /// empty audience, empty issuer) so that if multiple things are
-    /// wrong, the operator hears about the most serious one first.
+    /// empty audience, empty issuer, duplicate issuers) so that if
+    /// multiple things are wrong, the operator hears about the most
+    /// serious one first. Every per-issuer check runs across all
+    /// configured issuers, not just the first.
     pub fn validate(&self) -> Result<(), ConfigError> {
-        // ---- Forbidden algorithms ----
+        // ---- Empty issuer list ----
         //
-        // HS* (symmetric) and "none" are categorically forbidden.
-        // We use case-insensitive matching for "none" because some
-        // tooling emits it as "None" or "NONE"; HS* is matched
-        // case-sensitively because the JWT spec is case-sensitive
-        // there and any deviation is itself a sign of a malformed
-        // config.
-        for alg in &self.issuer.allowed_algorithms {
-            if alg.eq_ignore_ascii_case("none")
-                || matches!(alg.as_str(), "HS256" | "HS384" | "HS512")
-            {
-                return Err(ConfigError::ForbiddenAlgorithm(alg.clone()));
+        // A service with no trusted issuers can't validate any token
+        // at all. This is almost certainly a config mistake, not an
+        // intentional "accept nothing" mode -- if that's ever a real
+        // need, it should be a different, explicit config flag.
+        if self.issuers.is_empty() {
+            return Err(ConfigError::EmptyIssuerList);
+        }
+
+        // ---- Duplicate issuer URLs ----
+        //
+        // The validator keys its issuer map by this exact string; two
+        // configs sharing one would let the second silently shadow the
+        // first, with whichever config "wins" depending on map
+        // insertion order rather than anything the operator intended.
+        // Caught here, at load time, rather than surfacing as
+        // mysterious per-request behavior later.
+        let mut seen_issuers = std::collections::HashSet::new();
+        for issuer_cfg in &self.issuers {
+            if !seen_issuers.insert(issuer_cfg.issuer.clone()) {
+                return Err(ConfigError::DuplicateIssuer(issuer_cfg.issuer.clone()));
             }
         }
 
-        // ---- Empty allowed_algorithms ----
-        //
-        // After the forbidden-algorithm check (so the message is
-        // about emptiness, not about a forbidden value being the
-        // only thing in the list and then getting filtered out).
-        if self.issuer.allowed_algorithms.is_empty() {
-            return Err(ConfigError::EmptyAllowedAlgorithms);
-        }
-
-        // ---- Empty audience ----
-        if self.issuer.audience.is_empty() {
-            return Err(ConfigError::EmptyAudience);
-        }
-        for aud in &self.issuer.audience {
-            if aud.is_empty() {
-                return Err(ConfigError::EmptyAudience);
+        for issuer_cfg in &self.issuers {
+            // ---- Forbidden algorithms ----
+            for alg in &issuer_cfg.allowed_algorithms {
+                if alg.eq_ignore_ascii_case("none")
+                    || matches!(alg.as_str(), "HS256" | "HS384" | "HS512")
+                {
+                    return Err(ConfigError::ForbiddenAlgorithm {
+                        issuer: issuer_cfg.issuer.clone(),
+                        algorithm: alg.clone(),
+                    });
+                }
             }
-        }
 
-        // ---- Empty issuer ----
-        if self.issuer.issuer.is_empty() {
-            return Err(ConfigError::EmptyIssuer);
-        }
+            // ---- Empty allowed_algorithms ----
+            if issuer_cfg.allowed_algorithms.is_empty() {
+                return Err(ConfigError::EmptyAllowedAlgorithms {
+                    issuer: issuer_cfg.issuer.clone(),
+                });
+            }
 
-        // ---- TTL bounds ----
-        //
-        // The cache uses `Duration::clamp(min, max)`, which panics
-        // if min > max. We catch that here at config load rather
-        // than letting it crash the service mid-request.
-        if self.issuer.jwks_cache_ttl_min > self.issuer.jwks_cache_ttl_max {
-            return Err(ConfigError::InvalidCacheTtl {
-                min: self.issuer.jwks_cache_ttl_min,
-                max: self.issuer.jwks_cache_ttl_max,
-            });
+            // ---- Empty audience ----
+            if issuer_cfg.audience.is_empty() {
+                return Err(ConfigError::EmptyAudience {
+                    issuer: issuer_cfg.issuer.clone(),
+                });
+            }
+            for aud in &issuer_cfg.audience {
+                if aud.is_empty() {
+                    return Err(ConfigError::EmptyAudience {
+                        issuer: issuer_cfg.issuer.clone(),
+                    });
+                }
+            }
+
+            // ---- Empty issuer ----
+            if issuer_cfg.issuer.is_empty() {
+                return Err(ConfigError::EmptyIssuer);
+            }
+
+            // ---- TTL bounds ----
+            if issuer_cfg.jwks_cache_ttl_min > issuer_cfg.jwks_cache_ttl_max {
+                return Err(ConfigError::InvalidCacheTtl {
+                    issuer: issuer_cfg.issuer.clone(),
+                    min: issuer_cfg.jwks_cache_ttl_min,
+                    max: issuer_cfg.jwks_cache_ttl_max,
+                });
+            }
         }
 
         Ok(())
@@ -160,14 +191,22 @@ impl ServiceConfig {
 
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
-    #[error("forbidden algorithm in allowed list: {0}")]
-    ForbiddenAlgorithm(String),
-    #[error("audience must be non-empty")]
-    EmptyAudience,
+    #[error("no issuers configured -- at least one is required")]
+    EmptyIssuerList,
+    #[error("issuer '{0}' is configured more than once")]
+    DuplicateIssuer(String),
+    #[error("forbidden algorithm in allowed list for issuer '{issuer}': {algorithm}")]
+    ForbiddenAlgorithm { issuer: String, algorithm: String },
+    #[error("audience must be non-empty for issuer '{issuer}'")]
+    EmptyAudience { issuer: String },
     #[error("issuer must be non-empty")]
     EmptyIssuer,
-    #[error("jwks cache TTL min ({min:?}) exceeds max ({max:?})")]
-    InvalidCacheTtl { min: Duration, max: Duration },
-    #[error("allowed_algorithms must contain at least one algorithm")]
-    EmptyAllowedAlgorithms,
+    #[error("jwks cache TTL min ({min:?}) exceeds max ({max:?}) for issuer '{issuer}'")]
+    InvalidCacheTtl {
+        issuer: String,
+        min: Duration,
+        max: Duration,
+    },
+    #[error("allowed_algorithms must contain at least one algorithm for issuer '{issuer}'")]
+    EmptyAllowedAlgorithms { issuer: String },
 }

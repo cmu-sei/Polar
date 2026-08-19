@@ -62,6 +62,7 @@ use dashmap::DashMap;
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
@@ -124,35 +125,58 @@ pub trait JwksSource: Send + Sync {
 // Validator
 // ---------------------------------------------------------------------------
 
-/// JWT validator configured with one issuer. v1 supports a single
-/// issuer; multi-issuer support is a v2 direction (Section 12 of the
-/// architecture spec).
+/// JWT validator configured with one or more trusted issuers. A
+/// token's own (unverified, pre-signature) `iss` claim selects which
+/// issuer's config -- and therefore which JWKS/audience/claim-path
+/// settings -- governs the rest of validation. See the module doc
+/// comment for why peeking unverified data to *select* a trusted
+/// config is safe here, the same principle already used for the `alg`
+/// header peek below.
 pub struct Validator {
-    config: IssuerConfig,
+    /// Keyed by each issuer's `issuer` URL string -- the exact value
+    /// expected to match a token's `iss` claim.
+    issuers: HashMap<String, IssuerConfig>,
     jwks_source: Arc<dyn JwksSource>,
+    /// Unchanged from v1: already keyed internally by JWKS URI, so it
+    /// transparently holds cached keys for multiple issuers at once
+    /// with no changes needed here.
     cache: JwksCache,
-    /// Pre-computed set of allowed jsonwebtoken Algorithm enum values,
-    /// derived from the configured allowed_algorithms strings at
-    /// construction time. Computed once so per-request validation
-    /// doesn't have to re-parse the strings.
-    allowed_algorithms: Vec<Algorithm>,
+    /// Pre-computed allowed-algorithm sets, one per issuer, keyed the
+    /// same way as `issuers`.
+    allowed_algorithms: HashMap<String, Vec<Algorithm>>,
 }
 
 impl Validator {
     /// Construct a validator with the default HTTP-backed JWKS source.
     /// Production code uses this; tests use `with_jwks_source`.
-    pub fn new(config: IssuerConfig) -> Self {
-        Self::with_jwks_source(config, Arc::new(HttpJwksSource::new()))
+    pub fn new(issuers: Vec<IssuerConfig>) -> Self {
+        Self::with_jwks_source(issuers, Arc::new(HttpJwksSource::new()))
     }
 
     /// Construct a validator with a caller-provided JWKS source.
     /// This is the seam tests use to inject canned key material
     /// without standing up an HTTP server.
-    pub fn with_jwks_source(config: IssuerConfig, jwks_source: Arc<dyn JwksSource>) -> Self {
-        let cache = JwksCache::new(config.jwks_cache_ttl_min, config.jwks_cache_ttl_max);
-        let allowed_algorithms = parse_allowed_algorithms(&config.allowed_algorithms);
+    pub fn with_jwks_source(issuers: Vec<IssuerConfig>, jwks_source: Arc<dyn JwksSource>) -> Self {
+        // TTL bounds differ per issuer in principle, but JwksCache is
+        // a single cache shared across all issuers (it's already keyed
+        // by jwks_uri, so this is safe). We use the first issuer's TTL
+        // config for the cache's own housekeeping; per-entry TTL is
+        // still governed by each fetch's own server max-age / clamp,
+        // same as v1.
+        let cache = JwksCache::new(
+            issuers.first().map(|c| c.jwks_cache_ttl_min).unwrap_or(Duration::from_secs(300)),
+            issuers.first().map(|c| c.jwks_cache_ttl_max).unwrap_or(Duration::from_secs(3600)),
+        );
+
+        let mut allowed_algorithms = HashMap::new();
+        let mut issuer_map = HashMap::new();
+        for cfg in issuers {
+            allowed_algorithms.insert(cfg.issuer.clone(), parse_allowed_algorithms(&cfg.allowed_algorithms));
+            issuer_map.insert(cfg.issuer.clone(), cfg);
+        }
+
         Self {
-            config,
+            issuers: issuer_map,
             jwks_source,
             cache,
             allowed_algorithms,
@@ -164,27 +188,65 @@ impl Validator {
     /// Validation order — and the failure variant returned at each
     /// step — is part of the contract this function exposes:
     ///
-    ///  1. Pre-flight inspect the raw `alg` header. Catches `alg: none`
+    ///  1. Select the trusted issuer. Peeks the unverified `iss` claim
+    ///     from the token's payload and looks it up against our
+    ///     configured issuers. Everything from this point on is
+    ///     scoped to whichever `IssuerConfig` this selects — its own
+    ///     JWKS URI, audience, algorithm allow-list, and claim paths.
+    ///     An `iss` we don't recognize returns `InvalidIssuer` before
+    ///     any other work happens.
+    ///  2. Pre-flight inspect the raw `alg` header. Catches `alg: none`
     ///     and any other string that jsonwebtoken's `Algorithm` enum
     ///     can't represent, returning `ForbiddenAlgorithm` rather than
     ///     the generic `InvalidToken` that `decode_header` would emit.
-    ///  2. Parse the full header via `decode_header`. If parsing fails
+    ///  3. Parse the full header via `decode_header`. If parsing fails
     ///     after the pre-flight pass, the token is structurally
     ///     malformed (bad base64, missing parts, etc.) and we return
     ///     `InvalidToken`.
-    ///  3. Categorical-forbidden check on the parsed `Algorithm`. This
+    ///  4. Categorical-forbidden check on the parsed `Algorithm`. This
     ///     catches HS* tokens that did parse successfully — since
     ///     jsonwebtoken happily parses `alg: HS256`, the pre-flight
     ///     check above won't catch it but this one will.
-    ///  4. Configured allow-list check.
-    ///  5. Look up the signing key for the token's `kid`.
-    ///  6. Decode and verify. The `jsonwebtoken` crate handles
-    ///     signature, exp, iss, and aud checks here. We map its
-    ///     errors to our variants.
-    ///  7. Extract workload identity and instance binding from the
-    ///     claims using the configured paths.
+    ///  5. Configured allow-list check, scoped to the selected issuer.
+    ///  6. Look up the signing key for the token's `kid`, from the
+    ///     selected issuer's own JWKS.
+    ///  7. Decode and verify. The `jsonwebtoken` crate handles
+    ///     signature, exp, iss, and aud checks here, all against the
+    ///     selected issuer's own issuer string and audience list. We
+    ///     map its errors to our variants.
+    ///  8. Extract workload identity and instance binding from the
+    ///     claims using the selected issuer's own configured paths.
+    ///
+    /// (Note: this renumbers every step from v1. The old numbering had
+    /// a small pre-existing drift of its own — two different steps
+    /// both labeled "Step 5" internally, with the doc comment above
+    /// calling the second of them "Step 7" — discovered while updating
+    /// this for multi-issuer support and fixed as part of the same
+    /// pass, since every step number was already being touched.)
     pub async fn validate(&self, token: &str) -> Result<ValidatedClaims, ValidationError> {
-        // ---- Step 1: alg pre-flight ----
+        // ---- Step 1: issuer selection ----
+        //
+        // Peek the unverified `iss` claim from the token's payload.
+        // This is safe for the same reason the `alg` peek two steps
+        // down is safe: unverified data is used only to *select*
+        // which already-trusted, already-configured issuer to hold
+        // the token against — never to skip or weaken verification.
+        // An attacker who sets `iss` to a value we don't trust simply
+        // gets InvalidIssuer here; setting it to a value we *do*
+        // trust doesn't help them without also forging a valid
+        // signature against that issuer's real keys, which the steps
+        // below still fully enforce.
+        let unverified_iss = peek_iss(token).ok_or(ValidationError::InvalidToken)?;
+        let issuer_cfg = self
+            .issuers
+            .get(&unverified_iss)
+            .ok_or_else(|| ValidationError::InvalidIssuer(unverified_iss.clone()))?;
+        let allowed_algorithms = self
+            .allowed_algorithms
+            .get(&unverified_iss)
+            .expect("allowed_algorithms and issuers are always constructed together");
+
+        // ---- Step 2: alg pre-flight ----
         //
         // Inspect the raw `alg` field in the JWT header before handing
         // the token to jsonwebtoken. This is necessary because
@@ -198,7 +260,7 @@ impl Validator {
         //
         // The check intentionally only inspects `alg`, not the rest
         // of the token. Anything else (malformed structure, bad base64
-        // in segments, missing parts) falls through to step 2 where
+        // in segments, missing parts) falls through to step 3 where
         // jsonwebtoken's parser produces an InvalidToken error.
         if let Some(alg_str) = peek_alg(token) {
             if is_forbidden_alg_str(&alg_str) {
@@ -206,20 +268,20 @@ impl Validator {
             }
         }
 
-        // ---- Step 2: header parse ----
+        // ---- Step 3: header parse ----
         //
         // `decode_header` parses the JWT header into the typed
         // `Algorithm` enum without doing any signature work. After
-        // step 1 weeded out alg=none and other unrepresentable values,
+        // step 2 weeded out alg=none and other unrepresentable values,
         // anything that fails here is a real structural problem.
         let header = decode_header(token).map_err(|_| ValidationError::InvalidToken)?;
 
-        // ---- Step 3: categorical-forbidden check ----
+        // ---- Step 4: categorical-forbidden check ----
         //
         // Defense in depth: even if HS* somehow ends up in the
         // configured allow-list (the config validator should have
         // rejected it, but be paranoid), we never accept symmetric
-        // algorithms here. The pre-flight in step 1 also catches HS*
+        // algorithms here. The pre-flight in step 2 also catches HS*
         // by string match, but a bug there shouldn't be the only line
         // of defense.
         let alg_str = format!("{:?}", header.alg);
@@ -227,36 +289,38 @@ impl Validator {
             return Err(ValidationError::ForbiddenAlgorithm(alg_str));
         }
 
-        // ---- Step 4: configured allow-list check ----
+        // ---- Step 5: configured allow-list check ----
         //
-        // If the operator hasn't whitelisted this algorithm, reject
-        // before any signature work. This produces a clean
-        // ForbiddenAlgorithm error rather than the generic
+        // If the operator hasn't whitelisted this algorithm for this
+        // issuer, reject before any signature work. This produces a
+        // clean ForbiddenAlgorithm error rather than the generic
         // InvalidToken that jsonwebtoken would return for a
         // disallowed-but-recognized algorithm.
-        if !self.allowed_algorithms.contains(&header.alg) {
+        if !allowed_algorithms.contains(&header.alg) {
             return Err(ValidationError::ForbiddenAlgorithm(alg_str));
         }
 
-        // ---- Step 5: key lookup ----
+        // ---- Step 6: key lookup ----
         //
-        // The kid identifies which key in the JWKS signed this
-        // token. Tokens without a kid are rejected here; we don't
-        // try to verify against every key in the JWKS, because that
-        // would weaken our ability to detect rotation issues.
+        // The kid identifies which key in the selected issuer's JWKS
+        // signed this token. Tokens without a kid are rejected here;
+        // we don't try to verify against every key in the JWKS,
+        // because that would weaken our ability to detect rotation
+        // issues.
         let kid = header.kid.ok_or(ValidationError::InvalidToken)?;
-        let key = self.fetch_key_for_kid(&kid).await?;
+        let key = self.fetch_key_for_kid(issuer_cfg, &kid).await?;
 
-        // ---- Step 5: decode and verify ----
+        // ---- Step 7: decode and verify ----
         //
         // Set up the Validation struct with everything jsonwebtoken
         // needs to check. We tell it our allowed algorithms (already
         // filtered above, but jsonwebtoken's API requires a list),
-        // expected issuer, expected audience, and to require exp.
+        // this issuer's expected issuer string and audience, and to
+        // require exp.
         let mut validation = Validation::new(header.alg);
-        validation.set_issuer(&[&self.config.issuer]);
+        validation.set_issuer(&[&issuer_cfg.issuer]);
         validation.set_audience(
-            &self.config.audience.iter().map(|s| s.as_str()).collect::<Vec<_>>()
+            &issuer_cfg.audience.iter().map(|s| s.as_str()).collect::<Vec<_>>()
         );
         validation.set_required_spec_claims(&["exp", "iss", "aud"]);
         // We don't tighten `validation.algorithms` further here
@@ -273,15 +337,16 @@ impl Validator {
 
         let raw_claims = token_data.claims;
 
-        // ---- Step 6: extract identity claims ----
+        // ---- Step 8: extract identity claims ----
         //
         // The workload identity claim is required. The instance
-        // binding claim is optional (used for telemetry only).
+        // binding claim is optional (used for telemetry only). Both
+        // paths come from the selected issuer's own config.
         let workload_identity =
-            extract_string_claim(&raw_claims, &self.config.workload_identity_claim)?;
+            extract_string_claim(&raw_claims, &issuer_cfg.workload_identity_claim)?;
 
         let instance_binding =
-            extract_optional_string_claim(&raw_claims, &self.config.instance_binding_claim);
+            extract_optional_string_claim(&raw_claims, &issuer_cfg.instance_binding_claim);
 
         // Pull out the iss and aud values for the result. We know
         // these are present and valid because jsonwebtoken accepted
@@ -292,11 +357,23 @@ impl Validator {
             .unwrap_or("")
             .to_string();
 
-        let audience = raw_claims
-            .get("aud")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
+        let audience = match raw_claims.get("aud") {
+            Some(serde_json::Value::String(s)) => s.clone(),
+            Some(serde_json::Value::Array(arr)) => {
+                // aud may legitimately be an array (RFC 7519). Report
+                // whichever configured audience actually matched --
+                // jsonwebtoken's own validation above already confirmed
+                // at least one does -- rather than an arbitrary entry
+                // that might not be the one we actually validated
+                // against.
+                arr.iter()
+                    .filter_map(|v| v.as_str())
+                    .find(|s| issuer_cfg.audience.iter().any(|a| a == s))
+                    .unwrap_or("")
+                    .to_string()
+            }
+            _ => String::new(),
+        };
 
         Ok(ValidatedClaims {
             workload_identity,
@@ -307,15 +384,19 @@ impl Validator {
         })
     }
 
-    /// Fetch the decoding key for `kid`, hitting the cache first and
-    /// falling back to the JWKS source if the kid isn't cached or
-    /// the cache entry is expired.
+    /// Fetch the decoding key for `kid` under the given issuer,
+    /// hitting the cache first and falling back to the JWKS source if
+    /// the kid isn't cached or the cache entry is expired.
     ///
     /// If a refetch happens and the kid is still absent, we return
     /// `InvalidToken` — the issuer doesn't have a key for this kid,
     /// so the token can't be validated.
-    async fn fetch_key_for_kid(&self, kid: &str) -> Result<DecodingKey, ValidationError> {
-        let jwks_uri = self.config.jwks_uri.as_deref().ok_or_else(|| {
+    async fn fetch_key_for_kid(
+        &self,
+        issuer_cfg: &IssuerConfig,
+        kid: &str,
+    ) -> Result<DecodingKey, ValidationError> {
+        let jwks_uri = issuer_cfg.jwks_uri.as_deref().ok_or_else(|| {
             // v1 requires an explicit JWKS URI in config. OIDC discovery
             // (auto-derive from /.well-known/openid-configuration) is a
             // future addition; the test config sets `jwks_uri` explicitly.
@@ -677,6 +758,32 @@ fn peek_alg(token: &str) -> Option<String> {
     let header_json: serde_json::Value = serde_json::from_slice(&header_bytes).ok()?;
     let alg = header_json.get("alg")?.as_str()?;
     Some(alg.to_string())
+}
+
+/// Peek at the raw `iss` claim in a JWT payload without verifying the
+/// token's signature.
+///
+/// Mirrors `peek_alg`'s approach and shares its safety argument: this
+/// value is unverified and is used *only* to select which configured,
+/// trusted IssuerConfig to validate the rest of the token against.
+/// Every subsequent check (signature, issuer match, audience, exp) is
+/// still fully enforced against that selected config -- an attacker
+/// who sets `iss` to a value we don't trust simply gets InvalidIssuer;
+/// setting it to a value we *do* trust doesn't help them without also
+/// forging a valid signature for that issuer's actual keys.
+///
+/// Returns `None` if the token is too structurally broken to find a
+/// payload segment or an `iss` field at all; callers fall through to
+/// InvalidToken in that case.
+fn peek_iss(token: &str) -> Option<String> {
+    use base64::Engine;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+
+    let payload_b64 = token.split('.').nth(1)?;
+    let payload_bytes = URL_SAFE_NO_PAD.decode(payload_b64).ok()?;
+    let payload_json: serde_json::Value = serde_json::from_slice(&payload_bytes).ok()?;
+    let iss = payload_json.get("iss")?.as_str()?;
+    Some(iss.to_string())
 }
 
 /// Whether a raw `alg` string from a JWT header refers to a

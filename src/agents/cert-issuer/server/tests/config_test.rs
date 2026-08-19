@@ -27,13 +27,15 @@ fn valid_ca() -> CaConfig {
         ca_cert_path: "/tmp/ca.crt".to_string(),
         ca_key_path: "/tmp/ca.key".to_string(),
         default_lifetime: Duration::from_secs(3600),
+        server_lifetime: Duration::from_secs(3600),
+        identity_lifetime_overrides: std::collections::HashMap::new(),
     }
 }
 
 fn valid_config() -> ServiceConfig {
     ServiceConfig {
         bind_addr: "0.0.0.0:8443".to_string(),
-        issuer: valid_issuer(),
+        issuers: vec![valid_issuer()],
         ca: valid_ca(),
     }
 }
@@ -47,9 +49,12 @@ fn valid_config_passes_validation() {
 #[test]
 fn hs256_in_allowed_algorithms_is_rejected() {
     let mut cfg = valid_config();
-    cfg.issuer.allowed_algorithms.push("HS256".to_string());
+    cfg.issuers[0].allowed_algorithms.push("HS256".to_string());
     let err = cfg.validate().expect_err("HS256 must be rejected");
-    assert!(matches!(err, ConfigError::ForbiddenAlgorithm(ref a) if a == "HS256"));
+    assert!(matches!(
+        err,
+        ConfigError::ForbiddenAlgorithm { algorithm, .. } if algorithm == "HS256"
+    ));
 }
 
 #[test]
@@ -58,9 +63,9 @@ fn none_algorithm_in_allowed_list_is_rejected() {
     // security vulnerabilities. We reject it at config-load time so
     // no operator can accidentally enable it.
     let mut cfg = valid_config();
-    cfg.issuer.allowed_algorithms.push("none".to_string());
+    cfg.issuers[0].allowed_algorithms.push("none".to_string());
     let err = cfg.validate().expect_err("'none' must be rejected");
-    assert!(matches!(err, ConfigError::ForbiddenAlgorithm(_)));
+    assert!(matches!(err, ConfigError::ForbiddenAlgorithm { .. }));
 }
 
 #[test]
@@ -68,15 +73,15 @@ fn empty_audience_is_rejected() {
     // Audience matching is non-negotiable; an empty audience would
     // accept any token regardless of intended recipient.
     let mut cfg = valid_config();
-    cfg.issuer.audience = vec![];
+    cfg.issuers[0].audience = vec![];
     let err = cfg.validate().expect_err("empty audience must be rejected");
-    assert!(matches!(err, ConfigError::EmptyAudience));
+    assert!(matches!(err, ConfigError::EmptyAudience { .. }));
 }
 
 #[test]
 fn empty_issuer_is_rejected() {
     let mut cfg = valid_config();
-    cfg.issuer.issuer = String::new();
+    cfg.issuers[0].issuer = String::new();
     let err = cfg.validate().expect_err("empty issuer must be rejected");
     assert!(matches!(err, ConfigError::EmptyIssuer));
 }
@@ -84,8 +89,8 @@ fn empty_issuer_is_rejected() {
 #[test]
 fn cache_ttl_min_greater_than_max_is_rejected() {
     let mut cfg = valid_config();
-    cfg.issuer.jwks_cache_ttl_min = Duration::from_secs(7200);
-    cfg.issuer.jwks_cache_ttl_max = Duration::from_secs(3600);
+    cfg.issuers[0].jwks_cache_ttl_min = Duration::from_secs(7200);
+    cfg.issuers[0].jwks_cache_ttl_max = Duration::from_secs(3600);
     let err = cfg
         .validate()
         .expect_err("inverted TTL bounds must be rejected");
@@ -98,6 +103,38 @@ fn empty_allowed_algorithms_is_rejected() {
     // would make every token fail validation. This is almost certainly
     // a misconfiguration rather than an intentional choice.
     let mut cfg = valid_config();
-    cfg.issuer.allowed_algorithms.clear();
+    cfg.issuers[0].allowed_algorithms.clear();
     assert!(cfg.validate().is_err());
+}
+
+// ---------------------------------------------------------------------
+// New coverage for multi-issuer support -- these validation rules
+// (EmptyIssuerList, DuplicateIssuer) didn't exist before today; adding
+// tests for them alongside the fixes to the rest of this file rather
+// than leaving them uncovered.
+// ---------------------------------------------------------------------
+
+#[test]
+fn empty_issuer_list_is_rejected() {
+    let mut cfg = valid_config();
+    cfg.issuers = vec![];
+    let err = cfg
+        .validate()
+        .expect_err("a config with no issuers must be rejected");
+    assert!(matches!(err, ConfigError::EmptyIssuerList));
+}
+
+#[test]
+fn duplicate_issuer_urls_are_rejected() {
+    let mut cfg = valid_config();
+    let mut second_issuer = valid_issuer();
+    // Same issuer URL as the first, deliberately -- everything else
+    // about it can differ; the URL collision alone must be rejected,
+    // since Validator keys its issuer map by this exact string.
+    second_issuer.audience = vec!["some-other-audience".to_string()];
+    cfg.issuers.push(second_issuer);
+    let err = cfg
+        .validate()
+        .expect_err("two issuers sharing a URL must be rejected");
+    assert!(matches!(err, ConfigError::DuplicateIssuer(ref u) if u == &valid_issuer().issuer));
 }

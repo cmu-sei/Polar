@@ -51,14 +51,21 @@ async fn main() -> Result<()> {
         .with_context(|| format!("reading config from {config_path}"))?;
     let config: ServiceConfig =
         serde_json::from_slice(&config_bytes).context("parsing config JSON")?;
-    config.validate().context("config validation")?;
+        config.validate().context("config validation")?;
 
     info!(
         bind_addr = %config.bind_addr,
-        issuer = %config.issuer.issuer,
-        audience = %config.issuer.audience.join(", "),
+        issuer_count = config.issuers.len(),
         "cert issuer starting"
     );
+
+    for issuer_cfg in &config.issuers {
+        info!(
+            issuer = %issuer_cfg.issuer,
+            audience = %issuer_cfg.audience.join(", "),
+            "trusted issuer configured"
+        );
+    }
 
     // ---- CA materials ----
     //
@@ -78,13 +85,13 @@ async fn main() -> Result<()> {
         "Polar Internal CA",
     )
     .context("CA materials")?;
-
     let ca = RcgenCaClient::new(&ca_cert_pem, &ca_key_pem)
         .map_err(|e| anyhow::anyhow!("constructing CA client: {e}"))?;
+
     debug!("Internal certificate authroity initialized.");
 
     // ---- OIDC validator ----
-    let validator = Validator::new(config.issuer.clone());
+    let validator = Validator::new(config.issuers.clone());
     debug!("OIDC validator initialized.");
 
     // ---- Handler ----
