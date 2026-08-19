@@ -924,6 +924,116 @@ port-forwards-down:
     pkill -f "port-forward -n polar-auth svc/keycloak-svc" 2>/dev/null || true
     pkill -f "port-forward -n polar svc/ace-svc" 2>/dev/null || true
     echo "Port-forwards stopped."
+
+# Idempotent Keycloak bootstrap: realm, public client (PKCE, Authorization
+# Code + direct-grant enabled for scripted testing), audience mapper
+# scoping tokens to cert-issuer, and a test user. Safe to re-run --
+# every step checks for existence first. Test user credentials are read
+# directly from sops (secrets.sops.yaml / user.sops.yaml), never stored
+# as a Kubernetes Secret -- nothing in the cluster ever consumes them,
+# so there's no reason for them to touch cluster storage at all.
+#
+# Known Keycloak gotchas this script works around (found the hard way):
+#   - kcadm set-password defaults to a *temporary* password, which
+#     attaches a required action and blocks direct-grant login entirely
+#     until resolved -- creating the user with an inline credentials
+#     array (temporary=false) sidesteps this in one step.
+#   - the realm's default User Profile requires email/firstName/lastName;
+#     a user missing any of these fails direct-grant with the generic,
+#     unhelpful "Account is not fully set up" error, indistinguishable
+#     from the temporary-password case without checking both.
+#   - kcadm's `-q` search does a *partial* match by default (e.g.
+#     username=testuser also matches "testuser2") -- every existence
+#     check below passes `-q exact=true` explicitly to avoid a false
+#     "already exists" against an unrelated, similarly-named resource.
+keycloak-bootstrap:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    KC_NS="polar-auth"
+    KC_URL="http://localhost:8080"
+    KC_REALM="polar"
+    KC_CLIENT_ID="browser-cert-fetcher"
+    KC_AUDIENCE="polar-cert-issuer.local"
+    KC_REDIRECT_URI="http://localhost:8765/callback"
+
+    kc() {
+        kubectl exec -n "$KC_NS" deployment/keycloak -- /opt/keycloak/bin/kcadm.sh "$@"
+    }
+
+    echo "Logging into kcadm..."
+    KC_ADMIN_USER=$(kubectl get secret -n "$KC_NS" keycloak-admin-secret -o jsonpath="{.data.username}" | base64 -d)
+    KC_ADMIN_PASSWORD=$(kubectl get secret -n "$KC_NS" keycloak-admin-secret -o jsonpath="{.data.password}" | base64 -d)
+    kc config credentials --server "$KC_URL" --realm master --user "$KC_ADMIN_USER" --password "$KC_ADMIN_PASSWORD"
+
+    echo "Ensuring realm '$KC_REALM' exists..."
+    REALM_CHECK=$(kc get "realms/$KC_REALM" 2>/dev/null || echo "{}")
+    if [ "$(echo "$REALM_CHECK" | jq -r ".realm // empty")" != "$KC_REALM" ]; then
+        kc create realms -s realm="$KC_REALM" -s enabled=true
+        echo "  created"
+    else
+        echo "  already exists"
+    fi
+
+    echo "Ensuring client '$KC_CLIENT_ID' exists..."
+    CLIENT_LIST=$(kc get clients -r "$KC_REALM" -q clientId="$KC_CLIENT_ID" -q exact=true 2>/dev/null || echo "[]")
+    CLIENT_ID_INTERNAL=$(echo "$CLIENT_LIST" | jq -r ".[0].id // empty")
+    if [ -z "$CLIENT_ID_INTERNAL" ]; then
+        kc create clients -r "$KC_REALM" \
+            -s clientId="$KC_CLIENT_ID" \
+            -s publicClient=true \
+            -s standardFlowEnabled=true \
+            -s directAccessGrantsEnabled=true \
+            -s "redirectUris=[\"$KC_REDIRECT_URI\"]" \
+            -s "attributes={\"pkce.code.challenge.method\":\"S256\"}"
+        CLIENT_ID_INTERNAL=$(kc get clients -r "$KC_REALM" -q clientId="$KC_CLIENT_ID" -q exact=true | jq -r ".[0].id")
+        echo "  created (id=$CLIENT_ID_INTERNAL)"
+    else
+        echo "  already exists (id=$CLIENT_ID_INTERNAL)"
+    fi
+
+    echo "Ensuring audience mapper exists..."
+    MAPPERS=$(kc get "clients/$CLIENT_ID_INTERNAL/protocol-mappers/models" -r "$KC_REALM" 2>/dev/null || echo "[]")
+    MAPPER_EXISTS=$(echo "$MAPPERS" | jq -r ".[] | select(.name==\"polar-audience\") | .id // empty")
+    if [ -z "$MAPPER_EXISTS" ]; then
+        kc create "clients/$CLIENT_ID_INTERNAL/protocol-mappers/models" -r "$KC_REALM" \
+            -s name=polar-audience \
+            -s protocol=openid-connect \
+            -s protocolMapper=oidc-audience-mapper \
+            -s "config={\"included.custom.audience\":\"$KC_AUDIENCE\",\"id.token.claim\":\"false\",\"access.token.claim\":\"true\"}"
+        echo "  created"
+    else
+        echo "  already exists"
+    fi
+
+    echo "Ensuring test user exists..."
+    TARGET_DIR="infra/targets/local-minimal"
+    SHARED_JSON=$(SOPS_CONFIG="$TARGET_DIR/.sops.yaml" sops --decrypt --output-type json "$TARGET_DIR/secrets.sops.yaml" 2>/dev/null || echo "{}")
+    USER_JSON=$(SOPS_CONFIG="$TARGET_DIR/.user.sops.yaml" sops --decrypt --output-type json "$TARGET_DIR/user.sops.yaml" 2>/dev/null || echo "{}")
+    MERGED_JSON=$(jq -s ".[0] * .[1]" <(echo "$SHARED_JSON") <(echo "$USER_JSON"))
+    KC_TEST_USERNAME=$(echo "$MERGED_JSON" | jq -r ".keycloak_test_username // empty")
+    KC_TEST_PASSWORD=$(echo "$MERGED_JSON" | jq -r ".keycloak_test_password // empty")
+    if [ -z "$KC_TEST_USERNAME" ] || [ -z "$KC_TEST_PASSWORD" ]; then
+        echo "  ERROR: keycloak_test_username/keycloak_test_password not set in secrets.sops.yaml or user.sops.yaml" >&2
+        exit 1
+    fi
+    USER_LIST=$(kc get users -r "$KC_REALM" -q username="$KC_TEST_USERNAME" -q exact=true 2>/dev/null || echo "[]")
+    USER_EXISTS=$(echo "$USER_LIST" | jq -r ".[0].id // empty")
+    if [ -z "$USER_EXISTS" ]; then
+        kc create users -r "$KC_REALM" \
+            -s username="$KC_TEST_USERNAME" \
+            -s enabled=true \
+            -s emailVerified=true \
+            -s firstName=Test \
+            -s lastName=User \
+            -s email="$KC_TEST_USERNAME@polar.local" \
+            -s "credentials=[{\"type\":\"password\",\"value\":\"$KC_TEST_PASSWORD\",\"temporary\":false}]"
+        echo "  created"
+    else
+        echo "  already exists"
+    fi
+
+    echo "keycloak-bootstrap: done"
 # Print nix-usernetes kubeconfig export command (dev convenience only).
 cluster-ctx:
     @echo "Run: export KUBECONFIG={{_u7s_kubeconf}}"
