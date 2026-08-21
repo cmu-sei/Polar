@@ -136,6 +136,22 @@ what lets it recover automatically if its certificate or environment
 ever needs to be refreshed. It authenticates to Neo4j over mutual TLS
 and holds no other cluster permissions.
 
+### Loading data into Neo4j
+
+If you have a Neo4j dump file (a `.dump` produced by `neo4j-admin
+database dump`, for example from another environment's ingestion
+history), load it into the running deployment with:
+
+```bash
+just neo4j-load-dump ~/path/to/your.neo4j.dump
+```
+
+This scales Neo4j down, restores the dump via a temporary loader pod,
+fixes file ownership, scales Neo4j back up, and resets the `neo4j`
+user's password to match the cluster's own secret — the whole sequence
+is scripted and safe to run against a live deployment, but Neo4j will
+be briefly unavailable while it does.
+
 ### Accessing the deployment
 
 None of the in-cluster services are exposed outside the cluster by
