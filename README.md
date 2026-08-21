@@ -232,6 +232,45 @@ podman run -p 8080:8080 \
   ace-viz:latest
 ```
 
+### Local development without a cluster
+
+To hack on an individual agent or Cassini itself with plain `cargo
+build`/`cargo run` — no Kubernetes, no `cert-issuer`, no Keycloak — use
+a static, offline-generated CA and matching certificate pairs instead
+of the dynamic issuance flow:
+
+```bash
+just tls   # one-time; the generated certs are valid for years
+```
+
+This produces `result-tls-certs/`, entirely separate from any cluster's
+own CA, with a matching cert pair for Cassini and for Neo4j.
+
+Run the broker directly:
+
+```bash
+export TLS_SERVER_CERT_CHAIN=$PWD/result-tls-certs/server/server_cassini_certificate.pem
+export TLS_SERVER_KEY=$PWD/result-tls-certs/server/server_cassini_key.pem
+export TLS_CA_CERT=$PWD/result-tls-certs/ca_certificates/ca_certificate.pem
+
+cargo run -p cassini-broker
+```
+
+And any client connecting to it, on the same machine:
+
+```bash
+export TLS_CLIENT_CERT=$PWD/result-tls-certs/client/client_cassini_certificate.pem
+export TLS_CLIENT_KEY=$PWD/result-tls-certs/client/client_cassini_key.pem
+export TLS_CA_CERT=$PWD/result-tls-certs/ca_certificates/ca_certificate.pem
+
+cargo run -p <agent-binary>
+```
+
+A local Neo4j instance can use `result-tls-certs/neo4j/`'s server/client
+pair the same way, signed by its own dedicated CA (kept separate from
+Cassini's, matching how the two are also isolated in a real
+deployment).
+
 ## Validating human certificate issuance
 
 Kubernetes workloads (ACE, the ingestion agents) get their certificates
