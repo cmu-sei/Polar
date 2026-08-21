@@ -271,6 +271,14 @@ pair the same way, signed by its own dedicated CA (kept separate from
 Cassini's, matching how the two are also isolated in a real
 deployment).
 
+**What you actually need depends on which kind of agent you're
+running:** an observer only needs to talk to Cassini, so the Cassini
+cert pair above is enough. A consumer additionally connects to Neo4j,
+so it also needs the matching `TLS_*` env vars pointed at
+`result-tls-certs/neo4j/`'s certificates (consult that binary's own
+source/config for its exact Neo4j-side env var names, which may differ
+from Cassini's).
+
 ## Validating human certificate issuance
 
 Kubernetes workloads (ACE, the ingestion agents) get their certificates
