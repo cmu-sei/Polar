@@ -22,13 +22,13 @@
 */
 
 use crate::{JiraConsumerArgs, JiraConsumerState, subscribe_to_topic};
-use polar::{QUERY_COMMIT_FAILED, QUERY_RUN_FAILED, TRANSACTION_FAILED_ERROR};
 
 use jira_common::JIRA_PROJECTS_CONSUMER_TOPIC;
+use jira_common::graph::JiraNodeKey;
 use jira_common::types::JiraData;
-use neo4rs::Query;
+use polar::graph::controller::{GraphControllerMsg, GraphOp, GraphValue, IntoGraphKey, Property};
 use ractor::{Actor, ActorProcessingErr, ActorRef, async_trait};
-use tracing::{debug, info};
+use tracing::{debug, error, info};
 
 pub struct JiraProjectConsumer;
 
@@ -47,7 +47,7 @@ impl Actor for JiraProjectConsumer {
         match subscribe_to_topic(
             args.registration_id,
             JIRA_PROJECTS_CONSUMER_TOPIC.to_string(),
-            args.graph_config,
+            args.graph_controller,
         )
         .await
         {
@@ -76,46 +76,45 @@ impl Actor for JiraProjectConsumer {
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        match state.graph.start_txn().await {
-            Ok(mut transaction) => {
-                if let JiraData::Projects(projects) = message {
-                    // Create list of projects
-                    let project_array = projects.iter()
-                        .map(|project| {
-                            format!(
-                                r#"{{ project_id: "{project_id}", name: "{name}", key: "{key}", projectTypeKey: "{project_type_key}" }}"#,
-                                project_id = project.id,
-                                name = project.name,
-                                key = project.key,
-                                project_type_key = project.project_type_key, // renamed field
-                            )
-                        })
-                        .collect::<Vec<_>>()
-                        .join(",\n");
-
-                    // Here, we write a query that creates additional nodes for the group and namespace of the project
-                    let cypher_query = format!(
-                        "
-                        UNWIND [{project_array}] AS project_data
-                        MERGE (project:JiraProject {{ project_id: project_data.project_id }})
-                        SET project.name = project_data.name,
-                            project.key = project_data.key,
-                            project.projectTypeKey = project_data.projectTypeKey
-                        "
-                    );
-
-                    debug!(cypher_query);
-                    if let Err(_e) = transaction.run(Query::new(cypher_query)).await {
-                        myself.stop(Some(QUERY_RUN_FAILED.to_string()));
+        if let JiraData::Projects(projects) = message {
+            let items = projects
+                .iter()
+                .map(|project| {
+                    let key = JiraNodeKey::Project {
+                        project_id: project.id.to_string(),
                     }
+                    .into_key();
+                    let props = vec![
+                        Property(
+                            "name".into(),
+                            GraphValue::String(project.name.to_string()),
+                        ),
+                        Property("key".into(), GraphValue::String(project.key.to_string())),
+                        Property(
+                            "projectTypeKey".into(),
+                            GraphValue::String(project.project_type_key.to_string()),
+                        ),
+                    ];
+                    (key, props)
+                })
+                .collect::<Vec<_>>();
 
-                    if let Err(_e) = transaction.commit().await {
-                        myself.stop(Some(QUERY_COMMIT_FAILED.to_string()));
-                    }
-                    info!("Transaction committed.");
-                }
+            let project_count = items.len();
+
+            // Fire-and-forget: a failure here means the graph controller
+            // actor itself is gone, not that this specific write failed.
+            // Real write failures surface asynchronously via
+            // GraphSignal::OpFailed -> the supervisor's healthcheck path,
+            // not synchronously at this call site.
+            if let Err(e) = state
+                .graph_controller
+                .cast(GraphControllerMsg::Op(GraphOp::UpsertNodes { items }))
+            {
+                error!("Failed to send graph op for projects: {e}");
+                myself.stop(Some(format!("graph controller unavailable: {e}")));
+            } else {
+                debug!("Dispatched UpsertNodes op for {project_count} projects.");
             }
-            Err(e) => myself.stop(Some(format!("{TRANSACTION_FAILED_ERROR}. {e}"))),
         }
         Ok(())
     }

@@ -37,6 +37,7 @@ use sysinfo::{ProcessRefreshKind, System};
 //use url::Url;
 
 pub mod dispatch;
+pub mod graph;
 pub mod types;
 
 pub const JIRA_PROJECTS_CONSUMER_TOPIC: &str = "jira:consumer:projects";

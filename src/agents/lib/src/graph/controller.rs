@@ -58,6 +58,95 @@ pub mod rel {
     pub const HAS_LAYER: &str = "HAS_LAYER";
 }
 
+/// Cypher keywords that would be dangerous to interpolate directly into
+/// a query as a label, relationship type, or property name -- not
+/// exhaustive against every reserved word, but covers every keyword that
+/// could actually mutate or destroy data if smuggled in this way.
+const CYPHER_KEYWORD_BLACKLIST: &[&str] = &[
+    "MATCH", "MERGE", "CREATE", "DELETE", "DETACH", "SET", "REMOVE",
+    "RETURN", "WHERE", "WITH", "UNWIND", "CALL", "YIELD", "FOREACH",
+    "LOAD", "CSV", "UNION", "OPTIONAL", "DROP", "CONSTRAINT", "INDEX",
+];
+
+#[derive(Debug, thiserror::Error)]
+pub enum CypherIdentifierError {
+    #[error("identifier cannot be empty")]
+    Empty,
+    #[error("identifier '{0}' contains characters other than ASCII alphanumerics and underscores")]
+    InvalidCharacters(String),
+    #[error("identifier '{0}' cannot start with a digit")]
+    StartsWithDigit(String),
+    #[error("identifier '{0}' is a reserved Cypher keyword")]
+    ReservedKeyword(String),
+}
+
+/// Validates that `s` is safe to interpolate directly into a Cypher query
+/// as a label, relationship type, or property name. Cypher can only
+/// parameterize property *values* -- never labels, relationship types, or
+/// property names -- so anything derived from external/untrusted input
+/// (a Jira custom field name, for example) that ends up in one of those
+/// positions must pass this check first.
+pub fn validate_cypher_identifier(s: &str) -> Result<(), CypherIdentifierError> {
+    if s.is_empty() {
+        return Err(CypherIdentifierError::Empty);
+    }
+    if s.chars().next().unwrap().is_ascii_digit() {
+        return Err(CypherIdentifierError::StartsWithDigit(s.to_string()));
+    }
+    if !s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        return Err(CypherIdentifierError::InvalidCharacters(s.to_string()));
+    }
+    if CYPHER_KEYWORD_BLACKLIST.contains(&s.to_ascii_uppercase().as_str()) {
+        return Err(CypherIdentifierError::ReservedKeyword(s.to_string()));
+    }
+    Ok(())
+}
+
+/// A node key whose label and merge-key property name are determined at
+/// runtime rather than fixed in an enum variant at compile time -- needed
+/// for data sources whose own schema isn't known ahead of time (Jira
+/// custom fields, where the field name itself becomes part of the graph
+/// schema). label and key_prop_name are validated at construction time,
+/// since those two positions can never be safely parameterized; unlike
+/// them, key_prop_value is free-form and is parameterized normally.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct DynamicNodeKey {
+    label: String,
+    key_prop_name: String,
+    key_prop_value: String,
+}
+
+impl DynamicNodeKey {
+    pub fn new(
+        label: impl Into<String>,
+        key_prop_name: impl Into<String>,
+        key_prop_value: impl Into<String>,
+    ) -> Result<Self, CypherIdentifierError> {
+        let label = label.into();
+        let key_prop_name = key_prop_name.into();
+        validate_cypher_identifier(&label)?;
+        validate_cypher_identifier(&key_prop_name)?;
+        Ok(Self {
+            label,
+            key_prop_name,
+            key_prop_value: key_prop_value.into(),
+        })
+    }
+}
+
+impl GraphNodeKey for DynamicNodeKey {
+    fn cypher_match(&self, prefix: &str) -> (String, Vec<(String, BoltType)>) {
+        let value_param = format!("{prefix}_{}", self.key_prop_name);
+        (
+            format!(
+                "({prefix}:{} {{ {}: ${value_param} }})",
+                self.label, self.key_prop_name
+            ),
+            vec![(value_param, BoltType::String(self.key_prop_value.clone().into()))],
+        )
+    }
+}
+
 // ── GraphNodeKey trait ─────────────────────────────────────────────────────────
 
 /// A node identity that can be compiled into a parameterized Cypher MERGE clause.
@@ -174,6 +263,15 @@ pub enum GraphOp {
         props: Vec<Property>,
     },
 
+    /// Upsert many nodes of the same or different kinds in a single
+    /// transaction — one round-trip, same MERGE semantics as UpsertNode,
+    /// for callers that would otherwise need to hand-write a batched
+    /// Cypher query (e.g. UNWIND over a list) to avoid doing one round-trip
+    /// per item.
+    UpsertNodes {
+        items: Vec<(Box<dyn GraphNodeKey>, Vec<Property>)>,
+    },
+
     /// Ensure a directed relationship exists between two nodes.
     /// Creates both nodes if absent (MERGE semantics on all three patterns).
     EnsureEdge {
@@ -248,7 +346,6 @@ pub enum GraphControllerMsg {
 /// Pure and deterministic — same input always produces the same query.
 /// The resulting `Query` carries all parameters internally; callers do not
 /// need to bind them separately.
-
 pub fn compile_graph_op(op: &GraphOp) -> Query {
     let (cypher, params) = match op {
         GraphOp::UpsertNode { key, props } => {
@@ -274,6 +371,30 @@ pub fn compile_graph_op(op: &GraphOp) -> Query {
                 params.push((k.clone(), v.clone().into()));
             }
 
+            (cypher, params)
+        }
+
+        GraphOp::UpsertNodes { items } => {
+            trace!("Received UpsertNodes directive, {} items", items.len());
+            let mut cypher = String::new();
+            let mut params = Vec::new();
+            for (i, (key, props)) in items.iter().enumerate() {
+                let prefix = format!("n{i}");
+                let (node_pattern, node_params) = key.cypher_match(&prefix);
+                cypher.push_str(&format!("MERGE {node_pattern}\n"));
+                if !props.is_empty() {
+                    let sets = props
+                        .iter()
+                        .map(|Property(k, _)| format!("{prefix}.{k} = ${prefix}_{k}"))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    cypher.push_str(&format!("SET {sets}\n"));
+                }
+                params.extend(node_params);
+                for Property(k, v) in props {
+                    params.push((format!("{prefix}_{k}"), v.clone().into()));
+                }
+            }
             (cypher, params)
         }
 

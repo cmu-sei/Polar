@@ -22,13 +22,13 @@
 */
 
 use crate::{JiraConsumerArgs, JiraConsumerState, subscribe_to_topic};
-use polar::{QUERY_COMMIT_FAILED, QUERY_RUN_FAILED, TRANSACTION_FAILED_ERROR};
 
 use jira_common::JIRA_USERS_CONSUMER_TOPIC;
+use jira_common::graph::JiraNodeKey;
 use jira_common::types::JiraData;
-use neo4rs::Query;
+use polar::graph::controller::{GraphControllerMsg, GraphOp, GraphValue, IntoGraphKey, Property};
 use ractor::{Actor, ActorProcessingErr, ActorRef, async_trait};
-use tracing::{debug, info};
+use tracing::{debug, error, info};
 
 pub struct JiraUserConsumer;
 
@@ -47,7 +47,7 @@ impl Actor for JiraUserConsumer {
         match subscribe_to_topic(
             args.registration_id,
             JIRA_USERS_CONSUMER_TOPIC.to_string(),
-            args.graph_config,
+            args.graph_controller,
         )
         .await
         {
@@ -75,47 +75,45 @@ impl Actor for JiraUserConsumer {
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        match state.graph.start_txn().await {
-            Ok(mut transaction) => {
-                if let JiraData::Users(users) = message {
-                    // Create list of users
-                    let user_array = users
-                        .iter()
-                        .map(|user| {
-                            format!(
-                                r#"{{ html: {:?}, name: {:?}, key:{:?}, displayName:{:?}}}"#,
-                                <Option<std::string::String> as Clone>::clone(&user.html)
-                                    .unwrap_or("".to_string())
-                                    .clone(),
-                                user.name.to_string().clone(),
-                                user.key.to_string().clone(),
-                                user.display_name.to_string().clone(), // renamed field
-                            )
-                        })
-                        .collect::<Vec<_>>()
-                        .join(",\n");
-
-                    // Here, we write a query that creates additional nodes for the user and namespace of the user
-                    let cypher_query = format!(
-                        "
-                        UNWIND [{user_array}] AS user_data
-                        MERGE (user:JiraUser {{ key: user_data.key }})
-                        SET user.html = user_data.html, user.name = user_data.name, user.displayName = user_data.displayName
-                        "
-                    );
-
-                    debug!(cypher_query);
-                    if let Err(_e) = transaction.run(Query::new(cypher_query)).await {
-                        myself.stop(Some(QUERY_RUN_FAILED.to_string()));
+        if let JiraData::Users(users) = message {
+            let items = users
+                .iter()
+                .map(|user| {
+                    let key = JiraNodeKey::User {
+                        key: user.key.to_string(),
                     }
+                    .into_key();
+                    let props = vec![
+                        Property(
+                            "html".into(),
+                            GraphValue::String(user.html.clone().unwrap_or_default()),
+                        ),
+                        Property("name".into(), GraphValue::String(user.name.to_string())),
+                        Property(
+                            "displayName".into(),
+                            GraphValue::String(user.display_name.to_string()),
+                        ),
+                    ];
+                    (key, props)
+                })
+                .collect::<Vec<_>>();
 
-                    if let Err(_e) = transaction.commit().await {
-                        myself.stop(Some(QUERY_COMMIT_FAILED.to_string()));
-                    }
-                    info!("Transaction committed.");
-                }
+            let user_count = items.len();
+
+            // Fire-and-forget: a failure here means the graph controller
+            // actor itself is gone, not that this specific write failed.
+            // Real write failures surface asynchronously via
+            // GraphSignal::OpFailed -> the supervisor's healthcheck path,
+            // not synchronously at this call site.
+            if let Err(e) = state
+                .graph_controller
+                .cast(GraphControllerMsg::Op(GraphOp::UpsertNodes { items }))
+            {
+                error!("Failed to send graph op for users: {e}");
+                myself.stop(Some(format!("graph controller unavailable: {e}")));
+            } else {
+                debug!("Dispatched UpsertNodes op for {user_count} users.");
             }
-            Err(e) => myself.stop(Some(format!("{TRANSACTION_FAILED_ERROR}. {e}"))),
         }
         Ok(())
     }

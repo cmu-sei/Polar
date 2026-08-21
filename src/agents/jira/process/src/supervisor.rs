@@ -3,7 +3,6 @@ use std::time::Duration;
 
 use crate::BROKER_CLIENT_NAME;
 use crate::JiraConsumerArgs;
-use crate::get_neo_config;
 use crate::groups::JiraGroupConsumer;
 use crate::issues::JiraIssueConsumer;
 use crate::projects::JiraProjectConsumer;
@@ -20,6 +19,7 @@ use jira_common::JIRA_USERS_CONSUMER_TOPIC;
 use jira_common::types::JiraData;
 use polar::health::{DepCertEndpoint, HealthCheckActor, HealthCheckArgs, HealthCheckMessage};
 use polar::{Supervisor, SupervisorMessage};
+use polar::graph::controller::{GraphController, GraphControllerActor, GraphControllerArgs, GraphSignal};
 use ractor::Actor;
 use ractor::ActorProcessingErr;
 use ractor::ActorRef;
@@ -41,7 +41,7 @@ const DRAIN_WINDOW_SECS: u64 = 5;
 pub struct ConsumerSupervisor;
 
 pub struct ConsumerSupervisorState {
-    graph_config: neo4rs::Config,
+    graph_controller: Option<GraphController>,
     healthcheck: ActorRef<HealthCheckMessage>,
     draining: bool,
 }
@@ -74,16 +74,15 @@ impl Supervisor for ConsumerSupervisor {
 }
 impl ConsumerSupervisor {
     /// Helper to try restarting an actor at least 10 times using an exponential backoff strategy.
-    async fn restart_actor(
+        async fn restart_actor(
         actor_name: String,
         supervisor: ActorRef<SupervisorMessage>,
-        graph_config: neo4rs::Config,
+        graph_controller: GraphController,
     ) -> Result<ActorRef<JiraData>, String> {
-        // Set up an exponential backoff policy
         let mut backoff = ExponentialBackoff::default();
         backoff.initial_interval = Duration::from_secs(3);
         backoff.max_interval = Duration::from_secs(300);
-        backoff.max_elapsed_time = Some(Duration::from_secs(3000)); // roughly 10 attempts
+        backoff.max_elapsed_time = Some(Duration::from_secs(3000));
 
         let mut count = 0;
 
@@ -96,23 +95,46 @@ impl ConsumerSupervisor {
 
             let args = JiraConsumerArgs {
                 registration_id,
-                graph_config: graph_config.clone(),
+                graph_controller: graph_controller.clone(),
             };
 
             debug!("Restarting actor: {actor_name}, attempt: {count}");
 
             let spawn_result: Result<(ActorRef<JiraData>, JoinHandle<()>), ActorProcessingErr> =
-                if actor_name == JIRA_ISSUES_CONSUMER_TOPIC {
-                    Actor::spawn_linked(
+                match actor_name.as_str() {
+                    JIRA_ISSUES_CONSUMER_TOPIC => Actor::spawn_linked(
                         Some(JIRA_ISSUES_CONSUMER_TOPIC.to_string()),
                         JiraIssueConsumer,
                         args.clone(),
                         supervisor.clone().into(),
                     )
                     .await
-                    .map_err(|e| ActorProcessingErr::from(format!("{e}")))
-                } else {
-                    Err(ActorProcessingErr::from("Unsupported actor name"))
+                    .map_err(|e| ActorProcessingErr::from(format!("{e}"))),
+                    JIRA_GROUPS_CONSUMER_TOPIC => Actor::spawn_linked(
+                        Some(JIRA_GROUPS_CONSUMER_TOPIC.to_string()),
+                        JiraGroupConsumer,
+                        args.clone(),
+                        supervisor.clone().into(),
+                    )
+                    .await
+                    .map_err(|e| ActorProcessingErr::from(format!("{e}"))),
+                    JIRA_PROJECTS_CONSUMER_TOPIC => Actor::spawn_linked(
+                        Some(JIRA_PROJECTS_CONSUMER_TOPIC.to_string()),
+                        JiraProjectConsumer,
+                        args.clone(),
+                        supervisor.clone().into(),
+                    )
+                    .await
+                    .map_err(|e| ActorProcessingErr::from(format!("{e}"))),
+                    JIRA_USERS_CONSUMER_TOPIC => Actor::spawn_linked(
+                        Some(JIRA_USERS_CONSUMER_TOPIC.to_string()),
+                        JiraUserConsumer,
+                        args.clone(),
+                        supervisor.clone().into(),
+                    )
+                    .await
+                    .map_err(|e| ActorProcessingErr::from(format!("{e}"))),
+                    _ => Err(ActorProcessingErr::from("Unsupported actor name")),
                 };
 
             match spawn_result {
@@ -166,16 +188,12 @@ impl Actor for ConsumerSupervisor {
             Some(SupervisorMessage::PrepareShutdown)
         });
 
-        // NOTE: expects_graph is false here even though this agent's child
-        // actors (JiraProjectConsumer, JiraIssueConsumer, etc.) do write to
-        // Neo4j -- they manage their own graph connections independently via
-        // graph_config in their args, not through a GraphControllerActor
-        // this supervisor spawns. There is currently no signal path from
-        // those children back to this supervisor's healthcheck, so graph
-        // availability (GraphAvailable/GraphOpFailed) is NOT tracked for
-        // this agent yet. Cert rejuvenation still applies. Wiring real graph
-        // availability tracking here requires touching the child consumer
-        // actors themselves -- tracked as follow-up, not done in this pass.
+        // Graph availability is now tracked properly: the supervisor owns
+        // a single shared GraphControllerActor (spawned on first Registered
+        // event), and all four child consumers route writes through it
+        // instead of each independently holding a raw neo4rs::Graph
+        // connection. GraphAvailable/GraphOpFailed now flow to this
+        // healthcheck the same way every other consumer-shaped agent does.
         let dep_cert_endpoints = vec![
             DepCertEndpoint::parse("cassini-ip-svc.polar.svc.cluster.local:8080:300")
                 .map_err(|e| ActorProcessingErr::from(e))?,
@@ -187,7 +205,7 @@ impl Actor for ConsumerSupervisor {
             Some(HEALTHCHECK_ACTOR_NAME.to_string()),
             HealthCheckActor,
             HealthCheckArgs {
-                expects_graph: false,
+                expects_graph: true,
                 rejuvenation_threshold_secs: 300,
                 dep_cert_endpoints,
                 prepare_shutdown_port,
@@ -219,11 +237,10 @@ impl Actor for ConsumerSupervisor {
         .await?;
 
         let state = ConsumerSupervisorState {
-            graph_config: get_neo_config(),
+            graph_controller: None,
             healthcheck,
             draining: false,
         };
-
         Ok(state)
     }
 
@@ -241,18 +258,85 @@ impl Actor for ConsumerSupervisor {
                     error!("CONSUMER_SUPERVISOR: failed to send ShutdownAck: {e}");
                 }
             }
-            SupervisorMessage::GraphSignal(_) => {}
+            SupervisorMessage::GraphSignal(signal) => match signal {
+                GraphSignal::Available => {
+                    let _ = state.healthcheck.cast(HealthCheckMessage::GraphAvailable);
+                }
+                GraphSignal::OpFailed(reason) => {
+                    let _ = state
+                        .healthcheck
+                        .cast(HealthCheckMessage::GraphOpFailed(reason));
+                }
+            },
             SupervisorMessage::ForceExit => {
-                warn!("CONSUMER_SUPERVISOR: drain window elapsed, exiting now");
+                warn!("CONSUMER_SUPERVISOR: drain window elapsed, beginning graceful shutdown");
+
+                if let Some(controller) = state.graph_controller.take() {
+                    warn!(
+                        "CONSUMER_SUPERVISOR: stopping graph controller and waiting for any \
+                         in-flight write to complete before exiting"
+                    );
+                    match controller
+                        .stop_and_wait(
+                            Some("supervisor shutting down".into()),
+                            Some(Duration::from_secs(30)),
+                        )
+                        .await
+                    {
+                        Ok(()) => {
+                            info!("CONSUMER_SUPERVISOR: graph controller stopped cleanly");
+                        }
+                        Err(e) => {
+                            error!(
+                                "CONSUMER_SUPERVISOR: graph controller did not stop cleanly \
+                                 within 30s, exiting anyway: {e:?}"
+                            );
+                        }
+                    }
+                }
+
+                warn!("CONSUMER_SUPERVISOR: exiting now");
                 std::process::exit(1);
             }
             SupervisorMessage::ClientEvent { event } => match event {
                 ClientEvent::Registered { registration_id } => {
                     let _ = state.healthcheck.cast(HealthCheckMessage::CassiniConnected);
 
+                    if state.graph_controller.is_none() {
+                        let graph_signal_port = Arc::new(OutputPort::<GraphSignal>::default());
+                        graph_signal_port.subscribe(myself.clone(), |signal| {
+                            Some(SupervisorMessage::GraphSignal(signal))
+                        });
+
+                        match GraphControllerActor::spawn_linked(
+                            Some("jira.process.graph.controller".to_string()),
+                            GraphControllerActor,
+                            GraphControllerArgs { signal_port: graph_signal_port },
+                            myself.get_cell(),
+                        )
+                        .await
+                        {
+                            Ok((graph_controller, _)) => {
+                                state.graph_controller = Some(graph_controller);
+                                let _ = state.healthcheck.cast(HealthCheckMessage::GraphConnected);
+                            }
+                            Err(e) => {
+                                error!("Error initializing graph controller! {e}");
+                                return Err(ActorProcessingErr::from(e));
+                            }
+                        }
+                    } else {
+                        let _ = state.healthcheck.cast(HealthCheckMessage::GraphConnected);
+                    }
+
+                    let graph_controller = state
+                        .graph_controller
+                        .clone()
+                        .expect("graph_controller was just set above");
+
                     let args = JiraConsumerArgs {
                         registration_id,
-                        graph_config: get_neo_config(),
+                        graph_controller,
                     };
 
                     if let Err(e) = Actor::spawn_linked(
@@ -370,7 +454,7 @@ impl Actor for ConsumerSupervisor {
                 match ConsumerSupervisor::restart_actor(
                     actor_name.clone(),
                     myself.clone(),
-                    state.graph_config.clone(),
+                    state.graph_controller.clone().expect("graph_controller already spawned by the time a child could fail"),
                 )
                 .await
                 {
@@ -416,7 +500,7 @@ impl Actor for ConsumerSupervisor {
                 match ConsumerSupervisor::restart_actor(
                     actor_name.clone(),
                     myself.clone(),
-                    state.graph_config.clone(),
+                    state.graph_controller.clone().expect("graph_controller already spawned by the time a child could fail"),
                 )
                 .await
                 {

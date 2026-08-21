@@ -32,6 +32,7 @@ license.workspace = true
 cassini-broker.workspace = true
 futures-lite.workspace = true
 indexmap.workspace = true
+neo4rs.workspace = true
 polar.workspace = true
 ractor.workspace = true
 rkyv_derive = "0.8.15"

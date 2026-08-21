@@ -3096,6 +3096,7 @@ dependencies = [
  "cassini-broker",
  "futures-lite",
  "indexmap 2.14.0",
+ "neo4rs",
  "polar",
  "ractor",
  "rkyv",

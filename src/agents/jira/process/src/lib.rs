@@ -23,10 +23,9 @@
 
 use cassini_client::TcpClientMessage;
 use cassini_types::WireTraceCtx;
-use neo4rs::{Config, ConfigBuilder};
+use polar::graph::controller::GraphController;
 use ractor::registry::where_is;
 use std::error::Error;
-use tracing::info;
 
 pub mod groups;
 pub mod issues;
@@ -40,20 +39,23 @@ pub const JIRA_ISSUE_CONSUMER: &str = "issues";
 
 pub struct JiraConsumerState {
     pub registration_id: String,
-    graph: neo4rs::Graph,
+    pub graph_controller: GraphController,
 }
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct JiraConsumerArgs {
     pub registration_id: String,
-    pub graph_config: neo4rs::Config,
+    pub graph_controller: GraphController,
 }
 
 ///
-/// Helper fn to setup consumer state, subscribe to a given topic, and connect to the graph database
+/// Helper fn to set up consumer state and subscribe to a given topic.
+/// No longer connects to the graph database directly -- the supervisor
+/// owns the single shared GraphControllerActor and injects a reference to
+/// it via JiraConsumerArgs.graph_controller instead.
 pub async fn subscribe_to_topic(
     registration_id: String,
     topic: String,
-    config: neo4rs::Config,
+    graph_controller: GraphController,
 ) -> Result<JiraConsumerState, Box<dyn Error>> {
     let client = where_is(BROKER_CLIENT_NAME.to_string()).expect("Expected to find TCP client.");
 
@@ -62,51 +64,10 @@ pub async fn subscribe_to_topic(
         trace_ctx: WireTraceCtx::from_current_span(),
     })?;
 
-    //load neo config and connect to graph db
-
-    let graph = neo4rs::Graph::connect(config)?;
-
     Ok(JiraConsumerState {
         registration_id,
-        graph,
+        graph_controller,
     })
-}
-
-// TODO: remove, graph controllers have their own internal copy of this
-#[deprecated]
-pub fn get_neo_config() -> Config {
-    let database_name = std::env::var("GRAPH_DB")
-        .expect("Expected to get a neo4j database. GRAPH_DB variable not set.");
-    let neo_user = std::env::var("GRAPH_USER").expect("No GRAPH_USER value set for Neo4J.");
-    let neo_password =
-        std::env::var("GRAPH_PASSWORD").expect("No GRAPH_PASSWORD provided for Neo4J.");
-    let neo4j_endpoint = std::env::var("GRAPH_ENDPOINT").expect("No GRAPH_ENDPOINT provided.");
-    info!("Using Neo4j database at {neo4j_endpoint}");
-
-    match std::env::var("GRAPH_CA_CERT") {
-        Ok(client_certificate) => {
-            info!("Found GRAPH_CA_CERT at {client_certificate}. Configuring graph client.");
-            ConfigBuilder::default()
-                .uri(neo4j_endpoint)
-                .user(neo_user)
-                .password(neo_password)
-                .db(database_name)
-                .fetch_size(500)
-                .with_client_certificate(client_certificate)
-                .max_connections(10)
-                .build()
-                .expect("Expected to build neo4rs configuration")
-        }
-        Err(_) => ConfigBuilder::default()
-            .uri(neo4j_endpoint)
-            .user(neo_user)
-            .password(neo_password)
-            .db(database_name)
-            .fetch_size(500)
-            .max_connections(10)
-            .build()
-            .expect("Expected to build neo4rs configuration"),
-    }
 }
 
 #[derive(Debug)]

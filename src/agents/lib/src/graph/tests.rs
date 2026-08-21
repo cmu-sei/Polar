@@ -1,6 +1,7 @@
 use crate::graph::controller::{
-    GraphNodeKey, GraphOp, GraphValue, IntoGraphKey, Property, handle_op,
+    GraphNodeKey, GraphOp, GraphValue, IntoGraphKey, Property, handle_op, validate_cypher_identifier, CypherIdentifierError, DynamicNodeKey,
 };
+
 use neo4rs::{BoltType, Graph};
 use testcontainers::{ContainerAsync, runners::AsyncRunner};
 use testcontainers_modules::neo4j::{Neo4j, Neo4jImage};
@@ -171,6 +172,91 @@ impl GraphNodeKey for StateTypeKey {
 // of relying on clear_graph.
 
 #[tokio::test]
+async fn validate_cypher_identifier_accepts_normal_identifiers() {
+    assert!(validate_cypher_identifier("JiraCustomField").is_ok());
+    assert!(validate_cypher_identifier("story_points").is_ok());
+    assert!(validate_cypher_identifier("field_1").is_ok());
+}
+
+#[tokio::test]
+async fn validate_cypher_identifier_rejects_empty() {
+    assert!(matches!(
+        validate_cypher_identifier(""),
+        Err(CypherIdentifierError::Empty)
+    ));
+}
+
+#[tokio::test]
+async fn validate_cypher_identifier_rejects_leading_digit() {
+    assert!(matches!(
+        validate_cypher_identifier("1field"),
+        Err(CypherIdentifierError::StartsWithDigit(_))
+    ));
+}
+
+#[tokio::test]
+async fn validate_cypher_identifier_rejects_injection_attempt() {
+    // The exact shape of attack this exists to prevent: a field name
+    // engineered to close the current Cypher clause and inject a
+    // destructive statement.
+    let err = validate_cypher_identifier("}) DETACH DELETE (n) //")
+        .expect_err("must reject Cypher-breaking characters");
+    assert!(matches!(err, CypherIdentifierError::InvalidCharacters(_)));
+}
+
+#[tokio::test]
+async fn validate_cypher_identifier_rejects_reserved_keywords() {
+    assert!(matches!(
+        validate_cypher_identifier("DELETE"),
+        Err(CypherIdentifierError::ReservedKeyword(_))
+    ));
+    assert!(
+        matches!(
+            validate_cypher_identifier("merge"),
+            Err(CypherIdentifierError::ReservedKeyword(_))
+        ),
+        "keyword check must be case-insensitive"
+    );
+}
+
+#[tokio::test]
+async fn dynamic_node_key_construction_rejects_unsafe_label() {
+    assert!(DynamicNodeKey::new("Valid", "key", "some value").is_ok());
+    assert!(DynamicNodeKey::new("}) DROP //", "key", "some value").is_err());
+    assert!(DynamicNodeKey::new("Valid", "}) DROP //", "some value").is_err());
+}
+
+#[tokio::test]
+async fn dynamic_node_key_upserts_with_runtime_determined_label() {
+    let graph = &neo4j().await.graph;
+    clear_graph(graph).await;
+    let key = DynamicNodeKey::new("JiraIssue_CustomField", "field_key", "field-value-001")
+        .expect("valid identifier");
+    handle_op(
+        graph,
+        &GraphOp::UpsertNode {
+            key: key.into_key(),
+            props: vec![Property(
+                "label_text".into(),
+                GraphValue::String("some custom field value".into()),
+            )],
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        count_nodes(
+            graph,
+            "JiraIssue_CustomField",
+            "n.field_key = 'field-value-001'"
+        )
+        .await,
+        1
+    );
+}
+
+#[tokio::test]
 async fn upsert_node_creates_node_with_properties() {
     let graph = &neo4j().await.graph;
     clear_graph(graph).await;
@@ -240,6 +326,126 @@ async fn upsert_node_is_idempotent() {
 
     assert_eq!(
         count_nodes(graph, "BuildJob", "n.build_id = 'build-idem'").await,
+        1,
+        "MERGE should produce exactly one node regardless of call count"
+    );
+}
+
+#[tokio::test]
+async fn upsert_nodes_creates_multiple_nodes_with_distinct_properties() {
+    let graph = &neo4j().await.graph;
+    clear_graph(graph).await;
+    handle_op(
+        graph,
+        &GraphOp::UpsertNodes {
+            items: vec![
+                (
+                    BuildJobKey {
+                        build_id: "batch-001".into(),
+                    }
+                    .into_key(),
+                    vec![Property(
+                        "repo_url".into(),
+                        GraphValue::String("https://github.com/example/repo-a".into()),
+                    )],
+                ),
+                (
+                    BuildJobKey {
+                        build_id: "batch-002".into(),
+                    }
+                    .into_key(),
+                    vec![Property(
+                        "repo_url".into(),
+                        GraphValue::String("https://github.com/example/repo-b".into()),
+                    )],
+                ),
+            ],
+        },
+    )
+    .await
+    .unwrap();
+
+    // Deliberately checking each item ended up with *its own* property
+    // value, not a neighbor's -- this is exactly the failure mode a bug
+    // in the per-item parameter prefixing would produce (one item's
+    // property value silently overwriting another's under the same
+    // unprefixed $repo_url parameter name).
+    assert_eq!(
+        count_nodes(graph, "BuildJob", "n.build_id = 'batch-001'").await,
+        1
+    );
+    assert_eq!(
+        count_nodes(graph, "BuildJob", "n.build_id = 'batch-002'").await,
+        1
+    );
+
+    let mut result = graph
+        .execute(neo4rs::Query::new(
+            "MATCH (n:BuildJob { build_id: 'batch-001' }) RETURN n.repo_url AS url".to_string(),
+        ))
+        .await
+        .unwrap();
+    let row = result.next().await.unwrap().unwrap();
+    assert_eq!(
+        row.get::<String>("url").unwrap(),
+        "https://github.com/example/repo-a"
+    );
+
+    let mut result = graph
+        .execute(neo4rs::Query::new(
+            "MATCH (n:BuildJob { build_id: 'batch-002' }) RETURN n.repo_url AS url".to_string(),
+        ))
+        .await
+        .unwrap();
+    let row = result.next().await.unwrap().unwrap();
+    assert_eq!(
+        row.get::<String>("url").unwrap(),
+        "https://github.com/example/repo-b"
+    );
+}
+
+#[tokio::test]
+async fn upsert_nodes_is_idempotent() {
+    let graph = &neo4j().await.graph;
+    clear_graph(graph).await;
+    for _ in 0..3 {
+        handle_op(
+            graph,
+            &GraphOp::UpsertNodes {
+                items: vec![
+                    (
+                        BuildJobKey {
+                            build_id: "batch-idem-1".into(),
+                        }
+                        .into_key(),
+                        vec![Property(
+                            "repo_url".into(),
+                            GraphValue::String("https://github.com".into()),
+                        )],
+                    ),
+                    (
+                        BuildJobKey {
+                            build_id: "batch-idem-2".into(),
+                        }
+                        .into_key(),
+                        vec![Property(
+                            "repo_url".into(),
+                            GraphValue::String("https://gitlab.com".into()),
+                        )],
+                    ),
+                ],
+            },
+        )
+        .await
+        .unwrap();
+    }
+    assert_eq!(
+        count_nodes(graph, "BuildJob", "n.build_id = 'batch-idem-1'").await,
+        1,
+        "MERGE should produce exactly one node regardless of call count"
+    );
+    assert_eq!(
+        count_nodes(graph, "BuildJob", "n.build_id = 'batch-idem-2'").await,
         1,
         "MERGE should produce exactly one node regardless of call count"
     );
