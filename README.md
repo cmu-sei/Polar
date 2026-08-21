@@ -1,10 +1,13 @@
 # ACE — Agile Capacity Estimator
+
 A team completion-projection dashboard for Agile/Scrum teams. ACE reads
 work-item data from a Neo4j graph, runs Monte Carlo simulation against
 each team's actual historical performance, and shows you — honestly,
 with real confidence bands, not a single optimistic line — when a
 Program Increment is actually going to finish.
+
 ## What ACE does
+
 - **Projection Chart** — pick a team and PI, and see a probability
   distribution for the completion date: probability of finishing by the
   committed date, projected completion date, and projected percent
@@ -15,18 +18,22 @@ Program Increment is actually going to finish.
 - **Team Impact Adjustment** — compare multiple teams side by side to
   see where cross-team dependencies are putting a shared PI date at
   risk.
+
 The projection engine is PERT-based Monte Carlo: it samples from each
 team's own historical velocity (not an assumed one), and — when
 per-issue data is available — models per-issue completion individually
 with team-size contention, rather than a single aggregate burn-down
 line. See [src/ace/ARCHITECTURE.md](src/ace/ARCHITECTURE.md) for the
 full technical detail.
+
 ## Using ACE
+
 Once deployed (see Installation below), open the dashboard, select a
 team and PI increment, and click **Get Graph**. Advanced options let
 you adjust the projection start date and training window. See
 [src/ace/README.md](src/ace/README.md) for local development and
 direct container usage.
+
 ## Installation
 
 ACE ships as a container image, built reproducibly with Nix and
@@ -59,6 +66,9 @@ podman run --rm -it --name polar-dev \
   -v $PWD:/workspace \
   localhost/polar-dev:latest
 ```
+
+**On an ARM Mac:** you need a dev container image to get started.
+Reach out to the developers if you do not have one.
 
 Inside the container, at `/workspace`:
 
@@ -114,12 +124,54 @@ Swap `local-minimal` for whichever target you've set up. `--apply`
 renders every chart to `manifests/` and applies them to whatever
 cluster your current `$KUBECONFIG` points at, in dependency order.
 
+For `local-minimal` specifically, this deploys the full stack: Neo4j,
+Cassini, `cert-issuer`, ACE, the ingestion agents, and — as of this
+week — Keycloak and its own Postgres backing store, used for
+human-facing (as opposed to Kubernetes-workload) certificate issuance.
+
 ACE runs as a Kubernetes `Job` (not a `Deployment`): it requests a
 long-lived mTLS client certificate from the cluster's certificate
 infrastructure via an init container on every pod creation, which is
 what lets it recover automatically if its certificate or environment
 ever needs to be refreshed. It authenticates to Neo4j over mutual TLS
 and holds no other cluster permissions.
+
+### Accessing the deployment
+
+None of the in-cluster services are exposed outside the cluster by
+default. A single recipe brings up detached, auto-restarting
+port-forwards for everything you'd normally want reachable from your
+own machine:
+
+```bash
+just port-forwards-up       # neo4j (7473/7687), keycloak (8080), ace (8050)
+just port-forwards-down     # stop them
+```
+
+These survive terminal closure and automatically retry on the
+occasional dropped connection — a normal one-time step per session,
+not something to leave running in a dedicated terminal.
+
+- ACE's dashboard: `http://localhost:8050`
+- Neo4j Browser: `http://localhost:7473`
+- Keycloak admin console: `http://localhost:8080`
+
+### Bootstrapping Keycloak
+
+`local-minimal`'s Keycloak deploys with no realm, client, or users
+configured yet. A single idempotent recipe sets all of it up — safe to
+re-run any time:
+
+```bash
+just keycloak-bootstrap
+```
+
+This creates the `polar` realm, a public OIDC client
+(`browser-cert-fetcher`) used for human-facing certificate issuance,
+and a test user, using credentials you provide via `sops` (see
+`infra/targets/local-minimal/secrets.sops.yaml` — add
+`keycloak_test_username`/`keycloak_test_password` there before
+running).
 
 ### Bring your own cluster
 
@@ -136,7 +188,12 @@ To deploy against your own cluster:
 3. Copy `infra/targets/local-minimal/` to a new target directory,
    update `overrides.dhall`'s image references to point at your
    registry, and adjust any hostnames/URLs specific to your
-   environment.
+   environment. In particular, `cert-issuer`'s `issuers` list is where
+   trust in Kubernetes and/or an external IdP (Keycloak, Okta, etc.)
+   is configured — see the inline comments there for what each field
+   means, especially `identityStrategy`'s `clusterDomain` (only needed
+   if your cluster's kubelet runs with a non-default
+   `--cluster-domain`).
 4. `nu infra/render.nu <your-target> --apply`.
 
 Some recipes in the `Justfile` (`cluster-up`, `cluster-status`, and a
@@ -159,20 +216,90 @@ podman run -p 8080:8080 \
   ace-viz:latest
 ```
 
+## Validating human certificate issuance
+
+Kubernetes workloads (ACE, the ingestion agents) get their certificates
+automatically, with no manual steps. A **human**, authenticating
+against Keycloak, is a newer path this week's work added — there's no
+polished client tool for it yet, so this is a manual walkthrough of the
+real, verified sequence, useful for confirming the deployment is
+actually working end to end.
+
+1. Get a token from Keycloak (after `just port-forwards-up` and `just
+   keycloak-bootstrap`, using the same test credentials from
+   `secrets.sops.yaml`):
+
+```bash
+   TOKEN=$(curl -s -X POST http://localhost:8080/realms/polar/protocol/openid-connect/token \
+     -H "Content-Type: application/x-www-form-urlencoded" \
+     -d "grant_type=password" \
+     -d "client_id=browser-cert-fetcher" \
+     -d "username=<your test username>" \
+     -d "password=<your test password>" \
+     | jq -r '.access_token')
+```
+
+2. Decode it to see the exact identity/scope values this specific
+   deployment produces (these vary per-realm; don't assume the
+   values shown here):
+
+```bash
+   echo $TOKEN | cut -d. -f2 | base64 -d | jq .
+```
+
+   Look for `preferred_username` and `identity_scope` — the resulting
+   certificate's identity is `<preferred_username>.<identity_scope>`.
+
+3. Generate a keypair and CSR whose SAN matches that exact identity:
+
+```bash
+   openssl ecparam -genkey -name prime256v1 -noout -out key.pem
+   openssl req -new -key key.pem -out csr.pem -subj "/" \
+     -addext "subjectAltName=DNS:<preferred_username>.<identity_scope>"
+```
+
+4. Port-forward `cert-issuer` itself (not brought up by
+   `port-forwards-up`, since workloads reach it in-cluster and this is
+   only needed for this kind of manual, from-your-laptop check):
+
+```bash
+   kubectl port-forward -n polar svc/cert-issuer 8443:8443 &
+```
+
+5. Request the certificate:
+
+```bash
+   CSR_JSON=$(jq -n --arg csr "$(cat csr.pem)" \
+     '{csr_pem: $csr, cert_type: "CLIENT", extra_sans: []}')
+
+   curl -s -X POST http://localhost:8443/issue \
+     -H "Authorization: Bearer $TOKEN" \
+     -H "Content-Type: application/json" \
+     -d "$CSR_JSON" \
+   | jq .
+```
+
+   A successful response includes `certificate_pem` and `ca_chain_pem`.
+   Decode the certificate (`openssl x509 -noout -text`) and confirm its
+   Subject Alternative Name matches what you expected from step 3.
+
 ## Data source
+
 ACE reads from Neo4j — it does not talk to Jira, GitLab, or any other
 source system directly. The graph it reads from is populated by
 **Polar**, the platform this repository is built on: a set of
 Cassini-connected ingestion agents (Jira, GitLab, Kubernetes, and
 others) that observe source systems and write structured work-item
 data into Neo4j. Polar also provides the certificate infrastructure
-(cert-issuer) ACE uses for mTLS, and the Nix/Dhall/Kubernetes build
-and deployment pipeline this README's install steps use.
+(cert-issuer, Keycloak) ACE and its users authenticate through, and the
+Nix/Dhall/Kubernetes build and deployment pipeline this README's
+install steps use.
+
 If you're working on ACE itself, you'll mostly live in src/ace/. If
 you're working on the ingestion agents, certificate infrastructure, or
 deployment pipeline, see src/agents/ and infra/.
 
 ## License
+
 Licensed under a MIT-style license — see license.txt, or contact
 permission@sei.cmu.edu for full terms.
-
