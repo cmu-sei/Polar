@@ -22,7 +22,10 @@ use std::str::FromStr;
 use std::time::Duration;
 
 use cert_client::{handshake, keypair, output, token};
-use cert_issuer_common::{CertType, identity::normalize_identity};
+use cert_issuer_common::{
+    CertType,
+    identity::{IdentityNormalization, normalize_identity},
+};
 use clap::Parser;
 use polar_health::DepCertEndpoint;
 
@@ -124,6 +127,14 @@ struct Args {
     /// May be specified multiple times.
     #[arg(long = "cert", value_name = "TYPE:DIR:ALGORITHM[:SANS]")]
     certs: Vec<String>,
+
+    /// The cluster's own DNS domain, used to scope the identity SAN
+    /// derived from the SA token. Kubernetes' own default is
+    /// "cluster.local"; a real cluster's kubelet can be configured
+    /// with a different --cluster-domain, so this must be overridable
+    /// per deployment rather than assumed.
+    #[arg(long, default_value = "cluster.local")]
+    cluster_domain: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -212,7 +223,11 @@ async fn main() {
         }
     };
 
-    let dns_identity = match normalize_identity(&sub) {
+    let strategy = IdentityNormalization::KubernetesServiceAccount {
+        cluster_domain: args.cluster_domain.clone(),
+    };
+
+    let dns_identity = match normalize_identity(&sub, None, &strategy) {
         Ok(i) => i,
         Err(e) => {
             eprintln!("error: failed to normalize identity '{sub}': {e}");

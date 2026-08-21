@@ -91,8 +91,15 @@ impl Handler {
         // from being used to obtain a cert for another agent's
         // identity. The CSR module's `verify_identity` does the
         // actual byte-exact comparison.
-        // First, we normalize the identity string
-        let dns_identity = match normalize_identity(&claims.workload_identity) {
+        // First, we normalize the identity string, using this
+        // issuer's own strategy and (if configured) scope claim --
+        // both carried through on ValidatedClaims from oidc.rs, which
+        // already knows which issuer matched.
+        let dns_identity = match normalize_identity(
+            &claims.workload_identity,
+            claims.identity_scope.as_deref(),
+            &claims.identity_normalization,
+        ) {
             Ok(id) => id,
             Err(e) => return error_response(IssueOutcome::InvalidToken, &e.to_string()),
         };

@@ -24,13 +24,11 @@
 
 use cert_issuer::config::IssuerConfig;
 use cert_issuer::oidc::{ValidationError, Validator};
+use cert_issuer_common::identity::IdentityNormalization;
 use std::sync::Arc;
 use std::time::Duration;
-
 mod helpers;
-
 use helpers::*;
-
 fn test_issuer_config() -> IssuerConfig {
     IssuerConfig {
         issuer: TEST_ISSUER.to_string(),
@@ -43,6 +41,10 @@ fn test_issuer_config() -> IssuerConfig {
         // `extract_string_claim` in oidc.rs for why this isn't
         // dot-separated.
         instance_binding_claim: "kubernetes.io/pod/uid".to_string(),
+        identity_normalization: IdentityNormalization::KubernetesServiceAccount {
+            cluster_domain: "cluster.local".to_string(),
+        },
+        identity_scope_claim: None,
         allowed_algorithms: vec!["RS256".to_string(), "ES256".to_string()],
         jwks_cache_ttl_min: Duration::from_secs(30),
         jwks_cache_ttl_max: Duration::from_secs(3600),

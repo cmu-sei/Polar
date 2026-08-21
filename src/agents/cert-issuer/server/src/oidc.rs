@@ -83,6 +83,16 @@ pub struct ValidatedClaims {
     pub issuer: String,
     pub audience: String,
     pub raw: serde_json::Value,
+    /// The identity-scoping value extracted via this issuer's
+    /// `identity_scope_claim`, if configured. `None` for issuers using
+    /// `IdentityNormalization::KubernetesServiceAccount`, which derives
+    /// its own scoping from config rather than a second claim.
+    pub identity_scope: Option<String>,
+    /// This issuer's own identity normalization strategy, carried
+    /// through so `handler.rs` can call `normalize_identity` correctly
+    /// without needing to re-derive which issuer matched or look up
+    /// its config a second time.
+    pub identity_normalization: cert_issuer_common::identity::IdentityNormalization,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -348,6 +358,14 @@ impl Validator {
         let instance_binding =
             extract_optional_string_claim(&raw_claims, &issuer_cfg.instance_binding_claim);
 
+        // Only meaningful for issuers using SuffixedClaim -- None here
+        // for KubernetesServiceAccount, whose scoping comes from its
+        // own config (cluster_domain), not a second token claim.
+        let identity_scope = issuer_cfg
+            .identity_scope_claim
+            .as_ref()
+            .and_then(|path| extract_optional_string_claim(&raw_claims, path));
+
         // Pull out the iss and aud values for the result. We know
         // these are present and valid because jsonwebtoken accepted
         // the token with our Validation config.
@@ -374,13 +392,14 @@ impl Validator {
             }
             _ => String::new(),
         };
-
         Ok(ValidatedClaims {
             workload_identity,
             instance_binding,
             issuer,
             audience,
             raw: raw_claims,
+            identity_scope,
+            identity_normalization: issuer_cfg.identity_normalization.clone(),
         })
     }
 

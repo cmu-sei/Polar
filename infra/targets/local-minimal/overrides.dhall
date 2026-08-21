@@ -14,6 +14,8 @@
 
 let registry = "10.0.2.2:5000/"
 
+let IdentityStrategy = ../../schema/identity-strategy.dhall
+
 in
 { namespaces  = {=}
 , storage     = {=}
@@ -58,9 +60,39 @@ in
 , certIssuer =
   { image            = registry ++ "cert-issuer:latest"
   , imagePullSecrets = [] : List { name : Optional Text }
-  , oidcIssuerUrl    = "https://kubernetes.default.svc.cluster.local"
-  , oidcAudience     = ["polar-cert-issuer.local", "polar-cert-issuer-neo4j.local"]
-  , oidcJwksUri      = Some "https://kubernetes.default.svc.cluster.local/openid/v1/jwks"
+  , issuers =
+    [ { issuerUrl             = "https://kubernetes.default.svc.cluster.local"
+      , audience              = ["polar-cert-issuer.local", "polar-cert-issuer-neo4j.local"]
+      , jwksUri               = Some "https://kubernetes.default.svc.cluster.local/openid/v1/jwks"
+      , workloadIdentityClaim = "sub"
+      , instanceBindingClaim  = "kubernetes.io/pod/uid"
+      , identityStrategy      = IdentityStrategy.KubernetesServiceAccount { clusterDomain = "cluster.local" }
+      , identityScopeClaim    = None Text
+      , allowedAlgorithms     = ["RS256", "ES256", "EdDSA"]
+      , jwksCacheTtlMinSecs   = 30
+      , jwksCacheTtlMaxSecs   = 3600
+      }
+    -- Keycloak (human auth). issuerUrl matches the iss claim real
+    -- tokens actually carry -- which, since Keycloak runs with
+    -- --hostname-strict=false, depends on how the user reached it to
+    -- log in. For local-minimal that is the port-forward at
+    -- localhost:8080 (see just port-forwards-up), confirmed against
+    -- real tokens during testing. jwksUri is unrelated to that -- it
+    -- is the address cert-issuer itself, running in-cluster, actually
+    -- fetches signing keys from, so it uses the real in-cluster
+    -- Service DNS name rather than localhost.
+    , { issuerUrl             = "http://localhost:8080/realms/polar"
+      , audience              = ["polar-cert-issuer.local"]
+      , jwksUri               = Some "http://keycloak-svc.polar-auth.svc.cluster.local:8080/realms/polar/protocol/openid-connect/certs"
+      , workloadIdentityClaim = "preferred_username"
+      , instanceBindingClaim  = "sid"
+      , identityStrategy      = IdentityStrategy.SuffixedClaim
+      , identityScopeClaim    = Some "identity_scope"
+      , allowedAlgorithms     = ["RS256"]
+      , jwksCacheTtlMinSecs   = 30
+      , jwksCacheTtlMaxSecs   = 3600
+      }
+    ]
   , serverLifetimeSecs = 43200
   , identityLifetimeOverrides =
     [ { identity = "default.polar-graph.serviceaccount.cluster.local", lifetimeSecs = 31536000 } ]

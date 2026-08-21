@@ -7,6 +7,7 @@
 //! before any tokens are processed.
 
 use cert_issuer::config::{CaConfig, ConfigError, IssuerConfig, ServiceConfig};
+use cert_issuer_common::identity::IdentityNormalization;
 use std::time::Duration;
 
 fn valid_issuer() -> IssuerConfig {
@@ -16,6 +17,10 @@ fn valid_issuer() -> IssuerConfig {
         jwks_uri: None,
         workload_identity_claim: "sub".to_string(),
         instance_binding_claim: "kubernetes.io.pod.uid".to_string(),
+        identity_normalization: IdentityNormalization::KubernetesServiceAccount {
+            cluster_domain: "cluster.local".to_string(),
+        },
+        identity_scope_claim: None,
         allowed_algorithms: vec!["RS256".to_string(), "ES256".to_string()],
         jwks_cache_ttl_min: Duration::from_secs(30),
         jwks_cache_ttl_max: Duration::from_secs(3600),

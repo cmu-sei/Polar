@@ -14,24 +14,112 @@ let Prelude =
       https://prelude.dhall-lang.org/package.dhall
         sha256:931cbfae9d746c4611b07633ab1e547637ab4ba138b16bf65ef1b9ad66a60b7f
 
+-- Mirrors the Rust IdentityNormalization enum
+-- (#[serde(tag = "strategy", rename_all = "snake_case")]) exactly.
+-- A real Dhall union rather than a Text discriminator, since Dhall has
+-- no Text equality operator at all -- `merge` is the native mechanism
+-- for this kind of branching, and it's type-checked: a
+-- KubernetesServiceAccount variant simply cannot be constructed
+-- without its clusterDomain, no runtime "is this set" check needed.
+let IdentityStrategy = ../../../schema/identity-strategy.dhall
+
+let IssuerCfg =
+      { issuerUrl : Text
+      , audience : List Text
+      , jwksUri : Optional Text
+      , workloadIdentityClaim : Text
+      , instanceBindingClaim : Text
+      , identityStrategy : IdentityStrategy
+      -- Only meaningful when identityStrategy is SuffixedClaim. Names
+      -- a second claim in the same token supplying the
+      -- identity-scoping value.
+      , identityScopeClaim : Optional Text
+      , allowedAlgorithms : List Text
+      , jwksCacheTtlMinSecs : Natural
+      , jwksCacheTtlMaxSecs : Natural
+      }
+
 let render =
       \ ( v
         : { name : Text
           , port : Natural
           , caCertPath : Text
           , caKeyPath : Text
-          , oidcIssuerUrl : Text
-          , oidcAudience : List Text
-          , oidcJwksUri : Optional Text
+          , issuers : List IssuerCfg
           , defaultLifetimeSecs : Natural
           , serverLifetimeSecs : Natural
           , identityLifetimeOverrides : List { identity : Text, lifetimeSecs : Natural }
           }
         ) ->
-        let jwks =
-              merge
-                { Some = \(uri : Text) -> JSON.string uri, None = JSON.null }
-                v.oidcJwksUri
+        let renderIssuer =
+              \(iss : IssuerCfg) ->
+                let jwks =
+                      merge
+                        { Some = \(uri : Text) -> JSON.string uri, None = JSON.null }
+                        iss.jwksUri
+
+                let identityNormalizationJson =
+                      merge
+                        { KubernetesServiceAccount =
+                            \(cfg : { clusterDomain : Text }) ->
+                              JSON.object
+                                ( toMap
+                                    { strategy =
+                                        JSON.string "kubernetes_service_account"
+                                    , cluster_domain = JSON.string cfg.clusterDomain
+                                    }
+                                )
+                        , SuffixedClaim =
+                            JSON.object
+                              (toMap { strategy = JSON.string "suffixed_claim" })
+                        }
+                        iss.identityStrategy
+
+                let identityScopeClaimJson =
+                      merge
+                        { Some = \(c : Text) -> JSON.string c, None = JSON.null }
+                        iss.identityScopeClaim
+
+                in  JSON.object
+                      ( toMap
+                          { issuer = JSON.string iss.issuerUrl
+                          , audience =
+                              JSON.array
+                                ( Prelude.List.map
+                                    Text
+                                    JSON.Type
+                                    JSON.string
+                                    iss.audience
+                                )
+                          , jwks_uri = jwks
+                          , workload_identity_claim = JSON.string iss.workloadIdentityClaim
+                          , instance_binding_claim = JSON.string iss.instanceBindingClaim
+                          , identity_normalization = identityNormalizationJson
+                          , identity_scope_claim = identityScopeClaimJson
+                          , allowed_algorithms =
+                              JSON.array
+                                ( Prelude.List.map
+                                    Text
+                                    JSON.Type
+                                    JSON.string
+                                    iss.allowedAlgorithms
+                                )
+                          , jwks_cache_ttl_min =
+                              JSON.object
+                                ( toMap
+                                    { secs = JSON.natural iss.jwksCacheTtlMinSecs
+                                    , nanos = JSON.natural 0
+                                    }
+                                )
+                          , jwks_cache_ttl_max =
+                              JSON.object
+                                ( toMap
+                                    { secs = JSON.natural iss.jwksCacheTtlMaxSecs
+                                    , nanos = JSON.natural 0
+                                    }
+                                )
+                          }
+                      )
 
         let configJson =
               JSON.render
@@ -78,43 +166,13 @@ let render =
                                         )
                                   }
                               )
-                        , issuer =
-                            JSON.object
-                              ( toMap
-                                  { issuer = JSON.string v.oidcIssuerUrl
-                                  , audience =
-                                      JSON.array
-                                        ( Prelude.List.map
-                                            Text
-                                            JSON.Type
-                                            JSON.string
-                                            v.oidcAudience
-                                        )
-                                  , jwks_uri = jwks
-                                  , workload_identity_claim = JSON.string "sub"
-                                  , instance_binding_claim =
-                                      JSON.string "kubernetes.io/pod/uid"
-                                  , allowed_algorithms =
-                                      JSON.array
-                                        [ JSON.string "RS256"
-                                        , JSON.string "ES256"
-                                        , JSON.string "EdDSA"
-                                        ]
-                                  , jwks_cache_ttl_min =
-                                      JSON.object
-                                        ( toMap
-                                            { secs = JSON.natural 30
-                                            , nanos = JSON.natural 0
-                                            }
-                                        )
-                                  , jwks_cache_ttl_max =
-                                      JSON.object
-                                        ( toMap
-                                            { secs = JSON.natural 3600
-                                            , nanos = JSON.natural 0
-                                            }
-                                        )
-                                  }
+                        , issuers =
+                            JSON.array
+                              ( Prelude.List.map
+                                  IssuerCfg
+                                  JSON.Type
+                                  renderIssuer
+                                  v.issuers
                               )
                         }
                     )

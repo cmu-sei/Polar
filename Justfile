@@ -1095,6 +1095,7 @@ cluster-load-minimal neo4j_result=_neo4j_result: registry-up cluster-load-provis
         if [ -e "$1" ]; then
             echo "Pushing $1 -> {{_registry_host}}:{{_registry_port}}/$2"
             skopeo copy "docker-archive:$1" "docker://{{_registry_host}}:{{_registry_port}}/$2" --dest-tls-verify=false
+            podman exec u7s ctr -n k8s.io images rm "{{_registry_gateway}}:{{_registry_port}}/$2" > /dev/null 2>&1 || true
         else
             echo "Skipping $1 (not found)"
         fi
@@ -1105,7 +1106,7 @@ cluster-load-minimal neo4j_result=_neo4j_result: registry-up cluster-load-provis
     fi
     # Minimal-target images only
     _push ./result-cassini-image  "cassini:latest"
-    _push ./result-cert-issuer    "cert-issuer:latest"
+    _push ./result-cert-issuer-image "cert-issuer:latest"
     _push ./result-cert-client    "polar-cert-client:latest"
     _push ./result-polar-init     "polar-init:latest"
     _push ./result-kube-observer  "kube-observer:latest"
@@ -1127,6 +1128,7 @@ cluster-load-all neo4j_result=_neo4j_result: registry-up cluster-load-provisione
         if [ -e "$1" ]; then
             echo "Pushing $1 -> {{_registry_host}}:{{_registry_port}}/$2"
             skopeo copy "docker-archive:$1" "docker://{{_registry_host}}:{{_registry_port}}/$2" --dest-tls-verify=false
+            podman exec u7s ctr -n k8s.io images rm "{{_registry_gateway}}:{{_registry_port}}/$2" > /dev/null 2>&1 || true
         else
             echo "Skipping $1 (not found)"
         fi
@@ -1137,10 +1139,8 @@ cluster-load-all neo4j_result=_neo4j_result: registry-up cluster-load-provisione
     fi
     # Polar images — all from nix result symlinks
     _push ./result-cassini-image       "cassini:latest"
-    _push ./result-cert-issuer         "cert-issuer:latest"
+    _push ./result-cert-issuer-image    "cert-issuer:latest"
     _push ./result-cert-client         "polar-cert-client:latest"
-    _push ./result-harness-producer    "harness-producer:latest"
-    _push ./result-harness-sink        "harness-sink:latest"
     _push ./result-gitlab-observer     "gitlab-observer:latest"
     _push ./result-gitlab-consumer     "gitlab-consumer:latest"
     _push ./result-kube-observer       "kube-observer:latest"
@@ -1162,6 +1162,28 @@ cluster-load-all neo4j_result=_neo4j_result: registry-up cluster-load-provisione
     echo "Core images pushed to {{_registry_host}}:{{_registry_port}}."
 
 # Pull and push the local-path provisioner image to the local registry.
+
+# Push Cassini's own message-flow test harness images (producer/sink,
+# cassini/test/producer + cassini/test/sink) to the registry. Not part
+# of cluster-load-all/cluster-load-minimal -- these are test tooling,
+# not real Polar agents, and most Cassini development happens locally
+# without a cluster at all. Opt-in only, for the times you do want to
+# exercise the harness against a live deployment.
+cluster-load-cassini-harness: registry-up
+    #!/usr/bin/env bash
+    set -euo pipefail
+    _push() {
+        if [ -e "$1" ]; then
+            echo "Pushing $1 -> {{_registry_host}}:{{_registry_port}}/$2"
+            skopeo copy "docker-archive:$1" "docker://{{_registry_host}}:{{_registry_port}}/$2" --dest-tls-verify=false
+            podman exec u7s ctr -n k8s.io images rm "{{_registry_gateway}}:{{_registry_port}}/$2" > /dev/null 2>&1 || true
+        else
+            echo "Skipping $1 (not found)"
+        fi
+    }
+    _push ./result-cassini-producer-image "harness-producer:latest"
+    _push ./result-cassini-sink-image     "harness-sink:latest"
+    echo "Cassini test harness images pushed to {{_registry_host}}:{{_registry_port}}."
 cluster-load-provisioner:
     #!/usr/bin/env bash
     set -euo pipefail

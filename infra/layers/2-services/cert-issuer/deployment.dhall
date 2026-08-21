@@ -63,6 +63,14 @@ let render =
                       , name  = "KUBERNETES_CA_CERT"
                       , value = Some "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
                       }
+                    , k8s.EnvVar::{
+                      , name  = "JAEGER_ENABLE_TRACING"
+                      , value = Some "true"
+                      }
+                    , k8s.EnvVar::{
+                      , name  = "JAEGER_OTLP_ENDPOINT"
+                      , value = Some "http://jaeger-svc.polar.svc.cluster.local:4318/v1/traces"
+                      }
                     ]
                   , ports = Some
                     [ k8s.ContainerPort::{ containerPort = v.port, name = Some "http" } ]

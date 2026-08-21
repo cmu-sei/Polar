@@ -25,6 +25,11 @@
 //! - Empty `allowed_algorithms` is rejected because it makes every
 //!   token fail validation, which is almost certainly not what the
 //!   operator meant.
+//! - A `SuffixedClaim` identity normalization strategy with no
+//!   `identity_scope_claim` configured is rejected because the
+//!   strategy has no way to produce a scoped identity without one --
+//!   better to fail loudly at startup than to have every request
+//!   under that issuer silently fail identity normalization later.
 //!
 //! Things we *don't* validate here include URL well-formedness
 //! (network errors at first JWKS fetch will surface this), key file
@@ -32,6 +37,7 @@
 //! production), and bind address parseability (axum will fail at
 //! bind time with a clearer error than we'd produce).
 
+use cert_issuer_common::identity::IdentityNormalization;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
@@ -51,6 +57,9 @@ pub struct IssuerConfig {
 
     /// JSON path within the JWT claims for the workload identity.
     /// For Kubernetes: "sub" (yields system:serviceaccount:ns:sa).
+    /// For Keycloak, or similar: whatever bare-identity claim this
+    /// issuer's IdentityNormalization strategy expects (e.g.
+    /// "preferred_username").
     pub workload_identity_claim: String,
 
     /// JSON Pointer-style path for the per-instance binding identifier.
@@ -58,8 +67,20 @@ pub struct IssuerConfig {
     /// `kubernetes.io` is preserved as a single segment because it
     /// contains a dot — see the doc comment on `extract_string_claim`
     /// in oidc.rs).
-    /// Used in audit telemetry; not used for protocol binding in v1.
     pub instance_binding_claim: String,
+
+    /// How this issuer's identity claim is turned into a DNS-safe SAN.
+    /// See `cert_issuer_common::identity::IdentityNormalization` for
+    /// the full design rationale.
+    pub identity_normalization: IdentityNormalization,
+
+    /// JSON path within the JWT claims for the identity-scoping value
+    /// used by `IdentityNormalization::SuffixedClaim`. Required (and
+    /// validated as such below) when that strategy is selected;
+    /// meaningless and ignored for `KubernetesServiceAccount`, which
+    /// derives its own scoping from config (`cluster_domain`) rather
+    /// than a second claim.
+    pub identity_scope_claim: Option<String>,
 
     /// Allowed signing algorithms. HS256/384/512 and "none" are NEVER
     /// permitted regardless of what is in this list — `validate()`
@@ -183,6 +204,17 @@ impl ServiceConfig {
                     max: issuer_cfg.jwks_cache_ttl_max,
                 });
             }
+
+            // ---- SuffixedClaim requires a scope claim ----
+            if matches!(
+                issuer_cfg.identity_normalization,
+                IdentityNormalization::SuffixedClaim
+            ) && issuer_cfg.identity_scope_claim.is_none()
+            {
+                return Err(ConfigError::MissingScopeClaim {
+                    issuer: issuer_cfg.issuer.clone(),
+                });
+            }
         }
 
         Ok(())
@@ -209,4 +241,8 @@ pub enum ConfigError {
     },
     #[error("allowed_algorithms must contain at least one algorithm for issuer '{issuer}'")]
     EmptyAllowedAlgorithms { issuer: String },
+    #[error(
+        "issuer '{issuer}' uses the SuffixedClaim identity normalization strategy but has no identity_scope_claim configured"
+    )]
+    MissingScopeClaim { issuer: String },
 }

@@ -1,0 +1,18 @@
+sequenceDiagram
+    autonumber
+    participant Admin as Administrator
+    participant GrantTool as polar-admin-grant<br/>(admin's local tool)
+    participant CertIssuer as cert-issuer
+
+    Note over Admin,CertIssuer: One-time. A hard prerequisite for everything else --<br/>someone has to be first, with nothing else yet to vouch for them.
+
+    Admin->>GrantTool: Run tool
+    activate GrantTool
+    GrantTool->>GrantTool: Generate keypair locally<br/>(private key never leaves this machine)
+    GrantTool->>CertIssuer: Present kubectl-admin-backed<br/>Kubernetes credential + CSR<br/>(direct -- admins are not yet a<br/>Cassini participant at this point)
+    activate CertIssuer
+    CertIssuer->>CertIssuer: Validate the admin's Kubernetes<br/>credential (existing trust path,<br/>no new IdP config for admins)
+    CertIssuer-->>GrantTool: Signed, ordinary Polar client cert<br/>(no more privileged than any agent's)
+    deactivate CertIssuer
+    GrantTool->>GrantTool: Store cert + key locally<br/>(reused for every future grant/revoke)
+    deactivate GrantTool
