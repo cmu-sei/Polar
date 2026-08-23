@@ -336,3 +336,144 @@ with explicit trigger conditions.
   model before adding GitLab as an issuer
 - **Bare-metal targets** via TPM or SPIRE node attestation
 - **CA cross-signing** for zero-downtime rotation
+
+## Testing the cert issuer locally
+
+This assumes you've already run `cert-issuer-setup` and have the cert
+issuer running against the generated dev config:
+
+```sh
+python3 -m http.server 8081 --directory dev/    # mock JWKS server
+CERT_ISSUER_CONFIG=dev/config.json cargo run --bin cert-issuer
+```
+
+The examples below assume the default dev bind address,
+`127.0.0.1:8443` — adjust if your `dev/config.json` differs.
+
+### Liveness
+
+`/liveness` has no dependencies and should always return `200` as
+long as the process is up:
+
+```sh
+curl -i http://127.0.0.1:8443/liveness
+```
+
+```
+HTTP/1.1 200 OK
+content-length: 0
+```
+
+There's no body and no JSON — liveness answers exactly one question
+("is the HTTP server responding") and nothing more.
+
+### Readiness
+
+`/readiness` reflects `ca_loaded AND jwks_usable`. Pretty-print with
+`jq`:
+
+```sh
+curl -s http://127.0.0.1:8443/readiness | jq
+```
+
+**Known behavior — cold start.** The cert issuer does not eagerly
+fetch JWKS at startup; the first fetch only happens on the first
+`/issue` request that needs to validate a token (see
+`Validator::fetch_key_for_kid`). This means immediately after
+starting the process, before you've sent any issuance request,
+readiness will correctly report `jwks_usable: false`:
+
+```sh
+curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:8443/readiness
+# 503
+
+curl -s http://127.0.0.1:8443/readiness | jq
+# {
+#   "ready": false,
+#   "ca_loaded": true,
+#   "jwks_usable": false
+# }
+```
+
+`ca_loaded: true` here because CA materials load synchronously
+before the server starts accepting connections at all — if that had
+failed, the process wouldn't be running for you to curl in the first
+place.
+
+### Readiness after a successful issuance
+
+Send one real issuance request (see below) and readiness should flip
+to fully ready:
+
+```sh
+curl -s http://127.0.0.1:8443/readiness | jq
+# {
+#   "ready": true,
+#   "ca_loaded": true,
+#   "jwks_usable": true
+# }
+```
+
+### Simulating a JWKS outage
+
+Kill the mock JWKS server (Ctrl-C on the `python3 -m http.server`
+process) after having sent at least one successful issuance request,
+then check readiness immediately — it should still report ready,
+because the cache is still within `jwks_cache_ttl_max`:
+
+```sh
+curl -s http://127.0.0.1:8443/readiness | jq
+# still { "ready": true, ... } — cached keys are still usable
+```
+
+To actually observe `jwks_usable` flip to `false`, either wait past
+`jwks_cache_ttl_max` from `dev/config.json` (slow, only useful if
+you've set it low for testing) or send a request with an unrecognized
+`kid` while the JWKS server is down — that forces an opportunistic
+refetch, which will fail against the dead server, but per the
+readiness design this **should not** flip `jwks_usable` to false as
+long as the last successful fetch is still within its TTL window.
+This is the exact behavior the `health_state_survives_a_failed_opportunistic_refetch`
+test in `oidc_test.rs` pins down — if you see readiness flap to false
+here, that's a regression worth investigating, not expected behavior.
+
+### Issuing a cert directly with curl
+
+Useful for confirming the `/issue` wire contract without going
+through `cert-client`. Generate a CSR with openssl and inline it as
+JSON:
+
+```sh
+openssl req -new -newkey ed25519 -nodes \
+  -keyout /tmp/test.key -out /tmp/test.csr \
+  -subj "/" \
+  -addext "subjectAltName=DNS:polar-agent.polar.serviceaccount.cluster.local"
+
+CSR_JSON=$(jq -Rs . < /tmp/test.csr)
+
+curl -s -X POST http://127.0.0.1:8443/issue \
+  -H "Authorization: Bearer $(cat dev/token-agent)" \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"csr_pem\": $CSR_JSON,
+    \"cert_type\": \"CLIENT\",
+    \"key_algorithm\": \"ED25519\",
+    \"extra_sans\": []
+  }" | jq
+```
+
+A successful response includes `certificate_pem`, `ca_chain_pem`,
+`session_id`, and `expires_at`. Anything else — a 401, 403, or 500 —
+comes back as `{ "outcome": "...", "detail": "..." }`; the `outcome`
+field is what `cert-client` and the readiness/liveness design both
+key off of, so it's worth checking that a deliberately bad request
+(wrong audience token, mismatched SAN, expired token) produces the
+`outcome` you expect before assuming a bug is somewhere else.
+
+### Quick reference
+
+| Endpoint      | Method | Dependency checks         | Kubernetes action on failure |
+|---------------|--------|----------------------------|-------------------------------|
+| `/liveness`   | GET    | none                        | restart the pod               |
+| `/readiness`  | GET    | `ca_loaded && jwks_usable`  | stop routing traffic, no restart |
+| `/issue`      | POST   | full OIDC + CSR + CA path   | per-request 4xx/5xx, not a probe |

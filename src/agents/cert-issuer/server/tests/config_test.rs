@@ -7,7 +7,7 @@
 //! before any tokens are processed.
 
 use cert_issuer::config::{CaConfig, ConfigError, IssuerConfig, ServiceConfig};
-use std::time::Duration;
+use std::{collections::HashMap, time::Duration};
 
 fn valid_issuer() -> IssuerConfig {
     IssuerConfig {
@@ -27,6 +27,8 @@ fn valid_ca() -> CaConfig {
         ca_cert_path: "/tmp/ca.crt".to_string(),
         ca_key_path: "/tmp/ca.key".to_string(),
         default_lifetime: Duration::from_secs(3600),
+        server_lifetime: Duration::from_secs(3600),
+        identity_lifetime_overrides: HashMap::new(),
     }
 }
 

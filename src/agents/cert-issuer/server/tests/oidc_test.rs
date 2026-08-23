@@ -23,6 +23,7 @@
 //!  10. JWKS cache TTL is respected.
 
 use cert_issuer::config::IssuerConfig;
+use cert_issuer::health::HealthState;
 use cert_issuer::oidc::{ValidationError, Validator};
 use std::sync::Arc;
 use std::time::Duration;
@@ -52,11 +53,30 @@ fn test_issuer_config() -> IssuerConfig {
 /// Build a validator backed by a JwksSource serving the primary
 /// keypair under `TEST_KID`. This is the standard setup for tests
 /// that want a fully-functional validator.
+///
+/// The HealthState constructed here is internal and discarded —
+/// the vast majority of tests in this file care about token
+/// validation outcomes, not health reporting. Tests that need to
+/// assert on health state use
+/// `validator_with_default_jwks_and_health` instead.
 fn validator_with_default_jwks() -> (Validator, Arc<FakeJwksSource>) {
     let jwks = jwks_doc(&[jwk_for(TEST_KID, primary_keypair())]);
     let source = Arc::new(FakeJwksSource::new(jwks));
-    let validator = Validator::with_jwks_source(test_issuer_config(), source.clone());
+    let health = HealthState::new(Duration::from_secs(3600));
+    let validator = Validator::with_jwks_source(test_issuer_config(), source.clone(), health);
     (validator, source)
+}
+
+/// Like `validator_with_default_jwks`, but also returns the shared
+/// `HealthState` so tests can assert on it directly. Used only by
+/// the health-integration tests at the bottom of this file.
+fn validator_with_default_jwks_and_health() -> (Validator, Arc<FakeJwksSource>, Arc<HealthState>) {
+    let jwks = jwks_doc(&[jwk_for(TEST_KID, primary_keypair())]);
+    let source = Arc::new(FakeJwksSource::new(jwks));
+    let health = HealthState::new(Duration::from_secs(3600));
+    let validator =
+        Validator::with_jwks_source(test_issuer_config(), source.clone(), Arc::clone(&health));
+    (validator, source, health)
 }
 
 // ---------------------------------------------------------------------------
@@ -394,7 +414,8 @@ async fn jwks_cache_clamps_ttl_to_configured_max() {
     // max, and observing a refetch.
     let jwks = jwks_doc(&[jwk_for(TEST_KID, primary_keypair())]);
     let source = Arc::new(FakeJwksSource::new(jwks).with_max_age(Some(Duration::from_secs(86400))));
-    let validator = Validator::with_jwks_source(test_issuer_config(), source.clone());
+    let health = HealthState::new(Duration::from_secs(3600));
+    let validator = Validator::with_jwks_source(test_issuer_config(), source.clone(), health);
     let token = mint_default_token();
 
     validator.validate(&token).await.expect("first validates");
@@ -423,7 +444,8 @@ async fn jwks_cache_clamps_ttl_to_configured_min() {
     // 5s but well short of our 30s min, and observing no refetch.
     let jwks = jwks_doc(&[jwk_for(TEST_KID, primary_keypair())]);
     let source = Arc::new(FakeJwksSource::new(jwks).with_max_age(Some(Duration::from_secs(5))));
-    let validator = Validator::with_jwks_source(test_issuer_config(), source.clone());
+    let health = HealthState::new(Duration::from_secs(3600));
+    let validator = Validator::with_jwks_source(test_issuer_config(), source.clone(), health);
     let token = mint_default_token();
 
     validator.validate(&token).await.expect("first validates");
@@ -483,5 +505,158 @@ async fn unknown_kid_triggers_jwks_refetch() {
         source.fetch_count(),
         2,
         "unknown kid must trigger a JWKS refetch (1 prime + 1 unknown-kid refetch)",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Health state integration
+// ---------------------------------------------------------------------------
+//
+// The only integration point between OIDC validation and the
+// liveness/readiness endpoints is Validator::refresh_jwks calling
+// health.mark_jwks_fetch_succeeded() on success. HealthState's own
+// unit tests (in health.rs) cover the readiness computation itself
+// in isolation — these tests cover "does the validator actually
+// call the right method at the right time," exercised through the
+// public validate() API rather than by reaching into internals.
+
+/// A JwksSource that always fails. Used to prove that a failed
+/// fetch never marks health as usable — i.e. that
+/// mark_jwks_fetch_succeeded() really is gated on the success path
+/// in Validator::refresh_jwks and not called unconditionally.
+struct FailingJwksSource;
+
+#[async_trait::async_trait]
+impl cert_issuer::oidc::JwksSource for FailingJwksSource {
+    async fn fetch(&self, _jwks_uri: &str) -> Result<(Vec<u8>, Option<Duration>), String> {
+        Err("simulated JWKS endpoint failure".to_string())
+    }
+}
+
+/// A JwksSource that succeeds on its first call and fails on every
+/// call after that. Models "the JWKS endpoint was reachable, then
+/// became briefly unavailable" — the second call stands in for an
+/// opportunistic refetch triggered by an unrecognized kid arriving
+/// shortly after a successful prime.
+struct FlakyAfterFirstJwksSource {
+    doc: Vec<u8>,
+    call_count: std::sync::atomic::AtomicUsize,
+}
+
+impl FlakyAfterFirstJwksSource {
+    fn new(doc: Vec<u8>) -> Self {
+        Self {
+            doc,
+            call_count: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl cert_issuer::oidc::JwksSource for FlakyAfterFirstJwksSource {
+    async fn fetch(&self, _jwks_uri: &str) -> Result<(Vec<u8>, Option<Duration>), String> {
+        let call = self
+            .call_count
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if call == 0 {
+            Ok((self.doc.clone(), None))
+        } else {
+            Err("simulated upstream outage on refetch".to_string())
+        }
+    }
+}
+
+#[tokio::test]
+async fn successful_validation_marks_jwks_fetch_succeeded() {
+    let (validator, _source, health) = validator_with_default_jwks_and_health();
+
+    // ca_loaded is never set in this test — the validator has no
+    // reason to know about CA state, so is_ready() would be false
+    // regardless of JWKS outcome. Check jwks_usable directly, which
+    // is the field this test actually exercises.
+    assert!(
+        !health.readiness().jwks_usable,
+        "JWKS must not be usable before any validation has occurred"
+    );
+
+    let token = mint_default_token();
+    validator.validate(&token).await.expect("should validate");
+
+    assert!(
+        health.readiness().jwks_usable,
+        "a successful validation, which fetches JWKS, must mark the fetch as succeeded"
+    );
+}
+
+#[tokio::test]
+async fn failed_jwks_fetch_does_not_mark_success() {
+    let source = Arc::new(FailingJwksSource);
+    let health = HealthState::new(Duration::from_secs(3600));
+    let validator = Validator::with_jwks_source(test_issuer_config(), source, Arc::clone(&health));
+
+    let token = mint_default_token();
+    let err = validator
+        .validate(&token)
+        .await
+        .expect_err("fetch must fail");
+    assert!(
+        matches!(err, ValidationError::JwksUnavailable(_)),
+        "expected JwksUnavailable, got {err:?}",
+    );
+
+    assert!(
+        !health.readiness().jwks_usable,
+        "a failed fetch must not mark JWKS as usable",
+    );
+}
+
+#[tokio::test]
+async fn health_state_survives_a_failed_opportunistic_refetch() {
+    // This is the scenario the whole readiness design hinges on: a
+    // successful fetch primes the cache and marks health usable.
+    // Later, an unknown kid triggers an opportunistic refetch, and
+    // that refetch fails. Because the earlier successful fetch is
+    // still within jwks_cache_ttl_max, health must still report
+    // usable — the instance can still validate any token signed
+    // with the keys it already has cached, and reporting not-ready
+    // here would be lying about that capability.
+    let doc = jwks_doc(&[jwk_for(TEST_KID, primary_keypair())]);
+    let source = Arc::new(FlakyAfterFirstJwksSource::new(doc));
+    let health = HealthState::new(Duration::from_secs(3600));
+    let validator = Validator::with_jwks_source(test_issuer_config(), source, Arc::clone(&health));
+
+    let primary_token = mint_default_token();
+    validator
+        .validate(&primary_token)
+        .await
+        .expect("priming fetch must succeed");
+    assert!(
+        health.readiness().jwks_usable,
+        "must be usable after the priming fetch"
+    );
+
+    let unknown_token = mint_token(
+        SECONDARY_KID,
+        secondary_keypair(),
+        serde_json::json!({
+            "iss": TEST_ISSUER,
+            "aud": TEST_AUDIENCE,
+            "sub": "anything",
+            "exp": now_plus(300),
+        }),
+    );
+
+    let err = validator
+        .validate(&unknown_token)
+        .await
+        .expect_err("refetch is configured to fail");
+    assert!(
+        matches!(err, ValidationError::JwksUnavailable(_)),
+        "expected JwksUnavailable from the failing refetch, got {err:?}",
+    );
+
+    assert!(
+        health.readiness().jwks_usable,
+        "a failed opportunistic refetch must not erase a still-valid prior success"
     );
 }

@@ -10,7 +10,9 @@ env_setup.sh
 var/
 output/
 src/agents/*/result
+# don't persist "dev" folder generated as a result of cert-issuer-setup
 src/agents/dev
+dev/
 result*
 report.json
 config.json

@@ -20,14 +20,86 @@
 //! validation logic.
 
 use crate::handler::{Handler, HandlerBody, HandlerResponse};
+use crate::health::HealthState;
 use axum::Router;
 use axum::extract::{Json, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::post;
+use axum::routing::{get, post};
 use cert_issuer_common::{IssueError, IssueOutcome, IssueRequest};
 use std::sync::Arc;
 use tracing::error;
+
+/// `GET /liveness`
+///
+/// Answers exactly one question: is this process alive and able to
+/// serve HTTP? No dependency checks — not the CA, not JWKS, nothing.
+/// If this handler is reachable at all, it returns 200.
+///
+/// This is deliberately trivial. A liveness probe that checks
+/// dependencies risks Kubernetes restarting a perfectly healthy
+/// process because an *upstream* dependency (the Kubernetes API
+/// server's JWKS endpoint) is having a bad moment — restarting this
+/// process does nothing to fix that, it just adds churn and resets
+/// any in-memory cache that was otherwise still useful.
+async fn liveness() -> StatusCode {
+    StatusCode::OK
+}
+
+/// `GET /readiness`
+///
+/// Answers: would sending an issuance request to this instance
+/// reasonably be expected to succeed? Backed entirely by
+/// `HealthState::readiness()`, which is a pure read of
+/// already-tracked state — this handler makes no network calls and
+/// triggers no JWKS fetch. See `health.rs` module docs for the full
+/// rationale.
+///
+/// Returns 200 with the readiness report when ready, 503 with the
+/// same report when not — the body is included on both success and
+/// failure so an operator curling this endpoint during an incident
+/// can see exactly which condition is failing without needing to
+/// correlate with logs.
+async fn readiness(State(health): State<Arc<HealthState>>) -> (StatusCode, Json<ReadinessBody>) {
+    let report = health.readiness();
+    let status = if report.is_ready() {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+    (status, Json(ReadinessBody::from(report)))
+}
+
+/// Wire response body for `/readiness`. A thin wrapper around
+/// `ReadinessReport` — kept separate so the wire shape can evolve
+/// independently of the internal health state representation.
+#[derive(serde::Serialize)]
+struct ReadinessBody {
+    ready: bool,
+    ca_loaded: bool,
+    jwks_usable: bool,
+}
+
+impl From<crate::health::ReadinessReport> for ReadinessBody {
+    fn from(report: crate::health::ReadinessReport) -> Self {
+        Self {
+            ready: report.is_ready(),
+            ca_loaded: report.ca_loaded,
+            jwks_usable: report.jwks_usable,
+        }
+    }
+}
+
+/// Add health check routes to the existing router. Called from
+/// wherever the router is assembled in `main.rs` — merge this into
+/// the existing `/issue` route rather than standing up a second
+/// server, so both share the same bind address and port.
+pub fn health_routes(health: Arc<HealthState>) -> Router {
+    Router::new()
+        .route("/liveness", get(liveness))
+        .route("/readiness", get(readiness))
+        .with_state(health)
+}
 
 /// Build the Axum router for the cert issuer.
 ///

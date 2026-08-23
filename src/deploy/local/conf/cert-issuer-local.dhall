@@ -21,6 +21,5 @@ in  CertIssuer.ServiceConfig::{
     , ca = CertIssuer.CaConfig::{
       , ca_cert_path = "/home/polar/ca/ca.crt"
       , ca_key_path = "/home/polar/ca/ca.key"
-      , default_lifetime = CertIssuer.minutes 480
       }
     }

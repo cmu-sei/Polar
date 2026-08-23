@@ -34,8 +34,9 @@ use cert_issuer::{
     ca::{RcgenCaClient, load_or_bootstrap_ca},
     config::ServiceConfig,
     handler::Handler,
+    health,
     oidc::Validator,
-    server::build_router,
+    server::{build_router, health_routes},
 };
 use std::sync::Arc;
 use tracing::{debug, info, instrument};
@@ -77,14 +78,23 @@ async fn main() -> Result<()> {
         // descriptive enough for ad-hoc deployments.
         "Polar Internal CA",
     )
+    // CA load failure is a hard startup error by design — see
+    // health.rs module docs. There is no runtime "CA became
+    // unavailable" state for readiness to represent, because if this
+    // call fails the process must never reach a state where it's
+    // accepting connections at all.
     .context("CA materials")?;
+
+    // begin tracking health state once ca loads
+    let health = health::HealthState::new(config.issuer.jwks_cache_ttl_max);
+    health.mark_ca_loaded();
 
     let ca = RcgenCaClient::new(&ca_cert_pem, &ca_key_pem)
         .map_err(|e| anyhow::anyhow!("constructing CA client: {e}"))?;
     debug!("Internal certificate authroity initialized.");
 
     // ---- OIDC validator ----
-    let validator = Validator::new(config.issuer.clone());
+    let validator = Validator::new(config.issuer.clone(), Arc::clone(&health));
     debug!("OIDC validator initialized.");
 
     // ---- Handler ----
@@ -97,7 +107,7 @@ async fn main() -> Result<()> {
     });
 
     // ---- Server ----
-    let app = build_router(handler);
+    let app = build_router(handler).merge(health_routes(health));
     let listener = tokio::net::TcpListener::bind(&config.bind_addr)
         .await
         .with_context(|| format!("binding {}", config.bind_addr))?;

@@ -13,6 +13,7 @@ pub mod ca;
 pub mod config;
 pub mod csr;
 pub mod handler;
+pub mod health;
 pub mod oidc;
 pub mod server;
 pub mod telemetry;

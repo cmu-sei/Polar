@@ -57,7 +57,7 @@
 //! `Cache-Control` is present, we use the configured min as a sane
 //! lower-bound default.
 
-use crate::config::IssuerConfig;
+use crate::{config::IssuerConfig, health::HealthState};
 use dashmap::DashMap;
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
 use serde::{Deserialize, Serialize};
@@ -136,19 +136,25 @@ pub struct Validator {
     /// construction time. Computed once so per-request validation
     /// doesn't have to re-parse the strings.
     allowed_algorithms: Vec<Algorithm>,
+    health: Arc<HealthState>,
 }
 
 impl Validator {
     /// Construct a validator with the default HTTP-backed JWKS source.
     /// Production code uses this; tests use `with_jwks_source`.
-    pub fn new(config: IssuerConfig) -> Self {
-        Self::with_jwks_source(config, Arc::new(HttpJwksSource::new()))
+    /// Pass health state through
+    pub fn new(config: IssuerConfig, health: Arc<HealthState>) -> Self {
+        Self::with_jwks_source(config, Arc::new(HttpJwksSource::new()), health)
     }
 
     /// Construct a validator with a caller-provided JWKS source.
     /// This is the seam tests use to inject canned key material
     /// without standing up an HTTP server.
-    pub fn with_jwks_source(config: IssuerConfig, jwks_source: Arc<dyn JwksSource>) -> Self {
+    pub fn with_jwks_source(
+        config: IssuerConfig,
+        jwks_source: Arc<dyn JwksSource>,
+        health: Arc<HealthState>,
+    ) -> Self {
         let cache = JwksCache::new(config.jwks_cache_ttl_min, config.jwks_cache_ttl_max);
         let allowed_algorithms = parse_allowed_algorithms(&config.allowed_algorithms);
         Self {
@@ -156,6 +162,36 @@ impl Validator {
             jwks_source,
             cache,
             allowed_algorithms,
+            health,
+        }
+    }
+
+    /// Extract the "aud" claim, handling both the single-string and
+    /// array-of-strings encodings RFC 7519 permits. jsonwebtoken's
+    /// `set_audience` accepts an array as long as one entry matches our
+    /// configured audience list — there may be other entries that
+    /// don't. We report the entry that actually matched, since that's
+    /// the value meaningful to this service, not just whichever came
+    /// first in the array.
+    ///
+    /// The fallback-to-first-entry branch is defensive only: it should
+    /// be unreachable in practice, since jsonwebtoken would have
+    /// rejected the token before we get here if no array entry matched
+    /// our config. It exists so this function never silently returns
+    /// an empty string for a token that otherwise validated.
+    fn extract_audience(claims: &serde_json::Value, configured: &[String]) -> String {
+        match claims.get("aud") {
+            Some(serde_json::Value::String(s)) => s.clone(),
+            Some(serde_json::Value::Array(arr)) => {
+                let strings: Vec<&str> = arr.iter().filter_map(|v| v.as_str()).collect();
+                strings
+                    .iter()
+                    .find(|s| configured.iter().any(|c| c == *s))
+                    .or_else(|| strings.first())
+                    .map(|s| s.to_string())
+                    .unwrap_or_default()
+            }
+            _ => String::new(),
         }
     }
 
@@ -256,7 +292,12 @@ impl Validator {
         let mut validation = Validation::new(header.alg);
         validation.set_issuer(&[&self.config.issuer]);
         validation.set_audience(
-            &self.config.audience.iter().map(|s| s.as_str()).collect::<Vec<_>>()
+            &self
+                .config
+                .audience
+                .iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>(),
         );
         validation.set_required_spec_claims(&["exp", "iss", "aud"]);
         // We don't tighten `validation.algorithms` further here
@@ -292,11 +333,7 @@ impl Validator {
             .unwrap_or("")
             .to_string();
 
-        let audience = raw_claims
-            .get("aud")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
+        let audience = Self::extract_audience(&raw_claims, &self.config.audience);
 
         Ok(ValidatedClaims {
             workload_identity,
@@ -366,6 +403,9 @@ impl Validator {
         }
 
         self.cache.insert(jwks_uri, keys, server_max_age);
+
+        // state updated successfully
+        self.health.mark_jwks_fetch_succeeded();
         Ok(())
     }
 }
