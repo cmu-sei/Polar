@@ -253,7 +253,8 @@ identity alone, is what makes this safe rather than disruptive:
 - OCSP, as a live alternative or complement to a periodically-published
   CRL. The CRL is the simpler mechanism to get working first; OCSP is a
   documented, real future upgrade, not a rejected idea.
-- The correlation-ID request/reply patterns own formal specification —
+- ~~The correlation-ID request/reply patterns own formal specification~~
+  — done: see `docs/architecture/cassini-request-reply-protocol.md`.
   referenced here, written up separately.
 - Anything beyond the human-certificate use case for general credential
   distribution (agent-to-agent public key exchange, published external
