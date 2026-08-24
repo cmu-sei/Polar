@@ -25,12 +25,48 @@ use crate::{JiraConsumerArgs, JiraConsumerState, subscribe_to_topic};
 
 use jira_common::JIRA_GROUPS_CONSUMER_TOPIC;
 use jira_common::graph::JiraNodeKey;
-use jira_common::types::JiraData;
+use jira_common::types::{JiraData, JiraGroup};
 use polar::graph::controller::{GraphControllerMsg, GraphOp, GraphValue, IntoGraphKey, Property};
 use ractor::{Actor, ActorProcessingErr, ActorRef, async_trait};
 use tracing::{debug, error, info};
 
 pub struct JiraGroupConsumer;
+
+/// Builds the single UpsertNodes op for a batch of groups, as a pure
+/// function of already-deserialized data -- extracted specifically so
+/// this can be unit-tested directly, matching the same pattern used for
+/// issues.rs's build_ops_for_issue.
+fn build_ops_for_groups(groups: &[JiraGroup]) -> GraphOp {
+    let items = groups
+        .iter()
+        .map(|group| {
+            let key = JiraNodeKey::Group {
+                name: group.name.to_string(),
+            }
+            .into_key();
+            let props = vec![
+                Property(
+                    "html".into(),
+                    GraphValue::String(group.html.clone().unwrap_or_default()),
+                ),
+                // Fixed during migration: the original hand-rolled
+                // Cypher wrote this under the map key "labels" (plural)
+                // but the SET clause read "label" (singular) -- a
+                // mismatch that meant group.label was silently always
+                // null. Expressing this as a named Property forced an
+                // explicit choice rather than letting the mismatch
+                // continue silently.
+                Property(
+                    "label".into(),
+                    GraphValue::String(group.label.clone().unwrap_or_default()),
+                ),
+            ];
+            (key, props)
+        })
+        .collect::<Vec<_>>();
+
+    GraphOp::UpsertNodes { items }
+}
 
 #[async_trait]
 impl Actor for JiraGroupConsumer {
@@ -76,45 +112,15 @@ impl Actor for JiraGroupConsumer {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         if let JiraData::Groups(groups) = message {
-            let items = groups
-                .iter()
-                .map(|group| {
-                    let key = JiraNodeKey::Group {
-                        name: group.name.to_string(),
-                    }
-                    .into_key();
-                    let props = vec![
-                        Property(
-                            "html".into(),
-                            GraphValue::String(group.html.clone().unwrap_or_default()),
-                        ),
-                        // Fixed: the original hand-rolled Cypher wrote this
-                        // under the key "labels" but the SET clause read
-                        // "label" (singular) -- a mismatch that meant
-                        // group.label was silently always null. Now that
-                        // this is a real, named property rather than a
-                        // string-interpolated map key, the mismatch isn't
-                        // possible to reintroduce.
-                        Property(
-                            "label".into(),
-                            GraphValue::String(group.label.clone().unwrap_or_default()),
-                        ),
-                    ];
-                    (key, props)
-                })
-                .collect::<Vec<_>>();
-
-            let group_count = items.len();
+            let group_count = groups.len();
+            let op = build_ops_for_groups(&groups);
 
             // Fire-and-forget: a failure here means the graph controller
             // actor itself is gone, not that this specific write failed.
             // Real write failures surface asynchronously via
             // GraphSignal::OpFailed -> the supervisor's healthcheck path,
             // not synchronously at this call site.
-            if let Err(e) = state
-                .graph_controller
-                .cast(GraphControllerMsg::Op(GraphOp::UpsertNodes { items }))
-            {
+            if let Err(e) = state.graph_controller.cast(GraphControllerMsg::Op(op)) {
                 error!("Failed to send graph op for groups: {e}");
                 myself.stop(Some(format!("graph controller unavailable: {e}")));
             } else {
@@ -122,5 +128,94 @@ impl Actor for JiraGroupConsumer {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use polar::graph::controller::GraphNodeKey;
+
+    fn test_group(name: &str, html: Option<&str>, label: Option<&str>) -> JiraGroup {
+        JiraGroup {
+            name: name.to_string(),
+            html: html.map(|s| s.to_string()),
+            label: label.map(|s| s.to_string()),
+        }
+    }
+
+    fn key_pattern(key: &dyn GraphNodeKey) -> (String, Vec<(String, neo4rs::BoltType)>) {
+        key.cypher_match("n")
+    }
+
+    #[test]
+    fn builds_one_upsert_nodes_op_with_correct_property_names() {
+        // The real regression guard: "label" (singular), not "labels"
+        // (plural) -- the exact mismatch that was silently dropping
+        // every group's label before this migration.
+        let groups = vec![test_group("engineering", Some("<b>eng</b>"), Some("core"))];
+        let op = build_ops_for_groups(&groups);
+
+        let GraphOp::UpsertNodes { items } = op else {
+            panic!("expected UpsertNodes");
+        };
+        assert_eq!(items.len(), 1);
+
+        let (key, props) = &items[0];
+        let (pattern, params) = key_pattern(key.as_ref());
+        assert!(pattern.contains("JiraGroup"));
+        assert!(
+            params
+                .iter()
+                .any(|(_, v)| matches!(v, neo4rs::BoltType::String(s) if s.value == "engineering"))
+        );
+
+        assert!(props.contains(&Property(
+            "html".to_string(),
+            GraphValue::String("<b>eng</b>".to_string())
+        )));
+        assert!(props.contains(&Property(
+            "label".to_string(),
+            GraphValue::String("core".to_string())
+        )));
+        assert!(!props.iter().any(|p| p.0 == "labels"), "must never write the old, buggy plural key");
+    }
+
+    #[test]
+    fn missing_optional_fields_default_to_empty_string_not_panicking() {
+        let groups = vec![test_group("no-metadata", None, None)];
+        let op = build_ops_for_groups(&groups);
+
+        let GraphOp::UpsertNodes { items } = op else {
+            panic!("expected UpsertNodes");
+        };
+        let (_, props) = &items[0];
+        assert!(props.contains(&Property("html".to_string(), GraphValue::String(String::new()))));
+        assert!(props.contains(&Property("label".to_string(), GraphValue::String(String::new()))));
+    }
+
+    #[test]
+    fn multiple_groups_produce_one_item_each_with_distinct_identities() {
+        let groups = vec![
+            test_group("group-a", None, None),
+            test_group("group-b", None, None),
+        ];
+        let op = build_ops_for_groups(&groups);
+
+        let GraphOp::UpsertNodes { items } = op else {
+            panic!("expected UpsertNodes");
+        };
+        assert_eq!(items.len(), 2);
+
+        let names: Vec<String> = items
+            .iter()
+            .flat_map(|(key, _)| key_pattern(key.as_ref()).1)
+            .filter_map(|(_, v)| match v {
+                neo4rs::BoltType::String(s) => Some(s.value),
+                _ => None,
+            })
+            .collect();
+        assert!(names.contains(&"group-a".to_string()));
+        assert!(names.contains(&"group-b".to_string()));
     }
 }

@@ -25,12 +25,46 @@ use crate::{JiraConsumerArgs, JiraConsumerState, subscribe_to_topic};
 
 use jira_common::JIRA_USERS_CONSUMER_TOPIC;
 use jira_common::graph::JiraNodeKey;
-use jira_common::types::JiraData;
+use jira_common::types::{JiraData, JiraUser};
 use polar::graph::controller::{GraphControllerMsg, GraphOp, GraphValue, IntoGraphKey, Property};
 use ractor::{Actor, ActorProcessingErr, ActorRef, async_trait};
 use tracing::{debug, error, info};
 
 pub struct JiraUserConsumer;
+
+/// Builds the single UpsertNodes op for a batch of users, as a pure
+/// function of already-deserialized data -- extracted specifically so
+/// this can be unit-tested directly, matching the same pattern used for
+/// issues.rs's build_ops_for_issue.
+///
+/// Keyed on `key` (JiraNodeKey::User), the same identity issues.rs's
+/// own merge_user helper uses for Assignee/Creator/Reporter -- both
+/// paths converge on the same JiraUser node.
+fn build_ops_for_users(users: &[JiraUser]) -> GraphOp {
+    let items = users
+        .iter()
+        .map(|user| {
+            let key = JiraNodeKey::User {
+                key: user.key.to_string(),
+            }
+            .into_key();
+            let props = vec![
+                Property(
+                    "html".into(),
+                    GraphValue::String(user.html.clone().unwrap_or_default()),
+                ),
+                Property("name".into(), GraphValue::String(user.name.to_string())),
+                Property(
+                    "displayName".into(),
+                    GraphValue::String(user.display_name.to_string()),
+                ),
+            ];
+            (key, props)
+        })
+        .collect::<Vec<_>>();
+
+    GraphOp::UpsertNodes { items }
+}
 
 #[async_trait]
 impl Actor for JiraUserConsumer {
@@ -76,39 +110,15 @@ impl Actor for JiraUserConsumer {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         if let JiraData::Users(users) = message {
-            let items = users
-                .iter()
-                .map(|user| {
-                    let key = JiraNodeKey::User {
-                        key: user.key.to_string(),
-                    }
-                    .into_key();
-                    let props = vec![
-                        Property(
-                            "html".into(),
-                            GraphValue::String(user.html.clone().unwrap_or_default()),
-                        ),
-                        Property("name".into(), GraphValue::String(user.name.to_string())),
-                        Property(
-                            "displayName".into(),
-                            GraphValue::String(user.display_name.to_string()),
-                        ),
-                    ];
-                    (key, props)
-                })
-                .collect::<Vec<_>>();
-
-            let user_count = items.len();
+            let user_count = users.len();
+            let op = build_ops_for_users(&users);
 
             // Fire-and-forget: a failure here means the graph controller
             // actor itself is gone, not that this specific write failed.
             // Real write failures surface asynchronously via
             // GraphSignal::OpFailed -> the supervisor's healthcheck path,
             // not synchronously at this call site.
-            if let Err(e) = state
-                .graph_controller
-                .cast(GraphControllerMsg::Op(GraphOp::UpsertNodes { items }))
-            {
+            if let Err(e) = state.graph_controller.cast(GraphControllerMsg::Op(op)) {
                 error!("Failed to send graph op for users: {e}");
                 myself.stop(Some(format!("graph controller unavailable: {e}")));
             } else {
@@ -116,5 +126,92 @@ impl Actor for JiraUserConsumer {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use polar::graph::controller::GraphNodeKey;
+
+    fn test_user(key: &str, name: &str, html: Option<&str>, display_name: &str) -> JiraUser {
+        JiraUser {
+            name: name.to_string(),
+            key: key.to_string(),
+            html: html.map(|s| s.to_string()),
+            display_name: display_name.to_string(),
+        }
+    }
+
+    fn key_pattern(key: &dyn GraphNodeKey) -> (String, Vec<(String, neo4rs::BoltType)>) {
+        key.cypher_match("n")
+    }
+
+    #[test]
+    fn builds_one_upsert_nodes_op_keyed_on_key() {
+        let users = vec![test_user("jdoe", "jdoe", Some("<i>bio</i>"), "Jane Doe")];
+        let op = build_ops_for_users(&users);
+
+        let GraphOp::UpsertNodes { items } = op else {
+            panic!("expected UpsertNodes");
+        };
+        assert_eq!(items.len(), 1);
+
+        let (key, props) = &items[0];
+        let (pattern, params) = key_pattern(key.as_ref());
+        // Same identity merge_user (issues.rs) uses for Assignee/
+        // Creator/Reporter -- both paths must converge on one node.
+        assert!(pattern.contains("JiraUser"));
+        assert!(
+            params
+                .iter()
+                .any(|(_, v)| matches!(v, neo4rs::BoltType::String(s) if s.value == "jdoe"))
+        );
+
+        assert!(props.contains(&Property(
+            "displayName".to_string(),
+            GraphValue::String("Jane Doe".to_string())
+        )));
+        assert!(props.contains(&Property(
+            "html".to_string(),
+            GraphValue::String("<i>bio</i>".to_string())
+        )));
+    }
+
+    #[test]
+    fn missing_optional_html_defaults_to_empty_string_not_panicking() {
+        let users = vec![test_user("nohtml", "nohtml", None, "No HTML")];
+        let op = build_ops_for_users(&users);
+
+        let GraphOp::UpsertNodes { items } = op else {
+            panic!("expected UpsertNodes");
+        };
+        let (_, props) = &items[0];
+        assert!(props.contains(&Property("html".to_string(), GraphValue::String(String::new()))));
+    }
+
+    #[test]
+    fn multiple_users_produce_one_item_each_with_distinct_identities() {
+        let users = vec![
+            test_user("user-a", "user-a", None, "User A"),
+            test_user("user-b", "user-b", None, "User B"),
+        ];
+        let op = build_ops_for_users(&users);
+
+        let GraphOp::UpsertNodes { items } = op else {
+            panic!("expected UpsertNodes");
+        };
+        assert_eq!(items.len(), 2);
+
+        let keys: Vec<String> = items
+            .iter()
+            .flat_map(|(key, _)| key_pattern(key.as_ref()).1)
+            .filter_map(|(_, v)| match v {
+                neo4rs::BoltType::String(s) => Some(s.value),
+                _ => None,
+            })
+            .collect();
+        assert!(keys.contains(&"user-a".to_string()));
+        assert!(keys.contains(&"user-b".to_string()));
     }
 }
