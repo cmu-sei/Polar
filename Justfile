@@ -900,9 +900,9 @@ cluster-status:
 
 
 # Start detached, auto-restarting port-forwards for local dev (neo4j
-# browser/bolt, keycloak admin console, ace dashboard). Fully detached via
-# setsid -- survives terminal close, does not appear in `jobs`. Logs go to
-# /tmp/pf-*.log; stop with `just port-forwards-down`.
+# browser/bolt, keycloak admin console, ace dashboard, jaeger traces/UI).
+# Fully detached via setsid -- survives terminal close, does not appear
+# in `jobs`. Logs go to /tmp/pf-*.log; stop with `just port-forwards-down`.
 port-forwards-up:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -914,8 +914,9 @@ port-forwards-up:
     start_pf polar-graph polar-db-svc "7473:7473 7687:7687" /tmp/pf-neo4j.log
     start_pf polar-auth  keycloak-svc "8080:8080"            /tmp/pf-keycloak.log
     start_pf polar       ace-svc      "8050:8050"             /tmp/pf-ace.log
-    echo "Port-forwards started (neo4j: 7473/7687, keycloak: 8080, ace: 8050)."
-    echo "Logs: /tmp/pf-neo4j.log /tmp/pf-keycloak.log /tmp/pf-ace.log"
+    start_pf polar       jaeger-svc   "4318:4318 16686:16686" /tmp/pf-jaeger.log
+    echo "Port-forwards started (neo4j: 7473/7687, keycloak: 8080, ace: 8050, jaeger: 4318/16686)."
+    echo "Logs: /tmp/pf-neo4j.log /tmp/pf-keycloak.log /tmp/pf-ace.log /tmp/pf-jaeger.log"
 
 # Stop all detached port-forwards started by port-forwards-up.
 port-forwards-down:
@@ -923,6 +924,7 @@ port-forwards-down:
     pkill -f "port-forward -n polar-graph svc/polar-db-svc" 2>/dev/null || true
     pkill -f "port-forward -n polar-auth svc/keycloak-svc" 2>/dev/null || true
     pkill -f "port-forward -n polar svc/ace-svc" 2>/dev/null || true
+    pkill -f "port-forward -n polar svc/jaeger-svc" 2>/dev/null || true
     echo "Port-forwards stopped."
 
 # Idempotent Keycloak bootstrap: realm, public client (PKCE, Authorization
@@ -1184,6 +1186,19 @@ cluster-load-cassini-harness: registry-up
     _push ./result-cassini-producer-image "harness-producer:latest"
     _push ./result-cassini-sink-image     "harness-sink:latest"
     echo "Cassini test harness images pushed to {{_registry_host}}:{{_registry_port}}."
+
+# Mirror jaeger's third-party image into the local registry. Unlike
+# every other image in cluster-load-all/-minimal, jaeger isn't
+# Nix-built -- there's no result-jaeger symlink to push from, so this
+# needs its own recipe rather than fitting the existing _push pattern.
+# Was previously a manual, undocumented skopeo copy run by hand after
+# every registry/cluster reset.
+registry-load-jaeger: registry-up
+    #!/usr/bin/env bash
+    set -euo pipefail
+    skopeo copy docker://cr.jaegertracing.io/jaegertracing/jaeger:2.13.0 "docker://{{_registry_host}}:{{_registry_port}}/jaeger:2.13.0" --dest-tls-verify=false
+    podman exec u7s ctr -n k8s.io images rm "{{_registry_gateway}}:{{_registry_port}}/jaeger:2.13.0" > /dev/null 2>&1 || true
+    echo "jaeger:2.13.0 pushed to {{_registry_host}}:{{_registry_port}}."
 cluster-load-provisioner:
     #!/usr/bin/env bash
     set -euo pipefail

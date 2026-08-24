@@ -325,6 +325,22 @@ pub enum GraphOp {
         cypher: String,
         params: Vec<(String, BoltType)>,
     },
+        /// Run an arbitrary, heterogeneous sequence of ops in a single
+    /// transaction -- one round-trip, one commit -- for callers whose
+    /// single logical write spans several different node/edge shapes at
+    /// once (e.g. one Jira issue producing an issue node, several related
+    /// nodes of different types, and several relationship types, all from
+    /// one incoming message). UpsertNodes exists for the narrower "many
+    /// items, same shape" case and compiles to one query; this exists for
+    /// the general case and runs each inner op as its own query against
+    /// the same open transaction.
+    ///
+    /// Not itself compilable via compile_graph_op -- see handle_op, which
+    /// checks for this variant before falling through to the ordinary
+    /// compile-one-query-and-run path every other variant uses.
+    Transaction {
+        ops: Vec<GraphOp>,
+    },
 }
 
 // ── GraphControllerMsg ─────────────────────────────────────────────────────────
@@ -514,7 +530,7 @@ pub fn compile_graph_op(op: &GraphOp) -> Query {
                 "
                 // Upsert resource, state type, and state instance
                 MERGE ({res})
-                MERGE (stype {stype})
+                MERGE ({stype})
                 MERGE ({sinst})
                 {state_instance_set}
 
@@ -539,6 +555,12 @@ pub fn compile_graph_op(op: &GraphOp) -> Query {
             (cypher, params)
         }
         GraphOp::RawQuery { cypher, params } => (cypher.clone(), params.clone()),
+                GraphOp::Transaction { .. } => {
+            unreachable!(
+                "GraphOp::Transaction is not compilable via compile_graph_op -- \
+                 handle_op must intercept it before reaching this function"
+            );
+        }
     };
 
     let mut q = Query::new(cypher);
@@ -553,6 +575,21 @@ pub fn compile_graph_op(op: &GraphOp) -> Query {
 /// Should be typed with some sort of Nodekey.
 #[instrument(level = "trace", skip(graph))]
 pub async fn handle_op(graph: &Graph, op: &GraphOp) -> Result<(), ActorProcessingErr> {
+    if let GraphOp::Transaction { ops } = op {
+        let mut txn = graph.start_txn().await?;
+        for inner_op in ops {
+            let q = compile_graph_op(inner_op);
+            debug!("{}", q.query());
+            debug!("{:?}", q.get_params());
+            txn.run(q).await.map_err(|e| {
+                ActorProcessingErr::from(format!("neo4j execution failed: {:?}", e))
+            })?;
+        }
+        txn.commit().await?;
+        trace!("transaction committed ({} ops)", ops.len());
+        return Ok(());
+    }
+
     let q = compile_graph_op(op);
 
     let mut txn = graph.start_txn().await?;

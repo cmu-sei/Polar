@@ -641,3 +641,72 @@ async fn update_state_moves_has_state_pointer_on_transition() {
     let row = result.next().await.unwrap().unwrap();
     assert_eq!(row.get::<String>("name").unwrap(), "running");
 }
+
+#[tokio::test]
+async fn transaction_runs_mixed_ops_atomically() {
+    let graph = &neo4j().await.graph;
+    clear_graph(graph).await;
+    handle_op(
+        graph,
+        &GraphOp::Transaction {
+            ops: vec![
+                GraphOp::UpsertNode {
+                    key: BuildJobKey {
+                        build_id: "txn-parent".into(),
+                    }
+                    .into_key(),
+                    props: vec![Property(
+                        "repo_url".into(),
+                        GraphValue::String("https://github.com/example/parent".into()),
+                    )],
+                },
+                GraphOp::UpsertNode {
+                    key: BuildJobKey {
+                        build_id: "txn-child".into(),
+                    }
+                    .into_key(),
+                    props: vec![Property(
+                        "repo_url".into(),
+                        GraphValue::String("https://github.com/example/child".into()),
+                    )],
+                },
+                GraphOp::EnsureEdge {
+                    from: BuildJobKey {
+                        build_id: "txn-parent".into(),
+                    }
+                    .into_key(),
+                    to: BuildJobKey {
+                        build_id: "txn-child".into(),
+                    }
+                    .into_key(),
+                    rel_type: "TRIGGERED".into(),
+                    props: vec![],
+                },
+            ],
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        count_nodes(graph, "BuildJob", "n.build_id = 'txn-parent'").await,
+        1
+    );
+    assert_eq!(
+        count_nodes(graph, "BuildJob", "n.build_id = 'txn-child'").await,
+        1
+    );
+
+    let mut result = graph
+        .execute(neo4rs::Query::new(
+            "MATCH (:BuildJob { build_id: 'txn-parent' })-[r:TRIGGERED]->(:BuildJob { build_id: 'txn-child' }) RETURN count(r) AS c".to_string(),
+        ))
+        .await
+        .unwrap();
+    let row = result.next().await.unwrap().unwrap();
+    assert_eq!(
+        row.get::<i64>("c").unwrap(),
+        1,
+        "all three ops in the transaction should have committed together"
+    );
+}
