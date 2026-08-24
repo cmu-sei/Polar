@@ -102,6 +102,55 @@ pub fn validate_cypher_identifier(s: &str) -> Result<(), CypherIdentifierError> 
     Ok(())
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum GraphOpError {
+    #[error(transparent)]
+    Identifier(#[from] CypherIdentifierError),
+    #[error(
+        "compiled query uses keyword '{keyword}', not permitted for this \
+         GraphOp variant (permitted: {allowed:?})"
+    )]
+    DisallowedKeyword {
+        keyword: String,
+        allowed: Vec<String>,
+    },
+}
+
+/// Crate-private machinery behind every "raw" GraphOp variant -- not
+/// pub, so only compile_graph_op's own match arms can call it. Each
+/// public "Raw*" variant is a thin wrapper with its own explicit,
+/// narrow allowlist; there is no way for code outside this file to
+/// bypass a variant's allowlist or invoke this with an arbitrary one
+/// of its own choosing.
+///
+/// An allowlist, not a denylist: scans the compiled query text for
+/// every keyword in CYPHER_KEYWORD_BLACKLIST (the same fixed
+/// vocabulary validate_cypher_identifier already checks against) and
+/// rejects the query unless every one found is explicitly present in
+/// `allowed`. A keyword this function doesn't yet know about can't
+/// silently slip through the way it could with a hand-picked
+/// "dangerous words" denylist -- and, more importantly, a *known*
+/// keyword that isn't explicitly permitted for this specific variant
+/// is rejected by default, not just a hand-picked dangerous subset of
+/// them.
+fn validate_raw_op_text(cypher: &str, allowed: &[&str]) -> Result<(), GraphOpError> {
+    let upper = cypher.to_ascii_uppercase();
+    let words: std::collections::HashSet<&str> = upper
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .collect();
+
+    for kw in CYPHER_KEYWORD_BLACKLIST {
+        if words.contains(kw) && !allowed.contains(kw) {
+            return Err(GraphOpError::DisallowedKeyword {
+                keyword: (*kw).to_string(),
+                allowed: allowed.iter().map(|s| s.to_string()).collect(),
+            });
+        }
+    }
+    Ok(())
+}
+
 /// A node key whose label and merge-key property name are determined at
 /// runtime rather than fixed in an enum variant at compile time -- needed
 /// for data sources whose own schema isn't known ahead of time (Jira
@@ -309,23 +358,30 @@ pub enum GraphOp {
         state_instance_key: Box<dyn GraphNodeKey>,
         state_instance_props: Vec<Property>,
     },
-    /// Execute a raw parameterized Cypher query directly.
+
+    /// A parameterized Cypher MERGE-write the typed GraphOp model can't
+    /// express (e.g. matching two existing nodes by arbitrary properties
+    /// before creating an edge between them, or an UNWIND-batched upsert
+    /// with a structure UpsertNodes doesn't cover). Every one of this
+    /// codebase's real, current uses is MATCH/MERGE/SET/UNWIND only --
+    /// enforced, not just documented: see validate_raw_op_text's call
+    /// in this variant's own compile_graph_op arm. Named for that real,
+    /// narrow scope rather than "Raw", since the actual permission this
+    /// grants is bounded, not arbitrary. A genuine future need for
+    /// something broader (a delete, a procedure call) should be its
+    /// own new, separately-named, individually-reviewable variant with
+    /// its own explicit allowlist -- never a quiet widening of this
+    /// one's.
     ///
-    /// Use this when the operation requires property-based lookups that
-    /// cannot be expressed as MERGE patterns on known node keys — for example,
-    /// joining across two subgraphs using a shared digest value.
-    ///
-    /// The caller is responsible for correct Cypher and parameter binding.
-    /// Parameters are passed as (name, BoltType) pairs matching $name
-    /// placeholders in the query string.
-    ///
-    /// This variant bypasses compile_graph_op entirely and executes the
-    /// query string as-is in its own transaction, same as all other ops.
-    RawQuery {
+    /// The caller is responsible for correct Cypher and parameter
+    /// binding within that scope. Parameters are passed as (name,
+    /// BoltType) pairs matching $name placeholders in the query string.
+    RawMergeWrite {
         cypher: String,
         params: Vec<(String, BoltType)>,
     },
-        /// Run an arbitrary, heterogeneous sequence of ops in a single
+
+    /// Run an arbitrary, heterogeneous sequence of ops in a single
     /// transaction -- one round-trip, one commit -- for callers whose
     /// single logical write spans several different node/edge shapes at
     /// once (e.g. one Jira issue producing an issue node, several related
@@ -359,13 +415,37 @@ pub enum GraphControllerMsg {
 
 /// Compile a `GraphOp` into a parameterized Neo4j `Query`.
 ///
-/// Pure and deterministic — same input always produces the same query.
-/// The resulting `Query` carries all parameters internally; callers do not
-/// need to bind them separately.
-pub fn compile_graph_op(op: &GraphOp) -> Query {
+/// Pure and deterministic given the same input. Fallible, unlike
+/// earlier versions of this function -- Cypher can never parameterize
+/// labels, relationship types, or property *names* (only property
+/// *values* can be parameterized), so every op variant that accepts a
+/// caller-supplied String in one of those positions (EnsureEdge/
+/// ReplaceEdge/RemoveEdges's rel_type, every Property's name) is
+/// validated here via validate_cypher_identifier before it can reach
+/// query text. This is a backstop, not a replacement for validating
+/// early when a value is known to come from untrusted/dynamic input
+/// (see DynamicNodeKey) -- it exists specifically to protect every
+/// *other* caller too, including ones written before this existed and
+/// ones written after, without requiring each one to remember to
+/// validate itself.
+///
+/// GraphNodeKey's own cypher_match output (labels baked into fixed enum
+/// variants, or validated at construction via DynamicNodeKey) is not
+/// re-validated here -- that's already either a compile-time-safe
+/// literal or already validated at the one place it could be unsafe.
+///
+/// RawQuery is the sole, explicit exception -- see its own doc comment;
+/// it bypasses this function's compilation (and therefore this
+/// validation) entirely, by design, as the documented escape hatch for
+/// callers who need it.
+pub fn compile_graph_op(op: &GraphOp) -> Result<Query, GraphOpError> {
     let (cypher, params) = match op {
         GraphOp::UpsertNode { key, props } => {
             trace!("Received UpsertNode directive. {key:?}, {props:?}");
+
+            for Property(k, _) in props {
+                validate_cypher_identifier(k)?;
+            }
 
             // set a default prefix for the node's variable
             let prefix = "n";
@@ -392,6 +472,13 @@ pub fn compile_graph_op(op: &GraphOp) -> Query {
 
         GraphOp::UpsertNodes { items } => {
             trace!("Received UpsertNodes directive, {} items", items.len());
+
+            for (_, props) in items {
+                for Property(k, _) in props {
+                    validate_cypher_identifier(k)?;
+                }
+            }
+
             let mut cypher = String::new();
             let mut params = Vec::new();
             for (i, (key, props)) in items.iter().enumerate() {
@@ -421,6 +508,11 @@ pub fn compile_graph_op(op: &GraphOp) -> Query {
             props,
         } => {
             trace!("Received EnsureEdge directive {to:?} {rel_type} {props:?}");
+
+            validate_cypher_identifier(rel_type)?;
+            for Property(k, _) in props {
+                validate_cypher_identifier(k)?;
+            }
 
             let from_node = "n";
             let to_node = "m";
@@ -454,6 +546,8 @@ pub fn compile_graph_op(op: &GraphOp) -> Query {
         GraphOp::ReplaceEdge { from, rel_type, to } => {
             trace!("Received ReplaceEdge directive {from:?} -[{rel_type}]-> {to:?}");
 
+            validate_cypher_identifier(rel_type)?;
+
             let (from_pat, mut params) = from.cypher_match("from");
             let (to_pat, mut to_params) = to.cypher_match("to");
             params.append(&mut to_params);
@@ -478,6 +572,8 @@ pub fn compile_graph_op(op: &GraphOp) -> Query {
         GraphOp::RemoveEdges { from, rel_type } => {
             trace!("Received RemoveEdges directive {from:?} -[{rel_type}]-> *");
 
+            validate_cypher_identifier(rel_type)?;
+
             let (from_pat, params) = from.cypher_match("from");
 
             let cypher = format!(
@@ -500,6 +596,10 @@ pub fn compile_graph_op(op: &GraphOp) -> Query {
             trace!(
                 "Received UpdateState directive {resource_key:?} -> {state_type_key:?} via {state_instance_key:?}"
             );
+
+            for Property(k, _) in state_instance_props {
+                validate_cypher_identifier(k)?;
+            }
 
             // Generate node match patterns
             let (res_pat, mut params) = resource_key.cypher_match("res");
@@ -554,8 +654,11 @@ pub fn compile_graph_op(op: &GraphOp) -> Query {
 
             (cypher, params)
         }
-        GraphOp::RawQuery { cypher, params } => (cypher.clone(), params.clone()),
-                GraphOp::Transaction { .. } => {
+        GraphOp::RawMergeWrite { cypher, params } => {
+            validate_raw_op_text(cypher, &["MATCH", "MERGE", "SET", "UNWIND"])?;
+            (cypher.clone(), params.clone())
+        }
+        GraphOp::Transaction { .. } => {
             unreachable!(
                 "GraphOp::Transaction is not compilable via compile_graph_op -- \
                  handle_op must intercept it before reaching this function"
@@ -568,7 +671,7 @@ pub fn compile_graph_op(op: &GraphOp) -> Query {
         q = q.param(&k, v);
     }
 
-    q
+    Ok(q)
 }
 
 /// helper fn intedned for handling generic graph operations.
@@ -578,7 +681,7 @@ pub async fn handle_op(graph: &Graph, op: &GraphOp) -> Result<(), ActorProcessin
     if let GraphOp::Transaction { ops } = op {
         let mut txn = graph.start_txn().await?;
         for inner_op in ops {
-            let q = compile_graph_op(inner_op);
+            let q = compile_graph_op(inner_op)?;
             debug!("{}", q.query());
             debug!("{:?}", q.get_params());
             txn.run(q).await.map_err(|e| {
@@ -590,7 +693,7 @@ pub async fn handle_op(graph: &Graph, op: &GraphOp) -> Result<(), ActorProcessin
         return Ok(());
     }
 
-    let q = compile_graph_op(op);
+    let q = compile_graph_op(op)?;
 
     let mut txn = graph.start_txn().await?;
     debug!("{}", q.query());

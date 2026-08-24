@@ -6,7 +6,7 @@ use polar::{
             GraphController, GraphControllerMsg, GraphOp, GraphValue, IntoGraphKey, Property,
             rel::{BUILT_BY, IS},
         },
-        nodes::builds::BuildNodeKey,
+        nodes::builds::{BuildNodeKey,BackendJobIdentity},
         nodes::git::GitNodeKey,
     },
 };
@@ -118,10 +118,10 @@ pub fn project_event(
                 graph.cast(GraphControllerMsg::Op(GraphOp::EnsureEdge {
                     from: job_key.into_key(),
                     rel_type: "EXECUTED_IN".into(),
-                    to: BuildNodeKey::BackendJob {
-                        node_label: backend.node_label.clone(),
-                        identity_props: backend.identity_props.clone(),
-                    }
+                    to: BuildNodeKey::BackendJob(BackendJobIdentity::new(
+                        backend.node_label.clone(),
+                        backend.identity_props.clone(),
+                    )?)
                     .into_key(),
                     props: vec![Property(
                         "at".into(),

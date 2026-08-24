@@ -1,6 +1,7 @@
 use crate::graph::controller::{
     GraphNodeKey, GraphOp, GraphValue, IntoGraphKey, Property, handle_op, validate_cypher_identifier, CypherIdentifierError, DynamicNodeKey,
 };
+use crate::graph::nodes::builds::{BackendJobIdentity, BuildNodeKey};
 
 use neo4rs::{BoltType, Graph};
 use testcontainers::{ContainerAsync, runners::AsyncRunner};
@@ -224,6 +225,42 @@ async fn dynamic_node_key_construction_rejects_unsafe_label() {
     assert!(DynamicNodeKey::new("Valid", "key", "some value").is_ok());
     assert!(DynamicNodeKey::new("}) DROP //", "key", "some value").is_err());
     assert!(DynamicNodeKey::new("Valid", "}) DROP //", "some value").is_err());
+}
+
+#[tokio::test]
+async fn backend_job_identity_construction_rejects_unsafe_input() {
+    assert!(BackendJobIdentity::new("GitLabRunner", vec![("runner_id".into(), "42".into())]).is_ok());
+    assert!(
+        BackendJobIdentity::new("}) DROP //", vec![("runner_id".into(), "42".into())]).is_err()
+    );
+    assert!(
+        BackendJobIdentity::new("GitLabRunner", vec![("}) DROP //".into(), "42".into())]).is_err()
+    );
+}
+
+#[tokio::test]
+async fn backend_job_upserts_with_runtime_determined_label() {
+    let graph = &neo4j().await.graph;
+    clear_graph(graph).await;
+    let identity = BackendJobIdentity::new(
+        "GitLabRunner",
+        vec![("runner_id".to_string(), "42".to_string())],
+    )
+    .expect("valid identifier");
+    handle_op(
+        graph,
+        &GraphOp::UpsertNode {
+            key: BuildNodeKey::BackendJob(identity).into_key(),
+            props: vec![],
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        count_nodes(graph, "GitLabRunner", "n.runner_id = '42'").await,
+        1
+    );
 }
 
 #[tokio::test]
@@ -708,5 +745,175 @@ async fn transaction_runs_mixed_ops_atomically() {
         row.get::<i64>("c").unwrap(),
         1,
         "all three ops in the transaction should have committed together"
+    );
+}
+
+#[tokio::test]
+async fn ensure_edge_rejects_unsafe_rel_type_before_touching_the_graph() {
+    let graph = &neo4j().await.graph;
+    clear_graph(graph).await;
+    let result = handle_op(
+        graph,
+        &GraphOp::EnsureEdge {
+            from: BuildJobKey {
+                build_id: "reject-src".into(),
+            }
+            .into_key(),
+            to: BuildJobKey {
+                build_id: "reject-dst".into(),
+            }
+            .into_key(),
+            // The exact shape of attack this backstop exists to catch:
+            // a caller-supplied relationship type engineered to close
+            // the current Cypher clause and inject a destructive
+            // statement -- this is the same validate_cypher_identifier
+            // used everywhere else, now also protecting EnsureEdge
+            // callers that never validate their own rel_type.
+            rel_type: "X]->() DETACH DELETE (n) //".into(),
+            props: vec![],
+        },
+    )
+    .await;
+
+    assert!(
+        result.is_err(),
+        "an unsafe rel_type must be rejected, not silently reach a query"
+    );
+    // Confirm it was actually rejected pre-write, not partially applied.
+    assert_eq!(
+        count_nodes(graph, "BuildJob", "n.build_id = 'reject-src'").await,
+        0
+    );
+}
+
+#[tokio::test]
+async fn upsert_node_rejects_unsafe_property_name_before_touching_the_graph() {
+    let graph = &neo4j().await.graph;
+    clear_graph(graph).await;
+    let result = handle_op(
+        graph,
+        &GraphOp::UpsertNode {
+            key: BuildJobKey {
+                build_id: "reject-prop".into(),
+            }
+            .into_key(),
+            props: vec![Property(
+                "x`}) DETACH DELETE (n) //".into(),
+                GraphValue::String("whatever".into()),
+            )],
+        },
+    )
+    .await;
+
+    assert!(
+        result.is_err(),
+        "an unsafe property name must be rejected, not silently reach a query"
+    );
+    assert_eq!(
+        count_nodes(graph, "BuildJob", "n.build_id = 'reject-prop'").await,
+        0
+    );
+}
+
+#[tokio::test]
+async fn raw_merge_write_allows_its_real_documented_scope() {
+    let graph = &neo4j().await.graph;
+    clear_graph(graph).await;
+    handle_op(
+        graph,
+        &GraphOp::RawMergeWrite {
+            cypher: "
+                MATCH (a:BuildJob { build_id: $a })
+                MERGE (b:BuildJob { build_id: $b })
+                MERGE (a)-[:DEPENDS_ON]->(b)
+            "
+            .to_string(),
+            params: vec![
+                ("a".to_string(), BoltType::String("raw-a".into())),
+                ("b".to_string(), BoltType::String("raw-b".into())),
+            ],
+        },
+    )
+    .await
+    .unwrap_or(()); // MATCH on a nonexistent "a" is a legitimate no-op, not an error
+
+    // Create "a" first, then confirm the real MATCH+MERGE+edge shape works.
+    handle_op(
+        graph,
+        &GraphOp::UpsertNode {
+            key: BuildJobKey {
+                build_id: "raw-a".into(),
+            }
+            .into_key(),
+            props: vec![],
+        },
+    )
+    .await
+    .unwrap();
+    handle_op(
+        graph,
+        &GraphOp::RawMergeWrite {
+            cypher: "
+                MATCH (a:BuildJob { build_id: $a })
+                MERGE (b:BuildJob { build_id: $b })
+                MERGE (a)-[:DEPENDS_ON]->(b)
+            "
+            .to_string(),
+            params: vec![
+                ("a".to_string(), BoltType::String("raw-a".into())),
+                ("b".to_string(), BoltType::String("raw-b".into())),
+            ],
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        count_nodes(graph, "BuildJob", "n.build_id = 'raw-b'").await,
+        1
+    );
+    let mut result = graph
+        .execute(neo4rs::Query::new(
+            "MATCH (:BuildJob { build_id: 'raw-a' })-[r:DEPENDS_ON]->(:BuildJob { build_id: 'raw-b' }) RETURN count(r) AS c".to_string(),
+        ))
+        .await
+        .unwrap();
+    let row = result.next().await.unwrap().unwrap();
+    assert_eq!(row.get::<i64>("c").unwrap(), 1);
+}
+
+#[tokio::test]
+async fn raw_merge_write_rejects_disallowed_keywords_before_touching_the_graph() {
+    let graph = &neo4j().await.graph;
+    clear_graph(graph).await;
+
+    // DELETE, DETACH, DROP, REMOVE, CALL are all in the master
+    // vocabulary but none are in RawMergeWrite's own allowlist -- this
+    // is the real thing this whole redesign exists to guarantee: not
+    // just "the specific dangerous words we thought of," but "anything
+    // outside what this variant explicitly declares it needs."
+    for dangerous in [
+        "MATCH (n:BuildJob {build_id: 'raw-reject'}) DETACH DELETE n",
+        "MATCH (n:BuildJob {build_id: 'raw-reject'}) REMOVE n.build_id",
+        "CALL db.labels()",
+        "DROP INDEX ON :BuildJob(build_id)",
+    ] {
+        let result = handle_op(
+            graph,
+            &GraphOp::RawMergeWrite {
+                cypher: dangerous.to_string(),
+                params: vec![],
+            },
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "expected rejection for: {dangerous}"
+        );
+    }
+
+    assert_eq!(
+        count_nodes(graph, "BuildJob", "n.build_id = 'raw-reject'").await,
+        0
     );
 }

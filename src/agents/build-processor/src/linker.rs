@@ -188,7 +188,7 @@ impl ProvenanceLinker {
                 let params = vec![("rows".to_string(), BoltType::from(GraphValue::List(rows)))];
                 Self::send_op(
                     state,
-                    GraphOp::RawQuery { cypher, params },
+                    GraphOp::RawMergeWrite { cypher, params },
                     "Failed to batch-upsert package nodes",
                 )?;
             }
@@ -238,7 +238,7 @@ impl ProvenanceLinker {
                 ];
                 Self::send_op(
                     state,
-                    GraphOp::RawQuery { cypher, params },
+                    GraphOp::RawMergeWrite { cypher, params },
                     "Failed to batch root dependency edges",
                 )?;
             }
@@ -274,7 +274,7 @@ impl ProvenanceLinker {
                 let params = vec![("pairs".to_string(), BoltType::from(GraphValue::List(pairs)))];
                 Self::send_op(
                     state,
-                    GraphOp::RawQuery { cypher, params },
+                    GraphOp::RawMergeWrite { cypher, params },
                     "Failed to batch dependency tree edges",
                 )?;
             }
@@ -725,7 +725,7 @@ impl ProvenanceLinker {
 
         Self::send_op(
             state,
-            GraphOp::RawQuery { cypher, params },
+            GraphOp::RawMergeWrite { cypher, params },
             "Failed to project SecurityAdvisoryFound",
         )
     }
@@ -784,7 +784,7 @@ impl ProvenanceLinker {
 
         Self::send_op(
             state,
-            GraphOp::RawQuery { cypher, params },
+            GraphOp::RawMergeWrite { cypher, params },
             "Failed to project PackageStatusFound",
         )
     }

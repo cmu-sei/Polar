@@ -1383,7 +1383,7 @@ impl GraphOperable for OciRepository {
         // match what the OCI resolver writes on OCIArtifact.digest —
         // "sha256:<hex>" — verify once against real data.
 
-        graph.cast(GraphControllerMsg::Op(GraphOp::RawQuery {
+        graph.cast(GraphControllerMsg::Op(GraphOp::RawMergeWrite {
             cypher: "
                 MATCH (repo:FluxOCIRepository {name: $name, namespace: $namespace})
                 MATCH (oci:OCIArtifact {digest: $digest})
@@ -1560,7 +1560,7 @@ impl GraphOperable for Kustomization {
                 .unwrap_or(revision.as_str())
                 .to_string();
 
-            graph.cast(GraphControllerMsg::Op(GraphOp::RawQuery {
+            graph.cast(GraphControllerMsg::Op(GraphOp::RawMergeWrite {
                 cypher: "
                     MATCH (ks:FluxKustomization {name: $name, namespace: $namespace})
                     MATCH (oci:OCIArtifact {digest: $digest})

@@ -1,4 +1,5 @@
 use crate::graph::controller::GraphNodeKey;
+use crate::graph::controller::{CypherIdentifierError, validate_cypher_identifier};
 use neo4rs::BoltType;
 use serde::Deserialize;
 use serde::Serialize;
@@ -41,11 +42,12 @@ pub enum BuildNodeKey {
     /// A job on a backend execution system.
     /// Self-describing — the label and merge properties come from
     /// JobGraphIdentity, so this variant works for any backend
-    /// without the processor knowing which one it is.
-    BackendJob {
-        node_label: String,
-        identity_props: Vec<(String, String)>,
-    },
+    /// without the processor knowing which one it is. Wrapped in
+    /// BackendJobIdentity rather than holding these fields directly --
+    /// see its own doc comment; the fields are private specifically to
+    /// force construction through its validating constructor.
+    BackendJob(BackendJobIdentity),
+
     /// A named stage within a BuildExecution. Keyed on (build_id, stage_id)
     /// because stage_id alone isn't guaranteed unique across backends.
     /// Stage-level timing is where bottleneck analysis lives.
@@ -82,12 +84,10 @@ impl GraphNodeKey for BuildNodeKey {
                 )
             }
 
-            BuildNodeKey::BackendJob {
-                node_label,
-                identity_props,
-            } => {
+            BuildNodeKey::BackendJob(identity) => {
                 let mut params = vec![];
-                let prop_str = identity_props
+                let prop_str = identity
+                    .identity_props
                     .iter()
                     .map(|(k, v)| {
                         let param_key = format!("{prefix}_{k}");
@@ -97,8 +97,12 @@ impl GraphNodeKey for BuildNodeKey {
                     .collect::<Vec<_>>()
                     .join(", ");
 
-                (format!("({prefix}:{node_label} {{ {prop_str} }})"), params)
+                (
+                    format!("({prefix}:{} {{ {prop_str} }})", identity.node_label),
+                    params,
+                )
             }
+
             BuildNodeKey::BuildExecution => (
                 format!("({prefix}:BuildExecution {{type: \"BuildExecution\"}})"),
                 vec![(
@@ -131,6 +135,38 @@ impl GraphNodeKey for BuildNodeKey {
                 )
             }
         }
+    }
+}
+
+/// A backend job's identity, self-describing via a caller-supplied
+/// label and set of identity properties -- unlike this file's other
+/// node key variants, whose labels/property names are fixed Rust
+/// literals, a backend job's shape depends on which backend system
+/// produced it (GitLab, Jenkins, etc.), known only at runtime, parsed
+/// from that system's own metadata. node_label and every
+/// identity_props key are validated at construction -- the two
+/// positions Cypher can never parameterize -- the same pattern
+/// DynamicNodeKey uses elsewhere in this crate.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct BackendJobIdentity {
+    node_label: String,
+    identity_props: Vec<(String, String)>,
+}
+
+impl BackendJobIdentity {
+    pub fn new(
+        node_label: impl Into<String>,
+        identity_props: Vec<(String, String)>,
+    ) -> Result<Self, CypherIdentifierError> {
+        let node_label = node_label.into();
+        validate_cypher_identifier(&node_label)?;
+        for (k, _) in &identity_props {
+            validate_cypher_identifier(k)?;
+        }
+        Ok(Self {
+            node_label,
+            identity_props,
+        })
     }
 }
 
