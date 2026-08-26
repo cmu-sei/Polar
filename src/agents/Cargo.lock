@@ -1259,6 +1259,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "credentials_agent_common"
+version = "1.0.0"
+dependencies = [
+ "rkyv",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "critical-section"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
