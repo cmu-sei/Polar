@@ -94,12 +94,42 @@ async fn main() -> Result<()> {
     debug!("Internal certificate authroity initialized.");
 
     // ---- OIDC validator ----
-    let validator = Validator::new(config.issuer.clone(), Arc::clone(&health));
+    let validator = Arc::new(Validator::new(config.issuer.clone(), Arc::clone(&health)));
     debug!("OIDC validator initialized.");
 
+    // Break the readiness/Service-routing deadlock: fetch JWKS once
+    // here, driven by this process itself rather than by an inbound
+    // request the Service won't route until the pod is ready. Runs
+    // in the background so a slow or briefly-unreachable JWKS
+    // endpoint doesn't delay binding the HTTP port — liveness must
+    // stay independent of this. Retries with bounded exponential
+    // backoff rather than fetching once and giving up, since the
+    // Kubernetes API server may not be reachable in the first few
+    // seconds after this pod starts (e.g. during a simultaneous
+    // rollout of core cluster components).
+    {
+        let validator = Arc::clone(&validator);
+        tokio::spawn(async move {
+            let mut backoff = std::time::Duration::from_secs(1);
+            const MAX_BACKOFF: std::time::Duration = std::time::Duration::from_secs(30);
+            loop {
+                match validator.warm_jwks_cache().await {
+                    Ok(()) => {
+                        info!("JWKS cache warmed at startup");
+                        break;
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, next_retry = ?backoff, "JWKS warm-up failed, retrying");
+                        tokio::time::sleep(backoff).await;
+                        backoff = (backoff * 2).min(MAX_BACKOFF);
+                    }
+                }
+            }
+        });
+    }
     // ---- Handler ----
     let handler = Arc::new(Handler {
-        validator: Arc::new(validator),
+        validator: Arc::clone(&validator),
         ca: Arc::new(ca),
         default_lifetime: config.ca.default_lifetime,
         server_lifetime: config.ca.server_lifetime,

@@ -378,6 +378,7 @@ impl Validator {
     }
 
     /// Refetch the JWKS from the source and update the cache.
+    #[instrument(skip(self))]
     async fn refresh_jwks(&self, jwks_uri: &str) -> Result<(), ValidationError> {
         let (body, server_max_age) = self
             .jwks_source
@@ -407,6 +408,30 @@ impl Validator {
         // state updated successfully
         self.health.mark_jwks_fetch_succeeded();
         Ok(())
+    }
+
+    /// Eagerly fetch and cache the JWKS, without waiting for an
+    /// inbound token to trigger it.
+    ///
+    /// `fetch_key_for_kid` only fetches lazily, on demand — correct
+    /// for steady state, since there's no reason to poll JWKS on a
+    /// timer when nothing is asking for it. But it creates a
+    /// startup deadlock in Kubernetes: the readiness probe gates
+    /// whether the Service routes any traffic to this pod at all,
+    /// and readiness requires `jwks_usable`, which requires a
+    /// successful fetch — which would otherwise only happen via a
+    /// request the Service refuses to route until the pod is
+    /// already ready. Nothing breaks that cycle on its own.
+    ///
+    /// Call this once at startup, before the pod can possibly be
+    /// marked ready, so the first fetch is not gated by the thing
+    /// it's trying to satisfy. See `main.rs` for the call site.
+    #[instrument(skip(self))]
+    pub async fn warm_jwks_cache(&self) -> Result<(), ValidationError> {
+        let jwks_uri = self.config.jwks_uri.as_deref().ok_or_else(|| {
+            ValidationError::JwksUnavailable("no jwks_uri configured".to_string())
+        })?;
+        self.refresh_jwks(jwks_uri).await
     }
 }
 

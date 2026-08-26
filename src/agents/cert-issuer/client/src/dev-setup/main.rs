@@ -136,7 +136,9 @@ fn main() {
         "ca": {
             "ca_cert_path": "./dev/tmp/ca.crt",
             "ca_key_path": "./dev/tmp/ca.key",
-            "default_lifetime": { "secs": 7200, "nanos": 0 }
+            "default_lifetime": { "secs": 7200, "nanos": 0 },
+            "server_lifetime": { "secs": 7200, "nanos": 0 },
+            "identity_lifetime_overrides": {}
         },
         "issuer": {
             "issuer": ISSUER,

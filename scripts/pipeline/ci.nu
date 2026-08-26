@@ -278,12 +278,12 @@ def run-static-analysis [ws_manifest: path, artifact_dir: path]: nothing -> tabl
 
 def image-manifest []: nothing -> list<record> {
     [
-        # {
-        #     name: "polar-nu-init"
-        #     flake: ".#nuInitImage"
-        #     image: "polar-nu-init"
-        #     root_purl: ""
-        # }
+        {
+            name: "polar-nu-init"
+            flake: ".#nuInitImage"
+            image: "polar-nu-init"
+            root_purl: ""
+        }
         {
             name: "cert-issuer"
             flake: ".#certIssuerImage"
