@@ -2,21 +2,21 @@
 
 ## Purpose
 
-The Credentials Agent is the clusters single trusted broker for credential
+The Credentials Agent is the cluster's single trusted broker for credential
 distribution. Every Polar participant — human or agent — that needs a
 credential for a legitimate purpose asks the Credentials Agent for it,
 rather than that credential being scattered across ad hoc config, baked
 into images, or exchanged directly between the two parties who need it.
 
-Human certificate issuance (this documents primary worked example) is
+Human certificate issuance (this document's primary worked example) is
 one instance of that charter, not the whole of it. The same agent is
 equally the answer to:
 
-- An agent needing another agents public key, to encrypt a payload
+- An agent needing another agent's public key, to encrypt a payload
   before publishing it to a topic.
 - An agent needing a published, known credential to reach an external
   resource (a repository access token, for example).
-- An admin granting or revoking a humans certificate permissions.
+- An admin granting or revoking a human's certificate permissions.
 - Any future participant that needs to ask "what credential do I use
   for Y, and am I allowed to have it."
 
@@ -27,7 +27,7 @@ one agent owns the canonical answer and everyone else asks it.
 ## Why payload-level credential distribution, given mTLS already exists
 
 Every Cassini connection is mTLS. That protects data in transit between
-a participant and the broker. It does not protect a payload once its
+a participant and the broker. It does not protect a payload once it's
 anywhere else in the pipeline — and there are real such places. Cassini
 clients maintain a local, disk-backed retry queue (`QueueEntry::append`/
 `drain`, in `cassini-client`) for messages that could not be delivered
@@ -44,34 +44,222 @@ read this connection" — payload-level encryption is a second, independent
 layer of protection. The Credentials Agent is where a participant gets
 the public key it needs to apply that layer.
 
+## Source of truth: an event-sourced log, not the graph
+
+The Credentials Agent's actual record of truth is a local, append-only,
+hash-chained JSONL log — not Neo4j. Every grant, revocation, issuance
+request, and issuance outcome is written to this log in full: timestamped,
+containing the complete request body and (once known) its response, and
+a hash that incorporates the previous entry's hash. Tampering with any
+historical entry breaks every hash after it — the real property a
+blockchain would provide, obtained here without any of a blockchain's
+actual machinery (distributed consensus among mutually untrusted
+writers), which doesn't apply: there is exactly one trusted writer, the
+consumer itself.
+
+Only the consumer (the high-trust half) ever touches this log. It is
+never a distributed store and never intended to be — a single,
+`PersistentVolume`-backed file, mirroring how `cert-issuer`'s own CA
+material is already persisted today.
+
+**On startup, the consumer replays this log in full to rebuild its
+current state from scratch**, rather than trusting whatever Neo4j
+currently contains. This is the actual point of event sourcing here:
+Neo4j can be wrong, stale, or directly mutated out-of-band, and none of
+that can corrupt the real record, because the real record isn't in
+Neo4j at all.
+
+**Neo4j's role is reduced to a disposable, rebuildable projection** —
+the public surface needed for observability, and nothing more. If it's
+ever lost or corrupted, it's reconstructed by replaying the log again;
+it holds no information the log itself doesn't already contain in full.
+
+Durability: every write is `fsync`'d before the consumer acknowledges
+it. Issuance/grant/revocation events are low-frequency, not a hot path,
+so this costs nothing meaningful in practice, and an audit gap on a
+crash immediately after signing a certificate is not an acceptable
+tradeoff for the write-latency it would save.
+
+Growth: the log is allowed to simply grow, unbounded, for now. Replay
+time at startup grows with the log's entire lifetime history, and a
+future checkpoint/compaction mechanism is a real, known option if that
+ever becomes an actual problem — deliberately not built pre-emptively.
+
+**Grants are single-use.** A grant is consumed the moment it
+successfully authorizes an issuance — not by mutating or deleting the
+original grant event (an event-sourced log doesn't rewrite history),
+but as a fact derived from replay: a `Grant` event followed later by a
+successful `IssuanceCompleted` event referencing it means current state
+says *consumed*. A user needing a certificate again after that requires
+a fresh grant from an admin.
+
+## Cryptographic material: two separate keypairs
+
+The Credentials Agent holds two genuinely distinct keypairs, never one
+reused across both roles — reusing a single asymmetric keypair across
+two different cryptographic protocols (TLS authentication and
+general-purpose encryption) is a real smell in cryptographic
+engineering, even when nothing obviously breaks from doing so:
+
+- **Its own Polar mTLS client certificate**, obtained via the same
+  `cert-issuer` path every other agent uses — this is what lets it
+  connect to Cassini as a genuine, authenticated participant.
+- **A dedicated escrow keypair**, used only for the secret-escrow
+  mechanism below. Its public half is what other agents encrypt secrets
+  to; its private half never leaves the consumer.
+
+## Secret escrow
+
+The Credentials Agent's broader charter (an agent needing a published
+credential to reach an external resource — a repository access token,
+for example) means real, long-lived secret material can flow through
+this system, not just the human-issuance case's public artifacts (a
+CSR carries only a public key; a signed certificate is meant to be
+presented). If every event were logged with a plaintext payload, a
+future secret-distribution use case would put that secret in plaintext,
+permanently, in a file whose entire purpose is being replayed and read.
+
+The escrow model, worked out end to end:
+
+1. A participant holding a secret to hand off (Jira Agent holding a
+   Git token, for example) encrypts it directly to the Credentials
+   Agent's escrow public key *before* sending — using a type-safe Rust
+   construct, `EscrowedSecret`, wrapping ciphertext plus which key it's
+   encrypted to. The only way to construct one is through the function
+   that actually performs the encryption; there is no path from a plain
+   `String` to an `EscrowedSecret`, the same "make the unsafe state
+   unrepresentable" principle already used for `DynamicNodeKey`/
+   `BackendJobIdentity` in the graph library.
+2. What arrives at the Credentials Agent, and what the event log ever
+   contains, is always this one stable ciphertext form — encrypted to
+   the Credentials Agent's own escrow key, regardless of who eventually
+   requests it or how many times, or how far in the future.
+3. The Credentials Agent can always decrypt what it holds (it's its own
+   key) but has no reason to at rest — only transiently, at the exact
+   moment a specific, authorized consumer actually needs the secret:
+   decrypt with its own private key, immediately re-encrypt with that
+   consumer's public key, send, and destroy every intermediate
+   plaintext copy.
+4. That transient plaintext window is the one place real secret
+   material exists in memory at all, and it's treated as a hard
+   requirement, not "be careful": decrypted bytes are handled via
+   `zeroize`/`secrecy`-style wrapping, explicitly wiped the instant
+   re-encryption completes, rather than relying on Rust's ordinary
+   `Drop` (which guarantees deallocation, not zeroing beforehand).
+
+This is not homomorphic encryption — the Credentials Agent genuinely
+holds plaintext for a brief window on every relay. Short of adopting
+homomorphic encryption (a much larger, currently unwarranted undertaking),
+this is the strongest practical property available: no secret is ever
+at rest anywhere in this system, including this system's own audit log,
+except encrypted to a specific holder's own key.
+
+## Identity distribution
+
+Any participant encrypting a secret to the Credentials Agent, or
+verifying it's still talking to the Credentials Agent it originally
+agreed to trust, needs a reliable way to learn its current escrow
+public key. Cassini has no message retention (confirmed directly
+against `TopicManager::handle_subscribe_request` — subscribing only
+delivers messages published from that moment forward), so a subscriber
+joining after a one-time "publish key on startup" would receive
+nothing until a future key rotation, which may be arbitrarily far away
+or may never happen. Given how routinely agents restart in this system
+by design (forced rejuvenation is a core security mechanism, not a
+rare event), that would leave the overwhelming majority of agent
+startups with no reliable way to learn the current key at all.
+
+Rather than a periodic broadcast (which fights the grain of how this
+system already works — request/reply is the native idiom here, not
+speculative publishing), identity distribution is a request/reply pair,
+following exactly the protocol in
+`docs/architecture/cassini-request-reply-protocol.md`:
+
+- `credentials-agent-identity-requests` / `credentials-agent-identity-replies`.
+- **Internal agents** (already Cassini participants) query this
+  directly, any time they need it — at their own startup, or any time
+  they're uncertain — rather than waiting on a broadcast timer.
+- **The observer** proxies the same request/reply on behalf of external,
+  non-Cassini callers — the identical gateway pattern used for issuance
+  requests, just simpler: no CSR, no token, no trust decision to make,
+  since a public key is not a secret.
+- Once an agent receives its own certificate from the Credentials
+  Agent, the response includes the Credentials Agent's current escrow
+  public key automatically, as part of that same payload — no separate
+  round-trip needed for the common case of "I just started up and need
+  both."
+
+## Crate layout
+| credentials-agent/<br>
+-&nbsp;&nbsp;| common/ -- shared between observe and consume (message/event types)<br>
+&nbsp;&nbsp;&nbsp;| observe/ -- the low-trust HTTP gateway binary<br>
+&nbsp;&nbsp;&nbsp;| consume/ -- the high-trust binary (event log, graph projection, cert-issuer forwarding, escrow key custody)<br>
+&nbsp;&nbsp;&nbsp;| client/ -- what every other agent imports to talk to this one<br>
+
+`credentials-agent/client` is where the conveniences every future
+consumer of this agent needs actually live — `fetch_current_identity_key()`,
+`encrypt_for_recipient(...)`, and (eventually) `request_issuance(csr, token)`
+— so that no future agent reinvents correlation-ID bookkeeping or the
+escrow protocol independently.
+
+Two further extractions this introduces, worth naming explicitly since
+they're refactors of existing code, not purely new additions:
+
+- **The generic request/reply correlation-ID machinery itself is not
+  credentials-agent-specific** and does not live in `credentials-agent/client`
+  — it belongs in `lib`/`polar`, alongside the other genuinely
+  cross-cutting primitives already there (`graph`, `health`, `cassini`,
+  `events`), since `cassini-request-reply-protocol.md` is explicitly a
+  general pattern for any future agent needing synchronous-feeling
+  behavior over Cassini's pub/sub transport.
+- **Keypair generation and CSR building already exist, correctly, in
+  `cert-issuer/client`** — but `credentials-agent/client` now needs the
+  same capability for the human-issuance flow. Rather than have
+  `credentials-agent/client` depend on `cert-issuer/client` directly
+  (a backwards dependency direction, given the architecture's own goal
+  of `cert-issuer` becoming a narrowly-reachable, increasingly internal
+  service over time), this logic is extracted into a new, neutral
+  shared crate, `csr-utils`, that both `cert-issuer/client` and
+  `credentials-agent/client` depend on. `cert-issuer/client` itself is
+  refactored to use it too, rather than remaining the sole owner of
+  logic something else now also needs. `csr-utils` holds keypair
+  generation, CSR building, and a generic "attach a custom
+  attribute/hash to a CSR" primitive; the human-issuance flow's actual
+  decision to hash *the access token specifically* and bind it via
+  that primitive is flow-specific business logic, and stays in
+  `credentials-agent/client`.
+
 ## Architecture: observer and consumer
 
 Like every other Polar agent, the Credentials Agent has two halves with
 deliberately different trust levels.
 
-**Consumer (high-trust)**: owns the canonical, durable state. Subscribes
-to grant, revocation, and issuance events on Cassini and writes the
-authoritative record to the graph. Answers authenticated, high-trust
-questions — "what is currently granted to this identity" — only to
-callers who have already established their own trust (an mTLS-connected
-Polar participant), the same bar every other consumer-side interaction
-in this system already requires.
+**Consumer (high-trust)**: owns the actual state (the event log above)
+and the escrow private key. Subscribes to grant, revocation, and
+issuance events on Cassini, appends the authoritative record to the
+log, and projects the current, derived state into Neo4j for
+observability. Answers authenticated, high-trust questions — "what is
+currently granted to this identity" — only to callers who have already
+established their own trust (an mTLS-connected Polar participant), the
+same bar every other consumer-side interaction in this system already
+requires.
 
 **Observer (low-trust)**: the only part of this whole system that a
-humans own tooling ever talks to directly. Accepts external input —
-a users CSR-plus-token bundle, an external verifiers revocation-status
-query — and does the absolute minimum: basic well-formedness checking,
-then forwards. It never validates a token, never makes an authorization
-decision, never touches signing key material. That decision-making stays
-entirely on the high-trust side. This mirrors every other observer in
-Polar, whose job is to safely receive from an untrusted world without
+human's own tooling ever talks to directly. Accepts external input —
+a user's CSR-plus-token bundle, an external verifier's revocation-status
+query, an external caller's identity-key query — and does the absolute
+minimum: basic well-formedness checking, then forwards. It never
+validates a token, never makes an authorization decision, never touches
+signing key material or the escrow private key. That decision-making
+stays entirely on the high-trust side. This mirrors every other observer
+in Polar, whose job is to safely receive from an untrusted world without
 itself being trusted to decide anything — the only difference here is
-that this observers untrusted world is a human at a keyboard rather
+that this observer's untrusted world is a human at a keyboard rather
 than an external system like GitLab or Jira.
 
 Critically, this means `cert-issuer` — the one component that holds the
-CAs live signing key — is never directly reachable by user-facing
-requests at all. A humans tool talks to the Credentials Agents
+CA's live signing key — is never directly reachable by user-facing
+requests at all. A human's tool talks to the Credentials Agent's
 observer; everything else happens on the trusted side of the broker.
 
 ## Two independent lifecycles
@@ -79,13 +267,18 @@ observer; everything else happens on the trusted side of the broker.
 ### Admin bootstrap (one-time, per admin)
 
 An admin proves themselves once, using a credential that already exists
-independently of anything Polar-specific — for the bootstrap case, a
-`kubectl`-admin-backed Kubernetes credential, validated by `cert-issuer`
-via the exact same trust path already used for workload certs. In
-exchange, they receive an ordinary Polar client certificate — nothing
-more privileged than any other agent gets. That cert is what lets their
-own tooling connect to Cassini as a genuine, mTLS-authenticated
-participant afterward.
+independently of anything Polar-specific — a `kubectl`-admin-backed
+Kubernetes credential. This goes through the Credentials Agent's
+observer exactly like every other flow — there is no direct-to-`cert-issuer`
+carve-out for admin bootstrap; the observer already forwards either
+credential type (Kubernetes or IdP) blindly, and the trusted side
+validates whichever one arrives via the same multi-issuer `oidc.rs`
+logic already built for both. In exchange, the admin receives an
+ordinary Polar client certificate — nothing more privileged than any
+other agent gets, and no grant lookup is involved, since the Kubernetes
+credential itself is what authorizes this one exchange. That cert is
+what lets their own tooling connect to Cassini as a genuine,
+mTLS-authenticated participant afterward.
 
 This step exists because someone has to be first, with nothing else yet
 able to vouch for them. It is not part of the steady-state flow below,
@@ -93,22 +286,24 @@ and does not recur unless a new admin needs to be established.
 
 ### Admin grants and revocations (repeatable, ordinary agent traffic)
 
-Once bootstrapped, an admins ongoing actions are unremarkable Cassini
+Once bootstrapped, an admin's ongoing actions are unremarkable Cassini
 publishes, using their normal client cert:
 
 - **Grant**: `{ target_identity, permissions, granted_by, timestamp }`,
-  published to a credentials-grants topic. `target_identity` must be the
-  exact claim value the relevant `IssuerConfig.workload_identity_claim`
-  will later extract from that users real token — the admin confirms
-  this by querying the IdP directly for the accounts current value
-  before publishing, rather than guessing or reusing a stale value.
+  published to a `credentials-grants` topic. `target_identity` must be
+  the exact claim value the relevant `IssuerConfig.workload_identity_claim`
+  will later extract from that user's real token — the admin confirms
+  this by querying the IdP directly for the account's current value
+  before publishing, rather than guessing or reusing a stale value. A
+  grant is single-use — see "Source of truth," above.
 - **Revoke**: `{ serial, reason, revoked_by, timestamp }`, published to a
-  credentials-revocations topic, for either a human-issued or
+  `credentials-revocations` topic, for either a human-issued or
   workload-issued certificate — revocation is uniform across both, since
-  both are ultimately just certificates with serial numbers the
-  Credentials Agents consumer half has recorded.
+  both are ultimately just certificates with serial numbers already
+  recorded in the event log.
 
-The Credentials Agents consumer writes both as durable graph state.
+The Credentials Agent's consumer appends both to the event log and
+updates the Neo4j projection accordingly.
 
 ### User self-service issuance (steady state, fully automated)
 
@@ -117,67 +312,56 @@ requires no admin presence at the time it happens — only a prior grant,
 made independently, at any earlier point.
 
 1. The user authenticates against the IdP directly (Authorization Code
-   flow, unchanged from the original design) and receives a real access
-   token.
-2. Their tool generates a keypair locally — the private key never
-   leaves the machine — and builds a CSR. The CSR embeds a hash of the
-   raw token as a CSR attribute, cryptographically binding the two
-   artifacts together: a CSR generated in possession of one token cannot
-   later be silently paired with a different one.
-3. The tool sends the CSR-plus-token bundle to the Credentials Agents
+   flow) and receives a real access token.
+2. Their tool generates a keypair locally (via `csr-utils`) — the
+   private key never leaves the machine — and builds a CSR. The CSR
+   embeds a hash of the raw token as a custom attribute (via
+   `csr-utils`'s generic attribute-binding primitive), cryptographically
+   binding the two artifacts together: a CSR generated in possession of
+   one token cannot later be silently paired with a different one.
+3. The tool sends the CSR-plus-token bundle to the Credentials Agent's
    **observer** — not to `cert-issuer`, and not to the consumer side.
-4. The observer forwards it, unexamined beyond basic well-formedness,
-   onto the trusted side via Cassini.
-5. On the trusted side: the token is validated for real (the existing,
+   The observer acts as a synchronous-HTTP-to-async-Cassini gateway,
+   per `cassini-request-reply-protocol.md`: it holds the connection
+   open, generates a `correlation_id`, publishes to
+   `credentials-issuance-requests`, and subscribes to
+   `credentials-issuance-replies` filtering for that ID.
+4. On the trusted side: the token is validated for real (the existing,
    already-tested multi-issuer `oidc.rs` logic — signature, issuer,
    audience, expiry) and, since local signature validation alone cannot
    detect a session that was revoked or logged out server-side before
-   natural expiry, corroborated with a live call to the IdPs token
+   natural expiry, corroborated with a live call to the IdP's token
    introspection endpoint (RFC 7662). The Credentials Agent looks up
-   whatever grant exists for the now-validated identity, and checks that
-   no currently-valid certificate already exists for this exact
+   whatever grant exists for the now-validated identity, and checks
+   that no currently-valid certificate already exists for this exact
    `(identity, instance_binding)` pair (see "Pods cannot request their
    own renewal," below). `cert-issuer` combines identity (from the
    token, used unmodified) with permissions (from the grant) into the
-   certificates SAN set, and signs with its own key — no delegated
-   signing authority is needed for this path, since the admins earlier
-   grant is what authorizes the request, not the admins presence at
+   certificate's SAN set, and signs with its own key — no delegated
+   signing authority is needed for this path, since the admin's earlier
+   grant is what authorizes the request, not the admin's presence at
    request time.
+5. The reply — the signed certificate, or a refusal, tagged with the
+   original `correlation_id` — also includes the Credentials Agent's
+   current escrow public key, so the user's tool has it immediately
+   without a separate round-trip.
 6. The signed certificate is published back through Cassini, through
-   the Credentials Agent, and back to the users tool — the same
-   asynchronous path in reverse.
-7. The issuance itself is published as an event, the same shape whether
-   it came from this path or from a workloads `/issue` call, giving the
-   Credentials Agents consumer complete visibility into every
+   the Credentials Agent, and back to the user's tool — the same
+   asynchronous path in reverse. Per-attempt timeout and retry policy
+   (up to 3 attempts, 5-minute hard ceiling) follow
+   `cassini-request-reply-protocol.md` exactly.
+7. The issuance itself is appended to the event log — the same shape
+   whether it came from this path or from a workload's `/issue` call —
+   giving the Credentials Agent complete visibility into every
    certificate that has ever been issued, and therefore a complete,
    authoritative revocation list.
 
-## Request/reply over an inherently pub/sub transport
-
-Several of the interactions above — the users tool waiting for a signed
-certificate, `cert-issuer` waiting on a grant lookup — need to feel like
-a synchronous call, even though Cassinis actual client protocol
-(confirmed directly against `cassini-client`s source) offers no native
-request/reply primitive, only `send_message`.
-
-This is solved the same way any request/reply pattern is built on top of
-a pub/sub-only transport: by convention, not new broker capability. A
-requester generates a correlation ID, publishes a request carrying it,
-and either subscribes to a response topic or relies on the brokers
-existing per-session delivery (`registration_id`-addressed `PushMessage`
-delivery, already real and working in Cassini today) to receive a reply
-tagged with the same ID. The responder does the matching publish. No
-change to Cassini itself is required — this is a client-side
-convention, and one specific enough that it is worth formalizing as its
-own small, precise spec so any future agent needing the same shape of
-interaction can reuse it rather than reinvent it.
-
 ## Core services vs. everything else
 
-Two distinct populations exist for `polar-init`s purposes, driven by a
+Two distinct populations exist for `polar-init`'s purposes, driven by a
 new flag (not a new binary — `polar-init` stays entirely CLI/env-driven,
-consistent with its existing design) pointing it either at
-`cert-issuer` directly or at the Credentials Agents observer.
+consistent with its existing design) pointing it either at `cert-issuer`
+directly or at the Credentials Agent's observer.
 
 **Core services — Cassini and the Credentials Agent themselves —
 continue talking to `cert-issuer` directly.** This is not a convenience
@@ -186,13 +370,13 @@ Cassini being up and the Credentials Agent being a working participant
 on it. Cassini needs its own cert before any broker exists to relay a
 request through; the Credentials Agent needs its own cert before it can
 act as a Cassini participant at all — bootstrapping through its own
-observer would be circular. Every other services direct access today
+observer would be circular. Every other service's direct access today
 is incidental, not load-bearing, and can move to the relay path without
 issue.
 
-**Everything else talks only to the Credentials Agents observer.**
-The observer does not need to distinguish a humans IdP token from a
-workloads Kubernetes token to do this correctly — it forwards either
+**Everything else talks only to the Credentials Agent's observer.**
+The observer does not need to distinguish a human's IdP token from a
+workload's Kubernetes token to do this correctly — it forwards either
 kind blindly, exactly matching its "accept minimal input, decide
 nothing" role, and the trusted side validates either using the same
 multi-issuer `oidc.rs` machinery already built and tested for the human
@@ -207,7 +391,7 @@ certificate either, even with `cert-issuer` itself perfectly healthy.
 This is an extension of an already-accepted blast radius, not a new
 category of risk — a Cassini restart already cascades new certs and
 forced restarts across the whole fleet today, observed directly and
-repeatedly during this projects own development.
+repeatedly during this project's own development.
 
 ## Pods cannot request their own renewal
 
@@ -223,22 +407,22 @@ Today, this property holds only because the main agent binary happens
 not to contain renewal code — an omission, not an enforced rule.
 Nothing prevents it from being added later by accident, or by someone
 who does not know why it matters. The fix is to make this the
-**observers** responsibility, not a convention: the observer checks
-incoming requests against the Credentials Agents own issuance
-records, keyed on `(identity, instance_binding)` together, and refuses
-any request where that exact pair already holds a currently valid,
-unrevoked certificate.
+**observer's** responsibility, not a convention: the observer checks
+incoming requests against the Credentials Agent's own issuance records
+(derived from the event log), keyed on `(identity, instance_binding)`
+together, and refuses any request where that exact pair already holds
+a currently valid, unrevoked certificate.
 
 `instance_binding` is `IssuerConfig.instance_binding_claim`, present
 since v1 but previously unused beyond audit telemetry (for Kubernetes,
-the requesting pods own UID). Scoping the check to the pair, not
+the requesting pod's own UID). Scoping the check to the pair, not
 identity alone, is what makes this safe rather than disruptive:
 
 - **Rolling restart**: an old pod and a new pod briefly coexist during
   a normal Deployment update, both under the same ServiceAccount and
   therefore the same identity. Different UID, since it is a genuinely
-  new pod — the new pods first request is correctly allowed even
-  while the old pods cert is still valid.
+  new pod — the new pod's first request is correctly allowed even
+  while the old pod's cert is still valid.
 - **Health-check-triggered rejuvenation**: `restartPolicy: Never` plus
   the Job controller mean a `polar_health` deadline firing does not
   restart a container in place — it fails the pod outright, and the
@@ -253,10 +437,16 @@ identity alone, is what makes this safe rather than disruptive:
 - OCSP, as a live alternative or complement to a periodically-published
   CRL. The CRL is the simpler mechanism to get working first; OCSP is a
   documented, real future upgrade, not a rejected idea.
-- ~~The correlation-ID request/reply patterns own formal specification~~
-  — done: see `docs/architecture/cassini-request-reply-protocol.md`.
-  referenced here, written up separately.
-- Anything beyond the human-certificate use case for general credential
-  distribution (agent-to-agent public key exchange, published external
-  credentials) — the charter is stated here; the concrete mechanics are
-  future work.
+- Concrete flows for the broader credential-distribution charter beyond
+  human certificates (agent-to-agent public key exchange, published
+  external credentials like repository tokens) — the escrow mechanism
+  and event schema above are designed to support these without a
+  retrofit, but no concrete flow using them is built yet.
+- A checkpoint/compaction mechanism for the event log, if unbounded
+  growth ever becomes an actual, measured problem.
+
+## See also
+
+- `docs/architecture/cassini-request-reply-protocol.md` — the
+  correlation-ID request/reply mechanism used by both the issuance and
+  identity-distribution flows above.

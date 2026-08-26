@@ -5,7 +5,8 @@ sequenceDiagram
     participant GrantTool as polar-admin-grant<br/>(holds its own Polar cert --<br/>see admin_bootstrap_identity.mmd)
     participant Cassini as Cassini broker
     participant CredAgentCon as Credentials Agent<br/>(consumer -- high trust)
-    participant Graph as Neo4j
+    participant EventLog as Event log<br/>(hash-chained JSONL,<br/>PersistentVolume-backed --<br/>the actual record of truth)
+    participant Graph as Neo4j<br/>(rebuildable projection --<br/>observability only)
 
     Note over Admin,Graph: Phase 0 -- Admin provisions the user in the IdP<br/>(may already exist -- shown for completeness)
 
@@ -36,7 +37,11 @@ sequenceDiagram
     Cassini->>CredAgentCon: Deliver message
     deactivate Cassini
     activate CredAgentCon
-    CredAgentCon->>Graph: Write durable record<br/>(Grant node, or mark a<br/>Certificate node revoked)
+    CredAgentCon->>EventLog: Append event, fsync'd<br/>(hash includes previous entry's hash --<br/>this is the actual write- a grant is<br/>later consumed by a matching issuance,<br/>never mutated or deleted here)
+    activate EventLog
+    EventLog-->>CredAgentCon: Appended
+    deactivate EventLog
+    CredAgentCon->>Graph: Project derived state<br/>(Grant node, or mark a<br/>Certificate node revoked --<br/>rebuildable from the event log,<br/>never the source of truth)
     activate Graph
     Graph-->>CredAgentCon: Written
     deactivate Graph

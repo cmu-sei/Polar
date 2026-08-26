@@ -8,7 +8,9 @@ sequenceDiagram
     participant CredAgentCon as Credentials Agent<br/>(consumer -- high trust)
     participant CertIssuer as cert-issuer<br/>(never directly reachable<br/>by user-facing requests)
     participant CA as CA (in-process,<br/>part of cert-issuer)
-    participant Graph as Neo4j
+    participant EventLog as Event log<br/>(hash-chained JSONL,<br/>PersistentVolume-backed --<br/>the actual record of truth)
+    participant Graph as Neo4j<br/>(rebuildable projection --<br/>observability only)
+
     participant App as A Polar app<br/>(e.g. ACE)
 
     Note over User,Graph: Fully automated. No admin presence required at<br/>request time -- only a prior grant, made<br/>independently, at any earlier point.
@@ -49,7 +51,7 @@ sequenceDiagram
 
     CredAgentCon->>Graph: Look up any grant for this identity,<br/>and check whether this exact<br/>(identity, instance_binding) pair<br/>already holds a currently valid,<br/>unrevoked certificate
     activate Graph
-    Graph-->>CredAgentCon: Permissions (if granted) + renewal<br/>check result
+    Graph-->>CredAgentCon: Permissions (if granted) + renewal<br/>check result (queried from the<br/>projection -- a legitimate read,<br/>unlike the write path below)
     deactivate Graph
 
     alt No existing valid cert for this (identity, instance_binding)
@@ -62,7 +64,11 @@ sequenceDiagram
         deactivate CA
         CertIssuer-->>CredAgentCon: Signed certificate
         deactivate CertIssuer
-        CredAgentCon->>Graph: Write issuance-record node<br/>(provenance/audit trail --<br/>same pattern for every issuance,<br/>human- or workload-originated)
+        CredAgentCon->>EventLog: Append issuance-completed event,<br/>fsync'd (hash includes previous<br/>entry's hash -- the actual record-<br/>if this grant was used, it's<br/>consumed as of this event)
+        activate EventLog
+        EventLog-->>CredAgentCon: Appended
+        deactivate EventLog
+        CredAgentCon->>Graph: Project derived state<br/>(issuance-record node, provenance/<br/>audit trail -- rebuildable from<br/>the event log, never the source<br/>of truth)
         activate Graph
         Graph-->>CredAgentCon: Written
         deactivate Graph
@@ -71,7 +77,7 @@ sequenceDiagram
         Note over CredAgentCon: Refused. A pod cannot request its<br/>own renewal -- see "Pods cannot<br/>request their own renewal."
     end
 
-    CredAgentCon->>Cassini: Reply (signed cert, or refusal),<br/>tagged with the original correlation_id
+    CredAgentCon->>Cassini: Reply (signed cert, or refusal),<br/>tagged with the original correlation_id,<br/>including the Credentials Agent's<br/>current escrow public key
     deactivate CredAgentCon
     activate Cassini
     Cassini->>CredAgentObs: Deliver correlated reply
