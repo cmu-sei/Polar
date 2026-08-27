@@ -1269,6 +1269,7 @@ dependencies = [
  "polar",
  "ractor",
  "rkyv",
+ "tempfile",
  "tokio",
  "tracing",
 ]

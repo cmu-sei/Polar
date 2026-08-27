@@ -29,5 +29,6 @@ credentials_agent_common.workspace = true
 polar.workspace = true
 ractor.workspace = true
 rkyv.workspace = true
+tempfile.workspace = true
 tokio.workspace = true
 tracing.workspace = true

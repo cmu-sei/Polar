@@ -21,11 +21,9 @@
    DM24-0470
 */
 
-use crate::state::CredentialsState;
+use crate::ledger::{LedgerActor, LedgerActorArgs, LedgerMessage};
 use cassini_client::{TCPClientConfig, TcpClientActor, TcpClientArgs};
 use cassini_types::ClientEvent;
-use credentials_agent_common::events::CredentialsEvent;
-use polar::event_log::EventLog;
 use polar::graph::controller::{GraphController, GraphControllerActor, GraphControllerArgs, GraphSignal};
 use polar::health::{DepCertEndpoint, HealthCheckActor, HealthCheckArgs, HealthCheckMessage};
 use polar::{Supervisor, SupervisorMessage};
@@ -34,11 +32,12 @@ use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 
 const HEALTHCHECK_ACTOR_NAME: &str = "polar.credentials-agent.healthcheck";
+const LEDGER_ACTOR_NAME: &str = "polar.credentials-agent.ledger";
 const BROKER_CLIENT_NAME: &str = "CREDENTIALS_AGENT_CONSUMER_CLIENT";
 
-/// Path to the consumer's own event log -- the actual source of
-/// truth, per credentials-agent-architecture.md. Expected to live on
-/// a PersistentVolume, the same way cert-issuer's own CA material is
+/// Path to the ledger's own event log -- the actual source of truth,
+/// per credentials-agent-architecture.md. Expected to live on a
+/// PersistentVolume, the same way cert-issuer's own CA material is
 /// persisted, so "rebuild the log at startup" rebuilds from real
 /// history rather than from nothing on every pod restart.
 const CREDENTIALS_EVENT_LOG_PATH_ENV: &str = "CREDENTIALS_EVENT_LOG_PATH";
@@ -47,14 +46,11 @@ const CREDENTIALS_EVENT_LOG_PATH_DEFAULT: &str = "/var/lib/credentials-agent/eve
 pub struct ConsumerSupervisor;
 
 pub struct ConsumerSupervisorState {
-    /// The actual source of truth. Every Grant/Revoke/IssuanceCompleted
-    /// this supervisor ever handles gets appended here before
-    /// credentials_state (a purely derived, in-memory fold of this
-    /// same log) is ever updated to reflect it.
-    event_log: EventLog<CredentialsEvent>,
-    /// Rebuilt by replaying event_log in full at startup -- see
-    /// pre_start. Never itself persisted.
-    credentials_state: CredentialsState,
+    /// The single, serialized owner of the event log and derived
+    /// state -- see ledger.rs's own module doc for why this can't be
+    /// split across multiple actors the way jira/process's four data
+    /// streams safely are.
+    ledger: ActorRef<LedgerMessage>,
     graph_controller: Option<GraphController>,
     healthcheck: ActorRef<HealthCheckMessage>,
     draining: bool,
@@ -65,9 +61,9 @@ impl Supervisor for ConsumerSupervisor {
         // Real topic subscriptions (credentials-grants,
         // credentials-revocations, credentials-issuance-requests) are
         // the next increment -- this supervisor's startup sequence
-        // (event log replay, healthcheck, graph controller) is scoped
-        // and proven first, deliberately, before adding message
-        // handling on top of it.
+        // (ledger, healthcheck, graph controller) is scoped and
+        // proven first, deliberately, before adding message handling
+        // on top of it.
     }
 }
 
@@ -84,22 +80,17 @@ impl Actor for ConsumerSupervisor {
     ) -> Result<Self::State, ActorProcessingErr> {
         debug!("{myself:?} starting");
 
-        // Open and replay the event log before anything else -- this
-        // is the real source of truth; nothing else in this
-        // supervisor should be considered started until this has
-        // happened. A broken hash chain is a hard, fatal error here
-        // too, via EventLog::open's own error, propagated with '?'
-        // rather than caught and worked around.
         let log_path = std::env::var(CREDENTIALS_EVENT_LOG_PATH_ENV)
             .unwrap_or_else(|_| CREDENTIALS_EVENT_LOG_PATH_DEFAULT.to_string());
 
-        let (event_log, events) = EventLog::open(&log_path).map_err(|e| {
-            ActorProcessingErr::from(format!("Failed to open event log at {log_path}: {e}"))
-        })?;
-
-        let event_count = events.len();
-        let credentials_state = CredentialsState::from_events(&events);
-        info!("Replayed {event_count} event(s) from {log_path} into current state");
+        let (ledger, _) = LedgerActor::spawn_linked(
+            Some(LEDGER_ACTOR_NAME.to_string()),
+            LedgerActor,
+            LedgerActorArgs { log_path },
+            myself.get_cell(),
+        )
+        .await
+        .map_err(ActorProcessingErr::from)?;
 
         let prepare_shutdown_port = Arc::new(OutputPort::<()>::default());
         prepare_shutdown_port.subscribe(myself.clone(), |()| {
@@ -148,8 +139,7 @@ impl Actor for ConsumerSupervisor {
         .await?;
 
         Ok(ConsumerSupervisorState {
-            event_log,
-            credentials_state,
+            ledger,
             graph_controller: None,
             healthcheck,
             draining: false,
@@ -249,12 +239,16 @@ impl Actor for ConsumerSupervisor {
         &self,
         myself: ActorRef<Self::Msg>,
         message: SupervisionEvent,
-        state: &mut Self::State,
+        _state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
             SupervisionEvent::ActorTerminated(actor, _, reason) => {
-                if actor.get_name().as_deref() == Some(HEALTHCHECK_ACTOR_NAME) {
+                let name = actor.get_name();
+                if name.as_deref() == Some(HEALTHCHECK_ACTOR_NAME) {
                     info!("Healthcheck actor terminated ({reason:?}), exiting");
+                    myself.stop(None);
+                } else if name.as_deref() == Some(LEDGER_ACTOR_NAME) {
+                    error!("Ledger actor terminated ({reason:?}) -- exiting, since the ledger is this agent's actual source of truth and nothing else can safely continue without it");
                     myself.stop(None);
                 }
             }
@@ -264,7 +258,6 @@ impl Actor for ConsumerSupervisor {
             }
             _ => {}
         }
-        let _ = &state.credentials_state; // silence unused-field warning until topic handling lands
         Ok(())
     }
 }
