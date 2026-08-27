@@ -22,12 +22,15 @@
 */
 
 use crate::ledger::{LedgerActor, LedgerActorArgs, LedgerMessage};
-use cassini_client::{TCPClientConfig, TcpClientActor, TcpClientArgs};
-use cassini_types::ClientEvent;
+use cassini_client::{TcpClientMessage, TCPClientConfig, TcpClientActor, TcpClientArgs};
+use cassini_types::{ClientEvent,WireTraceCtx};
+use credentials_agent_common::{CREDENTIALS_GRANTS_TOPIC, CREDENTIALS_REVOCATIONS_TOPIC};
+use credentials_agent_common::events::CredentialsEvent;
 use polar::graph::controller::{GraphController, GraphControllerActor, GraphControllerArgs, GraphSignal};
 use polar::health::{DepCertEndpoint, HealthCheckActor, HealthCheckArgs, HealthCheckMessage};
 use polar::{Supervisor, SupervisorMessage};
 use ractor::{Actor, ActorProcessingErr, ActorRef, OutputPort, SupervisionEvent, async_trait};
+use ractor::registry::where_is;
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 
@@ -57,13 +60,26 @@ pub struct ConsumerSupervisorState {
 }
 
 impl Supervisor for ConsumerSupervisor {
-    fn deserialize_and_dispatch(_topic: String, _payload: Vec<u8>) {
-        // Real topic subscriptions (credentials-grants,
-        // credentials-revocations, credentials-issuance-requests) are
-        // the next increment -- this supervisor's startup sequence
-        // (ledger, healthcheck, graph controller) is scoped and
-        // proven first, deliberately, before adding message handling
-        // on top of it.
+    fn deserialize_and_dispatch(topic: String, payload: Vec<u8>) {
+        match rkyv::from_bytes::<CredentialsEvent, rkyv::rancor::Error>(&payload) {
+            Ok(event) => {
+                // Both credentials-grants and credentials-revocations
+                // carry the same CredentialsEvent type -- unlike
+                // jira/process's convention, topic name isn't used to
+                // select a different actor, since there's only ever
+                // one writer (LedgerActor) here at all.
+                if let Some(ledger) = where_is(LEDGER_ACTOR_NAME.to_string()) {
+                    if let Err(e) = ledger.send_message(LedgerMessage::AppendNoReply(event)) {
+                        warn!("Failed to forward event from topic {topic} to ledger: {e}");
+                    }
+                } else {
+                    warn!("Ledger actor not yet registered, dropping event from topic {topic}");
+                }
+            }
+            Err(e) => {
+                warn!("Failed to deserialize CredentialsEvent from topic {topic}: {e}");
+            }
+        }
     }
 }
 
@@ -228,7 +244,18 @@ impl Actor for ConsumerSupervisor {
                         let _ = state.healthcheck.cast(HealthCheckMessage::GraphConnected);
                     }
 
-                    // Real topic subscriptions are the next increment.
+                    if let Some(client) = where_is(BROKER_CLIENT_NAME.to_string()) {
+                        for topic in [CREDENTIALS_GRANTS_TOPIC, CREDENTIALS_REVOCATIONS_TOPIC] {
+                            if let Err(e) = client.send_message(TcpClientMessage::Subscribe {
+                                topic: topic.to_string(),
+                                trace_ctx: WireTraceCtx::from_current_span(),
+                            }) {
+                                error!("Failed to subscribe to {topic}: {e}");
+                            }
+                        }
+                    } else {
+                        error!("Broker client not found while attempting to subscribe");
+                    }
                 }
             }
         }
@@ -259,5 +286,96 @@ impl Actor for ConsumerSupervisor {
             _ => {}
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::GrantRecord;
+
+    async fn spawn_ledger_registered(log_path: &str) -> ActorRef<LedgerMessage> {
+        let (ledger, _) = Actor::spawn(
+            Some(LEDGER_ACTOR_NAME.to_string()),
+            LedgerActor,
+            LedgerActorArgs {
+                log_path: log_path.to_string(),
+            },
+        )
+        .await
+        .expect("ledger should spawn cleanly");
+        ledger
+    }
+
+    async fn check_grant(ledger: &ActorRef<LedgerMessage>, identity: &str) -> Option<GrantRecord> {
+        match ractor::rpc::call(
+            ledger,
+            |reply| LedgerMessage::CheckGrant {
+                identity: identity.to_string(),
+                reply,
+            },
+            None,
+        )
+        .await
+        .expect("call should succeed")
+        {
+            ractor::rpc::CallResult::Success(result) => result,
+            other => panic!("expected Success, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn deserialize_and_dispatch_forwards_a_real_event_to_the_real_ledger() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("events.jsonl");
+        let ledger = spawn_ledger_registered(path.to_str().unwrap()).await;
+
+        let event = CredentialsEvent::Grant {
+            target_identity: "alice".to_string(),
+            permissions: vec!["read".to_string()],
+            granted_by: "admin".to_string(),
+            timestamp: 1000,
+        };
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&event)
+            .unwrap()
+            .to_vec();
+
+        // The real function every incoming Cassini message actually
+        // goes through -- not a reimplementation of it.
+        ConsumerSupervisor::deserialize_and_dispatch(
+            CREDENTIALS_GRANTS_TOPIC.to_string(),
+            bytes,
+        );
+
+        // A subsequent call() to the same actor only returns after
+        // every prior message (including our dispatch above) has
+        // already been processed, by ractor's own sequential-mailbox
+        // guarantee -- no arbitrary sleep needed to synchronize.
+        let grant = check_grant(&ledger, "alice").await;
+        assert!(grant.is_some());
+        assert_eq!(grant.unwrap().granted_by, "admin");
+
+        ledger.stop(None);
+    }
+
+    #[tokio::test]
+    async fn deserialize_and_dispatch_handles_missing_ledger_gracefully() {
+        // No ledger registered at all -- must not panic, just log and
+        // drop, matching the documented behavior for this case.
+        let event = CredentialsEvent::Revoke {
+            serial: "abc123".to_string(),
+            reason: "compromised".to_string(),
+            revoked_by: "admin".to_string(),
+            timestamp: 1000,
+        };
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&event)
+            .unwrap()
+            .to_vec();
+
+        ConsumerSupervisor::deserialize_and_dispatch(
+            CREDENTIALS_REVOCATIONS_TOPIC.to_string(),
+            bytes,
+        );
+        // Reaching this line at all is the assertion -- no panic.
     }
 }

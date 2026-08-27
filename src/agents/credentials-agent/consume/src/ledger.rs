@@ -69,6 +69,13 @@ pub enum LedgerMessage {
         event: CredentialsEvent,
         reply: RpcReplyPort<Result<(), String>>,
     },
+    /// Fire-and-forget variant for callers with no synchronous reply
+    /// possible -- grant/revocation events arriving from Cassini via
+    /// deserialize_and_dispatch, a plain synchronous function that
+    /// can't await a ractor::rpc::call the way Append's callers can.
+    /// An append failure here is still logged loudly, just not
+    /// returned to any caller.
+    AppendNoReply(CredentialsEvent),
     /// The active grant for `identity`, if any.
     CheckGrant {
         identity: String,
@@ -130,6 +137,13 @@ impl Actor for LedgerActor {
                     Err(e) => Err(e.to_string()),
                 };
                 let _ = reply.send(result);
+            }
+            LedgerMessage::AppendNoReply(event) => {
+                if let Err(e) = state.event_log.append(&event) {
+                    tracing::error!("Failed to append event to ledger: {e}. Event: {event:?}");
+                } else {
+                    state.credentials_state.apply(&event);
+                }
             }
             LedgerMessage::CheckGrant { identity, reply } => {
                 let grant = state.credentials_state.grant_for(&identity).cloned();
