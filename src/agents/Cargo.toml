@@ -50,6 +50,7 @@ members = [
     "jira/common",
     "jira/process",
     "jira/observe",
+    "jwt-utils",
     "kubernetes/common",
     "kubernetes/consume",
     "kubernetes/observe",
@@ -184,6 +185,7 @@ gitlab-queries = { path = "gitlab/query" }
 gitlab-schema = { path = "gitlab/schema" }
 harness-common = { path = "cassini/test/common" }
 jira_common = { path = "jira/common" }
+jwt_utils = { path = "jwt-utils" }
 kube-common = { path = "kubernetes/common" }
 polar = { path = "lib" }
 polar-health = { path = "polar-health" }

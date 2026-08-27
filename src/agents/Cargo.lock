@@ -985,6 +985,7 @@ dependencies = [
  "chrono",
  "dashmap",
  "jsonwebtoken",
+ "jwt_utils",
  "polar",
  "rand 0.10.2",
  "rcgen",
@@ -3271,6 +3272,14 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+]
+
+[[package]]
+name = "jwt_utils"
+version = "1.0.0"
+dependencies = [
+ "base64 0.22.1",
+ "serde_json",
 ]
 
 [[package]]

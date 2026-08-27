@@ -795,14 +795,7 @@ fn peek_alg(token: &str) -> Option<String> {
 /// payload segment or an `iss` field at all; callers fall through to
 /// InvalidToken in that case.
 fn peek_iss(token: &str) -> Option<String> {
-    use base64::Engine;
-    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-
-    let payload_b64 = token.split('.').nth(1)?;
-    let payload_bytes = URL_SAFE_NO_PAD.decode(payload_b64).ok()?;
-    let payload_json: serde_json::Value = serde_json::from_slice(&payload_bytes).ok()?;
-    let iss = payload_json.get("iss")?.as_str()?;
-    Some(iss.to_string())
+    jwt_utils::peek_claim(token, "iss")
 }
 
 /// Whether a raw `alg` string from a JWT header refers to a
