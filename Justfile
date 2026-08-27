@@ -24,6 +24,27 @@ _taskfile := "/workspace/agent-task.json"
 default:
     @just --list
 
+# ── Helpers (private) ─────────────────────────────────────────────────────────
+
+# Load a docker-archive build result into the host podman.
+# No-ops when podman is unavailable (e.g. inside the dev container, where
+# podman-in-podman is explicitly not wanted and images reach the cluster via
+# `just cluster-load-*` instead), or when POLAR_SKIP_LOAD is set. This lets the
+# per-service build recipes run unchanged in both the dev container and on the
+# host — in the container they build only; on the host they also load.
+_load result:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ -n "${POLAR_SKIP_LOAD:-}" ]; then
+        echo "POLAR_SKIP_LOAD set — skipping podman load of {{result}}"
+        exit 0
+    fi
+    if ! command -v podman >/dev/null 2>&1; then
+        echo "podman not found — skipping load of {{result}} (build-only)"
+        exit 0
+    fi
+    podman load -i "{{result}}"
+
 # ── Agent containers ──────────────────────────────────────────────────────────
 
 # Build and load the agent container for your GPU type
@@ -43,7 +64,7 @@ agent-container gpu='rocm':
     esac
     echo "Building agent container ($target) for {{platform}}..."
     nix build {{_nix_flags}} ".#packages.{{platform}}.$target" -o result-agent-container
-    podman load -i result-agent-container
+    just _load result-agent-container
 
 # Build every package — binaries, all containers, TLS certs.
 # Use this to verify the full build after disruptive changes.
@@ -83,7 +104,7 @@ build-all:
 dev-container:
     echo "Building dev container ({{platform}})..."
     nix build {{_nix_flags}} ".#packages.{{platform}}.devContainer" -o result-dev-container
-    podman load -i result-dev-container
+    just _load result-dev-container
 
 # Build cert-issuer and cert-client images
 # Usage: just cert-issuer          (all)
@@ -98,11 +119,11 @@ cert-issuer target='all':
             nix build {{_nix_flags}} ".#polarPkgs.certIssuer.clientImage" -o result-cert-client
             nix build {{_nix_flags}} ".#polarPkgs.certIssuer.setupBin" -o result-cert-setup-bin
             nix build {{_nix_flags}} ".#packages.{{platform}}.certIssuerImage" -o result-cert-issuer-image
-            podman load -i result-cert-issuer-image
+            just _load result-cert-issuer-image
             ;;
         serverImage)
             nix build {{_nix_flags}} ".#packages.{{platform}}.certIssuerImage" -o result-cert-issuer
-            podman load -i result-cert-issuer
+            just _load result-cert-issuer
             ;;
         client)
             nix build {{_nix_flags}} ".#polarPkgs.certIssuer.clientImage" -o result-cert-client
@@ -127,21 +148,21 @@ cassini target='all':
             nix build {{_nix_flags}} "$base.cassiniImage"  -o result-cassini-image
             nix build {{_nix_flags}} "$base.producerImage" -o result-cassini-producer-image
             nix build {{_nix_flags}} "$base.sinkImage"     -o result-cassini-sink-image
-            podman load -i result-cassini-image
-            podman load -i result-cassini-producer-image
-            podman load -i result-cassini-sink-image
+            just _load result-cassini-image
+            just _load result-cassini-producer-image
+            just _load result-cassini-sink-image
             ;;
         server)
             nix build {{_nix_flags}} "$base.cassiniImage" -o result-cassini-image
-            podman load -i result-cassini-image
+            just _load result-cassini-image
             ;;
         producer)
             nix build {{_nix_flags}} "$base.producerImage" -o result-cassini-producer-image
-            podman load -i result-cassini-producer-image
+            just _load result-cassini-producer-image
             ;;
         sink)
             nix build {{_nix_flags}} "$base.sinkImage" -o result-cassini-sink-image
-            podman load -i result-cassini-sink-image
+            just _load result-cassini-sink-image
             ;;
         client)
             nix build {{_nix_flags}} "$base.clientBin" -o result-cassini-client
@@ -163,16 +184,16 @@ gitlab target='all':
         all)
             nix build {{_nix_flags}} "$base.observerImage" -o result-gitlab-observer
             nix build {{_nix_flags}} "$base.consumerImage" -o result-gitlab-consumer
-            podman load -i result-gitlab-observer
-            podman load -i result-gitlab-consumer
+            just _load result-gitlab-observer
+            just _load result-gitlab-consumer
             ;;
         observer)
             nix build {{_nix_flags}} "$base.observerImage" -o result-gitlab-observer
-            podman load -i result-gitlab-observer
+            just _load result-gitlab-observer
             ;;
         consumer)
             nix build {{_nix_flags}} "$base.consumerImage" -o result-gitlab-consumer
-            podman load -i result-gitlab-consumer
+            just _load result-gitlab-consumer
             ;;
         *) echo "Unknown target: {{target}}. Use all, observer, or consumer." && exit 1 ;;
     esac
@@ -191,16 +212,16 @@ kube target='all':
         all)
             nix build {{_nix_flags}} "$base.observerImage" -o result-kube-observer
             nix build {{_nix_flags}} "$base.consumerImage" -o result-kube-consumer
-            podman load -i result-kube-observer
-            podman load -i result-kube-consumer
+            just _load result-kube-observer
+            just _load result-kube-consumer
             ;;
         observer)
             nix build {{_nix_flags}} "$base.observerImage" -o result-kube-observer
-            podman load -i result-kube-observer
+            just _load result-kube-observer
             ;;
         consumer)
             nix build {{_nix_flags}} "$base.consumerImage" -o result-kube-consumer
-            podman load -i result-kube-consumer
+            just _load result-kube-consumer
             ;;
         *) echo "Unknown target: {{target}}. Use all, observer, or consumer." && exit 1 ;;
     esac
@@ -218,16 +239,16 @@ jira target='all':
         all)
             nix build {{_nix_flags}} "$base.observerImage" -o result-jira-observer
             nix build {{_nix_flags}} "$base.processorImage" -o result-jira-processor
-            podman load -i result-jira-observer
-            podman load -i result-jira-processor
+            just _load result-jira-observer
+            just _load result-jira-processor
             ;;
         observer)
             nix build {{_nix_flags}} "$base.observerImage" -o result-jira-observer
-            podman load -i result-jira-observer
+            just _load result-jira-observer
             ;;
         processor)
             nix build {{_nix_flags}} "$base.processorImage" -o result-jira-processor
-            podman load -i result-jira-processor
+            just _load result-jira-processor
             ;;
         *) echo "Unknown target: {{target}}. Use all, observer, or processor." && exit 1 ;;
     esac
@@ -350,16 +371,16 @@ git-agents target='all':
         all)
             nix build {{_nix_flags}} "$base.observerImage"  -o result-git-observer
             nix build {{_nix_flags}} "$base.processorImage" -o result-git-processor
-            podman load -i result-git-observer
-            podman load -i result-git-processor
+            just _load result-git-observer
+            just _load result-git-processor
             ;;
         observer)
             nix build {{_nix_flags}} "$base.observerImage" -o result-git-observer
-            podman load -i result-git-observer
+            just _load result-git-observer
             ;;
         processor)
             nix build {{_nix_flags}} "$base.processorImage" -o result-git-processor
-            podman load -i result-git-processor
+            just _load result-git-processor
             ;;
         *) echo "Unknown target: {{target}}. Use all, observer, processor, or scheduler." && exit 1 ;;
     esac
@@ -376,16 +397,16 @@ build-agents target='all':
         all)
             nix build {{_nix_flags}} ".#packages.{{platform}}.buildProcessorImage" -o result-build-processor
             nix build {{_nix_flags}} ".#packages.{{platform}}.polarPkgs.ociResolver.resolverImage" -o result-resolver
-            podman load -i result-build-processor
-            podman load -i result-resolver
+            just _load result-build-processor
+            just _load result-resolver
             ;;
         processor)
             nix build {{_nix_flags}} ".#packages.{{platform}}.buildProcessorImage" -o result-build-processor
-            podman load -i result-build-processor
+            just _load result-build-processor
             ;;
         resolver)
             nix build {{_nix_flags}} ".#packages.{{platform}}.polarPkgs.ociResolver.resolverImage" -o result-resolver
-            podman load -i result-resolver
+            just _load result-resolver
             ;;
         *) echo "Unknown target: {{target}}. Use all, processor, or resolver." && exit 1 ;;
     esac
@@ -404,16 +425,16 @@ openapi target='all':
         all)
             nix build {{_nix_flags}} "$base.observerImage"  -o result-openapi-observer
             nix build {{_nix_flags}} "$base.processorImage" -o result-openapi-processor
-            podman load -i result-openapi-observer
-            podman load -i result-openapi-processor
+            just _load result-openapi-observer
+            just _load result-openapi-processor
             ;;
         observer)
             nix build {{_nix_flags}} "$base.observerImage" -o result-openapi-observer
-            podman load -i result-openapi-observer
+            just _load result-openapi-observer
             ;;
         processor)
             nix build {{_nix_flags}} "$base.processorImage" -o result-openapi-processor
-            podman load -i result-openapi-processor
+            just _load result-openapi-processor
             ;;
         *) echo "Unknown target: {{target}}. Use all, observer, or processor." && exit 1 ;;
     esac
@@ -432,16 +453,16 @@ scheduler target='all':
         all)
             nix build {{_nix_flags}} "$base.processorImage" -o result-scheduler-processor
             nix build {{_nix_flags}} "$base.observerImage"  -o result-scheduler-observer
-            podman load -i result-scheduler-processor
-            podman load -i result-scheduler-observer
+            just _load result-scheduler-processor
+            just _load result-scheduler-observer
             ;;
         processor)
             nix build {{_nix_flags}} "$base.processorImage" -o result-scheduler-processor
-            podman load -i result-scheduler-processor
+            just _load result-scheduler-processor
             ;;
         observer)
             nix build {{_nix_flags}} "$base.observerImage" -o result-scheduler-observer
-            podman load -i result-scheduler-observer
+            just _load result-scheduler-observer
             ;;
         *) echo "Unknown target: {{target}}. Use all, processor, or observer." && exit 1 ;;
     esac
@@ -461,21 +482,21 @@ tls:
 nu-init:
     echo "Building nu-init container..."
     nix build {{_nix_flags}} ".#packages.{{platform}}.nuInitImage" -o result-nu-init
-    podman load -i result-nu-init
+    just _load result-nu-init
 
 polar-init:
     echo "Building polar-init container..."
     nix build {{_nix_flags}} ".#packages.{{platform}}.polarInitImage" -o result-polar-init
-    podman load -i result-polar-init
+    just _load result-polar-init
 
 ace:
     echo "Building ace container..."
     nix build {{_nix_flags}} ".#packages.{{platform}}.aceImage" -o result-ace
-    podman load -i result-ace
+    just _load result-ace
 
 git-server:
     nix build {{_nix_flags}} ".#packages.{{platform}}.gitServerImage" -o result-git-server-image
-    podman load -i result-git-server-image
+    just _load result-git-server-image
 
 # Update the nix-container-lib pin in container-lib.dhall and re-render all container.nix files.
 update-dhall-pins:

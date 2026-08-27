@@ -4,7 +4,6 @@ let
 
     craneLib = (crane.mkLib pkgs).overrideToolchain (p: p.rust-bin.nightly.latest.default.override {
         extensions = [ "rust-src" "rust-std" ];
-        targets = [ "x86_64-unknown-linux-gnu" ];
     });
 
     src = craneLib.cleanCargoSource ./.;
