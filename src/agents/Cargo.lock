@@ -1262,7 +1262,15 @@ dependencies = [
 name = "credentials-agent-consumer"
 version = "1.0.0"
 dependencies = [
+ "cassini-backoff",
+ "cassini-client",
+ "cassini-types",
  "credentials_agent_common",
+ "polar",
+ "ractor",
+ "rkyv",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
