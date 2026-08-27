@@ -1259,12 +1259,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "credentials-agent-consumer"
+version = "1.0.0"
+dependencies = [
+ "credentials_agent_common",
+]
+
+[[package]]
 name = "credentials_agent_common"
 version = "1.0.0"
 dependencies = [
  "rkyv",
  "serde",
  "serde_json",
+ "thiserror 1.0.69",
 ]
 
 [[package]]

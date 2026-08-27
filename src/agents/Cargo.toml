@@ -35,6 +35,7 @@ members = [
     "cassini/test/sink",
     "cassini/types",
     "credentials-agent/common",
+    "credentials-agent/consume",
     "git/common",
     "gitlab/common",
     "gitlab/consume",
@@ -177,6 +178,7 @@ cassini-client = { path = "cassini/client" }
 cassini-tracing = { path = "cassini/cassini-tracing" }
 cassini-types = { path = "cassini/types" }
 common = { path = "gitlab/common" }                         # gitlab common
+credentials_agent_common = { path = "credentials-agent/common" }
 git-agent-common = { path = "git/common" }
 gitlab-queries = { path = "gitlab/query" }
 gitlab-schema = { path = "gitlab/schema" }

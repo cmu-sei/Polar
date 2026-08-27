@@ -74,6 +74,26 @@ pub enum CredentialsEvent {
         revoked_by: String,
         timestamp: i64,
     },
+    /// Published internally by the consumer itself once a signed
+    /// certificate has actually been produced -- not published by any
+    /// external caller, unlike Grant/Revoke. Gives the Credentials
+    /// Agent complete visibility into every certificate ever issued
+    /// (the actual basis for a complete, authoritative CRL), and is
+    /// the fact the renewal-prevention check folds over: no request
+    /// may succeed for an `(identity, instance_binding)` pair that
+    /// already has a currently valid, unrevoked certificate on record.
+    ///
+    /// `permissions` deliberately isn't duplicated here -- the log is
+    /// fully replayable, so folding over history can always correlate
+    /// this event back to whichever `Grant` it consumed by
+    /// `identity`, making a second copy of the same data redundant
+    /// rather than genuinely useful.
+    IssuanceCompleted {
+        identity: String,
+        instance_binding: String,
+        serial: String,
+        timestamp: i64,
+    },
 }
 
 #[cfg(test)]
@@ -94,6 +114,15 @@ mod tests {
             serial: "abc123".to_string(),
             reason: "compromised".to_string(),
             revoked_by: "admin".to_string(),
+            timestamp: 1767225600000,
+        }
+    }
+
+    fn sample_issuance_completed() -> CredentialsEvent {
+        CredentialsEvent::IssuanceCompleted {
+            identity: "jdoe.polar.keycloak-issuer".to_string(),
+            instance_binding: "some-session-id".to_string(),
+            serial: "abc123".to_string(),
             timestamp: 1767225600000,
         }
     }
@@ -133,6 +162,25 @@ mod tests {
     #[test]
     fn revoke_round_trips_through_rkyv() {
         let original = sample_revoke();
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&original)
+            .unwrap()
+            .to_vec();
+        let restored: CredentialsEvent =
+            rkyv::from_bytes::<CredentialsEvent, rkyv::rancor::Error>(&bytes).unwrap();
+        assert_eq!(original, restored);
+    }
+
+    #[test]
+    fn issuance_completed_round_trips_through_serde_json() {
+        let original = sample_issuance_completed();
+        let json = serde_json::to_string(&original).unwrap();
+        let restored: CredentialsEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(original, restored);
+    }
+
+    #[test]
+    fn issuance_completed_round_trips_through_rkyv() {
+        let original = sample_issuance_completed();
         let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&original)
             .unwrap()
             .to_vec();

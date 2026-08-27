@@ -1,6 +1,7 @@
 pub mod cassini;
 pub mod events;
 pub mod graph;
+pub mod request_reply;
 pub mod time;
 pub mod event_log;
 pub mod topics;
