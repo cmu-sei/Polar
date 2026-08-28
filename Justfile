@@ -1077,6 +1077,7 @@ _neo4j_result := env_var('HOME') + "/Documents/projects/nix-neo4j/result-neo4j-i
 _registry_host := "localhost"
 _registry_port := "5000"
 _registry_gateway := "10.0.2.2"   # how u7s reaches the host registry (slirp4netns gateway)
+_cluster_runtime := "u7s"   # set to anything else (e.g. "none") if your cluster isn't u7s/podman-based -- skips the containerd image-cache cleanup below, which is u7s-specific and doesn't translate to other runtimes (kind, k3d, Docker Desktop Kubernetes, etc.)
 
 # Start a local OCI registry for image distribution. Works with any
 # Kubernetes cluster (u7s, kind, k3d, a real cluster) -- push here from
@@ -1118,7 +1119,9 @@ cluster-load-minimal neo4j_result=_neo4j_result: registry-up cluster-load-provis
         if [ -e "$1" ]; then
             echo "Pushing $1 -> {{_registry_host}}:{{_registry_port}}/$2"
             skopeo copy "docker-archive:$1" "docker://{{_registry_host}}:{{_registry_port}}/$2" --dest-tls-verify=false
-            podman exec u7s ctr -n k8s.io images rm "{{_registry_gateway}}:{{_registry_port}}/$2" > /dev/null 2>&1 || true
+            if [ "{{_cluster_runtime}}" = "u7s" ]; then
+                podman exec u7s ctr -n k8s.io images rm "{{_registry_gateway}}:{{_registry_port}}/$2" > /dev/null 2>&1 || true
+            fi
         else
             echo "Skipping $1 (not found)"
         fi
@@ -1151,7 +1154,9 @@ cluster-load-all neo4j_result=_neo4j_result: registry-up cluster-load-provisione
         if [ -e "$1" ]; then
             echo "Pushing $1 -> {{_registry_host}}:{{_registry_port}}/$2"
             skopeo copy "docker-archive:$1" "docker://{{_registry_host}}:{{_registry_port}}/$2" --dest-tls-verify=false
-            podman exec u7s ctr -n k8s.io images rm "{{_registry_gateway}}:{{_registry_port}}/$2" > /dev/null 2>&1 || true
+            if [ "{{_cluster_runtime}}" = "u7s" ]; then
+                podman exec u7s ctr -n k8s.io images rm "{{_registry_gateway}}:{{_registry_port}}/$2" > /dev/null 2>&1 || true
+            fi
         else
             echo "Skipping $1 (not found)"
         fi
@@ -1199,7 +1204,9 @@ cluster-load-cassini-harness: registry-up
         if [ -e "$1" ]; then
             echo "Pushing $1 -> {{_registry_host}}:{{_registry_port}}/$2"
             skopeo copy "docker-archive:$1" "docker://{{_registry_host}}:{{_registry_port}}/$2" --dest-tls-verify=false
-            podman exec u7s ctr -n k8s.io images rm "{{_registry_gateway}}:{{_registry_port}}/$2" > /dev/null 2>&1 || true
+            if [ "{{_cluster_runtime}}" = "u7s" ]; then
+                podman exec u7s ctr -n k8s.io images rm "{{_registry_gateway}}:{{_registry_port}}/$2" > /dev/null 2>&1 || true
+            fi
         else
             echo "Skipping $1 (not found)"
         fi
@@ -1223,7 +1230,9 @@ registry-load-jaeger: registry-up
         *) arch="$(uname -m)" ;;
     esac
     skopeo copy --override-os linux --override-arch "$arch" docker://cr.jaegertracing.io/jaegertracing/jaeger:2.13.0 "docker://{{_registry_host}}:{{_registry_port}}/jaeger:2.13.0" --dest-tls-verify=false
-    podman exec u7s ctr -n k8s.io images rm "{{_registry_gateway}}:{{_registry_port}}/jaeger:2.13.0" > /dev/null 2>&1 || true
+    if [ "{{_cluster_runtime}}" = "u7s" ]; then
+        podman exec u7s ctr -n k8s.io images rm "{{_registry_gateway}}:{{_registry_port}}/jaeger:2.13.0" > /dev/null 2>&1 || true
+    fi
     echo "jaeger:2.13.0 pushed to {{_registry_host}}:{{_registry_port}}."
 
 cluster-load-provisioner:
