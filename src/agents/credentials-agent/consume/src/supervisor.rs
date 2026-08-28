@@ -193,9 +193,16 @@ impl Actor for ConsumerSupervisor {
             // than silently proceeding unintrospected.
             introspection: IntrospectionClient::from_env().ok(),
             known_kubernetes_issuers: configured_kubernetes_issuers(),
-            escrow_keypair: std::sync::Arc::new(
-                crate::escrow::EscrowKeypair::generate().map_err(ActorProcessingErr::from)?,
-            ),
+            escrow_keypair: {
+                let escrow_key_path = std::env::var(crate::escrow::CREDENTIALS_ESCROW_KEY_PATH_ENV)
+                    .unwrap_or_else(|_| {
+                        crate::escrow::CREDENTIALS_ESCROW_KEY_PATH_DEFAULT.to_string()
+                    });
+                std::sync::Arc::new(
+                    crate::escrow::EscrowKeypair::load_or_generate(&escrow_key_path)
+                        .map_err(ActorProcessingErr::from)?,
+                )
+            },
         };
 
         let (issuance_actor, _) = IssuanceActor::spawn_linked(

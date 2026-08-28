@@ -21,19 +21,22 @@
    DM24-0470
 */
 
-//! A real, generated keypair -- no longer a mock. Generated once at
-//! consumer startup and held for the lifetime of the process.
+//! A real, persisted keypair -- generated once, ever, then loaded on
+//! every subsequent restart, matching cert-issuer's own
+//! load_or_bootstrap_ca pattern (check if the file exists, load if
+//! so, generate and persist if not). Without this, a fresh keypair
+//! generated on every restart would make anything encrypted to a
+//! prior process's key permanently unreadable the moment that process
+//! restarted -- the gap this file's own doc comment previously
+//! flagged as real, tracked follow-up work.
 //!
 //! Still genuinely incomplete relative to credentials-agent-architecture.md's
-//! full secret-escrow design: no persistence across restarts (a fresh
-//! keypair generates on every restart today, which is real, tracked
-//! follow-up work -- anything encrypted to a prior process's key
-//! becomes unreadable after a restart until real persistence lands),
-//! no rotation, no identity-distribution topic pair, and the private
-//! key is currently unused (nothing yet performs the decrypt/
-//! re-encrypt relay this key is ultimately for). Held anyway, rather
-//! than discarded, specifically so that work can reuse this same
-//! keypair instead of a second, wasted generation.
+//! full secret-escrow design: no rotation, no identity-distribution
+//! topic pair, and the private key is currently unused (nothing yet
+//! performs the decrypt/re-encrypt relay this key is ultimately for).
+//! Held anyway, rather than discarded, specifically so that work
+//! reuses this same persisted keypair instead of a second, wasted
+//! generation.
 //!
 //! Deliberately a separate keypair from this agent's own mTLS client
 //! certificate -- reusing one asymmetric keypair across two different
@@ -41,7 +44,36 @@
 //! even when nothing obviously breaks from doing so.
 
 use rsa::RsaPrivateKey;
-use rsa::pkcs8::LineEnding;
+use rsa::pkcs8::{DecodePrivateKey, EncodePrivateKey, LineEnding};
+
+pub const CREDENTIALS_ESCROW_KEY_PATH_ENV: &str = "CREDENTIALS_ESCROW_KEY_PATH";
+pub const CREDENTIALS_ESCROW_KEY_PATH_DEFAULT: &str = "/var/lib/credentials-agent/escrow-key.pem";
+
+#[derive(Debug, thiserror::Error)]
+pub enum EscrowKeypairError {
+    #[error("failed to generate escrow keypair: {0}")]
+    Generation(String),
+    #[error("failed to encode escrow key: {0}")]
+    Encoding(String),
+    #[error("failed to read existing escrow key at {path}: {source}")]
+    Read {
+        path: String,
+        source: std::io::Error,
+    },
+    #[error("failed to parse existing escrow key at {path}: {detail}")]
+    Parse { path: String, detail: String },
+    #[error("failed to write escrow key to {path}: {source}")]
+    Write {
+        path: String,
+        source: std::io::Error,
+    },
+    #[cfg(unix)]
+    #[error("failed to set escrow key file permissions at {path}: {source}")]
+    Permissions {
+        path: String,
+        source: std::io::Error,
+    },
+}
 
 pub struct EscrowKeypair {
     #[allow(dead_code)] // unused until the real decrypt/re-encrypt relay is built
@@ -50,21 +82,84 @@ pub struct EscrowKeypair {
 }
 
 impl EscrowKeypair {
-    pub fn generate() -> Result<Self, String> {
-        let mut rng = rsa::rand_core::OsRng;
-        let private_key = RsaPrivateKey::new(&mut rng, 2048)
-            .map_err(|e| format!("failed to generate escrow keypair: {e}"))?;
+    fn from_private_key(private_key: RsaPrivateKey) -> Result<Self, EscrowKeypairError> {
         let public_key = private_key.to_public_key();
-        let public_key_pem = rsa::pkcs8::EncodePublicKey::to_public_key_pem(
-            &public_key,
-            LineEnding::LF,
-        )
-        .map_err(|e| format!("failed to encode escrow public key: {e}"))?;
-
+        let public_key_pem =
+            rsa::pkcs8::EncodePublicKey::to_public_key_pem(&public_key, LineEnding::LF)
+                .map_err(|e| EscrowKeypairError::Encoding(e.to_string()))?;
         Ok(Self {
             private_key,
             public_key_pem,
         })
+    }
+
+    pub fn generate() -> Result<Self, EscrowKeypairError> {
+        let mut rng = rsa::rand_core::OsRng;
+        let private_key = RsaPrivateKey::new(&mut rng, 2048)
+            .map_err(|e| EscrowKeypairError::Generation(e.to_string()))?;
+        Self::from_private_key(private_key)
+    }
+
+    /// Loads a persisted keypair from `path` if it exists, or
+    /// generates a new one and persists it there if not.
+    pub fn load_or_generate(path: &str) -> Result<Self, EscrowKeypairError> {
+        if std::path::Path::new(path).exists() {
+            Self::load(path)
+        } else {
+            let keypair = Self::generate()?;
+            keypair.persist(path)?;
+            Ok(keypair)
+        }
+    }
+
+    fn load(path: &str) -> Result<Self, EscrowKeypairError> {
+        let pem = std::fs::read_to_string(path).map_err(|e| EscrowKeypairError::Read {
+            path: path.to_string(),
+            source: e,
+        })?;
+        let private_key =
+            RsaPrivateKey::from_pkcs8_pem(&pem).map_err(|e| EscrowKeypairError::Parse {
+                path: path.to_string(),
+                detail: e.to_string(),
+            })?;
+        Self::from_private_key(private_key)
+    }
+
+    fn persist(&self, path: &str) -> Result<(), EscrowKeypairError> {
+        if let Some(parent) = std::path::Path::new(path).parent() {
+            std::fs::create_dir_all(parent).map_err(|e| EscrowKeypairError::Write {
+                path: path.to_string(),
+                source: e,
+            })?;
+        }
+        let pem = self
+            .private_key
+            .to_pkcs8_pem(LineEnding::LF)
+            .map_err(|e| EscrowKeypairError::Encoding(e.to_string()))?;
+        std::fs::write(path, pem.as_bytes()).map_err(|e| EscrowKeypairError::Write {
+            path: path.to_string(),
+            source: e,
+        })?;
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(path)
+                .map_err(|e| EscrowKeypairError::Permissions {
+                    path: path.to_string(),
+                    source: e,
+                })?
+                .permissions();
+            perms.set_mode(0o600);
+            std::fs::set_permissions(path, perms).map_err(|e| {
+                EscrowKeypairError::Permissions {
+                    path: path.to_string(),
+                    source: e,
+                }
+            })?;
+        }
+
+        Ok(())
     }
 
     pub fn public_key_pem(&self) -> &str {
@@ -76,20 +171,6 @@ impl EscrowKeypair {
 pub(crate) mod tests {
     use super::*;
 
-    #[test]
-    fn generates_a_real_pem_encoded_public_key() {
-        let keypair = EscrowKeypair::generate().unwrap();
-        assert!(keypair.public_key_pem().starts_with("-----BEGIN PUBLIC KEY-----"));
-        assert!(keypair.public_key_pem().ends_with("-----END PUBLIC KEY-----\n"));
-    }
-
-    #[test]
-    fn two_generated_keypairs_are_genuinely_different() {
-        let a = EscrowKeypair::generate().unwrap();
-        let b = EscrowKeypair::generate().unwrap();
-        assert_ne!(a.public_key_pem(), b.public_key_pem());
-    }
-
     /// Cached across every test that needs *a* valid keypair but
     /// doesn't care about its specific value -- RSA generation is
     /// expensive (>100ms), matching cert-issuer's own established
@@ -100,5 +181,73 @@ pub(crate) mod tests {
         KEYPAIR
             .get_or_init(|| Arc::new(EscrowKeypair::generate().unwrap()))
             .clone()
+    }
+
+    #[test]
+    fn generates_a_real_pem_encoded_public_key() {
+        let keypair = EscrowKeypair::generate().unwrap();
+        assert!(
+            keypair
+                .public_key_pem()
+                .starts_with("-----BEGIN PUBLIC KEY-----")
+        );
+        assert!(keypair.public_key_pem().ends_with("-----END PUBLIC KEY-----\n"));
+    }
+
+    #[test]
+    fn two_generated_keypairs_are_genuinely_different() {
+        let a = EscrowKeypair::generate().unwrap();
+        let b = EscrowKeypair::generate().unwrap();
+        assert_ne!(a.public_key_pem(), b.public_key_pem());
+    }
+
+    #[test]
+    fn load_or_generate_persists_a_new_keypair_when_none_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("escrow-key.pem");
+        assert!(!path.exists());
+
+        let keypair = EscrowKeypair::load_or_generate(path.to_str().unwrap()).unwrap();
+
+        assert!(path.exists(), "a new keypair must be persisted to disk");
+        assert!(!keypair.public_key_pem().is_empty());
+    }
+
+    #[test]
+    fn load_or_generate_returns_the_same_key_on_a_second_call() {
+        // The real property this whole file exists for: a second
+        // "restart" against the same path must load the identical
+        // key, not generate a new, unrelated one.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("escrow-key.pem");
+
+        let first = EscrowKeypair::load_or_generate(path.to_str().unwrap()).unwrap();
+        let second = EscrowKeypair::load_or_generate(path.to_str().unwrap()).unwrap();
+
+        assert_eq!(first.public_key_pem(), second.public_key_pem());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn persisted_key_file_has_mode_0600() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("escrow-key.pem");
+        EscrowKeypair::load_or_generate(path.to_str().unwrap()).unwrap();
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "persisted escrow key must be mode 0600");
+    }
+
+    #[test]
+    fn load_or_generate_creates_missing_parent_directories() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nested").join("dirs").join("escrow-key.pem");
+        assert!(!path.parent().unwrap().exists());
+
+        EscrowKeypair::load_or_generate(path.to_str().unwrap()).unwrap();
+
+        assert!(path.exists());
     }
 }
