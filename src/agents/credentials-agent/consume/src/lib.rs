@@ -27,3 +27,4 @@ pub mod ledger;
 pub mod credential;
 pub mod introspection;
 pub mod escrow;
+pub mod issuance;

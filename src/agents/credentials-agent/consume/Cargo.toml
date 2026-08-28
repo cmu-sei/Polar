@@ -25,6 +25,8 @@ license.workspace = true
 cassini-backoff.workspace = true
 cassini-client.workspace = true
 cassini-types.workspace = true
+cert-client = { path = "../../cert-issuer/client" }
+cert-issuer-common = { path = "../../cert-issuer/common" }
 credentials_agent_common.workspace = true
 jwt_utils.workspace = true
 polar.workspace = true
@@ -40,4 +42,5 @@ tracing.workspace = true
 [dev-dependencies]
 base64.workspace = true
 serde_json.workspace = true
+time.workspace = true
 wiremock.workspace = true
