@@ -29,7 +29,7 @@ pub mod environment;
 pub mod facade;
 pub mod refused;
 
-use cassini_types::{ClientEvent, ClientMessage, ControlOp, WireTraceCtx};
+use cassini_types::{ClientEvent, ClientMessage, ControlOp, MAX_FRAME_BYTES, WireTraceCtx};
 use ractor::concurrency::{Duration, sleep};
 use ractor::{Actor, ActorProcessingErr, ActorRef, Message, OutputPort, RpcReplyPort, async_trait};
 use rkyv::rancor::Error;
@@ -632,6 +632,32 @@ impl TcpClientActor {
                     trace!("TCP client read loop iteration {}", msg_count);
                     match buf_reader.read_u32().await {
                         Ok(incoming_msg_length) => {
+                            if incoming_msg_length as usize > MAX_FRAME_BYTES {
+                                warn!(
+                                    len = incoming_msg_length,
+                                    max = MAX_FRAME_BYTES,
+                                    "Oversized frame from broker; reconnecting before allocating"
+                                );
+                                let reason = format!(
+                                    "frame length {incoming_msg_length} exceeds max {MAX_FRAME_BYTES} bytes"
+                                );
+                                TcpClientActor::dispatch_event(
+                                    &delivery,
+                                    ClientEvent::TransportError {
+                                        reason: reason.clone(),
+                                    },
+                                );
+                                match reconnect {
+                                    ReconnectMode::InPlace => {
+                                        let _ = myself.send_message(TcpClientMessage::Reconnect);
+                                    }
+                                    ReconnectMode::LeaveToSupervisor => {
+                                        myself.stop(Some(reason));
+                                    }
+                                }
+                                break;
+                            }
+
                             if incoming_msg_length > 0 {
                                 let mut buffer = vec![0; incoming_msg_length as usize];
 

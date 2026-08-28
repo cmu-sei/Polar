@@ -35,6 +35,12 @@ pub type SessionMap = HashMap<String, SessionDetails>;
 /// What a held subscriber hands over: each message it kept, with who published it.
 pub type HeldMessages = Vec<(std::sync::Arc<Vec<u8>>, Option<String>)>;
 
+/// The largest frame either end reads or writes: a hard cap on a frame's declared length, checked before it sizes an
+/// allocation. Without it, `read_u32` handed a value like `0xFFFFFFFF` turns directly into a ~4 GiB `vec![0u8; len]`.
+/// 64 MiB, decided 2026-10-30 (docs/architecture/cassini-backpressure.md, "Decided" 3): a connection's window is never
+/// below one frame, and a broker whose memory budget is below it refuses to start.
+pub const MAX_FRAME_BYTES: usize = 64 * 1024 * 1024;
+
 /// Our representation of a connected session, and how close it is to timing out
 /// TODO: Eventually, we might want to add metadata to the session struct to track additional information.
 /// Consider stuff like last_activity_time, last_message_received_time, etc.
