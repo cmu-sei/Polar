@@ -58,6 +58,20 @@ pub struct IssueResponse {
     pub expires_at: OffsetDateTime,
 }
 
+/// Successful response body for `POST /validate`. Distinct from
+/// `IssueResponse` -- exists specifically for credentials-agent's
+/// two-call issuance flow (validate first to get the real identity
+/// for a grant lookup, then issue separately once permitted SANs are
+/// known).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ValidateResponse {
+    /// The raw claim value -- not the normalized, DNS-safe identity
+    /// /issue's CSR-matching logic uses. Grants are keyed on this
+    /// exact raw value, per credentials-agent-architecture.md.
+    pub workload_identity: String,
+    pub instance_binding: Option<String>,
+}
+
 /// Error response body. Always returned on non-2xx responses.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct IssueError {

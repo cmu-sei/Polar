@@ -41,6 +41,7 @@ use crate::oidc::{ValidationError, Validator};
 use cert_issuer_common::{
     IssueError, IssueOutcome, IssueRequest, IssueResponse, identity::normalize_identity,
 };
+use cert_issuer_common::ValidateResponse;
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{error, instrument, warn};
@@ -66,15 +67,6 @@ pub struct HandlerResponse {
 pub enum HandlerBody {
     Success(IssueResponse),
     Error(IssueError),
-}
-
-#[derive(Debug, serde::Serialize)]
-pub struct ValidateResponse {
-    /// The raw claim value -- not the normalized, DNS-safe identity
-    /// /issue's CSR-matching logic uses. Grants are keyed on this
-    /// exact raw value, per credentials-agent-architecture.md.
-    pub workload_identity: String,
-    pub instance_binding: Option<String>,
 }
 
 #[derive(Debug)]
