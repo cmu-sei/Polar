@@ -37,6 +37,7 @@ members = [
     "credentials-agent/admin",
     "credentials-agent/common",
     "credentials-agent/consume",
+    "credentials-agent/fetcher",
     "credentials-agent/observe",
     "git/common",
     "gitlab/common",
