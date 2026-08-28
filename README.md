@@ -82,6 +82,30 @@ Once built, keep the container running (`podman stop`/`podman start`
 rather than `--rm`-ing it) so subsequent shells skip the rebuild
 entirely.
 
+**If your cluster tooling (`podman`, `skopeo`, and your Kubernetes
+distribution itself) lives on the host rather than inside the dev
+container** — common on a Mac, where the dev container only provides
+the Linux build environment — you'll need to get built images out of
+the container before `just cluster-load-all` can push them. `just
+cluster-build-all`'s `result-*` outputs are Nix store symlinks; they
+only resolve inside the container's own filesystem. Copying them with
+a plain `cp` copies the symlink itself, not the actual image data —
+`ls` will still show the file on the host side, but any tool that
+actually opens it (including `just cluster-load-all`'s own existence
+check) will report it as not found. Dereference on copy instead:
+
+```bash
+cp -L result-* /path/to/a/folder/the/host/can/see/
+```
+
+Then run `just cluster-load-all` from that folder, on the host.
+
+If your local cluster isn't `u7s` (nix-usernetes), set `_cluster_runtime`
+to anything other than `"u7s"` (e.g. `just _cluster_runtime=none
+cluster-load-all`) — the default cleanup step assumes `podman` +
+`containerd` specifically and doesn't apply to a different runtime
+(Docker Desktop's Kubernetes, kind, k3d, Colima, etc.).
+
 ### Build
 
 ```bash
