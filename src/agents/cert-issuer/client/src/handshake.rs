@@ -1,6 +1,6 @@
 // cert_issuer_init/src/handshake.rs
 
-use cert_issuer_common::{CertType, IssueError, IssueRequest, IssueResponse};
+use cert_issuer_common::{CertType, IssueError, IssueRequest, IssueResponse, ValidateResponse};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -88,25 +88,54 @@ impl HandshakeClient {
                 HandshakeError::Unreachable(e.to_string())
             })?;
 
-        let status = response.status();
-        let body_bytes = response
-            .bytes()
-            .await
-            .map_err(|e| HandshakeError::Malformed(format!("failed to read response body: {e}")))?;
+        parse_response(response).await
+    }
 
-        if status.is_success() {
-            serde_json::from_slice::<IssueResponse>(&body_bytes)
-                .map_err(|e| HandshakeError::Malformed(format!("invalid success body: {e}")))
-        } else {
-            // Non-2xx: attempt to deserialize as IssueError. If that
-            // fails, the response isn't from the cert issuer (proxy,
-            // load balancer, wrong endpoint) and Malformed is correct.
-            let issue_error = serde_json::from_slice::<IssueError>(&body_bytes).map_err(|e| {
-                HandshakeError::Malformed(format!(
-                    "non-2xx response ({status}) with unparseable body: {e}"
-                ))
-            })?;
-            Err(HandshakeError::Rejected(issue_error))
-        }
+    /// Execute the /validate handshake -- OIDC validation only, no
+    /// CSR, no signing. Built for credentials-agent's two-call
+    /// issuance flow: it needs the real, validated identity (for a
+    /// grant lookup and the renewal-prevention check) before it has
+    /// permitted SANs to embed into a CSR, since those come from a
+    /// grant that can't be looked up until identity is known.
+    pub async fn validate(&self, bearer_token: &str) -> Result<ValidateResponse, HandshakeError> {
+        let url = format!("{}/validate", self.base_url);
+
+        let response = self
+            .http
+            .post(&url)
+            .bearer_auth(bearer_token)
+            .send()
+            .await
+            .map_err(|e| HandshakeError::Unreachable(e.to_string()))?;
+
+        parse_response(response).await
+    }
+}
+
+/// Shared response-parsing tail for both `/issue` and `/validate`:
+/// a 2xx body deserializes as `T`, anything else deserializes as
+/// `IssueError` (both endpoints share the same error shape).
+async fn parse_response<T: serde::de::DeserializeOwned>(
+    response: reqwest::Response,
+) -> Result<T, HandshakeError> {
+    let status = response.status();
+    let body_bytes = response
+        .bytes()
+        .await
+        .map_err(|e| HandshakeError::Malformed(format!("failed to read response body: {e}")))?;
+
+    if status.is_success() {
+        serde_json::from_slice::<T>(&body_bytes)
+            .map_err(|e| HandshakeError::Malformed(format!("invalid success body: {e}")))
+    } else {
+        // Non-2xx: attempt to deserialize as IssueError. If that
+        // fails, the response isn't from the cert issuer (proxy,
+        // load balancer, wrong endpoint) and Malformed is correct.
+        let issue_error = serde_json::from_slice::<IssueError>(&body_bytes).map_err(|e| {
+            HandshakeError::Malformed(format!(
+                "non-2xx response ({status}) with unparseable body: {e}"
+            ))
+        })?;
+        Err(HandshakeError::Rejected(issue_error))
     }
 }

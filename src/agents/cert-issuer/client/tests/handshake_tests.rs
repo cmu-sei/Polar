@@ -10,7 +10,7 @@
 //! by looking at the pod's init container exit code.
 
 use cert_client::handshake::{HandshakeClient, HandshakeError};
-use cert_issuer_common::{CertType, IssueError, IssueOutcome, IssueResponse};
+use cert_issuer_common::{CertType, IssueError, IssueOutcome, IssueResponse, ValidateResponse};
 use time::OffsetDateTime;
 use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -385,4 +385,108 @@ async fn sends_extra_sans_in_request_body() {
         )
         .await
         .expect("must send extra_sans in request body");
+}
+
+// ---------------------------------------------------------------------------
+// /validate
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn validate_sends_bearer_token_in_authorization_header() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/validate"))
+        .and(header("authorization", "Bearer the-specific-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(
+            ValidateResponse {
+                workload_identity: "testuser".to_string(),
+                instance_binding: None,
+            },
+        ))
+        .mount(&server)
+        .await;
+
+    make_client(server.uri())
+        .validate("the-specific-token")
+        .await
+        .expect("must succeed when authorization header matches exactly");
+}
+
+#[tokio::test]
+async fn validate_successful_response_returns_workload_identity() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/validate"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(
+            ValidateResponse {
+                workload_identity: "testuser".to_string(),
+                instance_binding: Some("pod-uid-1".to_string()),
+            },
+        ))
+        .mount(&server)
+        .await;
+
+    let response = make_client(server.uri())
+        .validate("any-token")
+        .await
+        .expect("200 response must return Ok");
+
+    assert_eq!(response.workload_identity, "testuser");
+    assert_eq!(response.instance_binding.as_deref(), Some("pod-uid-1"));
+}
+
+#[tokio::test]
+async fn validate_invalid_token_rejection_maps_to_rejected_variant() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/validate"))
+        .respond_with(ResponseTemplate::new(401).set_body_json(IssueError {
+            outcome: IssueOutcome::InvalidToken,
+            detail: "token validation failed".to_string(),
+        }))
+        .mount(&server)
+        .await;
+
+    let err = make_client(server.uri())
+        .validate("bad-token")
+        .await
+        .expect_err("401 must be an error");
+
+    assert!(
+        matches!(err, HandshakeError::Rejected(ref e) if e.outcome == IssueOutcome::InvalidToken),
+        "expected Rejected(InvalidToken), got {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn validate_unreachable_server_maps_to_unreachable_variant() {
+    let err = make_client("127.0.0.1:1".into())
+        .validate("any-token")
+        .await
+        .expect_err("unreachable server must be an error");
+
+    assert!(
+        matches!(err, HandshakeError::Unreachable(_)),
+        "expected Unreachable, got {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn validate_malformed_success_body_maps_to_malformed_variant() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/validate"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("this is not json"))
+        .mount(&server)
+        .await;
+
+    let err = make_client(server.uri())
+        .validate("any-token")
+        .await
+        .expect_err("malformed body must be an error");
+
+    assert!(
+        matches!(err, HandshakeError::Malformed(_)),
+        "expected Malformed, got {err:?}"
+    );
 }

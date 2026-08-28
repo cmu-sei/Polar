@@ -964,6 +964,7 @@ dependencies = [
  "rcgen",
  "reqwest 0.12.28",
  "rsa",
+ "serde",
  "serde_json",
  "tempfile",
  "thiserror 1.0.69",
