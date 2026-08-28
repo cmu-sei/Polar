@@ -60,6 +60,21 @@ pub fn peek_claim(token: &str, claim_name: &str) -> Option<String> {
     Some(claim.to_string())
 }
 
+/// Reads a claim's raw numeric (integer) value from a JWT's payload,
+/// without any signature verification -- same trust caveat as
+/// `peek_claim`. A separate function rather than a generalization of
+/// `peek_claim` itself, since a JWT's standard numeric claims (`exp`,
+/// `iat`, `nbf`) are never strings, and forcing one function to
+/// interpret both shapes would either silently coerce (a real
+/// correctness risk) or push interpretation onto every caller, most
+/// of whom only ever need one shape or the other.
+pub fn peek_numeric_claim(token: &str, claim_name: &str) -> Option<i64> {
+    let payload_b64 = token.split('.').nth(1)?;
+    let payload_bytes = URL_SAFE_NO_PAD.decode(payload_b64).ok()?;
+    let payload_json: serde_json::Value = serde_json::from_slice(&payload_bytes).ok()?;
+    payload_json.get(claim_name)?.as_i64()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -100,5 +115,25 @@ mod tests {
     fn non_string_claim_returns_none() {
         let token = make_token(r#"{"iss": 12345}"#);
         assert_eq!(peek_claim(&token, "iss"), None);
+    }
+
+    #[test]
+    fn peeks_a_real_numeric_claim() {
+        let token = make_token(r#"{"exp":1767225600,"iss":"https://example.com"}"#);
+        assert_eq!(peek_numeric_claim(&token, "exp"), Some(1767225600));
+    }
+
+    #[test]
+    fn string_valued_claim_returns_none_for_numeric_peek() {
+        // A string-shaped claim genuinely isn't a number -- must not
+        // silently coerce or panic.
+        let token = make_token(r#"{"iss":"https://example.com"}"#);
+        assert_eq!(peek_numeric_claim(&token, "iss"), None);
+    }
+
+    #[test]
+    fn missing_numeric_claim_returns_none() {
+        let token = make_token(r#"{"iss":"https://example.com"}"#);
+        assert_eq!(peek_numeric_claim(&token, "exp"), None);
     }
 }

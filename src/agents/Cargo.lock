@@ -1288,6 +1288,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "credentials-agent-observer"
+version = "1.0.0"
+dependencies = [
+ "axum 0.7.9",
+ "base64 0.22.1",
+ "cassini-client",
+ "cassini-types",
+ "cert-issuer",
+ "chrono",
+ "credentials_agent_common",
+ "jwt_utils",
+ "polar",
+ "ractor",
+ "rcgen",
+ "rkyv",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "credentials_agent_common"
 version = "1.0.0"
 dependencies = [

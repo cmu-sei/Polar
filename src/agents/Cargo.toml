@@ -36,6 +36,7 @@ members = [
     "cassini/types",
     "credentials-agent/common",
     "credentials-agent/consume",
+    "credentials-agent/observe",
     "git/common",
     "gitlab/common",
     "gitlab/consume",
