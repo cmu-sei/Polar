@@ -6,7 +6,7 @@ use crate::{
 use async_trait::async_trait;
 use cassini_types::{
     ArchivedClientMessage, BrokerMessage, ClientMessage, ControlError, ControlOp, ControlResult,
-    DisconnectReason, ShutdownPhase, WireTraceCtx,
+    DisconnectReason, MAX_FRAME_BYTES, ShutdownPhase, WireTraceCtx,
 };
 use ractor::{
     Actor, ActorProcessingErr, ActorRef, SupervisionEvent, registry::where_is, rpc::CallResult,
@@ -173,7 +173,14 @@ impl Actor for ListenerManager {
                     let (stream, peer_addr) = match server.accept().await {
                         Ok(v) => v,
                         Err(e) => {
+                            // Some accept() failures (e.g. EMFILE/ENFILE when the
+                            // process is out of file descriptors) return
+                            // immediately rather than blocking. Without a
+                            // backoff, `continue` here spins this task at
+                            // 100% CPU on one core and floods the logs for as
+                            // long as the resource stays exhausted.
                             warn!(error = %e, "TCP accept failed");
+                            tokio::time::sleep(Duration::from_millis(100)).await;
                             continue;
                         }
                     };
@@ -672,6 +679,25 @@ impl Actor for Listener {
                         }
 
                         continue;
+                    }
+
+                    // guard against oversized, potentially insane message size
+                    if len > MAX_FRAME_BYTES {
+                        warn!(
+                            client_id = %client_id,
+                            len,
+                            max = MAX_FRAME_BYTES,
+                            "Oversized frame; disconnecting before allocating"
+                        );
+                        let _ = myself.send_message(BrokerMessage::DisconnectRequest {
+                            reason: DisconnectReason::TransportError(format!(
+                                "frame length {len} exceeds max {MAX_FRAME_BYTES} bytes"
+                            )),
+                            client_id: client_id.clone(),
+                            registration_id: None,
+                            trace_ctx: None,
+                        });
+                        return;
                     }
 
                     let mut buffer = vec![0u8; len];

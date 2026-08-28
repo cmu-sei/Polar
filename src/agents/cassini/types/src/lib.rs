@@ -8,6 +8,18 @@ pub use trace::WireTraceCtx;
 
 pub type SessionMap = HashMap<String, SessionDetails>;
 
+// Represents a hard cap on a single message frame's declared length, checked before it is used to
+// size an allocation. This bounds worst-case memory for one connection to
+// this many bytes no matter what a peer puts in the length prefix; without
+// it, `read_u32` handed a value like `0xFFFFFFFF` turns directly into a
+// ~4 GiB `vec![0u8; len]`.
+/* TODO: At the moment, 64 MiB is a placeholder —
+// we should figure out what a reasonable cap is given that various agents can pass
+// substantial amounts of information per-message.
+//
+*/
+pub const MAX_FRAME_BYTES: usize = 64 * 1024 * 1024;
+
 /// Our representation of a connected session, and how close it is to timing out
 /// TODO: Eventually, we might want to add metadata to the session struct to track additional information.
 /// Consider stuff like last_activity_time, last_message_received_time, etc.
