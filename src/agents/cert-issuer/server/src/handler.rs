@@ -68,6 +68,27 @@ pub enum HandlerBody {
     Error(IssueError),
 }
 
+#[derive(Debug, serde::Serialize)]
+pub struct ValidateResponse {
+    /// The raw claim value -- not the normalized, DNS-safe identity
+    /// /issue's CSR-matching logic uses. Grants are keyed on this
+    /// exact raw value, per credentials-agent-architecture.md.
+    pub workload_identity: String,
+    pub instance_binding: Option<String>,
+}
+
+#[derive(Debug)]
+pub enum ValidateHandlerBody {
+    Success(ValidateResponse),
+    Error(IssueError),
+}
+
+#[derive(Debug)]
+pub struct ValidateHandlerResponse {
+    pub status: u16,
+    pub body: ValidateHandlerBody,
+}
+
 impl Handler {
     /// Process an `/issue` request.
     #[instrument(skip(self))]
@@ -177,6 +198,36 @@ impl Handler {
                 ca_chain_pem: issued.ca_chain_pem,
                 session_id,
                 expires_at,
+            }),
+        }
+    }
+
+    /// Process a `/validate` request -- OIDC validation only, no CSR,
+    /// no signing. Exists specifically for credentials-agent's
+    /// two-call issuance flow: it needs the real, validated identity
+    /// (for a grant lookup and the renewal-prevention check) *before*
+    /// it has anything to embed into a CSR's SAN set, since permitted
+    /// SANs come from the grant, not known upfront.
+    #[instrument(skip(self))]
+    pub async fn handle_validate(&self, bearer_token: &str) -> ValidateHandlerResponse {
+        let claims = match self.validator.validate(bearer_token).await {
+            Ok(claims) => claims,
+            Err(e) => {
+                return ValidateHandlerResponse {
+                    status: status_for_outcome(map_validation_error(&e)),
+                    body: ValidateHandlerBody::Error(IssueError {
+                        outcome: map_validation_error(&e),
+                        detail: e.to_string(),
+                    }),
+                };
+            }
+        };
+
+        ValidateHandlerResponse {
+            status: 200,
+            body: ValidateHandlerBody::Success(ValidateResponse {
+                workload_identity: claims.workload_identity,
+                instance_binding: claims.instance_binding,
             }),
         }
     }

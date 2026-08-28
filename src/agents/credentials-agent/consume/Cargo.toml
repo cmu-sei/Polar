@@ -26,9 +26,14 @@ cassini-backoff.workspace = true
 cassini-client.workspace = true
 cassini-types.workspace = true
 credentials_agent_common.workspace = true
+jwt_utils.workspace = true
 polar.workspace = true
 ractor.workspace = true
 rkyv.workspace = true
 tempfile.workspace = true
+thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+
+[dev-dependencies]
+base64.workspace = true

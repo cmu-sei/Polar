@@ -19,7 +19,7 @@
 //! from a colocated orchestrator — without rewriting the
 //! validation logic.
 
-use crate::handler::{Handler, HandlerBody, HandlerResponse};
+use crate::handler::{Handler, HandlerBody, HandlerResponse, ValidateHandlerBody, ValidateHandlerResponse};
 use axum::Router;
 use axum::extract::{Json, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -38,6 +38,7 @@ use tracing::error;
 pub fn build_router(handler: Arc<Handler>) -> Router {
     Router::new()
         .route("/issue", post(issue))
+        .route("/validate", post(validate))
         .with_state(handler)
 }
 
@@ -73,6 +74,25 @@ async fn issue(
 
     let result = handler.handle(&bearer, request).await;
     handler_response_to_axum(result)
+}
+
+/// Handler for `POST /validate`.
+///
+/// OIDC validation only, no CSR, no signing -- exists specifically
+/// for credentials-agent's two-call issuance flow. Same header
+/// extraction as `/issue`; the only difference is there's no request
+/// body to parse at all, since there's no CSR involved yet at this
+/// point.
+async fn validate(State(handler): State<Arc<Handler>>, headers: HeaderMap) -> Response {
+    let bearer = match extract_bearer_token(&headers) {
+        Ok(t) => t,
+        Err(detail) => {
+            return reject(IssueOutcome::InvalidToken, detail);
+        }
+    };
+
+    let result = handler.handle_validate(&bearer).await;
+    validate_response_to_axum(result)
 }
 
 /// Extract the bearer token from the `Authorization: Bearer <token>`
@@ -125,6 +145,18 @@ fn handler_response_to_axum(resp: HandlerResponse) -> Response {
     match resp.body {
         HandlerBody::Success(success) => (status, Json(success)).into_response(),
         HandlerBody::Error(error) => (status, Json(error)).into_response(),
+    }
+}
+
+fn validate_response_to_axum(resp: ValidateHandlerResponse) -> Response {
+    let status = StatusCode::from_u16(resp.status).unwrap_or_else(|_| {
+        error!(status = resp.status, "handler produced invalid status");
+        StatusCode::INTERNAL_SERVER_ERROR
+    });
+
+    match resp.body {
+        ValidateHandlerBody::Success(success) => (status, Json(success)).into_response(),
+        ValidateHandlerBody::Error(error) => (status, Json(error)).into_response(),
     }
 }
 

@@ -1263,14 +1263,17 @@ dependencies = [
 name = "credentials-agent-consumer"
 version = "1.0.0"
 dependencies = [
+ "base64 0.22.1",
  "cassini-backoff",
  "cassini-client",
  "cassini-types",
  "credentials_agent_common",
+ "jwt_utils",
  "polar",
  "ractor",
  "rkyv",
  "tempfile",
+ "thiserror 1.0.69",
  "tokio",
  "tracing",
 ]
