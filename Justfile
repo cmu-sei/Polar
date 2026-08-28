@@ -1217,13 +1217,24 @@ cluster-load-cassini-harness: registry-up
 registry-load-jaeger: registry-up
     #!/usr/bin/env bash
     set -euo pipefail
-    skopeo copy docker://cr.jaegertracing.io/jaegertracing/jaeger:2.13.0 "docker://{{_registry_host}}:{{_registry_port}}/jaeger:2.13.0" --dest-tls-verify=false
+    case "$(uname -m)" in
+        x86_64) arch="amd64" ;;
+        aarch64|arm64) arch="arm64" ;;
+        *) arch="$(uname -m)" ;;
+    esac
+    skopeo copy --override-os linux --override-arch "$arch" docker://cr.jaegertracing.io/jaegertracing/jaeger:2.13.0 "docker://{{_registry_host}}:{{_registry_port}}/jaeger:2.13.0" --dest-tls-verify=false
     podman exec u7s ctr -n k8s.io images rm "{{_registry_gateway}}:{{_registry_port}}/jaeger:2.13.0" > /dev/null 2>&1 || true
     echo "jaeger:2.13.0 pushed to {{_registry_host}}:{{_registry_port}}."
+
 cluster-load-provisioner:
     #!/usr/bin/env bash
     set -euo pipefail
+    case "$(uname -m)" in
+        x86_64) arch="amd64" ;;
+        aarch64|arm64) arch="arm64" ;;
+        *) arch="$(uname -m)" ;;
+    esac
     img="docker.io/rancher/local-path-provisioner:v0.0.35"
     echo "Pushing $img -> {{_registry_host}}:{{_registry_port}}/local-path-provisioner:v0.0.35"
-    skopeo copy "docker://$img" "docker://{{_registry_host}}:{{_registry_port}}/local-path-provisioner:v0.0.35" --dest-tls-verify=false
-    skopeo copy "docker://docker.io/library/busybox:latest" "docker://{{_registry_host}}:{{_registry_port}}/busybox:latest" --dest-tls-verify=false
+    skopeo copy --override-os linux --override-arch "$arch" "docker://$img" "docker://{{_registry_host}}:{{_registry_port}}/local-path-provisioner:v0.0.35" --dest-tls-verify=false
+    skopeo copy --override-os linux --override-arch "$arch" "docker://docker.io/library/busybox:latest" "docker://{{_registry_host}}:{{_registry_port}}/busybox:latest" --dest-tls-verify=false
