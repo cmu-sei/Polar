@@ -1,6 +1,8 @@
 // cert_issuer_init/src/handshake.rs
 
-use cert_issuer_common::{CertType, IssueError, IssueRequest, IssueResponse, ValidateResponse};
+use cert_issuer_common::{
+    CertType, IssueError, IssueRequest, IssueResponse, ValidateRequest, ValidateResponse,
+};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -97,13 +99,18 @@ impl HandshakeClient {
     /// grant lookup and the renewal-prevention check) before it has
     /// permitted SANs to embed into a CSR, since those come from a
     /// grant that can't be looked up until identity is known.
-    pub async fn validate(&self, bearer_token: &str) -> Result<ValidateResponse, HandshakeError> {
+    pub async fn validate(
+        &self,
+        bearer_token: &str,
+        request: ValidateRequest,
+    ) -> Result<ValidateResponse, HandshakeError> {
         let url = format!("{}/validate", self.base_url);
 
         let response = self
             .http
             .post(&url)
             .bearer_auth(bearer_token)
+            .json(&request)
             .send()
             .await
             .map_err(|e| HandshakeError::Unreachable(e.to_string()))?;

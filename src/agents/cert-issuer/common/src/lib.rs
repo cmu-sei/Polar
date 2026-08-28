@@ -75,6 +75,26 @@ pub struct ValidateResponse {
     /// exact raw value, per credentials-agent-architecture.md.
     pub workload_identity: String,
     pub instance_binding: Option<String>,
+    /// The normalized, DNS-safe identity /issue's CSR-matching logic
+    /// will actually check against -- computed via the same
+    /// normalize_identity call /issue itself uses, so a client
+    /// building a CSR from this value is guaranteed to match, never a
+    /// second, independent computation that could drift. Only
+    /// populated when the request explicitly asks for it via
+    /// ValidateRequest::include_normalized_identity -- never returned
+    /// unrequested, since most callers of this endpoint (the
+    /// issuance flow's own internal /validate call) have no use for
+    /// it at all.
+    pub normalized_identity: Option<String>,
+}
+
+/// Request body for `POST /validate`. Previously took no body at all
+/// (just the bearer token via the Authorization header) -- this is
+/// the first real parameter it's ever had.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ValidateRequest {
+    #[serde(default)]
+    pub include_normalized_identity: bool,
 }
 
 /// Error response body. Always returned on non-2xx responses.

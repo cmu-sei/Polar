@@ -535,6 +535,7 @@ mod issuance_wiring_tests {
                 cert_issuer_common::ValidateResponse {
                     workload_identity: "system:serviceaccount:polar:admin-tool".to_string(),
                     instance_binding: Some("admin-tool-uid".to_string()),
+                    normalized_identity: None,
                 },
             ))
             .mount(&cert_issuer)

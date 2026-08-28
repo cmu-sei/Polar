@@ -10,7 +10,9 @@
 //! by looking at the pod's init container exit code.
 
 use cert_client::handshake::{HandshakeClient, HandshakeError};
-use cert_issuer_common::{CertType, IssueError, IssueOutcome, IssueResponse, ValidateResponse};
+use cert_issuer_common::{
+    CertType, IssueError, IssueOutcome, IssueResponse, ValidateRequest, ValidateResponse,
+};
 use time::OffsetDateTime;
 use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -402,13 +404,14 @@ async fn validate_sends_bearer_token_in_authorization_header() {
             ValidateResponse {
                 workload_identity: "testuser".to_string(),
                 instance_binding: None,
+                normalized_identity: None,
             },
         ))
         .mount(&server)
         .await;
 
     make_client(server.uri())
-        .validate("the-specific-token")
+        .validate("the-specific-token", ValidateRequest::default())
         .await
         .expect("must succeed when authorization header matches exactly");
 }
@@ -422,13 +425,14 @@ async fn validate_successful_response_returns_workload_identity() {
             ValidateResponse {
                 workload_identity: "testuser".to_string(),
                 instance_binding: Some("pod-uid-1".to_string()),
+                normalized_identity: None,
             },
         ))
         .mount(&server)
         .await;
 
     let response = make_client(server.uri())
-        .validate("any-token")
+        .validate("any-token", ValidateRequest::default())
         .await
         .expect("200 response must return Ok");
 
@@ -449,7 +453,7 @@ async fn validate_invalid_token_rejection_maps_to_rejected_variant() {
         .await;
 
     let err = make_client(server.uri())
-        .validate("bad-token")
+        .validate("bad-token", ValidateRequest::default())
         .await
         .expect_err("401 must be an error");
 
@@ -462,7 +466,7 @@ async fn validate_invalid_token_rejection_maps_to_rejected_variant() {
 #[tokio::test]
 async fn validate_unreachable_server_maps_to_unreachable_variant() {
     let err = make_client("127.0.0.1:1".into())
-        .validate("any-token")
+        .validate("any-token", ValidateRequest::default())
         .await
         .expect_err("unreachable server must be an error");
 
@@ -482,7 +486,7 @@ async fn validate_malformed_success_body_maps_to_malformed_variant() {
         .await;
 
     let err = make_client(server.uri())
-        .validate("any-token")
+        .validate("any-token", ValidateRequest::default())
         .await
         .expect_err("malformed body must be an error");
 

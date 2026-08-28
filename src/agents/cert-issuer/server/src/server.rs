@@ -83,7 +83,11 @@ async fn issue(
 /// extraction as `/issue`; the only difference is there's no request
 /// body to parse at all, since there's no CSR involved yet at this
 /// point.
-async fn validate(State(handler): State<Arc<Handler>>, headers: HeaderMap) -> Response {
+async fn validate(
+    State(handler): State<Arc<Handler>>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
     let bearer = match extract_bearer_token(&headers) {
         Ok(t) => t,
         Err(detail) => {
@@ -91,7 +95,31 @@ async fn validate(State(handler): State<Arc<Handler>>, headers: HeaderMap) -> Re
         }
     };
 
-    let result = handler.handle_validate(&bearer).await;
+    // Body is genuinely optional -- existing callers (the issuance
+    // flow's own internal /validate call) send none at all, and must
+    // keep working unchanged. An empty body defaults to
+    // ValidateRequest::default() (include_normalized_identity: false),
+    // a non-empty body must still parse as valid JSON.
+    let request = if body.is_empty() {
+        cert_issuer_common::ValidateRequest::default()
+    } else {
+        match serde_json::from_slice(&body) {
+            Ok(r) => r,
+            Err(e) => {
+                let status = StatusCode::from_u16(crate::handler::status_for_outcome(
+                    IssueOutcome::InvalidCsr,
+                ))
+                .unwrap_or(StatusCode::BAD_REQUEST);
+                let body = IssueError {
+                    outcome: IssueOutcome::InvalidCsr,
+                    detail: format!("malformed request body: {e}"),
+                };
+                return (status, Json(body)).into_response();
+            }
+        }
+    };
+
+    let result = handler.handle_validate(&bearer, request).await;
     validate_response_to_axum(result)
 }
 

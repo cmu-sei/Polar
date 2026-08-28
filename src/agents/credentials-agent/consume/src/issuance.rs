@@ -97,7 +97,11 @@ impl IssuanceHandler {
         }
 
         // ---- Step 3: real validation via cert-issuer's /validate ----
-        let validated = match self.cert_issuer.validate(&request.credential).await {
+        let validated = match self
+            .cert_issuer
+            .validate(&request.credential, cert_issuer_common::ValidateRequest::default())
+            .await
+        {
             Ok(v) => v,
             Err(e) => {
                 warn!("cert-issuer /validate rejected the credential: {e}");
@@ -318,6 +322,7 @@ mod tests {
                 cert_issuer_common::ValidateResponse {
                     workload_identity: "system:serviceaccount:polar:admin-tool".to_string(),
                     instance_binding: Some("admin-tool-uid".to_string()),
+                    normalized_identity: None,
                 },
             ))
             .mount(&server)
@@ -362,6 +367,7 @@ mod tests {
                 cert_issuer_common::ValidateResponse {
                     workload_identity: "testuser".to_string(),
                     instance_binding: Some("session-1".to_string()),
+                    normalized_identity: None,
                 },
             ))
             .mount(&server)
@@ -431,6 +437,7 @@ mod tests {
                 cert_issuer_common::ValidateResponse {
                     workload_identity: "nobody-granted-this-user".to_string(),
                     instance_binding: Some("session-1".to_string()),
+                    normalized_identity: None,
                 },
             ))
             .mount(&server)
@@ -472,6 +479,7 @@ mod tests {
                 cert_issuer_common::ValidateResponse {
                     workload_identity: "system:serviceaccount:polar:admin-tool".to_string(),
                     instance_binding: Some("admin-tool-uid".to_string()),
+                    normalized_identity: None,
                 },
             ))
             .mount(&server)

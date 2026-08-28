@@ -65,7 +65,9 @@ async fn valid_token_returns_raw_workload_identity_and_instance_binding() {
     let handler = test_handler();
     let token = mint_default_token();
 
-    let result = handler.handle_validate(&token).await;
+    let result = handler
+        .handle_validate(&token, cert_issuer_common::ValidateRequest::default())
+        .await;
 
     assert_eq!(result.status, 200);
     match result.body {
@@ -91,7 +93,9 @@ async fn invalid_token_is_rejected_with_the_correct_outcome() {
     let handler = test_handler();
     let token = mint_hs256_token();
 
-    let result = handler.handle_validate(&token).await;
+    let result = handler
+        .handle_validate(&token, cert_issuer_common::ValidateRequest::default())
+        .await;
 
     assert_eq!(result.status, 401);
     match result.body {
@@ -116,11 +120,61 @@ async fn missing_instance_binding_is_none_not_an_error() {
         }),
     );
 
-    let result = handler.handle_validate(&token).await;
+    let result = handler
+        .handle_validate(&token, cert_issuer_common::ValidateRequest::default())
+        .await;
 
     match result.body {
         ValidateHandlerBody::Success(response) => {
             assert_eq!(response.instance_binding, None);
+        }
+        ValidateHandlerBody::Error(e) => panic!("expected success, got {e:?}"),
+    }
+}
+
+#[tokio::test]
+async fn normalized_identity_is_none_when_not_requested() {
+    let handler = test_handler();
+    let token = mint_default_token();
+
+    let result = handler
+        .handle_validate(&token, cert_issuer_common::ValidateRequest::default())
+        .await;
+
+    match result.body {
+        ValidateHandlerBody::Success(response) => {
+            assert_eq!(response.normalized_identity, None);
+        }
+        ValidateHandlerBody::Error(e) => panic!("expected success, got {e:?}"),
+    }
+}
+
+#[tokio::test]
+async fn normalized_identity_is_included_and_genuinely_normalized_when_requested() {
+    let handler = test_handler();
+    let token = mint_default_token();
+
+    let result = handler
+        .handle_validate(
+            &token,
+            cert_issuer_common::ValidateRequest {
+                include_normalized_identity: true,
+            },
+        )
+        .await;
+
+    match result.body {
+        ValidateHandlerBody::Success(response) => {
+            let normalized = response
+                .normalized_identity
+                .expect("normalized_identity must be Some when requested");
+            assert!(!normalized.is_empty());
+            // Genuine normalization happened, not just a copy of the
+            // raw claim -- KubernetesServiceAccount normalization
+            // reshapes "system:serviceaccount:polar:git-observer"
+            // into a DNS-safe SAN, which is necessarily a different
+            // string.
+            assert_ne!(normalized, response.workload_identity);
         }
         ValidateHandlerBody::Error(e) => panic!("expected success, got {e:?}"),
     }

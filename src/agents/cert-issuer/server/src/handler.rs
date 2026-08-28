@@ -39,7 +39,7 @@ use crate::ca::{CaClient, CaError, CaIssueRequest};
 use crate::csr;
 use crate::oidc::{ValidationError, Validator};
 use cert_issuer_common::{
-    IssueError, IssueOutcome, IssueRequest, IssueResponse, identity::normalize_identity,
+    IssueError, IssueOutcome, IssueRequest, IssueResponse, identity::normalize_identity, ValidateRequest,
 };
 use cert_issuer_common::ValidateResponse;
 use std::sync::Arc;
@@ -202,7 +202,11 @@ impl Handler {
     /// it has anything to embed into a CSR's SAN set, since permitted
     /// SANs come from the grant, not known upfront.
     #[instrument(skip(self))]
-    pub async fn handle_validate(&self, bearer_token: &str) -> ValidateHandlerResponse {
+        pub async fn handle_validate(
+        &self,
+        bearer_token: &str,
+        request: ValidateRequest,
+    ) -> ValidateHandlerResponse {
         let claims = match self.validator.validate(bearer_token).await {
             Ok(claims) => claims,
             Err(e) => {
@@ -216,11 +220,38 @@ impl Handler {
             }
         };
 
+        // Computed via the exact same normalize_identity call /issue
+        // itself uses -- a client building a CSR from this value is
+        // guaranteed to match what /issue will check, never a second,
+        // independent computation that could drift. Only computed
+        // when actually asked for.
+        let normalized_identity = if request.include_normalized_identity {
+            match normalize_identity(
+                &claims.workload_identity,
+                claims.identity_scope.as_deref(),
+                &claims.identity_normalization,
+            ) {
+                Ok(id) => Some(id),
+                Err(e) => {
+                    return ValidateHandlerResponse {
+                        status: status_for_outcome(IssueOutcome::InvalidToken),
+                        body: ValidateHandlerBody::Error(IssueError {
+                            outcome: IssueOutcome::InvalidToken,
+                            detail: e.to_string(),
+                        }),
+                    };
+                }
+            }
+        } else {
+            None
+        };
+
         ValidateHandlerResponse {
             status: 200,
             body: ValidateHandlerBody::Success(ValidateResponse {
                 workload_identity: claims.workload_identity,
                 instance_binding: claims.instance_binding,
+                normalized_identity,
             }),
         }
     }
