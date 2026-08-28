@@ -27,3 +27,6 @@ pub mod observer;
 
 pub const CREDENTIALS_GRANTS_TOPIC: &str = "credentials-grants";
 pub const CREDENTIALS_REVOCATIONS_TOPIC: &str = "credentials-revocations";
+
+pub const CREDENTIALS_ISSUANCE_REQUESTS_TOPIC: &str = "credentials-issuance-requests";
+pub const CREDENTIALS_ISSUANCE_REPLIES_TOPIC: &str = "credentials-issuance-replies";

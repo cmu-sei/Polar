@@ -54,8 +54,16 @@ pub enum CredentialKindError {
 /// `CREDENTIALS_AGENT_KUBERNETES_ISSUERS` (comma-separated), falling
 /// back to the single well-known default if unset.
 pub fn configured_kubernetes_issuers() -> Vec<String> {
-    std::env::var(KUBERNETES_ISSUERS_ENV)
-        .unwrap_or_else(|_| KUBERNETES_ISSUERS_DEFAULT.to_string())
+    parse_kubernetes_issuers(std::env::var(KUBERNETES_ISSUERS_ENV).ok().as_deref())
+}
+
+/// Pure parsing logic, split out specifically so tests never need to
+/// touch the real, process-wide env var at all -- reading/writing it
+/// from multiple tests running in parallel is a genuine race
+/// (confirmed the hard way: this crate's own test suite hit it).
+fn parse_kubernetes_issuers(env_value: Option<&str>) -> Vec<String> {
+    env_value
+        .unwrap_or(KUBERNETES_ISSUERS_DEFAULT)
         .split(',')
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
@@ -122,32 +130,17 @@ mod tests {
 
     #[test]
     fn default_issuer_list_contains_the_well_known_kubernetes_issuer() {
-        // SAFETY-in-tests note: this reads/writes a process-wide env
-        // var, so it isn't safe to run concurrently with another test
-        // that touches the same one -- fine here since no other test
-        // in this module does.
-        unsafe {
-            std::env::remove_var(KUBERNETES_ISSUERS_ENV);
-        }
-        let issuers = configured_kubernetes_issuers();
+        let issuers = parse_kubernetes_issuers(None);
         assert_eq!(issuers, vec!["https://kubernetes.default.svc.cluster.local"]);
     }
 
     #[test]
     fn configured_env_var_overrides_default_and_supports_multiple() {
-        unsafe {
-            std::env::set_var(
-                KUBERNETES_ISSUERS_ENV,
-                "https://a.example.com, https://b.example.com",
-            );
-        }
-        let issuers = configured_kubernetes_issuers();
+        let issuers =
+            parse_kubernetes_issuers(Some("https://a.example.com, https://b.example.com"));
         assert_eq!(
             issuers,
             vec!["https://a.example.com", "https://b.example.com"]
         );
-        unsafe {
-            std::env::remove_var(KUBERNETES_ISSUERS_ENV);
-        }
     }
 }

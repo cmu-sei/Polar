@@ -28,3 +28,4 @@ pub mod credential;
 pub mod introspection;
 pub mod escrow;
 pub mod issuance;
+pub mod issuance_actor;
