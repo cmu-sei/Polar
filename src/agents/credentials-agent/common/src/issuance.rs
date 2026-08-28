@@ -88,6 +88,11 @@ pub enum IssuanceRefusalReason {
     /// weight credentials-agent-architecture.md places on this being a
     /// specific, auditable, security-relevant property.
     AlreadyHasValidCertificate,
+    /// Everything up through the grant/renewal checks succeeded, but
+    /// cert-issuer's own /issue call itself failed (CA unavailable, an
+    /// internal signing error). Distinct from the other variants,
+    /// which all cover failures before ever reaching cert-issuer.
+    SigningFailed,
 }
 
 #[cfg(test)]

@@ -50,6 +50,11 @@ pub struct IssueResponse {
     pub certificate_pem: String,
     /// PEM-encoded CA certificate(s) for the trust chain.
     pub ca_chain_pem: String,
+    /// The issued certificate's own X.509 serial number -- the join
+    /// key for revocation (credentials-agent's Revoke events, and any
+    /// future CRL, are keyed on this, not session_id below, which is
+    /// a separate, per-request audit-correlation value).
+    pub serial_number: String,
     /// UUID for audit correlation. The init container surfaces this
     /// in its log output so operators can grep across logs and graph events.
     pub session_id: String,

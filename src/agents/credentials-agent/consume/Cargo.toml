@@ -29,7 +29,9 @@ credentials_agent_common.workspace = true
 jwt_utils.workspace = true
 polar.workspace = true
 ractor.workspace = true
+reqwest.workspace = true
 rkyv.workspace = true
+serde.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
@@ -37,3 +39,5 @@ tracing.workspace = true
 
 [dev-dependencies]
 base64.workspace = true
+serde_json.workspace = true
+wiremock.workspace = true

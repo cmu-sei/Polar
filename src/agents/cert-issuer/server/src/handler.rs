@@ -188,6 +188,7 @@ impl Handler {
             body: HandlerBody::Success(IssueResponse {
                 certificate_pem: issued.certificate_pem,
                 ca_chain_pem: issued.ca_chain_pem,
+                serial_number: issued.serial_number,
                 session_id,
                 expires_at,
             }),

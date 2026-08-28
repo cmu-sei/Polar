@@ -21,6 +21,7 @@ fn fake_success_response() -> IssueResponse {
             .to_string(),
         ca_chain_pem: "-----BEGIN CERTIFICATE-----\nfake-ca\n-----END CERTIFICATE-----\n"
             .to_string(),
+        serial_number: "01:23:45:67:89:AB:CD:EF".to_string(),
         session_id: "00000000-0000-0000-0000-000000000001".to_string(),
         expires_at: OffsetDateTime::now_utc() + time::Duration::hours(1),
     }
