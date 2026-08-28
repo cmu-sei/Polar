@@ -32,10 +32,14 @@
 static NAMED_ACTOR_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 use crate::ledger::{LedgerActor, LedgerActorArgs, LedgerMessage};
+use crate::identity_normalization::IdentityNormalizationHandler;
+use crate::identity_normalization_actor::{IdentityNormalizationActor, IdentityNormalizationActorArgs};
 use cassini_client::{TcpClientMessage, TCPClientConfig, TcpClientActor, TcpClientArgs};
 use cassini_types::{ClientEvent,WireTraceCtx};
 use credentials_agent_common::{CREDENTIALS_GRANTS_TOPIC, CREDENTIALS_REVOCATIONS_TOPIC};
 use credentials_agent_common::events::CredentialsEvent;
+use credentials_agent_common::identity::IdentityNormalizationRequest;
+use credentials_agent_common::CREDENTIALS_IDENTITY_NORMALIZATION_REQUESTS_TOPIC;
 use polar::graph::controller::{GraphController, GraphControllerActor, GraphControllerArgs, GraphSignal};
 use polar::health::{DepCertEndpoint, HealthCheckActor, HealthCheckArgs, HealthCheckMessage};
 use polar::{Supervisor, SupervisorMessage};
@@ -66,6 +70,7 @@ const CREDENTIALS_EVENT_LOG_PATH_DEFAULT: &str = "/var/lib/credentials-agent/eve
 
 const CERT_ISSUER_URL_ENV: &str = "CREDENTIALS_AGENT_CERT_ISSUER_URL";
 const ISSUANCE_ACTOR_NAME: &str = "polar.credentials-agent.issuance";
+const IDENTITY_NORMALIZATION_ACTOR_NAME: &str = "polar.credentials-agent.identity-normalization";
 
 pub struct ConsumerSupervisor;
 
@@ -76,6 +81,7 @@ pub struct ConsumerSupervisorState {
     /// streams safely are.
     ledger: ActorRef<LedgerMessage>,
     issuance_actor: ActorRef<Envelope<IssuanceRequest>>,
+    identity_normalization_actor: ActorRef<Envelope<IdentityNormalizationRequest>>,
     graph_controller: Option<GraphController>,
     healthcheck: ActorRef<HealthCheckMessage>,
     draining: bool,
@@ -96,6 +102,30 @@ impl Supervisor for ConsumerSupervisor {
                 }
                 Err(e) => {
                     warn!("Failed to deserialize issuance request from topic {topic}: {e}");
+                }
+            }
+            return;
+        }
+
+        if topic == CREDENTIALS_IDENTITY_NORMALIZATION_REQUESTS_TOPIC {
+            match rkyv::from_bytes::<Envelope<IdentityNormalizationRequest>, rkyv::rancor::Error>(
+                &payload,
+            ) {
+                Ok(envelope) => {
+                    if let Some(actor) = where_is(IDENTITY_NORMALIZATION_ACTOR_NAME.to_string()) {
+                        if let Err(e) = actor.send_message(envelope) {
+                            warn!("Failed to forward identity-normalization request to actor: {e}");
+                        }
+                    } else {
+                        warn!(
+                            "Identity-normalization actor not yet registered, dropping request"
+                        );
+                    }
+                }
+                Err(e) => {
+                    warn!(
+                        "Failed to deserialize identity-normalization request from topic {topic}: {e}"
+                    );
                 }
             }
             return;
@@ -154,7 +184,7 @@ impl Actor for ConsumerSupervisor {
 
         let issuance_handler = IssuanceHandler {
             ledger: ledger.clone(),
-            cert_issuer: HandshakeClient::new(cert_issuer_url),
+            cert_issuer: HandshakeClient::new(cert_issuer_url.clone()),
             // Introspection is genuinely optional at the deployment
             // level -- a cluster that never has LikelyIdp credentials
             // in practice doesn't need it configured. If one does
@@ -173,6 +203,21 @@ impl Actor for ConsumerSupervisor {
             IssuanceActor,
             IssuanceActorArgs {
                 handler: issuance_handler,
+            },
+            myself.get_cell(),
+        )
+        .await
+        .map_err(ActorProcessingErr::from)?;
+
+        let identity_normalization_handler = IdentityNormalizationHandler {
+            cert_issuer: HandshakeClient::new(cert_issuer_url.clone()),
+        };
+
+        let (identity_normalization_actor, _) = IdentityNormalizationActor::spawn_linked(
+            Some(IDENTITY_NORMALIZATION_ACTOR_NAME.to_string()),
+            IdentityNormalizationActor,
+            IdentityNormalizationActorArgs {
+                handler: identity_normalization_handler,
             },
             myself.get_cell(),
         )
@@ -228,6 +273,7 @@ impl Actor for ConsumerSupervisor {
         Ok(ConsumerSupervisorState {
             ledger,
             issuance_actor,
+            identity_normalization_actor,
             graph_controller: None,
             healthcheck,
             draining: false,
@@ -282,16 +328,14 @@ impl Actor for ConsumerSupervisor {
                 warn!("CONSUMER_SUPERVISOR: exiting now");
                 std::process::exit(1);
             }
-            SupervisorMessage::ClientEvent { event } => {
-                if let ClientEvent::Registered { .. } = event {
+            SupervisorMessage::ClientEvent { event } => match event {
+                ClientEvent::Registered { .. } => {
                     let _ = state.healthcheck.cast(HealthCheckMessage::CassiniConnected);
-
                     if state.graph_controller.is_none() {
                         let graph_signal_port = Arc::new(OutputPort::<GraphSignal>::default());
                         graph_signal_port.subscribe(myself.clone(), |signal| {
                             Some(SupervisorMessage::GraphSignal(signal))
                         });
-
                         match GraphControllerActor::spawn_linked(
                             Some("credentials-agent.consumer.graph.controller".to_string()),
                             GraphControllerActor,
@@ -315,12 +359,12 @@ impl Actor for ConsumerSupervisor {
                     } else {
                         let _ = state.healthcheck.cast(HealthCheckMessage::GraphConnected);
                     }
-
                     if let Some(client) = where_is(BROKER_CLIENT_NAME.to_string()) {
                         for topic in [
                             CREDENTIALS_GRANTS_TOPIC,
                             CREDENTIALS_REVOCATIONS_TOPIC,
                             CREDENTIALS_ISSUANCE_REQUESTS_TOPIC,
+                            CREDENTIALS_IDENTITY_NORMALIZATION_REQUESTS_TOPIC,
                         ] {
                             if let Err(e) = client.send_message(TcpClientMessage::Subscribe {
                                 topic: topic.to_string(),
@@ -333,10 +377,24 @@ impl Actor for ConsumerSupervisor {
                         error!("Broker client not found while attempting to subscribe");
                     }
                 }
-            }
+                ClientEvent::MessagePublished { topic, payload, .. } => {
+                    if state.draining {
+                        warn!(
+                            "CONSUMER_SUPERVISOR: draining -- logging message on topic \
+                             '{topic}' ({} bytes) instead of dispatching; will be lost on \
+                             exit",
+                            payload.len()
+                        );
+                        // TODO: publish to dead-letter queue once Cassini supports one.
+                    } else {
+                        ConsumerSupervisor::deserialize_and_dispatch(topic, payload);
+                    }
+                }
+                _ => {}
+            },
         }
         Ok(())
-    }
+    } 
 
     async fn handle_supervisor_evt(
         &self,
@@ -620,5 +678,79 @@ mod issuance_wiring_tests {
 
         issuance_actor.stop_and_wait(None, None).await.unwrap();
         ledger.stop_and_wait(None, None).await.unwrap();
+    }
+}
+
+#[cfg(test)]
+mod identity_normalization_wiring_tests {
+    use super::*;
+    use crate::identity_normalization::IdentityNormalizationHandler;
+    use crate::identity_normalization_actor::{
+        IdentityNormalizationActor, IdentityNormalizationActorArgs,
+    };
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[tokio::test]
+    async fn full_pipeline_from_raw_bytes_through_dispatch_reaches_cert_issuer() {
+        let _guard = super::NAMED_ACTOR_TEST_LOCK.lock().await;
+
+        let cert_issuer = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/validate"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                cert_issuer_common::ValidateResponse {
+                    workload_identity: "testuser".to_string(),
+                    instance_binding: None,
+                    normalized_identity: Some("testuser.polar.keycloak-issuer".to_string()),
+                },
+            ))
+            .mount(&cert_issuer)
+            .await;
+
+        let handler = IdentityNormalizationHandler {
+            cert_issuer: HandshakeClient::new(cert_issuer.uri()),
+        };
+
+        let (_actor, _) = IdentityNormalizationActor::spawn(
+            Some(IDENTITY_NORMALIZATION_ACTOR_NAME.to_string()),
+            IdentityNormalizationActor,
+            IdentityNormalizationActorArgs { handler },
+        )
+        .await
+        .unwrap();
+
+        let request = IdentityNormalizationRequest {
+            credential: "any-token".to_string(),
+        };
+        let envelope = Envelope {
+            correlation_id: "test-correlation-id".to_string(),
+            payload: request,
+        };
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&envelope)
+            .unwrap()
+            .to_vec();
+
+        // The real function every incoming Cassini message on this
+        // topic actually goes through.
+        ConsumerSupervisor::deserialize_and_dispatch(
+            CREDENTIALS_IDENTITY_NORMALIZATION_REQUESTS_TOPIC.to_string(),
+            bytes,
+        );
+
+        // The actor processes on its own independent mailbox -- same
+        // honest compromise as issuance's own full-pipeline test, a
+        // short sleep rather than a fully deterministic wait.
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+        // No real broker is registered in this test, so the actor's
+        // final publish-the-reply step is expected to fail/log (no
+        // BROKER_CLIENT_NAME actor exists here) -- what this proves
+        // instead is that the full chain up to that point genuinely
+        // ran: dispatch -> actor -> handler -> a real HTTP call to
+        // cert-issuer's /validate, confirmed by the mock's own
+        // request count, not just assumed from no panic occurring.
+        let received = cert_issuer.received_requests().await.unwrap();
+        assert_eq!(received.len(), 1, "cert-issuer's /validate must have been called exactly once");
     }
 }

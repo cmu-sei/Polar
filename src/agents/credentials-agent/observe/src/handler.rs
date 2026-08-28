@@ -34,6 +34,10 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use cassini_client::TcpClientMessage;
 use credentials_agent_common::CREDENTIALS_ISSUANCE_REQUESTS_TOPIC;
+use credentials_agent_common::CREDENTIALS_IDENTITY_NORMALIZATION_REQUESTS_TOPIC;
+use credentials_agent_common::identity::{
+    IdentityNormalizationReply, IdentityNormalizationRefusalReason, IdentityNormalizationRequest,
+};
 use credentials_agent_common::issuance::{IssuanceReply, IssuanceRefusalReason, IssuanceRequest};
 use credentials_agent_common::observer::ObserverRejection;
 use polar::request_reply::{Envelope, ReplyRouter};
@@ -48,7 +52,8 @@ const MAX_TIMEOUT_SECS: i64 = 100;
 
 pub struct ObserverState {
     pub broker_client: ActorRef<TcpClientMessage>,
-    pub reply_router: Arc<ReplyRouter<IssuanceReply>>,
+    pub issuance_reply_router: Arc<ReplyRouter<IssuanceReply>>,
+    pub identity_reply_router: Arc<ReplyRouter<IdentityNormalizationReply>>,
 }
 
 pub async fn issue(
@@ -68,7 +73,7 @@ pub async fn issue(
 
     // Registered *before* publishing -- a reply arriving in the gap
     // between publishing and registering would have nowhere to route.
-    let rx = state.reply_router.register(correlation_id.clone());
+    let rx = state.issuance_reply_router.register(correlation_id.clone());
 
     let envelope = Envelope {
         correlation_id: correlation_id.clone(),
@@ -77,7 +82,7 @@ pub async fn issue(
     let payload = match rkyv::to_bytes::<rkyv::rancor::Error>(&envelope) {
         Ok(bytes) => bytes.to_vec(),
         Err(e) => {
-            state.reply_router.cancel(&correlation_id);
+            state.issuance_reply_router.cancel(&correlation_id);
             error!("Failed to serialize issuance request envelope: {e}");
             return (StatusCode::INTERNAL_SERVER_ERROR, "internal error").into_response();
         }
@@ -88,7 +93,7 @@ pub async fn issue(
         payload,
         trace_ctx: None,
     }) {
-        state.reply_router.cancel(&correlation_id);
+        state.issuance_reply_router.cancel(&correlation_id);
         error!("Failed to publish issuance request: {e}");
         return (StatusCode::SERVICE_UNAVAILABLE, "failed to reach the broker").into_response();
     }
@@ -100,10 +105,65 @@ pub async fn issue(
             (StatusCode::GATEWAY_TIMEOUT, "no reply received").into_response()
         }
         Err(_) => {
-            state.reply_router.cancel(&correlation_id);
+            state.issuance_reply_router.cancel(&correlation_id);
             (StatusCode::GATEWAY_TIMEOUT, "timed out waiting for a reply").into_response()
         }
     }
+}
+
+pub async fn identity(
+    State(state): State<Arc<ObserverState>>,
+    Json(request): Json<IdentityNormalizationRequest>,
+) -> Response {
+    let correlation_id = uuid::Uuid::new_v4().to_string();
+    let timeout = compute_timeout(&request.credential);
+
+    let rx = state.identity_reply_router.register(correlation_id.clone());
+
+    let envelope = Envelope {
+        correlation_id: correlation_id.clone(),
+        payload: request,
+    };
+    let payload = match rkyv::to_bytes::<rkyv::rancor::Error>(&envelope) {
+        Ok(bytes) => bytes.to_vec(),
+        Err(e) => {
+            state.identity_reply_router.cancel(&correlation_id);
+            error!("Failed to serialize identity-normalization request envelope: {e}");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "internal error").into_response();
+        }
+    };
+
+    if let Err(e) = state.broker_client.send_message(TcpClientMessage::Publish {
+        topic: CREDENTIALS_IDENTITY_NORMALIZATION_REQUESTS_TOPIC.to_string(),
+        payload,
+        trace_ctx: None,
+    }) {
+        state.identity_reply_router.cancel(&correlation_id);
+        error!("Failed to publish identity-normalization request: {e}");
+        return (StatusCode::SERVICE_UNAVAILABLE, "failed to reach the broker").into_response();
+    }
+
+    match tokio::time::timeout(timeout, rx).await {
+        Ok(Ok(reply)) => identity_reply_to_response(reply),
+        Ok(Err(_)) => {
+            warn!("Reply channel closed with no reply for correlation_id {correlation_id}");
+            (StatusCode::GATEWAY_TIMEOUT, "no reply received").into_response()
+        }
+        Err(_) => {
+            state.identity_reply_router.cancel(&correlation_id);
+            (StatusCode::GATEWAY_TIMEOUT, "timed out waiting for a reply").into_response()
+        }
+    }
+}
+
+fn identity_reply_to_response(reply: IdentityNormalizationReply) -> Response {
+    let status = match &reply {
+        IdentityNormalizationReply::Normalized { .. } => StatusCode::OK,
+        IdentityNormalizationReply::Refused { reason } => match reason {
+            IdentityNormalizationRefusalReason::TokenInvalid => StatusCode::UNAUTHORIZED,
+        },
+    };
+    (status, Json(reply)).into_response()
 }
 
 /// `min(token_remaining_lifetime / 3, 100s)`, computed by peeking the
@@ -262,7 +322,8 @@ mod tests {
 
         let state = Arc::new(ObserverState {
             broker_client: broker,
-            reply_router,
+            issuance_reply_router: reply_router,
+            identity_reply_router: Arc::new(ReplyRouter::new()),
         });
 
         let response = issue(
@@ -289,7 +350,8 @@ mod tests {
 
         let state = Arc::new(ObserverState {
             broker_client: broker,
-            reply_router,
+            issuance_reply_router: reply_router,
+            identity_reply_router: Arc::new(ReplyRouter::new()),
         });
 
         let response = issue(
@@ -314,7 +376,8 @@ mod tests {
 
         let state = Arc::new(ObserverState {
             broker_client: broker,
-            reply_router,
+            issuance_reply_router: reply_router,
+            identity_reply_router: Arc::new(ReplyRouter::new()),
         });
 
         let response = issue(
@@ -361,7 +424,8 @@ mod tests {
         let reply_router = Arc::new(ReplyRouter::new());
         let state = Arc::new(ObserverState {
             broker_client: broker,
-            reply_router,
+            issuance_reply_router: reply_router,
+            identity_reply_router: Arc::new(ReplyRouter::new()),
         });
 
         // A credential with no readable exp claim falls back to the
@@ -409,5 +473,156 @@ mod tests {
     fn compute_timeout_falls_back_to_ceiling_when_exp_is_unreadable() {
         let timeout = compute_timeout("not-a-real-token");
         assert_eq!(timeout, Duration::from_secs(MAX_TIMEOUT_SECS as u64));
+    }
+
+    struct FakeIdentityBroker {
+        reply_router: Arc<ReplyRouter<IdentityNormalizationReply>>,
+        canned_reply: IdentityNormalizationReply,
+    }
+
+    #[async_trait]
+    impl Actor for FakeIdentityBroker {
+        type Msg = TcpClientMessage;
+        type State = ();
+        type Arguments = ();
+
+        async fn pre_start(
+            &self,
+            _myself: ActorRef<Self::Msg>,
+            _args: (),
+        ) -> Result<Self::State, ActorProcessingErr> {
+            Ok(())
+        }
+
+        async fn handle(
+            &self,
+            _myself: ActorRef<Self::Msg>,
+            message: Self::Msg,
+            _state: &mut Self::State,
+        ) -> Result<(), ActorProcessingErr> {
+            if let TcpClientMessage::Publish { payload, .. } = message
+                && let Ok(envelope) =
+                    rkyv::from_bytes::<Envelope<IdentityNormalizationRequest>, rkyv::rancor::Error>(&payload)
+            {
+                self.reply_router
+                    .deliver(&envelope.correlation_id, self.canned_reply.clone());
+            }
+            Ok(())
+        }
+    }
+
+    async fn spawn_fake_identity_broker(
+        reply_router: Arc<ReplyRouter<IdentityNormalizationReply>>,
+        canned_reply: IdentityNormalizationReply,
+    ) -> ActorRef<TcpClientMessage> {
+        let (broker, _) = Actor::spawn(
+            None,
+            FakeIdentityBroker {
+                reply_router,
+                canned_reply,
+            },
+            (),
+        )
+        .await
+        .unwrap();
+        broker
+    }
+
+    #[tokio::test]
+    async fn identity_successful_reply_returns_200_with_the_normalized_identity() {
+        let identity_reply_router = Arc::new(ReplyRouter::new());
+        let canned_reply = IdentityNormalizationReply::Normalized {
+            identity: "testuser.polar.keycloak-issuer".to_string(),
+        };
+        let broker = spawn_fake_identity_broker(identity_reply_router.clone(), canned_reply).await;
+
+        let state = Arc::new(ObserverState {
+            broker_client: broker,
+            issuance_reply_router: Arc::new(ReplyRouter::new()),
+            identity_reply_router,
+        });
+
+        let response = identity(
+            State(state),
+            Json(IdentityNormalizationRequest {
+                credential: "any-token".to_string(),
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn identity_refused_reply_maps_to_401() {
+        let identity_reply_router = Arc::new(ReplyRouter::new());
+        let canned_reply = IdentityNormalizationReply::Refused {
+            reason: IdentityNormalizationRefusalReason::TokenInvalid,
+        };
+        let broker = spawn_fake_identity_broker(identity_reply_router.clone(), canned_reply).await;
+
+        let state = Arc::new(ObserverState {
+            broker_client: broker,
+            issuance_reply_router: Arc::new(ReplyRouter::new()),
+            identity_reply_router,
+        });
+
+        let response = identity(
+            State(state),
+            Json(IdentityNormalizationRequest {
+                credential: "bad-token".to_string(),
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn identity_no_reply_at_all_eventually_times_out() {
+        struct SilentBroker;
+        #[async_trait]
+        impl Actor for SilentBroker {
+            type Msg = TcpClientMessage;
+            type State = ();
+            type Arguments = ();
+            async fn pre_start(
+                &self,
+                _myself: ActorRef<Self::Msg>,
+                _args: (),
+            ) -> Result<Self::State, ActorProcessingErr> {
+                Ok(())
+            }
+            async fn handle(
+                &self,
+                _myself: ActorRef<Self::Msg>,
+                _message: Self::Msg,
+                _state: &mut Self::State,
+            ) -> Result<(), ActorProcessingErr> {
+                Ok(())
+            }
+        }
+
+        let (broker, _) = Actor::spawn(None, SilentBroker, ()).await.unwrap();
+        let state = Arc::new(ObserverState {
+            broker_client: broker,
+            issuance_reply_router: Arc::new(ReplyRouter::new()),
+            identity_reply_router: Arc::new(ReplyRouter::new()),
+        });
+
+        tokio::time::pause();
+        let handle = tokio::spawn(async move {
+            identity(
+                State(state),
+                Json(IdentityNormalizationRequest {
+                    credential: "any-token".to_string(),
+                }),
+            )
+            .await
+        });
+        tokio::time::advance(Duration::from_secs(101)).await;
+        let response = handle.await.unwrap();
+
+        assert_eq!(response.status(), StatusCode::GATEWAY_TIMEOUT);
     }
 }
