@@ -216,6 +216,35 @@ Some recipes in the `Justfile` (`cluster-up`, `cluster-status`, and a
 few others) are conveniences for this repo's own local development
 cluster and aren't required for deploying elsewhere.
 
+### Secrets setup
+
+Two things need to exist before any of the steps above will actually
+work: `my.env` (your own local environment overrides) and access to
+this target's `sops`-encrypted secrets (`secrets.sops.yaml`, cluster-
+wide values like the Keycloak test user's password; `user.sops.yaml`,
+your own personal credentials).
+
+1. **`my.env`**: `cp example.env my.env`, then fill in every value
+   marked `<required>`. This file is sourced by `direnv` on shell
+   entry and is gitignored — never commit it.
+
+2. **`sops` access**: decryption here uses your existing SSH keypair
+   as your identity (via `rage`'s SSH-key support), not a separate
+   `age` key you'd need to generate. Before you can decrypt anything,
+   your SSH *public* key needs to be added as a recipient on the
+   target's `.sops.yaml` by someone who can already decrypt it —
+   this is a one-time step, and not something you can do for
+   yourself the first time. Send them your public key
+   (`cat ~/.ssh/id_ed25519.pub`, or whichever key you use), and ask
+   them to add it to `infra/targets/<target>/.sops.yaml`'s `age:`
+   block and run `sops updatekeys infra/targets/<target>/secrets.sops.yaml`
+   (and the same for `user.sops.yaml`, under its own `.user.sops.yaml`
+   config) to re-encrypt with your key included.
+
+3. If your SSH private key isn't at the default path the devShell
+   assumes, set `SOPS_AGE_SSH_PRIVATE_KEY_FILE` in your own `my.env`
+   to point at it (see `example.env`'s own comment on this).
+
 ### Just the container
 
 To build and run ACE's container directly, without the full Kubernetes
