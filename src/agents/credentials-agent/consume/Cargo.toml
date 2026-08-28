@@ -33,6 +33,7 @@ polar.workspace = true
 ractor.workspace = true
 reqwest.workspace = true
 rkyv.workspace = true
+rsa.workspace = true
 serde.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true

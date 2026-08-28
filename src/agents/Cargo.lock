@@ -1276,6 +1276,7 @@ dependencies = [
  "ractor",
  "reqwest 0.12.28",
  "rkyv",
+ "rsa",
  "serde",
  "serde_json",
  "tempfile",

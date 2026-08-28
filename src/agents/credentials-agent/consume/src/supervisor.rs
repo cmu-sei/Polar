@@ -163,6 +163,9 @@ impl Actor for ConsumerSupervisor {
             // than silently proceeding unintrospected.
             introspection: IntrospectionClient::from_env().ok(),
             known_kubernetes_issuers: configured_kubernetes_issuers(),
+            escrow_keypair: std::sync::Arc::new(
+                crate::escrow::EscrowKeypair::generate().map_err(ActorProcessingErr::from)?,
+            ),
         };
 
         let (issuance_actor, _) = IssuanceActor::spawn_linked(
@@ -569,6 +572,7 @@ mod issuance_wiring_tests {
             cert_issuer: HandshakeClient::new(cert_issuer.uri()),
             introspection: None,
             known_kubernetes_issuers: vec!["https://kubernetes.default.svc.cluster.local".to_string()],
+            escrow_keypair: crate::escrow::tests::test_keypair(),
         };
 
         let (issuance_actor, _) = IssuanceActor::spawn(
@@ -613,7 +617,7 @@ mod issuance_wiring_tests {
             .await
             .is_none());
 
-        _issuance_actor.stop_and_wait(None, None).await.unwrap();
+        issuance_actor.stop_and_wait(None, None).await.unwrap();
         ledger.stop_and_wait(None, None).await.unwrap();
     }
 }

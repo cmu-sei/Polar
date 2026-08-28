@@ -28,7 +28,8 @@
 //! per "one mechanism, both flows."
 
 use crate::credential::{CredentialKind, classify_credential};
-use crate::escrow::mock_escrow_public_key_pem;
+use std::sync::Arc;
+use crate::escrow::EscrowKeypair;
 use crate::introspection::IntrospectionClient;
 use crate::ledger::LedgerMessage;
 use cert_client::handshake::HandshakeClient;
@@ -47,6 +48,7 @@ pub struct IssuanceHandler {
     /// allowed through unintrospected.
     pub introspection: Option<IntrospectionClient>,
     pub known_kubernetes_issuers: Vec<String>,
+    pub escrow_keypair: Arc<EscrowKeypair>,
 }
 
 impl IssuanceHandler {
@@ -197,7 +199,7 @@ impl IssuanceHandler {
         IssuanceReply::Issued {
             certificate_pem: issued.certificate_pem,
             ca_chain_pem: issued.ca_chain_pem,
-            escrow_public_key_pem: mock_escrow_public_key_pem(),
+            escrow_public_key_pem: self.escrow_keypair.public_key_pem().to_string(),
         }
     }
 }
@@ -331,6 +333,7 @@ mod tests {
             cert_issuer: HandshakeClient::new(server.uri()),
             introspection: None,
             known_kubernetes_issuers: vec!["https://kubernetes.default.svc.cluster.local".to_string()],
+            escrow_keypair: crate::escrow::tests::test_keypair(),
         };
 
         let reply = handler
@@ -399,6 +402,7 @@ mod tests {
                 "test-secret".to_string(),
             )),
             known_kubernetes_issuers: vec!["https://kubernetes.default.svc.cluster.local".to_string()],
+            escrow_keypair: crate::escrow::tests::test_keypair(),
         };
 
         let reply = handler
@@ -441,6 +445,7 @@ mod tests {
                 "test-secret".to_string(),
             )),
             known_kubernetes_issuers: vec!["https://kubernetes.default.svc.cluster.local".to_string()],
+            escrow_keypair: crate::escrow::tests::test_keypair(),
         };
 
         let reply = handler
@@ -503,6 +508,7 @@ mod tests {
             cert_issuer: HandshakeClient::new(server.uri()),
             introspection: None,
             known_kubernetes_issuers: vec!["https://kubernetes.default.svc.cluster.local".to_string()],
+            escrow_keypair: crate::escrow::tests::test_keypair(),
         };
 
         let reply = handler
@@ -547,6 +553,7 @@ mod tests {
                 "test-secret".to_string(),
             )),
             known_kubernetes_issuers: vec!["https://kubernetes.default.svc.cluster.local".to_string()],
+            escrow_keypair: crate::escrow::tests::test_keypair(),
         };
 
         let reply = handler
@@ -572,6 +579,7 @@ mod tests {
             cert_issuer: HandshakeClient::new("http://127.0.0.1:1".to_string()),
             introspection: None,
             known_kubernetes_issuers: vec!["https://kubernetes.default.svc.cluster.local".to_string()],
+            escrow_keypair: crate::escrow::tests::test_keypair(),
         };
 
         let reply = handler
