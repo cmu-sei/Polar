@@ -34,6 +34,7 @@ members = [
     "cassini/test/producer",
     "cassini/test/sink",
     "cassini/types",
+    "credentials-agent/admin",
     "credentials-agent/common",
     "credentials-agent/consume",
     "credentials-agent/observe",

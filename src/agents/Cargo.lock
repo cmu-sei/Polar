@@ -4752,6 +4752,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "polar-admin-grant"
+version = "1.0.0"
+dependencies = [
+ "cassini-client",
+ "cassini-types",
+ "clap",
+ "credentials_agent_common",
+ "polar",
+ "ractor",
+ "rkyv",
+ "tokio",
+]
+
+[[package]]
 name = "polar-health"
 version = "1.0.0"
 dependencies = [
