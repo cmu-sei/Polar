@@ -72,12 +72,18 @@
         # Regenerate with: cd src/flake && just render-dev
         container = mkPolarContainer ./src/flake/container.nix;
 
-        # ── CI container ──────────────────────────────────────────────────────
+        # ── CI ──────────────────────────────────────────────────────
+
+        # ── Container ──────────────────────────────────────────────────────
         ciContainer = import ./src/flake/ci-container.nix {
           inherit pkgs lib system;
           cassiniClient = polarPkgs.cassini.client;
           certIssuerClient = polarPkgs.certIssuer.client;
         };
+
+
+        # ── CI Library ──────────────────────────────────────────────────────
+        corePipelineLibFiles = pkgs.callPackage ./scripts/pipeline/core/package.nix {};
 
         # ── Agent containers ───────────────────────────────────────────────────
         # Regenerate with: cd src/flake && just render-agent
@@ -127,7 +133,7 @@
         packages = {
           # ── Workspace binaries ───────────────────────────────────────────────
           default     = polarPkgs.workspacePackages;
-          inherit polarPkgs tlsCerts;
+          inherit polarPkgs corePipelineLibFiles tlsCerts;
 
           # ── Dev / CI / Agent containers ──────────────────────────────────────
           devContainer         = container.image;
