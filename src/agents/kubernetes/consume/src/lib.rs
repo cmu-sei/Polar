@@ -167,25 +167,38 @@ fn opt_json<T: serde::Serialize>(v: &Option<T>) -> GraphValue {
 pub trait GraphOperable {
     /// Project this resource's identity, ownership, state, and structural
     /// edges into the graph. Must be idempotent: the watch redelivers.
+    ///
+    /// `cluster_uid` is the UID of the kube-system namespace in the cluster
+    /// this resource was observed in (issue #236). Every KubeNodeKey this
+    /// impl constructs must be scoped with it.
     fn project_into_graph(
         self,
         graph: &GraphController,
         tcp_client: &dyn CassiniClient,
+        cluster_uid: &str,
     ) -> Result<(), ActorProcessingErr>;
 
     /// Record the resource's deletion as a terminal state transition.
-    /// Deletion is a state, not an erasure — anchor nodes and history are
+    /// Deletion is a state, not an erasure -- anchor nodes and history are
     /// never removed, per the append-only provenance model.
-    fn project_delete(self, graph: &GraphController) -> Result<(), ActorProcessingErr>;
+    ///
+    /// `cluster_uid` must match whatever project_into_graph originally
+    /// scoped this resource's key with, or the delete matches nothing.
+    fn project_delete(
+        self,
+        graph: &GraphController,
+        cluster_uid: &str,
+    ) -> Result<(), ActorProcessingErr>;
 }
 
 fn handle_owner_refs(
     owners: &[OwnerReference],
     node_key: KubeNodeKey,
     graph: &GraphController,
+    cluster_uid: &str,
 ) -> Result<(), ActorProcessingErr> {
     for owner in owners {
-        if let Some(owner_key) = KubeNodeKey::from_owner_reference(owner) {
+        if let Some(owner_key) = KubeNodeKey::from_owner_reference(owner, cluster_uid) {
             graph.cast(GraphControllerMsg::Op(GraphOp::EnsureEdge {
                 from: owner_key.into_key(),
                 rel_type: "OWNS".into(),
@@ -239,6 +252,7 @@ impl GraphOperable for Job {
         self,
         graph: &GraphController,
         _tcp_client: &dyn CassiniClient,
+        cluster_uid: &str,
     ) -> Result<(), ActorProcessingErr> {
         // A resource without a uid has no identity to project. Defaulting to
         // "" would merge every uid-less resource into one node keyed on the
@@ -266,7 +280,10 @@ impl GraphOperable for Job {
             .cloned()
             .unwrap_or_default();
 
-        let job_key = KubeNodeKey::Job { uid: uid.clone() };
+        let job_key = KubeNodeKey::Job {
+            uid: uid.clone(),
+            cluster_uid: cluster_uid.to_string(),
+        };
 
         // ---- Anchor node ----
 
@@ -286,7 +303,7 @@ impl GraphOperable for Job {
         // ---- Owner refs (e.g. CronJob owns Job) ----
 
         if let Some(owners) = self.metadata.owner_references {
-            handle_owner_refs(&owners, job_key.clone(), graph)?;
+            handle_owner_refs(&owners, job_key.clone(), graph, cluster_uid)?;
         }
 
         // ---- State ----
@@ -328,6 +345,7 @@ impl GraphOperable for Job {
             // State keys embed the same epoch-ms value as valid_from so the
             // key remains deterministic and collision-free per transition.
             valid_from: valid_from_ms.to_string(),
+            cluster_uid: cluster_uid.to_string(),
         };
 
         graph.cast(GraphControllerMsg::Op(GraphOp::UpdateState {
@@ -348,7 +366,11 @@ impl GraphOperable for Job {
         Ok(())
     }
 
-    fn project_delete(self, graph: &GraphController) -> Result<(), ActorProcessingErr> {
+    fn project_delete(
+        self,
+        graph: &GraphController,
+        cluster_uid: &str,
+    ) -> Result<(), ActorProcessingErr> {
         let Some(uid) = self.metadata.uid.clone() else {
             return Ok(());
         };
@@ -356,10 +378,14 @@ impl GraphOperable for Job {
 
         project_deletion_state(
             graph,
-            KubeNodeKey::Job { uid: uid.clone() },
+            KubeNodeKey::Job {
+                uid: uid.clone(),
+                cluster_uid: cluster_uid.to_string(),
+            },
             KubeNodeKey::JobState {
                 uid,
                 valid_from: now.to_string(),
+                cluster_uid: cluster_uid.to_string(),
             },
             now,
         )
@@ -483,6 +509,7 @@ impl GraphOperable for Pod {
         self,
         graph: &GraphController,
         tcp_client: &dyn CassiniClient,
+        cluster_uid: &str,
     ) -> Result<(), ActorProcessingErr> {
         let Some(uid) = self.metadata.uid.clone() else {
             return Ok(());
@@ -501,7 +528,10 @@ impl GraphOperable for Pod {
             .and_then(|s| s.service_account_name.clone())
             .unwrap_or_default();
 
-        let pod_key = KubeNodeKey::Pod { uid: uid.clone() };
+        let pod_key = KubeNodeKey::Pod {
+            uid: uid.clone(),
+            cluster_uid: cluster_uid.to_string(),
+        };
 
         // ---- Anchor node ----
         //
@@ -522,7 +552,7 @@ impl GraphOperable for Pod {
         // ---- Owner refs ----
 
         if let Some(owners) = self.metadata.owner_references.clone() {
-            handle_owner_refs(&owners, pod_key.clone(), graph)?;
+            handle_owner_refs(&owners, pod_key.clone(), graph, cluster_uid)?;
         }
 
         // ---- Pod state ----
@@ -554,6 +584,7 @@ impl GraphOperable for Pod {
         let new_state_key = KubeNodeKey::PodState {
             pod_uid: uid.clone(),
             valid_from: pod_state_ms.to_string(),
+            cluster_uid: cluster_uid.to_string(),
         };
 
         graph.cast(GraphControllerMsg::Op(GraphOp::UpdateState {
@@ -585,6 +616,7 @@ impl GraphOperable for Pod {
                 let vol_key = KubeNodeKey::Volume {
                     name: volume.name.clone(),
                     namespace: namespace.clone(),
+                    cluster_uid: cluster_uid.to_string(),
                 };
 
                 // TODO: pretty much every other field for volumes are optional, but there are surely some things we're gonna want to know about them
@@ -607,6 +639,7 @@ impl GraphOperable for Pod {
                     let cm_key = KubeNodeKey::ConfigMap {
                         name: cm.name,
                         namespace: namespace.clone(),
+                        cluster_uid: cluster_uid.to_string(),
                     };
 
                     graph.cast(GraphControllerMsg::Op(GraphOp::UpsertNode {
@@ -628,6 +661,7 @@ impl GraphOperable for Pod {
                     let s_key = KubeNodeKey::Secret {
                         name: secret_name,
                         namespace: namespace.clone(),
+                        cluster_uid: cluster_uid.to_string(),
                     };
 
                     graph.cast(GraphControllerMsg::Op(GraphOp::UpsertNode {
@@ -647,6 +681,7 @@ impl GraphOperable for Pod {
                     let pvc_key = KubeNodeKey::PersistentVolumeClaim {
                         name: pvc.claim_name,
                         namespace: namespace.clone(),
+                        cluster_uid: cluster_uid.to_string(),
                     };
 
                     graph.cast(GraphControllerMsg::Op(GraphOp::UpsertNode {
@@ -679,6 +714,7 @@ impl GraphOperable for Pod {
                 let s_key = KubeNodeKey::Secret {
                     name: ps.name,
                     namespace: namespace.clone(),
+                    cluster_uid: cluster_uid.to_string(),
                 };
 
                 graph.cast(GraphControllerMsg::Op(GraphOp::UpsertNode {
@@ -739,6 +775,7 @@ impl GraphOperable for Pod {
             let container_key = KubeNodeKey::PodContainer {
                 pod_uid: uid.clone(),
                 name: container.name.clone(),
+                cluster_uid: cluster_uid.to_string(),
             };
 
             let props = vec![
@@ -799,6 +836,7 @@ impl GraphOperable for Pod {
                     let volume_key = KubeNodeKey::Volume {
                         name: mount.name.clone(),
                         namespace: namespace.clone(),
+                        cluster_uid: cluster_uid.to_string(),
                     };
 
                     let op = GraphOp::EnsureEdge {
@@ -863,6 +901,7 @@ impl GraphOperable for Pod {
                         pod_uid: uid.clone(),
                         image_id: Some(cs.image_id.clone()),
                         container_name: container.name.clone(),
+                        cluster_uid: cluster_uid.to_string(),
                     };
 
                     emit_provenance_event(
@@ -894,6 +933,7 @@ impl GraphOperable for Pod {
                     pod_uid: uid.clone(),
                     name: container.name.clone(),
                     valid_from: valid_from_ms.to_string(),
+                    cluster_uid: cluster_uid.to_string(),
                 }
                 .into_key();
 
@@ -924,6 +964,7 @@ impl GraphOperable for Pod {
                             let cm_key = KubeNodeKey::ConfigMap {
                                 name: cm_ref.name,
                                 namespace: namespace.clone(),
+                                cluster_uid: cluster_uid.to_string(),
                             };
 
                             graph.cast(GraphControllerMsg::Op(GraphOp::EnsureEdge {
@@ -938,6 +979,7 @@ impl GraphOperable for Pod {
                             let s_key = KubeNodeKey::Secret {
                                 name: secret_ref.name,
                                 namespace: namespace.clone(),
+                                cluster_uid: cluster_uid.to_string(),
                             };
 
                             graph.cast(GraphControllerMsg::Op(GraphOp::EnsureEdge {
@@ -964,6 +1006,7 @@ impl GraphOperable for Pod {
                         let cm_key = KubeNodeKey::ConfigMap {
                             name: cm_ref.name,
                             namespace: namespace.clone(),
+                            cluster_uid: cluster_uid.to_string(),
                         };
 
                         graph.cast(GraphControllerMsg::Op(GraphOp::EnsureEdge {
@@ -978,6 +1021,7 @@ impl GraphOperable for Pod {
                         let s_key = KubeNodeKey::Secret {
                             name: secret_ref.name,
                             namespace: namespace.clone(),
+                            cluster_uid: cluster_uid.to_string(),
                         };
 
                         graph.cast(GraphControllerMsg::Op(GraphOp::EnsureEdge {
@@ -993,7 +1037,11 @@ impl GraphOperable for Pod {
         Ok(())
     }
 
-    fn project_delete(self, graph: &GraphController) -> Result<(), ActorProcessingErr> {
+    fn project_delete(
+        self,
+        graph: &GraphController,
+        cluster_uid: &str,
+    ) -> Result<(), ActorProcessingErr> {
         let Some(uid) = self.metadata.uid.clone() else {
             return Ok(());
         };
@@ -1006,10 +1054,14 @@ impl GraphOperable for Pod {
         // query. Deletion is a state transition like any other.
         project_deletion_state(
             graph,
-            KubeNodeKey::Pod { uid: uid.clone() },
+            KubeNodeKey::Pod {
+                uid: uid.clone(),
+                cluster_uid: cluster_uid.to_string(),
+            },
             KubeNodeKey::PodState {
                 pod_uid: uid,
                 valid_from: now.to_string(),
+                cluster_uid: cluster_uid.to_string(),
             },
             now,
         )
@@ -1031,6 +1083,7 @@ impl GraphOperable for Deployment {
         self,
         graph: &GraphController,
         _tcp_client: &dyn CassiniClient,
+        cluster_uid: &str,
     ) -> Result<(), ActorProcessingErr> {
         let Some(uid) = self.metadata.uid.clone() else {
             return Ok(());
@@ -1084,7 +1137,10 @@ impl GraphOperable for Deployment {
             })
             .unwrap_or_else(now_ms);
 
-        let deployment_key = KubeNodeKey::Deployment { uid: uid.clone() };
+        let deployment_key = KubeNodeKey::Deployment {
+            uid: uid.clone(),
+            cluster_uid: cluster_uid.to_string(),
+        };
 
         // ---- Anchor node ----
 
@@ -1100,7 +1156,7 @@ impl GraphOperable for Deployment {
         // ---- Owner refs ----
 
         if let Some(owners) = self.metadata.owner_references {
-            handle_owner_refs(&owners, deployment_key.clone(), graph)?;
+            handle_owner_refs(&owners, deployment_key.clone(), graph, cluster_uid)?;
         }
 
         // ---- Immutable DeploymentState ----
@@ -1108,6 +1164,7 @@ impl GraphOperable for Deployment {
         let state_key = KubeNodeKey::DeploymentState {
             uid: uid.clone(),
             valid_from: valid_from_ms.to_string(),
+            cluster_uid: cluster_uid.to_string(),
         };
 
         graph.cast(GraphControllerMsg::Op(GraphOp::UpdateState {
@@ -1140,7 +1197,11 @@ impl GraphOperable for Deployment {
         Ok(())
     }
 
-    fn project_delete(self, graph: &GraphController) -> Result<(), ActorProcessingErr> {
+    fn project_delete(
+        self,
+        graph: &GraphController,
+        cluster_uid: &str,
+    ) -> Result<(), ActorProcessingErr> {
         let Some(uid) = self.metadata.uid.clone() else {
             return Ok(());
         };
@@ -1153,8 +1214,12 @@ impl GraphOperable for Deployment {
         // phase, and no replica counts are fabricated for it.
         project_deletion_state(
             graph,
-            KubeNodeKey::Deployment { uid: uid.clone() },
+            KubeNodeKey::Deployment {
+                uid: uid.clone(),
+                cluster_uid: cluster_uid.to_string(),
+            },
             KubeNodeKey::DeploymentState {
+                cluster_uid: cluster_uid.to_string(),
                 uid,
                 valid_from: now.to_string(),
             },
@@ -1172,6 +1237,7 @@ impl GraphOperable for ReplicaSet {
         self,
         graph: &GraphController,
         _tcp_client: &dyn CassiniClient,
+        cluster_uid: &str,
     ) -> Result<(), ActorProcessingErr> {
         let Some(uid) = self.metadata.uid.clone() else {
             return Ok(());
@@ -1203,7 +1269,10 @@ impl GraphOperable for ReplicaSet {
             })
             .unwrap_or_else(now_ms);
 
-        let rs_key = KubeNodeKey::ReplicaSet { uid: uid.clone() };
+        let rs_key = KubeNodeKey::ReplicaSet {
+            uid: uid.clone(),
+            cluster_uid: cluster_uid.to_string(),
+        };
 
         // ---- Anchor node ----
 
@@ -1219,7 +1288,7 @@ impl GraphOperable for ReplicaSet {
         // ---- Owner refs ----
 
         if let Some(owners) = self.metadata.owner_references {
-            handle_owner_refs(&owners, rs_key.clone(), graph)?;
+            handle_owner_refs(&owners, rs_key.clone(), graph, cluster_uid)?;
         }
 
         // ---- Immutable ReplicaSetState ----
@@ -1233,6 +1302,7 @@ impl GraphOperable for ReplicaSet {
         let state_key = KubeNodeKey::ReplicaSetState {
             uid: uid.clone(),
             valid_from: valid_from_ms.to_string(),
+            cluster_uid: cluster_uid.to_string(),
         };
 
         graph.cast(GraphControllerMsg::Op(GraphOp::UpdateState {
@@ -1254,7 +1324,11 @@ impl GraphOperable for ReplicaSet {
         Ok(())
     }
 
-    fn project_delete(self, graph: &GraphController) -> Result<(), ActorProcessingErr> {
+    fn project_delete(
+        self,
+        graph: &GraphController,
+        cluster_uid: &str,
+    ) -> Result<(), ActorProcessingErr> {
         let Some(uid) = self.metadata.uid.clone() else {
             return Ok(());
         };
@@ -1265,10 +1339,14 @@ impl GraphOperable for ReplicaSet {
         // no "Deleted" phase. Deletion attests one fact only.
         project_deletion_state(
             graph,
-            KubeNodeKey::ReplicaSet { uid: uid.clone() },
+            KubeNodeKey::ReplicaSet {
+                uid: uid.clone(),
+                cluster_uid: cluster_uid.to_string(),
+            },
             KubeNodeKey::ReplicaSetState {
                 uid,
                 valid_from: now.to_string(),
+                cluster_uid: cluster_uid.to_string(),
             },
             now,
         )
@@ -1286,6 +1364,7 @@ impl GraphOperable for OciRepository {
         self,
         graph: &GraphController,
         _tcp_client: &dyn CassiniClient,
+        cluster_uid: &str,
     ) -> Result<(), ActorProcessingErr> {
         let Some(uid) = self.metadata.uid.clone() else {
             return Ok(());
@@ -1297,7 +1376,10 @@ impl GraphOperable for OciRepository {
             .clone()
             .unwrap_or_else(|| "default".into());
 
-        let repo_key = KubeNodeKey::FluxOciRepository { uid: uid.clone() };
+        let repo_key = KubeNodeKey::FluxOciRepository {
+            uid: uid.clone(),
+            cluster_uid: cluster_uid.to_string(),
+        };
 
         // ---- Anchor node ----
         //
@@ -1347,6 +1429,7 @@ impl GraphOperable for OciRepository {
         let state_key = KubeNodeKey::FluxOciRepositoryState {
             uid: uid.clone(),
             valid_from: valid_from_ms.to_string(),
+            cluster_uid: cluster_uid.to_string(),
         };
 
         graph.cast(GraphControllerMsg::Op(GraphOp::UpdateState {
@@ -1383,9 +1466,14 @@ impl GraphOperable for OciRepository {
         // match what the OCI resolver writes on OCIArtifact.digest —
         // "sha256:<hex>" — verify once against real data.
 
+        // NOTE: this is a natural-key match, not a KubeNodeKey::cypher_match
+        // -- see the TODO on the Kustomization impl below for why. Same
+        // collision exposure applies here: {name, namespace} alone is not
+        // unique across clusters, so cluster_uid is added to the MATCH,
+        // matching the anchor node this same impl writes it onto above.
         graph.cast(GraphControllerMsg::Op(GraphOp::RawQuery {
             cypher: "
-                MATCH (repo:FluxOCIRepository {name: $name, namespace: $namespace})
+                MATCH (repo:FluxOCIRepository {name: $name, namespace: $namespace, cluster_uid: $cluster_uid})
                 MATCH (oci:OCIArtifact {digest: $digest})
                 MERGE (repo)-[:RECONCILED]->(oci)
             "
@@ -1393,6 +1481,10 @@ impl GraphOperable for OciRepository {
             params: vec![
                 ("name".into(), BoltType::String(name.into())),
                 ("namespace".into(), BoltType::String(namespace.into())),
+                (
+                    "cluster_uid".into(),
+                    BoltType::String(cluster_uid.to_string().into()),
+                ),
                 (
                     "digest".into(),
                     BoltType::String(artifact.digest.clone().into()),
@@ -1403,7 +1495,11 @@ impl GraphOperable for OciRepository {
         Ok(())
     }
 
-    fn project_delete(self, graph: &GraphController) -> Result<(), ActorProcessingErr> {
+    fn project_delete(
+        self,
+        graph: &GraphController,
+        cluster_uid: &str,
+    ) -> Result<(), ActorProcessingErr> {
         let Some(uid) = self.metadata.uid.clone() else {
             return Ok(());
         };
@@ -1411,10 +1507,14 @@ impl GraphOperable for OciRepository {
 
         project_deletion_state(
             graph,
-            KubeNodeKey::FluxOciRepository { uid: uid.clone() },
+            KubeNodeKey::FluxOciRepository {
+                uid: uid.clone(),
+                cluster_uid: cluster_uid.to_string(),
+            },
             KubeNodeKey::FluxOciRepositoryState {
                 uid,
                 valid_from: now.to_string(),
+                cluster_uid: cluster_uid.to_string(),
             },
             now,
         )
@@ -1430,6 +1530,7 @@ impl GraphOperable for Kustomization {
         self,
         graph: &GraphController,
         _tcp_client: &dyn CassiniClient,
+        cluster_uid: &str,
     ) -> Result<(), ActorProcessingErr> {
         let Some(uid) = self.metadata.uid.clone() else {
             return Ok(());
@@ -1441,7 +1542,10 @@ impl GraphOperable for Kustomization {
             .clone()
             .unwrap_or_else(|| "default".into());
 
-        let ks_key = KubeNodeKey::FluxKustomization { uid: uid.clone() };
+        let ks_key = KubeNodeKey::FluxKustomization {
+            uid: uid.clone(),
+            cluster_uid: cluster_uid.to_string(),
+        };
 
         // ---- Anchor node ----
         //
@@ -1516,6 +1620,7 @@ impl GraphOperable for Kustomization {
         let state_key = KubeNodeKey::FluxKustomizationState {
             uid: uid.clone(),
             valid_from: valid_from_ms.to_string(),
+            cluster_uid: cluster_uid.to_string(),
         };
 
         graph.cast(GraphControllerMsg::Op(GraphOp::UpdateState {
@@ -1560,9 +1665,12 @@ impl GraphOperable for Kustomization {
                 .unwrap_or(revision.as_str())
                 .to_string();
 
+            // NOTE: natural-key match, same as FluxOCIRepository's RECONCILED
+            // query above -- {name, namespace} alone is not unique across
+            // clusters, so cluster_uid is added to the MATCH.
             graph.cast(GraphControllerMsg::Op(GraphOp::RawQuery {
                 cypher: "
-                    MATCH (ks:FluxKustomization {name: $name, namespace: $namespace})
+                    MATCH (ks:FluxKustomization {name: $name, namespace: $namespace, cluster_uid: $cluster_uid})
                     MATCH (oci:OCIArtifact {digest: $digest})
                     MERGE (ks)-[:DEPLOYED]->(oci)
                 "
@@ -1570,6 +1678,10 @@ impl GraphOperable for Kustomization {
                 params: vec![
                     ("name".into(), BoltType::String(name.into())),
                     ("namespace".into(), BoltType::String(namespace.into())),
+                    (
+                        "cluster_uid".into(),
+                        BoltType::String(cluster_uid.to_string().into()),
+                    ),
                     ("digest".into(), BoltType::String(digest.into())),
                 ],
             }))?;
@@ -1577,7 +1689,11 @@ impl GraphOperable for Kustomization {
         Ok(())
     }
 
-    fn project_delete(self, graph: &GraphController) -> Result<(), ActorProcessingErr> {
+    fn project_delete(
+        self,
+        graph: &GraphController,
+        cluster_uid: &str,
+    ) -> Result<(), ActorProcessingErr> {
         let Some(uid) = self.metadata.uid.clone() else {
             return Ok(());
         };
@@ -1585,10 +1701,14 @@ impl GraphOperable for Kustomization {
 
         project_deletion_state(
             graph,
-            KubeNodeKey::FluxKustomization { uid: uid.clone() },
+            KubeNodeKey::FluxKustomization {
+                uid: uid.clone(),
+                cluster_uid: cluster_uid.to_string(),
+            },
             KubeNodeKey::FluxKustomizationState {
                 uid,
                 valid_from: now.to_string(),
+                cluster_uid: cluster_uid.to_string(),
             },
             now,
         )

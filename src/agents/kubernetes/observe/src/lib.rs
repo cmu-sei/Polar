@@ -10,8 +10,8 @@ use kube::{api::ListParams, runtime::watcher};
 use kube_common::flux::kustomization::Kustomization;
 use kube_common::flux::oci_repositories::OciRepository;
 use kube_common::{
-    KIND_KUSTOMIZATION, KIND_OCI_REPOSITORY, KUBERNETES_CONSUMER, RESOURCE_APPLIED_ACTION,
-    RESOURCE_DELETED_ACTION, RawKubeEvent,
+    KIND_KUSTOMIZATION, KIND_OCI_REPOSITORY, RESOURCE_APPLIED_ACTION, RESOURCE_DELETED_ACTION,
+    RawKubeEvent,
 };
 
 use polar::cassini::{CassiniClient, TcpClient};
@@ -78,6 +78,7 @@ pub async fn list_and_watch_global<T>(
     tcp_client: &TcpClient,
     kube_client: Client,
     kind: &str,
+    cluster_uid: &str,
 ) -> Result<(), ActorProcessingErr>
 where
     T: Resource + Clone + DeserializeOwned + Serialize + Debug + Send + 'static,
@@ -104,6 +105,7 @@ where
             action: RESOURCE_APPLIED_ACTION.into(),
             object: to_value(&obj)?,
             resource_version: resource_version.clone(),
+            cluster_uid: cluster_uid.to_string(),
         };
 
         emit_event(tcp_client, ev).await?;
@@ -152,6 +154,7 @@ where
                     action: RESOURCE_APPLIED_ACTION.into(),
                     object: serde_json::to_value(obj)?,
                     resource_version: None, // runtime watcher manages this internally
+                    cluster_uid: cluster_uid.to_string(),
                 };
 
                 emit_event(tcp_client, ev).await?;
@@ -163,6 +166,7 @@ where
                     action: RESOURCE_DELETED_ACTION.into(),
                     object: serde_json::to_value(obj)?,
                     resource_version: None,
+                    cluster_uid: cluster_uid.to_string(),
                 };
 
                 emit_event(tcp_client, ev).await?;
@@ -191,6 +195,7 @@ pub async fn list_and_watch_namespaced<T>(
     kube_client: Client,
     kind: &str,
     namespace: &str,
+    cluster_uid: &str,
 ) -> Result<(), ActorProcessingErr>
 where
     T: Resource + Clone + DeserializeOwned + Serialize + Debug + Send + 'static,
@@ -213,6 +218,7 @@ where
             action: RESOURCE_APPLIED_ACTION.into(),
             object: to_value(&obj)?,
             resource_version: resource_version.clone(),
+            cluster_uid: cluster_uid.to_string(),
         };
 
         emit_event(tcp_client, ev).await?;
@@ -261,6 +267,7 @@ where
                     action: RESOURCE_APPLIED_ACTION.into(),
                     object: serde_json::to_value(obj)?,
                     resource_version: None, // runtime watcher manages this internally
+                    cluster_uid: cluster_uid.to_string(),
                 };
 
                 emit_event(tcp_client, ev).await?;
@@ -272,6 +279,7 @@ where
                     action: RESOURCE_DELETED_ACTION.into(),
                     object: serde_json::to_value(obj)?,
                     resource_version: None,
+                    cluster_uid: cluster_uid.to_string(),
                 };
 
                 emit_event(tcp_client, ev).await?;
@@ -301,15 +309,15 @@ where
 ///
 /// Failures propagate upward.
 async fn emit_event(tcp_client: &TcpClient, ev: RawKubeEvent) -> Result<(), ActorProcessingErr> {
+    let topic = kube_common::kube_events_topic(&ev.cluster_uid);
     let payload = to_vec(&ev)?;
-    trace!("Emitting event {ev:?}");
+    trace!("Emitting event {ev:?} on topic {topic}");
     tcp_client.publish(PublishRequest {
-        topic: KUBERNETES_CONSUMER.to_string(),
+        topic,
         trace_ctx: None,
         payload,
         offline_behavior: OfflineBehavior::default(),
     })?;
-
     Ok(())
 }
 
@@ -321,12 +329,14 @@ pub struct GlobalWatcherState {
     pub kube_client: Client,
     pub tcp_client: TcpClient,
     pub kind: &'static str,
+    pub cluster_uid: std::sync::Arc<str>,
 }
 pub struct NamespacedWatcherState {
     pub kube_client: Client,
     pub tcp_client: TcpClient,
     pub namespace: String,
     pub kind: &'static str,
+    pub cluster_uid: std::sync::Arc<str>,
 }
 
 // TODO: Change existging calls to these macros to use constants defined in kube-common
@@ -378,6 +388,7 @@ macro_rules! impl_namespaced_watcher {
                             state.kube_client.clone(),
                             state.kind,
                             &state.namespace,
+                            &state.cluster_uid,
                         )
                         .await
                         {
@@ -440,6 +451,7 @@ macro_rules! impl_global_watcher {
                             &state.tcp_client,
                             state.kube_client.clone(),
                             state.kind,
+                            &state.cluster_uid,
                         )
                         .await
                         {
