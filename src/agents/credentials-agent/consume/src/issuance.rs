@@ -294,7 +294,7 @@ mod tests {
             LedgerActor,
             LedgerActorArgs {
                 log_path: path.to_str().unwrap().to_string(),
-                graph_controller: crate::ledger::tests::fake_graph_controller().await,
+                projection_actor: crate::projection::tests::fake_projection_actor().await,
             },
         )
         .await

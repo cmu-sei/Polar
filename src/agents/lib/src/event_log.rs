@@ -107,6 +107,7 @@ fn compute_hash(prev_hash: &str, timestamp: &DateTime<Utc>, event_json: &str) ->
 pub struct EventLog<E> {
     file: File,
     last_hash: String,
+    path: std::path::PathBuf,
     _marker: PhantomData<E>,
 }
 
@@ -123,8 +124,12 @@ where
     /// hard, fatal error. This mechanism's entire point is
     /// tamper-evidence; silently continuing past a broken chain would
     /// defeat it.
-    pub fn open(path: impl AsRef<Path>) -> Result<(Self, Vec<E>), EventLogError> {
-        let path = path.as_ref();
+    /// Shared replay logic -- reads `path` from scratch, verifying
+    /// the entire hash chain, returning each event paired with its
+    /// own entry's hash (not just the final one) plus the final hash
+    /// itself. Both `open` and `events_since` build on this rather
+    /// than duplicating the same parse-and-verify loop.
+    fn replay_file(path: &Path) -> Result<(Vec<(String, E)>, String), EventLogError> {
         let mut events = Vec::new();
         let mut last_hash = GENESIS_HASH.to_string();
 
@@ -165,9 +170,16 @@ where
                     .map_err(|source| EventLogError::EventDeserialize { line: i, source })?;
 
                 last_hash = entry.hash.clone();
-                events.push(event);
+                events.push((entry.hash.clone(), event));
             }
         }
+
+        Ok((events, last_hash))
+    }
+
+    pub fn open(path: impl AsRef<Path>) -> Result<(Self, Vec<E>), EventLogError> {
+        let path = path.as_ref();
+        let (events, last_hash) = Self::replay_file(path)?;
 
         let file = OpenOptions::new().create(true).append(true).open(path)?;
 
@@ -175,10 +187,50 @@ where
             Self {
                 file,
                 last_hash,
+                path: path.to_path_buf(),
                 _marker: PhantomData,
             },
-            events,
+            events.into_iter().map(|(_, e)| e).collect(),
         ))
+    }
+
+    /// Re-reads the log from disk, returning every event that
+    /// appended *after* `since_hash` (exclusive) -- the real catch-up
+    /// mechanism for a caller (e.g. a graph projection) that fell
+    /// behind and needs to resume from a known prior position,
+    /// without re-processing everything from the beginning. Re-reads
+    /// the whole file rather than tracking full history in memory
+    /// permanently, matching this log's existing "let it grow,
+    /// revisit if it's ever actually a problem" policy -- catch-up is
+    /// a rare, not performance-critical operation.
+    ///
+    /// If `since_hash` doesn't match any entry actually in the log (a
+    /// stale or corrupted checkpoint, or `GENESIS_HASH` for "nothing
+    /// yet") every event in the log is returned -- a full catch-up is
+    /// the safe, correct fallback for an unrecognized position, not
+    /// an error.
+    pub fn events_since(&self, since_hash: &str) -> Result<Vec<E>, EventLogError> {
+        let (events, _) = Self::replay_file(&self.path)?;
+
+        if since_hash == GENESIS_HASH {
+            return Ok(events.into_iter().map(|(_, e)| e).collect());
+        }
+
+        match events.iter().position(|(hash, _)| hash == since_hash) {
+            Some(idx) => Ok(events.into_iter().skip(idx + 1).map(|(_, e)| e).collect()),
+            None => Ok(events.into_iter().map(|(_, e)| e).collect()),
+        }
+    }
+
+    /// Returns the full (hash, event) history, re-read from disk --
+    /// for callers needing more than just a final position
+    /// (`events_since`'s own job); specifically, a caller that needs
+    /// to sequentially re-fold through history to reconstruct correct
+    /// historical context at each point, not just "everything after
+    /// X" taken in isolation.
+    pub fn replay_with_hashes(&self) -> Result<Vec<(String, E)>, EventLogError> {
+        let (events, _) = Self::replay_file(&self.path)?;
+        Ok(events)
     }
 
     /// Appends a new event, `fsync`'d before returning -- the write is
@@ -388,5 +440,117 @@ mod tests {
 
         let result = EventLog::<TestEvent>::open(&path);
         assert!(matches!(result, Err(EventLogError::ChainBroken { .. })));
+    }
+
+    #[test]
+    fn events_since_returns_only_events_after_the_given_hash() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("log.jsonl");
+
+        let e1 = TestEvent::Grant {
+            identity: "alice".into(),
+            permissions: vec!["read".into()],
+        };
+        let e2 = TestEvent::Grant {
+            identity: "bob".into(),
+            permissions: vec!["write".into()],
+        };
+        let e3 = TestEvent::Revoke {
+            serial: "abc123".into(),
+            reason: "compromised".into(),
+        };
+
+        let (mut log, _) = EventLog::<TestEvent>::open(&path).unwrap();
+        log.append(&e1).unwrap();
+        let hash_after_e1 = log.current_hash().to_string();
+        log.append(&e2).unwrap();
+        log.append(&e3).unwrap();
+
+        let since = log.events_since(&hash_after_e1).unwrap();
+        assert_eq!(since, vec![e2, e3]);
+    }
+
+    #[test]
+    fn events_since_genesis_hash_returns_everything() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("log.jsonl");
+
+        let e1 = TestEvent::Grant {
+            identity: "alice".into(),
+            permissions: vec!["read".into()],
+        };
+        let e2 = TestEvent::Revoke {
+            serial: "abc123".into(),
+            reason: "compromised".into(),
+        };
+
+        let (mut log, _) = EventLog::<TestEvent>::open(&path).unwrap();
+        log.append(&e1).unwrap();
+        log.append(&e2).unwrap();
+
+        let since = log.events_since(GENESIS_HASH).unwrap();
+        assert_eq!(since, vec![e1, e2]);
+    }
+
+    #[test]
+    fn events_since_unrecognized_hash_fails_safe_to_everything() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("log.jsonl");
+
+        let e1 = TestEvent::Grant {
+            identity: "alice".into(),
+            permissions: vec!["read".into()],
+        };
+
+        let (mut log, _) = EventLog::<TestEvent>::open(&path).unwrap();
+        log.append(&e1).unwrap();
+
+        // A stale or corrupted checkpoint pointing at a hash that
+        // genuinely isn't in this log at all -- must fail safe to a
+        // full catch-up, not silently return nothing or error.
+        let since = log.events_since("some-hash-that-was-never-actually-appended").unwrap();
+        assert_eq!(since, vec![e1]);
+    }
+
+    #[test]
+    fn events_since_the_latest_hash_returns_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("log.jsonl");
+
+        let e1 = TestEvent::Grant {
+            identity: "alice".into(),
+            permissions: vec!["read".into()],
+        };
+
+        let (mut log, _) = EventLog::<TestEvent>::open(&path).unwrap();
+        log.append(&e1).unwrap();
+        let latest = log.current_hash().to_string();
+
+        let since = log.events_since(&latest).unwrap();
+        assert!(since.is_empty(), "nothing new since the most recent event");
+    }
+
+    #[test]
+    fn replay_with_hashes_returns_every_hash_paired_correctly() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("log.jsonl");
+
+        let e1 = TestEvent::Grant {
+            identity: "alice".into(),
+            permissions: vec!["read".into()],
+        };
+        let e2 = TestEvent::Revoke {
+            serial: "abc123".into(),
+            reason: "compromised".into(),
+        };
+
+        let (mut log, _) = EventLog::<TestEvent>::open(&path).unwrap();
+        log.append(&e1).unwrap();
+        let hash_after_e1 = log.current_hash().to_string();
+        log.append(&e2).unwrap();
+        let hash_after_e2 = log.current_hash().to_string();
+
+        let history = log.replay_with_hashes().unwrap();
+        assert_eq!(history, vec![(hash_after_e1, e1), (hash_after_e2, e2)]);
     }
 }

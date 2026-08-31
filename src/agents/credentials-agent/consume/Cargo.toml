@@ -29,6 +29,7 @@ cert-client = { path = "../../cert-issuer/client" }
 cert-issuer-common = { path = "../../cert-issuer/common" }
 credentials_agent_common.workspace = true
 jwt_utils.workspace = true
+neo4rs.workspace = true
 polar.workspace = true
 ractor.workspace = true
 reqwest.workspace = true

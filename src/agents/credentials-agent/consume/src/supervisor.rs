@@ -32,6 +32,7 @@
 static NAMED_ACTOR_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 use crate::ledger::{LedgerActor, LedgerActorArgs, LedgerMessage};
+use crate::projection::{ProjectionActor, ProjectionActorArgs, ProjectionMessage};
 use crate::identity_normalization::IdentityNormalizationHandler;
 use crate::identity_normalization_actor::{IdentityNormalizationActor, IdentityNormalizationActorArgs};
 use cassini_client::{TcpClientMessage, TCPClientConfig, TcpClientActor, TcpClientArgs};
@@ -40,7 +41,6 @@ use credentials_agent_common::{CREDENTIALS_GRANTS_TOPIC, CREDENTIALS_REVOCATIONS
 use credentials_agent_common::events::CredentialsEvent;
 use credentials_agent_common::identity::IdentityNormalizationRequest;
 use credentials_agent_common::CREDENTIALS_IDENTITY_NORMALIZATION_REQUESTS_TOPIC;
-use polar::graph::controller::{GraphController, GraphControllerActor, GraphControllerArgs, GraphSignal};
 use polar::health::{DepCertEndpoint, HealthCheckActor, HealthCheckArgs, HealthCheckMessage};
 use polar::{Supervisor, SupervisorMessage};
 use ractor::{Actor, ActorProcessingErr, ActorRef, OutputPort, SupervisionEvent, async_trait};
@@ -80,9 +80,11 @@ pub struct ConsumerSupervisorState {
     /// split across multiple actors the way jira/process's four data
     /// streams safely are.
     ledger: ActorRef<LedgerMessage>,
+    /// Owns the graph projection, and its own GraphControllerActor as
+    /// a direct child -- see projection.rs's own module doc.
+    projection_actor: ActorRef<ProjectionMessage>,
     issuance_actor: ActorRef<Envelope<IssuanceRequest>>,
     identity_normalization_actor: ActorRef<Envelope<IdentityNormalizationRequest>>,
-    graph_controller: Option<GraphController>,
     healthcheck: ActorRef<HealthCheckMessage>,
     draining: bool,
 }
@@ -169,19 +171,28 @@ impl Actor for ConsumerSupervisor {
         let log_path = std::env::var(CREDENTIALS_EVENT_LOG_PATH_ENV)
             .unwrap_or_else(|_| CREDENTIALS_EVENT_LOG_PATH_DEFAULT.to_string());
 
-        // Spawned eagerly, unlike every other graph-writing agent in
-        // this codebase -- the Credentials Agent's own health must
-        // never depend on Neo4j's availability at all (see ledger.rs's
-        // own module doc). No technical dependency requires waiting
-        // for Cassini registration first; a Bolt connection to Neo4j
-        // is entirely independent of Cassini/TCP client registration.
-        let graph_signal_port = Arc::new(OutputPort::<GraphSignal>::default());
-        let (graph_controller, _) = GraphControllerActor::spawn_linked(
-            Some("credentials-agent.consumer.graph.controller".to_string()),
-            GraphControllerActor,
-            GraphControllerArgs {
-                signal_port: graph_signal_port,
-            },
+        // ProjectionActor owns the graph projection as its own,
+        // genuinely separate concern -- see projection.rs's own
+        // module doc for why this isn't LedgerActor's job despite
+        // being where the events originate. Spawned eagerly, unlike
+        // every other graph-writing agent in this codebase -- the
+        // Credentials Agent's own health must never depend on Neo4j's
+        // availability at all. No technical dependency requires
+        // waiting for Cassini registration first; a Bolt connection
+        // to Neo4j is entirely independent of Cassini/TCP client
+        // registration.
+        //
+        // Spawned before LedgerActor, with ledger: None -- the two
+        // actors need references to each other, which can't both be
+        // constructor arguments (neither ActorRef exists before its
+        // own actor is spawned). ProjectionActor's need for the
+        // ledger reference is deferred via SetLedger below, since
+        // nothing calls into it until an actual event or catch-up
+        // happens, well after both actors exist.
+        let (projection_actor, _) = ProjectionActor::spawn_linked(
+            Some("credentials-agent.consumer.projection".to_string()),
+            ProjectionActor,
+            ProjectionActorArgs { ledger: None },
             myself.get_cell(),
         )
         .await
@@ -192,12 +203,14 @@ impl Actor for ConsumerSupervisor {
             LedgerActor,
             LedgerActorArgs {
                 log_path,
-                graph_controller: graph_controller.clone(),
+                projection_actor: projection_actor.clone(),
             },
             myself.get_cell(),
         )
         .await
         .map_err(ActorProcessingErr::from)?;
+
+        let _ = projection_actor.cast(ProjectionMessage::SetLedger(ledger.clone()));
 
         let cert_issuer_url = std::env::var(CERT_ISSUER_URL_ENV).map_err(|_| {
             ActorProcessingErr::from(format!("{CERT_ISSUER_URL_ENV} must be set"))
@@ -300,9 +313,9 @@ impl Actor for ConsumerSupervisor {
 
         Ok(ConsumerSupervisorState {
             ledger,
+            projection_actor,
             issuance_actor,
             identity_normalization_actor,
-            graph_controller: Some(graph_controller),
             healthcheck,
             draining: false,
         })
@@ -331,27 +344,29 @@ impl Actor for ConsumerSupervisor {
             }
             SupervisorMessage::ForceExit => {
                 warn!("CONSUMER_SUPERVISOR: drain window elapsed, beginning graceful shutdown");
-
-                if let Some(controller) = state.graph_controller.take() {
-                    warn!(
-                        "CONSUMER_SUPERVISOR: stopping graph controller and waiting for any \
-                         in-flight write to complete before exiting"
-                    );
-                    match controller
-                        .stop_and_wait(
-                            Some("supervisor shutting down".into()),
-                            Some(std::time::Duration::from_secs(30)),
-                        )
-                        .await
-                    {
-                        Ok(()) => info!("CONSUMER_SUPERVISOR: graph controller stopped cleanly"),
-                        Err(e) => error!(
-                            "CONSUMER_SUPERVISOR: graph controller did not stop cleanly \
-                             within 30s, exiting anyway: {e:?}"
-                        ),
-                    }
+                // ProjectionActor owns its own GraphControllerActor as
+                // a direct, linked child now -- stopping it cascades
+                // down to stop the graph controller cleanly too,
+                // rather than the supervisor needing its own separate
+                // reference to reach it directly.
+                warn!(
+                    "CONSUMER_SUPERVISOR: stopping projection actor (and its graph controller) \
+                     and waiting for any in-flight write to complete before exiting"
+                );
+                match state
+                    .projection_actor
+                    .stop_and_wait(
+                        Some("supervisor shutting down".into()),
+                        Some(std::time::Duration::from_secs(30)),
+                    )
+                    .await
+                {
+                    Ok(()) => info!("CONSUMER_SUPERVISOR: projection actor stopped cleanly"),
+                    Err(e) => error!(
+                        "CONSUMER_SUPERVISOR: projection actor did not stop cleanly within \
+                         30s, exiting anyway: {e:?}"
+                    ),
                 }
-
                 warn!("CONSUMER_SUPERVISOR: exiting now");
                 std::process::exit(1);
             }
@@ -440,7 +455,7 @@ mod tests {
             LedgerActor,
             LedgerActorArgs {
                 log_path: log_path.to_string(),
-                graph_controller: crate::ledger::tests::fake_graph_controller().await,
+                projection_actor: crate::projection::tests::fake_projection_actor().await,
             },
         )
         .await
@@ -628,7 +643,7 @@ mod issuance_wiring_tests {
             LedgerActor,
             LedgerActorArgs {
                 log_path: log_path.to_str().unwrap().to_string(),
-                graph_controller: crate::ledger::tests::fake_graph_controller().await,
+                projection_actor: crate::projection::tests::fake_projection_actor().await,
             },
         )
         .await

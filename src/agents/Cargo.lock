@@ -1272,6 +1272,7 @@ dependencies = [
  "cert-issuer-common",
  "credentials_agent_common",
  "jwt_utils",
+ "neo4rs",
  "polar",
  "ractor",
  "reqwest 0.12.28",

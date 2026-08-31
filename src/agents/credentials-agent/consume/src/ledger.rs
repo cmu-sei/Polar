@@ -42,52 +42,30 @@
 //! read and write going through this same actor's mailbox gives a
 //! consistent, race-free view of derived state for free.
 //!
-//! ## Graph projection: best-effort, never gating this agent's health
-//!
-//! Unlike every other graph-writing agent in this codebase, the
-//! Credentials Agent's own liveness must never depend on Neo4j's
-//! availability -- this service is too structurally critical (once
-//! cert-issuer reachability narrowing lands, every other agent's own
-//! cert issuance routes through it) to restart itself over a
-//! dependency that isn't actually load-bearing for correctness. The
-//! event log is the real source of truth and functions completely
-//! independently of Neo4j; the graph is purely a disposable,
-//! rebuildable observability projection. Every projection attempt
-//! here is fire-and-forget: on failure, log a warning and move on --
-//! never block or fail the append itself, which is what correctness
-//! actually depends on.
-//!
-//! A `CredentialsNodeKey::ProjectionCheckpoint` singleton node tracks
-//! the hash of the last event successfully incorporated into the
-//! projection, using EventLog's own hash-chain position (a content-
-//! derived, tamper-evident marker) rather than a separate counter.
-//! This is the foundation for eventual-consistency catch-up on
-//! reconnection after an outage -- the actual catch-up logic (reading
-//! this checkpoint back and re-projecting only the gap) is real,
-//! separate, immediately-following work, not built in this pass.
+//! Graph projection is deliberately *not* owned here -- see
+//! projection.rs's own module doc for why. This actor's only
+//! involvement is a fire-and-forget notification to ProjectionActor
+//! after each successful append+fold; it has no state of its own
+//! about graph availability, checkpoints, or anything else
+//! graph-related.
 
+use crate::projection::ProjectionMessage;
 use crate::state::{CredentialsState, GrantRecord};
 use credentials_agent_common::events::CredentialsEvent;
-use credentials_agent_common::graph::CredentialsNodeKey;
 use polar::event_log::EventLog;
-use polar::graph::controller::{GraphController, GraphControllerMsg, GraphOp, GraphValue, Property, IntoGraphKey};
 use ractor::{Actor, ActorProcessingErr, ActorRef, RpcReplyPort, async_trait};
 
 pub struct LedgerActor;
 
 pub struct LedgerActorArgs {
     pub log_path: String,
-    /// Spawned eagerly by the supervisor, passed in directly at
-    /// construction -- not lazily discovered later, since nothing
-    /// about this actor's own correctness depends on Cassini
-    /// registration having happened first.
-    pub graph_controller: GraphController,
+    pub projection_actor: ActorRef<ProjectionMessage>,
 }
 
 pub struct LedgerActorState {
     event_log: EventLog<CredentialsEvent>,
     credentials_state: CredentialsState,
-    graph_controller: GraphController,
+    projection_actor: ActorRef<ProjectionMessage>,
 }
 
 pub enum LedgerMessage {
@@ -120,6 +98,15 @@ pub enum LedgerMessage {
         instance_binding: String,
         reply: RpcReplyPort<bool>,
     },
+    /// Full (hash, event) history, re-read from the log -- used by
+    /// ProjectionActor for catch-up: replaying and re-folding through
+    /// history to reconstruct correct historical context at each
+    /// point (e.g. whether a grant existed at the moment a specific
+    /// past event happened), not just "everything after X" taken in
+    /// isolation.
+    GetFullHistory {
+        reply: RpcReplyPort<Result<Vec<(String, CredentialsEvent)>, String>>,
+    },
 }
 
 #[async_trait]
@@ -150,7 +137,7 @@ impl Actor for LedgerActor {
         Ok(LedgerActorState {
             event_log,
             credentials_state,
-            graph_controller: args.graph_controller,
+            projection_actor: args.projection_actor,
         })
     }
 
@@ -162,22 +149,14 @@ impl Actor for LedgerActor {
     ) -> Result<(), ActorProcessingErr> {
         match message {
             LedgerMessage::Append { event, reply } => {
-                // Checked before folding -- apply() removes a
-                // consumed grant from the in-memory map, so this is
-                // the only point a caller can still observe whether
-                // one existed prior to this specific event.
-                let grant_existed = if let CredentialsEvent::IssuanceCompleted { identity, .. } =
-                    &event
-                {
-                    state.credentials_state.grant_for(identity).is_some()
-                } else {
-                    false
-                };
-
                 let result = match state.event_log.append(&event) {
                     Ok(()) => {
                         state.credentials_state.apply(&event);
-                        project_to_graph(state, &event, grant_existed);
+                        let hash = state.event_log.current_hash().to_string();
+                        let _ = state.projection_actor.cast(ProjectionMessage::ProjectEvent {
+                            hash,
+                            event: event.clone(),
+                        });
                         Ok(())
                     }
                     Err(e) => Err(e.to_string()),
@@ -189,11 +168,11 @@ impl Actor for LedgerActor {
                     tracing::error!("Failed to append event to ledger: {e}. Event: {event:?}");
                 } else {
                     state.credentials_state.apply(&event);
-                    // Grant/Revoke only, per deserialize_and_dispatch's
-                    // own routing -- IssuanceCompleted never arrives
-                    // via this path, so grant_existed is never
-                    // relevant here.
-                    project_to_graph(state, &event, false);
+                    let hash = state.event_log.current_hash().to_string();
+                    let _ = state.projection_actor.cast(ProjectionMessage::ProjectEvent {
+                        hash,
+                        event,
+                    });
                 }
             }
             LedgerMessage::CheckGrant { identity, reply } => {
@@ -210,193 +189,18 @@ impl Actor for LedgerActor {
                     .has_valid_certificate(&identity, &instance_binding);
                 let _ = reply.send(has_valid);
             }
+            LedgerMessage::GetFullHistory { reply } => {
+                let result = state.event_log.replay_with_hashes().map_err(|e| e.to_string());
+                let _ = reply.send(result);
+            }
         }
         Ok(())
-    }
-}
-
-/// Builds the graph operations for one event -- pure, and deliberately
-/// separate from the actual send, so it's testable without a real
-/// graph controller.
-fn graph_ops_for_event(event: &CredentialsEvent, grant_existed: bool) -> Vec<GraphOp> {
-    match event {
-        CredentialsEvent::Grant {
-            target_identity,
-            permissions,
-            granted_by,
-            timestamp,
-        } => {
-            vec![GraphOp::UpsertNodes {
-                items: vec![(
-                    CredentialsNodeKey::Grant {
-                        target_identity: target_identity.clone(),
-                    }
-                    .into_key(),
-                    vec![
-                        Property(
-                            "permissions".to_string(),
-                            GraphValue::List(
-                                permissions
-                                    .iter()
-                                    .map(|p| GraphValue::String(p.clone()))
-                                    .collect(),
-                            ),
-                        ),
-                        Property(
-                            "granted_by".to_string(),
-                            GraphValue::String(granted_by.clone()),
-                        ),
-                        Property("granted_at".to_string(), GraphValue::I64(*timestamp)),
-                        Property("consumed".to_string(), GraphValue::Bool(false)),
-                    ],
-                )],
-            }]
-        }
-        CredentialsEvent::Revoke {
-            serial,
-            reason,
-            revoked_by,
-            timestamp,
-        } => {
-            vec![GraphOp::UpsertNodes {
-                items: vec![(
-                    CredentialsNodeKey::Certificate {
-                        serial: serial.clone(),
-                    }
-                    .into_key(),
-                    vec![
-                        Property("revoked".to_string(), GraphValue::Bool(true)),
-                        Property(
-                            "revoked_reason".to_string(),
-                            GraphValue::String(reason.clone()),
-                        ),
-                        Property(
-                            "revoked_by".to_string(),
-                            GraphValue::String(revoked_by.clone()),
-                        ),
-                        Property("revoked_at".to_string(), GraphValue::I64(*timestamp)),
-                    ],
-                )],
-            }]
-        }
-        CredentialsEvent::IssuanceCompleted {
-            identity,
-            instance_binding,
-            serial,
-            timestamp,
-        } => {
-            let mut items = vec![(
-                CredentialsNodeKey::Certificate {
-                    serial: serial.clone(),
-                }
-                .into_key(),
-                vec![
-                    Property("identity".to_string(), GraphValue::String(identity.clone())),
-                    Property(
-                        "instance_binding".to_string(),
-                        GraphValue::String(instance_binding.clone()),
-                    ),
-                    Property("issued_at".to_string(), GraphValue::I64(*timestamp)),
-                    Property("revoked".to_string(), GraphValue::Bool(false)),
-                ],
-            )];
-
-            // Only mark a grant consumed if one genuinely existed and
-            // was actually consumed by this event -- never create a
-            // spurious grant node (MERGE would otherwise happily
-            // create one) for the Kubernetes-bootstrap case, where no
-            // Grant event ever existed at all.
-            if grant_existed {
-                items.push((
-                    CredentialsNodeKey::Grant {
-                        target_identity: identity.clone(),
-                    }
-                    .into_key(),
-                    vec![
-                        Property("consumed".to_string(), GraphValue::Bool(true)),
-                        Property("consumed_at".to_string(), GraphValue::I64(*timestamp)),
-                    ],
-                ));
-            }
-
-            vec![GraphOp::UpsertNodes { items }]
-        }
-    }
-}
-
-/// Fire-and-forget: attempts to project `event`'s effect (plus an
-/// updated checkpoint) into the graph, in one atomic transaction.
-/// Never fails the caller -- a failure here is logged and otherwise
-/// ignored, since the event log (already durable by this point) is
-/// what correctness actually depends on, not this projection.
-fn project_to_graph(state: &LedgerActorState, event: &CredentialsEvent, grant_existed: bool) {
-    let mut ops = graph_ops_for_event(event, grant_existed);
-
-    ops.push(GraphOp::UpsertNodes {
-        items: vec![(
-            CredentialsNodeKey::ProjectionCheckpoint.into_key(),
-            vec![Property(
-                "last_hash".to_string(),
-                GraphValue::String(state.event_log.current_hash().to_string()),
-            )],
-        )],
-    });
-
-    if let Err(e) = state
-        .graph_controller
-        .cast(GraphControllerMsg::Op(GraphOp::Transaction { ops }))
-    {
-        tracing::warn!(
-            "Failed to project event to graph (best-effort, event log remains authoritative): {e}"
-        );
     }
 }
 
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use ractor::async_trait;
-
-    struct FakeGraphController;
-
-    #[async_trait]
-    impl Actor for FakeGraphController {
-        type Msg = polar::graph::controller::GraphControllerMsg;
-        type State = ();
-        type Arguments = ();
-
-        async fn pre_start(
-            &self,
-            _myself: ActorRef<Self::Msg>,
-            _args: (),
-        ) -> Result<Self::State, ActorProcessingErr> {
-            Ok(())
-        }
-
-        async fn handle(
-            &self,
-            _myself: ActorRef<Self::Msg>,
-            _message: Self::Msg,
-            _state: &mut Self::State,
-        ) -> Result<(), ActorProcessingErr> {
-            // Accepts and discards every op -- sufficient for tests
-            // that don't care about graph behavior specifically;
-            // projection is best-effort by design, so a fake that
-            // simply does nothing with each op is a faithful stand-in.
-            Ok(())
-        }
-    }
-
-    /// Shared by every test in this crate that needs *a* GraphController
-    /// but doesn't care about its actual graph behavior -- spawns fresh
-    /// each call, since (unlike the escrow keypair) there's no expensive
-    /// generation cost to justify caching one across tests.
-    pub(crate) async fn fake_graph_controller() -> polar::graph::controller::GraphController {
-        let (controller, _) = Actor::spawn(None, FakeGraphController, ())
-            .await
-            .expect("fake graph controller should spawn cleanly");
-        controller
-    }
 
     async fn spawn_ledger(log_path: &str) -> ActorRef<LedgerMessage> {
         let (ledger, _) = Actor::spawn(
@@ -404,7 +208,7 @@ pub(crate) mod tests {
             LedgerActor,
             LedgerActorArgs {
                 log_path: log_path.to_string(),
-                graph_controller: fake_graph_controller().await,
+                projection_actor: crate::projection::tests::fake_projection_actor().await,
             },
         )
         .await
@@ -579,53 +383,5 @@ pub(crate) mod tests {
         );
 
         respawned.stop(None);
-    }
-
-    #[test]
-    fn graph_ops_for_grant_produces_the_correct_upsert() {
-        let event = CredentialsEvent::Grant {
-            target_identity: "alice".to_string(),
-            permissions: vec!["read".to_string(), "write".to_string()],
-            granted_by: "admin".to_string(),
-            timestamp: 1000,
-        };
-        let ops = graph_ops_for_event(&event, false);
-        assert_eq!(ops.len(), 1);
-        match &ops[0] {
-            GraphOp::UpsertNodes { items } => {
-                assert_eq!(items.len(), 1);
-            }
-            other => panic!("expected UpsertNodes, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn graph_ops_for_issuance_only_marks_grant_consumed_when_one_existed() {
-        let event = CredentialsEvent::IssuanceCompleted {
-            identity: "alice".to_string(),
-            instance_binding: "pod-uid-1".to_string(),
-            serial: "serial-1".to_string(),
-            timestamp: 2000,
-        };
-
-        let with_grant = graph_ops_for_event(&event, true);
-        match &with_grant[0] {
-            GraphOp::UpsertNodes { items } => assert_eq!(
-                items.len(),
-                2,
-                "certificate node + grant-consumed node when a grant existed"
-            ),
-            other => panic!("expected UpsertNodes, got {other:?}"),
-        }
-
-        let without_grant = graph_ops_for_event(&event, false);
-        match &without_grant[0] {
-            GraphOp::UpsertNodes { items } => assert_eq!(
-                items.len(),
-                1,
-                "only the certificate node -- no spurious grant node for the Kubernetes-bootstrap case"
-            ),
-            other => panic!("expected UpsertNodes, got {other:?}"),
-        }
     }
 }
