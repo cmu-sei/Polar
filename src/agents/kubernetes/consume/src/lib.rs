@@ -66,7 +66,7 @@ use std::collections::HashMap;
 use chrono::Utc;
 use k8s_openapi::api::apps::v1::{Deployment, ReplicaSet};
 use k8s_openapi::api::batch::v1::Job;
-use k8s_openapi::api::core::v1::ContainerStatus;
+use k8s_openapi::api::core::v1::{ContainerStatus, Namespace};
 use k8s_openapi::{api::core::v1::Pod, apimachinery::pkg::apis::meta::v1::OwnerReference};
 use kube_common::flux::{kustomization::Kustomization, oci_repositories::OciRepository};
 use neo4rs::BoltType;
@@ -247,6 +247,91 @@ fn project_deletion_state(
 // Job
 // ---------------------------------------------------------------------------
 
+impl GraphOperable for Namespace {
+    fn project_into_graph(
+        self,
+        graph: &GraphController,
+        _tcp_client: &dyn CassiniClient,
+        cluster_uid: &str,
+    ) -> Result<(), ActorProcessingErr> {
+        let Some(name) = self.metadata.name.clone() else {
+            return Ok(());
+        };
+
+        let ns_key = KubeNodeKey::Namespace {
+            name: name.clone(),
+            cluster_uid: cluster_uid.to_string(),
+        };
+
+        // ---- Anchor node ----
+        graph.cast(GraphControllerMsg::Op(GraphOp::UpsertNode {
+            key: ns_key.clone().into_key(),
+            props: vec![
+                Property("name".into(), GraphValue::String(name.clone())),
+                ts("observed_at", now_ms()),
+            ],
+        }))?;
+
+        // ---- State ----
+        //
+        // Namespace's status carries only `phase` (Active/Terminating) --
+        // no attested transition timestamp the way Flux resources have
+        // last_update_time, so valid_from falls back to observation time,
+        // same as Job/Deployment/ReplicaSet/Pod do for the same reason.
+        let phase = self
+            .status
+            .as_ref()
+            .and_then(|s| s.phase.clone())
+            .unwrap_or_else(|| "Unknown".into());
+
+        let valid_from_ms = now_ms();
+
+        let state_key = KubeNodeKey::NamespaceState {
+            name: name.clone(),
+            valid_from: valid_from_ms.to_string(),
+            cluster_uid: cluster_uid.to_string(),
+        };
+
+        graph.cast(GraphControllerMsg::Op(GraphOp::UpdateState {
+            resource_key: ns_key.into_key(),
+            state_type_key: KubeNodeKey::State.into_key(),
+            state_instance_key: state_key.into_key(),
+            state_instance_props: vec![
+                Property("phase".into(), GraphValue::String(phase)),
+                ts("valid_from", valid_from_ms),
+                ts("observed_at", now_ms()),
+            ],
+        }))?;
+
+        Ok(())
+    }
+
+    fn project_delete(
+        self,
+        graph: &GraphController,
+        cluster_uid: &str,
+    ) -> Result<(), ActorProcessingErr> {
+        let Some(name) = self.metadata.name.clone() else {
+            return Ok(());
+        };
+        let now = now_ms();
+
+        project_deletion_state(
+            graph,
+            KubeNodeKey::Namespace {
+                name: name.clone(),
+                cluster_uid: cluster_uid.to_string(),
+            },
+            KubeNodeKey::NamespaceState {
+                name,
+                valid_from: now.to_string(),
+                cluster_uid: cluster_uid.to_string(),
+            },
+            now,
+        )
+    }
+}
+
 impl GraphOperable for Job {
     fn project_into_graph(
         self,
@@ -291,13 +376,23 @@ impl GraphOperable for Job {
             key: job_key.clone().into_key(),
             props: vec![
                 Property("name".into(), GraphValue::String(name.clone())),
-                Property("namespace".into(), GraphValue::String(namespace.clone())),
                 Property(
                     "cyclops_build_id".into(),
                     GraphValue::String(cyclops_build_id),
                 ),
                 ts("observed_at", now_ms()),
             ],
+        }))?;
+
+        graph.cast(GraphControllerMsg::Op(GraphOp::EnsureEdge {
+            from: job_key.clone().into_key(),
+            rel_type: "IN_NAMESPACE".into(),
+            to: KubeNodeKey::Namespace {
+                name: namespace.clone(),
+                cluster_uid: cluster_uid.to_string(),
+            }
+            .into_key(),
+            props: Vec::new(),
         }))?;
 
         // ---- Owner refs (e.g. CronJob owns Job) ----
@@ -543,10 +638,20 @@ impl GraphOperable for Pod {
             key: pod_key.clone().into_key(),
             props: vec![
                 Property("name".into(), GraphValue::String(pod_name)),
-                Property("namespace".into(), GraphValue::String(namespace.clone())),
                 Property("sa_name".into(), GraphValue::String(sa_name)),
                 ts("observed_at", now_ms()),
             ],
+        }))?;
+
+        graph.cast(GraphControllerMsg::Op(GraphOp::EnsureEdge {
+            from: pod_key.clone().into_key(),
+            rel_type: "IN_NAMESPACE".into(),
+            to: KubeNodeKey::Namespace {
+                name: namespace.clone(),
+                cluster_uid: cluster_uid.to_string(),
+            }
+            .into_key(),
+            props: Vec::new(),
         }))?;
 
         // ---- Owner refs ----
@@ -894,9 +999,9 @@ impl GraphOperable for Pod {
             {
                 Some(cs) => {
                     // discovery_ref is what we emit for resolution AND what
-                    // we key the PodContainer node on — both must agree,
-                    // otherwise the USES_IMAGE join in the resolution
-                    // handler will never match.
+                    // we key the PodContainer node on — both must agree
+                    // (including cluster_uid now), otherwise the USES_IMAGE
+                    // join in the resolution handler will never match.
                     let source_ref = DiscoverySourceRef::KubernetesPodContainer {
                         pod_uid: uid.clone(),
                         image_id: Some(cs.image_id.clone()),
@@ -1148,9 +1253,19 @@ impl GraphOperable for Deployment {
             key: deployment_key.clone().into_key(),
             props: vec![
                 Property("name".into(), GraphValue::String(name)),
-                Property("namespace".into(), GraphValue::String(namespace)),
                 ts("observed_at", now_ms()),
             ],
+        }))?;
+
+        graph.cast(GraphControllerMsg::Op(GraphOp::EnsureEdge {
+            from: deployment_key.clone().into_key(),
+            rel_type: "IN_NAMESPACE".into(),
+            to: KubeNodeKey::Namespace {
+                name: namespace,
+                cluster_uid: cluster_uid.to_string(),
+            }
+            .into_key(),
+            props: Vec::new(),
         }))?;
 
         // ---- Owner refs ----
@@ -1280,9 +1395,19 @@ impl GraphOperable for ReplicaSet {
             key: rs_key.clone().into_key(),
             props: vec![
                 Property("name".into(), GraphValue::String(name)),
-                Property("namespace".into(), GraphValue::String(namespace)),
                 ts("observed_at", now_ms()),
             ],
+        }))?;
+
+        graph.cast(GraphControllerMsg::Op(GraphOp::EnsureEdge {
+            from: rs_key.clone().into_key(),
+            rel_type: "IN_NAMESPACE".into(),
+            to: KubeNodeKey::Namespace {
+                name: namespace,
+                cluster_uid: cluster_uid.to_string(),
+            }
+            .into_key(),
+            props: Vec::new(),
         }))?;
 
         // ---- Owner refs ----
@@ -1390,10 +1515,20 @@ impl GraphOperable for OciRepository {
             key: repo_key.clone().into_key(),
             props: vec![
                 Property("name".into(), GraphValue::String(name.clone())),
-                Property("namespace".into(), GraphValue::String(namespace.clone())),
                 Property("url".into(), GraphValue::String(self.spec.url.clone())),
                 ts("observed_at", now_ms()),
             ],
+        }))?;
+
+        graph.cast(GraphControllerMsg::Op(GraphOp::EnsureEdge {
+            from: repo_key.clone().into_key(),
+            rel_type: "IN_NAMESPACE".into(),
+            to: KubeNodeKey::Namespace {
+                name: namespace.clone(),
+                cluster_uid: cluster_uid.to_string(),
+            }
+            .into_key(),
+            props: Vec::new(),
         }))?;
 
         // ---- State ----
@@ -1467,13 +1602,16 @@ impl GraphOperable for OciRepository {
         // "sha256:<hex>" — verify once against real data.
 
         // NOTE: this is a natural-key match, not a KubeNodeKey::cypher_match
-        // -- see the TODO on the Kustomization impl below for why. Same
-        // collision exposure applies here: {name, namespace} alone is not
-        // unique across clusters, so cluster_uid is added to the MATCH,
-        // matching the anchor node this same impl writes it onto above.
+        // -- see the TODO on the Kustomization impl below for why. {name,
+        // cluster_uid} alone is not unique across namespaces in the same
+        // cluster (two OCIRepositories can share a name in different
+        // namespaces), so the match routes through the IN_NAMESPACE edge
+        // rather than a namespace property -- this anchor no longer carries
+        // one; see the edge written just above in this function.
         graph.cast(GraphControllerMsg::Op(GraphOp::RawQuery {
             cypher: "
-                MATCH (repo:FluxOCIRepository {name: $name, namespace: $namespace, cluster_uid: $cluster_uid})
+                MATCH (repo:FluxOCIRepository {name: $name, cluster_uid: $cluster_uid})
+                    -[:IN_NAMESPACE]->(:Namespace {name: $namespace, cluster_uid: $cluster_uid})
                 MATCH (oci:OCIArtifact {digest: $digest})
                 MERGE (repo)-[:RECONCILED]->(oci)
             "
@@ -1559,7 +1697,6 @@ impl GraphOperable for Kustomization {
             key: ks_key.clone().into_key(),
             props: vec![
                 Property("name".into(), GraphValue::String(name.clone())),
-                Property("namespace".into(), GraphValue::String(namespace.clone())),
                 Property(
                     "source_ref".into(),
                     GraphValue::String(
@@ -1569,6 +1706,17 @@ impl GraphOperable for Kustomization {
                 ),
                 ts("observed_at", now_ms()),
             ],
+        }))?;
+
+        graph.cast(GraphControllerMsg::Op(GraphOp::EnsureEdge {
+            from: ks_key.clone().into_key(),
+            rel_type: "IN_NAMESPACE".into(),
+            to: KubeNodeKey::Namespace {
+                name: namespace.clone(),
+                cluster_uid: cluster_uid.to_string(),
+            }
+            .into_key(),
+            props: Vec::new(),
         }))?;
 
         // ---- RECONCILES_FROM edge: honest TODO, not dead code ----
@@ -1666,11 +1814,15 @@ impl GraphOperable for Kustomization {
                 .to_string();
 
             // NOTE: natural-key match, same as FluxOCIRepository's RECONCILED
-            // query above -- {name, namespace} alone is not unique across
-            // clusters, so cluster_uid is added to the MATCH.
+            // query above -- {name, cluster_uid} alone is not unique across
+            // namespaces in the same cluster, so the match routes through
+            // the IN_NAMESPACE edge rather than a namespace property; this
+            // anchor no longer carries one, see the edge written earlier in
+            // this function.
             graph.cast(GraphControllerMsg::Op(GraphOp::RawQuery {
                 cypher: "
-                    MATCH (ks:FluxKustomization {name: $name, namespace: $namespace, cluster_uid: $cluster_uid})
+                    MATCH (ks:FluxKustomization {name: $name, cluster_uid: $cluster_uid})
+                        -[:IN_NAMESPACE]->(:Namespace {name: $namespace, cluster_uid: $cluster_uid})
                     MATCH (oci:OCIArtifact {digest: $digest})
                     MERGE (ks)-[:DEPLOYED]->(oci)
                 "

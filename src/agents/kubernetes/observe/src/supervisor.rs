@@ -1,14 +1,17 @@
+use crate::{DeploymentWatcher, JobWatcher, PodWatcher, ReplicasetWatcher};
+use cassini_client::{OfflineBehavior, PublishRequest};
 use cassini_types::ClientEvent;
-use k8s_openapi::api::apps::v1::{Deployment, ReplicaSet};
-use k8s_openapi::api::batch::v1::Job;
-use k8s_openapi::api::core::v1::{ConfigMap, Namespace, Pod, Secret};
+use k8s_openapi::api::core::v1::Namespace;
 use kube::Config;
 use kube::ResourceExt;
 use kube::runtime::{watcher, watcher::Event};
 use kube::{Api, Client, api::ListParams};
-use kube_common::{KIND_KUSTOMIZATION, KIND_OCI_REPOSITORY};
+use kube_common::{
+    KIND_KUSTOMIZATION, KIND_OCI_REPOSITORY, KUBERNETES_DISCOVERY_ANNOUNCE,
+    KUBERNETES_DISCOVERY_QUERY,
+};
 use polar::SupervisorMessage;
-use polar::cassini::TcpClient;
+use polar::cassini::{CassiniClient, SubscribeRequest, TcpClient};
 use polar::health::{DepCertEndpoint, HealthCheckActor, HealthCheckArgs, HealthCheckMessage};
 use ractor::concurrency::Duration;
 use ractor::{Actor, ActorProcessingErr, ActorRef, OutputPort, SupervisionEvent, async_trait};
@@ -20,7 +23,7 @@ use tracing::{instrument, trace};
 
 use crate::{
     GlobalWatcherState, KustomizationWatcher, NamespacedWatcherState, OciRepositoryWatcher,
-    TCP_CLIENT_NAME, WatcherMsg, emit_event, impl_namespaced_watcher,
+    TCP_CLIENT_NAME, WatcherMsg, emit_event,
 };
 use futures::{StreamExt, TryStreamExt};
 use kube_common::{RESOURCE_APPLIED_ACTION, RESOURCE_DELETED_ACTION, RawKubeEvent};
@@ -37,6 +40,11 @@ pub struct ClusterObserverSupervisorState {
     kube_client: kube::Client,
     tcp_client: TcpClient,
     healthcheck: ActorRef<HealthCheckMessage>,
+    /// This cluster's identity per issue #236 -- the UID of the kube-system
+    /// namespace. Resolved once in `init`, before any watcher spawns, and
+    /// cloned (cheap: Arc, not String) into every watcher's state below and
+    /// into the discovery.announce payload.
+    cluster_uid: Arc<str>,
     #[allow(dead_code)]
     node_watcher: Option<Watcher>,
     namespace_watcher: Option<Watcher>,
@@ -44,23 +52,20 @@ pub struct ClusterObserverSupervisorState {
     oci_repository_watcher: Option<Watcher>,
     /// Watches Flux Kustomization resources cluster-wide.
     kustomization_watcher: Option<Watcher>,
-    /// This cluster's identity per issue #236. Resolved once in `init`,
-    /// cloned (Arc, not String -- one shared allocation) into every
-    /// watcher's state below.
-    cluster_uid: Arc<str>,
 }
 
 impl ClusterObserverSupervisor {
     /// Resolves this cluster's identity per issue #236: the UID of the
-    /// kube-system namespace, a permanent fixture in every cluster whose
-    /// UID is a real UUID -- collision-safe across clusters by construction,
-    /// not convention. Resolved once here, before any watcher spawns, since
-    /// every watcher below needs it to pick its publish topic and to stamp
-    /// RawKubeEvent::cluster_uid.
+    /// kube-system namespace, a permanent fixture in every cluster whose UID
+    /// is a real UUID -- collision-safe across clusters by construction, not
+    /// convention. Resolved once here, before any watcher spawns or the
+    /// discovery.announce message goes out, since everything downstream
+    /// (topic selection, RawKubeEvent::cluster_uid, the announce payload
+    /// itself) depends on this value.
     ///
-    /// A single targeted `get`, not the continuous Namespace watch
-    /// NamespaceSupervisor runs further down -- this is a one-shot bootstrap
-    /// and doesn't depend on that watch loop being up yet.
+    /// A single targeted `get`, not a list+filter -- and not the same thing
+    /// as the continuous Namespace *watch* NamespaceSupervisor runs further
+    /// down in this file; this is a one-shot bootstrap, independent of it.
     async fn resolve_cluster_uid(kube_client: &Client) -> Result<Arc<str>, ActorProcessingErr> {
         let namespaces: Api<Namespace> = Api::all(kube_client.clone());
         let kube_system = namespaces.get("kube-system").await?;
@@ -83,8 +88,8 @@ impl ClusterObserverSupervisor {
                 debug!("Kubernetes client initialized");
 
                 // Resolve cluster identity before anything else spawns.
-                // Fatal on failure, same as the client construction above
-                // it -- nothing downstream can safely proceed without this.
+                // Fatal on failure, same as the client construction above it
+                // -- nothing downstream can safely proceed without this.
                 let cluster_uid = Self::resolve_cluster_uid(&kube_client).await?;
                 info!("Resolved cluster identity: {cluster_uid}");
 
@@ -107,6 +112,22 @@ impl ClusterObserverSupervisor {
             Err(e) => Err(ActorProcessingErr::from(e)),
         }
     }
+}
+
+/// Publishes this cluster's UID to the discovery.announce topic, raw UTF-8
+/// bytes with no envelope -- it's a single scalar, not worth wrapping.
+/// Called both on initial registration and whenever a kube-consumer
+/// re-announces via discovery.query, so it's a shared function rather than
+/// inlined twice.
+async fn announce(tcp_client: &TcpClient, cluster_uid: &str) -> Result<(), ActorProcessingErr> {
+    debug!("Announcing cluster {cluster_uid} on {KUBERNETES_DISCOVERY_ANNOUNCE}");
+    tcp_client.publish(PublishRequest {
+        topic: KUBERNETES_DISCOVERY_ANNOUNCE.to_string(),
+        trace_ctx: None,
+        payload: cluster_uid.as_bytes().to_vec(),
+        offline_behavior: OfflineBehavior::default(),
+    })?;
+    Ok(())
 }
 
 #[async_trait]
@@ -274,12 +295,31 @@ impl Actor for ClusterObserverSupervisor {
                 ClientEvent::Registered { .. } => {
                     let _ = state.healthcheck.cast(HealthCheckMessage::CassiniConnected);
 
+                    // Subscriptions are connection-scoped, unlike the watcher
+                    // actors below -- redone unconditionally on every
+                    // Registered (first connect AND reconnect after a TCP
+                    // client respawn), whereas the watchers are guarded by
+                    // is_none() because they're process-lifetime actors
+                    // independent of any one connection.
+                    if let Err(e) = state.tcp_client.subscribe(SubscribeRequest {
+                        topic: KUBERNETES_DISCOVERY_QUERY.to_string(),
+                        trace_ctx: None,
+                    }) {
+                        error!("{e}");
+                        return Err(ActorProcessingErr::from(e.to_string()));
+                    }
+
+                    // Announce unconditionally too: a kube-consumer that was
+                    // already running before this observer (re)connected has
+                    // no other way to learn this cluster exists.
+                    announce(&state.tcp_client, &state.cluster_uid).await?;
+
                     if state.namespace_watcher.is_none() {
                         let ns_watcher_state = NamespaceSupervisorState {
                             tcp_client: state.tcp_client.clone(),
                             kube_client: state.kube_client.clone(),
-                            supervisors: HashMap::new(),
                             cluster_uid: state.cluster_uid.clone(),
+                            supervisors: HashMap::new(),
                         };
 
                         let (ns_watcher, _) = Actor::spawn_linked(
@@ -341,8 +381,18 @@ impl Actor for ClusterObserverSupervisor {
                         );
                     }
                 }
-                ClientEvent::MessagePublished { .. } => {
-                    todo!("Handle incoming messages")
+                ClientEvent::MessagePublished { topic, payload, .. } => {
+                    if topic == KUBERNETES_DISCOVERY_QUERY {
+                        debug!("Received discovery.query, re-announcing cluster identity");
+                        announce(&state.tcp_client, &state.cluster_uid).await?;
+                    } else {
+                        // This observer only ever subscribes to
+                        // discovery.query -- anything else arriving here
+                        // means either a broker misconfiguration or a topic
+                        // this actor was never meant to receive.
+                        warn!("Unexpected message on unhandled topic: {topic}");
+                    }
+                    let _ = payload; // no other topic's payload is consumed
                 }
                 ClientEvent::TransportError { reason } => {
                     warn!("Transport error occurred (non-fatal, awaiting reconnect): {reason}");
@@ -359,20 +409,6 @@ impl Actor for ClusterObserverSupervisor {
     }
 }
 
-impl_namespaced_watcher!(
-    DeploymentWatcher,
-    resource = Deployment,
-    kind = "Deployment"
-);
-impl_namespaced_watcher!(
-    ReplicasetWatcher,
-    resource = ReplicaSet,
-    kind = "ReplicaSet"
-);
-impl_namespaced_watcher!(PodWatcher, resource = Pod, kind = "Pod");
-impl_namespaced_watcher!(SecretWatcher, resource = Secret, kind = "Secret");
-impl_namespaced_watcher!(ConfigMapWatcher, resource = ConfigMap, kind = "ConfigMap");
-impl_namespaced_watcher!(JobWatcher, resource = Job, kind = "Job");
 // impl_namespaced_watcher!(ContainerWatcher, resource = Container, kind = "Container");
 
 pub struct NamespaceWatcherSupervisor;
@@ -479,10 +515,10 @@ impl Actor for NamespaceWatcherSupervisor {
             namespace: args.namespace,
             tcp_client: args.tcp_client,
             kube_client: args.kube_client,
+            cluster_uid: args.cluster_uid,
             deployment_watcher,
             replicaset_watcher,
             pod_watcher,
-            cluster_uid: args.cluster_uid,
         };
 
         Ok(state)
@@ -624,25 +660,29 @@ impl NamespaceSupervisor {
             match event {
                 Event::Apply(obj) => {
                     let ns_name = obj.name_any();
+
                     debug!("Discovered new namespace {ns_name}");
                     let ev = RawKubeEvent {
                         kind: kind.into(),
                         action: RESOURCE_APPLIED_ACTION.into(),
                         object: serde_json::to_value(obj)?,
-                        resource_version: None,
+                        resource_version: None, // runtime watcher manages this internally
                         cluster_uid: cluster_uid.to_string(),
                     };
+
                     emit_event(tcp_client, ev).await?;
 
                     match supervisors.get(&ns_name) {
                         Some(_s) => (),
                         None => {
+                            //spawn watcher supervisor
                             let supervisor_state = NamespaceWatcherSupervisorArgs {
                                 kube_client: kube_client.clone(),
                                 tcp_client: tcp_client.to_owned(),
                                 namespace: ns_name.clone(),
                                 cluster_uid: cluster_uid.clone(),
                             };
+
                             match Actor::spawn_linked(
                                 Some(format!("cluster.{ns_name}.supervisor")),
                                 NamespaceWatcherSupervisor,
@@ -662,6 +702,7 @@ impl NamespaceSupervisor {
 
                 Event::Delete(obj) => {
                     let ns_name = obj.name_any();
+
                     debug!("Namespace {ns_name} was deleted.");
                     let ev = RawKubeEvent {
                         kind: kind.into(),
@@ -670,6 +711,7 @@ impl NamespaceSupervisor {
                         resource_version: None,
                         cluster_uid: cluster_uid.to_string(),
                     };
+
                     emit_event(tcp_client, ev).await?;
 
                     if let Some(_supervisor) = supervisors.get(&ns_name) {

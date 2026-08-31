@@ -5,7 +5,7 @@ use cassini_client::PublishRequest;
 use cassini_types::ClientEvent;
 use k8s_openapi::api::apps::v1::{Deployment, ReplicaSet};
 use k8s_openapi::api::batch::v1::Job;
-use k8s_openapi::api::core::v1::Pod;
+use k8s_openapi::api::core::v1::{Namespace, Pod};
 use kube_common::KUBERNETES_DISCOVERY_QUERY;
 use kube_common::RawKubeEvent;
 use kube_common::{
@@ -212,6 +212,13 @@ impl ClusterConsumerSupervisor {
             InboundTopic::KubeEvents { cluster_uid } => {
                 let ev: RawKubeEvent = serde_json::from_slice(&payload)?;
                 match ev.kind.as_str() {
+                    "Namespace" => Self::handle_event::<Namespace>(
+                        ev,
+                        cache,
+                        graph_controller,
+                        tcp_client,
+                        &cluster_uid,
+                    )?,
                     "Pod" => Self::handle_event::<Pod>(
                         ev,
                         cache,
@@ -404,6 +411,21 @@ impl Actor for ClusterConsumerSupervisor {
                         })
                 {
                     warn!("CONSUMER_SUPERVISOR: unsubscribe failed (continuing): {e}");
+                }
+                // Registered subscribes to this alongside discovery.announce
+                // (see below); it was previously the only one of the three
+                // subscriptions made there with no matching teardown here.
+                if let Err(e) =
+                    state
+                        .broker_client
+                        .unsubscribe(polar::cassini::UnsubscribeRequest {
+                            topic: KUBERNETES_RESOLUTION_EVENTS.to_string(),
+                            trace_ctx: None,
+                        })
+                {
+                    warn!(
+                        "CONSUMER_SUPERVISOR: unsubscribe from resolution events failed (continuing): {e}"
+                    );
                 }
                 for cluster_uid in &state.known_cluster_uids {
                     if let Err(e) =

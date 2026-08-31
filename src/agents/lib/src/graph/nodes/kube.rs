@@ -16,6 +16,11 @@ pub enum KubeNodeKey {
         name: String,
         cluster_uid: String,
     },
+    NamespaceState {
+        name: String,
+        valid_from: String,
+        cluster_uid: String,
+    },
     Deployment {
         uid: String,
         cluster_uid: String,
@@ -127,6 +132,28 @@ impl GraphNodeKey for KubeNodeKey {
                     ),
                     vec![
                         (name_k, BoltType::String(name.clone().into())),
+                        (
+                            cluster_uid_k,
+                            BoltType::String(cluster_uid.to_string().into()),
+                        ),
+                    ],
+                )
+            }
+            KubeNodeKey::NamespaceState {
+                name,
+                valid_from,
+                cluster_uid,
+            } => {
+                let name_k = format!("{prefix}_name");
+                let valid_k = format!("{prefix}_valid_from");
+                let cluster_uid_k = format!("{prefix}_cluster_uid");
+                (
+                    format!(
+                        "({prefix}:NamespaceState {{ namespace_name: ${name_k}, valid_from: ${valid_k}, cluster_uid: ${cluster_uid_k} }})"
+                    ),
+                    vec![
+                        (name_k, BoltType::String(name.to_string().into())),
+                        (valid_k, BoltType::String(valid_from.to_string().into())),
                         (
                             cluster_uid_k,
                             BoltType::String(cluster_uid.to_string().into()),
