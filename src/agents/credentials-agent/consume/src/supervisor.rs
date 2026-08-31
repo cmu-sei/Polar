@@ -169,10 +169,31 @@ impl Actor for ConsumerSupervisor {
         let log_path = std::env::var(CREDENTIALS_EVENT_LOG_PATH_ENV)
             .unwrap_or_else(|_| CREDENTIALS_EVENT_LOG_PATH_DEFAULT.to_string());
 
+        // Spawned eagerly, unlike every other graph-writing agent in
+        // this codebase -- the Credentials Agent's own health must
+        // never depend on Neo4j's availability at all (see ledger.rs's
+        // own module doc). No technical dependency requires waiting
+        // for Cassini registration first; a Bolt connection to Neo4j
+        // is entirely independent of Cassini/TCP client registration.
+        let graph_signal_port = Arc::new(OutputPort::<GraphSignal>::default());
+        let (graph_controller, _) = GraphControllerActor::spawn_linked(
+            Some("credentials-agent.consumer.graph.controller".to_string()),
+            GraphControllerActor,
+            GraphControllerArgs {
+                signal_port: graph_signal_port,
+            },
+            myself.get_cell(),
+        )
+        .await
+        .map_err(ActorProcessingErr::from)?;
+
         let (ledger, _) = LedgerActor::spawn_linked(
             Some(LEDGER_ACTOR_NAME.to_string()),
             LedgerActor,
-            LedgerActorArgs { log_path },
+            LedgerActorArgs {
+                log_path,
+                graph_controller: graph_controller.clone(),
+            },
             myself.get_cell(),
         )
         .await
@@ -247,7 +268,7 @@ impl Actor for ConsumerSupervisor {
             Some(HEALTHCHECK_ACTOR_NAME.to_string()),
             HealthCheckActor,
             HealthCheckArgs {
-                expects_graph: true,
+                expects_graph: false,
                 rejuvenation_threshold_secs: 300,
                 dep_cert_endpoints,
                 prepare_shutdown_port,
@@ -281,7 +302,7 @@ impl Actor for ConsumerSupervisor {
             ledger,
             issuance_actor,
             identity_normalization_actor,
-            graph_controller: None,
+            graph_controller: Some(graph_controller),
             healthcheck,
             draining: false,
         })
@@ -289,7 +310,7 @@ impl Actor for ConsumerSupervisor {
 
     async fn handle(
         &self,
-        myself: ActorRef<Self::Msg>,
+        _myself: ActorRef<Self::Msg>,
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
@@ -299,16 +320,15 @@ impl Actor for ConsumerSupervisor {
                 info!("CONSUMER_SUPERVISOR: PrepareShutdown received");
                 state.draining = true;
             }
-            SupervisorMessage::GraphSignal(signal) => match signal {
-                GraphSignal::Available => {
-                    let _ = state.healthcheck.cast(HealthCheckMessage::GraphAvailable);
-                }
-                GraphSignal::OpFailed(reason) => {
-                    let _ = state
-                        .healthcheck
-                        .cast(HealthCheckMessage::GraphOpFailed(reason));
-                }
-            },
+            SupervisorMessage::GraphSignal(_) => {
+                // Nothing subscribes to produce this anymore -- the
+                // graph controller is spawned eagerly with no signal
+                // consumer, since this agent's health never depends
+                // on graph availability. Kept as an explicit no-op
+                // arm, not a wildcard, so this stays visible and
+                // intentional rather than silently swallowed by a
+                // catch-all.
+            }
             SupervisorMessage::ForceExit => {
                 warn!("CONSUMER_SUPERVISOR: drain window elapsed, beginning graceful shutdown");
 
@@ -338,34 +358,13 @@ impl Actor for ConsumerSupervisor {
             SupervisorMessage::ClientEvent { event } => match event {
                 ClientEvent::Registered { .. } => {
                     let _ = state.healthcheck.cast(HealthCheckMessage::CassiniConnected);
-                    if state.graph_controller.is_none() {
-                        let graph_signal_port = Arc::new(OutputPort::<GraphSignal>::default());
-                        graph_signal_port.subscribe(myself.clone(), |signal| {
-                            Some(SupervisorMessage::GraphSignal(signal))
-                        });
-                        match GraphControllerActor::spawn_linked(
-                            Some("credentials-agent.consumer.graph.controller".to_string()),
-                            GraphControllerActor,
-                            GraphControllerArgs {
-                                signal_port: graph_signal_port,
-                            },
-                            myself.get_cell(),
-                        )
-                        .await
-                        {
-                            Ok((graph_controller, _)) => {
-                                state.graph_controller = Some(graph_controller);
-                                let _ =
-                                    state.healthcheck.cast(HealthCheckMessage::GraphConnected);
-                            }
-                            Err(e) => {
-                                error!("Error initializing graph controller! {e}");
-                                return Err(ActorProcessingErr::from(e));
-                            }
-                        }
-                    } else {
-                        let _ = state.healthcheck.cast(HealthCheckMessage::GraphConnected);
-                    }
+                    // Graph controller is spawned eagerly in pre_start now, not here -- this
+                    // agent's own health never depends on graph availability at all (expects_graph:
+                    // false), so there's no GraphConnected signal to cast, and no lazy
+                    // spawn-on-Registered logic needed. This is different from most every other
+                    // consumer in Polar, since Credentials Agent's source of truth is its own
+                    // event-sourced log and the bits that end up in the graph are simply a state
+                    // projection.
                     if let Some(client) = where_is(BROKER_CLIENT_NAME.to_string()) {
                         for topic in [
                             CREDENTIALS_GRANTS_TOPIC,
@@ -441,6 +440,7 @@ mod tests {
             LedgerActor,
             LedgerActorArgs {
                 log_path: log_path.to_string(),
+                graph_controller: crate::ledger::tests::fake_graph_controller().await,
             },
         )
         .await
@@ -628,6 +628,7 @@ mod issuance_wiring_tests {
             LedgerActor,
             LedgerActorArgs {
                 log_path: log_path.to_str().unwrap().to_string(),
+                graph_controller: crate::ledger::tests::fake_graph_controller().await,
             },
         )
         .await

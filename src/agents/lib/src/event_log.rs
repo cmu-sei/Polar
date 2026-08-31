@@ -202,6 +202,17 @@ where
         self.last_hash = hash;
         Ok(())
     }
+
+    /// The hash of the most recently appended entry -- `GENESIS_HASH`
+    /// if nothing has been appended yet. Callers that need a stable
+    /// position marker for the log (e.g. a graph projection's own
+    /// checkpoint, tracking exactly how far it's caught up) use this
+    /// rather than inventing a separate counter or timestamp, since
+    /// it's already a content-derived, tamper-evident position by
+    /// construction.
+    pub fn current_hash(&self) -> &str {
+        &self.last_hash
+    }
 }
 
 #[cfg(test)]

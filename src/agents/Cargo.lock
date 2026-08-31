@@ -1314,6 +1314,8 @@ dependencies = [
 name = "credentials_agent_common"
 version = "1.0.0"
 dependencies = [
+ "neo4rs",
+ "polar",
  "rkyv",
  "serde",
  "serde_json",

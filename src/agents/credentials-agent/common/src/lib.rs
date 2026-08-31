@@ -25,6 +25,7 @@ pub mod events;
 pub mod issuance;
 pub mod observer;
 pub mod identity;
+pub mod graph;
 
 pub const CREDENTIALS_GRANTS_TOPIC: &str = "credentials-grants";
 pub const CREDENTIALS_REVOCATIONS_TOPIC: &str = "credentials-revocations";

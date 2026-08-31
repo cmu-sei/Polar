@@ -25,6 +25,8 @@ license.workspace = true
 rkyv.workspace = true
 serde.workspace = true
 thiserror.workspace = true
+neo4rs.workspace = true
+polar.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true
