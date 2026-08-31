@@ -171,7 +171,7 @@ pub struct ClusterConsumerSupervisorState {
 impl ClusterConsumerSupervisor {
     pub fn handle_event<T>(
         ev: RawKubeEvent,
-        _cache: &mut ProjectionCache,
+        cache: &mut ProjectionCache,
         graph_controller: &GraphController,
         tcp_client: &TcpClient,
         cluster_uid: &str,
@@ -192,7 +192,7 @@ impl ClusterConsumerSupervisor {
         let obj = from_value::<T>(ev.object)?;
         match ev.action.as_str() {
             RESOURCE_APPLIED_ACTION => {
-                obj.project_into_graph(graph_controller, tcp_client, cluster_uid)?
+                obj.project_into_graph(graph_controller, tcp_client, cluster_uid, cache)?
             }
             RESOURCE_DELETED_ACTION => obj.project_delete(graph_controller, cluster_uid)?,
             _ => warn!("Unexpected action received!! {}", ev.action),
