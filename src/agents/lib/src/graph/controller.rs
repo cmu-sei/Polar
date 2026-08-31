@@ -1,5 +1,5 @@
 use neo4rs::{BoltNull, BoltType, Graph, Query};
-use ractor::{Actor, ActorProcessingErr, ActorRef, async_trait};
+use ractor::{Actor, ActorProcessingErr, ActorRef, async_trait, RpcReplyPort};
 use ractor::concurrency::Duration;
 use serde::{Deserialize, Serialize};
 use std::fmt::Debug;
@@ -409,6 +409,18 @@ pub enum GraphOp {
 pub enum GraphControllerMsg {
     Op(GraphOp),
     Tick,
+    /// A read-only query, returning its collected result rows.
+    /// Unlike Op, this bypasses compile_graph_op's own validation
+    /// entirely -- the caller is trusted to construct a safe,
+    /// parameterized query itself, matching neo4rs::query(...)'s own
+    /// established parameterization pattern. No schema-access
+    /// enforcement yet (which query labels a given agent should be
+    /// allowed to touch at all) -- a real, separate, deliberately
+    /// deferred piece of future work, not an oversight.
+    Query(
+        neo4rs::Query,
+        RpcReplyPort<Result<Vec<neo4rs::Row>, String>>,
+    ),
 }
 
 // ── Compiler ───────────────────────────────────────────────────────────────────
@@ -706,6 +718,31 @@ pub async fn handle_op(graph: &Graph, op: &GraphOp) -> Result<(), ActorProcessin
     Ok(())
 }
 
+/// Runs a read-only query against `graph` directly, collecting its
+/// result rows. Pure with respect to actor state -- takes `&Graph`
+/// the same way `handle_op` does, so it's directly testable against a
+/// real Neo4j connection without needing to spawn an actor or
+/// establish a second, independent connection of its own.
+pub async fn handle_query(
+    graph: &neo4rs::Graph,
+    query: neo4rs::Query,
+) -> Result<Vec<neo4rs::Row>, String> {
+    match graph.execute_read(query).await {
+        Ok(mut stream) => {
+            let mut rows = Vec::new();
+            loop {
+                match stream.next().await {
+                    Ok(Some(row)) => rows.push(row),
+                    Ok(None) => break,
+                    Err(e) => return Err(e.to_string()),
+                }
+            }
+            Ok(rows)
+        }
+        Err(e) => Err(e.to_string()),
+    }
+}
+
 // ── GraphSignal ────────────────────────────────────────────────────────────
 
 /// Signals the GraphController emits about real connectivity — distinct
@@ -915,6 +952,10 @@ impl Actor for GraphControllerActor {
                         state.signal_port.send(GraphSignal::OpFailed(reason));
                     }
                 }
+            }
+            GraphControllerMsg::Query(query, reply) => {
+                let result = handle_query(&state.graph, query).await;
+                let _ = reply.send(result);
             }
         }
         Ok(())

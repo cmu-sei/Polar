@@ -1,5 +1,5 @@
 use crate::graph::controller::{
-    GraphNodeKey, GraphOp, GraphValue, IntoGraphKey, Property, handle_op, validate_cypher_identifier, CypherIdentifierError, DynamicNodeKey,
+    GraphNodeKey, GraphOp, GraphValue, IntoGraphKey, Property, handle_op, validate_cypher_identifier, CypherIdentifierError, DynamicNodeKey, handle_query,
 };
 use crate::graph::nodes::builds::{BackendJobIdentity, BuildNodeKey};
 
@@ -33,6 +33,7 @@ static NEO4J_FIXTURE: tokio::sync::OnceCell<Neo4jFixture> = tokio::sync::OnceCel
 async fn neo4j() -> &'static Neo4jFixture {
     NEO4J_FIXTURE
         .get_or_init(|| async {
+            let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
             polar::init_logging("polar.graph.tests".to_string());
 
             let container = Neo4j::default()
@@ -916,4 +917,53 @@ async fn raw_merge_write_rejects_disallowed_keywords_before_touching_the_graph()
         count_nodes(graph, "BuildJob", "n.build_id = 'raw-reject'").await,
         0
     );
+}
+
+#[tokio::test]
+async fn query_returns_real_rows_from_a_real_actor() {
+    let graph = &neo4j().await.graph;
+    clear_graph(graph).await;
+
+    handle_op(
+        graph,
+        &GraphOp::UpsertNode {
+            key: BuildJobKey {
+                build_id: "query-test-001".into(),
+            }
+            .into_key(),
+            props: vec![Property(
+                "repo_url".into(),
+                GraphValue::String("https://example.com/query-test".into()),
+            )],
+        },
+    )
+    .await
+    .unwrap();
+
+    let query = neo4rs::Query::new(
+        "MATCH (n:BuildJob { build_id: 'query-test-001' }) RETURN n.repo_url AS url".to_string(),
+    );
+
+    let rows = handle_query(graph, query).await.unwrap();
+
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].get::<String>("url").unwrap(),
+        "https://example.com/query-test"
+    );
+}
+
+#[tokio::test]
+async fn query_returns_empty_vec_for_no_matching_rows() {
+    let graph = &neo4j().await.graph;
+    clear_graph(graph).await;
+
+    let query = neo4rs::Query::new(
+        "MATCH (n:BuildJob { build_id: 'definitely-does-not-exist' }) RETURN n.repo_url AS url"
+            .to_string(),
+    );
+
+    let rows = handle_query(graph, query).await.unwrap();
+
+    assert!(rows.is_empty());
 }
