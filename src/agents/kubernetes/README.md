@@ -15,7 +15,6 @@ This repository contains microservices that observe Kubernetes clusters and proc
 * mTLS certificates for secure service communication
 * Running instance of the **Cassini** message broker - see [cassini's README for details](../cassini/broker/readme.md)
 
----
 # Generating Flux CRD Types with kopium
 
 The Rust types for Flux CRDs (`OciRepository`, `Kustomization`, etc.) in

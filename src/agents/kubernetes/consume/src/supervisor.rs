@@ -5,7 +5,7 @@ use cassini_client::PublishRequest;
 use cassini_types::ClientEvent;
 use k8s_openapi::api::apps::v1::{Deployment, ReplicaSet};
 use k8s_openapi::api::batch::v1::Job;
-use k8s_openapi::api::core::v1::{Namespace, Pod};
+use k8s_openapi::api::core::v1::{Namespace, Node, Pod};
 use kube_common::KUBERNETES_DISCOVERY_QUERY;
 use kube_common::RawKubeEvent;
 use kube_common::{
@@ -57,6 +57,19 @@ pub struct StateFingerprint {
 #[derive(Default)]
 pub struct ProjectionCache {
     entries: HashMap<(String, String, String), StateFingerprint>, // (kind, cluster_uid, uid)
+    /// (cluster_uid, node_name) -> node_uid. The *only* place a Node's UID
+    /// becomes knowable to anything that only has its name -- Pod carries
+    /// spec.node_name, never a UID (k8s exposes no such field). Populated
+    /// when a Node is itself observed (both fields attested by the same
+    /// apiserver object in the same watch event, so the mapping is exactly
+    /// as trustworthy as the UID itself); consulted by Pod when building
+    /// RUNNING_ON. If a Pod arrives whose node hasn't been observed yet,
+    /// resolve_node_uid returns None and the edge is skipped for this
+    /// observation -- never fabricated from the name alone. The watch
+    /// redelivers Pods continuously, so this self-heals once the Node
+    /// catches up; same "don't fabricate, let redelivery retry" policy
+    /// already used for image_id discovery on containers.
+    node_uids_by_name: HashMap<(String, String), String>,
 }
 
 pub enum EmitDecision {
@@ -126,6 +139,24 @@ impl ProjectionCache {
 
     pub fn evict(&mut self, kind: String, cluster_uid: String, uid: &str) {
         self.entries.remove(&(kind, cluster_uid, uid.to_string()));
+    }
+
+    /// Records this cluster's Node name -> UID mapping. Call this from
+    /// Node's own project_into_graph, where both fields come off the same
+    /// attested object.
+    pub fn record_node_uid(&mut self, cluster_uid: String, node_name: String, node_uid: String) {
+        self.node_uids_by_name
+            .insert((cluster_uid, node_name), node_uid);
+    }
+
+    /// Resolves a Node's name to its attested UID, if this cache has
+    /// observed that Node directly. None means "not observed yet" -- the
+    /// caller must not substitute the name itself as if it were an
+    /// identity; see the field doc on node_uids_by_name.
+    pub fn resolve_node_uid(&self, cluster_uid: &str, node_name: &str) -> Option<&str> {
+        self.node_uids_by_name
+            .get(&(cluster_uid.to_string(), node_name.to_string()))
+            .map(|s| s.as_str())
     }
 }
 
@@ -213,6 +244,13 @@ impl ClusterConsumerSupervisor {
                 let ev: RawKubeEvent = serde_json::from_slice(&payload)?;
                 match ev.kind.as_str() {
                     "Namespace" => Self::handle_event::<Namespace>(
+                        ev,
+                        cache,
+                        graph_controller,
+                        tcp_client,
+                        &cluster_uid,
+                    )?,
+                    "Node" => Self::handle_event::<Node>(
                         ev,
                         cache,
                         graph_controller,
@@ -378,6 +416,7 @@ impl Actor for ClusterConsumerSupervisor {
                 graph_controller: None,
                 projection_cache: ProjectionCache {
                     entries: HashMap::new(),
+                    node_uids_by_name: HashMap::new(),
                 },
                 healthcheck,
                 draining: false,

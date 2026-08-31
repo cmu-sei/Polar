@@ -22,8 +22,8 @@ use tracing::{debug, error, info, warn};
 use tracing::{instrument, trace};
 
 use crate::{
-    GlobalWatcherState, KustomizationWatcher, NamespacedWatcherState, OciRepositoryWatcher,
-    TCP_CLIENT_NAME, WatcherMsg, emit_event,
+    GlobalWatcherState, KustomizationWatcher, NamespacedWatcherState, NodeWatcher,
+    OciRepositoryWatcher, TCP_CLIENT_NAME, WatcherMsg, emit_event,
 };
 use futures::{StreamExt, TryStreamExt};
 use kube_common::{RESOURCE_APPLIED_ACTION, RESOURCE_DELETED_ACTION, RawKubeEvent};
@@ -45,7 +45,6 @@ pub struct ClusterObserverSupervisorState {
     /// cloned (cheap: Arc, not String) into every watcher's state below and
     /// into the discovery.announce payload.
     cluster_uid: Arc<str>,
-    #[allow(dead_code)]
     node_watcher: Option<Watcher>,
     namespace_watcher: Option<Watcher>,
     /// Watches Flux OCIRepository resources cluster-wide.
@@ -234,6 +233,9 @@ impl Actor for ClusterObserverSupervisor {
                     if let Some(w) = state.kustomization_watcher.take() {
                         w.stop(Some("tcp_client_respawn".to_string()));
                     }
+                    if let Some(w) = state.node_watcher.take() {
+                        w.stop(Some("tcp_client_respawn".to_string()));
+                    }
 
                     match TcpClient::spawn(TCP_CLIENT_NAME, myself.clone(), |event| {
                         Some(SupervisorMessage::ClientEvent { event })
@@ -379,6 +381,31 @@ impl Actor for ClusterObserverSupervisor {
                         debug!(
                             "Kustomization watcher already running; skipping respawn on reconnect"
                         );
+                    }
+
+                    if state.node_watcher.is_none() {
+                        // "Node", not a kube_common::KIND_* constant -- matches
+                        // the literal used in NodeWatcher's own
+                        // impl_global_watcher! invocation (global.rs) and the
+                        // consumer's dispatch match on ev.kind.
+                        let node_watcher_state = GlobalWatcherState {
+                            tcp_client: state.tcp_client.clone(),
+                            kube_client: state.kube_client.clone(),
+                            kind: "Node",
+                            cluster_uid: state.cluster_uid.clone(),
+                        };
+
+                        let (node_watcher, _) = Actor::spawn_linked(
+                            Some("cluster.node".into()),
+                            NodeWatcher,
+                            node_watcher_state,
+                            myself.clone().into(),
+                        )
+                        .await?;
+
+                        state.node_watcher = Some(node_watcher);
+                    } else {
+                        debug!("Node watcher already running; skipping respawn on reconnect");
                     }
                 }
                 ClientEvent::MessagePublished { topic, payload, .. } => {

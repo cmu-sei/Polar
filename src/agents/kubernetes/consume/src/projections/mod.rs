@@ -81,10 +81,10 @@ mod deployment;
 mod job;
 mod kustomization;
 mod namespace;
+mod node;
 mod oci_repository;
 mod pod;
 mod replicaset;
-
 // ---------------------------------------------------------------------------
 // Time helpers — the only place timestamps are constructed.
 // ---------------------------------------------------------------------------

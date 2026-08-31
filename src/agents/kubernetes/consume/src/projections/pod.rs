@@ -185,6 +185,44 @@ impl GraphOperable for Pod {
             props: Vec::new(),
         }))?;
 
+        // ---- RUNNING_ON ----
+        //
+        // spec.node_name is the only pointer Pod has to its Node, and it's
+        // a name, never a UID -- k8s exposes no field that would let us
+        // build a KubeNodeKey::Node directly. We will not match on the name
+        // alone (RawQuery or a natural-key variant): the only edge this
+        // crate will write is one built from a UID it can actually attest,
+        // so this resolves through ProjectionCache's node-name index
+        // instead, which is itself populated from Node's own observed
+        // (attested) uid+name pair.
+        //
+        // If the Node hasn't been observed yet, we skip -- never fabricate
+        // an edge from the name. The watch redelivers Pods continuously
+        // (state suppression above doesn't gate this; structural edges run
+        // every observation), so this self-heals once Node catches up.
+        if let Some(node_name) = self.spec.as_ref().and_then(|s| s.node_name.clone()) {
+            match cache.resolve_node_uid(cluster_uid, &node_name) {
+                Some(node_uid) => {
+                    graph.cast(GraphControllerMsg::Op(GraphOp::EnsureEdge {
+                        from: pod_key.clone().into_key(),
+                        rel_type: "RUNNING_ON".into(),
+                        to: KubeNodeKey::Node {
+                            uid: node_uid.to_string(),
+                            cluster_uid: cluster_uid.to_string(),
+                        }
+                        .into_key(),
+                        props: Vec::new(),
+                    }))?;
+                }
+                None => {
+                    debug!(
+                        "Pod {uid} scheduled on node {node_name}, but that node hasn't been \
+                         observed yet -- deferring RUNNING_ON until it is"
+                    );
+                }
+            }
+        }
+
         // ---- Owner refs ----
 
         if let Some(owners) = self.metadata.owner_references.clone() {

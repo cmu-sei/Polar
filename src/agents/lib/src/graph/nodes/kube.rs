@@ -94,6 +94,20 @@ pub enum KubeNodeKey {
         valid_from: String,
         cluster_uid: String,
     },
+    /// Cluster-scoped like Job -- no namespace field, a Node isn't
+    /// namespaced. Deliberately UID-keyed for consistency with every other
+    /// actively-watched resource in this schema, even though that costs us
+    /// a resolution step for RUNNING_ON (see ProjectionCache::resolve_node_uid
+    /// in the consumer crate) since Pod only carries the Node's *name*.
+    Node {
+        uid: String,
+        cluster_uid: String,
+    },
+    NodeState {
+        uid: String,
+        valid_from: String,
+        cluster_uid: String,
+    },
     FluxOciRepository {
         uid: String,
         cluster_uid: String,
@@ -278,6 +292,44 @@ impl GraphNodeKey for KubeNodeKey {
                 (
                     format!(
                         "({prefix}:KubernetesJobState {{ uid: ${uid_k}, valid_from: ${vf_k}, cluster_uid: ${cluster_uid_k} }})"
+                    ),
+                    vec![
+                        (uid_k, BoltType::String(uid.clone().into())),
+                        (vf_k, BoltType::String(valid_from.clone().into())),
+                        (
+                            cluster_uid_k,
+                            BoltType::String(cluster_uid.to_string().into()),
+                        ),
+                    ],
+                )
+            }
+            KubeNodeKey::Node { uid, cluster_uid } => {
+                let uid_k = format!("{prefix}_uid");
+                let cluster_uid_k = format!("{prefix}_cluster_uid");
+                (
+                    format!(
+                        "({prefix}:KubernetesNode {{ uid: ${uid_k}, cluster_uid: ${cluster_uid_k} }})"
+                    ),
+                    vec![
+                        (uid_k, BoltType::String(uid.clone().into())),
+                        (
+                            cluster_uid_k,
+                            BoltType::String(cluster_uid.to_string().into()),
+                        ),
+                    ],
+                )
+            }
+            KubeNodeKey::NodeState {
+                uid,
+                valid_from,
+                cluster_uid,
+            } => {
+                let uid_k = format!("{prefix}_uid");
+                let vf_k = format!("{prefix}_valid_from");
+                let cluster_uid_k = format!("{prefix}_cluster_uid");
+                (
+                    format!(
+                        "({prefix}:KubernetesNodeState {{ uid: ${uid_k}, valid_from: ${vf_k}, cluster_uid: ${cluster_uid_k} }})"
                     ),
                     vec![
                         (uid_k, BoltType::String(uid.clone().into())),
