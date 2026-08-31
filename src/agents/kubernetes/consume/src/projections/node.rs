@@ -99,11 +99,7 @@ impl GraphOperable for Node {
 
         let valid_from_ms = conditions
             .iter()
-            .filter_map(|c| {
-                c.last_transition_time
-                    .as_ref()
-                    .map(|t| t.0.as_millisecond())
-            })
+            .filter_map(|c| c.last_transition_time.as_ref().map(|t| t.0.as_millisecond()))
             .max()
             .unwrap_or_else(now_ms);
 
@@ -136,7 +132,7 @@ impl GraphOperable for Node {
             EmitDecision::Suppress => {
                 debug!("Node {uid} state unchanged since last observation, suppressing write");
             }
-            EmitDecision::Emit { .. } => {
+            EmitDecision::Emit => {
                 let mut props = meaningful_props;
                 props.push(ts("valid_from", valid_from_ms));
                 props.push(ts("observed_at", now_ms()));

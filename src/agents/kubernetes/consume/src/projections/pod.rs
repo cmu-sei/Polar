@@ -277,7 +277,7 @@ impl GraphOperable for Pod {
             EmitDecision::Suppress => {
                 debug!("Pod {uid} state unchanged since last observation, suppressing write");
             }
-            EmitDecision::Emit { .. } => {
+            EmitDecision::Emit => {
                 let mut props = meaningful_props;
                 // Previously absent on PodState instances — valid_from
                 // existed only inside the state key, making the temporal
@@ -649,7 +649,7 @@ impl GraphOperable for Pod {
                             container.name
                         );
                     }
-                    EmitDecision::Emit { .. } => {
+                    EmitDecision::Emit => {
                         // Previously absent as a property (key-only) — the
                         // lead-time query's `min(s.valid_from)` depends on
                         // this being an explicit, uniformly-encoded value.

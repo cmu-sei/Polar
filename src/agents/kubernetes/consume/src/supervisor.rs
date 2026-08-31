@@ -51,7 +51,6 @@ const DRAIN_WINDOW_SECS: u64 = 5;
 pub struct StateFingerprint {
     pub signature: String,
     pub valid_from: String,
-    pub last_state_node_id: Option<String>,
 }
 
 #[derive(Default)]
@@ -72,11 +71,16 @@ pub struct ProjectionCache {
     node_uids_by_name: HashMap<(String, String), String>,
 }
 
+/// Whether a caller should actually write the state it just computed.
+/// Emit carries nothing -- a node-chaining feature (linking a new state
+/// instance back to whatever preceded it) was scaffolded here originally,
+/// but nothing in this crate ever built the edge that would have consumed
+/// it, so the dead field was removed rather than left implying a
+/// capability that doesn't exist. If that feature gets built, it belongs
+/// here again, deliberately, not resurrected from this comment.
 pub enum EmitDecision {
     Suppress,
-    Emit {
-        previous_state_node_id: Option<String>,
-    },
+    Emit,
 }
 
 impl ProjectionCache {
@@ -88,57 +92,21 @@ impl ProjectionCache {
         new_signature: String,
         valid_from: String,
     ) -> EmitDecision {
-        let key = (kind.clone(), cluster_uid, uid.clone());
+        let key = (kind, cluster_uid, uid);
 
         match self.entries.get(&key) {
             Some(existing) if existing.signature == new_signature => EmitDecision::Suppress,
-            Some(existing) => {
-                let prev = existing.last_state_node_id.clone();
+            _ => {
                 self.entries.insert(
                     key,
                     StateFingerprint {
                         signature: new_signature,
                         valid_from,
-                        last_state_node_id: None,
                     },
                 );
-                EmitDecision::Emit {
-                    previous_state_node_id: prev,
-                }
-            }
-            None => {
-                self.entries.insert(
-                    key,
-                    StateFingerprint {
-                        signature: new_signature,
-                        valid_from,
-                        last_state_node_id: None,
-                    },
-                );
-                EmitDecision::Emit {
-                    previous_state_node_id: None,
-                }
+                EmitDecision::Emit
             }
         }
-    }
-
-    pub fn set_last_state_node_id(
-        &mut self,
-        kind: &str,
-        cluster_uid: String,
-        uid: &str,
-        node_id: String,
-    ) {
-        if let Some(entry) = self
-            .entries
-            .get_mut(&(kind.to_string(), cluster_uid, uid.to_string()))
-        {
-            entry.last_state_node_id = Some(node_id);
-        }
-    }
-
-    pub fn evict(&mut self, kind: String, cluster_uid: String, uid: &str) {
-        self.entries.remove(&(kind, cluster_uid, uid.to_string()));
     }
 
     /// Records this cluster's Node name -> UID mapping. Call this from

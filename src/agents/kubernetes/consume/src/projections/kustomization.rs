@@ -154,7 +154,7 @@ impl GraphOperable for Kustomization {
                     "Kustomization {uid} state unchanged since last observation, suppressing write"
                 );
             }
-            EmitDecision::Emit { .. } => {
+            EmitDecision::Emit => {
                 let mut props = meaningful_props;
                 props.push(ts("valid_from", valid_from_ms));
                 props.push(ts("observed_at", now_ms()));

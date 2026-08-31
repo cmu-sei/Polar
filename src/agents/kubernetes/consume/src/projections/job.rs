@@ -10,8 +10,8 @@ use tracing::debug;
 use crate::supervisor::{EmitDecision, ProjectionCache};
 
 use super::{
-    GraphOperable, handle_owner_refs, k8s_time_ms, now_ms, project_deletion_state,
-    state_signature, ts,
+    GraphOperable, handle_owner_refs, k8s_time_ms, now_ms, project_deletion_state, state_signature,
+    ts,
 };
 
 impl GraphOperable for Job {
@@ -145,7 +145,7 @@ impl GraphOperable for Job {
             EmitDecision::Suppress => {
                 debug!("Job {uid} state unchanged since last observation, suppressing write");
             }
-            EmitDecision::Emit { .. } => {
+            EmitDecision::Emit => {
                 let mut props = meaningful_props;
                 props.push(ts("valid_from", valid_from_ms));
                 props.push(ts("observed_at", now_ms()));
