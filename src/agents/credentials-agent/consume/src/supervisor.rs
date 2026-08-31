@@ -75,16 +75,16 @@ const IDENTITY_NORMALIZATION_ACTOR_NAME: &str = "polar.credentials-agent.identit
 pub struct ConsumerSupervisor;
 
 pub struct ConsumerSupervisorState {
-    /// The single, serialized owner of the event log and derived
-    /// state -- see ledger.rs's own module doc for why this can't be
-    /// split across multiple actors the way jira/process's four data
-    /// streams safely are.
-    ledger: ActorRef<LedgerMessage>,
     /// Owns the graph projection, and its own GraphControllerActor as
-    /// a direct child -- see projection.rs's own module doc.
+    /// a direct child -- see projection.rs's own module doc. The only
+    /// child actor reference genuinely held here: LedgerActor,
+    /// IssuanceActor, and IdentityNormalizationActor were previously
+    /// also held as fields, but spawn_linked already ties their
+    /// lifecycle to this supervisor via ractor's own linking --
+    /// nothing in this file ever actually read those fields, and the
+    /// compiler was correctly flagging genuine dead code, not a false
+    /// positive.
     projection_actor: ActorRef<ProjectionMessage>,
-    issuance_actor: ActorRef<Envelope<IssuanceRequest>>,
-    identity_normalization_actor: ActorRef<Envelope<IdentityNormalizationRequest>>,
     healthcheck: ActorRef<HealthCheckMessage>,
     draining: bool,
 }
@@ -239,7 +239,7 @@ impl Actor for ConsumerSupervisor {
             },
         };
 
-        let (issuance_actor, _) = IssuanceActor::spawn_linked(
+        let (_issuance_actor, _) = IssuanceActor::spawn_linked(
             Some(ISSUANCE_ACTOR_NAME.to_string()),
             IssuanceActor,
             IssuanceActorArgs {
@@ -254,7 +254,7 @@ impl Actor for ConsumerSupervisor {
             cert_issuer: HandshakeClient::new(cert_issuer_url.clone()),
         };
 
-        let (identity_normalization_actor, _) = IdentityNormalizationActor::spawn_linked(
+        let (_identity_normalization_actor, _) = IdentityNormalizationActor::spawn_linked(
             Some(IDENTITY_NORMALIZATION_ACTOR_NAME.to_string()),
             IdentityNormalizationActor,
             IdentityNormalizationActorArgs {
@@ -312,10 +312,7 @@ impl Actor for ConsumerSupervisor {
         .await?;
 
         Ok(ConsumerSupervisorState {
-            ledger,
             projection_actor,
-            issuance_actor,
-            identity_normalization_actor,
             healthcheck,
             draining: false,
         })
