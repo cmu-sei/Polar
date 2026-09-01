@@ -117,6 +117,7 @@ impl Actor for SessionManager {
                 registration_id,
                 client_id,
                 trace_ctx,
+                peer_identity,
             } => {
                 self.handle_registration_request(
                     myself.clone(),
@@ -124,6 +125,7 @@ impl Actor for SessionManager {
                     registration_id,
                     client_id,
                     trace_ctx,
+                    peer_identity,
                 )
                 .await?;
             }
@@ -311,6 +313,7 @@ impl SessionManager {
         registration_id: Option<String>,
         client_id: String,
         trace_ctx: Option<opentelemetry::Context>,
+        _peer_identity: Option<String>,
     ) -> Result<(), ActorProcessingErr> {
         let span =
             trace_span!("session_manager.registration_request", %client_id, ?registration_id);
@@ -566,6 +569,7 @@ impl Actor for SessionAgent {
                 payload,
                 reply_to,
                 trace_ctx,
+                published_by,
             } => {
                 self.handle_publish_request(
                     myself.clone(),
@@ -575,6 +579,7 @@ impl Actor for SessionAgent {
                     payload,
                     reply_to,
                     trace_ctx,
+                    published_by,
                 )
                 .await?;
             }
@@ -582,9 +587,17 @@ impl Actor for SessionAgent {
                 payload,
                 topic,
                 trace_ctx,
+                published_by,
             } => {
-                self.handle_push_message(myself.clone(), state, payload, topic, trace_ctx)
-                    .await?;
+                self.handle_push_message(
+                    myself.clone(),
+                    state,
+                    payload,
+                    topic,
+                    trace_ctx,
+                    published_by,
+                )
+                .await?;
             }
             BrokerMessage::PublishRequestAck { topic, trace_ctx } => {
                 self.handle_publish_ack(myself.clone(), state, topic, trace_ctx)
@@ -801,6 +814,7 @@ impl SessionAgent {
         payload: Arc<Vec<u8>>,
         _reply_to: Option<ActorRef<BrokerMessage>>, // added but ignored; we'll use our own
         trace_ctx: Option<opentelemetry::Context>,
+        published_by: Option<String>,
     ) -> Result<(), ActorProcessingErr> {
         let span = trace_span!("session.publish_request", %registration_id, %topic);
         try_set_parent_otel(&span, trace_ctx);
@@ -838,6 +852,7 @@ impl SessionAgent {
                         payload,
                         result: Err(err_msg),
                         trace_ctx: Some(span.context()),
+                        published_by: None,
                     });
                 // no broker -> timeout path (client may be fine; broker is not)
                 let _ = myself.send_message(BrokerMessage::TimeoutMessage {
@@ -866,6 +881,7 @@ impl SessionAgent {
             // Set reply_to to ourselves so the topic agent can ack us directly
             reply_to: Some(myself.clone()),
             trace_ctx: Some(span.context()),
+            published_by,
         }) {
             error!("failed to forward publish to broker: {e}");
             // Notify manager that publish failed (delta -1)
@@ -888,6 +904,7 @@ impl SessionAgent {
         payload: Arc<Vec<u8>>,
         topic: String,
         trace_ctx: Option<opentelemetry::Context>,
+        published_by: Option<String>,
     ) -> Result<(), ActorProcessingErr> {
         let registration_id = state.registration_id.clone();
         let span = trace_span!("session.push_message", %registration_id, %topic);
@@ -900,6 +917,7 @@ impl SessionAgent {
             payload: payload.clone(),
             result: Ok(()),
             trace_ctx: Some(span.context()),
+            published_by: published_by.clone(),
         }) {
             warn!("{PUBLISH_REQ_FAILED_TXT}: {CLIENT_NOT_FOUND_TXT}: {e}");
 
@@ -907,6 +925,7 @@ impl SessionAgent {
                 subscriber
                     .send_message(BrokerMessage::PushMessageFailed {
                         payload: payload.clone(),
+                        published_by: published_by.clone(),
                     })
                     .inspect_err(|_| warn!("failed to DLQ message on topic {topic}"))
                     .ok();

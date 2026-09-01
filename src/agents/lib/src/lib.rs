@@ -145,6 +145,7 @@ pub fn emit_provenance_event(
         payload,
         trace_ctx,
         offline_behavior: OfflineBehavior::Drop,
+        share_identity: true,
     })?;
 
     Ok(())

@@ -258,6 +258,7 @@ impl Actor for TopicManager {
                 payload,
                 reply_to,
                 trace_ctx,
+                published_by,
             } => {
                 self.handle_publish_request(
                     myself.clone(),
@@ -267,6 +268,7 @@ impl Actor for TopicManager {
                     payload,
                     reply_to,
                     trace_ctx,
+                    published_by,
                 )
                 .await?;
             }
@@ -274,10 +276,18 @@ impl Actor for TopicManager {
                 topic,
                 payload,
                 trace_ctx,
+                published_by,
                 ..
             } => {
-                self.handle_publish_response(myself.clone(), state, topic, payload, trace_ctx)
-                    .await?;
+                self.handle_publish_response(
+                    myself.clone(),
+                    state,
+                    topic,
+                    payload,
+                    trace_ctx,
+                    published_by,
+                )
+                .await?;
             }
             BrokerMessage::SubscribeRequest {
                 registration_id,
@@ -370,6 +380,7 @@ impl TopicManager {
         payload: Arc<Vec<u8>>,
         reply_to: Option<ActorRef<BrokerMessage>>,
         trace_ctx: Option<opentelemetry::Context>,
+        published_by: Option<String>,
     ) -> Result<(), ActorProcessingErr> {
         let span = trace_span!("cassini.topic_manager.publish_request", %registration_id, topic = %topic, payload_len = payload.len());
 
@@ -395,6 +406,7 @@ impl TopicManager {
                     payload,
                     reply_to, // forward to topic agent
                     trace_ctx: Some(span.context()),
+                    published_by,
                 }) {
                     error!(error = %e, topic = %topic, "failed to forward publish");
                 }
@@ -421,13 +433,12 @@ impl TopicManager {
         topic: String,
         payload: Arc<Vec<u8>>,
         trace_ctx: Option<opentelemetry::Context>,
+        published_by: Option<String>,
     ) -> Result<(), ActorProcessingErr> {
         let span = trace_span!("cassini.topic_manager.publish_response", topic = %topic, payload_len = payload.len());
         try_set_parent_otel(&span, trace_ctx);
         let _g = span.enter();
-
         trace!("Topic manager received publish response for \"{topic}\"");
-
         // forward to broker
         if let Some(broker) = myself.try_get_supervisor() {
             if let Err(e) = broker.send_message(BrokerMessage::PublishResponse {
@@ -435,6 +446,7 @@ impl TopicManager {
                 payload,
                 result: Ok(()),
                 trace_ctx: Some(span.context()),
+                published_by,
             }) {
                 error!("Failed to forward publish response to broker: {}", e);
             }
@@ -526,7 +538,7 @@ struct TopicAgent;
 
 struct TopicAgentState {
     subscribers: HashMap<String, ActorRef<BrokerMessage>>,
-    queue: VecDeque<(std::time::Instant, Arc<Vec<u8>>)>,
+    queue: VecDeque<(std::time::Instant, Arc<Vec<u8>>, Option<String>)>,
     flushing: bool,
 }
 
@@ -582,6 +594,7 @@ impl Actor for TopicAgent {
                 payload,
                 reply_to,
                 trace_ctx,
+                published_by,
             } => {
                 self.handle_publish_request(
                     myself.clone(),
@@ -591,6 +604,7 @@ impl Actor for TopicAgent {
                     payload,
                     reply_to,
                     trace_ctx,
+                    published_by,
                 )
                 .await?;
             }
@@ -649,7 +663,7 @@ impl TopicAgent {
         // Actually, during shutdown, there are no active subscribers (they are terminated in phase 4).
         // But phase 3 (flush) happens before phase 4 (terminate subscribers). So subscribers might still exist.
         // We must attempt to deliver all queued messages to existing subscribers.
-        while let Some((_queued_at, msg)) = state.queue.pop_front() {
+        while let Some((_queued_at, msg, published_by)) = state.queue.pop_front() {
             if state.subscribers.is_empty() {
                 warn!(
                     "Discarding queued message on topic {} during flush: no subscribers",
@@ -663,6 +677,7 @@ impl TopicAgent {
                     payload: msg.clone(),
                     result: Ok(()),
                     trace_ctx: None,
+                    published_by: published_by.clone(),
                 }) {
                     warn!("Failed to deliver queued message to subscriber: {}", e);
                 }
@@ -700,6 +715,7 @@ impl TopicAgent {
         payload: Arc<Vec<u8>>,
         reply_to: Option<ActorRef<BrokerMessage>>,
         trace_ctx: Option<opentelemetry::Context>,
+        published_by: Option<String>,
     ) -> Result<(), ActorProcessingErr> {
         let span = trace_span!(
             "cassini.topic_agent.publish",
@@ -718,12 +734,15 @@ impl TopicAgent {
                     payload: payload.clone(),
                     result: Ok(()),
                     trace_ctx: Some(span.context()),
+                    published_by: published_by.clone(),
                 }) {
                     warn!("{PUBLISH_REQ_FAILED_TXT}: {e}")
                 }
             }
         } else {
-            state.queue.push_back((std::time::Instant::now(), payload.clone()));
+            state
+                .queue
+                .push_back((std::time::Instant::now(), payload.clone(), published_by));
             info!(
                 "{}",
                 format!(
@@ -772,13 +791,14 @@ impl TopicAgent {
         state.subscribers.insert(registration_id, subscriber_ref.clone());
 
         // Drain queued messages now that someone is listening.
-        while let Some((_queued_at, msg)) = state.queue.pop_front() {
+        while let Some((_queued_at, msg, published_by)) = state.queue.pop_front() {
             subscriber_ref
                 .send_message(BrokerMessage::PublishResponse {
                     topic: myself.get_name().unwrap(),
                     payload: msg,
                     result: Ok(()),
                     trace_ctx: Some(span.context()),
+                    published_by,
                 })
                 .ok();
         }
@@ -822,7 +842,7 @@ impl TopicAgent {
         let threshold = std::time::Duration::from_secs(QUEUE_STALE_AFTER_SECS);
         let mut dropped = 0usize;
 
-        while let Some((queued_at, _)) = state.queue.front() {
+        while let Some((queued_at, _, _)) = state.queue.front() {
             if queued_at.elapsed() < threshold {
                 break;
             }

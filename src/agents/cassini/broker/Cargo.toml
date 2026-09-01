@@ -25,6 +25,7 @@ opentelemetry.workspace = true
 tracing-opentelemetry.workspace = true
 opentelemetry_sdk.workspace = true
 opentelemetry-otlp.workspace = true
+x509-parser.workspace = true
 
 [[bin]]
 name = "cassini-server"

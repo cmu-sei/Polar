@@ -520,11 +520,7 @@ pub async fn drain_queue(
 
         session
             .send_and_await(
-                TcpClientMessage::Publish {
-                    topic: entry.topic.clone(),
-                    payload,
-                    trace_ctx: None,
-                },
+                TcpClientMessage::publish(entry.topic.clone(), payload, None),
                 BridgeMode::Publish,
                 Duration::from_secs(10),
                 "Timed out waiting for publish ack",
@@ -678,11 +674,7 @@ async fn handle_ipc_connection(
                 };
                 match s
                     .send_and_await(
-                        TcpClientMessage::Publish {
-                            topic: topic.clone(),
-                            payload,
-                            trace_ctx: None,
-                        },
+                        TcpClientMessage::publish(topic.clone(), payload, None),
                         BridgeMode::Publish,
                         Duration::from_secs(10),
                         "Timed out waiting for publish ack",
@@ -1094,11 +1086,7 @@ pub async fn run_publish_direct(
 
     let result = session
         .send_and_await(
-            TcpClientMessage::Publish {
-                topic,
-                payload,
-                trace_ctx: None,
-            },
+            TcpClientMessage::publish(topic, payload, None),
             BridgeMode::Publish,
             publish_timeout,
             "Timed out waiting for publish ack",

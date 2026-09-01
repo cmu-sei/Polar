@@ -49,6 +49,49 @@ fn now_ms() -> u64 {
         .as_millis() as u64
 }
 
+/// Extracts the connecting client's own DNS-SAN identity from their
+/// verified mTLS certificate -- called once, right after the TLS
+/// handshake completes, before the stream is split into separate
+/// read/write halves (peer_certificates() is only reachable through
+/// the still-unified TlsStream). mTLS verification itself already
+/// happened during acceptor.accept() (with_client_cert_verifier); this
+/// never makes its own trust decision, only reads what's already been
+/// verified.
+///
+/// Returns None (never fails the connection) if the cert genuinely
+/// has no DNS SAN at all -- rare/effectively impossible for certs
+/// issued by cert-issuer itself, which always embeds one, but this is
+/// an additive enhancement, not a new security gate, so failing open
+/// here is deliberate.
+fn extract_peer_identity(stream: &TlsStream<TcpStream>) -> Option<String> {
+    let (_, connection) = stream.get_ref();
+    let peer_certs = connection.peer_certificates()?;
+    let leaf_cert = peer_certs.first()?;
+
+    use x509_parser::prelude::FromDer;
+    let (_, parsed) =
+        match x509_parser::certificate::X509Certificate::from_der(leaf_cert.as_ref()) {
+            Ok(v) => v,
+            Err(e) => {
+                warn!(error = ?e, "Failed to parse peer certificate for identity extraction");
+                return None;
+            }
+        };
+
+    for ext in parsed.extensions() {
+        if let x509_parser::extensions::ParsedExtension::SubjectAlternativeName(san) =
+            ext.parsed_extension()
+        {
+            for name in &san.general_names {
+                if let x509_parser::extensions::GeneralName::DNSName(dns) = name {
+                    return Some(dns.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
 // ============================== Listener Manager ============================== //
 
 pub struct ListenerManager;
@@ -205,11 +248,13 @@ impl Actor for ListenerManager {
                                 return;
                             }
                         };
-
+                        // Extracted before split() -- peer_certificates()
+                        // is only reachable through the still-unified
+                        // TlsStream.
+                        let peer_identity = extract_peer_identity(&stream);
                         let client_id = Uuid::new_v4().to_string();
                         let (reader, writer) = split(stream);
                         let writer = BufWriter::new(writer);
-
                         let listener_args = ListenerArguments {
                             writer: Arc::new(Mutex::new(writer)),
                             reader: Some(reader),
@@ -220,6 +265,7 @@ impl Actor for ListenerManager {
                                 .try_get_supervisor()
                                 .expect("ListenerManager must have a supervisor (the broker)")
                                 .into(),
+                            peer_identity,
                         };
 
                         let spawn_span = info_span!(
@@ -519,6 +565,7 @@ struct ListenerState {
     registration_id: Option<String>,
     task_handle: Option<JoinHandle<()>>,
     broker: ActorRef<BrokerMessage>,
+    peer_identity: Option<String>,
 }
 
 struct ListenerArguments {
@@ -528,6 +575,7 @@ struct ListenerArguments {
     session_mgr: ActorRef<BrokerMessage>,
     registration_id: Option<String>,
     broker: ActorRef<BrokerMessage>,
+    peer_identity: Option<String>,
 }
 
 impl Listener {
@@ -594,6 +642,7 @@ impl Actor for Listener {
             registration_id: args.registration_id,
             task_handle: None,
             broker: args.broker,
+            peer_identity: args.peer_identity,
         })
     }
 
@@ -621,6 +670,7 @@ impl Actor for Listener {
         }
 
         let client_id = state.client_id.clone();
+        let peer_identity = state.peer_identity.clone();
         let reader = state.reader.take().ok_or_else(|| {
             ActorProcessingErr::from(std::io::Error::other("Reader already taken"))
         })?;
@@ -695,6 +745,7 @@ impl Actor for Listener {
                                 let converted = BrokerMessage::from_client_message(
                                     deserialized,
                                     client_id.clone(),
+                                    peer_identity.clone(),
                                 );
 
                                 if let Err(e) = myself.send_message(converted) {
@@ -727,6 +778,7 @@ impl Actor for Listener {
                 registration_id,
                 client_id,
                 trace_ctx,
+                peer_identity,
             } => {
                 self.handle_registration_request(
                     myself,
@@ -734,6 +786,7 @@ impl Actor for Listener {
                     registration_id,
                     client_id,
                     trace_ctx,
+                    peer_identity,
                 )
                 .await?;
             }
@@ -771,6 +824,7 @@ impl Actor for Listener {
                 registration_id,
                 reply_to,
                 trace_ctx,
+                published_by,
             } => {
                 self.handle_publish_request(
                     myself,
@@ -780,6 +834,7 @@ impl Actor for Listener {
                     registration_id,
                     reply_to,
                     trace_ctx,
+                    published_by,
                 )
                 .await?;
             }
@@ -788,9 +843,12 @@ impl Actor for Listener {
                 payload,
                 trace_ctx,
                 result,
+                published_by,
             } => {
-                self.handle_publish_response(myself, state, topic, payload, trace_ctx, result)
-                    .await?;
+                self.handle_publish_response(
+                    myself, state, topic, payload, trace_ctx, result, published_by,
+                )
+                .await?;
             }
             BrokerMessage::PublishRequestAck { topic, trace_ctx } => {
                 self.handle_publish_request_ack(myself, state, topic, trace_ctx)
@@ -864,17 +922,18 @@ impl Listener {
         registration_id: Option<String>,
         client_id: String,
         trace_ctx: Option<opentelemetry::Context>,
+        peer_identity: Option<String>,
     ) -> Result<(), ActorProcessingErr> {
         let span = trace_span!("cassini.request.registration", %client_id, registration_id = ?registration_id);
         try_set_parent_otel(&span, trace_ctx);
         let _g = span.enter();
         trace!("Listener received registration request");
-
         let broker = state.broker.clone();
         if let Err(e) = broker.send_message(BrokerMessage::RegistrationRequest {
             registration_id,
             client_id: client_id.clone(),
             trace_ctx: Some(span.context()),
+            peer_identity,
         }) {
             let err_msg = format!("{REGISTRATION_REQ_FAILED_TXT}: {e}");
             error!("{err_msg}");
@@ -1024,6 +1083,7 @@ impl Listener {
         registration_id: String,
         _reply_to: Option<ActorRef<BrokerMessage>>,
         trace_ctx: Option<opentelemetry::Context>,
+        published_by: Option<String>,
     ) -> Result<(), ActorProcessingErr> {
         let span = info_span!("cassini.request.publish_request", client_id = %state.client_id, %registration_id, topic = ?topic, payload_bytes = payload.len());
         try_set_parent_otel(&span, trace_ctx.clone());
@@ -1077,12 +1137,14 @@ impl Listener {
             payload: payload.clone(),
             reply_to: None,
             trace_ctx,
+            published_by,
         }) {
             let msg = ClientMessage::PublishResponse {
                 topic,
                 payload,
                 result: Err(format!("{PUBLISH_REQ_FAILED_TXT}: {e}")),
                 trace_ctx: WireTraceCtx::from_current_span(),
+                published_by: None,
             };
             if let Err(e) =
                 Listener::write(state.client_id.clone(), msg, Arc::clone(&state.writer)).await
@@ -1101,18 +1163,19 @@ impl Listener {
         payload: Arc<Vec<u8>>,
         trace_ctx: Option<opentelemetry::Context>,
         result: Result<(), String>,
+        published_by: Option<String>,
     ) -> Result<(), ActorProcessingErr> {
         let span =
             trace_span!("cassini.listener.publish_response", topic = ?topic, ok = result.is_ok());
         try_set_parent_otel(&span, trace_ctx);
         let _g = span.enter();
         trace!("Listener received publish response");
-
         let msg = ClientMessage::PublishResponse {
             topic,
             payload,
             result,
             trace_ctx: WireTraceCtx::from_current_span(),
+            published_by,
         };
         if let Err(e) =
             Listener::write(state.client_id.clone(), msg, Arc::clone(&state.writer)).await

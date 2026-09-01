@@ -125,6 +125,7 @@ pub struct PublishRequest {
     pub payload: Vec<u8>,
     pub trace_ctx: Option<WireTraceCtx>,
     pub offline_behavior: OfflineBehavior,
+    pub share_identity: bool,
 }
 
 impl<M: Message + Sync> Default for ClientEventForwarder<M> {
@@ -275,6 +276,12 @@ pub enum TcpClientMessage {
         topic: String,
         payload: Vec<u8>,
         trace_ctx: Option<WireTraceCtx>,
+        /// Whether the publisher's identity (always known to the
+        /// broker via the connection's own verified mTLS cert) should
+        /// actually be forwarded to subscribers on delivery. Prefer
+        /// the publish()/publish_anonymous() constructors over
+        /// constructing this variant directly.
+        share_identity: bool,
     },
     Subscribe {
         topic: String,
@@ -315,6 +322,36 @@ pub enum TcpClientMessage {
     /// a transition back to Unregistered and a fresh registration,
     /// rather than retrying the same now-invalid registration_id forever.
     SessionInvalidated,
+}
+
+impl TcpClientMessage {
+    /// The common case -- identity shared with subscribers. Prefer
+    /// this over constructing Publish directly.
+    pub fn publish(topic: String, payload: Vec<u8>, trace_ctx: Option<WireTraceCtx>) -> Self {
+        TcpClientMessage::Publish {
+            topic,
+            payload,
+            trace_ctx,
+            share_identity: true,
+        }
+    }
+
+    /// Explicit opt-out for the rare case where genuine anonymity is
+    /// wanted -- the broker still knows who's connected (it's derived
+    /// from the verified mTLS cert, not client-supplied), it simply
+    /// won't forward that identity on to subscribers for this publish.
+    pub fn publish_anonymous(
+        topic: String,
+        payload: Vec<u8>,
+        trace_ctx: Option<WireTraceCtx>,
+    ) -> Self {
+        TcpClientMessage::Publish {
+            topic,
+            payload,
+            trace_ctx,
+            share_identity: false,
+        }
+    }
 }
 
 type TlsWriter = Option<Arc<Mutex<BufWriter<WriteHalf<TlsStream<TcpStream>>>>>>;
@@ -483,6 +520,7 @@ impl TcpClientActor {
                                                 payload,
                                                 result,
                                                 trace_ctx,
+                                                published_by,
                                             } => {
                                                 let span = trace_span!("client.handle_publish_response");
                                                 if let Some(wire_ctx) = trace_ctx {
@@ -497,6 +535,7 @@ impl TcpClientActor {
                                                         topic: topic.clone(),
                                                         payload: payload.to_vec(),
                                                         trace_ctx: current_trace_ctx,
+                                                        published_by: published_by.clone(),
                                                     };
                                                     // Send to output port (existing)
                                                     queue_out.send(event.clone());
@@ -819,12 +858,14 @@ impl TcpClientActor {
         topic: String,
         payload: Vec<u8>,
         trace_ctx: Option<WireTraceCtx>,
+        share_identity: bool,
     ) -> Result<(), ActorProcessingErr> {
         let envelope = ClientMessage::PublishRequest {
             topic,
             payload: payload.into(),
             registration_id: registration_id.to_owned(),
             trace_ctx,
+            share_identity,
         };
         if let Err(e) = TcpClientActor::send_message(envelope, state).await {
             TcpClientActor::emit_transport_err_and_stop(myself, state, e.to_string());
@@ -1215,9 +1256,12 @@ impl Actor for TcpClientActor {
                         topic,
                         payload,
                         trace_ctx,
+                        share_identity,
                     } => {
-                        self.handle_publish(myself, state, &reg_id, topic, payload, trace_ctx)
-                            .await?;
+                        self.handle_publish(
+                            myself, state, &reg_id, topic, payload, trace_ctx, share_identity,
+                        )
+                        .await?;
                     }
                     TcpClientMessage::Subscribe { topic, trace_ctx } => {
                         self.handle_subscribe(myself, state, &reg_id, topic, trace_ctx)

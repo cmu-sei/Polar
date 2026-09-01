@@ -27,6 +27,22 @@ pub enum DisconnectReason {
     // PolicyViolation(PolicyViolation),
     TransportError(String),
 }
+
+/// The publisher's own identity, attached to a published message so a
+/// subscriber can know who sent it -- extracted by the broker from
+/// the publisher's verified mTLS client certificate at connection
+/// time, never client-supplied. `share_identity` is the one thing a
+/// publisher genuinely controls: whether this known identity is
+/// actually forwarded to subscribers on delivery, or suppressed for
+/// this specific publish. A publisher can choose to stay anonymous,
+/// but can never spoof a different identity -- `identity` itself is
+/// always broker-derived.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, Serialize, Deserialize, Archive)]
+pub struct PublisherContext {
+    pub identity: String,
+    pub share_identity: bool,
+}
+
 /// Internal messagetypes for the Broker.
 /// Activities that flow from an actor will also be traced leveraging Contexts,
 /// These are optional because they aren't initialzied until the listener begins to handle the message
@@ -76,6 +92,12 @@ pub enum BrokerMessage {
         registration_id: Option<String>,
         client_id: String,
         trace_ctx: Option<opentelemetry::Context>,
+        /// The connecting client's own DNS-SAN identity, extracted by
+        /// the broker from their verified mTLS client certificate at
+        /// TLS-accept time. Never client-supplied -- the wire-level
+        /// ClientMessage::RegistrationRequest never carries this at
+        /// all, since the client has no way to send it.
+        peer_identity: Option<String>,
     },
     /// Reassign a session to a new client listener (used during reconnection)
     ReassignClient {
@@ -108,13 +130,25 @@ pub enum BrokerMessage {
         payload: Arc<Vec<u8>>,
         reply_to: Option<ActorRef<BrokerMessage>>,
         trace_ctx: Option<opentelemetry::Context>,
+        /// Already resolved by from_client_message at decode time --
+        /// the publisher's own peer_identity if they chose to share
+        /// it, None otherwise. Everything downstream (topic/subscriber
+        /// routing, delivery) just propagates this as-is; nothing past
+        /// decode time needs to know about share_identity/peer_identity
+        /// separately again.
+        published_by: Option<String>,
     },
-    /// Publish response to the client.
+    /// Publish response to the client -- also reused, unmodified in
+    /// shape, as the delivery vehicle when forwarding a published
+    /// message to a subscriber (see session.rs's handle_push_message).
+    /// published_by is only meaningful in that second case; for the
+    /// original publisher's own ack it's left None.
     PublishResponse {
         topic: String,
         payload: Arc<Vec<u8>>,
         result: Result<(), String>,
         trace_ctx: Option<opentelemetry::Context>,
+        published_by: Option<String>,
     },
     /// Message sent to the client to let them know they successfully published a message
     PublishRequestAck {
@@ -161,10 +195,12 @@ pub enum BrokerMessage {
         payload: Arc<Vec<u8>>,
         topic: String,
         trace_ctx: Option<opentelemetry::Context>,
+        published_by: Option<String>,
     },
     /// Sent back to subscription actors if sessions fail to forward messages to the client for requeueing
     PushMessageFailed {
         payload: Arc<Vec<u8>>,
+        published_by: Option<String>,
         //trace_ctx: Option<opentelemetry::Context>,
     },
     /// Subscribe acknowledgment to the client.
@@ -256,7 +292,15 @@ pub enum BrokerMessage {
 }
 
 impl BrokerMessage {
-    pub fn from_client_message(msg: ClientMessage, client_id: String) -> Self {
+    /// `peer_identity` is passed separately, exactly like `client_id`
+    /// already is -- both are connection-derived, broker-side facts
+    /// the wire message itself never carries. Only meaningful for the
+    /// RegistrationRequest arm; every other arm ignores it.
+    pub fn from_client_message(
+        msg: ClientMessage,
+        client_id: String,
+        peer_identity: Option<String>,
+    ) -> Self {
         match msg {
             ClientMessage::RegistrationRequest {
                 registration_id,
@@ -265,12 +309,14 @@ impl BrokerMessage {
                 registration_id,
                 client_id,
                 trace_ctx: trace_ctx.map(|w| w.to_opentelemetry_context()),
+                peer_identity,
             },
             ClientMessage::PublishRequest {
                 topic,
                 payload,
                 registration_id,
                 trace_ctx,
+                share_identity,
             } => BrokerMessage::PublishRequest {
                 registration_id,
                 topic,
@@ -278,6 +324,16 @@ impl BrokerMessage {
                 // Client doesn't know the session actor, so reply_to is None
                 reply_to: None,
                 trace_ctx: trace_ctx.map(|w| w.to_opentelemetry_context()),
+                // Resolved once, here, at decode time -- the earliest
+                // point both share_identity (from the wire message)
+                // and peer_identity (this connection's own,
+                // broker-derived identity) are simultaneously
+                // available.
+                published_by: if share_identity {
+                    peer_identity.clone()
+                } else {
+                    None
+                },
             },
             ClientMessage::SubscribeRequest {
                 topic,
@@ -402,6 +458,7 @@ pub enum ClientEvent {
         topic: String,
         payload: Vec<u8>,
         trace_ctx: Option<WireTraceCtx>,
+        published_by: Option<String>,
     },
     TransportError {
         reason: String,
@@ -439,13 +496,16 @@ pub enum ClientMessage {
         payload: Arc<Vec<u8>>,
         registration_id: String,
         trace_ctx: Option<WireTraceCtx>,
+        share_identity: bool,
     },
-    /// Publish response to the client.
+    /// Publish response to the client -- also delivers a subscribed
+    /// message; see BrokerMessage::PublishResponse's own doc.
     PublishResponse {
         topic: String,
         payload: Arc<Vec<u8>>,
         result: Result<(), String>,
         trace_ctx: Option<WireTraceCtx>,
+        published_by: Option<String>,
     },
     /// Sent back to actor that made initial publish request
     PublishRequestAck {

@@ -74,6 +74,7 @@ mod tests {
             registration_id: None,
             client_id: "test-client".to_string(),
             trace_ctx: None,
+            peer_identity: None,
         };
 
         // This should not panic or error

@@ -115,6 +115,7 @@ impl CassiniClient for TcpClient {
             topic: req.topic.clone(),
             payload: req.payload.clone(),
             trace_ctx: req.trace_ctx.clone(),
+            share_identity: req.share_identity,
         });
 
         match result {

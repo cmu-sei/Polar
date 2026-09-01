@@ -44,6 +44,7 @@ mod tests {
             payload: Arc::new(vec![1u8, 2, 3, 4, 5]),
             reply_to: None,
             trace_ctx: None,
+            published_by: None,
         };
 
         // This should not panic or error

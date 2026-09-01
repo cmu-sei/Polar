@@ -86,6 +86,7 @@ impl Actor for SubscriberManager {
                 registration_id,
                 client_id,
                 trace_ctx,
+                peer_identity,
             } => {
                 self.handle_registration_request(
                     myself.clone(),
@@ -93,6 +94,7 @@ impl Actor for SubscriberManager {
                     registration_id,
                     client_id,
                     trace_ctx,
+                    peer_identity,
                 )
                 .await?;
             }
@@ -229,6 +231,7 @@ impl SubscriberManager {
         registration_id: Option<String>,
         client_id: String,
         trace_ctx: Option<opentelemetry::Context>,
+        _peer_identity: Option<String>,
     ) -> Result<(), ActorProcessingErr> {
         // Reject new registrations during shutdown
         if state.is_shutting_down {
@@ -259,6 +262,7 @@ impl SubscriberManager {
                         registration_id: Some(registration_id.clone()),
                         client_id: client_id.clone(),
                         trace_ctx: Some(span.context()),
+                        peer_identity: None,
                     }) {
                         warn!(error = %e, "{REGISTRATION_REQ_FAILED_TXT}: {SUBSCRIBER_NOT_FOUND_TXT}");
                     }
@@ -501,7 +505,7 @@ pub struct SubscriberAgentState {
     // session_ref is now stored directly
     session_ref: ActorRef<BrokerMessage>,
     topic: String,
-    dead_letter_queue: VecDeque<Arc<Vec<u8>>>,
+    dead_letter_queue: VecDeque<(Arc<Vec<u8>>, Option<String>)>,
 }
 
 pub struct SubscriberAgentArgs {
@@ -561,6 +565,7 @@ impl Actor for SubscriberAgent {
                 registration_id,
                 client_id,
                 trace_ctx,
+                peer_identity,
             } => {
                 self.handle_registration_request(
                     myself.clone(),
@@ -568,6 +573,7 @@ impl Actor for SubscriberAgent {
                     registration_id,
                     client_id,
                     trace_ctx,
+                    peer_identity,
                 )
                 .await?;
             }
@@ -575,13 +581,24 @@ impl Actor for SubscriberAgent {
                 topic,
                 payload,
                 trace_ctx,
+                published_by,
                 ..
             } => {
-                self.handle_publish_response(myself.clone(), state, topic, payload, trace_ctx)
-                    .await?;
+                self.handle_publish_response(
+                    myself.clone(),
+                    state,
+                    topic,
+                    payload,
+                    trace_ctx,
+                    published_by,
+                )
+                .await?;
             }
-            BrokerMessage::PushMessageFailed { payload } => {
-                self.handle_push_message_failed(myself.clone(), state, payload)
+            BrokerMessage::PushMessageFailed {
+                payload,
+                published_by,
+            } => {
+                self.handle_push_message_failed(myself.clone(), state, payload, published_by)
                     .await?;
             }
             other => warn!(?other, "{UNEXPECTED_MESSAGE_STR}"),
@@ -599,6 +616,7 @@ impl SubscriberAgent {
         registration_id: Option<String>,
         client_id: String,
         trace_ctx: Option<opentelemetry::Context>,
+        _peer_identity: Option<String>,
     ) -> Result<(), ActorProcessingErr> {
         let span = trace_span!("cassini.subscriber.handle_registration_request", %client_id, has_registration_id = registration_id.is_some());
         try_set_parent_otel(&span, trace_ctx);
@@ -610,11 +628,12 @@ impl SubscriberAgent {
             // Reconnection: forward missed messages to session (which we already have)
             let session = state.session_ref.clone();
             info!("Forwarding missed messages to session: {id}");
-            while let Some(msg) = state.dead_letter_queue.pop_front() {
+            while let Some((msg, published_by)) = state.dead_letter_queue.pop_front() {
                 if let Err(e) = session.send_message(BrokerMessage::PushMessage {
                     payload: msg,
                     topic: state.topic.clone(),
                     trace_ctx: Some(span.context()),
+                    published_by,
                 }) {
                     warn!("Failed to forward message to subscriber! {e} Ending subscription");
                     myself.stop(None);
@@ -631,6 +650,7 @@ impl SubscriberAgent {
         topic: String,
         payload: Arc<Vec<u8>>,
         trace_ctx: Option<opentelemetry::Context>,
+        published_by: Option<String>,
     ) -> Result<(), ActorProcessingErr> {
         let span = trace_span!("cassini.subscriber.publish_response", %topic);
         try_set_parent_otel(&span, trace_ctx);
@@ -640,12 +660,12 @@ impl SubscriberAgent {
             "New message on topic: \"{topic}\", forwarding to session: {}",
             state.registration_id
         );
-
         let session = state.session_ref.clone();
         if let Err(e) = session.send_message(BrokerMessage::PushMessage {
             payload: payload.clone(),
             topic,
             trace_ctx: Some(span.context()),
+            published_by,
         }) {
             warn!("Failed to forward message to subscriber! {e} Ending subscription");
             myself.stop(None);
@@ -653,14 +673,14 @@ impl SubscriberAgent {
         }
         Ok(())
     }
-
     async fn handle_push_message_failed(
         &self,
         _myself: ActorRef<BrokerMessage>,
         state: &mut SubscriberAgentState,
         payload: Arc<Vec<u8>>,
+        published_by: Option<String>,
     ) -> Result<(), ActorProcessingErr> {
-        state.dead_letter_queue.push_back(payload.clone());
+        state.dead_letter_queue.push_back((payload.clone(), published_by));
         debug!(
             "Subscriber queue has {} message(s) waiting",
             state.dead_letter_queue.len()

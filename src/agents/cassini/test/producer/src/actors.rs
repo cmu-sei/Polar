@@ -385,11 +385,11 @@ impl Actor for ProducerAgent {
                     let payload = rkyv::to_bytes::<rkyv::rancor::Error>(&envelope)
                         .expect("Expected to serialize payload to bytes");
 
-                    let message = TcpClientMessage::Publish {
-                        topic: topic.clone(),
-                        payload: payload.into(),
-                        trace_ctx: Some(trace_ctx_inner), // client message expects Option
-                    };
+                    let message = TcpClientMessage::publish(
+                        topic.clone(),
+                        payload.into(),
+                        Some(trace_ctx_inner), // client message expects Option
+                    );
 
                     if let Err(e) = tcp_client.send_message(message) {
                         tracing::warn!("Failed to send message {e}");
@@ -470,11 +470,11 @@ impl Actor for ProducerAgent {
 
                     // Send a burst of messages (all using the same trace context)
                     for _ in 1..burst_size {
-                        let message = TcpClientMessage::Publish {
-                            topic: topic.clone(),
-                            payload: payload.clone().into(),
-                            trace_ctx: Some(trace_ctx_inner), // client message expects Option
-                        };
+                        let message = TcpClientMessage::publish(
+                            topic.clone(),
+                            payload.clone().into(),
+                            Some(trace_ctx_inner), // client message expects Option
+                        );
 
                         if let Err(e) = tcp_client.send_message(message) {
                             tracing::warn!("Failed to send message {e}");

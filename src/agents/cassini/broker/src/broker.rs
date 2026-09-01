@@ -422,6 +422,7 @@ impl Actor for Broker {
                 registration_id,
                 client_id,
                 trace_ctx,
+                peer_identity,
             } => {
                 self.handle_registration_request(
                     myself,
@@ -429,6 +430,7 @@ impl Actor for Broker {
                     registration_id,
                     client_id,
                     trace_ctx,
+                    peer_identity,
                 )
                 .await?;
             }
@@ -454,6 +456,7 @@ impl Actor for Broker {
                 payload,
                 reply_to,
                 trace_ctx,
+                published_by,
             } => {
                 self.handle_publish_request(
                     myself,
@@ -463,6 +466,7 @@ impl Actor for Broker {
                     payload,
                     reply_to,
                     trace_ctx,
+                    published_by,
                 )
                 .await?;
             }
@@ -471,9 +475,18 @@ impl Actor for Broker {
                 payload,
                 result,
                 trace_ctx,
+                published_by,
             } => {
-                self.handle_publish_response(myself, state, topic, payload, result, trace_ctx)
-                    .await?;
+                self.handle_publish_response(
+                    myself,
+                    state,
+                    topic,
+                    payload,
+                    result,
+                    trace_ctx,
+                    published_by,
+                )
+                .await?;
             }
             BrokerMessage::ErrorMessage { error, .. } => {
                 self.handle_error_message(myself, state, error).await?;
@@ -645,6 +658,7 @@ impl Broker {
         registration_id: Option<String>,
         client_id: String,
         trace_ctx: Option<opentelemetry::Context>,
+        peer_identity: Option<String>,
     ) -> Result<(), ActorProcessingErr> {
         let span = trace_span!("cassini.broker.registration_request", %client_id, registration_id = ?registration_id);
         try_set_parent_otel(&span, trace_ctx);
@@ -669,6 +683,7 @@ impl Broker {
                 registration_id: registration_id.clone(),
                 client_id: client_id.clone(),
                 trace_ctx: Some(span.context()),
+                peer_identity: peer_identity.clone(),
             }) {
                 error!(error = %e, "Failed to forward RegistrationRequest to SessionManager");
             }
@@ -678,6 +693,7 @@ impl Broker {
                     registration_id,
                     client_id,
                     trace_ctx: Some(span.context()),
+                    peer_identity,
                 }) {
                     warn!(error = %e, "Failed to notify SubscriberManager about registration");
                 }
@@ -779,6 +795,7 @@ impl Broker {
         payload: Arc<Vec<u8>>,
         reply_to: Option<ActorRef<BrokerMessage>>,
         trace_ctx: Option<opentelemetry::Context>,
+        published_by: Option<String>,
     ) -> Result<(), ActorProcessingErr> {
         let payload_len = payload.len();
         let span = trace_span!("cassini.broker.publish_request", %registration_id, %topic, payload_bytes = payload_len);
@@ -799,6 +816,7 @@ impl Broker {
                     payload: Vec::new().into(),
                     result: Err("Broker is shutting down".to_string()),
                     trace_ctx: Some(span.context()),
+                    published_by: None,
                 })
             {
                 warn!(error = %e2, "Failed to notify SessionManager of publish failure");
@@ -815,6 +833,7 @@ impl Broker {
                 payload,
                 reply_to, // pass through the reply_to from the incoming message
                 trace_ctx: Some(span.context()),
+                published_by,
             });
 
             if let Err(e) = forward {
@@ -828,6 +847,7 @@ impl Broker {
                         payload: Vec::new().into(),
                         result: Err(format!("forward failed: {e}")),
                         trace_ctx: Some(span.context()),
+                        published_by: None,
                     }) {
                         warn!(error = %e2, "Failed to notify SessionManager of publish failure");
                     }
@@ -846,6 +866,7 @@ impl Broker {
                     payload: Vec::new().into(),
                     result: Err("topic manager unavailable".to_string()),
                     trace_ctx: Some(span.context()),
+                    published_by: None,
                 });
             }
         }
@@ -860,6 +881,7 @@ impl Broker {
         payload: Arc<Vec<u8>>,
         result: Result<(), String>,
         trace_ctx: Option<opentelemetry::Context>,
+        published_by: Option<String>,
     ) -> Result<(), ActorProcessingErr> {
         let payload_len = payload.len();
         let span = trace_span!("cassini.broker.publish_response", %topic, ok = result.is_ok(), payload_bytes = payload_len);
@@ -872,6 +894,7 @@ impl Broker {
                 payload,
                 result,
                 trace_ctx: Some(span.context()),
+                published_by,
             }) {
                 error!(error = %e, "Failed to forward PublishResponse to SubscriberManager");
             }
