@@ -2,8 +2,14 @@
 
 This repository contains microservices that observe Kubernetes clusters and process cluster data into a graph representation. The system consists of:
 
-* **Observer Agents**: Collect resource data from a Kubernetes cluster and watches for events.
-* **Consumer Agents**: Transform and enrich this data, then publish it to a graph database.
+* **Observer Agents**: Collect resource data from a Kubernetes cluster and watch for events, stamping every observation with that cluster's identity.
+* **Consumer Agents**: Transform and enrich this data, then publish it to a graph database, using that same identity to keep data from different clusters unambiguous.
+
+## Multi-Cluster Identity
+
+A single Cassini broker and a single consumer can serve multiple clusters at once. Every observer resolves the UID of its cluster's `kube-system` namespace once at startup — a permanent fixture in every cluster, requiring no manual configuration, and collision-safe across clusters by construction rather than by convention, since it's a real UUID assigned by the Kubernetes API server itself.
+
+That `cluster_uid` is stamped onto every event an observer emits and carried through to every node and edge a consumer writes. Observers publish to a per-cluster topic (`polar.kubernetes.<cluster_uid>.events`) rather than a shared one, and consumers discover which clusters exist dynamically — via a broker-side announce/query handshake, not static configuration — subscribing to each cluster's topic as it's discovered. A consumer that restarts and missed earlier announcements re-triggers them by publishing to a query topic every currently-running observer is listening on.
 
 ## Getting Started
 
@@ -15,7 +21,6 @@ This repository contains microservices that observe Kubernetes clusters and proc
 * mTLS certificates for secure service communication
 * Running instance of the **Cassini** message broker - see [cassini's README for details](../cassini/broker/readme.md)
 
----
 # Generating Flux CRD Types with kopium
 
 The Rust types for Flux CRDs (`OciRepository`, `Kustomization`, etc.) in
@@ -159,5 +164,61 @@ cargo run -b kube-observer
 Consumers subscribe to messages from Cassini and process them into graph nodes/edges.
 
 ```bash
-cargo run -p kube-consumer
+cargo run -b kube-consumer
 ```
+---
+
+## Testing
+
+### Unit Tests
+
+`cargo test` runs the unit tests embedded throughout each crate — `kube-common`'s fixture-parsing tests, the observer's mocked-apiserver tests (via [`tower-test`](https://docs.rs/tower-test), exercising the real LIST/WATCH/emit logic without a live cluster), and each agent's own logic tests. No external services required for any of these.
+
+### Integration Tests: the Scenario Harness
+
+`kube_common::testing` provides a reusable harness for exercising an agent's real graph-projection logic — `GraphOperable::project_into_graph`, in the kube-consumer's case — against a real Neo4j instance, without needing a live Kubernetes cluster or a running Cassini broker connection. A `Scenario` loads synthetic resources from YAML fixtures (ordinary Kubernetes manifests — the same shape as `kubectl get -o yaml`, not a bespoke test format), projects them through the actual production code path, and asserts against the resulting graph state directly.
+
+The first such test, `consume/tests/pod_running_on_scenario.rs`, confirms an end-to-end chain: a `Node` fixture is observed, a `Pod` fixture referencing that node is observed, and the resulting graph actually contains a `RUNNING_ON` edge between them — resolved through the same name-to-UID cache the production consumer uses, since Kubernetes never exposes a Node's UID anywhere on a Pod, only its name.
+
+This harness, and the broader goal of validating cross-agent graph projection without depending on the full production stack (Cassini, actor supervision, a live cluster) for every test, is tracked as an ongoing effort — see the project's issue tracker for the current scope and roadmap.
+
+#### Prerequisites
+
+Integration tests require a real Neo4j instance, provided via [`testcontainers-rs`](https://docs.rs/testcontainers). Before running:
+
+* `GRAPH_ENDPOINT`, `GRAPH_USER`, `GRAPH_PASSWORD`, and `GRAPH_DB=neo4j` must already be set in the environment. The harness reads these first and configures the test container to match them, rather than starting a container and reporting its values back out — so `GRAPH_ENDPOINT` must specify a *fixed* port (e.g. `bolt://localhost:7687`), not one left for Docker to assign dynamically. `GRAPH_DB` must be `neo4j`: Neo4j Community Edition supports exactly one standard database, and it's always named that.
+* A working Docker-compatible container runtime.
+
+  **If you're on Podman** (e.g. NixOS with `virtualisation.podman.enable`), `dockerCompat` alone isn't sufficient — either enable the Docker-compatible socket in your NixOS configuration:
+
+  ```nix
+  virtualisation.podman.dockerSocket.enable = true;
+  ```
+
+  (requires being in the `podman` group — the same caveat as the Docker group: members can effectively gain root), or point `testcontainers` at Podman's own socket directly, without a system rebuild:
+
+  ```bash
+  systemctl --user enable --now podman.socket
+  export DOCKER_HOST="unix://$XDG_RUNTIME_DIR/podman/podman.sock"
+  export TESTCONTAINERS_RYUK_DISABLED=true
+  ```
+
+  Disabling Ryuk (testcontainers' cleanup sidecar, which rootless Podman generally can't grant sufficient privileges to) means a crashed test run won't clean up its own container automatically — check `podman ps` / `docker ps` occasionally if developing this way.
+
+Run the integration tests:
+
+```bash
+cargo test -p kube-consume --test pod_running_on_scenario
+```
+
+(`kube-consume` above is an assumed package name, matching the same placeholder flagged directly in `pod_running_on_scenario.rs` — substitute whatever the `consume` crate's `Cargo.toml` actually declares if this doesn't resolve.)
+
+Pass `--nocapture` to see tracing output from both the test itself and the production code paths it exercises — without it, `cargo test` only shows output for failing tests:
+
+```bash
+cargo test -p kube-consume --test pod_running_on_scenario -- --nocapture
+```
+
+#### Isolation Model
+
+Neo4j Community Edition's one-database-only limitation means scenario tests share a single Neo4j instance and a single `GraphControllerActor` for the whole test binary, rather than one per test. Isolation instead comes from `cluster_uid`: every scenario generates its own, and — per the Multi-Cluster Identity section above — every node and edge this system writes is already scoped by it, so concurrent scenarios sharing one database can't see or collide with each other's data without any additional setup.

@@ -29,6 +29,7 @@ pub enum DiscoverySourceRef {
         pod_uid: String,
         image_id: Option<String>,
         container_name: String,
+        cluster_uid: String,
     },
     OCIRepository {
         repo_uri: String,

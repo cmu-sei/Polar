@@ -207,7 +207,6 @@ let
     cargo-hack
     cargo-mutants
     cargo-cyclonedx
-    cargo-audit
     skopeo
     cosign
     cassiniClient

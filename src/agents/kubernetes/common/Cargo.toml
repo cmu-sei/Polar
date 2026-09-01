@@ -19,5 +19,12 @@ tcp-stream.workspace = true
 tracing.workspace = true
 url.workspace = true
 k8s-openapi = { workspace = true }
-
+thiserror.workspace = true
+serde_yaml.workspace = true
 schemars = "1.2.1"
+
+uuid.workspace = true
+neo4rs.workspace = true
+testcontainers.workspace = true
+testcontainers-modules.workspace = true
+tokio.workspace = true

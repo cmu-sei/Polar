@@ -1,14 +1,18 @@
 use crate::BROKER_CLIENT_NAME;
 use crate::GraphOperable;
+use cassini_client::OfflineBehavior;
+use cassini_client::PublishRequest;
 use cassini_types::ClientEvent;
 use k8s_openapi::api::apps::v1::{Deployment, ReplicaSet};
 use k8s_openapi::api::batch::v1::Job;
-use k8s_openapi::api::core::v1::Pod;
+use k8s_openapi::api::core::v1::{Namespace, Node, Pod};
+use kube_common::KUBERNETES_DISCOVERY_QUERY;
+use kube_common::RawKubeEvent;
 use kube_common::{
-    KIND_KUSTOMIZATION, KIND_OCI_REPOSITORY, RESOURCE_APPLIED_ACTION, RESOURCE_DELETED_ACTION,
+    KIND_KUSTOMIZATION, KIND_OCI_REPOSITORY, KUBERNETES_DISCOVERY_ANNOUNCE,
+    RESOURCE_APPLIED_ACTION, RESOURCE_DELETED_ACTION,
     flux::{kustomization::Kustomization, oci_repositories::OciRepository},
 };
-use kube_common::{KUBERNETES_CONSUMER, RawKubeEvent};
 use polar::DiscoverySourceRef;
 use polar::ProvenanceEvent;
 use polar::RkyvError;
@@ -24,15 +28,16 @@ use polar::graph::nodes::builds::ArtifactNodeKey;
 use polar::graph::nodes::kube::KubeNodeKey;
 use polar::health::{DepCertEndpoint, HealthCheckActor, HealthCheckArgs, HealthCheckMessage};
 use polar::topics::KUBERNETES_RESOLUTION_EVENTS;
-use ractor::{Actor, OutputPort};
 use ractor::ActorProcessingErr;
 use ractor::ActorRef;
 use ractor::SupervisionEvent;
 use ractor::async_trait;
 use ractor::concurrency::Duration;
+use ractor::{Actor, OutputPort};
 use serde::de::DeserializeOwned;
 use serde_json::from_value;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::sync::Arc;
 use tracing::debug;
 use tracing::error;
@@ -46,74 +51,132 @@ const DRAIN_WINDOW_SECS: u64 = 5;
 pub struct StateFingerprint {
     pub signature: String,
     pub valid_from: String,
-    pub last_state_node_id: Option<String>,
 }
 
 #[derive(Default)]
 pub struct ProjectionCache {
-    entries: HashMap<(String, String), StateFingerprint>,
+    entries: HashMap<(String, String, String), StateFingerprint>, // (kind, cluster_uid, uid)
+    /// (cluster_uid, node_name) -> node_uid. The *only* place a Node's UID
+    /// becomes knowable to anything that only has its name -- Pod carries
+    /// spec.node_name, never a UID (k8s exposes no such field). Populated
+    /// when a Node is itself observed (both fields attested by the same
+    /// apiserver object in the same watch event, so the mapping is exactly
+    /// as trustworthy as the UID itself); consulted by Pod when building
+    /// RUNNING_ON. If a Pod arrives whose node hasn't been observed yet,
+    /// resolve_node_uid returns None and the edge is skipped for this
+    /// observation -- never fabricated from the name alone. The watch
+    /// redelivers Pods continuously, so this self-heals once the Node
+    /// catches up; same "don't fabricate, let redelivery retry" policy
+    /// already used for image_id discovery on containers.
+    node_uids_by_name: HashMap<(String, String), String>,
 }
 
+/// Whether a caller should actually write the state it just computed.
+/// Emit carries nothing -- a node-chaining feature (linking a new state
+/// instance back to whatever preceded it) was scaffolded here originally,
+/// but nothing in this crate ever built the edge that would have consumed
+/// it, so the dead field was removed rather than left implying a
+/// capability that doesn't exist. If that feature gets built, it belongs
+/// here again, deliberately, not resurrected from this comment.
 pub enum EmitDecision {
     Suppress,
-    Emit {
-        previous_state_node_id: Option<String>,
-    },
+    Emit,
 }
 
 impl ProjectionCache {
     pub fn should_emit(
         &mut self,
         kind: String,
+        cluster_uid: String,
         uid: String,
         new_signature: String,
         valid_from: String,
     ) -> EmitDecision {
-        let key = (kind.clone(), uid.clone());
+        let key = (kind, cluster_uid, uid);
 
         match self.entries.get(&key) {
             Some(existing) if existing.signature == new_signature => EmitDecision::Suppress,
-            Some(existing) => {
-                let prev = existing.last_state_node_id.clone();
+            _ => {
                 self.entries.insert(
                     key,
                     StateFingerprint {
                         signature: new_signature,
                         valid_from,
-                        last_state_node_id: None,
                     },
                 );
-                EmitDecision::Emit {
-                    previous_state_node_id: prev,
-                }
-            }
-            None => {
-                self.entries.insert(
-                    key,
-                    StateFingerprint {
-                        signature: new_signature,
-                        valid_from,
-                        last_state_node_id: None,
-                    },
-                );
-                EmitDecision::Emit {
-                    previous_state_node_id: None,
-                }
+                EmitDecision::Emit
             }
         }
     }
 
-    pub fn set_last_state_node_id(&mut self, kind: &str, uid: &str, node_id: String) {
-        if let Some(entry) = self.entries.get_mut(&(kind.to_string(), uid.to_string())) {
-            entry.last_state_node_id = Some(node_id);
-        }
+    /// Removes this resource's entry from the suppression cache. Call this
+    /// from project_delete, once the "Deleted" state has actually been
+    /// written -- there is no future observation to compare a signature
+    /// against once the underlying k8s object is gone, so keeping the
+    /// entry alive only costs memory for the remaining life of this
+    /// process. Without this, `entries` grows monotonically with every
+    /// (kind, cluster_uid, uid) ever observed, including resources deleted
+    /// hours ago -- an unbounded leak in any cluster with normal Pod/Job
+    /// churn, which is most of them.
+    pub fn evict(&mut self, kind: String, cluster_uid: String, uid: &str) {
+        self.entries.remove(&(kind, cluster_uid, uid.to_string()));
     }
 
-    pub fn evict(&mut self, kind: String, uid: &str) {
-        self.entries.remove(&(kind, uid.to_string()));
+    /// Records this cluster's Node name -> UID mapping. Call this from
+    /// Node's own project_into_graph, where both fields come off the same
+    /// attested object.
+    pub fn record_node_uid(&mut self, cluster_uid: String, node_name: String, node_uid: String) {
+        self.node_uids_by_name
+            .insert((cluster_uid, node_name), node_uid);
+    }
+
+    /// Resolves a Node's name to its attested UID, if this cache has
+    /// observed that Node directly. None means "not observed yet" -- the
+    /// caller must not substitute the name itself as if it were an
+    /// identity; see the field doc on node_uids_by_name.
+    pub fn resolve_node_uid(&self, cluster_uid: &str, node_name: &str) -> Option<&str> {
+        self.node_uids_by_name
+            .get(&(cluster_uid.to_string(), node_name.to_string()))
+            .map(|s| s.as_str())
+    }
+
+    /// Removes a Node's name -> UID mapping. Call this from Node's own
+    /// project_delete. Without this, a deleted Node's entry stays resolvable
+    /// until something else happens to overwrite it -- if a same-named
+    /// replacement Node shows up before that overwrite, a Pod could resolve
+    /// RUNNING_ON to the deleted Node's UID for that window. Evicting here
+    /// closes it: after this call, resolve_node_uid correctly returns None
+    /// until the replacement is actually observed.
+    pub fn forget_node_uid(&mut self, cluster_uid: &str, node_name: &str) {
+        self.node_uids_by_name
+            .remove(&(cluster_uid.to_string(), node_name.to_string()));
     }
 }
 
+enum InboundTopic {
+    KubeEvents { cluster_uid: String },
+    ResolutionEvents,
+    DiscoveryAnnounce,
+    Unknown,
+}
+
+fn classify_topic(topic: &str) -> InboundTopic {
+    if topic == KUBERNETES_RESOLUTION_EVENTS {
+        return InboundTopic::ResolutionEvents;
+    }
+    if topic == KUBERNETES_DISCOVERY_ANNOUNCE {
+        return InboundTopic::DiscoveryAnnounce;
+    }
+    if let Some(cluster_uid) = topic
+        .strip_prefix("polar.kubernetes.")
+        .and_then(|rest| rest.strip_suffix(".events"))
+    {
+        return InboundTopic::KubeEvents {
+            cluster_uid: cluster_uid.to_string(),
+        };
+    }
+    InboundTopic::Unknown
+}
 pub struct ClusterConsumerSupervisor;
 
 pub struct ClusterConsumerSupervisorState {
@@ -121,6 +184,7 @@ pub struct ClusterConsumerSupervisorState {
     graph_controller: Option<GraphController>,
     projection_cache: ProjectionCache,
     healthcheck: ActorRef<HealthCheckMessage>,
+    known_cluster_uids: HashSet<String>,
     /// Set true once a fatal failure has triggered the bounded drain window.
     /// While true, incoming messages are logged instead of processed, since
     /// whatever failed (likely the graph controller) can't be trusted, and
@@ -131,25 +195,30 @@ pub struct ClusterConsumerSupervisorState {
 impl ClusterConsumerSupervisor {
     pub fn handle_event<T>(
         ev: RawKubeEvent,
-        _cache: &mut ProjectionCache,
+        cache: &mut ProjectionCache,
         graph_controller: &GraphController,
         tcp_client: &TcpClient,
+        cluster_uid: &str,
     ) -> Result<(), ActorProcessingErr>
     where
         T: DeserializeOwned + GraphOperable,
     {
+        // mismatch check is cheap and worth having because ev.cluster_uid and the cluster derived from the subscribed topic name should always agree by construction
+        // the observer stamps both from the same local value
+        if ev.cluster_uid != cluster_uid {
+            warn!(
+                "cluster_uid mismatch: message arrived on the topic for cluster {cluster_uid} \
+                 but its own payload claims {} -- trusting the topic, not the payload",
+                ev.cluster_uid
+            );
+        }
         debug!("Handling event for resource {}", ev.kind);
         let obj = from_value::<T>(ev.object)?;
-
         match ev.action.as_str() {
             RESOURCE_APPLIED_ACTION => {
-                debug!("handling RESOURCE_APPLIED_ACTION.");
-                obj.project_into_graph(graph_controller, tcp_client)?
+                obj.project_into_graph(graph_controller, tcp_client, cluster_uid, cache)?
             }
-            RESOURCE_DELETED_ACTION => {
-                debug!("handling RESOURCE_DELETED_ACTION.");
-                obj.project_delete(graph_controller)?;
-            }
+            RESOURCE_DELETED_ACTION => obj.project_delete(graph_controller, cluster_uid, cache)?,
             _ => warn!("Unexpected action received!! {}", ev.action),
         }
         Ok(())
@@ -161,72 +230,118 @@ impl ClusterConsumerSupervisor {
         cache: &mut ProjectionCache,
         graph_controller: &GraphController,
         tcp_client: &TcpClient,
+        known_cluster_uids: &mut HashSet<String>,
     ) -> Result<(), ActorProcessingErr> {
-        // determine the topic the mesasge came from, we could've gotten notified of a new resource, or been notified that
-        // some resource we saw was resolved from an external source (like a container image)
-        match topic.as_str() {
-            KUBERNETES_CONSUMER => {
-                // 1) Parse the raw message into your RawKubeEvent
+        match classify_topic(&topic) {
+            InboundTopic::KubeEvents { cluster_uid } => {
                 let ev: RawKubeEvent = serde_json::from_slice(&payload)?;
-
-                // TODO: Define constants for these and match on them instead, these literals are also used in the marco calls to define their watchers
                 match ev.kind.as_str() {
-                    "Pod" => Self::handle_event::<Pod>(ev, cache, graph_controller, tcp_client)?,
-                    "Deployment" => {
-                        Self::handle_event::<Deployment>(ev, cache, graph_controller, tcp_client)?
-                    }
-                    "ReplicaSet" => {
-                        Self::handle_event::<ReplicaSet>(ev, cache, graph_controller, tcp_client)?
-                    }
-                    "Job" => Self::handle_event::<Job>(ev, cache, graph_controller, tcp_client)?,
+                    "Namespace" => Self::handle_event::<Namespace>(
+                        ev,
+                        cache,
+                        graph_controller,
+                        tcp_client,
+                        &cluster_uid,
+                    )?,
+                    "Node" => Self::handle_event::<Node>(
+                        ev,
+                        cache,
+                        graph_controller,
+                        tcp_client,
+                        &cluster_uid,
+                    )?,
+                    "Pod" => Self::handle_event::<Pod>(
+                        ev,
+                        cache,
+                        graph_controller,
+                        tcp_client,
+                        &cluster_uid,
+                    )?,
+                    "Deployment" => Self::handle_event::<Deployment>(
+                        ev,
+                        cache,
+                        graph_controller,
+                        tcp_client,
+                        &cluster_uid,
+                    )?,
+                    "ReplicaSet" => Self::handle_event::<ReplicaSet>(
+                        ev,
+                        cache,
+                        graph_controller,
+                        tcp_client,
+                        &cluster_uid,
+                    )?,
+                    "Job" => Self::handle_event::<Job>(
+                        ev,
+                        cache,
+                        graph_controller,
+                        tcp_client,
+                        &cluster_uid,
+                    )?,
                     KIND_OCI_REPOSITORY => Self::handle_event::<OciRepository>(
                         ev,
                         cache,
                         graph_controller,
                         tcp_client,
+                        &cluster_uid,
                     )?,
                     KIND_KUSTOMIZATION => Self::handle_event::<Kustomization>(
                         ev,
                         cache,
                         graph_controller,
                         tcp_client,
+                        &cluster_uid,
                     )?,
                     _ => warn!("Unexpected resource type {}", ev.kind),
                 }
             }
-            KUBERNETES_RESOLUTION_EVENTS => {
+            InboundTopic::ResolutionEvents => {
                 let ev = rkyv::from_bytes::<ProvenanceEvent, RkyvError>(&payload)?;
-                match ev {
-                    ProvenanceEvent::OCIArtifactResolved {
-                        digest, source_ref, ..
-                    } => {
-                        if let DiscoverySourceRef::KubernetesPodContainer {
+                if let ProvenanceEvent::OCIArtifactResolved {
+                    digest, source_ref, ..
+                } = ev
+                {
+                    if let DiscoverySourceRef::KubernetesPodContainer {
+                        pod_uid,
+                        container_name,
+                        cluster_uid,
+                        ..
+                    } = source_ref
+                    {
+                        debug!(
+                            "pod {pod_uid} container {container_name} resolved with digest {digest}, updating graph"
+                        );
+                        let container_k = KubeNodeKey::PodContainer {
                             pod_uid,
-                            container_name,
-                            ..
-                        } = source_ref
-                        {
-                            debug!(
-                                "pod {pod_uid} container {container_name} was resolved with digest {digest}, updating graph"
-                            );
-                            let container_k = KubeNodeKey::PodContainer {
-                                pod_uid,
-                                name: container_name,
-                            };
-                            let artifact_k = ArtifactNodeKey::OCIArtifact { digest };
-                            let op = GraphOp::EnsureEdge {
-                                from: container_k.into_key(),
-                                to: artifact_k.into_key(),
-                                rel_type: "USES_IMAGE".to_string(),
-                                props: vec![],
-                            };
-                            graph_controller.send_message(GraphControllerMsg::Op(op))?;
-                        }
+                            name: container_name,
+                            cluster_uid,
+                        };
+                        let artifact_k = ArtifactNodeKey::OCIArtifact { digest };
+                        let op = GraphOp::EnsureEdge {
+                            from: container_k.into_key(),
+                            to: artifact_k.into_key(),
+                            rel_type: "USES_IMAGE".to_string(),
+                            props: vec![],
+                        };
+                        graph_controller.send_message(GraphControllerMsg::Op(op))?;
                     }
-                    _ => (), //ignore all other events
                 }
             }
-            _ => (), //ignore unhandled topics for now, we shouldn't see anything else
+            InboundTopic::DiscoveryAnnounce => {
+                let announced_uid = String::from_utf8(payload).map_err(|e| {
+                    ActorProcessingErr::from(format!("non-utf8 discovery.announce payload: {e}"))
+                })?;
+                if known_cluster_uids.insert(announced_uid.clone()) {
+                    info!("Discovered cluster {announced_uid}, subscribing to its events topic");
+                    tcp_client.subscribe(SubscribeRequest {
+                        topic: kube_common::kube_events_topic(&announced_uid),
+                        trace_ctx: None,
+                    })?;
+                } else {
+                    debug!("Redundant announcement for known cluster {announced_uid}, no-op");
+                }
+            }
+            InboundTopic::Unknown => warn!("Unexpected topic received: {topic}"),
         }
         Ok(())
     }
@@ -294,9 +409,11 @@ impl Actor for ClusterConsumerSupervisor {
                 graph_controller: None,
                 projection_cache: ProjectionCache {
                     entries: HashMap::new(),
+                    node_uids_by_name: HashMap::new(),
                 },
                 healthcheck,
                 draining: false,
+                known_cluster_uids: HashSet::new(),
             }),
             Err(e) => Err(ActorProcessingErr::from(e)),
         }
@@ -312,15 +429,49 @@ impl Actor for ClusterConsumerSupervisor {
             SupervisorMessage::PrepareShutdown => {
                 info!("CONSUMER_SUPERVISOR: PrepareShutdown received, unsubscribing from Cassini");
 
-                if let Err(e) = state.broker_client.unsubscribe(polar::cassini::UnsubscribeRequest {
-                    topic: KUBERNETES_CONSUMER.to_string(),
-                    trace_ctx: None,
-                }) {
-                    warn!("CONSUMER_SUPERVISOR: unsubscribe failed (continuing): {e}");
-                }
-
                 if let Err(e) = state.healthcheck.cast(HealthCheckMessage::ShutdownAck) {
                     error!("CONSUMER_SUPERVISOR: failed to send ShutdownAck: {e}");
+                }
+
+                // PrepareShutdown:
+                if let Err(e) =
+                    state
+                        .broker_client
+                        .unsubscribe(polar::cassini::UnsubscribeRequest {
+                            topic: KUBERNETES_DISCOVERY_ANNOUNCE.to_string(),
+                            trace_ctx: None,
+                        })
+                {
+                    warn!("CONSUMER_SUPERVISOR: unsubscribe failed (continuing): {e}");
+                }
+                // Registered subscribes to this alongside discovery.announce
+                // (see below); it was previously the only one of the three
+                // subscriptions made there with no matching teardown here.
+                if let Err(e) =
+                    state
+                        .broker_client
+                        .unsubscribe(polar::cassini::UnsubscribeRequest {
+                            topic: KUBERNETES_RESOLUTION_EVENTS.to_string(),
+                            trace_ctx: None,
+                        })
+                {
+                    warn!(
+                        "CONSUMER_SUPERVISOR: unsubscribe from resolution events failed (continuing): {e}"
+                    );
+                }
+                for cluster_uid in &state.known_cluster_uids {
+                    if let Err(e) =
+                        state
+                            .broker_client
+                            .unsubscribe(polar::cassini::UnsubscribeRequest {
+                                topic: kube_common::kube_events_topic(cluster_uid),
+                                trace_ctx: None,
+                            })
+                    {
+                        warn!(
+                            "CONSUMER_SUPERVISOR: unsubscribe failed for cluster {cluster_uid} (continuing): {e}"
+                        );
+                    }
                 }
             }
 
@@ -354,16 +505,17 @@ impl Actor for ClusterConsumerSupervisor {
                             match GraphControllerActor::spawn_linked(
                                 Some("kubernetes.cluster.graph.controller".to_string()),
                                 GraphControllerActor,
-                                GraphControllerArgs { signal_port: graph_signal_port },
+                                GraphControllerArgs {
+                                    signal_port: graph_signal_port,
+                                },
                                 myself.get_cell(),
                             )
                             .await
                             {
                                 Ok((graph_controller, _)) => {
                                     state.graph_controller = Some(graph_controller);
-                                    let _ = state
-                                        .healthcheck
-                                        .cast(HealthCheckMessage::GraphConnected);
+                                    let _ =
+                                        state.healthcheck.cast(HealthCheckMessage::GraphConnected);
                                 }
                                 Err(e) => {
                                     error!("Error initializing graph controller! {e}");
@@ -375,8 +527,9 @@ impl Actor for ClusterConsumerSupervisor {
                         }
 
                         info!("Subscribing to topics...");
+
                         if let Err(e) = state.broker_client.subscribe(SubscribeRequest {
-                            topic: KUBERNETES_CONSUMER.into(),
+                            topic: KUBERNETES_DISCOVERY_ANNOUNCE.into(),
                             trace_ctx: None,
                         }) {
                             error!("{e}");
@@ -386,6 +539,19 @@ impl Actor for ClusterConsumerSupervisor {
                         if let Err(e) = state.broker_client.subscribe(SubscribeRequest {
                             topic: KUBERNETES_RESOLUTION_EVENTS.into(),
                             trace_ctx: None,
+                        }) {
+                            error!("{e}");
+                            return Err(ActorProcessingErr::from(e.to_string()));
+                        }
+
+                        info!(
+                            "Requesting re-announcement from any already-running kube-observers..."
+                        );
+                        if let Err(e) = state.broker_client.publish(PublishRequest {
+                            topic: KUBERNETES_DISCOVERY_QUERY.to_string(),
+                            trace_ctx: None,
+                            payload: Vec::new(),
+                            offline_behavior: OfflineBehavior::default(),
                         }) {
                             error!("{e}");
                             return Err(ActorProcessingErr::from(e.to_string()));
@@ -408,6 +574,7 @@ impl Actor for ClusterConsumerSupervisor {
                                 &mut state.projection_cache,
                                 controller,
                                 &state.broker_client,
+                                &mut state.known_cluster_uids,
                             )?;
                         } else {
                             error!("No graph controller present!");
@@ -417,7 +584,9 @@ impl Actor for ClusterConsumerSupervisor {
 
                     ClientEvent::TransportError { reason } => {
                         error!("Transport error occurred! {reason}");
-                        let _ = state.healthcheck.cast(HealthCheckMessage::CassiniDisconnected);
+                        let _ = state
+                            .healthcheck
+                            .cast(HealthCheckMessage::CassiniDisconnected);
                     }
 
                     _ => (),

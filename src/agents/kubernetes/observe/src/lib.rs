@@ -1,18 +1,10 @@
 use cassini_client::{OfflineBehavior, PublishRequest};
 use futures::{StreamExt, TryStreamExt};
 use k8s_openapi::NamespaceResourceScope;
-use k8s_openapi::api::core::v1::Node;
-use k8s_openapi::api::rbac::v1::{ClusterRole, ClusterRoleBinding};
-use k8s_openapi::apiextensions_apiserver::pkg::apis::apiextensions::v1::CustomResourceDefinition;
 use kube::runtime::watcher::Event;
 use kube::{Api, Client, Resource};
 use kube::{api::ListParams, runtime::watcher};
-use kube_common::flux::kustomization::Kustomization;
-use kube_common::flux::oci_repositories::OciRepository;
-use kube_common::{
-    KIND_KUSTOMIZATION, KIND_OCI_REPOSITORY, KUBERNETES_CONSUMER, RESOURCE_APPLIED_ACTION,
-    RESOURCE_DELETED_ACTION, RawKubeEvent,
-};
+use kube_common::{RESOURCE_APPLIED_ACTION, RESOURCE_DELETED_ACTION, RawKubeEvent};
 
 use polar::cassini::{CassiniClient, TcpClient};
 use ractor::ActorProcessingErr;
@@ -20,12 +12,18 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::{to_value, to_vec};
 use std::fmt::Debug;
-use tracing::{debug, error, instrument, trace, warn};
+use tracing::{debug, error, instrument, trace};
+use watchers::global::*;
+use watchers::namespaced::*;
 // pub mod pods;
 pub mod supervisor;
+pub mod watchers;
 
 pub const TCP_CLIENT_NAME: &str = "kubernetes.cluster_name.supervisor_name.client";
 
+pub enum WatcherMsg {
+    Start,
+}
 pub struct KubernetesObserver;
 
 pub struct KubernetesObserverState {
@@ -57,7 +55,10 @@ pub struct WatcherActor;
 /// 4. Emits:
 ///     - `RESOURCE_APPLIED_ACTION` for Apply events
 ///     - `RESOURCE_DELETED_ACTION` for Delete events
-///     - `RESOURCE_APPLIED_ACTION` for Restarted batches
+///     - `RESOURCE_APPLIED_ACTION` for InitApply events (a post-recovery
+///       relist after the watch's resourceVersion went stale; see the
+///       Event::Apply/InitApply match arm below for why these are treated
+///       identically here)
 /// 5. If the watcher stream terminates unexpectedly, this function returns an error,
 ///    allowing the caller (actor) to fail and be restarted by supervision.
 ///
@@ -73,19 +74,24 @@ pub struct WatcherActor;
 ///
 /// This function is intentionally actor-agnostic. Lifecycle control
 /// is delegated to the caller.
-#[instrument(skip(tcp_client, kube_client))]
-pub async fn list_and_watch_global<T>(
+///
+/// Shared by both `list_and_watch_global` and `list_and_watch_namespaced`,
+/// which differ only in how they construct `api` (`Api::all` vs
+/// `Api::namespaced`) -- everything past that point was previously
+/// duplicated in full between the two.
+#[instrument(skip(tcp_client, api))]
+async fn list_and_watch_inner<T>(
+    api: Api<T>,
     tcp_client: &TcpClient,
-    kube_client: Client,
     kind: &str,
+    cluster_uid: &str,
 ) -> Result<(), ActorProcessingErr>
 where
     T: Resource + Clone + DeserializeOwned + Serialize + Debug + Send + 'static,
     <T as Resource>::DynamicType: Default,
 {
-    // get all deployed pods in our given namespace
-    let api: Api<T> = Api::all(kube_client);
     debug!("Observing {} resources.", kind);
+
     // ---- LIST ----
     let list = api.list(&ListParams::default()).await?;
 
@@ -96,14 +102,13 @@ where
         list.items.len()
     );
 
-    // TODO: Send as a batch?
-    // We can push the envelope to the consumer, but there's really no escaping it since we're querying for already deployed resources
     for obj in list.items {
         let ev = RawKubeEvent {
             kind: kind.to_string(),
             action: RESOURCE_APPLIED_ACTION.into(),
             object: to_value(&obj)?,
             resource_version: resource_version.clone(),
+            cluster_uid: cluster_uid.to_string(),
         };
 
         emit_event(tcp_client, ev).await?;
@@ -146,12 +151,31 @@ where
         trace!("Observed kube event for kind {kind}: {event:?}");
 
         match event {
-            Event::Apply(obj) => {
+            // InitApply carries the same payload shape as Apply, delivered
+            // during a post-recovery relist -- per kube_runtime::watcher's
+            // own docs, if the watch connection breaks and the
+            // resourceVersion it was tracking is no longer valid, the
+            // stream starts over with Event::Init, followed by one
+            // InitApply per object in the fresh list, then InitDone.
+            // kube-rs's own reference reflector buffers InitApply and
+            // swaps the buffer in on InitDone for atomicity; this function
+            // has no such atomicity contract (every event is emitted
+            // individually, to a broker topic, regardless of which phase
+            // produced it), so there is nothing to buffer -- InitApply is
+            // simply treated as Apply. Init and InitDone remain silently
+            // ignored: bookkeeping markers with no object payload.
+            //
+            // Previously only Apply was handled here; InitApply fell into
+            // the catch-all below and was silently dropped, meaning any
+            // object whose state changed during a watch-recovery window
+            // never reached the consumer for that relist.
+            Event::Apply(obj) | Event::InitApply(obj) => {
                 let ev = RawKubeEvent {
                     kind: kind.into(),
                     action: RESOURCE_APPLIED_ACTION.into(),
                     object: serde_json::to_value(obj)?,
                     resource_version: None, // runtime watcher manages this internally
+                    cluster_uid: cluster_uid.to_string(),
                 };
 
                 emit_event(tcp_client, ev).await?;
@@ -163,11 +187,13 @@ where
                     action: RESOURCE_DELETED_ACTION.into(),
                     object: serde_json::to_value(obj)?,
                     resource_version: None,
+                    cluster_uid: cluster_uid.to_string(),
                 };
 
                 emit_event(tcp_client, ev).await?;
             }
-            // TODO: Set up a spike to investigate observing othe event variants like Init, InitApply, InitDone. They represent valid state transitions
+            // Init: relist starting, no payload, nothing to emit.
+            // InitDone: relist finished, no payload, nothing to emit.
             _ => (),
         }
     }
@@ -185,113 +211,22 @@ where
         "watch stream for {kind} ended unexpectedly"
     )))
 }
+
 #[instrument(skip(tcp_client, kube_client))]
 pub async fn list_and_watch_namespaced<T>(
     tcp_client: &TcpClient,
     kube_client: Client,
     kind: &str,
     namespace: &str,
+    cluster_uid: &str,
 ) -> Result<(), ActorProcessingErr>
 where
     T: Resource + Clone + DeserializeOwned + Serialize + Debug + Send + 'static,
     <T as Resource>::DynamicType: Default,
     T: Resource<Scope = NamespaceResourceScope>,
 {
-    debug!("Observing {} resources in namespace {namespace}", kind);
-    // get all deployed pods in our given namespace
     let api: Api<T> = Api::namespaced(kube_client, namespace);
-
-    // ---- LIST ----
-    let list = api.list(&ListParams::default()).await?;
-
-    let resource_version = list.metadata.resource_version.clone();
-
-    for obj in list.items {
-        debug!("Discovered k8s object of kind: {kind}.");
-        let ev = RawKubeEvent {
-            kind: kind.to_string(),
-            action: RESOURCE_APPLIED_ACTION.into(),
-            object: to_value(&obj)?,
-            resource_version: resource_version.clone(),
-        };
-
-        emit_event(tcp_client, ev).await?;
-    }
-    // ---------------------------------------------------------------------
-    // WATCHER CONFIGURATION
-    // ---------------------------------------------------------------------
-    //
-    // We rely on kube_runtime's watcher to:
-    //  - Perform initial LIST
-    //  - Handle relisting on 410 Gone
-    //  - Maintain resourceVersion continuity
-    //
-    // We enable bookmarks for better stream continuity and observability.
-    //
-    let watcher_config = watcher::Config {
-        label_selector: None,
-        field_selector: None,
-        timeout: None,
-        list_semantic: watcher::ListSemantic::MostRecent,
-        initial_list_strategy: watcher::InitialListStrategy::ListWatch,
-        page_size: None,
-        bookmarks: true,
-    };
-
-    // ---------------------------------------------------------------------
-    // STREAM INITIALIZATION
-    // ---------------------------------------------------------------------
-
-    let mut stream = watcher(api, watcher_config).boxed();
-
-    // ---------------------------------------------------------------------
-    // EVENT LOOP
-    // ---------------------------------------------------------------------
-    //
-    // This loop is intentionally infinite. If it exits, something abnormal
-    // occurred and we fail hard so supervision can restart us.
-    //
-    while let Some(event) = stream.try_next().await? {
-        trace!("Observed kube event for kind {kind}: {event:?}");
-
-        match event {
-            Event::Apply(obj) => {
-                let ev = RawKubeEvent {
-                    kind: kind.into(),
-                    action: RESOURCE_APPLIED_ACTION.into(),
-                    object: serde_json::to_value(obj)?,
-                    resource_version: None, // runtime watcher manages this internally
-                };
-
-                emit_event(tcp_client, ev).await?;
-            }
-
-            Event::Delete(obj) => {
-                let ev = RawKubeEvent {
-                    kind: kind.into(),
-                    action: RESOURCE_DELETED_ACTION.into(),
-                    object: serde_json::to_value(obj)?,
-                    resource_version: None,
-                };
-
-                emit_event(tcp_client, ev).await?;
-            }
-            _ => (),
-        }
-    }
-
-    // ---------------------------------------------------------------------
-    // STREAM TERMINATION
-    // ---------------------------------------------------------------------
-    //
-    // Reaching here means the stream ended without error.
-    // That should not normally happen.
-    //
-    error!("Watcher stream for {kind} terminated unexpectedly");
-
-    Err(ActorProcessingErr::from(format!(
-        "watch stream for {kind} ended unexpectedly"
-    )))
+    list_and_watch_inner(api, tcp_client, kind, cluster_uid).await
 }
 /// Serializes and publishes a RawKubeEvent.
 ///
@@ -301,202 +236,76 @@ where
 ///
 /// Failures propagate upward.
 async fn emit_event(tcp_client: &TcpClient, ev: RawKubeEvent) -> Result<(), ActorProcessingErr> {
+    let topic = kube_common::kube_events_topic(&ev.cluster_uid);
     let payload = to_vec(&ev)?;
-    trace!("Emitting event {ev:?}");
+    trace!("Emitting event {ev:?} on topic {topic}");
     tcp_client.publish(PublishRequest {
-        topic: KUBERNETES_CONSUMER.to_string(),
+        topic,
         trace_ctx: None,
         payload,
         offline_behavior: OfflineBehavior::default(),
     })?;
-
     Ok(())
 }
 
-pub enum WatcherMsg {
-    Start,
-}
-
-pub struct GlobalWatcherState {
-    pub kube_client: Client,
-    pub tcp_client: TcpClient,
-    pub kind: &'static str,
-}
-pub struct NamespacedWatcherState {
-    pub kube_client: Client,
-    pub tcp_client: TcpClient,
-    pub namespace: String,
-    pub kind: &'static str,
-}
-
 // TODO: Change existging calls to these macros to use constants defined in kube-common
-#[macro_export]
-macro_rules! impl_namespaced_watcher {
-    (
-        $actor_name:ident,
-        resource = $resource_ty:ty,
-        kind = $kind:expr
-    ) => {
-        pub struct $actor_name;
 
-        #[ractor::async_trait]
-        impl ractor::Actor for $actor_name {
-            type Msg = WatcherMsg;
-            type State = $crate::NamespacedWatcherState;
-            type Arguments = $crate::NamespacedWatcherState;
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
 
-            async fn pre_start(
-                &self,
-                myself: ractor::ActorRef<Self::Msg>,
-                state: Self::Arguments,
-            ) -> Result<Self::State, ractor::ActorProcessingErr> {
-                debug!("{myself:?} starting.");
+    #[test]
+    fn raw_kube_event_round_trips_through_json() {
+        let ev = RawKubeEvent {
+            kind: "Pod".to_string(),
+            action: RESOURCE_APPLIED_ACTION.to_string(),
+            object: json!({"metadata": {"name": "test-pod", "uid": "abc-123"}}),
+            resource_version: Some("42".to_string()),
+            cluster_uid: "cluster-uid-xyz".to_string(),
+        };
 
-                Ok(state)
-            }
+        let bytes = to_vec(&ev).expect("RawKubeEvent must serialize");
+        let decoded: RawKubeEvent =
+            serde_json::from_slice(&bytes).expect("emitted bytes must deserialize back");
 
-            async fn post_start(
-                &self,
-                myself: ractor::ActorRef<Self::Msg>,
-                _state: &mut Self::State,
-            ) -> Result<(), ractor::ActorProcessingErr> {
-                debug!("{myself:?} started");
-                myself.cast(WatcherMsg::Start)?;
-                Ok(())
-            }
+        assert_eq!(decoded.kind, ev.kind);
+        assert_eq!(decoded.action, ev.action);
+        assert_eq!(decoded.object, ev.object);
+        assert_eq!(decoded.resource_version, ev.resource_version);
+        assert_eq!(decoded.cluster_uid, ev.cluster_uid);
+    }
 
-            async fn handle(
-                &self,
-                myself: ractor::ActorRef<Self::Msg>,
-                message: Self::Msg,
-                state: &mut Self::State,
-            ) -> Result<(), ractor::ActorProcessingErr> {
-                match message {
-                    WatcherMsg::Start => {
-                        if let Err(e) = crate::list_and_watch_namespaced::<$resource_ty>(
-                            &state.tcp_client,
-                            state.kube_client.clone(),
-                            state.kind,
-                            &state.namespace,
-                        )
-                        .await
-                        {
-                            error!("{e}");
-                            myself.stop(None);
-                        }
-                    }
-                }
+    #[test]
+    fn raw_kube_event_preserves_absent_resource_version() {
+        // resource_version is None for every watch-stream event -- LIST is
+        // the only phase that has one (see list_and_watch_inner). Confirms
+        // serde round-trips that as an actual absence rather than a
+        // string "null" a downstream match on resource_version could
+        // mistake for a real value.
+        let ev = RawKubeEvent {
+            kind: "Pod".to_string(),
+            action: RESOURCE_DELETED_ACTION.to_string(),
+            object: json!({}),
+            resource_version: None,
+            cluster_uid: "cluster-uid-xyz".to_string(),
+        };
 
-                Ok(())
-            }
-        }
-    };
+        let bytes = to_vec(&ev).expect("RawKubeEvent must serialize");
+        let decoded: RawKubeEvent =
+            serde_json::from_slice(&bytes).expect("emitted bytes must deserialize back");
+
+        assert_eq!(decoded.resource_version, None);
+    }
+
+    #[test]
+    fn topic_is_derived_from_cluster_uid() {
+        // emit_event's only actual branching logic is topic selection.
+        // Worth pinning directly: a typo'd format string here silently
+        // routes every event for a cluster to the wrong topic, with no
+        // compile-time signal and no obvious runtime one either -- the
+        // publish still succeeds, just to nobody who's listening.
+        let topic = kube_common::kube_events_topic("abc-123");
+        assert_eq!(topic, "polar.kubernetes.abc-123.events");
+    }
 }
-
-#[macro_export]
-macro_rules! impl_global_watcher {
-    (
-        $actor_name:ident,
-        resource = $resource_ty:ty,
-        kind = $kind:expr
-    ) => {
-        pub struct $actor_name;
-
-        #[ractor::async_trait]
-        impl ractor::Actor for $actor_name {
-            type Msg = WatcherMsg;
-            type State = GlobalWatcherState;
-            type Arguments = GlobalWatcherState;
-
-            async fn pre_start(
-                &self,
-                myself: ractor::ActorRef<Self::Msg>,
-                state: Self::Arguments,
-            ) -> Result<Self::State, ractor::ActorProcessingErr> {
-                debug!("{myself:?} starting.");
-
-                Ok(state)
-            }
-
-            async fn post_start(
-                &self,
-                myself: ractor::ActorRef<Self::Msg>,
-                _state: &mut Self::State,
-            ) -> Result<(), ractor::ActorProcessingErr> {
-                debug!("{myself:?} started");
-                myself.cast(WatcherMsg::Start)?;
-                Ok(())
-            }
-
-            async fn handle(
-                &self,
-                myself: ractor::ActorRef<Self::Msg>,
-                message: Self::Msg,
-                state: &mut Self::State,
-            ) -> Result<(), ractor::ActorProcessingErr> {
-                match message {
-                    WatcherMsg::Start => {
-                        if let Err(e) = list_and_watch_global::<$resource_ty>(
-                            &state.tcp_client,
-                            state.kube_client.clone(),
-                            state.kind,
-                        )
-                        .await
-                        {
-                            // A 404 means the CRD isn't installed in this cluster.
-                            // Log a warning and exit cleanly rather than crashing the
-                            // supervisor — Flux CRDs are optional infrastructure.
-                            let err_str = e.to_string();
-                            if err_str.contains("404") || err_str.contains("not found") {
-                                warn!(
-                                    "CRD for {} not found in cluster (404) — \
-                                     skipping watcher. Install the CRD to enable observation.",
-                                    $kind
-                                );
-                            } else {
-                                error!("{e}");
-                                myself.stop(None);
-                            }
-                        }
-                    }
-                }
-
-                Ok(())
-            }
-        }
-    };
-}
-
-impl_global_watcher!(NodeWatcher, resource = Node, kind = "Node");
-impl_global_watcher!(
-    CRDWatcher,
-    resource = CustomResourceDefinition,
-    kind = "CRD"
-);
-impl_global_watcher!(
-    ClusterRoleWatcher,
-    resource = ClusterRole,
-    kind = "ClusterRole"
-);
-impl_global_watcher!(
-    ClusterRoleBindingWatcher,
-    resource = ClusterRoleBinding,
-    kind = "ClusterRoleBinding"
-);
-
-//
-// // ---- Flux CRD watchers ----
-//
-// These use impl_global_watcher because Flux resources are not scoped to a
-// single application namespace. KIND_* constants from kube_common ensure the
-// kind strings here match exactly what the processor dispatches on.
-impl_global_watcher!(
-    OciRepositoryWatcher,
-    resource = OciRepository,
-    kind = KIND_OCI_REPOSITORY
-);
-impl_global_watcher!(
-    KustomizationWatcher,
-    resource = Kustomization,
-    kind = KIND_KUSTOMIZATION
-);

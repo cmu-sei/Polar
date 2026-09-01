@@ -42,7 +42,6 @@ pub mod rel {
     pub const BUILT_BY: &str = "BUILT_BY";
     pub const PRODUCED: &str = "PRODUCED";
     pub const TRANSITIONED_TO: &str = "TRANSITIONED_TO";
-    pub const HAS_STATE: &str = "HAS_STATE";
     pub const OF_TYPE: &str = "OF_TYPE";
     pub const DEPENDS_ON: &str = "DEPENDS_ON";
     pub const ANALYZED_AS: &str = "ANALYZED_AS";
@@ -203,7 +202,13 @@ pub enum GraphOp {
     /// 2. Upsert the immutable state instance node (this specific observation)
     /// 3. Link resource → state instance via TRANSITIONED_TO (history)
     /// 4. Link state instance → state type via OF_TYPE (taxonomy)
-    /// 5. Repoint to the unvarying singleton node.
+    ///
+    /// No HAS_STATE, no "current state" pointer of any kind. `resource
+    /// -[:TRANSITIONED_TO]-> instance -[:OF_TYPE]-> type` already answers
+    /// "has this resource ever had a state" in two hops; a materialized
+    /// one-hop shortcut for that same always-true-once-true fact, rewritten
+    /// on every single transition, earned nothing. Current state is
+    /// whichever TRANSITIONED_TO target has the latest valid_from.
     UpdateState {
         resource_key: Box<dyn GraphNodeKey>,
         state_type_key: Box<dyn GraphNodeKey>,
@@ -237,6 +242,25 @@ pub enum GraphOp {
 /// `GraphOp` regardless of which node key vocabulary it uses.
 pub enum GraphControllerMsg {
     Op(GraphOp),
+
+    /// A deterministic completion barrier, not a graph operation.
+    ///
+    /// Ractor processes one actor's mailbox strictly sequentially: message
+    /// N+1's `handle()` cannot begin until message N's has returned, and
+    /// `Op`'s own arm below `.await`s `handle_op` -- the real
+    /// `start_txn()/run()/commit()` round-trip -- to full completion before
+    /// returning. That means this variant needs no synchronization logic of
+    /// its own: by the time it is handled at all, every `Op` sent before it
+    /// on this actor has already been fully written (or failed) to Neo4j.
+    /// Replying is the entire implementation.
+    ///
+    /// Exists for callers -- test harnesses (issue #221), specifically --
+    /// that need to send operations, then query or dump graph state
+    /// afterward, without racing the actor's own mailbox processing. Usage:
+    /// `graph.call(GraphControllerMsg::Sync, Some(timeout)).await`. The
+    /// bare tuple-variant constructor already has the
+    /// `FnOnce(RpcReplyPort<()>) -> GraphControllerMsg` shape `call` wants.
+    Sync(ractor::RpcReplyPort<()>),
 }
 
 // ── Compiler ───────────────────────────────────────────────────────────────────
@@ -400,12 +424,6 @@ pub fn compile_graph_op(op: &GraphOp) -> Query {
 
                 // Bind instance to its type
                 MERGE (sinst)-[:OF_TYPE]->(stype)
-
-                // Replace current state pointer
-                WITH res, stype
-                OPTIONAL MATCH (res)-[r:HAS_STATE]->()
-                DELETE r
-                MERGE (res)-[:HAS_STATE]->(stype)
                 ",
                 res = res_pat.trim_start_matches('(').trim_end_matches(')'),
                 stype = stype_pat.trim_start_matches('(').trim_end_matches(')'),
@@ -474,7 +492,11 @@ pub enum GraphSignal {
 /// its own transaction. This is intentional: concurrent writes to the same
 /// node are safe because MERGE is idempotent, and serialization prevents
 /// partial state from two concurrent UpdateState calls interleaving.
-/// TODO: Create an impl for this struct that allows us to spawn a new one based on a given configuration
+///
+/// Connection instantiation (`get_neo_config` + `Graph::connect`) is
+/// deliberately owned entirely by this actor, driven only by
+/// `GRAPH_*`/`TLS_*` environment variables -- no external config injection
+/// path, by design, not by omission.
 pub struct GraphControllerActor;
 
 impl GraphControllerActor {
@@ -604,7 +626,11 @@ impl Actor for GraphControllerActor {
         // this pinned fork version (rc.8) before relying on this — it may
         // need to go through start_txn()/run()/commit() like handle_op does,
         // rather than a direct .execute() call.
-        match state.graph.execute(Query::new("RETURN 1".to_string())).await {
+        match state
+            .graph
+            .execute(Query::new("RETURN 1".to_string()))
+            .await
+        {
             Ok(_) => {
                 info!("GraphControllerActor: canary query succeeded, graph available");
                 state.signal_port.send(GraphSignal::Available);
@@ -635,6 +661,17 @@ impl Actor for GraphControllerActor {
                     state.signal_port.send(GraphSignal::OpFailed(reason));
                 }
             },
+            GraphControllerMsg::Sync(reply) => {
+                // No graph work here by design -- see the variant's own doc
+                // comment. The guarantee is entirely a consequence of
+                // reaching this arm at all: every prior Op has already been
+                // awaited to completion above.
+                if reply.send(()).is_err() {
+                    // Receiver dropped (caller timed out or gave up) --
+                    // nothing to recover, and nothing left to signal to.
+                    trace!("Sync reply port closed before we could answer it");
+                }
+            }
         }
         Ok(())
     }
