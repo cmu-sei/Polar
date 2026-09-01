@@ -46,7 +46,7 @@ pub struct BuildProcessorState {
 ///
 /// ## Actor tree
 ///
-/// ```
+/// ```text
 /// BuildProcessorSupervisor
 ///   ├── TcpClient          (Cassini broker connection)
 ///   ├── GraphControllerActor (Neo4j writes for execution lifecycle events)

@@ -152,17 +152,18 @@ impl Actor for JiraUserObserver {
                         payload: bytes.to_vec().into(),
                         registration_id: state.registration_id.clone(),
                         trace_ctx: None,
+                        share_identity: true,
                     };
 
                     // serialize the inner message before sending
                     let payload = rkyv::to_bytes::<rkyv::rancor::Error>(&msg)
                         .expect("Failed to serialize ClientMessage::PublishRequest");
 
-                    tcp_client.send_message(TcpClientMessage::Publish {
-                        topic: JIRA_USERS_CONSUMER_TOPIC.to_string(),
-                        payload: payload.into_vec(),
-                        trace_ctx: WireTraceCtx::from_current_span(),
-                    })?
+                    tcp_client.send_message(TcpClientMessage::publish(
+                        JIRA_USERS_CONSUMER_TOPIC.to_string(),
+                        payload.into_vec(),
+                        WireTraceCtx::from_current_span(),
+                    ))?
                 }
             }
             JiraObserverMessage::Backoff(reason) => {

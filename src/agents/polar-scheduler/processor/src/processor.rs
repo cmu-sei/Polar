@@ -188,11 +188,11 @@ async fn publish_notification(
     notif: &ScheduleNotification,
 ) -> Result<(), ActorProcessingErr> {
     let payload = rkyv::to_bytes::<rkyv::rancor::Error>(notif)?.to_vec();
-    state.tcp_client.cast(TcpClientMessage::Publish {
-        topic: topic.to_string(),
+    state.tcp_client.cast(TcpClientMessage::publish(
+        topic.to_string(),
         payload,
-        trace_ctx: None,
-    })?;
+        None,
+    ))?;
     Ok(())
 }
 

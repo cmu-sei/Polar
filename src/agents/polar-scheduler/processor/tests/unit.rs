@@ -43,7 +43,7 @@ fn test_compile_upsert_node() {
         key: ScheduleKey::Permanent { agent_id: "agent-1".to_string() }.into_key(),
         props: vec![Property("schedule".to_string(), GraphValue::String("{}".to_string()))],
     };
-    let q = compile_graph_op(&op);
+    let q = compile_graph_op(&op).unwrap();
     assert!(!q.query().is_empty());
     assert!(q.query().contains("MERGE"));
 }
@@ -54,7 +54,7 @@ fn test_compile_upsert_node_adhoc() {
         key: ScheduleKey::Adhoc { agent_type: "worker".to_string() }.into_key(),
         props: vec![],
     };
-    let q = compile_graph_op(&op);
+    let q = compile_graph_op(&op).unwrap();
     assert!(q.query().contains("MERGE"));
     assert!(q.query().contains("Adhoc"));
 }
@@ -65,7 +65,7 @@ fn test_compile_upsert_node_ephemeral() {
         key: ScheduleKey::Ephemeral { agent_type: "handler".to_string() }.into_key(),
         props: vec![],
     };
-    let q = compile_graph_op(&op);
+    let q = compile_graph_op(&op).unwrap();
     assert!(q.query().contains("MERGE"));
     assert!(q.query().contains("Ephemeral"));
 }
@@ -78,7 +78,7 @@ fn test_compile_ensure_edge() {
         rel_type: "DESCRIBES".to_string(),
         props: vec![],
     };
-    let q = compile_graph_op(&op);
+    let q = compile_graph_op(&op).unwrap();
     assert!(q.query().contains("MERGE"));
     assert!(q.query().contains("DESCRIBES"));
 }
@@ -90,7 +90,7 @@ fn test_compile_replace_edge() {
         rel_type: "HAS_STATE".to_string(),
         to: ScheduleKey::Adhoc { agent_type: "b".to_string() }.into_key(),
     };
-    let q = compile_graph_op(&op);
+    let q = compile_graph_op(&op).unwrap();
     assert!(q.query().contains("HAS_STATE"));
 }
 
@@ -100,7 +100,7 @@ fn test_compile_remove_edges() {
         from: ScheduleKey::Permanent { agent_id: "a".to_string() }.into_key(),
         rel_type: "HAS_STATE".to_string(),
     };
-    let q = compile_graph_op(&op);
+    let q = compile_graph_op(&op).unwrap();
     assert!(q.query().contains("MATCH"));
     assert!(q.query().contains("DELETE"));
 }
@@ -113,7 +113,7 @@ fn test_compile_update_state() {
         state_instance_key: ScheduleKey::Ephemeral { agent_type: "instance".to_string() }.into_key(),
         state_instance_props: vec![Property("status".to_string(), GraphValue::String("active".to_string()))],
     };
-    let q = compile_graph_op(&op);
+    let q = compile_graph_op(&op).unwrap();
     assert!(q.query().contains("MERGE"));
     assert!(q.query().contains("TRANSITIONED_TO"));
 }

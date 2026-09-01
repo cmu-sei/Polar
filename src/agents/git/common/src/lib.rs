@@ -100,15 +100,26 @@ pub enum GitHttpCredential {
 }
 
 impl GitHttpCredential {
-    pub fn into_git2_cred(self) -> Result<git2::Cred, git2::Error> {
+    /// Reduces either variant to the plain (username, password) pair
+    /// HTTP Basic Auth actually needs -- the Token variant's "oauth2"
+    /// dummy username convention (documented on the variant itself)
+    /// lives here as the single source of truth for that mapping,
+    /// reused by into_git2_cred below rather than duplicated.
+    pub fn as_userpass(&self) -> (String, String) {
         match self {
             GitHttpCredential::UserPass { username, password } => {
-                git2::Cred::userpass_plaintext(&username, &password)
+                (username.clone(), password.clone())
             }
-            GitHttpCredential::Token { token, username } => {
-                git2::Cred::userpass_plaintext(username.as_deref().unwrap_or("oauth2"), &token)
-            }
+            GitHttpCredential::Token { token, username } => (
+                username.clone().unwrap_or_else(|| "oauth2".to_string()),
+                token.clone(),
+            ),
         }
+    }
+
+    pub fn into_git2_cred(self) -> Result<git2::Cred, git2::Error> {
+        let (username, password) = self.as_userpass();
+        git2::Cred::userpass_plaintext(&username, &password)
     }
 }
 

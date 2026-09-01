@@ -73,6 +73,7 @@ impl Actor for Harness {
                         payload: bytes,
                         trace_ctx: None,
                         offline_behavior: OfflineBehavior::default(),
+                        share_identity: true,
                     })?;
                     tracing::info!("published discovery event for {}", state.http_url);
                     myself.stop(None);

@@ -122,6 +122,7 @@ impl GitlabRepositoryConsumer {
                 payload,
                 trace_ctx: WireTraceCtx::from_current_span(),
                 offline_behavior: OfflineBehavior::default(),
+                share_identity: true,
             })?;
         }
 

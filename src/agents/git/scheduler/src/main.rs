@@ -83,11 +83,11 @@ impl RootSupervisor {
         let event = ConfigurationEvent { config };
         let payload = to_bytes::<RkyvError>(&event)?;
 
-        state.tcp_client.cast(TcpClientMessage::Publish {
-            topic: GIT_REPO_CONFIG_EVENTS.to_string(),
-            payload: payload.to_vec(),
-            trace_ctx: WireTraceCtx::from_current_span(),
-        })?;
+        state.tcp_client.cast(TcpClientMessage::publish(
+            GIT_REPO_CONFIG_EVENTS.to_string(),
+            payload.to_vec(),
+            WireTraceCtx::from_current_span(),
+        ))?;
 
         Ok(())
     }

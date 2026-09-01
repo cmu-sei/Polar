@@ -132,6 +132,7 @@ impl GitlabProjectConsumer {
             payload,
             trace_ctx: None,
             offline_behavior: OfflineBehavior::default(),
+            share_identity: true,
         })?;
 
         Ok(())

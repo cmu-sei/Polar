@@ -100,11 +100,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             })?;
             // Send announcement (formerly registration)
             let payload = rkyv::to_bytes::<rkyv::rancor::Error>(&announcement)?.to_vec();
-            tcp_client.cast(TcpClientMessage::Publish {
-                topic: "scheduler.adhoc".to_string(),
+            tcp_client.cast(TcpClientMessage::publish(
+                "scheduler.adhoc".to_string(),
                 payload,
-                trace_ctx: None,
-            })?;
+                None,
+            ))?;
             registered = true;
             break;
         }

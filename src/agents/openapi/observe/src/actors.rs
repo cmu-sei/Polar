@@ -305,11 +305,11 @@ impl Actor for ApiObserver {
                         let client = where_is(BROKER_CLIENT_NAME.to_owned())
                             .expect("Expected to find TCP client");
 
-                        client.send_message(TcpClientMessage::Publish {
-                            topic: "polar.web.consumer".to_string(),
-                            payload: payload.to_vec(),
-                            trace_ctx: WireTraceCtx::from_current_span(),
-                        })?;
+                        client.send_message(TcpClientMessage::publish(
+                            "polar.web.consumer".to_string(),
+                            payload.to_vec(),
+                            WireTraceCtx::from_current_span(),
+                        ))?;
                     }
                     // BUG FIX: was `Err(_) => todo!()` -- a live panic on
                     // any malformed OpenAPI response. Now returns an error

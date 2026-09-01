@@ -221,11 +221,11 @@ pub fn send_to_broker(
 
         let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&envelope).unwrap();
 
-        if let Err(e) = client.send_message(TcpClientMessage::Publish {
-            topic: topic.to_string(),
-            payload: bytes.to_vec(),
-            trace_ctx: WireTraceCtx::from_current_span(),
-        }) {
+        if let Err(e) = client.send_message(TcpClientMessage::publish(
+            topic.to_string(),
+            bytes.to_vec(),
+            WireTraceCtx::from_current_span(),
+        )) {
             return Err(ActorProcessingErr::from(format!(
                 "Failed to message TCP client {e}"
             )));

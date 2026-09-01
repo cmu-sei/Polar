@@ -216,11 +216,11 @@ impl Actor for GitWatcherActor {
         match msg {
             GitWatcherMsg::PublishChange(change) => {
                 let payload = rkyv::to_bytes::<rkyv::rancor::Error>(&change)?.to_vec();
-                state.tcp_client.cast(TcpClientMessage::Publish {
-                    topic: "scheduler.in".to_string(),
+                state.tcp_client.cast(TcpClientMessage::publish(
+                    "scheduler.in".to_string(),
                     payload,
-                    trace_ctx: None,
-                })?;
+                    None,
+                ))?;
                 debug!("Published schedule change");
             }
             GitWatcherMsg::PerformInitialScan => {

@@ -106,11 +106,11 @@ impl Actor for PublishSupervisor {
             let result = match rkyv::to_bytes::<rkyv::rancor::Error>(&event) {
                 Ok(bytes) => state
                     .client
-                    .send_message(TcpClientMessage::Publish {
-                        topic: state.topic.clone(),
-                        payload: bytes.to_vec(),
-                        trace_ctx: None,
-                    })
+                    .send_message(TcpClientMessage::publish(
+                        state.topic.clone(),
+                        bytes.to_vec(),
+                        None,
+                    ))
                     .map_err(|e| e.to_string()),
                 Err(e) => Err(format!("serialization failed: {e}")),
             };

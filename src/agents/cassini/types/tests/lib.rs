@@ -136,9 +136,10 @@ fn test_client_event_variants() {
         topic: "topic".to_string(),
         payload: vec![1, 2, 3],
         trace_ctx: None,
+        published_by: None,
     };
 
-    assert_eq!(format!("{:?}", event), "MessagePublished { topic: \"topic\", payload: [1, 2, 3], trace_ctx: None }");
+    assert_eq!(format!("{:?}", event), "MessagePublished { topic: \"topic\", payload: [1, 2, 3], trace_ctx: None, published_by: None }");
 
     let event = ClientEvent::TransportError {
         reason: "test".to_string(),
@@ -202,6 +203,7 @@ fn test_client_message_publish_request() {
         payload: payload.clone(),
         registration_id: "id".to_string(),
         trace_ctx: None,
+        share_identity: true,
     };
 
     match &msg {
@@ -287,7 +289,7 @@ fn test_broker_message_from_client_message() {
         trace_ctx: None,
     };
 
-    let broker_msg = BrokerMessage::from_client_message(client_msg, "client1".to_string());
+    let broker_msg = BrokerMessage::from_client_message(client_msg, "client1".to_string(), None);
 
     match broker_msg {
         BrokerMessage::RegistrationRequest {
@@ -310,9 +312,10 @@ fn test_broker_message_from_client_message_unsupported() {
         payload: Arc::new(vec![1, 2, 3]),
         registration_id: "id".to_string(),
         trace_ctx: None,
+        share_identity: true,
     };
 
-    let broker_msg = BrokerMessage::from_client_message(client_msg, "client1".to_string());
+    let broker_msg = BrokerMessage::from_client_message(client_msg, "client1".to_string(), None);
 
     match &broker_msg {
         BrokerMessage::PublishRequest { topic, payload, registration_id, .. } => {
@@ -332,6 +335,7 @@ fn test_client_message_publish_response() {
         payload: payload.clone(),
         result: Ok(()),
         trace_ctx: None,
+        published_by: None,
     };
 
     match &msg {

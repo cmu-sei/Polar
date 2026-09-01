@@ -91,11 +91,11 @@ impl Actor for IssuanceActor {
 
         match where_is(BROKER_CLIENT_NAME.to_string()) {
             Some(client) => {
-                if let Err(e) = client.send_message(TcpClientMessage::Publish {
-                    topic: CREDENTIALS_ISSUANCE_REPLIES_TOPIC.to_string(),
-                    payload: payload_bytes,
-                    trace_ctx: None,
-                }) {
+                if let Err(e) = client.send_message(TcpClientMessage::publish(
+                    CREDENTIALS_ISSUANCE_REPLIES_TOPIC.to_string(),
+                    payload_bytes,
+                    None,
+                )) {
                     error!("Failed to publish issuance reply: {e}");
                 }
             }

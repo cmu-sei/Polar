@@ -88,11 +88,11 @@ async fn test_schedule_propagation() {
     };
     let payload = rkyv::to_bytes::<rkyv::rancor::Error>(&change).unwrap().to_vec();
     tcp_client
-        .cast(TcpClientMessage::Publish {
-            topic: "scheduler.in".to_string(),
+        .cast(TcpClientMessage::publish(
+            "scheduler.in".to_string(),
             payload,
-            trace_ctx: None,
-        })
+            None,
+        ))
         .unwrap();
 
     // ===== 5. Wait for the graph node to appear =====

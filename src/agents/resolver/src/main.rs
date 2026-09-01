@@ -407,6 +407,7 @@ impl ResolverAgent {
             payload: payload.into(),
             trace_ctx: WireTraceCtx::from_current_span(),
             offline_behavior: OfflineBehavior::default(),
+            share_identity: true,
         })?)
     }
 }
@@ -481,6 +482,7 @@ impl Actor for ResolverAgent {
                                         payload: payload.into(),
                                         trace_ctx: WireTraceCtx::from_current_span(),
                                         offline_behavior: OfflineBehavior::default(),
+                                        share_identity: true,
                                     })?;
                                 }
                                 DiscoverySourceRef::OCIRepository { .. } => (),

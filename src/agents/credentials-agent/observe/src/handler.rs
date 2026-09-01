@@ -88,11 +88,11 @@ pub async fn issue(
         }
     };
 
-    if let Err(e) = state.broker_client.send_message(TcpClientMessage::Publish {
-        topic: CREDENTIALS_ISSUANCE_REQUESTS_TOPIC.to_string(),
+    if let Err(e) = state.broker_client.send_message(TcpClientMessage::publish(
+        CREDENTIALS_ISSUANCE_REQUESTS_TOPIC.to_string(),
         payload,
-        trace_ctx: None,
-    }) {
+        None,
+    )) {
         state.issuance_reply_router.cancel(&correlation_id);
         error!("Failed to publish issuance request: {e}");
         return (StatusCode::SERVICE_UNAVAILABLE, "failed to reach the broker").into_response();
@@ -133,11 +133,11 @@ pub async fn identity(
         }
     };
 
-    if let Err(e) = state.broker_client.send_message(TcpClientMessage::Publish {
-        topic: CREDENTIALS_IDENTITY_NORMALIZATION_REQUESTS_TOPIC.to_string(),
+    if let Err(e) = state.broker_client.send_message(TcpClientMessage::publish(
+        CREDENTIALS_IDENTITY_NORMALIZATION_REQUESTS_TOPIC.to_string(),
         payload,
-        trace_ctx: None,
-    }) {
+        None,
+    )) {
         state.identity_reply_router.cancel(&correlation_id);
         error!("Failed to publish identity-normalization request: {e}");
         return (StatusCode::SERVICE_UNAVAILABLE, "failed to reach the broker").into_response();

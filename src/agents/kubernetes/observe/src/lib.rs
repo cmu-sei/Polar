@@ -308,6 +308,7 @@ async fn emit_event(tcp_client: &TcpClient, ev: RawKubeEvent) -> Result<(), Acto
         trace_ctx: None,
         payload,
         offline_behavior: OfflineBehavior::default(),
+        share_identity: true,
     })?;
 
     Ok(())
