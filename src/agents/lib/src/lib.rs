@@ -4,13 +4,12 @@ pub mod graph;
 pub mod topics;
 pub use events::*;
 
-use cassini_client::{
-    OfflineBehavior, PublishRequest, TCPClientConfig, TcpClientActor, TcpClientArgs,
-    TcpClientMessage,
-};
+use cassini_client::{OfflineBehavior, PublishRequest};
 use cassini_types::{ClientEvent, WireTraceCtx};
+pub use polar_health;
+pub use polar_health as health;
+use ractor::ActorProcessingErr;
 use ractor::OutputPort;
-use ractor::{Actor, ActorProcessingErr, ActorRef};
 use reqwest::{Certificate, Client, ClientBuilder};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -20,8 +19,6 @@ use std::sync::Arc;
 use tokio::fs;
 use tokio::io::AsyncReadExt;
 use tracing::{debug, info};
-pub use polar_health;
-pub use polar_health as health;
 
 use crate::cassini::CassiniClient;
 use crate::topics::PROVENANCE_DISCOVERY;
@@ -67,7 +64,9 @@ pub trait Supervisor {
 }
 
 pub enum SupervisorMessage {
-    ClientEvent { event: ClientEvent },
+    ClientEvent {
+        event: ClientEvent,
+    },
     Heartbeat,
     PrepareShutdown,
     /// Graph controller availability/failure signal, translated from
@@ -83,43 +82,6 @@ pub enum SupervisorMessage {
     /// dead-letter queue, publish drained messages there instead of only
     /// logging them.
     ForceExit,
-}
-
-/// Spawn a TCP client to connect to the Cassini message broker.
-///
-/// CAUTION: There is a known bug in the ractor framework that makes output
-/// ports drop messages and freeze under high load.
-/// See: https://github.com/slawlor/ractor/issues/225
-#[deprecated = "There is a known bug in the ractor framework that makes output ports drop messages and freeze under high load. Functionality moved to TcpClient::spawn()"]
-pub async fn spawn_tcp_client<M, F>(
-    service_name: &str,
-    supervisor: ActorRef<M>,
-    map_event: F,
-) -> Result<ActorRef<TcpClientMessage>, ActorProcessingErr>
-where
-    M: Send + 'static,
-    F: Fn(ClientEvent) -> Option<M> + Send + Sync + 'static,
-{
-    let events_output = std::sync::Arc::new(OutputPort::default());
-
-    events_output.subscribe(supervisor.clone(), map_event);
-
-    let config = TCPClientConfig::new()?;
-
-    let (tcp_client, _) = Actor::spawn_linked(
-        Some(format!("{service_name}.tcp")),
-        TcpClientActor,
-        TcpClientArgs {
-            config,
-            registration_id: None,
-            events_output: Some(events_output),
-            event_handler: None,
-        },
-        supervisor.into(),
-    )
-    .await?;
-
-    Ok(tcp_client)
 }
 
 // ── Provenance emission helper ─────────────────────────────────────────────────

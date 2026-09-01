@@ -216,6 +216,7 @@ impl GraphOperable for Kustomization {
         self,
         graph: &GraphController,
         cluster_uid: &str,
+        cache: &mut ProjectionCache,
     ) -> Result<(), ActorProcessingErr> {
         let Some(uid) = self.metadata.uid.clone() else {
             return Ok(());
@@ -229,11 +230,19 @@ impl GraphOperable for Kustomization {
                 cluster_uid: cluster_uid.to_string(),
             },
             KubeNodeKey::FluxKustomizationState {
-                uid,
+                uid: uid.clone(),
                 valid_from: now.to_string(),
                 cluster_uid: cluster_uid.to_string(),
             },
             now,
-        )
+        )?;
+
+        cache.evict(
+            KIND_KUSTOMIZATION.to_string(),
+            cluster_uid.to_string(),
+            &uid,
+        );
+
+        Ok(())
     }
 }

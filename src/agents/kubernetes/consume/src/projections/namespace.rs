@@ -1,7 +1,7 @@
 use k8s_openapi::api::core::v1::Namespace;
 use polar::cassini::CassiniClient;
 use polar::graph::controller::{
-    GraphController, GraphControllerMsg, GraphOp, GraphValue, IntoGraphKey, Property,
+    GraphController, GraphControllerMsg, GraphOp, GraphValue, IntoGraphKey, NULL_FIELD, Property,
 };
 use polar::graph::nodes::kube::KubeNodeKey;
 use ractor::ActorProcessingErr;
@@ -34,6 +34,10 @@ impl GraphOperable for Namespace {
             props: vec![
                 Property("name".into(), GraphValue::String(name.clone())),
                 ts("observed_at", now_ms()),
+                Property(
+                    "uid".into(),
+                    GraphValue::String(self.metadata.uid.unwrap_or_else(|| NULL_FIELD.to_string())),
+                ),
             ],
         }))?;
 
@@ -91,6 +95,7 @@ impl GraphOperable for Namespace {
         self,
         graph: &GraphController,
         cluster_uid: &str,
+        cache: &mut ProjectionCache,
     ) -> Result<(), ActorProcessingErr> {
         let Some(name) = self.metadata.name.clone() else {
             return Ok(());
@@ -104,11 +109,15 @@ impl GraphOperable for Namespace {
                 cluster_uid: cluster_uid.to_string(),
             },
             KubeNodeKey::NamespaceState {
-                name,
+                name: name.clone(),
                 valid_from: now.to_string(),
                 cluster_uid: cluster_uid.to_string(),
             },
             now,
-        )
+        )?;
+
+        cache.evict("Namespace".to_string(), cluster_uid.to_string(), &name);
+
+        Ok(())
     }
 }

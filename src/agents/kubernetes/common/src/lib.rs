@@ -2,15 +2,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::fmt::Debug;
 pub mod flux;
+pub mod testing;
 
 pub const KUBERNETES_OBSERVER: &str = "kubernetes.cluster.observer.pods";
-
-/// Deprecated: bypassed by every actual producer/consumer in this crate in
-/// favor of a single topic multiplexed by kind. Superseded by
-/// `kube_events_topic`, which additionally scopes by cluster (issue #236).
-/// Remove once lib.rs and supervisor.rs are migrated off it.
-#[deprecated(note = "use kube_events_topic(cluster_uid) instead")]
-pub const KUBERNETES_CONSUMER: &str = "kubernetes.cluster.consumer.Pod";
 
 pub const BATCH_PROCESS_ACTION: &str = "BatchProcess";
 pub const RESOURCE_APPLIED_ACTION: &str = "Applied";

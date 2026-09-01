@@ -153,26 +153,14 @@ impl GraphOperable for Node {
         self,
         graph: &GraphController,
         cluster_uid: &str,
+        cache: &mut ProjectionCache,
     ) -> Result<(), ActorProcessingErr> {
         let Some(uid) = self.metadata.uid.clone() else {
             return Ok(());
         };
+        let name = self.metadata.name.clone().unwrap_or_default();
         let now = now_ms();
 
-        // NOTE: does not forget this Node's entry in
-        // ProjectionCache::node_uids_by_name -- project_delete has no cache
-        // parameter (a deliberate scope decision when ProjectionCache was
-        // wired up: only project_into_graph's state-write path was gated).
-        // Practical effect: if a Node is deleted and a *new* Node reuses
-        // the same name before this cache entry is overwritten by observing
-        // the replacement, a Pod's RUNNING_ON could resolve to the deleted
-        // Node's UID for that window. Narrow and self-correcting (the
-        // mapping is overwritten the moment the new Node is observed), but
-        // real. Closing it means extending project_delete's signature the
-        // same way project_into_graph's was -- touching all seven impls to
-        // give one of them a capability, which is exactly the kind of
-        // schema-wide call this crate has consistently asked for a
-        // decision on rather than assumed. Flagged, not fixed.
         project_deletion_state(
             graph,
             KubeNodeKey::Node {
@@ -180,11 +168,22 @@ impl GraphOperable for Node {
                 cluster_uid: cluster_uid.to_string(),
             },
             KubeNodeKey::NodeState {
-                uid,
+                uid: uid.clone(),
                 valid_from: now.to_string(),
                 cluster_uid: cluster_uid.to_string(),
             },
             now,
-        )
+        )?;
+
+        cache.evict("Node".to_string(), cluster_uid.to_string(), &uid);
+
+        // Closes the staleness window flagged when RUNNING_ON was first
+        // built: without this, a deleted Node's name -> uid mapping stayed
+        // resolvable until something else happened to overwrite it, so a
+        // same-named replacement Node showing up before that overwrite
+        // could have a Pod's RUNNING_ON resolve to the deleted Node's UID.
+        cache.forget_node_uid(cluster_uid, &name);
+
+        Ok(())
     }
 }

@@ -10,8 +10,8 @@ use tracing::debug;
 use crate::supervisor::{EmitDecision, ProjectionCache};
 
 use super::{
-    GraphOperable, handle_owner_refs, k8s_time_ms, now_ms, project_deletion_state, state_signature,
-    ts,
+    GraphOperable, handle_owner_refs, k8s_time_ms, now_ms, project_deletion_state,
+    state_signature, ts,
 };
 
 impl GraphOperable for Deployment {
@@ -143,9 +143,7 @@ impl GraphOperable for Deployment {
             valid_from_ms.to_string(),
         ) {
             EmitDecision::Suppress => {
-                debug!(
-                    "Deployment {uid} state unchanged since last observation, suppressing write"
-                );
+                debug!("Deployment {uid} state unchanged since last observation, suppressing write");
             }
             EmitDecision::Emit => {
                 let mut props = meaningful_props;
@@ -168,6 +166,7 @@ impl GraphOperable for Deployment {
         self,
         graph: &GraphController,
         cluster_uid: &str,
+        cache: &mut ProjectionCache,
     ) -> Result<(), ActorProcessingErr> {
         let Some(uid) = self.metadata.uid.clone() else {
             return Ok(());
@@ -187,10 +186,14 @@ impl GraphOperable for Deployment {
             },
             KubeNodeKey::DeploymentState {
                 cluster_uid: cluster_uid.to_string(),
-                uid,
+                uid: uid.clone(),
                 valid_from: now.to_string(),
             },
             now,
-        )
+        )?;
+
+        cache.evict("Deployment".to_string(), cluster_uid.to_string(), &uid);
+
+        Ok(())
     }
 }

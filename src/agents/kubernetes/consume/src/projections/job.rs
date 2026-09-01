@@ -166,6 +166,7 @@ impl GraphOperable for Job {
         self,
         graph: &GraphController,
         cluster_uid: &str,
+        cache: &mut ProjectionCache,
     ) -> Result<(), ActorProcessingErr> {
         let Some(uid) = self.metadata.uid.clone() else {
             return Ok(());
@@ -179,11 +180,15 @@ impl GraphOperable for Job {
                 cluster_uid: cluster_uid.to_string(),
             },
             KubeNodeKey::JobState {
-                uid,
+                uid: uid.clone(),
                 valid_from: now.to_string(),
                 cluster_uid: cluster_uid.to_string(),
             },
             now,
-        )
+        )?;
+
+        cache.evict("Job".to_string(), cluster_uid.to_string(), &uid);
+
+        Ok(())
     }
 }

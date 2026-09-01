@@ -752,6 +752,7 @@ impl GraphOperable for Pod {
         self,
         graph: &GraphController,
         cluster_uid: &str,
+        cache: &mut ProjectionCache,
     ) -> Result<(), ActorProcessingErr> {
         let Some(uid) = self.metadata.uid.clone() else {
             return Ok(());
@@ -770,17 +771,34 @@ impl GraphOperable for Pod {
                 cluster_uid: cluster_uid.to_string(),
             },
             KubeNodeKey::PodState {
-                pod_uid: uid,
+                pod_uid: uid.clone(),
                 valid_from: now.to_string(),
                 cluster_uid: cluster_uid.to_string(),
             },
             now,
-        )
+        )?;
+
+        cache.evict("Pod".to_string(), cluster_uid.to_string(), &uid);
 
         // NOTE: container state instances are deliberately NOT transitioned
         // here. The kubelet reports Terminated states for containers via the
         // normal status path before/at pod deletion; fabricating terminal
         // container states from the delete event would write unattested
-        // values.
+        // values. Their cache entries are still evicted below, though --
+        // this pod's uid will never recur (k8s never reuses a Pod uid), so
+        // every "PodContainer" entry keyed under it is permanently stale
+        // the moment the pod itself is gone, whether or not a new state was
+        // ever written for it here.
+        if let Some(spec) = self.spec.as_ref() {
+            for container in &spec.containers {
+                cache.evict(
+                    "PodContainer".to_string(),
+                    cluster_uid.to_string(),
+                    &format!("{uid}/{}", container.name),
+                );
+            }
+        }
+
+        Ok(())
     }
 }

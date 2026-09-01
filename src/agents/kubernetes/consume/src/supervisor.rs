@@ -109,6 +109,19 @@ impl ProjectionCache {
         }
     }
 
+    /// Removes this resource's entry from the suppression cache. Call this
+    /// from project_delete, once the "Deleted" state has actually been
+    /// written -- there is no future observation to compare a signature
+    /// against once the underlying k8s object is gone, so keeping the
+    /// entry alive only costs memory for the remaining life of this
+    /// process. Without this, `entries` grows monotonically with every
+    /// (kind, cluster_uid, uid) ever observed, including resources deleted
+    /// hours ago -- an unbounded leak in any cluster with normal Pod/Job
+    /// churn, which is most of them.
+    pub fn evict(&mut self, kind: String, cluster_uid: String, uid: &str) {
+        self.entries.remove(&(kind, cluster_uid, uid.to_string()));
+    }
+
     /// Records this cluster's Node name -> UID mapping. Call this from
     /// Node's own project_into_graph, where both fields come off the same
     /// attested object.
@@ -125,6 +138,18 @@ impl ProjectionCache {
         self.node_uids_by_name
             .get(&(cluster_uid.to_string(), node_name.to_string()))
             .map(|s| s.as_str())
+    }
+
+    /// Removes a Node's name -> UID mapping. Call this from Node's own
+    /// project_delete. Without this, a deleted Node's entry stays resolvable
+    /// until something else happens to overwrite it -- if a same-named
+    /// replacement Node shows up before that overwrite, a Pod could resolve
+    /// RUNNING_ON to the deleted Node's UID for that window. Evicting here
+    /// closes it: after this call, resolve_node_uid correctly returns None
+    /// until the replacement is actually observed.
+    pub fn forget_node_uid(&mut self, cluster_uid: &str, node_name: &str) {
+        self.node_uids_by_name
+            .remove(&(cluster_uid.to_string(), node_name.to_string()));
     }
 }
 
@@ -193,7 +218,7 @@ impl ClusterConsumerSupervisor {
             RESOURCE_APPLIED_ACTION => {
                 obj.project_into_graph(graph_controller, tcp_client, cluster_uid, cache)?
             }
-            RESOURCE_DELETED_ACTION => obj.project_delete(graph_controller, cluster_uid)?,
+            RESOURCE_DELETED_ACTION => obj.project_delete(graph_controller, cluster_uid, cache)?,
             _ => warn!("Unexpected action received!! {}", ev.action),
         }
         Ok(())

@@ -17,11 +17,21 @@
 //!   4. structural edges derived from spec (volumes, secrets, containers)
 //!
 //! `UpdateState` is the single door for temporal state. It owns the
-//! TRANSITIONED_TO edge, the OF_TYPE taxonomy edge, and the HAS_STATE
-//! current-status pointer. No impl may hand-roll state nodes with
-//! UpsertNode/EnsureEdge — doing so bypasses the HAS_STATE pointer
-//! maintenance and leaves deleted resources appearing live to any
-//! "what's deployed right now" query.
+//! TRANSITIONED_TO edge (append-only history — every transition gets its
+//! own instance, forever) and the OF_TYPE taxonomy edge on each new
+//! instance, linking it to the shared, unvarying state-type anchor
+//! (`KubeNodeKey::State`). There is no separate "current state" pointer
+//! relationship, and deliberately so: `resource -[:TRANSITIONED_TO]->
+//! instance` already carries the full history, and current state is just
+//! whichever instance has the latest `valid_from` — a value that's easy to
+//! derive and would drift from the truth immediately if instead
+//! materialized as a separately-maintained edge.
+//!
+//! No impl may hand-roll state nodes with UpsertNode/EnsureEdge — doing so
+//! skips writing a new TRANSITIONED_TO instance for that transition, so a
+//! "what's deployed right now" query (latest TRANSITIONED_TO target by
+//! valid_from) keeps returning the last real instance as current even
+//! after deletion.
 //!
 //! # Timestamp convention
 //!
@@ -85,6 +95,7 @@ mod node;
 mod oci_repository;
 mod pod;
 mod replicaset;
+
 // ---------------------------------------------------------------------------
 // Time helpers — the only place timestamps are constructed.
 // ---------------------------------------------------------------------------
@@ -208,10 +219,18 @@ pub trait GraphOperable {
     ///
     /// `cluster_uid` must match whatever project_into_graph originally
     /// scoped this resource's key with, or the delete matches nothing.
+    ///
+    /// `cache` must be evicted here, using the exact same (kind, uid) this
+    /// resource's project_into_graph used with should_emit -- the deletion
+    /// state above is written once and is final, so there is no future
+    /// observation left to suppress against. Leaving the entry in place
+    /// after this point only costs memory for the rest of this process's
+    /// life.
     fn project_delete(
         self,
         graph: &GraphController,
         cluster_uid: &str,
+        cache: &mut ProjectionCache,
     ) -> Result<(), ActorProcessingErr>;
 }
 
@@ -239,11 +258,13 @@ fn handle_owner_refs(
 ///
 /// Every project_delete funnels through here so that (a) the phase is
 /// always exactly "Deleted", (b) the write goes through UpdateState and
-/// therefore updates the HAS_STATE current-status pointer — the previous
-/// hand-rolled UpsertNode+EnsureEdge paths bypassed that pointer and left
-/// deleted resources appearing live to current-state queries — and (c) no
-/// unattested values (e.g. fabricated zero replica counts) are recorded.
-/// Deletion attests exactly one fact: the resource is gone.
+/// therefore records a real TRANSITIONED_TO instance for the deletion —
+/// the previous hand-rolled UpsertNode+EnsureEdge paths wrote no such
+/// instance, so a "what's deployed right now" query (latest
+/// TRANSITIONED_TO target by valid_from) kept returning the last live
+/// instance as current even after deletion — and (c) no unattested values
+/// (e.g. fabricated zero replica counts) are recorded. Deletion attests
+/// exactly one fact: the resource is gone.
 fn project_deletion_state(
     graph: &GraphController,
     resource_key: KubeNodeKey,

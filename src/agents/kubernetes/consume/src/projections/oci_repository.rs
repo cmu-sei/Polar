@@ -191,6 +191,7 @@ impl GraphOperable for OciRepository {
         self,
         graph: &GraphController,
         cluster_uid: &str,
+        cache: &mut ProjectionCache,
     ) -> Result<(), ActorProcessingErr> {
         let Some(uid) = self.metadata.uid.clone() else {
             return Ok(());
@@ -204,11 +205,19 @@ impl GraphOperable for OciRepository {
                 cluster_uid: cluster_uid.to_string(),
             },
             KubeNodeKey::FluxOciRepositoryState {
-                uid,
+                uid: uid.clone(),
                 valid_from: now.to_string(),
                 cluster_uid: cluster_uid.to_string(),
             },
             now,
-        )
+        )?;
+
+        cache.evict(
+            KIND_OCI_REPOSITORY.to_string(),
+            cluster_uid.to_string(),
+            &uid,
+        );
+
+        Ok(())
     }
 }

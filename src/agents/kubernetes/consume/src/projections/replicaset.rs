@@ -10,8 +10,8 @@ use tracing::debug;
 use crate::supervisor::{EmitDecision, ProjectionCache};
 
 use super::{
-    GraphOperable, handle_owner_refs, k8s_time_ms, now_ms, project_deletion_state,
-    state_signature, ts,
+    GraphOperable, handle_owner_refs, k8s_time_ms, now_ms, project_deletion_state, state_signature,
+    ts,
 };
 
 impl GraphOperable for ReplicaSet {
@@ -116,7 +116,9 @@ impl GraphOperable for ReplicaSet {
             valid_from_ms.to_string(),
         ) {
             EmitDecision::Suppress => {
-                debug!("ReplicaSet {uid} state unchanged since last observation, suppressing write");
+                debug!(
+                    "ReplicaSet {uid} state unchanged since last observation, suppressing write"
+                );
             }
             EmitDecision::Emit => {
                 let mut props = meaningful_props;
@@ -139,6 +141,7 @@ impl GraphOperable for ReplicaSet {
         self,
         graph: &GraphController,
         cluster_uid: &str,
+        cache: &mut ProjectionCache,
     ) -> Result<(), ActorProcessingErr> {
         let Some(uid) = self.metadata.uid.clone() else {
             return Ok(());
@@ -146,8 +149,11 @@ impl GraphOperable for ReplicaSet {
         let now = now_ms();
 
         // Previously wrote fabricated zero replica counts via a manual
-        // UpsertNode + EnsureEdge path (bypassing HAS_STATE maintenance) and
-        // no "Deleted" phase. Deletion attests one fact only.
+        // UpsertNode + EnsureEdge path, with no "Deleted" phase and no new
+        // TRANSITIONED_TO instance recorded for the deletion — so a
+        // "current state" query (latest TRANSITIONED_TO by valid_from)
+        // kept returning the last live instance as current. Deletion
+        // attests one fact only.
         project_deletion_state(
             graph,
             KubeNodeKey::ReplicaSet {
@@ -155,11 +161,15 @@ impl GraphOperable for ReplicaSet {
                 cluster_uid: cluster_uid.to_string(),
             },
             KubeNodeKey::ReplicaSetState {
-                uid,
+                uid: uid.clone(),
                 valid_from: now.to_string(),
                 cluster_uid: cluster_uid.to_string(),
             },
             now,
-        )
+        )?;
+
+        cache.evict("ReplicaSet".to_string(), cluster_uid.to_string(), &uid);
+
+        Ok(())
     }
 }

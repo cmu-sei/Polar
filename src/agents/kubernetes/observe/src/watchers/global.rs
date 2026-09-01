@@ -26,6 +26,23 @@ pub struct GlobalWatcherState {
     pub kind: &'static str,
     pub cluster_uid: std::sync::Arc<str>,
 }
+
+/// True if a kube-rs API error string indicates the resource kind isn't
+/// installed in this cluster (a missing CRD, for the Flux watchers) rather
+/// than a real failure. Pulled out of the macro body below so it's testable
+/// on its own -- string-matching logic embedded directly in a
+/// macro_rules! expansion can't be unit tested in isolation at all.
+///
+/// Referenced by bare name inside impl_global_watcher! below, which relies
+/// on every current invocation of that macro living in this same file (true
+/// today). Despite #[macro_export], if this macro is ever invoked from
+/// outside this file, this reference won't resolve -- it would need to
+/// become `$crate::is_absent_resource_error` and this fn would need to be
+/// `pub(crate)`. Not done here since that case doesn't exist yet.
+fn is_absent_resource_error(err: &str) -> bool {
+    err.contains("404") || err.contains("not found")
+}
+
 /// Performs a full LIST + WATCH lifecycle for a Kubernetes resource.
 ///
 /// ## Semantics
@@ -224,7 +241,7 @@ macro_rules! impl_global_watcher {
                             // Log a warning and exit cleanly rather than crashing the
                             // supervisor — Flux CRDs are optional infrastructure.
                             let err_str = e.to_string();
-                            if err_str.contains("404") || err_str.contains("not found") {
+                            if is_absent_resource_error(&err_str) {
                                 warn!(
                                     "CRD for {} not found in cluster (404) — \
                                      skipping watcher. Install the CRD to enable observation.",
