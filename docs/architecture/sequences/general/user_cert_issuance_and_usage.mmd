@@ -3,84 +3,87 @@ sequenceDiagram
     participant User as End user
     participant UserTool as user-cert-fetcher<br/>(user's local tool)
     participant IdP as Identity Provider<br/>(Keycloak / Okta / etc.)
-    participant CredAgentObs as Credentials Agent<br/>(observer -- low trust)
+    participant CredAgentObs as Credentials Agent<br/>(observer - low trust)
     participant Cassini as Cassini broker
-    participant CredAgentCon as Credentials Agent<br/>(consumer -- high trust)
+    participant CredAgentCon as Credentials Agent<br/>(consumer - high trust)
+    participant Ledger as LedgerActor<br/>(event log + derived state -<br/>the actual record of truth)
     participant CertIssuer as cert-issuer<br/>(never directly reachable<br/>by user-facing requests)
     participant CA as CA (in-process,<br/>part of cert-issuer)
-    participant EventLog as Event log<br/>(hash-chained JSONL,<br/>PersistentVolume-backed --<br/>the actual record of truth)
-    participant Graph as Neo4j<br/>(rebuildable projection --<br/>observability only)
+    participant Projection as ProjectionActor<br/>(best-effort, fire-and-forget -<br/>never gates this agent's own health)
+    participant Graph as Neo4j<br/>(rebuildable projection -<br/>observability only)
 
     participant App as A Polar app<br/>(e.g. ACE)
 
-    Note over User,Graph: Fully automated. No admin presence required at<br/>request time -- only a prior grant, made<br/>independently, at any earlier point.
+    Note over User,Graph: Fully automated. No admin presence required at<br/>request time - only a prior grant, made<br/>independently, at any earlier point.
 
     User->>UserTool: Run tool
     activate UserTool
-    UserTool->>UserTool: Generate keypair locally<br/>(private key never leaves this machine)
     UserTool->>IdP: Authorization Code flow (unchanged)
     activate IdP
     IdP-->>User: Present login (password, smart card/PIV, MFA)
     User->>IdP: Authenticate directly with IdP
     IdP-->>UserTool: Access token (identity claims,<br/>used unmodified)
     deactivate IdP
-    UserTool->>UserTool: Build CSR, embedding a hash of<br/>the raw token as a CSR attribute<br/>(binds the two artifacts together --<br/>cannot later be silently paired<br/>with a different token)
 
-    UserTool->>CredAgentObs: Send CSR + token bundle<br/>(correlation_id generated)
+    Note over UserTool,CertIssuer: Query the normalized identity first -<br/>see identity_normalization_query.mmd.<br/>The CSR's SAN must already match what<br/>cert-issuer's /issue will check before<br/>the CSR is ever submitted for signing.
+
+    UserTool->>UserTool: Generate keypair locally<br/>(private key never leaves this machine),<br/>build CSR using the normalized identity<br/>as the DNS SAN
+
+    UserTool->>CredAgentObs: POST /issue with the CSR<br/>and credential
     deactivate UserTool
     activate CredAgentObs
-    CredAgentObs->>CredAgentObs: Basic well-formedness check only --<br/>no token validation, no trust decision.<br/>The observer never touches signing<br/>key material or makes any judgment.
-    CredAgentObs->>Cassini: Forward, tagged with correlation_id
+    CredAgentObs->>CredAgentObs: Well-formedness check on the CSR only -<br/>no token validation, no trust decision.<br/>The observer never touches signing<br/>key material or makes any judgment.
+    CredAgentObs--)Cassini: Publish IssuanceRequest,<br/>tagged with a fresh correlation_id
     deactivate CredAgentObs
     activate Cassini
 
-    Cassini->>CredAgentCon: Deliver
+    Cassini--)CredAgentCon: Deliver
     deactivate Cassini
     activate CredAgentCon
 
-    CredAgentCon->>IdP: Token introspection (RFC 7662) --<br/>local signature validation alone cannot<br/>detect a session revoked or logged out<br/>server-side before natural expiry
+    CredAgentCon->>IdP: Token introspection (RFC 7662) -<br/>local signature validation alone cannot<br/>detect a session revoked or logged out<br/>server-side before natural expiry
     activate IdP
     IdP-->>CredAgentCon: Still valid (or not)
     deactivate IdP
 
-    CredAgentCon->>CertIssuer: Forward CSR + token<br/>(direct, internal, core-to-core --<br/>both are trusted services)
+    CredAgentCon->>CertIssuer: POST /validate<br/>(direct, internal, core-to-core -<br/>both are trusted services)
     activate CertIssuer
-    CertIssuer->>CertIssuer: Validate token for real (existing,<br/>already-tested multi-issuer oidc.rs<br/>logic -- issuer selection, signature,<br/>audience, expiry, claim extraction)
-    CertIssuer-->>CredAgentCon: Validated identity + instance_binding
+    CertIssuer->>CertIssuer: Validate token for real (existing,<br/>already-tested multi-issuer oidc.rs<br/>logic - issuer selection, signature,<br/>audience, expiry, claim extraction)
+    CertIssuer-->>CredAgentCon: Validated identity and instance_binding
     deactivate CertIssuer
 
-    CredAgentCon->>Graph: Look up any grant for this identity,<br/>and check whether this exact<br/>(identity, instance_binding) pair<br/>already holds a currently valid,<br/>unrevoked certificate
-    activate Graph
-    Graph-->>CredAgentCon: Permissions (if granted) + renewal<br/>check result (queried from the<br/>projection -- a legitimate read,<br/>unlike the write path below)
-    deactivate Graph
+    CredAgentCon->>Ledger: Check grant for this identity, and<br/>whether this exact identity and<br/>instance_binding pair already holds<br/>a currently valid, unrevoked<br/>certificate - an in-memory,<br/>race-free lookup against this<br/>actor's own derived state, never<br/>a graph read
+    activate Ledger
+    Ledger-->>CredAgentCon: Permissions (if granted) and<br/>renewal check result
+    deactivate Ledger
 
-    alt No existing valid cert for this (identity, instance_binding)
-        CredAgentCon->>CertIssuer: Sign, with these permissions<br/>embedded in the SAN set
+    alt No existing valid cert for this identity and instance_binding
+        CredAgentCon->>CertIssuer: POST /issue, with these<br/>permissions embedded in the<br/>SAN set
         activate CertIssuer
-        CertIssuer->>CertIssuer: Combine identity (from token,<br/>unmodified) + permissions<br/>(from the grant, admin's final say)
+        CertIssuer->>CertIssuer: Combine identity (from token,<br/>unmodified) and permissions<br/>(from the grant, admin's final say)
         CertIssuer->>CA: Sign CSR
         activate CA
         CA-->>CertIssuer: Signed certificate
         deactivate CA
         CertIssuer-->>CredAgentCon: Signed certificate
         deactivate CertIssuer
-        CredAgentCon->>EventLog: Append issuance-completed event,<br/>fsync'd (hash includes previous<br/>entry's hash -- the actual record-<br/>if this grant was used, it's<br/>consumed as of this event)
-        activate EventLog
-        EventLog-->>CredAgentCon: Appended
-        deactivate EventLog
-        CredAgentCon->>Graph: Project derived state<br/>(issuance-record node, provenance/<br/>audit trail -- rebuildable from<br/>the event log, never the source<br/>of truth)
-        activate Graph
-        Graph-->>CredAgentCon: Written
-        deactivate Graph
+        CredAgentCon->>Ledger: Append issuance-completed event
+        activate Ledger
+        Ledger->>Ledger: fsync'd to the event log first<br/>(hash includes previous entry's<br/>hash - the actual record - if<br/>this grant was used, it's<br/>consumed as of this event),<br/>then folded into derived state
+        Ledger--)Projection: Notify (fire-and-forget) -<br/>this reply below never waits<br/>on what happens next
+        deactivate Ledger
+        activate Projection
+        Projection->>Graph: Best-effort write (certificate<br/>node, grant marked consumed) -<br/>a failure here is logged and<br/>ignored, never affects the<br/>reply already on its way - see<br/>graph_projection_catch_up.mmd<br/>for how a missed write is<br/>eventually recovered
+        deactivate Projection
         CredAgentCon--)Cassini: Publish issuance event<br/>(fire-and-forget)
     else Already holds a currently valid cert
-        Note over CredAgentCon: Refused. A pod cannot request its<br/>own renewal -- see "Pods cannot<br/>request their own renewal."
+        Note over CredAgentCon: Refused. A pod cannot request its<br/>own renewal - see "Pods cannot<br/>request their own renewal."
     end
 
-    CredAgentCon->>Cassini: Reply (signed cert, or refusal),<br/>tagged with the original correlation_id,<br/>including the Credentials Agent's<br/>current escrow public key
+    CredAgentCon--)Cassini: Reply (signed cert, or refusal),<br/>tagged with the original correlation_id,<br/>including the Credentials Agent's<br/>current escrow public key
     deactivate CredAgentCon
     activate Cassini
-    Cassini->>CredAgentObs: Deliver correlated reply
+    Cassini--)CredAgentObs: Deliver correlated reply
     deactivate Cassini
     activate CredAgentObs
     CredAgentObs->>UserTool: Signed certificate (or refusal)
@@ -90,10 +93,10 @@ sequenceDiagram
     UserTool->>UserTool: Store cert alongside already-held<br/>private key (e.g. browser NSS import)
     deactivate UserTool
 
-    Note over User,App: Downstream usage (not built today --<br/>shown to confirm the end-to-end vision is coherent)
+    Note over User,App: Downstream usage (not built today -<br/>shown to confirm the end-to-end vision is coherent)
 
     User->>App: mTLS request, presenting the<br/>installed certificate
     activate App
-    App->>App: Read identity + permission SANs<br/>directly from the cert -- zero<br/>further IdP round-trip, zero<br/>dependency on Keycloak, Cassini,<br/>or Neo4j being reachable,<br/>exactly like how Kubernetes<br/>checks a client cert
+    App->>App: Read identity and permission SANs<br/>directly from the cert - zero<br/>further IdP round-trip, zero<br/>dependency on Keycloak, Cassini,<br/>or Neo4j being reachable,<br/>exactly like how Kubernetes<br/>checks a client cert
     App-->>User: Session established
     deactivate App

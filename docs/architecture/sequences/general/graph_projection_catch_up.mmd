@@ -1,0 +1,35 @@
+sequenceDiagram
+    autonumber
+    participant GraphController as GraphControllerActor<br/>(ProjectionActor's own child)
+    participant Projection as ProjectionActor
+    participant Ledger as LedgerActor<br/>(event log + derived State)
+    participant Graph as Neo4j
+    Note over GraphController,Graph: Fires on every reconnection - at startup,<br/>or after a genuine outage. Never gates this<br/>agent's own health- a missed write during<br/>an outage is recovered here, not by<br/>refusing to serve requests while Neo4j is down.
+    GraphController--)Projection: GraphSignal::Available
+    activate Projection
+    Projection->>GraphController: Query { MATCH (n:CredentialsProjectionCheckpoint)<br/>RETURN n.last_hash }
+    activate GraphController
+    GraphController->>Graph: Read-only query (execute_read)
+    activate Graph
+    Graph-->>GraphController: last_hash (or no row at all,<br/>if nothing has ever been projected)
+    deactivate Graph
+    GraphController-->>Projection: last_hash: Option type str
+    deactivate GraphController
+    Projection->>Ledger: GetFullHistory
+    activate Ledger
+    Ledger->>Ledger: Re-read the entire log from disk,<br/>returning every (hash, event) pair -<br/>not just what changed, since correct<br/>historical context (e.g. did a grant<br/>exist at this exact past moment) can<br/>only be reconstructed by folding<br/>sequentially from the beginning
+    Ledger-->>Projection: Full (hash, event) history, in order
+    deactivate Ledger
+    Projection->>Projection: Pure, in-memory replay: fold through<br/>a fresh CredentialsState sequentially,<br/>event by event - correct historical<br/>context at every point - but only<br/>emit ops for events after last_hash.<br/>Everything before it already<br/>succeeded, there's nothing to redo.
+    alt Anything new since last_hash
+        Projection->>GraphController: Transaction { catch-up ops,<br/>updated checkpoint }
+        activate GraphController
+        GraphController->>Graph: Atomic write
+        activate Graph
+        Graph-->>GraphController: Written (or failed -<br/>logged, retried on the<br/>next Available signal,<br/>never blocks anything)
+        deactivate Graph
+        deactivate GraphController
+    else Already fully caught up
+        Note over Projection: Nothing to do
+    end
+    deactivate Projection

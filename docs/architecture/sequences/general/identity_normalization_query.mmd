@@ -1,0 +1,39 @@
+sequenceDiagram
+    autonumber
+    participant UserTool as user-cert-fetcher<br/>(user's local tool)
+    participant CredAgentObs as Credentials Agent<br/>(observer - low trust)
+    participant Cassini as Cassini broker
+    participant CredAgentCon as Credentials Agent<br/>(consumer - high trust)
+    participant CertIssuer as cert-issuer
+
+    Note over UserTool,CertIssuer: Genuinely separate from issuance itself -<br/>the client must know the exact normalized<br/>identity before it can build a matching<br/>CSR, since verify_identity requires the<br/>CSR's SAN to already match before it's<br/>ever submitted for signing.
+
+    UserTool->>CredAgentObs: POST /identity<br/>{ credential }
+    activate CredAgentObs
+    CredAgentObs->>CredAgentObs: A dedicated route, distinct from /issue -<br/>the observer does not inspect the<br/>credential itself to decide this - arriving<br/>on this specific route is what marks the<br/>request an identity query at all
+    CredAgentObs--)Cassini: Publish IdentityNormalizationRequest,<br/>tagged with a fresh correlation_id
+    deactivate CredAgentObs
+    activate Cassini
+
+    Cassini--)CredAgentCon: Deliver
+    deactivate Cassini
+    activate CredAgentCon
+
+    CredAgentCon->>CertIssuer: POST /validate<br/>{ include_normalized_identity: true }
+    activate CertIssuer
+    CertIssuer->>CertIssuer: Validate token for real (issuer<br/>selection, signature, audience,<br/>expiry) then compute the normalized<br/>identity via the exact same<br/>normalize_identity call /issue<br/>itself uses - guaranteed to match,<br/>never a second, independent<br/>computation that could drift
+    CertIssuer-->>CredAgentCon: workload_identity also<br/>normalized_identity, or a<br/>validation error
+    deactivate CertIssuer
+
+    Note over CredAgentCon: No introspection, no grant lookup,<br/>no signing - a thin, fast wrapper<br/>around cert-issuer's own /validate
+
+    CredAgentCon--)Cassini: Publish IdentityNormalizationReply<br/>(Normalized or Refused), tagged<br/>with the original correlation_id
+    deactivate CredAgentCon
+    activate Cassini
+    Cassini--)CredAgentObs: Deliver correlated reply
+    deactivate Cassini
+    activate CredAgentObs
+    CredAgentObs->>UserTool: Normalized identity (or refusal)
+    deactivate CredAgentObs
+
+    Note over UserTool: The client now builds its CSR using<br/>this exact value is the DNS SAN -<br/>see user_cert_issuance_and_usage.mmd<br/>for what happens next
