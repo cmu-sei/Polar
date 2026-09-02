@@ -79,6 +79,13 @@ pub struct CredentialsState {
     /// matching entry above without a linear scan over every
     /// currently-valid certificate.
     serial_index: HashMap<String, (String, String)>,
+
+    /// The current, escrowed secret for each name -- keyed on the
+    /// storing agent's own chosen name. A second SecretStored for the
+    /// same name overwrites the entry here (derived state only; the
+    /// event log itself never rewrites history, so the superseded
+    /// EscrowedSecret remains recoverable by replay regardless).
+    stored_secrets: HashMap<String, credentials_agent_common::escrow_secret::EscrowedSecret>,
 }
 
 impl CredentialsState {
@@ -192,6 +199,13 @@ impl CredentialsState {
                     record.revoked_at = Some(*timestamp);
                 }
             }
+            CredentialsEvent::SecretStored { name, secret, .. } => {
+                // Overwrites any prior entry for this name -- the
+                // event log itself still holds the superseded
+                // SecretStored event in full, so nothing is ever
+                // truly lost, only no longer current.
+                self.stored_secrets.insert(name.clone(), secret.clone());
+            }
         }
         superseded_serials
     }
@@ -220,6 +234,16 @@ impl CredentialsState {
         self.valid_certificates
             .values()
             .find(|record| record.identity == identity && !record.revoked)
+    }
+
+    /// The current, escrowed secret stored under `name`, if any --
+    /// always the most recently stored one; a superseded prior value
+    /// remains in the event log but is no longer returned here.
+    pub fn secret_for(
+        &self,
+        name: &str,
+    ) -> Option<&credentials_agent_common::escrow_secret::EscrowedSecret> {
+        self.stored_secrets.get(name)
     }
 }
 

@@ -1,0 +1,118 @@
+/*
+   Polar (OSS)
+
+   Copyright 2024 Carnegie Mellon University.
+
+   NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+   FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND,
+   EITHER EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS
+   FOR PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL.
+   CARNEGIE MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM
+   PATENT, TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+
+   Licensed under a MIT-style license, please see license.txt or contact permission@sei.cmu.edu for
+   full terms.
+
+   [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+   distribution.  Please see Copyright notice for non-US Government use and distribution.
+
+   This Software includes and/or makes use of Third-Party Software each subject to its own license.
+
+   DM24-0470
+*/
+
+//! Wraps StoreSecretHandler in its own actor, mirroring
+//! IdentityNormalizationActor/CertificateActor's shape -- except this
+//! actor's own Msg type is StoreSecretDispatch, not a bare
+//! Envelope<StoreSecretRequest>, since the handler genuinely needs
+//! published_by (broker-verified, carried alongside the envelope by
+//! ConsumerSupervisor::dispatch_store_secret_request -- see its own
+//! doc comment for why this couldn't go through the shared Supervisor
+//! trait's ordinary deserialize_and_dispatch).
+
+use crate::store_secret::StoreSecretHandler;
+use crate::supervisor::BROKER_CLIENT_NAME;
+use cassini_client::TcpClientMessage;
+use credentials_agent_common::CREDENTIALS_STORE_SECRET_REPLIES_TOPIC;
+use credentials_agent_common::secret::StoreSecretRequest;
+use polar::request_reply::Envelope;
+use ractor::registry::where_is;
+use ractor::{Actor, ActorProcessingErr, ActorRef, async_trait};
+use tracing::error;
+
+pub struct StoreSecretActor;
+
+pub struct StoreSecretActorArgs {
+    pub handler: StoreSecretHandler,
+}
+
+pub struct StoreSecretActorState {
+    handler: StoreSecretHandler,
+}
+
+/// The envelope, bundled with the broker-verified published_by this
+/// dispatch path exists specifically to carry alongside it.
+pub struct StoreSecretDispatch {
+    pub envelope: Envelope<StoreSecretRequest>,
+    pub published_by: Option<String>,
+}
+
+#[async_trait]
+impl Actor for StoreSecretActor {
+    type Msg = StoreSecretDispatch;
+    type State = StoreSecretActorState;
+    type Arguments = StoreSecretActorArgs;
+
+    async fn pre_start(
+        &self,
+        _myself: ActorRef<Self::Msg>,
+        args: StoreSecretActorArgs,
+    ) -> Result<Self::State, ActorProcessingErr> {
+        Ok(StoreSecretActorState {
+            handler: args.handler,
+        })
+    }
+
+    async fn handle(
+        &self,
+        _myself: ActorRef<Self::Msg>,
+        message: Self::Msg,
+        state: &mut Self::State,
+    ) -> Result<(), ActorProcessingErr> {
+        let correlation_id = message.envelope.correlation_id.clone();
+        let reply = state
+            .handler
+            .handle(message.envelope.payload, message.published_by)
+            .await;
+
+        let envelope = Envelope {
+            correlation_id,
+            payload: reply,
+        };
+
+        let payload_bytes = match rkyv::to_bytes::<rkyv::rancor::Error>(&envelope) {
+            Ok(bytes) => bytes.to_vec(),
+            Err(e) => {
+                error!("Failed to serialize store-secret reply: {e}");
+                return Ok(());
+            }
+        };
+
+        match where_is(BROKER_CLIENT_NAME.to_string()) {
+            Some(client) => {
+                if let Err(e) = client.send_message(TcpClientMessage::publish(
+                    CREDENTIALS_STORE_SECRET_REPLIES_TOPIC.to_string(),
+                    payload_bytes,
+                    None,
+                )) {
+                    error!("Failed to publish store-secret reply: {e}");
+                }
+            }
+            None => {
+                error!("Broker client not found while attempting to publish store-secret reply");
+            }
+        }
+
+        Ok(())
+    }
+}

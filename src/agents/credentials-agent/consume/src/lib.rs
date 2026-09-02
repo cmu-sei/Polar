@@ -36,3 +36,5 @@ pub mod escrow_key;
 pub mod escrow_key_actor;
 pub mod certificate;
 pub mod certificate_actor;
+pub mod store_secret;
+pub mod store_secret_actor;

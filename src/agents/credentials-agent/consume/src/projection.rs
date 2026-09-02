@@ -291,6 +291,12 @@ fn graph_ops_for_event(event: &CredentialsEvent, grant_existed: bool) -> Vec<Gra
 
             vec![GraphOp::UpsertNodes { items }]
         }
+        // Deliberately not projected -- the graph stays
+        // metadata-only, observability-only; secret material,
+        // encrypted or not, doesn't belong there any more than a
+        // full cert PEM does. Lookup goes through LedgerActor's own
+        // CredentialsState directly, not the graph.
+        CredentialsEvent::SecretStored { .. } => vec![],
     }
 }
 
@@ -365,7 +371,8 @@ fn event_timestamp(event: &CredentialsEvent) -> i64 {
     match event {
         CredentialsEvent::Grant { timestamp, .. }
         | CredentialsEvent::Revoke { timestamp, .. }
-        | CredentialsEvent::IssuanceCompleted { timestamp, .. } => *timestamp,
+        | CredentialsEvent::IssuanceCompleted { timestamp, .. }
+        | CredentialsEvent::SecretStored { timestamp, .. } => *timestamp,
     }
 }
 

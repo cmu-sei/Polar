@@ -39,10 +39,14 @@ use crate::escrow_key::EscrowKeyHandler;
 use crate::certificate::CertificateHandler;
 use crate::certificate_actor::{CertificateActor, CertificateActorArgs};
 use crate::escrow_key_actor::{EscrowKeyActor, EscrowKeyActorArgs};
+use crate::store_secret::StoreSecretHandler;
+use crate::store_secret_actor::{StoreSecretActor, StoreSecretActorArgs, StoreSecretDispatch};
 use credentials_agent_common::CREDENTIALS_CERTIFICATE_REQUESTS_TOPIC;
 use credentials_agent_common::CREDENTIALS_ESCROW_KEY_REQUESTS_TOPIC;
+use credentials_agent_common::CREDENTIALS_STORE_SECRET_REQUESTS_TOPIC;
 use credentials_agent_common::certificate::CertificateRequest;
 use credentials_agent_common::escrow_key::EscrowKeyRequest;
+use credentials_agent_common::secret::StoreSecretRequest;
 use cassini_client::{TcpClientMessage, TCPClientConfig, TcpClientActor, TcpClientArgs};
 use cassini_types::{ClientEvent,WireTraceCtx};
 use credentials_agent_common::{CREDENTIALS_GRANTS_TOPIC, CREDENTIALS_REVOCATIONS_TOPIC};
@@ -81,6 +85,7 @@ const ISSUANCE_ACTOR_NAME: &str = "polar.credentials-agent.issuance";
 const IDENTITY_NORMALIZATION_ACTOR_NAME: &str = "polar.credentials-agent.identity-normalization";
 const ESCROW_KEY_ACTOR_NAME: &str = "polar.credentials-agent.escrow-key";
 const CERTIFICATE_ACTOR_NAME: &str = "polar.credentials-agent.certificate";
+const STORE_SECRET_ACTOR_NAME: &str = "polar.credentials-agent.store-secret";
 
 pub struct ConsumerSupervisor;
 
@@ -196,6 +201,32 @@ impl Supervisor for ConsumerSupervisor {
             }
             Err(e) => {
                 warn!("Failed to deserialize CredentialsEvent from topic {topic}: {e}");
+            }
+        }
+    }
+}
+
+impl ConsumerSupervisor {
+    /// Not part of the shared Supervisor trait -- see its own call
+    /// site's comment for why. Deserializes and forwards to
+    /// StoreSecretActor, bundled with the broker-verified
+    /// published_by this dispatch path exists specifically to carry.
+    fn dispatch_store_secret_request(payload: Vec<u8>, published_by: Option<String>) {
+        match rkyv::from_bytes::<Envelope<StoreSecretRequest>, rkyv::rancor::Error>(&payload) {
+            Ok(envelope) => {
+                if let Some(actor) = where_is(STORE_SECRET_ACTOR_NAME.to_string()) {
+                    if let Err(e) = actor.send_message(StoreSecretDispatch {
+                        envelope,
+                        published_by,
+                    }) {
+                        warn!("Failed to forward store-secret request to actor: {e}");
+                    }
+                } else {
+                    warn!("Store-secret actor not yet registered, dropping request");
+                }
+            }
+            Err(e) => {
+                warn!("Failed to deserialize store-secret request: {e}");
             }
         }
     }
@@ -341,6 +372,21 @@ impl Actor for ConsumerSupervisor {
         .await
         .map_err(ActorProcessingErr::from)?;
 
+        let store_secret_handler = StoreSecretHandler {
+            escrow_keypair: escrow_keypair.clone(),
+            ledger: ledger.clone(),
+        };
+        let (_store_secret_actor, _) = StoreSecretActor::spawn_linked(
+            Some(STORE_SECRET_ACTOR_NAME.to_string()),
+            StoreSecretActor,
+            StoreSecretActorArgs {
+                handler: store_secret_handler,
+            },
+            myself.get_cell(),
+        )
+        .await
+        .map_err(ActorProcessingErr::from)?;
+
         let prepare_shutdown_port = Arc::new(OutputPort::<()>::default());
 
         prepare_shutdown_port.subscribe(myself.clone(), |()| {
@@ -462,6 +508,7 @@ impl Actor for ConsumerSupervisor {
                             CREDENTIALS_IDENTITY_NORMALIZATION_REQUESTS_TOPIC,
                             CREDENTIALS_ESCROW_KEY_REQUESTS_TOPIC,
                             CREDENTIALS_CERTIFICATE_REQUESTS_TOPIC,
+                            CREDENTIALS_STORE_SECRET_REQUESTS_TOPIC,
                         ] {
                             if let Err(e) = client.send_message(TcpClientMessage::Subscribe {
                                 topic: topic.to_string(),
@@ -474,7 +521,12 @@ impl Actor for ConsumerSupervisor {
                         error!("Broker client not found while attempting to subscribe");
                     }
                 }
-                ClientEvent::MessagePublished { topic, payload, .. } => {
+                ClientEvent::MessagePublished {
+                    topic,
+                    payload,
+                    published_by,
+                    ..
+                } => {
                     if state.draining {
                         warn!(
                             "CONSUMER_SUPERVISOR: draining -- logging message on topic \
@@ -483,6 +535,17 @@ impl Actor for ConsumerSupervisor {
                             payload.len()
                         );
                         // TODO: publish to dead-letter queue once Cassini supports one.
+                    } else if topic == CREDENTIALS_STORE_SECRET_REQUESTS_TOPIC {
+                        // Not routed through the shared Supervisor
+                        // trait's own deserialize_and_dispatch --
+                        // that signature is cross-cutting (every
+                        // agent implements it) and can't gain a
+                        // published_by parameter just for this one,
+                        // credentials-agent-specific need. This is
+                        // the one dispatch path that genuinely
+                        // requires it: stored_by must be
+                        // broker-verified, never self-reported.
+                        ConsumerSupervisor::dispatch_store_secret_request(payload, published_by);
                     } else {
                         ConsumerSupervisor::deserialize_and_dispatch(topic, payload);
                     }

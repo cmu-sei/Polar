@@ -214,6 +214,24 @@ pub enum CredentialsEvent {
         /// can encrypt a payload directly to it.
         certificate_pem: String,
     },
+    /// Published internally by the consumer itself, once a
+    /// StoreSecretRequest has been validated (genuinely encrypted to
+    /// this agent's own current escrow key) and is being persisted.
+    /// A second SecretStored for the same `name` supersedes the
+    /// first in derived state (CredentialsState::apply's own folding
+    /// logic) -- not by rewriting history here, this event log never
+    /// does that, but by simply overwriting the map entry a later
+    /// event produces during replay. The old event, and the old
+    /// (now-superseded) EscrowedSecret it carried, remain in the log
+    /// forever regardless -- nothing sent to a stale ciphertext form
+    /// is ever irrecoverable, only no longer current.
+    SecretStored {
+        name: String,
+        secret: crate::escrow_secret::EscrowedSecret,
+        /// Broker-verified (published_by), never self-reported.
+        stored_by: String,
+        timestamp: i64,
+    },
 }
 
 #[cfg(test)]

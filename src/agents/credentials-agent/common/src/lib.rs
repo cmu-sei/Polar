@@ -29,6 +29,7 @@ pub mod graph;
 pub mod certificate;
 pub mod escrow_key;
 pub mod escrow_secret;
+pub mod secret;
 
 pub const CREDENTIALS_GRANTS_TOPIC: &str = "credentials-grants";
 pub const CREDENTIALS_REVOCATIONS_TOPIC: &str = "credentials-revocations";
@@ -44,3 +45,6 @@ pub const CREDENTIALS_ESCROW_KEY_REPLIES_TOPIC: &str = "credentials-escrow-key-r
 
 pub const CREDENTIALS_CERTIFICATE_REQUESTS_TOPIC: &str = "credentials-certificate-requests";
 pub const CREDENTIALS_CERTIFICATE_REPLIES_TOPIC: &str = "credentials-certificate-replies";
+
+pub const CREDENTIALS_STORE_SECRET_REQUESTS_TOPIC: &str = "credentials-store-secret-requests";
+pub const CREDENTIALS_STORE_SECRET_REPLIES_TOPIC: &str = "credentials-store-secret-replies";
