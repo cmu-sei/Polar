@@ -28,6 +28,11 @@ thiserror.workspace = true
 neo4rs.workspace = true
 polar.workspace = true
 clap.workspace = true
+aes-gcm = "0.11.1"
+zeroize = { version = "1.9.0", features = ["aarch64"] }
+secrecy = "0.10.3"
+sha2.workspace = true
+rsa.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true

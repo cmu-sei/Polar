@@ -139,11 +139,18 @@ The escrow model, worked out end to end:
    Git token, for example) encrypts it directly to the Credentials
    Agent's escrow public key *before* sending — using a type-safe Rust
    construct, `EscrowedSecret`, wrapping ciphertext plus which key it's
-   encrypted to. The only way to construct one is through the function
-   that actually performs the encryption; there is no path from a plain
-   `String` to an `EscrowedSecret`, the same "make the unsafe state
-   unrepresentable" principle already used for `DynamicNodeKey`/
-   `BackendJobIdentity` in the graph library.
+   encrypted to. The only way to construct one from plaintext is
+   through the function that actually performs the encryption; there
+   is no ergonomic, accidental path from a plain `String` sitting in
+   memory to an `EscrowedSecret` that skips encryption, the same "make
+   the unsafe state unrepresentable" principle already used for
+   `DynamicNodeKey`/`BackendJobIdentity` in the graph library.
+   (Unlike those two types, `EscrowedSecret` genuinely has to cross a
+   process boundary -- deserializing one from wire bytes on receipt is
+   a distinct, necessary operation, reconstructing a value that was
+   already, provably produced by the encryption function in a
+   different process, not a second path to fabricate one from
+   plaintext.)
 2. What arrives at the Credentials Agent, and what the event log ever
    contains, is always this one stable ciphertext form — encrypted to
    the Credentials Agent's own escrow key, regardless of who eventually
@@ -168,37 +175,137 @@ this is the strongest practical property available: no secret is ever
 at rest anywhere in this system, including this system's own audit log,
 except encrypted to a specific holder's own key.
 
+**Encryption scheme**: a standard hybrid cryptosystem, using only
+FIPS-140-approved primitives given this project's own compliance
+posture (the same reason `rustls` is used in FIPS mode elsewhere in
+this system) -- RSA-OAEP (SHA-256) wraps a randomly-generated AES-256
+key; AES-256-GCM encrypts the actual secret payload. RSA-OAEP alone is
+not used directly on the payload: it has a hard plaintext-size ceiling
+(roughly 440 bytes at 4096-bit/SHA-256-OAEP) that an arbitrary secret
+should not be assumed to fit under.
+
+## Agent escrow identity: pod-instance vs. service identity
+
+Every other agent that wants to *participate* in secret escrow (not
+just the Credentials Agent itself) needs its own dedicated escrow
+keypair, mirroring `EscrowKeypair`'s own pattern — used only to
+encrypt payloads to, and decrypt payloads from, other Polar agents.
+Never the agent's mTLS client certificate, for the same reason the
+Credentials Agent's own two keypairs are kept separate: reusing one
+asymmetric keypair across two different cryptographic protocols is a
+real smell, even when nothing obviously breaks.
+
+**Two distinct layers of identity are in play, not one:**
+
+- **Pod-instance identity** (the existing mTLS client certificate):
+  proves "I am a currently-live, running process embodying this
+  service, right now." Genuinely ephemeral — a new keypair every
+  single rejuvenation, even though the *name* it asserts (the
+  FQDN/SAN, tied to workload identity) is stable across restarts.
+  `instance_binding` is the separate claim that actually changes each
+  time. This is also now the mechanism `published_by` on
+  `ClientEvent::MessagePublished` is grounded in -- extracted directly
+  from the connecting client's verified mTLS certificate at the
+  broker level, never self-reported, which is what makes
+  identity-based authorization below possible without a separate
+  signature or trust decision.
+- **Service identity** (the new escrow keypair): the durable,
+  cryptographic identity of the *service itself*, persisting across
+  however many pod instances have ever embodied it. Not tied to any
+  one process's lifetime.
+
+**Root of trust**: an escrow keypair is not self-asserted or
+established merely by publishing it over a broker-verified connection.
+It goes through a real CSR flow against `cert-issuer` — the same
+underlying machinery already hardened for human/workload mTLS
+issuance, reused for its proven pattern, not literally reissued as an
+mTLS cert (wrong purpose: this key is for encryption, not TLS
+handshakes). The agent generates its keypair locally, builds a CSR,
+and receives back a CA-signed escrow certificate, anchored to the same
+Smallstep CA root every other certificate in this system already
+trusts. Any agent encrypting to another agent can independently verify
+the recipient's escrow certificate against the root CA directly — not
+merely trust the Credentials Agent's own bookkeeping that a given key
+belongs to a given identity.
+
+**Issuance is automated, not admin-mediated — for now.** Unlike human
+certificate issuance, which requires a real admin's prior `Grant`
+before a user's tool can obtain a certificate, an agent's escrow
+certificate is issued automatically: the agent's own, already-validated
+service identity (the same Kubernetes-credential validation path admin
+bootstrap already uses) is sufficient authorization on its own, with
+no separate grant lookup — mirroring admin bootstrap's own reasoning
+that the underlying credential already authorizes the exchange.
+
+But unlike admin bootstrap's own resulting certificate ("nothing more
+privileged than any other agent gets"), an escrow certificate is not
+permission-less. The Credentials Agent embeds a permission set into
+the certificate's SAN, the same mechanism the human grant flow already
+uses — playing the "admin" role itself for this specific flow,
+automatically, rather than waiting on a real admin's separate action.
+Today, every agent receives the same, uniform permission set; there is
+no per-agent differentiation yet. This is a deliberate, named
+simplification, not the design ceiling: the intended direction is for
+the Credentials Agent to source agent-specific permission configuration
+from the scheduler agent (see the scheduler's own credential-schedule
+work, a separate, related effort), at which point this flow's
+permission set stops being uniform and becomes genuinely agent-specific
+— without requiring any change to the issuance mechanism itself, only
+to where its permission input comes from.
+
+**Escrowed across rejuvenation, not regenerated.** An agent's own
+escrow private key is itself just another secret, escrowed through the
+same general `EscrowedSecret` store/retrieve mechanism this document
+already describes — no separate, new key-custody system. A first-ever
+pod for a given service generates its escrow keypair, gets it
+CA-signed, and escrows the resulting keypair (private key included) to
+the Credentials Agent for safekeeping. Every rejuvenation after that
+retrieves the previously-escrowed keypair instead of generating a new
+one — so ciphertext already sent to that service's public key never
+becomes orphaned by a routine restart.
+
+**Authorization for retrieval cross-checks both identity layers**: the
+Credentials Agent validates that the requester's current,
+broker-verified pod-instance identity (`published_by`, extracted from
+the live mTLS cert) matches the service-level identity the requested
+escrow keypair is registered under. A currently-live pod proving it's
+genuinely "the Jira Agent" right now is what authorizes retrieving
+"the Jira Agent"'s own, persistent escrow identity — not proof of
+possessing any specific prior keypair, which is exactly the property
+that makes surviving rejuvenation possible at all.
+
 ## Escrow-key and certificate-lookup queries
 
-Two related but genuinely distinct request/reply queries exist,
-both following the protocol in
-`docs/architecture/cassini-request-reply-protocol.md` exactly, and
-both core-to-core only today (no observer proxy built for either yet
+Three related but genuinely distinct request/reply queries exist, all
+following the protocol in
+`docs/architecture/cassini-request-reply-protocol.md` exactly, and all
+core-to-core only today (no observer proxy built for any of them yet
 -- see "What is deferred," below).
 
-**Escrow-key query** (`credentials-escrow-key-requests` /
-`credentials-escrow-key-replies`): any participant encrypting a secret
-to the Credentials Agent needs a reliable way to learn its current
-escrow public key. Cassini has no message retention (confirmed
-directly against `TopicManager::handle_subscribe_request` --
-subscribing only delivers messages published from that moment
-forward), so a subscriber joining after a one-time "publish key on
-startup" would receive nothing until a future key rotation, which may
-be arbitrarily far away or may never happen. Given how routinely
-agents restart in this system by design (forced rejuvenation is a core
-security mechanism, not a rare event), that would leave the
-overwhelming majority of agent startups with no reliable way to learn
-the current key at all -- a periodic broadcast would fight the grain
-of how this system already works besides (request/reply is the native
-idiom here, not speculative publishing). `EscrowKeyRequest` is
-genuinely empty -- nothing to validate, nothing to check; any
-authenticated core service asking on this topic gets the key, since a
-public key isn't a secret and needs no trust decision.
+**Credentials Agent's own escrow-key query**
+(`credentials-escrow-key-requests` / `credentials-escrow-key-replies`):
+any participant encrypting a secret to the Credentials Agent needs a
+reliable way to learn its current escrow public key. Cassini has no
+message retention (confirmed directly against
+`TopicManager::handle_subscribe_request` -- subscribing only delivers
+messages published from that moment forward), so a subscriber joining
+after a one-time "publish key on startup" would receive nothing until
+a future key rotation, which may be arbitrarily far away or may never
+happen. Given how routinely agents restart in this system by design
+(forced rejuvenation is a core security mechanism, not a rare event),
+that would leave the overwhelming majority of agent startups with no
+reliable way to learn the current key at all -- a periodic broadcast
+would fight the grain of how this system already works besides
+(request/reply is the native idiom here, not speculative publishing).
+`EscrowKeyRequest` is genuinely empty -- nothing to validate, nothing
+to check; any authenticated core service asking on this topic gets the
+key, since a public key isn't a secret and needs no trust decision.
 
 **Certificate-lookup query** (`credentials-certificate-requests` /
 `credentials-certificate-replies`): the decrypt-reencrypt-destroy
 relay described in "Secret escrow," above, needs the requesting
-consumer's own current, real public certificate to re-encrypt to.
+consumer's own current, real public *mTLS* certificate to re-encrypt
+to for flows that genuinely want pod-instance-level targeting.
 `CertificateRequest { identity }` answers with either the actual
 signed PEM (`CertificateReply::Found`) or `CertificateReply::NotFound`
 -- deliberately not distinguishing "never issued" from "revoked"; a
@@ -208,11 +315,18 @@ right now, not why one might be missing. Backed directly by
 non-revoked certificate can exist per identity at any time (see
 "Source of truth," above, on reissue superseding a prior certificate).
 
-Both queries are internal-agent-only today, not proxied through the
-observer the way issuance is -- an external, non-Cassini caller has no
-current way to ask either. Extending the observer to proxy these,
-the way it already does for issuance, is real, undesigned future work,
-not a rejected idea.
+**Agent escrow-key query** (not yet built -- see "What is deferred"):
+the analogous lookup for an *agent's own* escrow public key (its
+service identity, per "Agent escrow identity," above), as opposed to
+either the Credentials Agent's own escrow key or an agent's ephemeral
+mTLS certificate. This is the key another agent actually encrypts
+agent-to-agent payloads to.
+
+Every one of these queries is internal-agent-only today, not proxied
+through the observer the way issuance is -- an external, non-Cassini
+caller has no current way to ask any of them. Extending the observer
+to proxy these, the way it already does for issuance, is real,
+undesigned future work, not a rejected idea.
 
 ## Crate layout
 
@@ -262,7 +376,8 @@ they're refactors of existing code, not purely new additions:
   "attach a custom attribute/hash to a CSR" primitive; the
   human-issuance flow's actual decision to hash *the access token
   specifically* and bind it via that primitive is flow-specific
-  business logic, and stays in `fetcher`.
+  business logic, and stays in `fetcher`. The agent escrow-identity
+  CSR flow (see above) is expected to reuse `csr-utils` the same way.
 
 ## Architecture: observer and consumer
 
@@ -297,7 +412,7 @@ CA's live signing key — is never directly reachable by user-facing
 requests at all. A human's tool talks to the Credentials Agent's
 observer; everything else happens on the trusted side of the broker.
 
-## Two independent lifecycles
+## Three independent lifecycles
 
 ### Admin bootstrap (one-time, per admin)
 
@@ -408,6 +523,24 @@ made independently, at any earlier point.
    certificate that has ever been issued, and therefore a complete,
    authoritative revocation list.
 
+### Automated agent escrow-identity issuance (steady state, fully automated)
+
+The third lifecycle, alongside admin bootstrap and user self-service
+issuance -- see "Agent escrow identity," above, for the full design.
+In brief: an agent generates its own escrow keypair locally, builds a
+CSR via `csr-utils`, and submits it, authorized purely by its own
+already-validated service identity (no separate grant lookup, the same
+reasoning admin bootstrap already uses). The Credentials Agent embeds
+a permission set into the resulting certificate automatically, playing
+the "admin" role itself for this one flow -- uniform across all agents
+today, with a named path to becoming agent-specific once the
+Credentials Agent can source real per-agent configuration from the
+scheduler. The resulting keypair-plus-certificate is then escrowed
+through the same general `EscrowedSecret` mechanism this document
+already describes, so a rejuvenated pod retrieves its service's
+existing escrow identity rather than generating a new one and
+orphaning any ciphertext already sent to the old one.
+
 ## Core services vs. everything else
 
 Two distinct populations exist for `polar-init`'s purposes, driven by a
@@ -492,17 +625,29 @@ identity alone, is what makes this safe rather than disruptive:
 - The actual secret-escrow store/retrieve flow -- an agent handing off
   a real secret (a repository access token, for example) for the
   Credentials Agent to hold and later relay to an authorized consumer.
-  The prerequisites are built: the escrow-key query (so a holder knows
-  what public key to encrypt to), the certificate-lookup query (so the
-  Credentials Agent knows what public key to re-encrypt to on
-  retrieval), and `IssuanceCompleted` carrying the real certificate PEM
-  each of those queries answers with. The `EscrowedSecret` type, the
-  store/retrieve request/reply message pair, and the handler actually
-  performing the decrypt-reencrypt-destroy relay described in "Secret
-  escrow," above, are not built yet.
+  The prerequisites are built: the Credentials Agent's own escrow-key
+  query (so a holder knows what public key to encrypt to), the
+  certificate-lookup query (so the Credentials Agent knows an agent's
+  current mTLS public key when that's the right target), and
+  `IssuanceCompleted` carrying the real certificate PEM each of those
+  queries answers with. Not yet built: the `EscrowedSecret` type
+  itself, the store/retrieve request/reply message pair, and the
+  handler actually performing the decrypt-reencrypt-destroy relay
+  described in "Secret escrow," above.
+- The agent escrow-identity CSR flow described in "Agent escrow
+  identity," above, in full: the CSR submission path itself, the
+  automated-issuance permission-embedding logic, the agent escrow-key
+  query (a third query alongside the two described in "Escrow-key and
+  certificate-lookup queries"), and escrowing an agent's own keypair
+  across rejuvenation via the general store/retrieve mechanism once it
+  exists.
+- Sourcing agent-specific (rather than uniform) permission sets for
+  automated agent escrow-identity issuance from the scheduler agent,
+  once the scheduler's own credential-schedule work exists.
 - Extending the observer to proxy the escrow-key and certificate-lookup
-  queries for external, non-Cassini callers, the way it already does
-  for issuance -- both are internal-agent-only today.
+  queries (and the future agent escrow-key query) for external,
+  non-Cassini callers, the way it already does for issuance -- all are
+  internal-agent-only today.
 - A checkpoint/compaction mechanism for the event log, if unbounded
   growth ever becomes an actual, measured problem.
 

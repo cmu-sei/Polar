@@ -28,6 +28,7 @@ pub mod identity;
 pub mod graph;
 pub mod certificate;
 pub mod escrow_key;
+pub mod escrow_secret;
 
 pub const CREDENTIALS_GRANTS_TOPIC: &str = "credentials-grants";
 pub const CREDENTIALS_REVOCATIONS_TOPIC: &str = "credentials-revocations";
