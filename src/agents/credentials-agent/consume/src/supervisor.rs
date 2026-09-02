@@ -486,6 +486,7 @@ impl Actor for ConsumerSupervisor {
 mod tests {
     use super::*;
     use crate::state::GrantRecord;
+    use credentials_agent_common::events::{GrantReason, RevocationReason};
 
     async fn spawn_ledger_registered(log_path: &str) -> ActorRef<LedgerMessage> {
         let (ledger, _) = Actor::spawn(
@@ -530,6 +531,7 @@ mod tests {
             permissions: vec!["read".to_string()],
             granted_by: "admin".to_string(),
             timestamp: 1000,
+            reason: GrantReason::UserOnboarding,
         };
         let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&event)
             .unwrap()
@@ -560,7 +562,7 @@ mod tests {
         // drop, matching the documented behavior for this case.
         let event = CredentialsEvent::Revoke {
             serial: "abc123".to_string(),
-            reason: "compromised".to_string(),
+            reason: RevocationReason::Compromised,
             revoked_by: "admin".to_string(),
             timestamp: 1000,
         };

@@ -192,6 +192,7 @@ impl IssuanceHandler {
             instance_binding,
             serial: issued.serial_number,
             timestamp: polar::time::now_millis(),
+            certificate_pem: issued.certificate_pem.clone(),
         };
         if let Err(e) = call_append(&self.ledger, event).await {
             error!(
@@ -272,6 +273,7 @@ async fn call_append(ledger: &ActorRef<LedgerMessage>, event: CredentialsEvent) 
 mod tests {
     use super::*;
     use crate::ledger::{LedgerActor, LedgerActorArgs};
+    use credentials_agent_common::events::GrantReason;
     use base64::Engine;
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use wiremock::matchers::{body_partial_json, method, path};
@@ -392,6 +394,7 @@ mod tests {
                     permissions: vec!["read".to_string(), "write".to_string()],
                     granted_by: "admin".to_string(),
                     timestamp: 1000,
+                    reason: GrantReason::UserOnboarding,
                 },
                 reply,
             },
@@ -504,6 +507,8 @@ mod tests {
                     instance_binding: "admin-tool-uid".to_string(),
                     serial: "already-issued-serial".to_string(),
                     timestamp: 1000,
+                    certificate_pem: "-----BEGIN CERTIFICATE-----\nfake\n-----END CERTIFICATE-----\n"
+                        .to_string(),
                 },
                 reply,
             },

@@ -48,7 +48,7 @@
 
 use crate::ledger::LedgerMessage;
 use crate::state::CredentialsState;
-use credentials_agent_common::events::CredentialsEvent;
+use credentials_agent_common::events::{CredentialsEvent, RevocationReason};
 use credentials_agent_common::graph::CredentialsNodeKey;
 use polar::graph::controller::{
     GraphController, GraphControllerActor, GraphControllerArgs, GraphControllerMsg, GraphOp,
@@ -82,7 +82,16 @@ pub enum ProjectionMessage {
     /// hash (EventLog::current_hash() at the moment it was appended),
     /// carried along so this actor can keep the checkpoint accurate
     /// without needing to ask the ledger for it separately.
-    ProjectEvent { hash: String, event: CredentialsEvent },
+    ProjectEvent {
+        hash: String,
+        event: CredentialsEvent,
+        /// Serial numbers of any certificates superseded as a side
+        /// effect of folding this event -- CredentialsState::apply's
+        /// own return value, threaded through so the graph's copy of
+        /// those certificates gets marked revoked too, not just the
+        /// in-memory one.
+        superseded_serials: Vec<String>,
+    },
     GraphSignal(GraphSignal),
     /// Sent once, shortly after startup, once LedgerActor exists --
     /// see ProjectionActorArgs::ledger's own doc for why this can't
@@ -128,12 +137,23 @@ impl Actor for ProjectionActor {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
-            ProjectionMessage::ProjectEvent { hash, event } => {
+            ProjectionMessage::ProjectEvent {
+                hash,
+                event,
+                superseded_serials,
+            } => {
                 let Some(ledger) = &state.ledger else {
                     warn!("Dropping event projection -- ledger reference not yet set");
                     return Ok(());
                 };
-                project_single_event(&state.graph_controller, &hash, &event, ledger).await;
+                project_single_event(
+                    &state.graph_controller,
+                    &hash,
+                    &event,
+                    &superseded_serials,
+                    ledger,
+                )
+                .await;
             }
             ProjectionMessage::GraphSignal(GraphSignal::Available) => {
                 let Some(ledger) = &state.ledger else {
@@ -165,6 +185,7 @@ fn graph_ops_for_event(event: &CredentialsEvent, grant_existed: bool) -> Vec<Gra
             permissions,
             granted_by,
             timestamp,
+            reason,
         } => {
             vec![GraphOp::UpsertNodes {
                 items: vec![(
@@ -188,6 +209,10 @@ fn graph_ops_for_event(event: &CredentialsEvent, grant_existed: bool) -> Vec<Gra
                         ),
                         Property("granted_at".to_string(), GraphValue::I64(*timestamp)),
                         Property("consumed".to_string(), GraphValue::Bool(false)),
+                        Property(
+                            "reason".to_string(),
+                            GraphValue::String(format!("{reason:?}")),
+                        ),
                     ],
                 )],
             }]
@@ -208,7 +233,7 @@ fn graph_ops_for_event(event: &CredentialsEvent, grant_existed: bool) -> Vec<Gra
                         Property("revoked".to_string(), GraphValue::Bool(true)),
                         Property(
                             "revoked_reason".to_string(),
-                            GraphValue::String(reason.clone()),
+                            GraphValue::String(format!("{reason:?}")),
                         ),
                         Property(
                             "revoked_by".to_string(),
@@ -224,6 +249,11 @@ fn graph_ops_for_event(event: &CredentialsEvent, grant_existed: bool) -> Vec<Gra
             instance_binding,
             serial,
             timestamp,
+            // Deliberately not projected -- the graph stays
+            // metadata-only, observability-only; a full cert PEM
+            // doesn't belong there. Lookup goes through LedgerActor's
+            // own CredentialsState directly, not the graph.
+            certificate_pem: _,
         } => {
             let mut items = vec![(
                 CredentialsNodeKey::Certificate {
@@ -289,6 +319,7 @@ async fn project_single_event(
     graph_controller: &GraphController,
     hash: &str,
     event: &CredentialsEvent,
+    superseded_serials: &[String],
     ledger: &ActorRef<LedgerMessage>,
 ) {
     let grant_existed = if let CredentialsEvent::IssuanceCompleted { identity, .. } = event {
@@ -309,12 +340,55 @@ async fn project_single_event(
     };
 
     let mut ops = graph_ops_for_event(event, grant_existed);
+
+    // A reissue implicitly supersedes any prior, still-valid
+    // certificate for the same identity -- CredentialsState::apply's
+    // own return value names exactly which ones. Each gets its own
+    // revocation op here, synthetic (no real Revoke event exists for
+    // this), so the graph's copy doesn't silently drift out of sync
+    // with the in-memory state that already knows this happened.
+    let timestamp = event_timestamp(event);
+    for serial in superseded_serials {
+        ops.push(supersession_op(serial, timestamp));
+    }
+
     ops.push(checkpoint_op(hash));
 
     if let Err(e) = graph_controller.cast(GraphControllerMsg::Op(GraphOp::Transaction { ops })) {
         warn!(
             "Failed to project event to graph (best-effort, event log remains authoritative): {e}"
         );
+    }
+}
+
+fn event_timestamp(event: &CredentialsEvent) -> i64 {
+    match event {
+        CredentialsEvent::Grant { timestamp, .. }
+        | CredentialsEvent::Revoke { timestamp, .. }
+        | CredentialsEvent::IssuanceCompleted { timestamp, .. } => *timestamp,
+    }
+}
+
+fn supersession_op(serial: &str, timestamp: i64) -> GraphOp {
+    GraphOp::UpsertNodes {
+        items: vec![(
+            CredentialsNodeKey::Certificate {
+                serial: serial.to_string(),
+            }
+            .into_key(),
+            vec![
+                Property("revoked".to_string(), GraphValue::Bool(true)),
+                Property(
+                    "revoked_reason".to_string(),
+                    GraphValue::String(format!("{:?}", RevocationReason::Superseded)),
+                ),
+                Property(
+                    "revoked_by".to_string(),
+                    GraphValue::String("system".to_string()),
+                ),
+                Property("revoked_at".to_string(), GraphValue::I64(timestamp)),
+            ],
+        )],
     }
 }
 
@@ -351,8 +425,11 @@ fn ops_for_catch_up(
             false
         };
 
-        state.apply(event);
+        let superseded_serials = state.apply(event);
         ops.extend(graph_ops_for_event(event, grant_existed));
+        for serial in &superseded_serials {
+            ops.push(supersession_op(serial, event_timestamp(event)));
+        }
         latest_hash = Some(hash.clone());
     }
 
@@ -428,6 +505,7 @@ async fn catch_up(ledger: &ActorRef<LedgerMessage>, graph_controller: &GraphCont
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use credentials_agent_common::events::GrantReason;
 
     struct FakeProjectionActor;
 
@@ -472,6 +550,7 @@ pub(crate) mod tests {
             permissions: vec!["read".to_string(), "write".to_string()],
             granted_by: "admin".to_string(),
             timestamp: 1000,
+            reason: GrantReason::UserOnboarding,
         };
         let ops = graph_ops_for_event(&event, false);
         assert_eq!(ops.len(), 1);
@@ -490,6 +569,8 @@ pub(crate) mod tests {
             instance_binding: "pod-uid-1".to_string(),
             serial: "serial-1".to_string(),
             timestamp: 2000,
+            certificate_pem: "-----BEGIN CERTIFICATE-----\nfake\n-----END CERTIFICATE-----\n"
+                .to_string(),
         };
         let with_grant = graph_ops_for_event(&event, true);
         match &with_grant[0] {

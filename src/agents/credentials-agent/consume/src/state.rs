@@ -21,7 +21,7 @@
    DM24-0470
 */
 
-use credentials_agent_common::events::CredentialsEvent;
+use credentials_agent_common::events::{CredentialsEvent, GrantReason, RevocationReason};
 use std::collections::HashMap;
 
 /// A grant currently available to be consumed by a matching issuance.
@@ -30,6 +30,7 @@ pub struct GrantRecord {
     pub permissions: Vec<String>,
     pub granted_by: String,
     pub timestamp: i64,
+    pub reason: GrantReason,
 }
 
 /// A currently-valid (issued, not yet revoked) certificate.
@@ -39,6 +40,18 @@ pub struct CertificateRecord {
     pub instance_binding: String,
     pub serial: String,
     pub timestamp: i64,
+    /// The actual signed certificate PEM, carried through from
+    /// IssuanceCompleted -- what a certificate-lookup query returns
+    /// for this identity.
+    pub certificate_pem: String,
+    /// Marked in place rather than removed on revocation (explicit,
+    /// via a Revoke event) or supersession (implicit, when a reissue
+    /// for the same identity arrives) -- the record, and its own
+    /// audit trail, survives either way.
+    pub revoked: bool,
+    pub revoked_reason: Option<RevocationReason>,
+    pub revoked_by: Option<String>,
+    pub revoked_at: Option<i64>,
 }
 
 /// The Credentials Agent's derived state -- entirely a function of
@@ -87,13 +100,25 @@ impl CredentialsState {
     /// Folds one event into the current state. Order matters -- this
     /// must only ever be called in the exact order events were
     /// originally appended (or replayed) in.
-    pub fn apply(&mut self, event: &CredentialsEvent) {
+    ///
+    /// Returns the serial numbers of any certificates superseded as
+    /// a side effect of this fold -- always empty except for a real
+    /// reissue, where a prior, still-valid certificate for the same
+    /// identity gets implicitly revoked. This is the one place that
+    /// genuinely knows this happened at the moment it does, so both
+    /// the steady-state projection path (ledger.rs) and the catch-up
+    /// replay path (projection.rs) use this same, single source of
+    /// truth to know which certificates need their own revocation op
+    /// emitted to the graph, rather than duplicating this logic.
+    pub fn apply(&mut self, event: &CredentialsEvent) -> Vec<String> {
+        let mut superseded_serials = Vec::new();
         match event {
             CredentialsEvent::Grant {
                 target_identity,
                 permissions,
                 granted_by,
                 timestamp,
+                reason,
             } => {
                 self.active_grants.insert(
                     target_identity.clone(),
@@ -101,6 +126,7 @@ impl CredentialsState {
                         permissions: permissions.clone(),
                         granted_by: granted_by.clone(),
                         timestamp: *timestamp,
+                        reason: *reason,
                     },
                 );
             }
@@ -109,6 +135,7 @@ impl CredentialsState {
                 instance_binding,
                 serial,
                 timestamp,
+                certificate_pem,
             } => {
                 // Single-use: remove the matching grant, if any. A
                 // harmless no-op when there isn't one -- exactly what
@@ -116,6 +143,22 @@ impl CredentialsState {
                 // fold through this same logic with zero
                 // special-casing.
                 self.active_grants.remove(identity);
+
+                // A reissue for the same identity supersedes any
+                // prior, still-valid certificate for it -- regardless
+                // of instance_binding, since a pod restart gets a
+                // fresh one. Marked revoked in place, not removed, so
+                // the record survives. Done before inserting the new
+                // entry, so this can't mark the new one itself.
+                for record in self.valid_certificates.values_mut() {
+                    if record.identity == *identity && !record.revoked {
+                        record.revoked = true;
+                        record.revoked_reason = Some(RevocationReason::Superseded);
+                        record.revoked_by = Some("system".to_string());
+                        record.revoked_at = Some(*timestamp);
+                        superseded_serials.push(record.serial.clone());
+                    }
+                }
 
                 let key = (identity.clone(), instance_binding.clone());
                 self.valid_certificates.insert(
@@ -125,16 +168,32 @@ impl CredentialsState {
                         instance_binding: instance_binding.clone(),
                         serial: serial.clone(),
                         timestamp: *timestamp,
+                        certificate_pem: certificate_pem.clone(),
+                        revoked: false,
+                        revoked_reason: None,
+                        revoked_by: None,
+                        revoked_at: None,
                     },
                 );
                 self.serial_index.insert(serial.clone(), key);
             }
-            CredentialsEvent::Revoke { serial, .. } => {
-                if let Some(key) = self.serial_index.remove(serial) {
-                    self.valid_certificates.remove(&key);
+            CredentialsEvent::Revoke {
+                serial,
+                reason,
+                revoked_by,
+                timestamp,
+            } => {
+                if let Some(key) = self.serial_index.get(serial)
+                    && let Some(record) = self.valid_certificates.get_mut(key)
+                {
+                    record.revoked = true;
+                    record.revoked_reason = Some(*reason);
+                    record.revoked_by = Some(revoked_by.clone());
+                    record.revoked_at = Some(*timestamp);
                 }
             }
         }
+        superseded_serials
     }
 
     /// The active grant for a given identity, if any -- `None` if
@@ -148,7 +207,19 @@ impl CredentialsState {
     /// renewal-prevention check itself.
     pub fn has_valid_certificate(&self, identity: &str, instance_binding: &str) -> bool {
         self.valid_certificates
-            .contains_key(&(identity.to_string(), instance_binding.to_string()))
+            .get(&(identity.to_string(), instance_binding.to_string()))
+            .is_some_and(|record| !record.revoked)
+    }
+    /// The current, non-revoked certificate for a given identity, if
+    /// any -- regardless of instance_binding, since a caller looking
+    /// up another agent's cert has no way of knowing that in advance.
+    /// A reissue for the same identity marks any prior entry revoked
+    /// (see apply()'s own IssuanceCompleted handling), so there's at
+    /// most one non-revoked entry per identity at any given time.
+    pub fn certificate_for(&self, identity: &str) -> Option<&CertificateRecord> {
+        self.valid_certificates
+            .values()
+            .find(|record| record.identity == identity && !record.revoked)
     }
 }
 
@@ -162,6 +233,7 @@ mod tests {
             permissions: vec!["read".to_string()],
             granted_by: "admin".to_string(),
             timestamp: 1000,
+            reason: GrantReason::UserOnboarding,
         }
     }
 
@@ -171,13 +243,15 @@ mod tests {
             instance_binding: instance_binding.to_string(),
             serial: serial.to_string(),
             timestamp: 2000,
+            certificate_pem: "-----BEGIN CERTIFICATE-----\nfake\n-----END CERTIFICATE-----\n"
+                .to_string(),
         }
     }
 
     fn revoked(serial: &str) -> CredentialsEvent {
         CredentialsEvent::Revoke {
             serial: serial.to_string(),
-            reason: "compromised".to_string(),
+            reason: RevocationReason::Compromised,
             revoked_by: "admin".to_string(),
             timestamp: 3000,
         }

@@ -24,7 +24,7 @@
 mod publish;
 
 use clap::{Parser, Subcommand};
-use credentials_agent_common::events::CredentialsEvent;
+use credentials_agent_common::events::{CredentialsEvent, GrantReason, RevocationReason};
 use credentials_agent_common::{CREDENTIALS_GRANTS_TOPIC, CREDENTIALS_REVOCATIONS_TOPIC};
 
 #[derive(Parser, Debug)]
@@ -52,14 +52,16 @@ enum Command {
         permissions: Vec<String>,
         #[arg(long)]
         granted_by: String,
+        #[arg(long, value_enum)]
+        reason: GrantReason,
     },
     /// Revoke a certificate by its serial number -- uniform for
     /// human- and workload-issued certificates alike.
     Revoke {
         #[arg(long)]
         serial: String,
-        #[arg(long)]
-        reason: String,
+        #[arg(long, value_enum)]
+        reason: RevocationReason,
         #[arg(long)]
         revoked_by: String,
     },
@@ -77,12 +79,14 @@ fn event_and_topic_from_command(command: Command) -> (CredentialsEvent, &'static
             target_identity,
             permissions,
             granted_by,
+            reason,
         } => (
             CredentialsEvent::Grant {
                 target_identity,
                 permissions,
                 granted_by,
                 timestamp: polar::time::now_millis(),
+                reason,
             },
             CREDENTIALS_GRANTS_TOPIC,
         ),
@@ -132,6 +136,7 @@ mod tests {
             target_identity: "testuser".to_string(),
             permissions: vec!["read".to_string(), "write".to_string()],
             granted_by: "admin".to_string(),
+            reason: GrantReason::UserOnboarding,
         };
 
         let (event, topic) = event_and_topic_from_command(command);
@@ -156,7 +161,7 @@ mod tests {
     fn revoke_command_produces_the_right_event_and_topic() {
         let command = Command::Revoke {
             serial: "abc123".to_string(),
-            reason: "compromised".to_string(),
+            reason: RevocationReason::Compromised,
             revoked_by: "admin".to_string(),
         };
 
@@ -171,7 +176,7 @@ mod tests {
                 ..
             } => {
                 assert_eq!(serial, "abc123");
-                assert_eq!(reason, "compromised");
+                assert_eq!(reason, RevocationReason::Compromised);
                 assert_eq!(revoked_by, "admin");
             }
             other => panic!("expected Revoke, got {other:?}"),

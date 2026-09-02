@@ -151,11 +151,12 @@ impl Actor for LedgerActor {
             LedgerMessage::Append { event, reply } => {
                 let result = match state.event_log.append(&event) {
                     Ok(()) => {
-                        state.credentials_state.apply(&event);
+                        let superseded_serials = state.credentials_state.apply(&event);
                         let hash = state.event_log.current_hash().to_string();
                         let _ = state.projection_actor.cast(ProjectionMessage::ProjectEvent {
                             hash,
                             event: event.clone(),
+                            superseded_serials,
                         });
                         Ok(())
                     }
@@ -167,11 +168,12 @@ impl Actor for LedgerActor {
                 if let Err(e) = state.event_log.append(&event) {
                     tracing::error!("Failed to append event to ledger: {e}. Event: {event:?}");
                 } else {
-                    state.credentials_state.apply(&event);
+                    let superseded_serials = state.credentials_state.apply(&event);
                     let hash = state.event_log.current_hash().to_string();
                     let _ = state.projection_actor.cast(ProjectionMessage::ProjectEvent {
                         hash,
                         event,
+                        superseded_serials,
                     });
                 }
             }
@@ -201,6 +203,7 @@ impl Actor for LedgerActor {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use credentials_agent_common::events::GrantReason;
 
     async fn spawn_ledger(log_path: &str) -> ActorRef<LedgerMessage> {
         let (ledger, _) = Actor::spawn(
@@ -286,6 +289,7 @@ pub(crate) mod tests {
                 permissions: vec!["read".to_string()],
                 granted_by: "admin".to_string(),
                 timestamp: 1000,
+                reason: GrantReason::UserOnboarding,
             },
         )
         .await
@@ -311,6 +315,7 @@ pub(crate) mod tests {
                 permissions: vec!["read".to_string()],
                 granted_by: "admin".to_string(),
                 timestamp: 1000,
+                reason: GrantReason::UserOnboarding,
             },
         )
         .await
@@ -323,6 +328,8 @@ pub(crate) mod tests {
                 instance_binding: "pod-uid-1".to_string(),
                 serial: "serial-1".to_string(),
                 timestamp: 2000,
+                certificate_pem: "-----BEGIN CERTIFICATE-----\nfake\n-----END CERTIFICATE-----\n"
+                    .to_string(),
             },
         )
         .await
@@ -354,6 +361,7 @@ pub(crate) mod tests {
                     permissions: vec!["read".to_string()],
                     granted_by: "admin".to_string(),
                     timestamp: 1000,
+                    reason: GrantReason::UserOnboarding,
                 },
             )
             .await
@@ -365,6 +373,8 @@ pub(crate) mod tests {
                     instance_binding: "pod-uid-1".to_string(),
                     serial: "serial-1".to_string(),
                     timestamp: 2000,
+                    certificate_pem: "-----BEGIN CERTIFICATE-----\nfake\n-----END CERTIFICATE-----\n"
+                        .to_string(),
                 },
             )
             .await
