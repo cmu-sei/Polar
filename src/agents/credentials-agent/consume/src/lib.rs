@@ -32,3 +32,5 @@ pub mod issuance_actor;
 pub mod identity_normalization;
 pub mod identity_normalization_actor;
 pub mod projection;
+pub mod escrow_key;
+pub mod escrow_key_actor;

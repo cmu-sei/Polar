@@ -35,6 +35,10 @@ use crate::ledger::{LedgerActor, LedgerActorArgs, LedgerMessage};
 use crate::projection::{ProjectionActor, ProjectionActorArgs, ProjectionMessage};
 use crate::identity_normalization::IdentityNormalizationHandler;
 use crate::identity_normalization_actor::{IdentityNormalizationActor, IdentityNormalizationActorArgs};
+use crate::escrow_key::EscrowKeyHandler;
+use crate::escrow_key_actor::{EscrowKeyActor, EscrowKeyActorArgs};
+use credentials_agent_common::CREDENTIALS_ESCROW_KEY_REQUESTS_TOPIC;
+use credentials_agent_common::escrow_key::EscrowKeyRequest;
 use cassini_client::{TcpClientMessage, TCPClientConfig, TcpClientActor, TcpClientArgs};
 use cassini_types::{ClientEvent,WireTraceCtx};
 use credentials_agent_common::{CREDENTIALS_GRANTS_TOPIC, CREDENTIALS_REVOCATIONS_TOPIC};
@@ -71,6 +75,7 @@ const CREDENTIALS_EVENT_LOG_PATH_DEFAULT: &str = "/var/lib/credentials-agent/eve
 const CERT_ISSUER_URL_ENV: &str = "CREDENTIALS_AGENT_CERT_ISSUER_URL";
 const ISSUANCE_ACTOR_NAME: &str = "polar.credentials-agent.issuance";
 const IDENTITY_NORMALIZATION_ACTOR_NAME: &str = "polar.credentials-agent.identity-normalization";
+const ESCROW_KEY_ACTOR_NAME: &str = "polar.credentials-agent.escrow-key";
 
 pub struct ConsumerSupervisor;
 
@@ -128,6 +133,24 @@ impl Supervisor for ConsumerSupervisor {
                     warn!(
                         "Failed to deserialize identity-normalization request from topic {topic}: {e}"
                     );
+                }
+            }
+            return;
+        }
+
+        if topic == CREDENTIALS_ESCROW_KEY_REQUESTS_TOPIC {
+            match rkyv::from_bytes::<Envelope<EscrowKeyRequest>, rkyv::rancor::Error>(&payload) {
+                Ok(envelope) => {
+                    if let Some(actor) = where_is(ESCROW_KEY_ACTOR_NAME.to_string()) {
+                        if let Err(e) = actor.send_message(envelope) {
+                            warn!("Failed to forward escrow-key request to actor: {e}");
+                        }
+                    } else {
+                        warn!("Escrow-key actor not yet registered, dropping request");
+                    }
+                }
+                Err(e) => {
+                    warn!("Failed to deserialize escrow-key request from topic {topic}: {e}");
                 }
             }
             return;
@@ -216,6 +239,17 @@ impl Actor for ConsumerSupervisor {
             ActorProcessingErr::from(format!("{CERT_ISSUER_URL_ENV} must be set"))
         })?;
 
+        let escrow_keypair = {
+            let escrow_key_path = std::env::var(crate::escrow::CREDENTIALS_ESCROW_KEY_PATH_ENV)
+                .unwrap_or_else(|_| {
+                    crate::escrow::CREDENTIALS_ESCROW_KEY_PATH_DEFAULT.to_string()
+                });
+            std::sync::Arc::new(
+                crate::escrow::EscrowKeypair::load_or_generate(&escrow_key_path)
+                    .map_err(ActorProcessingErr::from)?,
+            )
+        };
+
         let issuance_handler = IssuanceHandler {
             ledger: ledger.clone(),
             cert_issuer: HandshakeClient::new(cert_issuer_url.clone()),
@@ -227,16 +261,7 @@ impl Actor for ConsumerSupervisor {
             // than silently proceeding unintrospected.
             introspection: IntrospectionClient::from_env().ok(),
             known_kubernetes_issuers: configured_kubernetes_issuers(),
-            escrow_keypair: {
-                let escrow_key_path = std::env::var(crate::escrow::CREDENTIALS_ESCROW_KEY_PATH_ENV)
-                    .unwrap_or_else(|_| {
-                        crate::escrow::CREDENTIALS_ESCROW_KEY_PATH_DEFAULT.to_string()
-                    });
-                std::sync::Arc::new(
-                    crate::escrow::EscrowKeypair::load_or_generate(&escrow_key_path)
-                        .map_err(ActorProcessingErr::from)?,
-                )
-            },
+            escrow_keypair: escrow_keypair.clone(),
         };
 
         let (_issuance_actor, _) = IssuanceActor::spawn_linked(
@@ -265,7 +290,22 @@ impl Actor for ConsumerSupervisor {
         .await
         .map_err(ActorProcessingErr::from)?;
 
+        let escrow_key_handler = EscrowKeyHandler {
+            escrow_keypair: escrow_keypair.clone(),
+        };
+        let (_escrow_key_actor, _) = EscrowKeyActor::spawn_linked(
+            Some(ESCROW_KEY_ACTOR_NAME.to_string()),
+            EscrowKeyActor,
+            EscrowKeyActorArgs {
+                handler: escrow_key_handler,
+            },
+            myself.get_cell(),
+        )
+        .await
+        .map_err(ActorProcessingErr::from)?;
+
         let prepare_shutdown_port = Arc::new(OutputPort::<()>::default());
+
         prepare_shutdown_port.subscribe(myself.clone(), |()| {
             Some(SupervisorMessage::PrepareShutdown)
         });
@@ -383,6 +423,7 @@ impl Actor for ConsumerSupervisor {
                             CREDENTIALS_REVOCATIONS_TOPIC,
                             CREDENTIALS_ISSUANCE_REQUESTS_TOPIC,
                             CREDENTIALS_IDENTITY_NORMALIZATION_REQUESTS_TOPIC,
+                            CREDENTIALS_ESCROW_KEY_REQUESTS_TOPIC,
                         ] {
                             if let Err(e) = client.send_message(TcpClientMessage::Subscribe {
                                 topic: topic.to_string(),
