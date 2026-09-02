@@ -36,8 +36,12 @@ use crate::projection::{ProjectionActor, ProjectionActorArgs, ProjectionMessage}
 use crate::identity_normalization::IdentityNormalizationHandler;
 use crate::identity_normalization_actor::{IdentityNormalizationActor, IdentityNormalizationActorArgs};
 use crate::escrow_key::EscrowKeyHandler;
+use crate::certificate::CertificateHandler;
+use crate::certificate_actor::{CertificateActor, CertificateActorArgs};
 use crate::escrow_key_actor::{EscrowKeyActor, EscrowKeyActorArgs};
+use credentials_agent_common::CREDENTIALS_CERTIFICATE_REQUESTS_TOPIC;
 use credentials_agent_common::CREDENTIALS_ESCROW_KEY_REQUESTS_TOPIC;
+use credentials_agent_common::certificate::CertificateRequest;
 use credentials_agent_common::escrow_key::EscrowKeyRequest;
 use cassini_client::{TcpClientMessage, TCPClientConfig, TcpClientActor, TcpClientArgs};
 use cassini_types::{ClientEvent,WireTraceCtx};
@@ -76,6 +80,7 @@ const CERT_ISSUER_URL_ENV: &str = "CREDENTIALS_AGENT_CERT_ISSUER_URL";
 const ISSUANCE_ACTOR_NAME: &str = "polar.credentials-agent.issuance";
 const IDENTITY_NORMALIZATION_ACTOR_NAME: &str = "polar.credentials-agent.identity-normalization";
 const ESCROW_KEY_ACTOR_NAME: &str = "polar.credentials-agent.escrow-key";
+const CERTIFICATE_ACTOR_NAME: &str = "polar.credentials-agent.certificate";
 
 pub struct ConsumerSupervisor;
 
@@ -151,6 +156,24 @@ impl Supervisor for ConsumerSupervisor {
                 }
                 Err(e) => {
                     warn!("Failed to deserialize escrow-key request from topic {topic}: {e}");
+                }
+            }
+            return;
+        }
+
+        if topic == CREDENTIALS_CERTIFICATE_REQUESTS_TOPIC {
+            match rkyv::from_bytes::<Envelope<CertificateRequest>, rkyv::rancor::Error>(&payload) {
+                Ok(envelope) => {
+                    if let Some(actor) = where_is(CERTIFICATE_ACTOR_NAME.to_string()) {
+                        if let Err(e) = actor.send_message(envelope) {
+                            warn!("Failed to forward certificate request to actor: {e}");
+                        }
+                    } else {
+                        warn!("Certificate actor not yet registered, dropping request");
+                    }
+                }
+                Err(e) => {
+                    warn!("Failed to deserialize certificate request from topic {topic}: {e}");
                 }
             }
             return;
@@ -304,6 +327,20 @@ impl Actor for ConsumerSupervisor {
         .await
         .map_err(ActorProcessingErr::from)?;
 
+        let certificate_handler = CertificateHandler {
+            ledger: ledger.clone(),
+        };
+        let (_certificate_actor, _) = CertificateActor::spawn_linked(
+            Some(CERTIFICATE_ACTOR_NAME.to_string()),
+            CertificateActor,
+            CertificateActorArgs {
+                handler: certificate_handler,
+            },
+            myself.get_cell(),
+        )
+        .await
+        .map_err(ActorProcessingErr::from)?;
+
         let prepare_shutdown_port = Arc::new(OutputPort::<()>::default());
 
         prepare_shutdown_port.subscribe(myself.clone(), |()| {
@@ -424,6 +461,7 @@ impl Actor for ConsumerSupervisor {
                             CREDENTIALS_ISSUANCE_REQUESTS_TOPIC,
                             CREDENTIALS_IDENTITY_NORMALIZATION_REQUESTS_TOPIC,
                             CREDENTIALS_ESCROW_KEY_REQUESTS_TOPIC,
+                            CREDENTIALS_CERTIFICATE_REQUESTS_TOPIC,
                         ] {
                             if let Err(e) = client.send_message(TcpClientMessage::Subscribe {
                                 topic: topic.to_string(),

@@ -26,6 +26,7 @@ pub mod issuance;
 pub mod observer;
 pub mod identity;
 pub mod graph;
+pub mod certificate;
 pub mod escrow_key;
 
 pub const CREDENTIALS_GRANTS_TOPIC: &str = "credentials-grants";
@@ -39,3 +40,6 @@ pub const CREDENTIALS_IDENTITY_NORMALIZATION_REPLIES_TOPIC: &str = "credentials-
 
 pub const CREDENTIALS_ESCROW_KEY_REQUESTS_TOPIC: &str = "credentials-escrow-key-requests";
 pub const CREDENTIALS_ESCROW_KEY_REPLIES_TOPIC: &str = "credentials-escrow-key-replies";
+
+pub const CREDENTIALS_CERTIFICATE_REQUESTS_TOPIC: &str = "credentials-certificate-requests";
+pub const CREDENTIALS_CERTIFICATE_REPLIES_TOPIC: &str = "credentials-certificate-replies";

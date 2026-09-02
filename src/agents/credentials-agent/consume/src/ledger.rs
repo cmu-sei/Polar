@@ -50,10 +50,10 @@
 //! graph-related.
 
 use crate::projection::ProjectionMessage;
-use crate::state::{CredentialsState, GrantRecord};
 use credentials_agent_common::events::CredentialsEvent;
 use polar::event_log::EventLog;
 use ractor::{Actor, ActorProcessingErr, ActorRef, RpcReplyPort, async_trait};
+use crate::state::{CertificateRecord, CredentialsState, GrantRecord};
 
 pub struct LedgerActor;
 
@@ -97,6 +97,14 @@ pub enum LedgerMessage {
         identity: String,
         instance_binding: String,
         reply: RpcReplyPort<bool>,
+    },
+    /// The current, non-revoked certificate for `identity`, if any --
+    /// regardless of instance_binding. Backs the certificate-lookup
+    /// query: one agent asking for another's public cert so it can
+    /// encrypt a payload directly to it.
+    CheckCertificate {
+        identity: String,
+        reply: RpcReplyPort<Option<CertificateRecord>>,
     },
     /// Full (hash, event) history, re-read from the log -- used by
     /// ProjectionActor for catch-up: replaying and re-folding through
@@ -191,6 +199,10 @@ impl Actor for LedgerActor {
                     .has_valid_certificate(&identity, &instance_binding);
                 let _ = reply.send(has_valid);
             }
+            LedgerMessage::CheckCertificate { identity, reply } => {
+                let record = state.credentials_state.certificate_for(&identity).cloned();
+                let _ = reply.send(record);
+            }
             LedgerMessage::GetFullHistory { reply } => {
                 let result = state.event_log.replay_with_hashes().map_err(|e| e.to_string());
                 let _ = reply.send(result);
@@ -239,6 +251,26 @@ pub(crate) mod tests {
         match ractor::rpc::call(
             ledger,
             |reply| LedgerMessage::CheckGrant {
+                identity: identity.to_string(),
+                reply,
+            },
+            None,
+        )
+        .await
+        .expect("call should succeed")
+        {
+            ractor::rpc::CallResult::Success(result) => result,
+            other => panic!("expected Success, got {other:?}"),
+        }
+    }
+
+    pub(crate) async fn check_certificate(
+        ledger: &ActorRef<LedgerMessage>,
+        identity: &str,
+    ) -> Option<CertificateRecord> {
+        match ractor::rpc::call(
+            ledger,
+            |reply| LedgerMessage::CheckCertificate {
                 identity: identity.to_string(),
                 reply,
             },
@@ -338,6 +370,14 @@ pub(crate) mod tests {
         assert!(check_grant(&ledger, "alice").await.is_none());
         assert!(check_renewal(&ledger, "alice", "pod-uid-1").await);
         assert!(!check_renewal(&ledger, "alice", "different-pod-uid").await);
+
+        let cert = check_certificate(&ledger, "alice").await;
+        assert!(cert.is_some());
+        assert_eq!(
+            cert.unwrap().certificate_pem,
+            "-----BEGIN CERTIFICATE-----\nfake\n-----END CERTIFICATE-----\n"
+        );
+        assert!(check_certificate(&ledger, "nobody").await.is_none());
 
         ledger.stop(None);
     }
