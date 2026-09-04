@@ -173,7 +173,13 @@ holds plaintext for a brief window on every relay. Short of adopting
 homomorphic encryption (a much larger, currently unwarranted undertaking),
 this is the strongest practical property available: no secret is ever
 at rest anywhere in this system, including this system's own audit log,
-except encrypted to a specific holder's own key.
+except encrypted to a specific holder's own key. This is deliberately
+not a zero-knowledge design -- the Credentials Agent is a trusted
+custodian *with* access, not one deliberately locked out of what it
+holds. See "Agent escrow bootstrap," below, for the one place this
+general model needs a real, narrow exception (retrieving one's own
+escrow keypair for the very first time, when no stable key yet exists
+to receive the response encrypted to).
 
 **Encryption scheme**: a standard hybrid cryptosystem, using only
 FIPS-140-approved primitives given this project's own compliance
@@ -274,6 +280,170 @@ genuinely "the Jira Agent" right now is what authorizes retrieving
 possessing any specific prior keypair, which is exactly the property
 that makes surviving rejuvenation possible at all.
 
+## Agent escrow bootstrap: retrieve, fall back to issue-then-escrow
+
+**The actual startup sequence, per agent, per pod.** An agent's own
+escrow identity bootstrap is retrieve-first, issuance-as-fallback —
+not two independent paths. On startup: attempt to retrieve a
+previously-escrowed keypair for this service identity. If one exists,
+decrypt and proceed (see the ephemeral-exchange requirement below). If
+none exists — genuinely the first-ever pod for this service, or store
+never having happened for another reason — fall into issuance:
+generate a keypair locally, submit a CSR, receive a CA-signed escrow
+certificate back, then immediately encrypt the new private key to the
+Credentials Agent's own escrow key and store it via the general store
+mechanism, so every subsequent rejuvenation retrieves instead of
+reissuing.
+
+**Why the normal re-encrypt-to-the-requester's-key pattern breaks
+specifically here.** The general secret-retrieve flow (once fully
+built) re-encrypts a stored secret to the requester's own,
+already-stable, CA-signed escrow certificate — no circularity, since
+the requester already has a durable key to receive with. Retrieving
+*one's own escrow keypair for the first time* is different: the thing
+being retrieved *is* the agent's only durable key, so at the moment of
+the request, no such stable key yet exists to encrypt the response to.
+The only alternative would be the agent's ephemeral mTLS certificate —
+precisely the cross-purpose key reuse this document already rejects
+elsewhere. This is a real, narrow circularity specific to this one
+bootstrap case, not a flaw in the general store/retrieve design.
+
+**Resolution: ephemeral key exchange for this one response.** The
+requesting agent generates a throwaway X25519 keypair solely for this
+request, sending its ephemeral public half alongside the retrieve
+request. The Credentials Agent generates its own matching ephemeral
+keypair, performs an X25519 ECDH exchange to derive a one-time shared
+secret (via HKDF), uses it to AES-256-GCM-encrypt the response, and
+returns its own ephemeral public key alongside the ciphertext so the
+requester can independently derive the same shared secret. Both
+ephemeral keypairs are discarded immediately after this single
+exchange completes.
+
+**Protecting the escrowed private key after retrieval: the actual
+threat this addresses.** The mTLS private key already has a hard upper
+bound on any compromise's value — an hour, then it's dead regardless
+of what happens to the process. The escrow private key has no such
+bound; it's specifically designed to outlive any single pod's
+lifetime, which makes it a genuinely more valuable target for a
+process-level compromise (an observer parsing untrusted external
+payloads, for instance) to steal and carry forward. This doesn't
+defend against a still-live, compromised process *misusing* the key
+while it runs — that's what runtime attestation (a separate, already-
+named piece of this system's own architecture, not yet built) exists
+to eventually help operators detect. What this defends against
+specifically is key *extraction*: a compromise that reads the raw
+private key out of process memory and carries it elsewhere.
+
+**Primary mechanism: the Linux kernel keyring, when the init container
+can set it up.** The init container performs the retrieve-or-issue-
+then-escrow sequence above and, if the pod's own container-runtime
+configuration supports it, adds the resulting private key to the
+pod's shared session-keyring via the kernel's asymmetric-key subsystem
+(`add_key()`), writing only the resulting integer key-serial handle to
+the same shared `emptyDir` volume already used for `cert.pem`/
+`key.pem` (a new file, `escrow-key-handle`). `CryptoActor` (below)
+references that serial directly for `KEYCTL_PKEY_DECRYPT`/
+`KEYCTL_PKEY_SIGN` operations — the raw private key bytes are never
+copied into the agent's own userspace-readable memory at all, at any
+point.
+
+**Runtime capability detection, not static environment detection.**
+Whether a pod's containers genuinely share a kernel keyring namespace
+depends on the container runtime's own configuration (gVisor, Kata
+Containers, or explicit per-container user-namespace isolation all
+break this) — a property that's fragile to detect statically from
+inside a container. Instead, `CryptoActor` empirically tries a cheap,
+harmless keyring operation (a `KEYCTL_PKEY_QUERY` or equivalent read)
+against the handle immediately on startup. Success means kernel-
+keyring sharing genuinely works in this deployment, and `CryptoActor`
+proceeds using `keyctl` operations directly, never holding the raw
+key itself. Failure — or the handle never having been written at all,
+because the init container's own attempt to set one up failed or
+wasn't attempted — means `CryptoActor` transparently runs the entire
+retrieve-or-issue-then-escrow sequence itself, holding the resulting
+private key in its own process memory for the pod's remaining
+lifetime. Either way, every other actor in the process sees the same,
+identical interface from `CryptoActor` — which path was taken is
+never visible outside it.
+
+## CryptoActor: the process-local gateway to the Credentials Agent
+
+**The single, exclusive path.** No actor other than `CryptoActor`
+itself ever talks to the Credentials Agent, or holds a Cassini
+connection for that purpose. Every credential request and every
+cryptographic operation any actor in the process needs is a local,
+in-process actor call to `CryptoActor` — encapsulating both agent-
+escrow-identity custody (see "Agent escrow bootstrap," above) and
+general secret store/retrieve behind one, consistent interface.
+
+**Two genuinely different categories of thing flow through it, with
+different sharing rules:**
+
+- **The agent's own escrow private key never leaves `CryptoActor`.**
+  No operation hands it back to a requesting actor as raw bytes; it's
+  used internally, purely to perform sign/encrypt/decrypt operations
+  *on behalf of* whichever actor asked. This is what keeps the
+  kernel-keyring protection (or, in its absence, `CryptoActor`'s own
+  in-memory custody) meaningful — the boundary that actually matters
+  is "inside vs. outside `CryptoActor`," not merely "inside vs.
+  outside the process."
+- **General stored secrets** (a GitLab access token, for example) are
+  handed back to the requesting actor as plaintext — there's no
+  meaningful "operation" to perform on a bearer token other than using
+  it directly. These are a pass-through of whatever a `StoreSecretReply`/
+  future retrieve-reply payload from the Credentials Agent itself
+  already contained; `CryptoActor` is not a vault for this category,
+  only for the agent's own escrow identity.
+
+**Local caching.** `CryptoActor` may cache what it learns (another
+agent's escrow public key, once queried, does not need re-querying on
+every subsequent local request to encrypt something to that same
+target) — reducing redundant round-trips to the Credentials Agent
+without weakening either sharing rule above.
+
+**Relationship to the agent's own `TcpClientActor`.** Two distinct
+entry points exist, for two genuinely different purposes:
+
+1. **Direct actor → `CryptoActor` calls**, for credential retrieval
+   and any standalone cryptographic operation an actor needs on its
+   own behalf (an observer wanting the plaintext GitLab token it
+   itself stored earlier, for instance).
+2. **The "encrypt and send" flow**, which stays inside the familiar,
+   already-existing `TcpClientActor` interface every actor already
+   uses to publish anything. A requesting actor asks `TcpClientActor`
+   to encrypt-and-publish a payload to a named recipient (and a
+   topic/queue) exactly the way it already asks for an ordinary,
+   unencrypted publish — one message, one actor to talk to, whether or
+   not encryption is involved. `TcpClientActor` itself delegates to
+   `CryptoActor` internally for the encryption step, then proceeds
+   with its own, ordinary queue-management and delivery machinery
+   unchanged.
+
+**Fire-and-forget only, in both directions, between `CryptoActor` and
+`TcpClientActor` — never a blocking call.** Every `TcpClientActor`
+interaction anywhere else in this system has always been
+fire-and-forget (`TcpClientMessage::publish`'s own doc comment: "Publish
+is fire-and-forget at the `TcpClientMessage` level"); the actual
+request/reply semantics this system needs have always lived one layer
+up, via the correlation-ID/`Envelope<T>` pattern already established
+throughout this document, never by one actor blocking on a
+`ractor::rpc::call` to `TcpClientActor` itself. This matters
+concretely here: a blocking call from `TcpClientActor` into
+`CryptoActor`, where `CryptoActor` in turn needs to send a message
+back through that same, now-blocked `TcpClientActor` instance (to
+query a recipient's escrow public key it doesn't yet have cached, for
+example) is a genuine deadlock — ractor's own sequential-mailbox
+guarantee means `TcpClientActor` cannot process that inbound query
+until its own, currently-paused `handle()` call returns, which is
+itself waiting on `CryptoActor`, which is waiting on `TcpClientActor`
+processing that very message. Kept strictly fire-and-forget in both
+directions, with correlation-ID-based replies instead of blocking
+awaits, this circular-wait shape cannot arise. No second Cassini
+connection is needed to avoid it — one connection, one `TcpClientActor`,
+shared safely by both the agent's own ordinary traffic and
+`CryptoActor`'s own Credentials-Agent traffic, precisely because
+neither side of that sharing ever blocks the other.
+
 ## Escrow-key and certificate-lookup queries
 
 Three related but genuinely distinct request/reply queries exist, all
@@ -320,7 +490,9 @@ the analogous lookup for an *agent's own* escrow public key (its
 service identity, per "Agent escrow identity," above), as opposed to
 either the Credentials Agent's own escrow key or an agent's ephemeral
 mTLS certificate. This is the key another agent actually encrypts
-agent-to-agent payloads to.
+agent-to-agent payloads to -- and, per "CryptoActor," above, is what
+`CryptoActor` itself queries (and caches) on behalf of the
+"encrypt and send" flow.
 
 Every one of these queries is internal-agent-only today, not proxied
 through the observer the way issuance is -- an external, non-Cassini
@@ -351,6 +523,13 @@ and `fetcher` (a human's own tool, talking to the observer's HTTP
 gateway, since a human isn't a Cassini participant yet at the point
 they need this). Correlation-ID request/reply bookkeeping still lives
 in `lib`/`polar` as originally planned, not duplicated in either.
+`CryptoActor` itself (see above) is expected to live in its own,
+standalone crate -- not `lib`/`polar`, and not credentials-agent-
+specific -- mirroring `polar-health`'s own, already-established
+pattern exactly: a dedicated crate any agent depends on and
+`spawn_linked`s directly within its own supervisor, passing
+agent-specific configuration through its own `Args` type the same way
+`HealthCheckArgs` already does.
 
 Two further extractions this introduces, worth naming explicitly since
 they're refactors of existing code, not purely new additions:
@@ -377,7 +556,8 @@ they're refactors of existing code, not purely new additions:
   human-issuance flow's actual decision to hash *the access token
   specifically* and bind it via that primitive is flow-specific
   business logic, and stays in `fetcher`. The agent escrow-identity
-  CSR flow (see above) is expected to reuse `csr-utils` the same way.
+  CSR flow (see above) is expected to reuse `csr-utils` the same way,
+  from within `CryptoActor`.
 
 ## Architecture: observer and consumer
 
@@ -526,20 +706,23 @@ made independently, at any earlier point.
 ### Automated agent escrow-identity issuance (steady state, fully automated)
 
 The third lifecycle, alongside admin bootstrap and user self-service
-issuance -- see "Agent escrow identity," above, for the full design.
-In brief: an agent generates its own escrow keypair locally, builds a
-CSR via `csr-utils`, and submits it, authorized purely by its own
+issuance -- see "Agent escrow identity" and "Agent escrow bootstrap,"
+above, for the full design. In brief: `CryptoActor`, on the affected
+agent's own behalf, first attempts to retrieve a previously-escrowed
+keypair for its own service identity; only if none exists does it fall
+into issuance -- generating its own escrow keypair locally, building a
+CSR via `csr-utils`, and submitting it, authorized purely by its own
 already-validated service identity (no separate grant lookup, the same
 reasoning admin bootstrap already uses). The Credentials Agent embeds
 a permission set into the resulting certificate automatically, playing
 the "admin" role itself for this one flow -- uniform across all agents
 today, with a named path to becoming agent-specific once the
 Credentials Agent can source real per-agent configuration from the
-scheduler. The resulting keypair-plus-certificate is then escrowed
-through the same general `EscrowedSecret` mechanism this document
-already describes, so a rejuvenated pod retrieves its service's
-existing escrow identity rather than generating a new one and
-orphaning any ciphertext already sent to the old one.
+scheduler. `CryptoActor` then immediately escrows the resulting
+keypair through the same general `EscrowedSecret` mechanism this
+document already describes, so the next rejuvenation retrieves its
+service's existing escrow identity rather than generating a new one
+and orphaning any ciphertext already sent to the old one.
 
 ## Core services vs. everything else
 
@@ -622,25 +805,33 @@ identity alone, is what makes this safe rather than disruptive:
 - OCSP, as a live alternative or complement to a periodically-published
   CRL. The CRL is the simpler mechanism to get working first; OCSP is a
   documented, real future upgrade, not a rejected idea.
-- The actual secret-escrow store/retrieve flow -- an agent handing off
-  a real secret (a repository access token, for example) for the
-  Credentials Agent to hold and later relay to an authorized consumer.
-  The prerequisites are built: the Credentials Agent's own escrow-key
-  query (so a holder knows what public key to encrypt to), the
-  certificate-lookup query (so the Credentials Agent knows an agent's
-  current mTLS public key when that's the right target), and
-  `IssuanceCompleted` carrying the real certificate PEM each of those
-  queries answers with. Not yet built: the `EscrowedSecret` type
-  itself, the store/retrieve request/reply message pair, and the
-  handler actually performing the decrypt-reencrypt-destroy relay
-  described in "Secret escrow," above.
+- The general secret-retrieve flow itself -- the decrypt-reencrypt-
+  destroy relay described in "Secret escrow," above, for the general
+  case (an agent retrieving a secret it, or another agent, stored
+  earlier, re-encrypted to that agent's own already-stable escrow
+  certificate). Store, and everything store depends on, is built; this
+  specific relay is not.
+- `CryptoActor` itself, in full: the process-local actor described
+  above, its kernel-keyring integration and runtime capability
+  detection, its in-memory fallback custody path, its local cache, and
+  its delegation relationship with `TcpClientActor` for the
+  "encrypt and send" flow. Expected to be its own, standalone crate
+  (mirroring `polar-health`), not credentials-agent-specific.
 - The agent escrow-identity CSR flow described in "Agent escrow
-  identity," above, in full: the CSR submission path itself, the
-  automated-issuance permission-embedding logic, the agent escrow-key
-  query (a third query alongside the two described in "Escrow-key and
-  certificate-lookup queries"), and escrowing an agent's own keypair
-  across rejuvenation via the general store/retrieve mechanism once it
-  exists.
+  identity" and "Automated agent escrow-identity issuance," above, in
+  full: the CSR submission path itself, the automated-issuance
+  permission-embedding logic, and the agent escrow-key query (a third
+  query alongside the two described in "Escrow-key and
+  certificate-lookup queries").
+- The ephemeral X25519/HKDF key-exchange mechanism described in "Agent
+  escrow bootstrap," above -- specific to the one-time "retrieve my
+  own escrow keypair for the first time" response, where no stable
+  requester key yet exists to encrypt to normally.
+- The init container's own extension to attempt kernel-keyring setup
+  as part of its existing handshake, including the runtime-dependent
+  question of whether a given deployment's container-runtime
+  configuration actually shares a session-keyring across a pod's
+  containers at all.
 - Sourcing agent-specific (rather than uniform) permission sets for
   automated agent escrow-identity issuance from the scheduler agent,
   once the scheduler's own credential-schedule work exists.
@@ -648,6 +839,12 @@ identity alone, is what makes this safe rather than disruptive:
   queries (and the future agent escrow-key query) for external,
   non-Cassini callers, the way it already does for issuance -- all are
   internal-agent-only today.
+- A real "infrastructure failure vs. deterministic refusal" reply
+  variant for `IssuanceReply`, mirroring the distinction
+  `StoreSecretReply::Failed` already draws -- today, a signed
+  certificate that fails to append to the ledger is still reported to
+  the caller as `Issued`, the same shape of gap `StoreSecretReply`
+  was corrected to avoid.
 - A checkpoint/compaction mechanism for the event log, if unbounded
   growth ever becomes an actual, measured problem.
 

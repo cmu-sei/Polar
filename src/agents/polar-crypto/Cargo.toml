@@ -1,0 +1,19 @@
+[ package ]
+name = "polar-crypto"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[ dependencies ]
+ractor = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+rkyv = { workspace = true }
+uuid = { workspace = true }
+polar = { workspace = true }
+cassini-client = { workspace = true }
+cassini-types = { workspace = true }
+credentials_agent_common = { workspace = true }
+thiserror.workspace = true
+rsa.workspace = true

@@ -4900,6 +4900,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "polar-crypto"
+version = "1.0.0"
+dependencies = [
+ "cassini-client",
+ "cassini-types",
+ "credentials_agent_common",
+ "polar",
+ "ractor",
+ "rkyv",
+ "rsa",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "polar-health"
 version = "1.0.0"
 dependencies = [

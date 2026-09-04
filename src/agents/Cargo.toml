@@ -62,6 +62,7 @@ members = [
     "openapi/common",
     "openapi/process",
     "openapi/observe",
+    "polar-crypto",
     "polar-health",
     "polar-healthcheck",
     "polar-init",
@@ -191,6 +192,7 @@ jira_common = { path = "jira/common" }
 jwt_utils = { path = "jwt-utils" }
 kube-common = { path = "kubernetes/common" }
 polar = { path = "lib" }
+polar-crypto = { path = "polar-crypto" }
 polar-health = { path = "polar-health" }
 polar-init = { path = "polar-init" }
 openapi-common = { path = "openapi/common" }
