@@ -149,6 +149,13 @@ impl Handler {
             .unwrap_or(match request.cert_type {
                 cert_issuer_common::CertType::Server => self.server_lifetime,
                 cert_issuer_common::CertType::Client => self.default_lifetime,
+                // Not short-lived like Client -- the actual security
+                // mechanism protecting a service's own durable
+                // identity is scheduled rotation plus real
+                // revocation (once implemented), not a tight expiry
+                // window, matching server_lifetime's own existing
+                // "not meant to expire in an hour" reasoning exactly.
+                cert_issuer_common::CertType::Service => self.server_lifetime,
             });
 
         let ca_request = CaIssueRequest {

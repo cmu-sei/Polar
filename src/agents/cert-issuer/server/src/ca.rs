@@ -164,9 +164,21 @@ impl CaClient for RcgenCaClient {
                 ExtendedKeyUsagePurpose::ServerAuth,
                 ExtendedKeyUsagePurpose::ClientAuth, // keep both — Cassini connects to peers too
             ],
+            // No standard ExtendedKeyUsage purpose (ClientAuth,
+            // ServerAuth, EmailProtection, etc.) accurately describes
+            // "agent-to-agent payload encryption" -- left empty
+            // rather than forcing a misleading fit.
+            CertType::Service => vec![],
         };
         csr.params.extended_key_usages = eku;
-        csr.params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+        csr.params.key_usages = match req.cert_type {
+            CertType::Client | CertType::Server => vec![KeyUsagePurpose::DigitalSignature],
+            // This certificate's actual cryptographic purpose is
+            // RSA-OAEP key-wrapping (this project's own hybrid
+            // encryption scheme -- see credentials-agent-architecture.md's
+            // "Secret escrow"), not signing anything.
+            CertType::Service => vec![KeyUsagePurpose::KeyEncipherment],
+        };
         csr.params.not_before = not_before;
         csr.params.not_after = not_after;
 

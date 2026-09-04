@@ -9,26 +9,31 @@ use time::OffsetDateTime;
 pub mod identity;
 
 // cert_issuer_common/src/lib.rs — add to IssueRequest
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, clap::ValueEnum)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, clap::ValueEnum,)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum CertType {
+    #[default]
     Client,
     Server,
+    /// A service's own durable, agent-to-agent encryption identity --
+    /// not a client/server TLS role at all, and deliberately never
+    /// treated as one. See credentials-agent-architecture.md's own
+    /// "Agent escrow identity" section (which calls this a service's
+    /// "escrow keypair" -- named Service here specifically to avoid
+    /// conflating the certificate's own type with the separate
+    /// mechanism, described in the same document, that later escrows
+    /// it alongside its private key).
+    Service,
 }
 
-impl ToString for CertType {
-    fn to_string(&self) -> String {
+impl std::fmt::Display for CertType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let s = match self {
             Self::Client => "client",
             Self::Server => "server",
+            Self::Service => "service",
         };
-        s.into()
-    }
-}
-
-impl Default for CertType {
-    fn default() -> Self {
-        CertType::Client
+        write!(f, "{s}")
     }
 }
 
