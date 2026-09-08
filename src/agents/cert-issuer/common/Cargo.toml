@@ -10,3 +10,7 @@ serde.workspace = true
 thiserror.workspace = true
 time.workspace = true
 clap.workspace = true
+rkyv.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

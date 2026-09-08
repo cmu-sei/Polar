@@ -1056,7 +1056,9 @@ name = "cert-issuer-common"
 version = "1.0.0"
 dependencies = [
  "clap",
+ "rkyv",
  "serde",
+ "serde_json",
  "thiserror 1.0.69",
  "time",
 ]

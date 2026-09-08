@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use time::OffsetDateTime;
 pub mod identity;
+pub mod permission;
 
 // cert_issuer_common/src/lib.rs — add to IssueRequest
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, clap::ValueEnum,)]
