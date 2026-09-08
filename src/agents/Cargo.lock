@@ -1056,6 +1056,7 @@ name = "cert-issuer-common"
 version = "1.0.0"
 dependencies = [
  "clap",
+ "fqdn",
  "rkyv",
  "serde",
  "serde_json",
@@ -2125,6 +2126,12 @@ checksum = "cb4cb245038516f5f85277875cdaa4f7d2c9a0fa0468de06ed190163b1581fcf"
 dependencies = [
  "percent-encoding",
 ]
+
+[[package]]
+name = "fqdn"
+version = "0.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "886ac788f62d16d6b0f26b2fa762b34ef16ebfb4b624c2c15fbcadc9173c0f72"
 
 [[package]]
 name = "fs_extra"
