@@ -23,6 +23,7 @@
 
 mod publish;
 
+use cert_issuer_common::permission::Permission;
 use clap::{Parser, Subcommand};
 use credentials_agent_common::events::{CredentialsEvent, GrantReason, RevocationReason};
 use credentials_agent_common::{CREDENTIALS_GRANTS_TOPIC, CREDENTIALS_REVOCATIONS_TOPIC};
@@ -47,9 +48,14 @@ enum Command {
     Grant {
         #[arg(long)]
         target_identity: String,
-        /// May be specified multiple times: --permission read --permission write
-        #[arg(long = "permission", required = true)]
-        permissions: Vec<String>,
+        /// Terse scope[:target] form -- may be specified multiple
+        /// times: --permission p:s2s:cassini.cluster.local
+        /// --permission p:u2s. Scopes: s2s (service-to-service), s2u
+        /// (service-to-user), u2s (user-to-service), u2u
+        /// (user-to-user). Target is an optional FQDN, validated the
+        /// same way it will be when the certificate itself is parsed.
+        #[arg(long = "permission", required = true, value_parser = Permission::from_san_string)]
+        permissions: Vec<Permission>,
         #[arg(long)]
         granted_by: String,
         #[arg(long, value_enum)]
@@ -134,7 +140,10 @@ mod tests {
     fn grant_command_produces_the_right_event_and_topic() {
         let command = Command::Grant {
             target_identity: "testuser".to_string(),
-            permissions: vec!["read".to_string(), "write".to_string()],
+            permissions: vec![
+                Permission::from_san_string("p:s2s:cassini.cluster.local").unwrap(),
+                Permission::from_san_string("p:u2s").unwrap(),
+            ],
             granted_by: "admin".to_string(),
             reason: GrantReason::UserOnboarding,
         };
@@ -150,7 +159,13 @@ mod tests {
                 ..
             } => {
                 assert_eq!(target_identity, "testuser");
-                assert_eq!(permissions, vec!["read".to_string(), "write".to_string()]);
+                assert_eq!(
+                    permissions,
+                    vec![
+                        Permission::from_san_string("p:s2s:cassini.cluster.local").unwrap(),
+                        Permission::from_san_string("p:u2s").unwrap(),
+                    ]
+                );
                 assert_eq!(granted_by, "admin");
             }
             other => panic!("expected Grant, got {other:?}"),

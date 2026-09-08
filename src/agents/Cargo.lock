@@ -4901,6 +4901,7 @@ version = "1.0.0"
 dependencies = [
  "cassini-client",
  "cassini-types",
+ "cert-issuer-common",
  "clap",
  "credentials_agent_common",
  "polar",

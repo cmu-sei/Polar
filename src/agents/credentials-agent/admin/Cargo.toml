@@ -24,6 +24,7 @@ license.workspace = true
 [dependencies]
 cassini-client.workspace = true
 cassini-types.workspace = true
+cert-issuer-common = { version = "1.0.0", path = "../../cert-issuer/common" }
 clap = { version = "4.5.60", features = ["derive"] }
 credentials_agent_common.workspace = true
 polar.workspace = true
