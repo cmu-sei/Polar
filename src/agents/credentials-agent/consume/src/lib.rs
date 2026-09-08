@@ -38,3 +38,4 @@ pub mod certificate;
 pub mod certificate_actor;
 pub mod store_secret;
 pub mod store_secret_actor;
+pub mod agent_escrow_issuance;

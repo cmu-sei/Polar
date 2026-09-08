@@ -106,6 +106,16 @@ pub enum LedgerMessage {
         identity: String,
         reply: RpcReplyPort<Option<CertificateRecord>>,
     },
+    /// Whether `identity` already holds a currently-issued agent
+    /// escrow-identity (CertType::Service) certificate -- the
+    /// identity-scoped analog CheckRenewal's own
+    /// (identity, instance_binding)-scoped check is for ordinary mTLS
+    /// issuance. AgentEscrowIssuanceHandler's own version of "pods
+    /// cannot request their own renewal."
+    CheckAgentEscrowCertificate {
+        identity: String,
+        reply: RpcReplyPort<bool>,
+    },
     /// Full (hash, event) history, re-read from the log -- used by
     /// ProjectionActor for catch-up: replaying and re-folding through
     /// history to reconstruct correct historical context at each
@@ -202,6 +212,12 @@ impl Actor for LedgerActor {
             LedgerMessage::CheckCertificate { identity, reply } => {
                 let record = state.credentials_state.certificate_for(&identity).cloned();
                 let _ = reply.send(record);
+            }
+            LedgerMessage::CheckAgentEscrowCertificate { identity, reply } => {
+                let has_one = state
+                    .credentials_state
+                    .has_agent_escrow_certificate(&identity);
+                let _ = reply.send(has_one);
             }
             LedgerMessage::GetFullHistory { reply } => {
                 let result = state.event_log.replay_with_hashes().map_err(|e| e.to_string());
@@ -306,6 +322,26 @@ pub(crate) mod tests {
         }
     }
 
+    pub(crate) async fn check_agent_escrow_certificate(
+        ledger: &ActorRef<LedgerMessage>,
+        identity: &str,
+    ) -> bool {
+        match ractor::rpc::call(
+            ledger,
+            |reply| LedgerMessage::CheckAgentEscrowCertificate {
+                identity: identity.to_string(),
+                reply,
+            },
+            None,
+        )
+        .await
+        .expect("call should succeed")
+        {
+            ractor::rpc::CallResult::Success(result) => result,
+            other => panic!("expected Success, got {other:?}"),
+        }
+    }
+
     #[tokio::test]
     async fn append_then_check_grant_round_trips_through_real_actor_messages() {
         let dir = tempfile::tempdir().unwrap();
@@ -384,6 +420,35 @@ pub(crate) mod tests {
             "-----BEGIN CERTIFICATE-----\nfake\n-----END CERTIFICATE-----\n"
         );
         assert!(check_certificate(&ledger, "nobody").await.is_none());
+
+        ledger.stop(None);
+    }
+
+    #[tokio::test]
+    async fn agent_escrow_issuance_is_visible_through_the_real_actor() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("events.jsonl");
+        let ledger = spawn_ledger(path.to_str().unwrap()).await;
+
+        assert!(!check_agent_escrow_certificate(&ledger, "git-observer").await);
+
+        append(
+            &ledger,
+            CredentialsEvent::AgentEscrowIssuanceCompleted {
+                identity: "git-observer".to_string(),
+                instance_binding: "pod-uid-1".to_string(),
+                serial: "service-serial-1".to_string(),
+                timestamp: 2000,
+                certificate_pem:
+                    "-----BEGIN CERTIFICATE-----\nfake-service-cert\n-----END CERTIFICATE-----\n"
+                        .to_string(),
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(check_agent_escrow_certificate(&ledger, "git-observer").await);
+        assert!(!check_agent_escrow_certificate(&ledger, "nobody").await);
 
         ledger.stop(None);
     }
