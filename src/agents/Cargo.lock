@@ -1387,6 +1387,7 @@ name = "credentials_agent_common"
 version = "1.0.0"
 dependencies = [
  "aes-gcm",
+ "cert-issuer-common",
  "clap",
  "neo4rs",
  "polar",

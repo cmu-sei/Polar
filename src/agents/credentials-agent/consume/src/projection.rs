@@ -199,7 +199,7 @@ fn graph_ops_for_event(event: &CredentialsEvent, grant_existed: bool) -> Vec<Gra
                             GraphValue::List(
                                 permissions
                                     .iter()
-                                    .map(|p| GraphValue::String(p.clone()))
+                                    .map(|p| GraphValue::String(p.to_san_string()))
                                     .collect(),
                             ),
                         ),
@@ -554,7 +554,16 @@ pub(crate) mod tests {
     fn graph_ops_for_grant_produces_the_correct_upsert() {
         let event = CredentialsEvent::Grant {
             target_identity: "alice".to_string(),
-            permissions: vec!["read".to_string(), "write".to_string()],
+            permissions: vec![
+                cert_issuer_common::permission::Permission {
+                    scope: cert_issuer_common::permission::PermissionScope::ServiceToService,
+                    target: None,
+                },
+                cert_issuer_common::permission::Permission {
+                    scope: cert_issuer_common::permission::PermissionScope::UserToService,
+                    target: None,
+                },
+            ],
             granted_by: "admin".to_string(),
             timestamp: 1000,
             reason: GrantReason::UserOnboarding,

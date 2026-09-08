@@ -629,7 +629,10 @@ mod tests {
 
         let event = CredentialsEvent::Grant {
             target_identity: "alice".to_string(),
-            permissions: vec!["read".to_string()],
+            permissions: vec![cert_issuer_common::permission::Permission {
+                scope: cert_issuer_common::permission::PermissionScope::ServiceToService,
+                target: None,
+            }],
             granted_by: "admin".to_string(),
             timestamp: 1000,
             reason: GrantReason::UserOnboarding,

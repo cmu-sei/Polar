@@ -167,9 +167,10 @@ impl IssuanceHandler {
         };
 
         // ---- Step 6: sign, via cert-issuer's /issue ----
+        let extra_sans: Vec<String> = permissions.iter().map(|p| p.to_san_string()).collect();
         let issued = match self
             .cert_issuer
-            .issue(&request.credential, &request.csr_pem, CertType::Client, permissions)
+            .issue(&request.credential, &request.csr_pem, CertType::Client, extra_sans)
             .await
         {
             Ok(r) => r,
@@ -378,7 +379,7 @@ mod tests {
         Mock::given(method("POST"))
             .and(path("/issue"))
             .and(body_partial_json(serde_json::json!({
-                "extra_sans": ["read", "write"]
+                "extra_sans": ["p:s2s", "p:u2s"]
             })))
             .respond_with(ResponseTemplate::new(200).set_body_json(fake_issue_response()))
             .mount(&server)
@@ -391,7 +392,16 @@ mod tests {
             |reply| LedgerMessage::Append {
                 event: CredentialsEvent::Grant {
                     target_identity: "testuser".to_string(),
-                    permissions: vec!["read".to_string(), "write".to_string()],
+                    permissions: vec![
+                        cert_issuer_common::permission::Permission {
+                            scope: cert_issuer_common::permission::PermissionScope::ServiceToService,
+                            target: None,
+                        },
+                        cert_issuer_common::permission::Permission {
+                            scope: cert_issuer_common::permission::PermissionScope::UserToService,
+                            target: None,
+                        },
+                    ],
                     granted_by: "admin".to_string(),
                     timestamp: 1000,
                     reason: GrantReason::UserOnboarding,

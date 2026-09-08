@@ -27,7 +27,7 @@ use std::collections::HashMap;
 /// A grant currently available to be consumed by a matching issuance.
 #[derive(Debug, Clone, PartialEq)]
 pub struct GrantRecord {
-    pub permissions: Vec<String>,
+    pub permissions: Vec<cert_issuer_common::permission::Permission>,
     pub granted_by: String,
     pub timestamp: i64,
     pub reason: GrantReason,
@@ -254,7 +254,10 @@ mod tests {
     fn grant(identity: &str) -> CredentialsEvent {
         CredentialsEvent::Grant {
             target_identity: identity.to_string(),
-            permissions: vec!["read".to_string()],
+            permissions: vec![cert_issuer_common::permission::Permission {
+                scope: cert_issuer_common::permission::PermissionScope::ServiceToService,
+                target: None,
+            }],
             granted_by: "admin".to_string(),
             timestamp: 1000,
             reason: GrantReason::UserOnboarding,

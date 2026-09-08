@@ -166,12 +166,12 @@ pub enum CredentialsEvent {
     /// this against the IdP directly before publishing.
     Grant {
         target_identity: String,
-        /// Deliberately a plain string list for now -- the concrete
-        /// shape of a "permission" (how it becomes SAN entries, what
-        /// vocabulary it's drawn from) is real, undesigned follow-up
-        /// work, not something to speculatively over-structure here
-        /// ahead of that design.
-        permissions: Vec<String>,
+        /// A real, structured shape now -- see
+        /// cert_issuer_common::permission::Permission's own doc
+        /// comment for the design (RBAC-style scope + optional FQDN
+        /// target, embedded into the certificate's own SAN set at
+        /// issuance time via Permission::to_san_string).
+        permissions: Vec<cert_issuer_common::permission::Permission>,
         granted_by: String,
         timestamp: i64,
         reason: GrantReason,
@@ -241,7 +241,16 @@ mod tests {
     fn sample_grant() -> CredentialsEvent {
         CredentialsEvent::Grant {
             target_identity: "jdoe".to_string(),
-            permissions: vec!["read".to_string(), "write".to_string()],
+            permissions: vec![
+                cert_issuer_common::permission::Permission {
+                    scope: cert_issuer_common::permission::PermissionScope::UserToService,
+                    target: Some("cassini.cluster.local".to_string()),
+                },
+                cert_issuer_common::permission::Permission {
+                    scope: cert_issuer_common::permission::PermissionScope::UserToUser,
+                    target: None,
+                },
+            ],
             granted_by: "admin".to_string(),
             timestamp: 1767225600000,
             reason: GrantReason::UserOnboarding,
