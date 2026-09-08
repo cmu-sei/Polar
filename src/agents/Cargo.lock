@@ -1057,11 +1057,14 @@ version = "1.0.0"
 dependencies = [
  "clap",
  "fqdn",
+ "rcgen",
  "rkyv",
+ "rsa",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
  "time",
+ "x509-parser 0.16.0",
 ]
 
 [[package]]
