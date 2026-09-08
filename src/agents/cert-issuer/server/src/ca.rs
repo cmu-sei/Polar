@@ -146,14 +146,27 @@ impl CaClient for RcgenCaClient {
             .sans
             .iter()
             .map(|s| {
-                rcgen::SanType::DnsName(
-                    s.clone()
-                        .try_into()
-                        .map_err(|e| CaError::Malformed(format!("SAN: {e}")))
-                        .unwrap(),
-                )
+                let ia5 = s
+                    .clone()
+                    .try_into()
+                    .map_err(|e| CaError::Malformed(format!("SAN: {e}")))?;
+                // A Permission's own SAN-string form (see
+                // cert_issuer_common::permission::Permission::to_san_string)
+                // is not hostname-shaped -- it's deliberately terse,
+                // colon-delimited metadata (p:s2s:cassini.cluster.local),
+                // which DnsName's own semantic expectations don't fit,
+                // even though the underlying Ia5String type itself
+                // permits the characters. URI carries no such
+                // hostname expectation; a colon is ordinary,
+                // defining syntax there. Every other extra SAN keeps
+                // its existing DnsName treatment.
+                if s.starts_with("p:") {
+                    Ok(rcgen::SanType::URI(ia5))
+                } else {
+                    Ok(rcgen::SanType::DnsName(ia5))
+                }
             })
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>, CaError>>()?;
 
         let not_before = OffsetDateTime::now_utc();
         let not_after = not_before + req.lifetime;
@@ -631,6 +644,116 @@ mod tests {
             })
             .collect();
         assert_eq!(dns_names, vec![identity]);
+    }
+
+    #[tokio::test]
+    async fn permission_shaped_san_is_embedded_as_uri_not_dns_name() {
+        let client = make_client();
+        let identity = "git-observer.polar.svc.cluster.local";
+        let permission_san = "p:s2s:cassini.cluster.local";
+        let req = CaIssueRequest {
+            csr_pem: make_csr(identity),
+            sans: vec![identity.to_string(), permission_san.to_string()],
+            lifetime: Duration::from_secs(3600),
+            cert_type: CertType::Client,
+        };
+        let result = client.issue(req).await.expect("must succeed");
+
+        let (_, pem) =
+            x509_parser::pem::parse_x509_pem(result.certificate_pem.as_bytes()).expect("pem");
+        let (_, cert) = x509_parser::parse_x509_certificate(&pem.contents).expect("x509");
+
+        let san_ext = cert
+            .extensions()
+            .iter()
+            .find_map(|e| match e.parsed_extension() {
+                x509_parser::extensions::ParsedExtension::SubjectAlternativeName(s) => Some(s),
+                _ => None,
+            })
+            .expect("SAN extension present");
+
+        let dns_names: Vec<&str> = san_ext
+            .general_names
+            .iter()
+            .filter_map(|n| match n {
+                x509_parser::extensions::GeneralName::DNSName(d) => Some(*d),
+                _ => None,
+            })
+            .collect();
+        let uris: Vec<&str> = san_ext
+            .general_names
+            .iter()
+            .filter_map(|n| match n {
+                x509_parser::extensions::GeneralName::URI(u) => Some(*u),
+                _ => None,
+            })
+            .collect();
+
+        // The permission-shaped SAN must land as URI, not DnsName --
+        // and the identity SAN must still be DnsName, proving the
+        // distinction is genuinely per-entry, not all-or-nothing.
+        assert_eq!(dns_names, vec![identity]);
+        assert_eq!(uris, vec![permission_san]);
+    }
+
+    #[tokio::test]
+    async fn ordinary_extra_san_is_still_embedded_as_dns_name() {
+        let client = make_client();
+        let identity = "git-observer.polar.svc.cluster.local";
+        let extra_hostname = "extra-host.cluster.local";
+        let req = CaIssueRequest {
+            csr_pem: make_csr(identity),
+            sans: vec![identity.to_string(), extra_hostname.to_string()],
+            lifetime: Duration::from_secs(3600),
+            cert_type: CertType::Client,
+        };
+        let result = client.issue(req).await.expect("must succeed");
+
+        let (_, pem) =
+            x509_parser::pem::parse_x509_pem(result.certificate_pem.as_bytes()).expect("pem");
+        let (_, cert) = x509_parser::parse_x509_certificate(&pem.contents).expect("x509");
+
+        let san_ext = cert
+            .extensions()
+            .iter()
+            .find_map(|e| match e.parsed_extension() {
+                x509_parser::extensions::ParsedExtension::SubjectAlternativeName(s) => Some(s),
+                _ => None,
+            })
+            .expect("SAN extension present");
+
+        let dns_names: Vec<&str> = san_ext
+            .general_names
+            .iter()
+            .filter_map(|n| match n {
+                x509_parser::extensions::GeneralName::DNSName(d) => Some(*d),
+                _ => None,
+            })
+            .collect();
+
+        // A non-permission-shaped extra SAN must keep its existing,
+        // pre-change behavior -- proving this fix didn't regress the
+        // ordinary case while fixing the permission one.
+        assert_eq!(dns_names, vec![identity, extra_hostname]);
+    }
+
+    #[tokio::test]
+    async fn malformed_san_returns_an_error_not_a_panic() {
+        let client = make_client();
+        let identity = "git-observer.polar.svc.cluster.local";
+        // Non-ASCII -- Ia5String::try_from genuinely rejects this;
+        // before this fix, the surrounding .unwrap() would have
+        // panicked the whole process on input like this rather than
+        // returning a real error.
+        let req = CaIssueRequest {
+            csr_pem: make_csr(identity),
+            sans: vec![identity.to_string(), "café.example.com".to_string()],
+            lifetime: Duration::from_secs(3600),
+            cert_type: CertType::Client,
+        };
+
+        let result = client.issue(req).await;
+        assert!(matches!(result, Err(CaError::Malformed(_))));
     }
 
     #[tokio::test]
