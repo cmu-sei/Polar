@@ -297,6 +297,50 @@ fn graph_ops_for_event(event: &CredentialsEvent, grant_existed: bool) -> Vec<Gra
         // full cert PEM does. Lookup goes through LedgerActor's own
         // CredentialsState directly, not the graph.
         CredentialsEvent::SecretStored { .. } => vec![],
+        CredentialsEvent::AgentEscrowIssuanceCompleted {
+            identity,
+            instance_binding,
+            serial,
+            timestamp,
+            // Deliberately not projected, same reasoning as
+            // IssuanceCompleted's own certificate_pem above.
+            certificate_pem: _,
+        } => {
+            let mut items = vec![(
+                CredentialsNodeKey::AgentEscrowCertificate {
+                    serial: serial.clone(),
+                }
+                .into_key(),
+                vec![
+                    Property("identity".to_string(), GraphValue::String(identity.clone())),
+                    Property(
+                        "instance_binding".to_string(),
+                        GraphValue::String(instance_binding.clone()),
+                    ),
+                    Property("issued_at".to_string(), GraphValue::I64(*timestamp)),
+                ],
+            )];
+
+            // Same reasoning as IssuanceCompleted's own grant-existed
+            // check above -- never create a spurious grant node for
+            // the (far more common, given the uniform-permission
+            // default) case where no Grant event ever existed for
+            // this identity at all.
+            if grant_existed {
+                items.push((
+                    CredentialsNodeKey::Grant {
+                        target_identity: identity.clone(),
+                    }
+                    .into_key(),
+                    vec![
+                        Property("consumed".to_string(), GraphValue::Bool(true)),
+                        Property("consumed_at".to_string(), GraphValue::I64(*timestamp)),
+                    ],
+                ));
+            }
+
+            vec![GraphOp::UpsertNodes { items }]
+        }
     }
 }
 
@@ -372,7 +416,8 @@ fn event_timestamp(event: &CredentialsEvent) -> i64 {
         CredentialsEvent::Grant { timestamp, .. }
         | CredentialsEvent::Revoke { timestamp, .. }
         | CredentialsEvent::IssuanceCompleted { timestamp, .. }
-        | CredentialsEvent::SecretStored { timestamp, .. } => *timestamp,
+        | CredentialsEvent::SecretStored { timestamp, .. }
+        | CredentialsEvent::AgentEscrowIssuanceCompleted { timestamp, .. } => *timestamp,
     }
 }
 
@@ -603,6 +648,36 @@ pub(crate) mod tests {
                 items.len(),
                 1,
                 "only the certificate node -- no spurious grant node for the Kubernetes-bootstrap case"
+            ),
+            other => panic!("expected UpsertNodes, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn graph_ops_for_agent_escrow_issuance_only_marks_grant_consumed_when_one_existed() {
+        let event = CredentialsEvent::AgentEscrowIssuanceCompleted {
+            identity: "git-observer".to_string(),
+            instance_binding: "pod-uid-1".to_string(),
+            serial: "service-serial-1".to_string(),
+            timestamp: 2000,
+            certificate_pem: "-----BEGIN CERTIFICATE-----\nfake-service-cert\n-----END CERTIFICATE-----\n"
+                .to_string(),
+        };
+        let with_grant = graph_ops_for_event(&event, true);
+        match &with_grant[0] {
+            GraphOp::UpsertNodes { items } => assert_eq!(
+                items.len(),
+                2,
+                "agent escrow certificate node + grant-consumed node when a grant existed"
+            ),
+            other => panic!("expected UpsertNodes, got {other:?}"),
+        }
+        let without_grant = graph_ops_for_event(&event, false);
+        match &without_grant[0] {
+            GraphOp::UpsertNodes { items } => assert_eq!(
+                items.len(),
+                1,
+                "only the agent escrow certificate node -- no spurious grant node for the uniform-permission-default case"
             ),
             other => panic!("expected UpsertNodes, got {other:?}"),
         }

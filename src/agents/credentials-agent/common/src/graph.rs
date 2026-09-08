@@ -44,6 +44,16 @@ pub enum CredentialsNodeKey {
     /// already treats a certificate's identity as (cert-issuer's own
     /// telemetry, credentials-agent's own Revoke events).
     Certificate { serial: String },
+    /// An issued agent escrow-identity (CertType::Service)
+    /// certificate, keyed on its own serial number. A distinct node
+    /// type from Certificate, not folded into it -- these are
+    /// genuinely different kinds of certificate (a service's durable
+    /// identity vs. a pod-instance's ephemeral mTLS credential), and
+    /// today's shared serial_index/Revoke fold logic doesn't even
+    /// track these two kinds of certificate together (see
+    /// AgentEscrowCertificateRecord's own doc comment, in
+    /// credentials-agent/consume's state.rs).
+    AgentEscrowCertificate { serial: String },
     /// A singleton node tracking exactly how far this projection has
     /// caught up with the event log -- there is and only ever will be
     /// exactly one of these.
@@ -64,6 +74,13 @@ impl GraphNodeKey for CredentialsNodeKey {
                 let k = format!("{prefix}_serial");
                 (
                     format!("({prefix}:CredentialsCertificate {{ serial: ${k} }})"),
+                    vec![(k, BoltType::String(serial.clone().into()))],
+                )
+            }
+            CredentialsNodeKey::AgentEscrowCertificate { serial } => {
+                let k = format!("{prefix}_serial");
+                (
+                    format!("({prefix}:CredentialsAgentEscrowCertificate {{ serial: ${k} }})"),
                     vec![(k, BoltType::String(serial.clone().into()))],
                 )
             }

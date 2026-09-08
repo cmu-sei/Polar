@@ -54,6 +54,22 @@ pub struct CertificateRecord {
     pub revoked_at: Option<i64>,
 }
 
+/// A currently-issued agent escrow-identity (CertType::Service)
+/// certificate -- keyed on identity alone, per
+/// AgentEscrowIssuanceCompleted's own doc comment, not
+/// (identity, instance_binding). Deliberately does not track
+/// revocation yet -- Revoke events today only ever look up (and
+/// mark) entries in valid_certificates, never this map. A real,
+/// separate expansion, named here rather than silently assumed:
+/// service-certificate revocation.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AgentEscrowCertificateRecord {
+    pub instance_binding: String,
+    pub serial: String,
+    pub timestamp: i64,
+    pub certificate_pem: String,
+}
+
 /// The Credentials Agent's derived state -- entirely a function of
 /// folding `credentials_agent_common::events::CredentialsEvent`
 /// through `apply()`, in order, from an empty state. Never itself
@@ -86,6 +102,12 @@ pub struct CredentialsState {
     /// event log itself never rewrites history, so the superseded
     /// EscrowedSecret remains recoverable by replay regardless).
     stored_secrets: HashMap<String, credentials_agent_common::escrow_secret::EscrowedSecret>,
+
+    /// Every currently-issued agent escrow-identity certificate,
+    /// keyed on identity alone -- see AgentEscrowCertificateRecord's
+    /// own doc comment for why this is a separate map from
+    /// valid_certificates, not folded into it.
+    agent_escrow_certificates: HashMap<String, AgentEscrowCertificateRecord>,
 }
 
 impl CredentialsState {
@@ -206,6 +228,23 @@ impl CredentialsState {
                 // truly lost, only no longer current.
                 self.stored_secrets.insert(name.clone(), secret.clone());
             }
+            CredentialsEvent::AgentEscrowIssuanceCompleted {
+                identity,
+                instance_binding,
+                serial,
+                timestamp,
+                certificate_pem,
+            } => {
+                self.agent_escrow_certificates.insert(
+                    identity.clone(),
+                    AgentEscrowCertificateRecord {
+                        instance_binding: instance_binding.clone(),
+                        serial: serial.clone(),
+                        timestamp: *timestamp,
+                        certificate_pem: certificate_pem.clone(),
+                    },
+                );
+            }
         }
         superseded_serials
     }
@@ -245,6 +284,26 @@ impl CredentialsState {
     ) -> Option<&credentials_agent_common::escrow_secret::EscrowedSecret> {
         self.stored_secrets.get(name)
     }
+
+    /// True if `identity` already holds a currently-issued agent
+    /// escrow-identity certificate -- the check
+    /// AgentEscrowIssuanceHandler uses in place of the pod-instance-
+    /// scoped renewal-prevention check human/workload mTLS issuance
+    /// uses instead.
+    pub fn has_agent_escrow_certificate(&self, identity: &str) -> bool {
+        self.agent_escrow_certificates.contains_key(identity)
+    }
+
+    /// The agent escrow-identity certificate record for `identity`,
+    /// if one has ever been issued -- backs the agent escrow-key
+    /// query (credentials-agent-architecture.md's own "Escrow-key and
+    /// certificate-lookup queries" section, third query).
+    pub fn agent_escrow_certificate_for(
+        &self,
+        identity: &str,
+    ) -> Option<&AgentEscrowCertificateRecord> {
+        self.agent_escrow_certificates.get(identity)
+    }
 }
 
 #[cfg(test)]
@@ -271,6 +330,17 @@ mod tests {
             serial: serial.to_string(),
             timestamp: 2000,
             certificate_pem: "-----BEGIN CERTIFICATE-----\nfake\n-----END CERTIFICATE-----\n"
+                .to_string(),
+        }
+    }
+
+    fn agent_escrow_issued(identity: &str, instance_binding: &str, serial: &str) -> CredentialsEvent {
+        CredentialsEvent::AgentEscrowIssuanceCompleted {
+            identity: identity.to_string(),
+            instance_binding: instance_binding.to_string(),
+            serial: serial.to_string(),
+            timestamp: 2000,
+            certificate_pem: "-----BEGIN CERTIFICATE-----\nfake-service-cert\n-----END CERTIFICATE-----\n"
                 .to_string(),
         }
     }
@@ -373,5 +443,63 @@ mod tests {
 
         assert!(state.grant_for("alice").is_none());
         assert!(!state.has_valid_certificate("alice", "pod-uid-1"));
+    }
+
+    #[test]
+    fn agent_escrow_issuance_is_visible_after_being_folded() {
+        let mut state = CredentialsState::new();
+        assert!(!state.has_agent_escrow_certificate("git-observer"));
+        assert!(state.agent_escrow_certificate_for("git-observer").is_none());
+
+        state.apply(&agent_escrow_issued("git-observer", "pod-uid-1", "service-serial-1"));
+
+        assert!(state.has_agent_escrow_certificate("git-observer"));
+        let record = state
+            .agent_escrow_certificate_for("git-observer")
+            .expect("must exist after folding");
+        assert_eq!(record.serial, "service-serial-1");
+        assert_eq!(record.instance_binding, "pod-uid-1");
+    }
+
+    #[test]
+    fn agent_escrow_certificate_is_genuinely_separate_from_valid_certificates() {
+        // Same identity, same instance_binding -- an ordinary mTLS
+        // client certificate and a service escrow certificate for the
+        // same agent must not collide or interfere with each other's
+        // own map, proving these are genuinely two separate lookups,
+        // not accidentally sharing state.
+        let mut state = CredentialsState::new();
+        state.apply(&issued("git-observer", "pod-uid-1", "client-serial-1"));
+        state.apply(&agent_escrow_issued("git-observer", "pod-uid-1", "service-serial-1"));
+
+        assert!(state.has_valid_certificate("git-observer", "pod-uid-1"));
+        assert!(state.has_agent_escrow_certificate("git-observer"));
+        assert_eq!(
+            state.certificate_for("git-observer").unwrap().serial,
+            "client-serial-1"
+        );
+        assert_eq!(
+            state
+                .agent_escrow_certificate_for("git-observer")
+                .unwrap()
+                .serial,
+            "service-serial-1"
+        );
+    }
+
+    #[test]
+    fn a_second_agent_escrow_issuance_for_the_same_identity_overwrites_the_first() {
+        // Mirrors reissue-supersession's own spirit for ordinary
+        // certificates -- the newest one wins in derived state, even
+        // though this map (deliberately, per its own doc comment)
+        // doesn't yet track revocation the way valid_certificates
+        // does for the superseded entry.
+        let mut state = CredentialsState::new();
+        state.apply(&agent_escrow_issued("git-observer", "pod-uid-1", "service-serial-1"));
+        state.apply(&agent_escrow_issued("git-observer", "pod-uid-2", "service-serial-2"));
+
+        let record = state.agent_escrow_certificate_for("git-observer").unwrap();
+        assert_eq!(record.serial, "service-serial-2");
+        assert_eq!(record.instance_binding, "pod-uid-2");
     }
 }

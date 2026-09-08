@@ -232,6 +232,27 @@ pub enum CredentialsEvent {
         stored_by: String,
         timestamp: i64,
     },
+    /// Published internally by the consumer itself once a signed
+    /// CertType::Service certificate has actually been produced, for
+    /// the automated agent escrow-identity issuance lifecycle -- see
+    /// credentials-agent-architecture.md's own "Automated agent
+    /// escrow-identity issuance" section. Genuinely distinct from
+    /// IssuanceCompleted, not a reuse of it: this is a service's
+    /// durable identity, not a pod-instance's ephemeral mTLS
+    /// certificate, so the derived lookup this folds into
+    /// (CredentialsState's own agent escrow certificate map) is keyed
+    /// on identity alone -- not (identity, instance_binding) the way
+    /// IssuanceCompleted's own valid_certificates map is.
+    /// `instance_binding` is still recorded here, for the same audit-
+    /// visibility reason IssuanceCompleted records it, even though it
+    /// plays no role in this event's own dedup/lookup semantics.
+    AgentEscrowIssuanceCompleted {
+        identity: String,
+        instance_binding: String,
+        serial: String,
+        timestamp: i64,
+        certificate_pem: String,
+    },
 }
 
 #[cfg(test)]
