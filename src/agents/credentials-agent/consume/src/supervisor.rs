@@ -41,12 +41,16 @@ use crate::certificate_actor::{CertificateActor, CertificateActorArgs};
 use crate::escrow_key_actor::{EscrowKeyActor, EscrowKeyActorArgs};
 use crate::store_secret::StoreSecretHandler;
 use crate::store_secret_actor::{StoreSecretActor, StoreSecretActorArgs, StoreSecretDispatch};
+use crate::retrieve_secret::RetrieveSecretHandler;
+use crate::retrieve_secret_actor::{RetrieveSecretActor, RetrieveSecretActorArgs, RetrieveSecretDispatch};
 use credentials_agent_common::CREDENTIALS_CERTIFICATE_REQUESTS_TOPIC;
 use credentials_agent_common::CREDENTIALS_ESCROW_KEY_REQUESTS_TOPIC;
 use credentials_agent_common::CREDENTIALS_STORE_SECRET_REQUESTS_TOPIC;
 use credentials_agent_common::certificate::CertificateRequest;
 use credentials_agent_common::escrow_key::EscrowKeyRequest;
 use credentials_agent_common::secret::StoreSecretRequest;
+use credentials_agent_common::retrieve_secret::RetrieveSecretRequest;
+use credentials_agent_common::CREDENTIALS_RETRIEVE_SECRET_REQUESTS_TOPIC;
 use cassini_client::{TcpClientMessage, TCPClientConfig, TcpClientActor, TcpClientArgs};
 use cassini_types::{ClientEvent,WireTraceCtx};
 use credentials_agent_common::{CREDENTIALS_GRANTS_TOPIC, CREDENTIALS_REVOCATIONS_TOPIC};
@@ -94,6 +98,7 @@ const IDENTITY_NORMALIZATION_ACTOR_NAME: &str = "polar.credentials-agent.identit
 const ESCROW_KEY_ACTOR_NAME: &str = "polar.credentials-agent.escrow-key";
 const CERTIFICATE_ACTOR_NAME: &str = "polar.credentials-agent.certificate";
 const STORE_SECRET_ACTOR_NAME: &str = "polar.credentials-agent.store-secret";
+const RETRIEVE_SECRET_ACTOR_NAME: &str = "polar.credentials-agent.retrieve-secret";
 const AGENT_ESCROW_ISSUANCE_ACTOR_NAME: &str = "polar.credentials-agent.agent-escrow-issuance";
 const AGENT_ESCROW_KEY_ACTOR_NAME: &str = "polar.credentials-agent.agent-escrow-key";
 
@@ -273,6 +278,30 @@ impl ConsumerSupervisor {
             }
             Err(e) => {
                 warn!("Failed to deserialize store-secret request: {e}");
+            }
+        }
+    }
+
+    /// Mirrors dispatch_store_secret_request's own reasoning exactly
+    /// -- see its own doc comment. Deserializes and forwards to
+    /// RetrieveSecretActor, bundled with the broker-verified
+    /// published_by this dispatch path exists specifically to carry.
+    fn dispatch_retrieve_secret_request(payload: Vec<u8>, published_by: Option<String>) {
+        match rkyv::from_bytes::<Envelope<RetrieveSecretRequest>, rkyv::rancor::Error>(&payload) {
+            Ok(envelope) => {
+                if let Some(actor) = where_is(RETRIEVE_SECRET_ACTOR_NAME.to_string()) {
+                    if let Err(e) = actor.send_message(RetrieveSecretDispatch {
+                        envelope,
+                        published_by,
+                    }) {
+                        warn!("Failed to forward retrieve-secret request to actor: {e}");
+                    }
+                } else {
+                    warn!("Retrieve-secret actor not yet registered, dropping request");
+                }
+            }
+            Err(e) => {
+                warn!("Failed to deserialize retrieve-secret request: {e}");
             }
         }
     }
@@ -464,6 +493,21 @@ impl Actor for ConsumerSupervisor {
         .await
         .map_err(ActorProcessingErr::from)?;
 
+        let retrieve_secret_handler = RetrieveSecretHandler {
+            escrow_keypair: escrow_keypair.clone(),
+            ledger: ledger.clone(),
+        };
+        let (_retrieve_secret_actor, _) = RetrieveSecretActor::spawn_linked(
+            Some(RETRIEVE_SECRET_ACTOR_NAME.to_string()),
+            RetrieveSecretActor,
+            RetrieveSecretActorArgs {
+                handler: retrieve_secret_handler,
+            },
+            myself.get_cell(),
+        )
+        .await
+        .map_err(ActorProcessingErr::from)?;
+
         let prepare_shutdown_port = Arc::new(OutputPort::<()>::default());
 
         prepare_shutdown_port.subscribe(myself.clone(), |()| {
@@ -586,6 +630,7 @@ impl Actor for ConsumerSupervisor {
                             CREDENTIALS_ESCROW_KEY_REQUESTS_TOPIC,
                             CREDENTIALS_CERTIFICATE_REQUESTS_TOPIC,
                             CREDENTIALS_STORE_SECRET_REQUESTS_TOPIC,
+                            CREDENTIALS_RETRIEVE_SECRET_REQUESTS_TOPIC,
                             CREDENTIALS_AGENT_ESCROW_ISSUANCE_REQUESTS_TOPIC,
                             CREDENTIALS_AGENT_ESCROW_KEY_REQUESTS_TOPIC,
                         ] {
@@ -625,6 +670,13 @@ impl Actor for ConsumerSupervisor {
                         // requires it: stored_by must be
                         // broker-verified, never self-reported.
                         ConsumerSupervisor::dispatch_store_secret_request(payload, published_by);
+                    } else if topic == CREDENTIALS_RETRIEVE_SECRET_REQUESTS_TOPIC {
+                        // Same reasoning as dispatch_store_secret_request
+                        // above -- requested_by must be broker-verified,
+                        // never self-reported, since it's what
+                        // RetrieveSecretHandler derives the
+                        // re-encryption target from.
+                        ConsumerSupervisor::dispatch_retrieve_secret_request(payload, published_by);
                     } else {
                         ConsumerSupervisor::deserialize_and_dispatch(topic, payload);
                     }
@@ -1111,7 +1163,7 @@ mod agent_escrow_wiring_tests {
         // has no ledger side effect of its own to poll for the way
         // the issuance test above does.
         let captured = std::sync::Arc::new(tokio::sync::Mutex::new(None));
-        let (_broker_client, _) = ractor::Actor::spawn(
+        let (broker_client, _) = ractor::Actor::spawn(
             Some(BROKER_CLIENT_NAME.to_string()),
             CapturingBrokerClient {
                 captured: captured.clone(),
@@ -1134,7 +1186,7 @@ mod agent_escrow_wiring_tests {
         .await
         .unwrap();
 
-        // Seed a real agent escrow certificate to be found.
+        // Seed a real requester certificate.
         let certificate_pem = {
             let mut rng = rsa::rand_core::OsRng;
             let private_key = rsa::RsaPrivateKey::new(&mut rng, 2048).unwrap();
@@ -1214,6 +1266,196 @@ mod agent_escrow_wiring_tests {
         }
 
         agent_escrow_key_actor.stop_and_wait(None, None).await.unwrap();
+        broker_client.stop_and_wait(None, None).await.unwrap();
+        ledger.stop_and_wait(None, None).await.unwrap();
+    }
+}
+
+#[cfg(test)]
+mod retrieve_secret_wiring_tests {
+    use super::*;
+    use crate::retrieve_secret::RetrieveSecretHandler;
+    use crate::retrieve_secret_actor::{RetrieveSecretActor, RetrieveSecretActorArgs};
+    use credentials_agent_common::escrow_secret::EscrowedSecret;
+    use credentials_agent_common::retrieve_secret::{RetrieveSecretReply, RetrieveSecretRequest};
+
+    struct CapturingBrokerClient {
+        captured: std::sync::Arc<tokio::sync::Mutex<Option<Vec<u8>>>>,
+    }
+
+    #[ractor::async_trait]
+    impl ractor::Actor for CapturingBrokerClient {
+        type Msg = TcpClientMessage;
+        type State = ();
+        type Arguments = ();
+
+        async fn pre_start(
+            &self,
+            _myself: ActorRef<Self::Msg>,
+            _args: (),
+        ) -> Result<Self::State, ActorProcessingErr> {
+            Ok(())
+        }
+
+        async fn handle(
+            &self,
+            _myself: ActorRef<Self::Msg>,
+            message: Self::Msg,
+            _state: &mut Self::State,
+        ) -> Result<(), ActorProcessingErr> {
+            if let TcpClientMessage::Publish { payload, .. } = message {
+                *self.captured.lock().await = Some(payload);
+            }
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn full_pipeline_from_raw_bytes_through_the_special_dispatch_path_to_a_real_reply() {
+        let _guard = super::NAMED_ACTOR_TEST_LOCK.lock().await;
+        // Proves the actual thing dispatch_store_secret_request's own
+        // doc comment named as the real reason this dispatch path
+        // exists outside the shared Supervisor trait: published_by
+        // genuinely reaches the handler, derived from this call's own
+        // argument, not from anything in the serialized request
+        // bytes -- the same real, end-to-end proof
+        // agent_escrow_wiring_tests already established for the
+        // ordinary-path actors, applied here to the one, special
+        // dispatch path this crate has that they don't use.
+
+        let captured = std::sync::Arc::new(tokio::sync::Mutex::new(None));
+        let (broker_client, _) = ractor::Actor::spawn(
+            Some(BROKER_CLIENT_NAME.to_string()),
+            CapturingBrokerClient {
+                captured: captured.clone(),
+            },
+            (),
+        )
+        .await
+        .unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let log_path = dir.path().join("events.jsonl");
+        let (ledger, _) = LedgerActor::spawn(
+            Some(LEDGER_ACTOR_NAME.to_string()),
+            LedgerActor,
+            LedgerActorArgs {
+                log_path: log_path.to_str().unwrap().to_string(),
+                projection_actor: crate::projection::tests::fake_projection_actor().await,
+            },
+        )
+        .await
+        .unwrap();
+
+        // Seed a real requester certificate.
+        let mut rng = rsa::rand_core::OsRng;
+        let requester_private_key = rsa::RsaPrivateKey::new(&mut rng, 2048).unwrap();
+        let requester_private_key_pem = rsa::pkcs8::EncodePrivateKey::to_pkcs8_pem(
+            &requester_private_key,
+            rsa::pkcs8::LineEnding::LF,
+        )
+        .unwrap();
+        let requester_key_pair = rcgen::KeyPair::from_pem(&requester_private_key_pem).unwrap();
+        let requester_params = rcgen::CertificateParams::new(vec![
+            "requester.polar.svc.cluster.local".to_string(),
+        ])
+        .unwrap();
+        let requester_certificate_pem =
+            requester_params.self_signed(&requester_key_pair).unwrap().pem();
+        let _ = ractor::rpc::call(
+            &ledger,
+            |reply| LedgerMessage::Append {
+                event: credentials_agent_common::events::CredentialsEvent::IssuanceCompleted {
+                    identity: "requester".to_string(),
+                    instance_binding: "pod-uid-1".to_string(),
+                    serial: "requester-serial-1".to_string(),
+                    timestamp: 1000,
+                    certificate_pem: requester_certificate_pem,
+                },
+                reply,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+
+        // Seed a real, stored secret.
+        let escrow_keypair = crate::escrow::tests::test_keypair();
+        let original_plaintext = b"a real secret via the real dispatch path";
+        let stored_secret =
+            EscrowedSecret::encrypt(original_plaintext, escrow_keypair.public_key_pem()).unwrap();
+        let _ = ractor::rpc::call(
+            &ledger,
+            |reply| LedgerMessage::Append {
+                event: credentials_agent_common::events::CredentialsEvent::SecretStored {
+                    name: "gitlab-token".to_string(),
+                    secret: stored_secret,
+                    stored_by: "some-storing-agent".to_string(),
+                    timestamp: 1000,
+                },
+                reply,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+
+        let handler = RetrieveSecretHandler {
+            escrow_keypair,
+            ledger: ledger.clone(),
+        };
+        let (retrieve_secret_actor, _) = RetrieveSecretActor::spawn(
+            Some(RETRIEVE_SECRET_ACTOR_NAME.to_string()),
+            RetrieveSecretActor,
+            RetrieveSecretActorArgs { handler },
+        )
+        .await
+        .unwrap();
+
+        let request = RetrieveSecretRequest {
+            name: "gitlab-token".to_string(),
+        };
+        let envelope = Envelope {
+            correlation_id: "test-correlation-id-retrieve".to_string(),
+            payload: request,
+        };
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&envelope)
+            .unwrap()
+            .to_vec();
+
+        // The actual, real, private dispatch function this test
+        // exists to exercise -- not deserialize_and_dispatch, since
+        // this specific topic is deliberately routed elsewhere (see
+        // ConsumerSupervisor's own ClientEvent::MessagePublished
+        // handler and dispatch_retrieve_secret_request's own doc
+        // comment for why).
+        ConsumerSupervisor::dispatch_retrieve_secret_request(
+            bytes,
+            Some("requester".to_string()),
+        );
+
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+        let captured_bytes = captured
+            .lock()
+            .await
+            .clone()
+            .expect("the actor's own reply must have actually been published");
+        let reply_envelope = rkyv::from_bytes::<Envelope<RetrieveSecretReply>, rkyv::rancor::Error>(
+            &captured_bytes,
+        )
+        .unwrap();
+        assert_eq!(reply_envelope.correlation_id, "test-correlation-id-retrieve");
+        match reply_envelope.payload {
+            RetrieveSecretReply::Found { secret } => {
+                let decrypted = secret.decrypt(&requester_private_key).unwrap();
+                assert_eq!(&*decrypted, original_plaintext);
+            }
+            other => panic!("expected Found, got {other:?}"),
+        }
+
+        retrieve_secret_actor.stop_and_wait(None, None).await.unwrap();
+        broker_client.stop_and_wait(None, None).await.unwrap();
         ledger.stop_and_wait(None, None).await.unwrap();
     }
 }
