@@ -32,6 +32,7 @@ pub mod escrow_secret;
 pub mod secret;
 pub mod agent_escrow_issuance;
 pub mod agent_escrow_key;
+pub mod retrieve_secret;
 
 /// Published by an admin's tool (polar-admin-grant) to grant or
 /// revoke permissions -- see events.rs's own CredentialsEvent::Grant/
@@ -97,3 +98,12 @@ pub const CREDENTIALS_AGENT_ESCROW_ISSUANCE_REPLIES_TOPIC: &str =
 /// specifically.
 pub const CREDENTIALS_AGENT_ESCROW_KEY_REQUESTS_TOPIC: &str = "credentials-agent-escrow-key-requests";
 pub const CREDENTIALS_AGENT_ESCROW_KEY_REPLIES_TOPIC: &str = "credentials-agent-escrow-key-replies";
+
+/// Retrieve half of the general secret-escrow mechanism -- see
+/// retrieve_secret.rs's own RetrieveSecretRequest/Reply. The
+/// general-case relay, re-encrypting to the requester's own,
+/// already-stable mTLS certificate; not the one bootstrap case (an
+/// agent retrieving its own escrow keypair for the first time) that
+/// needs the separate ephemeral X25519 exchange instead.
+pub const CREDENTIALS_RETRIEVE_SECRET_REQUESTS_TOPIC: &str = "credentials-retrieve-secret-requests";
+pub const CREDENTIALS_RETRIEVE_SECRET_REPLIES_TOPIC: &str = "credentials-retrieve-secret-replies";
