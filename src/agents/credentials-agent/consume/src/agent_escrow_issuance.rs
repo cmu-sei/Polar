@@ -136,11 +136,10 @@ impl AgentEscrowIssuanceHandler {
         // (state.rs) for why a second, competing service certificate
         // for the same identity would break a real invariant the
         // certificate-lookup query relies on.
-        let already_has_one = match call_check_agent_escrow_certificate(&self.ledger, &identity).await
-        {
+        let already_has_one = match call_check_agent_escrow_renewal(&self.ledger, &identity).await {
             Ok(v) => v,
             Err(e) => {
-                error!("Ledger CheckAgentEscrowCertificate call failed: {e}");
+                error!("Ledger CheckAgentEscrowRenewal call failed: {e}");
                 return AgentEscrowIssuanceReply::Refused {
                     reason: AgentEscrowIssuanceRefusalReason::CredentialInvalid,
                 };
@@ -250,13 +249,13 @@ async fn call_check_grant(
     }
 }
 
-async fn call_check_agent_escrow_certificate(
+async fn call_check_agent_escrow_renewal(
     ledger: &ActorRef<LedgerMessage>,
     identity: &str,
 ) -> Result<bool, String> {
     match ractor::rpc::call(
         ledger,
-        |reply| LedgerMessage::CheckAgentEscrowCertificate {
+        |reply| LedgerMessage::CheckAgentEscrowRenewal {
             identity: identity.to_string(),
             reply,
         },

@@ -108,13 +108,28 @@ pub enum LedgerMessage {
     },
     /// Whether `identity` already holds a currently-issued agent
     /// escrow-identity (CertType::Service) certificate -- the
-    /// identity-scoped analog CheckRenewal's own
-    /// (identity, instance_binding)-scoped check is for ordinary mTLS
+    /// identity-scoped analog of CheckRenewal's own
+    /// (identity, instance_binding)-scoped check for ordinary mTLS
     /// issuance. AgentEscrowIssuanceHandler's own version of "pods
-    /// cannot request their own renewal."
-    CheckAgentEscrowCertificate {
+    /// cannot request their own renewal." A bare bool, mirroring
+    /// CheckRenewal's own shape exactly -- not CheckCertificate's,
+    /// since this consumer never needs the full record, only whether
+    /// one exists. CheckAgentEscrowKey, below, is the record-
+    /// returning counterpart for the consumer that does.
+    CheckAgentEscrowRenewal {
         identity: String,
         reply: RpcReplyPort<bool>,
+    },
+    /// The current agent escrow-identity (CertType::Service)
+    /// certificate record for `identity`, if one has ever been
+    /// issued -- mirrors CheckCertificate's own Option<Record> shape.
+    /// Backs the agent escrow-key query: AgentEscrowKeyHandler
+    /// genuinely needs the full record (its certificate_pem
+    /// specifically, to extract the public key from) to answer that
+    /// query, unlike CheckAgentEscrowRenewal above.
+    CheckAgentEscrowKey {
+        identity: String,
+        reply: RpcReplyPort<Option<crate::state::AgentEscrowCertificateRecord>>,
     },
     /// Full (hash, event) history, re-read from the log -- used by
     /// ProjectionActor for catch-up: replaying and re-folding through
@@ -213,11 +228,18 @@ impl Actor for LedgerActor {
                 let record = state.credentials_state.certificate_for(&identity).cloned();
                 let _ = reply.send(record);
             }
-            LedgerMessage::CheckAgentEscrowCertificate { identity, reply } => {
+            LedgerMessage::CheckAgentEscrowRenewal { identity, reply } => {
                 let has_one = state
                     .credentials_state
                     .has_agent_escrow_certificate(&identity);
                 let _ = reply.send(has_one);
+            }
+            LedgerMessage::CheckAgentEscrowKey { identity, reply } => {
+                let record = state
+                    .credentials_state
+                    .agent_escrow_certificate_for(&identity)
+                    .cloned();
+                let _ = reply.send(record);
             }
             LedgerMessage::GetFullHistory { reply } => {
                 let result = state.event_log.replay_with_hashes().map_err(|e| e.to_string());
@@ -322,13 +344,33 @@ pub(crate) mod tests {
         }
     }
 
-    pub(crate) async fn check_agent_escrow_certificate(
+    pub(crate) async fn check_agent_escrow_renewal(
         ledger: &ActorRef<LedgerMessage>,
         identity: &str,
     ) -> bool {
         match ractor::rpc::call(
             ledger,
-            |reply| LedgerMessage::CheckAgentEscrowCertificate {
+            |reply| LedgerMessage::CheckAgentEscrowRenewal {
+                identity: identity.to_string(),
+                reply,
+            },
+            None,
+        )
+        .await
+        .expect("call should succeed")
+        {
+            ractor::rpc::CallResult::Success(result) => result,
+            other => panic!("expected Success, got {other:?}"),
+        }
+    }
+
+    pub(crate) async fn check_agent_escrow_key(
+        ledger: &ActorRef<LedgerMessage>,
+        identity: &str,
+    ) -> Option<crate::state::AgentEscrowCertificateRecord> {
+        match ractor::rpc::call(
+            ledger,
+            |reply| LedgerMessage::CheckAgentEscrowKey {
                 identity: identity.to_string(),
                 reply,
             },
@@ -430,7 +472,8 @@ pub(crate) mod tests {
         let path = dir.path().join("events.jsonl");
         let ledger = spawn_ledger(path.to_str().unwrap()).await;
 
-        assert!(!check_agent_escrow_certificate(&ledger, "git-observer").await);
+        assert!(!check_agent_escrow_renewal(&ledger, "git-observer").await);
+        assert!(check_agent_escrow_key(&ledger, "git-observer").await.is_none());
 
         append(
             &ledger,
@@ -447,8 +490,13 @@ pub(crate) mod tests {
         .await
         .unwrap();
 
-        assert!(check_agent_escrow_certificate(&ledger, "git-observer").await);
-        assert!(!check_agent_escrow_certificate(&ledger, "nobody").await);
+        assert!(check_agent_escrow_renewal(&ledger, "git-observer").await);
+        assert!(!check_agent_escrow_renewal(&ledger, "nobody").await);
+
+        let record = check_agent_escrow_key(&ledger, "git-observer").await;
+        assert!(record.is_some());
+        assert_eq!(record.unwrap().serial, "service-serial-1");
+        assert!(check_agent_escrow_key(&ledger, "nobody").await.is_none());
 
         ledger.stop(None);
     }
