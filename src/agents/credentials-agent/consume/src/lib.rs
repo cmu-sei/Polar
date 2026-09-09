@@ -42,3 +42,4 @@ pub mod agent_escrow_issuance;
 pub mod agent_escrow_issuance_actor;
 pub mod agent_escrow_key;
 pub mod agent_escrow_key_actor;
+pub mod retrieve_secret;

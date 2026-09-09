@@ -131,6 +131,14 @@ pub enum LedgerMessage {
         identity: String,
         reply: RpcReplyPort<Option<crate::state::AgentEscrowCertificateRecord>>,
     },
+    /// The current, escrowed secret for `name`, if one has ever been
+    /// stored -- backs the general secret-retrieve mechanism.
+    /// Mirrors CheckCertificate/CheckAgentEscrowKey's own
+    /// Option<T> shape.
+    CheckSecret {
+        name: String,
+        reply: RpcReplyPort<Option<credentials_agent_common::escrow_secret::EscrowedSecret>>,
+    },
     /// Full (hash, event) history, re-read from the log -- used by
     /// ProjectionActor for catch-up: replaying and re-folding through
     /// history to reconstruct correct historical context at each
@@ -240,6 +248,10 @@ impl Actor for LedgerActor {
                     .agent_escrow_certificate_for(&identity)
                     .cloned();
                 let _ = reply.send(record);
+            }
+            LedgerMessage::CheckSecret { name, reply } => {
+                let secret = state.credentials_state.secret_for(&name).cloned();
+                let _ = reply.send(secret);
             }
             LedgerMessage::GetFullHistory { reply } => {
                 let result = state.event_log.replay_with_hashes().map_err(|e| e.to_string());

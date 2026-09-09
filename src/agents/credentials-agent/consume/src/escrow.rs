@@ -76,7 +76,6 @@ pub enum EscrowKeypairError {
 }
 
 pub struct EscrowKeypair {
-    #[allow(dead_code)] // unused until the real decrypt/re-encrypt relay is built
     private_key: RsaPrivateKey,
     public_key_pem: String,
 }
@@ -164,6 +163,14 @@ impl EscrowKeypair {
 
     pub fn public_key_pem(&self) -> &str {
         &self.public_key_pem
+    }
+
+    /// The genuine reason this keypair exists in the first place --
+    /// used by the decrypt-reencrypt-destroy relay to actually
+    /// decrypt what's held in escrow, transiently, at the exact
+    /// moment a specific, authorized consumer needs it.
+    pub fn private_key(&self) -> &RsaPrivateKey {
+        &self.private_key
     }
 }
 
