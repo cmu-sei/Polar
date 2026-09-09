@@ -63,9 +63,17 @@ use crate::credential::configured_kubernetes_issuers;
 use crate::introspection::IntrospectionClient;
 use crate::issuance::IssuanceHandler;
 use crate::issuance_actor::{IssuanceActor, IssuanceActorArgs};
+use crate::agent_escrow_issuance::AgentEscrowIssuanceHandler;
+use crate::agent_escrow_issuance_actor::{AgentEscrowIssuanceActor, AgentEscrowIssuanceActorArgs};
+use crate::agent_escrow_key::AgentEscrowKeyHandler;
+use crate::agent_escrow_key_actor::{AgentEscrowKeyActor, AgentEscrowKeyActorArgs};
 use cert_client::handshake::HandshakeClient;
 use credentials_agent_common::CREDENTIALS_ISSUANCE_REQUESTS_TOPIC;
+use credentials_agent_common::CREDENTIALS_AGENT_ESCROW_ISSUANCE_REQUESTS_TOPIC;
+use credentials_agent_common::CREDENTIALS_AGENT_ESCROW_KEY_REQUESTS_TOPIC;
 use credentials_agent_common::issuance::IssuanceRequest;
+use credentials_agent_common::agent_escrow_issuance::AgentEscrowIssuanceRequest;
+use credentials_agent_common::agent_escrow_key::AgentEscrowKeyRequest;
 use polar::request_reply::Envelope;
 
 const HEALTHCHECK_ACTOR_NAME: &str = "polar.credentials-agent.healthcheck";
@@ -86,6 +94,8 @@ const IDENTITY_NORMALIZATION_ACTOR_NAME: &str = "polar.credentials-agent.identit
 const ESCROW_KEY_ACTOR_NAME: &str = "polar.credentials-agent.escrow-key";
 const CERTIFICATE_ACTOR_NAME: &str = "polar.credentials-agent.certificate";
 const STORE_SECRET_ACTOR_NAME: &str = "polar.credentials-agent.store-secret";
+const AGENT_ESCROW_ISSUANCE_ACTOR_NAME: &str = "polar.credentials-agent.agent-escrow-issuance";
+const AGENT_ESCROW_KEY_ACTOR_NAME: &str = "polar.credentials-agent.agent-escrow-key";
 
 pub struct ConsumerSupervisor;
 
@@ -119,6 +129,42 @@ impl Supervisor for ConsumerSupervisor {
                 }
                 Err(e) => {
                     warn!("Failed to deserialize issuance request from topic {topic}: {e}");
+                }
+            }
+            return;
+        }
+
+        if topic == CREDENTIALS_AGENT_ESCROW_ISSUANCE_REQUESTS_TOPIC {
+            match rkyv::from_bytes::<Envelope<AgentEscrowIssuanceRequest>, rkyv::rancor::Error>(&payload) {
+                Ok(envelope) => {
+                    if let Some(actor) = where_is(AGENT_ESCROW_ISSUANCE_ACTOR_NAME.to_string()) {
+                        if let Err(e) = actor.send_message(envelope) {
+                            warn!("Failed to forward agent escrow-issuance request to actor: {e}");
+                        }
+                    } else {
+                        warn!("Agent escrow-issuance actor not yet registered, dropping request");
+                    }
+                }
+                Err(e) => {
+                    warn!("Failed to deserialize agent escrow-issuance request from topic {topic}: {e}");
+                }
+            }
+            return;
+        }
+
+        if topic == CREDENTIALS_AGENT_ESCROW_KEY_REQUESTS_TOPIC {
+            match rkyv::from_bytes::<Envelope<AgentEscrowKeyRequest>, rkyv::rancor::Error>(&payload) {
+                Ok(envelope) => {
+                    if let Some(actor) = where_is(AGENT_ESCROW_KEY_ACTOR_NAME.to_string()) {
+                        if let Err(e) = actor.send_message(envelope) {
+                            warn!("Failed to forward agent escrow-key request to actor: {e}");
+                        }
+                    } else {
+                        warn!("Agent escrow-key actor not yet registered, dropping request");
+                    }
+                }
+                Err(e) => {
+                    warn!("Failed to deserialize agent escrow-key request from topic {topic}: {e}");
                 }
             }
             return;
@@ -329,6 +375,37 @@ impl Actor for ConsumerSupervisor {
         .await
         .map_err(ActorProcessingErr::from)?;
 
+        let agent_escrow_issuance_handler = AgentEscrowIssuanceHandler {
+            ledger: ledger.clone(),
+            cert_issuer: HandshakeClient::new(cert_issuer_url.clone()),
+            known_kubernetes_issuers: configured_kubernetes_issuers(),
+            escrow_keypair: escrow_keypair.clone(),
+        };
+        let (_agent_escrow_issuance_actor, _) = AgentEscrowIssuanceActor::spawn_linked(
+            Some(AGENT_ESCROW_ISSUANCE_ACTOR_NAME.to_string()),
+            AgentEscrowIssuanceActor,
+            AgentEscrowIssuanceActorArgs {
+                handler: agent_escrow_issuance_handler,
+            },
+            myself.get_cell(),
+        )
+        .await
+        .map_err(ActorProcessingErr::from)?;
+
+        let agent_escrow_key_handler = AgentEscrowKeyHandler {
+            ledger: ledger.clone(),
+        };
+        let (_agent_escrow_key_actor, _) = AgentEscrowKeyActor::spawn_linked(
+            Some(AGENT_ESCROW_KEY_ACTOR_NAME.to_string()),
+            AgentEscrowKeyActor,
+            AgentEscrowKeyActorArgs {
+                handler: agent_escrow_key_handler,
+            },
+            myself.get_cell(),
+        )
+        .await
+        .map_err(ActorProcessingErr::from)?;
+
         let identity_normalization_handler = IdentityNormalizationHandler {
             cert_issuer: HandshakeClient::new(cert_issuer_url.clone()),
         };
@@ -509,6 +586,8 @@ impl Actor for ConsumerSupervisor {
                             CREDENTIALS_ESCROW_KEY_REQUESTS_TOPIC,
                             CREDENTIALS_CERTIFICATE_REQUESTS_TOPIC,
                             CREDENTIALS_STORE_SECRET_REQUESTS_TOPIC,
+                            CREDENTIALS_AGENT_ESCROW_ISSUANCE_REQUESTS_TOPIC,
+                            CREDENTIALS_AGENT_ESCROW_KEY_REQUESTS_TOPIC,
                         ] {
                             if let Err(e) = client.send_message(TcpClientMessage::Subscribe {
                                 topic: topic.to_string(),
@@ -844,6 +923,297 @@ mod issuance_wiring_tests {
             .is_none());
 
         issuance_actor.stop_and_wait(None, None).await.unwrap();
+        ledger.stop_and_wait(None, None).await.unwrap();
+    }
+}
+
+#[cfg(test)]
+mod agent_escrow_wiring_tests {
+    use super::*;
+    use crate::agent_escrow_issuance::AgentEscrowIssuanceHandler;
+    use crate::agent_escrow_issuance_actor::{AgentEscrowIssuanceActor, AgentEscrowIssuanceActorArgs};
+    use crate::agent_escrow_key::AgentEscrowKeyHandler;
+    use crate::agent_escrow_key_actor::{AgentEscrowKeyActor, AgentEscrowKeyActorArgs};
+    use base64::Engine;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use credentials_agent_common::agent_escrow_issuance::AgentEscrowIssuanceRequest;
+    use credentials_agent_common::agent_escrow_key::{AgentEscrowKeyReply, AgentEscrowKeyRequest};
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn make_token(iss: &str) -> String {
+        let header = URL_SAFE_NO_PAD.encode(r#"{"alg":"none"}"#);
+        let payload = URL_SAFE_NO_PAD.encode(format!(r#"{{"iss":"{iss}"}}"#));
+        format!("{header}.{payload}.")
+    }
+
+    async fn check_agent_escrow_key(
+        ledger: &ActorRef<LedgerMessage>,
+        identity: &str,
+    ) -> Option<crate::state::AgentEscrowCertificateRecord> {
+        match ractor::rpc::call(
+            ledger,
+            |reply| LedgerMessage::CheckAgentEscrowKey {
+                identity: identity.to_string(),
+                reply,
+            },
+            None,
+        )
+        .await
+        .unwrap()
+        {
+            ractor::rpc::CallResult::Success(result) => result,
+            other => panic!("expected Success, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn full_pipeline_from_raw_bytes_through_dispatch_to_a_recorded_agent_escrow_issuance() {
+        let _guard = super::NAMED_ACTOR_TEST_LOCK.lock().await;
+        // Mirrors issuance_wiring_tests's own
+        // full_pipeline_from_raw_bytes_through_dispatch_to_a_recorded_issuance
+        // exactly, proving the same real, end-to-end chain for the new
+        // topic/actor pair specifically: raw bytes on
+        // CREDENTIALS_AGENT_ESCROW_ISSUANCE_REQUESTS_TOPIC ->
+        // deserialize_and_dispatch -> AgentEscrowIssuanceActor's real
+        // async handle() -> AgentEscrowIssuanceHandler's real logic ->
+        // a genuinely recorded AgentEscrowIssuanceCompleted event.
+
+        let cert_issuer = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/validate"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                cert_issuer_common::ValidateResponse {
+                    workload_identity: "system:serviceaccount:polar:git-observer".to_string(),
+                    instance_binding: Some("pod-uid-1".to_string()),
+                    normalized_identity: None,
+                },
+            ))
+            .mount(&cert_issuer)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/issue"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                cert_issuer_common::IssueResponse {
+                    certificate_pem: "-----BEGIN CERTIFICATE-----\nfake-service\n-----END CERTIFICATE-----\n"
+                        .to_string(),
+                    ca_chain_pem: "-----BEGIN CERTIFICATE-----\nfake-ca\n-----END CERTIFICATE-----\n"
+                        .to_string(),
+                    serial_number: "agent-escrow-wiring-test-serial".to_string(),
+                    session_id: "00000000-0000-0000-0000-000000000098".to_string(),
+                    expires_at: time::OffsetDateTime::now_utc() + time::Duration::hours(1),
+                },
+            ))
+            .mount(&cert_issuer)
+            .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let log_path = dir.path().join("events.jsonl");
+        let (ledger, _) = LedgerActor::spawn(
+            Some(LEDGER_ACTOR_NAME.to_string()),
+            LedgerActor,
+            LedgerActorArgs {
+                log_path: log_path.to_str().unwrap().to_string(),
+                projection_actor: crate::projection::tests::fake_projection_actor().await,
+            },
+        )
+        .await
+        .unwrap();
+
+        let handler = AgentEscrowIssuanceHandler {
+            ledger: ledger.clone(),
+            cert_issuer: HandshakeClient::new(cert_issuer.uri()),
+            known_kubernetes_issuers: vec!["https://kubernetes.default.svc.cluster.local".to_string()],
+            escrow_keypair: crate::escrow::tests::test_keypair(),
+        };
+
+        let (agent_escrow_issuance_actor, _) = AgentEscrowIssuanceActor::spawn(
+            Some(AGENT_ESCROW_ISSUANCE_ACTOR_NAME.to_string()),
+            AgentEscrowIssuanceActor,
+            AgentEscrowIssuanceActorArgs { handler },
+        )
+        .await
+        .unwrap();
+
+        let request = AgentEscrowIssuanceRequest {
+            csr_pem: "fake-csr".to_string(),
+            credential: make_token("https://kubernetes.default.svc.cluster.local"),
+        };
+        let envelope = Envelope {
+            correlation_id: "test-correlation-id".to_string(),
+            payload: request,
+        };
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&envelope)
+            .unwrap()
+            .to_vec();
+
+        // The real function every incoming Cassini message on this
+        // topic actually goes through.
+        ConsumerSupervisor::deserialize_and_dispatch(
+            CREDENTIALS_AGENT_ESCROW_ISSUANCE_REQUESTS_TOPIC.to_string(),
+            bytes,
+        );
+
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+        let record = check_agent_escrow_key(&ledger, "system:serviceaccount:polar:git-observer").await;
+        assert!(
+            record.is_some(),
+            "AgentEscrowIssuanceCompleted must have actually been recorded in the ledger by now"
+        );
+        assert_eq!(record.unwrap().serial, "agent-escrow-wiring-test-serial");
+
+        agent_escrow_issuance_actor.stop_and_wait(None, None).await.unwrap();
+        ledger.stop_and_wait(None, None).await.unwrap();
+    }
+
+    struct CapturingBrokerClient {
+        captured: std::sync::Arc<tokio::sync::Mutex<Option<Vec<u8>>>>,
+    }
+
+    #[ractor::async_trait]
+    impl ractor::Actor for CapturingBrokerClient {
+        type Msg = TcpClientMessage;
+        type State = ();
+        type Arguments = ();
+
+        async fn pre_start(
+            &self,
+            _myself: ActorRef<Self::Msg>,
+            _args: (),
+        ) -> Result<Self::State, ActorProcessingErr> {
+            Ok(())
+        }
+
+        async fn handle(
+            &self,
+            _myself: ActorRef<Self::Msg>,
+            message: Self::Msg,
+            _state: &mut Self::State,
+        ) -> Result<(), ActorProcessingErr> {
+            if let TcpClientMessage::Publish { payload, .. } = message {
+                *self.captured.lock().await = Some(payload);
+            }
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn full_pipeline_from_raw_bytes_through_dispatch_answers_the_agent_escrow_key_query() {
+        let _guard = super::NAMED_ACTOR_TEST_LOCK.lock().await;
+        // Same real-chain proof as the issuance test above, for the
+        // agent escrow-key query specifically -- a genuinely separate
+        // actor and topic pair. A real, capturing fake broker client
+        // (registered under BROKER_CLIENT_NAME, the exact name
+        // AgentEscrowKeyActor's own handle() looks up via where_is)
+        // lets this test assert on the actual, real published reply
+        // bytes, not merely that dispatch didn't panic -- this query
+        // has no ledger side effect of its own to poll for the way
+        // the issuance test above does.
+        let captured = std::sync::Arc::new(tokio::sync::Mutex::new(None));
+        let (_broker_client, _) = ractor::Actor::spawn(
+            Some(BROKER_CLIENT_NAME.to_string()),
+            CapturingBrokerClient {
+                captured: captured.clone(),
+            },
+            (),
+        )
+        .await
+        .unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let log_path = dir.path().join("events.jsonl");
+        let (ledger, _) = LedgerActor::spawn(
+            Some(LEDGER_ACTOR_NAME.to_string()),
+            LedgerActor,
+            LedgerActorArgs {
+                log_path: log_path.to_str().unwrap().to_string(),
+                projection_actor: crate::projection::tests::fake_projection_actor().await,
+            },
+        )
+        .await
+        .unwrap();
+
+        // Seed a real agent escrow certificate to be found.
+        let certificate_pem = {
+            let mut rng = rsa::rand_core::OsRng;
+            let private_key = rsa::RsaPrivateKey::new(&mut rng, 2048).unwrap();
+            let private_key_pem =
+                rsa::pkcs8::EncodePrivateKey::to_pkcs8_pem(&private_key, rsa::pkcs8::LineEnding::LF)
+                    .unwrap();
+            let key_pair = rcgen::KeyPair::from_pem(&private_key_pem).unwrap();
+            let params = rcgen::CertificateParams::new(vec![
+                "git-observer.polar.svc.cluster.local".to_string(),
+            ])
+            .unwrap();
+            params.self_signed(&key_pair).unwrap().pem()
+        };
+        let _ = ractor::rpc::call(
+            &ledger,
+            |reply| LedgerMessage::Append {
+                event: credentials_agent_common::events::CredentialsEvent::AgentEscrowIssuanceCompleted {
+                    identity: "git-observer".to_string(),
+                    instance_binding: "pod-uid-1".to_string(),
+                    serial: "agent-escrow-key-wiring-test-serial".to_string(),
+                    timestamp: 2000,
+                    certificate_pem: certificate_pem.clone(),
+                },
+                reply,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+
+        let handler = AgentEscrowKeyHandler {
+            ledger: ledger.clone(),
+        };
+        let (agent_escrow_key_actor, _) = AgentEscrowKeyActor::spawn(
+            Some(AGENT_ESCROW_KEY_ACTOR_NAME.to_string()),
+            AgentEscrowKeyActor,
+            AgentEscrowKeyActorArgs { handler },
+        )
+        .await
+        .unwrap();
+
+        let request = AgentEscrowKeyRequest {
+            identity: "git-observer".to_string(),
+        };
+        let envelope = Envelope {
+            correlation_id: "test-correlation-id-2".to_string(),
+            payload: request,
+        };
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&envelope)
+            .unwrap()
+            .to_vec();
+
+        ConsumerSupervisor::deserialize_and_dispatch(
+            CREDENTIALS_AGENT_ESCROW_KEY_REQUESTS_TOPIC.to_string(),
+            bytes,
+        );
+
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+        let captured_bytes = captured
+            .lock()
+            .await
+            .clone()
+            .expect("the actor's own reply must have actually been published");
+        let reply_envelope = rkyv::from_bytes::<Envelope<AgentEscrowKeyReply>, rkyv::rancor::Error>(
+            &captured_bytes,
+        )
+        .unwrap();
+        assert_eq!(reply_envelope.correlation_id, "test-correlation-id-2");
+        match reply_envelope.payload {
+            AgentEscrowKeyReply::Found { public_key_pem } => {
+                let expected =
+                    cert_issuer_common::public_key::extract_public_key_pem(&certificate_pem).unwrap();
+                assert_eq!(public_key_pem, expected);
+            }
+            other => panic!("expected Found, got {other:?}"),
+        }
+
+        agent_escrow_key_actor.stop_and_wait(None, None).await.unwrap();
         ledger.stop_and_wait(None, None).await.unwrap();
     }
 }

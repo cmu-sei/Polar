@@ -39,4 +39,6 @@ pub mod certificate_actor;
 pub mod store_secret;
 pub mod store_secret_actor;
 pub mod agent_escrow_issuance;
+pub mod agent_escrow_issuance_actor;
 pub mod agent_escrow_key;
+pub mod agent_escrow_key_actor;
