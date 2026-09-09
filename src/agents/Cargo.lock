@@ -1349,6 +1349,7 @@ dependencies = [
  "neo4rs",
  "polar",
  "ractor",
+ "rcgen",
  "reqwest 0.12.28",
  "rkyv",
  "rsa",
