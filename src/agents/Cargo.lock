@@ -5178,11 +5178,13 @@ version = "1.0.0"
 dependencies = [
  "cassini-client",
  "cassini-types",
+ "cert-issuer-common",
  "credentials_agent_common",
  "polar",
  "ractor",
  "rkyv",
  "rsa",
+ "tempfile",
  "thiserror 1.0.69",
  "tokio",
  "tracing",
@@ -7468,6 +7470,7 @@ name = "user-cert-fetcher"
 version = "1.0.0"
 dependencies = [
  "cert-client",
+ "cert-issuer-common",
  "clap",
  "credentials_agent_common",
  "reqwest 0.12.28",

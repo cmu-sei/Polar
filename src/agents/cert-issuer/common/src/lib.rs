@@ -9,6 +9,7 @@ use time::OffsetDateTime;
 pub mod identity;
 pub mod permission;
 pub mod public_key;
+pub mod keypair;
 
 // cert_issuer_common/src/lib.rs — add to IssueRequest
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, clap::ValueEnum,)]

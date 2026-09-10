@@ -21,7 +21,8 @@
 use std::str::FromStr;
 use std::time::Duration;
 
-use cert_client::{handshake, keypair, output, token};
+use cert_client::{handshake, output, token};
+use cert_issuer_common::keypair;
 use cert_issuer_common::{
     CertType,
     identity::{IdentityNormalization, normalize_identity},

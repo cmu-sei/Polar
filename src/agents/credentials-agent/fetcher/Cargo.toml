@@ -23,6 +23,7 @@ license.workspace = true
 
 [dependencies]
 cert-client = { path = "../../cert-issuer/client" }
+cert-issuer-common = { version = "1.0.0", path = "../../cert-issuer/common" }
 clap = { version = "4.5.60", features = ["derive"] }
 credentials_agent_common = { path = "../common" }
 reqwest.workspace = true

@@ -14,6 +14,7 @@ rkyv.workspace = true
 fqdn = { version = "0.5.2", features = ["domain-label-cannot-start-or-end-with-hyphen", "domain-label-length-limited-to-63", "domain-name-length-limited-to-255", "domain-name-without-special-chars"], default-features = false }
 x509-parser.workspace = true
 rsa.workspace = true
+rcgen.workspace = true
 
 [dev-dependencies]
 rcgen.workspace = true
