@@ -45,3 +45,4 @@ pub mod agent_escrow_key_actor;
 pub mod retrieve_secret;
 pub mod retrieve_secret_actor;
 pub mod agent_escrow_keypair_bootstrap;
+pub mod agent_escrow_keypair_bootstrap_actor;

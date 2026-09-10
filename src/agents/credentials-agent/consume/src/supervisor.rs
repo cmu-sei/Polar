@@ -43,6 +43,11 @@ use crate::store_secret::StoreSecretHandler;
 use crate::store_secret_actor::{StoreSecretActor, StoreSecretActorArgs, StoreSecretDispatch};
 use crate::retrieve_secret::RetrieveSecretHandler;
 use crate::retrieve_secret_actor::{RetrieveSecretActor, RetrieveSecretActorArgs, RetrieveSecretDispatch};
+use crate::agent_escrow_keypair_bootstrap::AgentEscrowKeypairBootstrapHandler;
+use crate::agent_escrow_keypair_bootstrap_actor::{
+    AgentEscrowKeypairBootstrapActor, AgentEscrowKeypairBootstrapActorArgs,
+    AgentEscrowKeypairBootstrapDispatch,
+};
 use credentials_agent_common::CREDENTIALS_CERTIFICATE_REQUESTS_TOPIC;
 use credentials_agent_common::CREDENTIALS_ESCROW_KEY_REQUESTS_TOPIC;
 use credentials_agent_common::CREDENTIALS_STORE_SECRET_REQUESTS_TOPIC;
@@ -51,6 +56,8 @@ use credentials_agent_common::escrow_key::EscrowKeyRequest;
 use credentials_agent_common::secret::StoreSecretRequest;
 use credentials_agent_common::retrieve_secret::RetrieveSecretRequest;
 use credentials_agent_common::CREDENTIALS_RETRIEVE_SECRET_REQUESTS_TOPIC;
+use credentials_agent_common::agent_escrow_keypair_bootstrap::RetrieveAgentEscrowKeypairRequest;
+use credentials_agent_common::CREDENTIALS_RETRIEVE_AGENT_ESCROW_KEYPAIR_REQUESTS_TOPIC;
 use cassini_client::{TcpClientMessage, TCPClientConfig, TcpClientActor, TcpClientArgs};
 use cassini_types::{ClientEvent,WireTraceCtx};
 use credentials_agent_common::{CREDENTIALS_GRANTS_TOPIC, CREDENTIALS_REVOCATIONS_TOPIC};
@@ -99,6 +106,8 @@ const ESCROW_KEY_ACTOR_NAME: &str = "polar.credentials-agent.escrow-key";
 const CERTIFICATE_ACTOR_NAME: &str = "polar.credentials-agent.certificate";
 const STORE_SECRET_ACTOR_NAME: &str = "polar.credentials-agent.store-secret";
 const RETRIEVE_SECRET_ACTOR_NAME: &str = "polar.credentials-agent.retrieve-secret";
+const AGENT_ESCROW_KEYPAIR_BOOTSTRAP_ACTOR_NAME: &str =
+    "polar.credentials-agent.agent-escrow-keypair-bootstrap";
 const AGENT_ESCROW_ISSUANCE_ACTOR_NAME: &str = "polar.credentials-agent.agent-escrow-issuance";
 const AGENT_ESCROW_KEY_ACTOR_NAME: &str = "polar.credentials-agent.agent-escrow-key";
 
@@ -305,6 +314,33 @@ impl ConsumerSupervisor {
             }
         }
     }
+
+    /// Mirrors dispatch_store_secret_request's own reasoning exactly
+    /// -- see its own doc comment. Deserializes and forwards to
+    /// AgentEscrowKeypairBootstrapActor, bundled with the
+    /// broker-verified published_by this dispatch path exists
+    /// specifically to carry.
+    fn dispatch_agent_escrow_keypair_bootstrap_request(payload: Vec<u8>, published_by: Option<String>) {
+        match rkyv::from_bytes::<Envelope<RetrieveAgentEscrowKeypairRequest>, rkyv::rancor::Error>(
+            &payload,
+        ) {
+            Ok(envelope) => {
+                if let Some(actor) = where_is(AGENT_ESCROW_KEYPAIR_BOOTSTRAP_ACTOR_NAME.to_string()) {
+                    if let Err(e) = actor.send_message(AgentEscrowKeypairBootstrapDispatch {
+                        envelope,
+                        published_by,
+                    }) {
+                        warn!("Failed to forward agent escrow-keypair bootstrap request to actor: {e}");
+                    }
+                } else {
+                    warn!("Agent escrow-keypair bootstrap actor not yet registered, dropping request");
+                }
+            }
+            Err(e) => {
+                warn!("Failed to deserialize agent escrow-keypair bootstrap request: {e}");
+            }
+        }
+    }
 }
 
 #[async_trait]
@@ -508,6 +544,21 @@ impl Actor for ConsumerSupervisor {
         .await
         .map_err(ActorProcessingErr::from)?;
 
+        let agent_escrow_keypair_bootstrap_handler = AgentEscrowKeypairBootstrapHandler {
+            escrow_keypair: escrow_keypair.clone(),
+            ledger: ledger.clone(),
+        };
+        let (_agent_escrow_keypair_bootstrap_actor, _) = AgentEscrowKeypairBootstrapActor::spawn_linked(
+            Some(AGENT_ESCROW_KEYPAIR_BOOTSTRAP_ACTOR_NAME.to_string()),
+            AgentEscrowKeypairBootstrapActor,
+            AgentEscrowKeypairBootstrapActorArgs {
+                handler: agent_escrow_keypair_bootstrap_handler,
+            },
+            myself.get_cell(),
+        )
+        .await
+        .map_err(ActorProcessingErr::from)?;
+
         let prepare_shutdown_port = Arc::new(OutputPort::<()>::default());
 
         prepare_shutdown_port.subscribe(myself.clone(), |()| {
@@ -631,6 +682,7 @@ impl Actor for ConsumerSupervisor {
                             CREDENTIALS_CERTIFICATE_REQUESTS_TOPIC,
                             CREDENTIALS_STORE_SECRET_REQUESTS_TOPIC,
                             CREDENTIALS_RETRIEVE_SECRET_REQUESTS_TOPIC,
+                            CREDENTIALS_RETRIEVE_AGENT_ESCROW_KEYPAIR_REQUESTS_TOPIC,
                             CREDENTIALS_AGENT_ESCROW_ISSUANCE_REQUESTS_TOPIC,
                             CREDENTIALS_AGENT_ESCROW_KEY_REQUESTS_TOPIC,
                         ] {
@@ -677,6 +729,15 @@ impl Actor for ConsumerSupervisor {
                         // RetrieveSecretHandler derives the
                         // re-encryption target from.
                         ConsumerSupervisor::dispatch_retrieve_secret_request(payload, published_by);
+                    } else if topic == CREDENTIALS_RETRIEVE_AGENT_ESCROW_KEYPAIR_REQUESTS_TOPIC {
+                        // Same reasoning as dispatch_store_secret_request
+                        // above -- requested_by must be broker-verified,
+                        // since it's what AgentEscrowKeypairBootstrapHandler
+                        // derives the escrowed-secret lookup name from.
+                        ConsumerSupervisor::dispatch_agent_escrow_keypair_bootstrap_request(
+                            payload,
+                            published_by,
+                        );
                     } else {
                         ConsumerSupervisor::deserialize_and_dispatch(topic, payload);
                     }
@@ -1455,6 +1516,164 @@ mod retrieve_secret_wiring_tests {
         }
 
         retrieve_secret_actor.stop_and_wait(None, None).await.unwrap();
+        broker_client.stop_and_wait(None, None).await.unwrap();
+        ledger.stop_and_wait(None, None).await.unwrap();
+    }
+}
+
+#[cfg(test)]
+mod agent_escrow_keypair_bootstrap_wiring_tests {
+    use super::*;
+    use crate::agent_escrow_keypair_bootstrap::AgentEscrowKeypairBootstrapHandler;
+    use crate::agent_escrow_keypair_bootstrap_actor::{
+        AgentEscrowKeypairBootstrapActor, AgentEscrowKeypairBootstrapActorArgs,
+    };
+    use credentials_agent_common::agent_escrow_keypair_bootstrap::{
+        RetrieveAgentEscrowKeypairReply, RetrieveAgentEscrowKeypairRequest,
+        agent_escrow_keypair_secret_name,
+    };
+    use credentials_agent_common::escrow_secret::EscrowedSecret;
+    use x25519_dalek::{EphemeralSecret, PublicKey};
+
+    struct CapturingBrokerClient {
+        captured: std::sync::Arc<tokio::sync::Mutex<Option<Vec<u8>>>>,
+    }
+
+    #[ractor::async_trait]
+    impl ractor::Actor for CapturingBrokerClient {
+        type Msg = TcpClientMessage;
+        type State = ();
+        type Arguments = ();
+
+        async fn pre_start(
+            &self,
+            _myself: ActorRef<Self::Msg>,
+            _args: (),
+        ) -> Result<Self::State, ActorProcessingErr> {
+            Ok(())
+        }
+
+        async fn handle(
+            &self,
+            _myself: ActorRef<Self::Msg>,
+            message: Self::Msg,
+            _state: &mut Self::State,
+        ) -> Result<(), ActorProcessingErr> {
+            if let TcpClientMessage::Publish { payload, .. } = message {
+                *self.captured.lock().await = Some(payload);
+            }
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn full_pipeline_from_raw_bytes_through_the_special_dispatch_path_to_a_real_reply() {
+        let _guard = super::NAMED_ACTOR_TEST_LOCK.lock().await;
+        // Mirrors retrieve_secret_wiring_tests's own test of the
+        // identical shape -- proves published_by genuinely reaches
+        // this handler too, via this crate's second dispatch path
+        // outside the shared Supervisor trait.
+
+        let captured = std::sync::Arc::new(tokio::sync::Mutex::new(None));
+        let (broker_client, _) = ractor::Actor::spawn(
+            Some(BROKER_CLIENT_NAME.to_string()),
+            CapturingBrokerClient {
+                captured: captured.clone(),
+            },
+            (),
+        )
+        .await
+        .unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let log_path = dir.path().join("events.jsonl");
+        let (ledger, _) = LedgerActor::spawn(
+            Some(LEDGER_ACTOR_NAME.to_string()),
+            LedgerActor,
+            LedgerActorArgs {
+                log_path: log_path.to_str().unwrap().to_string(),
+                projection_actor: crate::projection::tests::fake_projection_actor().await,
+            },
+        )
+        .await
+        .unwrap();
+
+        // Seed a real, stored "escrow keypair" secret.
+        let escrow_keypair = crate::escrow::tests::test_keypair();
+        let original_plaintext = b"a real escrowed keypair, via the real dispatch path";
+        let stored_secret =
+            EscrowedSecret::encrypt(original_plaintext, escrow_keypair.public_key_pem()).unwrap();
+        let _ = ractor::rpc::call(
+            &ledger,
+            |reply| LedgerMessage::Append {
+                event: credentials_agent_common::events::CredentialsEvent::SecretStored {
+                    name: agent_escrow_keypair_secret_name("git-observer"),
+                    secret: stored_secret,
+                    stored_by: "git-observer".to_string(),
+                    timestamp: 1000,
+                },
+                reply,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+
+        let handler = AgentEscrowKeypairBootstrapHandler {
+            escrow_keypair,
+            ledger: ledger.clone(),
+        };
+        let (agent_escrow_keypair_bootstrap_actor, _) = AgentEscrowKeypairBootstrapActor::spawn(
+            Some(AGENT_ESCROW_KEYPAIR_BOOTSTRAP_ACTOR_NAME.to_string()),
+            AgentEscrowKeypairBootstrapActor,
+            AgentEscrowKeypairBootstrapActorArgs { handler },
+        )
+        .await
+        .unwrap();
+
+        let requester_secret = EphemeralSecret::random();
+        let requester_public_key = PublicKey::from(&requester_secret).to_bytes();
+
+        let request = RetrieveAgentEscrowKeypairRequest {
+            ephemeral_public_key: requester_public_key,
+        };
+        let envelope = Envelope {
+            correlation_id: "test-correlation-id-bootstrap".to_string(),
+            payload: request,
+        };
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&envelope)
+            .unwrap()
+            .to_vec();
+
+        // The actual, real, private dispatch function this test
+        // exists to exercise.
+        ConsumerSupervisor::dispatch_agent_escrow_keypair_bootstrap_request(
+            bytes,
+            Some("git-observer".to_string()),
+        );
+
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+        let captured_bytes = captured
+            .lock()
+            .await
+            .clone()
+            .expect("the actor's own reply must have actually been published");
+        let reply_envelope = rkyv::from_bytes::<Envelope<RetrieveAgentEscrowKeypairReply>, rkyv::rancor::Error>(&captured_bytes)
+            .unwrap();
+        assert_eq!(reply_envelope.correlation_id, "test-correlation-id-bootstrap");
+        match reply_envelope.payload {
+            RetrieveAgentEscrowKeypairReply::Found { payload } => {
+                let decrypted = payload.decrypt(requester_secret).unwrap();
+                assert_eq!(decrypted.as_slice(), original_plaintext);
+            }
+            other => panic!("expected Found, got {other:?}"),
+        }
+
+        agent_escrow_keypair_bootstrap_actor
+            .stop_and_wait(None, None)
+            .await
+            .unwrap();
         broker_client.stop_and_wait(None, None).await.unwrap();
         ledger.stop_and_wait(None, None).await.unwrap();
     }
