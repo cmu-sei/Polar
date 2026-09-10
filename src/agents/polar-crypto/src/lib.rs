@@ -32,27 +32,37 @@
 //! agent's existing TcpClientActor rather than opening a second
 //! Cassini connection.
 //!
-//! Today's scope: the general-secret store pass-through only.
-//! Retrieving one's own escrow keypair (and everything that depends
-//! on it -- the ephemeral X25519 exchange, kernel-keyring custody)
-//! is real, deliberately deferred work: the Credentials Agent's own
-//! retrieve endpoint doesn't exist yet, so this actor has nothing
-//! real to call for that flow today.
+//! Scope so far: general-secret store, and the retrieve half of the
+//! agent escrow-keypair bootstrap flow. What's still deliberately
+//! deferred: the issuance fallback for when RetrieveOwnEscrowKeypair
+//! comes back None (no keypair has ever been escrowed for this
+//! identity yet), escrowing that issuance's own result afterward, and
+//! kernel-keyring custody -- see credentials-agent-architecture.md's
+//! own "Agent escrow bootstrap" section for the full, intended
+//! sequence this crate is still working toward.
 
 use cassini_client::TcpClientMessage;
 use cassini_types::ClientEvent;
+use credentials_agent_common::agent_escrow_keypair_bootstrap::{
+    RetrieveAgentEscrowKeypairReply, RetrieveAgentEscrowKeypairRequest,
+};
 use credentials_agent_common::escrow_key::EscrowKeyRequest;
 use credentials_agent_common::escrow_secret::EscrowedSecret;
 use credentials_agent_common::secret::{StoreRefusalReason, StoreSecretReply, StoreSecretRequest};
 use credentials_agent_common::{
     CREDENTIALS_ESCROW_KEY_REPLIES_TOPIC, CREDENTIALS_ESCROW_KEY_REQUESTS_TOPIC,
-    CREDENTIALS_STORE_SECRET_REPLIES_TOPIC, CREDENTIALS_STORE_SECRET_REQUESTS_TOPIC,
+    CREDENTIALS_RETRIEVE_AGENT_ESCROW_KEYPAIR_REPLIES_TOPIC,
+    CREDENTIALS_RETRIEVE_AGENT_ESCROW_KEYPAIR_REQUESTS_TOPIC, CREDENTIALS_STORE_SECRET_REPLIES_TOPIC,
+    CREDENTIALS_STORE_SECRET_REQUESTS_TOPIC,
 };
 use polar::request_reply::{Envelope, ReplyRouter};
 use ractor::{Actor, ActorProcessingErr, ActorRef, OutputPort, RpcReplyPort, async_trait};
+use rsa::RsaPrivateKey;
+use rsa::pkcs8::DecodePrivateKey;
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{error, warn};
+use x25519_dalek::{EphemeralSecret, PublicKey};
 
 /// How long CryptoActor waits for a single correlated reply from the
 /// Credentials Agent before giving up -- generous relative to what a
@@ -77,18 +87,37 @@ pub enum CryptoError {
     Refused(StoreRefusalReason),
     #[error("store request was valid but failed to persist: {0}")]
     StoreFailed(String),
+    #[error("retrieve refused: {0:?}")]
+    RetrieveRefused(
+        credentials_agent_common::agent_escrow_keypair_bootstrap::RetrieveAgentEscrowKeypairRefusalReason,
+    ),
+    #[error("retrieve request was valid but failed: {0}")]
+    RetrieveFailed(String),
+    #[error("the ephemeral key exchange itself failed: {0}")]
+    EphemeralExchange(#[from] credentials_agent_common::ephemeral_exchange::EphemeralExchangeError),
+    #[error("the retrieved escrow keypair's own private-key PEM failed to parse: {0}")]
+    InvalidRetrievedKey(String),
 }
 
 pub enum CryptoMessage {
     /// A general secret to escrow -- e.g. an access token an observer
     /// holds and wants the Credentials Agent to store on its behalf.
-    /// Not the agent's own escrow private key; that flow depends on
-    /// retrieve, not built yet (see this crate's own top-level doc
-    /// comment).
+    /// Not the agent's own escrow private key -- see
+    /// RetrieveOwnEscrowKeypair, below, for that flow.
     StoreSecret {
         name: String,
         plaintext: Vec<u8>,
         reply: RpcReplyPort<Result<(), CryptoError>>,
+    },
+    /// The retrieve half of the agent escrow-keypair bootstrap flow --
+    /// see credentials-agent-architecture.md's own "Agent escrow
+    /// bootstrap" section. `None` means no keypair has ever been
+    /// escrowed for this identity yet (a genuine absence, not an
+    /// error) -- the caller's own signal to fall back to issuance.
+    /// That fallback itself, and escrowing its own result afterward,
+    /// isn't built yet; this variant only covers the retrieve half.
+    RetrieveOwnEscrowKeypair {
+        reply: RpcReplyPort<Result<Option<RsaPrivateKey>, CryptoError>>,
     },
     /// Internal: a ClientEvent forwarded from the shared
     /// TcpClientActor's own OutputPort, filtered to just the topics
@@ -112,6 +141,7 @@ pub struct CryptoActorState {
     tcp_client: ActorRef<TcpClientMessage>,
     escrow_key_reply_router: Arc<ReplyRouter<credentials_agent_common::escrow_key::EscrowKeyReply>>,
     store_secret_reply_router: Arc<ReplyRouter<StoreSecretReply>>,
+    retrieve_agent_escrow_keypair_reply_router: Arc<ReplyRouter<RetrieveAgentEscrowKeypairReply>>,
     /// The Credentials Agent's own current escrow public key, learned
     /// on first use and reused afterward -- avoids re-querying on
     /// every single store, per credentials-agent-architecture.md's
@@ -156,11 +186,18 @@ impl Actor for CryptoActor {
         }) {
             error!("CryptoActor failed to subscribe to store-secret replies: {e}");
         }
+        if let Err(e) = args.tcp_client.send_message(TcpClientMessage::Subscribe {
+            topic: CREDENTIALS_RETRIEVE_AGENT_ESCROW_KEYPAIR_REPLIES_TOPIC.to_string(),
+            trace_ctx: None,
+        }) {
+            error!("CryptoActor failed to subscribe to agent escrow-keypair retrieve replies: {e}");
+        }
 
         Ok(CryptoActorState {
             tcp_client: args.tcp_client,
             escrow_key_reply_router: Arc::new(ReplyRouter::new()),
             store_secret_reply_router: Arc::new(ReplyRouter::new()),
+            retrieve_agent_escrow_keypair_reply_router: Arc::new(ReplyRouter::new()),
             cached_credentials_agent_escrow_key: Arc::new(tokio::sync::Mutex::new(None)),
         })
     }
@@ -194,6 +231,19 @@ impl Actor for CryptoActor {
                     Err(e) => warn!("CryptoActor failed to deserialize store-secret reply: {e}"),
                 }
             }
+            CryptoMessage::ClientEvent(ClientEvent::MessagePublished { topic, payload, .. })
+                if topic == CREDENTIALS_RETRIEVE_AGENT_ESCROW_KEYPAIR_REPLIES_TOPIC =>
+            {
+                match rkyv::from_bytes::<Envelope<RetrieveAgentEscrowKeypairReply>, rkyv::rancor::Error>(&payload)
+                {
+                    Ok(envelope) => state
+                        .retrieve_agent_escrow_keypair_reply_router
+                        .deliver(&envelope.correlation_id, envelope.payload),
+                    Err(e) => warn!(
+                        "CryptoActor failed to deserialize agent escrow-keypair retrieve reply: {e}"
+                    ),
+                }
+            }
             CryptoMessage::ClientEvent(_) => {
                 // Some other topic's event, forwarded to every
                 // subscriber of the shared OutputPort -- not ours,
@@ -223,6 +273,23 @@ impl Actor for CryptoActor {
                         cached_key,
                         name,
                         plaintext,
+                    )
+                    .await;
+                    let _ = reply.send(result);
+                });
+            }
+            CryptoMessage::RetrieveOwnEscrowKeypair { reply } => {
+                // Same reasoning as StoreSecret's own arm above --
+                // spawned, not awaited inline, since
+                // handle_retrieve_own_escrow_keypair itself awaits a
+                // reply from this same actor's own mailbox.
+                let tcp_client = state.tcp_client.clone();
+                let retrieve_agent_escrow_keypair_reply_router =
+                    state.retrieve_agent_escrow_keypair_reply_router.clone();
+                tokio::spawn(async move {
+                    let result = handle_retrieve_own_escrow_keypair(
+                        tcp_client,
+                        retrieve_agent_escrow_keypair_reply_router,
                     )
                     .await;
                     let _ = reply.send(result);
@@ -348,6 +415,85 @@ async fn publish_store_secret_request(
     }
 }
 
+/// The retrieve half of the agent escrow-keypair bootstrap flow --
+/// see credentials-agent-architecture.md's own "Agent escrow
+/// bootstrap" section. A fresh, single-use X25519 ephemeral keypair
+/// is generated for this one call: its public half travels in the
+/// request, and its private half is consumed decrypting the reply
+/// (matching EphemeralSecret::diffie_hellman's own single-use
+/// semantics -- once used, it's gone, by construction, not just by
+/// convention).
+async fn handle_retrieve_own_escrow_keypair(
+    tcp_client: ActorRef<TcpClientMessage>,
+    retrieve_agent_escrow_keypair_reply_router: Arc<ReplyRouter<RetrieveAgentEscrowKeypairReply>>,
+) -> Result<Option<RsaPrivateKey>, CryptoError> {
+    let my_ephemeral_secret = EphemeralSecret::random();
+    let my_ephemeral_public_key = PublicKey::from(&my_ephemeral_secret).to_bytes();
+
+    let reply = publish_retrieve_agent_escrow_keypair_request(
+        &tcp_client,
+        &retrieve_agent_escrow_keypair_reply_router,
+        RetrieveAgentEscrowKeypairRequest {
+            ephemeral_public_key: my_ephemeral_public_key,
+        },
+    )
+    .await?;
+
+    match reply {
+        RetrieveAgentEscrowKeypairReply::Found { payload } => {
+            let decrypted_pem = payload.decrypt(my_ephemeral_secret)?;
+            let private_key = RsaPrivateKey::from_pkcs8_pem(
+                std::str::from_utf8(&decrypted_pem)
+                    .map_err(|e| CryptoError::InvalidRetrievedKey(e.to_string()))?,
+            )
+            .map_err(|e| CryptoError::InvalidRetrievedKey(e.to_string()))?;
+            Ok(Some(private_key))
+        }
+        RetrieveAgentEscrowKeypairReply::NotFound => Ok(None),
+        RetrieveAgentEscrowKeypairReply::Refused { reason } => Err(CryptoError::RetrieveRefused(reason)),
+        RetrieveAgentEscrowKeypairReply::Failed { detail } => Err(CryptoError::RetrieveFailed(detail)),
+    }
+}
+
+async fn publish_retrieve_agent_escrow_keypair_request(
+    tcp_client: &ActorRef<TcpClientMessage>,
+    retrieve_agent_escrow_keypair_reply_router: &Arc<ReplyRouter<RetrieveAgentEscrowKeypairReply>>,
+    request: RetrieveAgentEscrowKeypairRequest,
+) -> Result<RetrieveAgentEscrowKeypairReply, CryptoError> {
+    let correlation_id = uuid::Uuid::new_v4().to_string();
+
+    let rx = retrieve_agent_escrow_keypair_reply_router.register(correlation_id.clone());
+
+    let envelope = Envelope {
+        correlation_id: correlation_id.clone(),
+        payload: request,
+    };
+    let payload = rkyv::to_bytes::<rkyv::rancor::Error>(&envelope)
+        .map(|b| b.to_vec())
+        .map_err(|e| {
+            retrieve_agent_escrow_keypair_reply_router.cancel(&correlation_id);
+            CryptoError::Serialization(e.to_string())
+        })?;
+
+    if let Err(e) = tcp_client.send_message(TcpClientMessage::publish(
+        CREDENTIALS_RETRIEVE_AGENT_ESCROW_KEYPAIR_REQUESTS_TOPIC.to_string(),
+        payload,
+        None,
+    )) {
+        retrieve_agent_escrow_keypair_reply_router.cancel(&correlation_id);
+        return Err(CryptoError::BrokerUnreachable(e.to_string()));
+    }
+
+    match tokio::time::timeout(REPLY_TIMEOUT, rx).await {
+        Ok(Ok(reply)) => Ok(reply),
+        Ok(Err(_)) => Err(CryptoError::NoReply),
+        Err(_) => {
+            retrieve_agent_escrow_keypair_reply_router.cancel(&correlation_id);
+            Err(CryptoError::Timeout)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -392,6 +538,12 @@ mod tests {
         /// happened (queried exactly once across N stores), not just
         /// "repeated calls didn't crash."
         escrow_key_queries: Arc<std::sync::atomic::AtomicUsize>,
+        /// If Some, RetrieveAgentEscrowKeypairRequests are answered
+        /// with a real Found reply, genuinely re-encrypted via the
+        /// ephemeral exchange to whatever ephemeral public key the
+        /// request itself carries. If None, answered with NotFound --
+        /// the "nothing escrowed yet" case.
+        stored_escrow_keypair_pem: Option<String>,
     }
 
     #[async_trait]
@@ -471,6 +623,37 @@ mod tests {
                         trace_ctx: None,
                     });
                 }
+            } else if topic == CREDENTIALS_RETRIEVE_AGENT_ESCROW_KEYPAIR_REQUESTS_TOPIC {
+                if let Ok(envelope) = rkyv::from_bytes::<
+                    Envelope<RetrieveAgentEscrowKeypairRequest>,
+                    rkyv::rancor::Error,
+                >(&payload)
+                {
+                    let reply_payload = match &self.stored_escrow_keypair_pem {
+                        Some(pem) => {
+                            let encrypted = credentials_agent_common::ephemeral_exchange::EphemeralEncryptedPayload::encrypt(
+                                pem.as_bytes(),
+                                &envelope.payload.ephemeral_public_key,
+                            )
+                            .unwrap();
+                            RetrieveAgentEscrowKeypairReply::Found { payload: encrypted }
+                        }
+                        None => RetrieveAgentEscrowKeypairReply::NotFound,
+                    };
+                    let reply = Envelope {
+                        correlation_id: envelope.correlation_id,
+                        payload: reply_payload,
+                    };
+                    let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&reply)
+                        .unwrap()
+                        .to_vec();
+                    self.events_output.send(ClientEvent::MessagePublished {
+                        topic: CREDENTIALS_RETRIEVE_AGENT_ESCROW_KEYPAIR_REPLIES_TOPIC.to_string(),
+                        payload: bytes,
+                        published_by: None,
+                        trace_ctx: None,
+                    });
+                }
             }
 
             Ok(())
@@ -478,6 +661,15 @@ mod tests {
     }
 
     async fn spawn_crypto_actor_with_fake_credentials_agent() -> (
+        ActorRef<CryptoMessage>,
+        Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        spawn_crypto_actor_with_fake_credentials_agent_and_stored_keypair(None).await
+    }
+
+    async fn spawn_crypto_actor_with_fake_credentials_agent_and_stored_keypair(
+        stored_escrow_keypair_pem: Option<String>,
+    ) -> (
         ActorRef<CryptoMessage>,
         Arc<std::sync::atomic::AtomicUsize>,
     ) {
@@ -492,6 +684,7 @@ mod tests {
                 escrow_private_key: private_key,
                 escrow_public_key_pem: public_key_pem,
                 escrow_key_queries: escrow_key_queries.clone(),
+                stored_escrow_keypair_pem,
             },
             (),
         )
@@ -555,5 +748,61 @@ mod tests {
             1,
             "escrow key should be queried exactly once, then served from cache"
         );
+    }
+
+    #[tokio::test]
+    async fn retrieve_own_escrow_keypair_returns_none_when_nothing_has_ever_been_escrowed() {
+        let (crypto_actor, _) = spawn_crypto_actor_with_fake_credentials_agent().await;
+
+        let result = ractor::call!(crypto_actor, |reply| {
+            CryptoMessage::RetrieveOwnEscrowKeypair { reply }
+        })
+        .unwrap();
+
+        match result {
+            Ok(None) => {}
+            other => panic!("expected Ok(None), got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn retrieve_own_escrow_keypair_genuinely_round_trips_a_real_key_through_the_real_ephemeral_exchange()
+     {
+        // A real, distinct RSA keypair standing in for what the
+        // agent had previously escrowed -- its own PKCS8 PEM is what
+        // the fake Credentials Agent hands back, genuinely
+        // re-encrypted via the real ephemeral exchange for each call.
+        let mut rng = rsa::rand_core::OsRng;
+        let previously_escrowed_key = RsaPrivateKey::new(&mut rng, 2048).unwrap();
+        let previously_escrowed_key_pem = rsa::pkcs8::EncodePrivateKey::to_pkcs8_pem(
+            &previously_escrowed_key,
+            rsa::pkcs8::LineEnding::LF,
+        )
+        .unwrap();
+
+        let (crypto_actor, _) = spawn_crypto_actor_with_fake_credentials_agent_and_stored_keypair(
+            Some(previously_escrowed_key_pem.to_string()),
+        )
+        .await;
+
+        let result = ractor::call!(crypto_actor, |reply| {
+            CryptoMessage::RetrieveOwnEscrowKeypair { reply }
+        })
+        .unwrap();
+
+        match result {
+            Ok(Some(retrieved_key)) => {
+                // The real proof: the retrieved key's own modulus
+                // genuinely matches the original -- a real key
+                // round-tripped through the real ephemeral exchange
+                // and real PKCS8 parsing, not merely "some value came
+                // back."
+                assert_eq!(
+                    retrieved_key.to_public_key(),
+                    previously_escrowed_key.to_public_key()
+                );
+            }
+            other => panic!("expected Ok(Some(_)), got {other:?}"),
+        }
     }
 }

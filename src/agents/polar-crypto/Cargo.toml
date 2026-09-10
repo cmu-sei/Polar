@@ -17,3 +17,4 @@ cassini-types = { workspace = true }
 credentials_agent_common = { workspace = true }
 thiserror.workspace = true
 rsa.workspace = true
+x25519-dalek = { version = "3.0.0", features = ["getrandom"] }
