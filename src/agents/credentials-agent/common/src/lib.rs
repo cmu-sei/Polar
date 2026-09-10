@@ -34,6 +34,7 @@ pub mod agent_escrow_issuance;
 pub mod agent_escrow_key;
 pub mod retrieve_secret;
 pub mod ephemeral_exchange;
+pub mod agent_escrow_keypair_bootstrap;
 
 /// Published by an admin's tool (polar-admin-grant) to grant or
 /// revoke permissions -- see events.rs's own CredentialsEvent::Grant/
@@ -108,3 +109,13 @@ pub const CREDENTIALS_AGENT_ESCROW_KEY_REPLIES_TOPIC: &str = "credentials-agent-
 /// needs the separate ephemeral X25519 exchange instead.
 pub const CREDENTIALS_RETRIEVE_SECRET_REQUESTS_TOPIC: &str = "credentials-retrieve-secret-requests";
 pub const CREDENTIALS_RETRIEVE_SECRET_REPLIES_TOPIC: &str = "credentials-retrieve-secret-replies";
+
+/// The one, narrow bootstrap case CREDENTIALS_RETRIEVE_SECRET_REQUESTS_TOPIC
+/// above doesn't cover -- see agent_escrow_keypair_bootstrap.rs's own
+/// RetrieveAgentEscrowKeypairRequest/Reply and its own module doc for
+/// why this needs a genuinely separate mechanism (the ephemeral
+/// X25519 exchange) rather than the general retrieve flow.
+pub const CREDENTIALS_RETRIEVE_AGENT_ESCROW_KEYPAIR_REQUESTS_TOPIC: &str =
+    "credentials-retrieve-agent-escrow-keypair-requests";
+pub const CREDENTIALS_RETRIEVE_AGENT_ESCROW_KEYPAIR_REPLIES_TOPIC: &str =
+    "credentials-retrieve-agent-escrow-keypair-replies";
