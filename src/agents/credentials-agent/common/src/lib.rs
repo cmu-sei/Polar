@@ -33,6 +33,7 @@ pub mod secret;
 pub mod agent_escrow_issuance;
 pub mod agent_escrow_key;
 pub mod retrieve_secret;
+pub mod ephemeral_exchange;
 
 /// Published by an admin's tool (polar-admin-grant) to grant or
 /// revoke permissions -- see events.rs's own CredentialsEvent::Grant/

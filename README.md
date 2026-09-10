@@ -242,32 +242,127 @@ cluster and aren't required for deploying elsewhere.
 
 ### Secrets setup
 
-Two things need to exist before any of the steps above will actually
-work: `my.env` (your own local environment overrides) and access to
-this target's `sops`-encrypted secrets (`secrets.sops.yaml`, cluster-
-wide values like the Keycloak test user's password; `user.sops.yaml`,
-your own personal credentials).
+Two genuinely different kinds of secrets exist for a target like
+`local`, each with its own file and its own SOPS config:
 
-1. **`my.env`**: `cp example.env my.env`, then fill in every value
-   marked `<required>`. This file is sourced by `direnv` on shell
-   entry and is gitignored — never commit it.
+- **`secrets.sops.yaml`** — cluster-wide values shared by the whole
+  team (the Keycloak test user's password, the Neo4j auth string,
+  etc.). Encrypted to *every* team member's key, listed together in
+  `.sops.yaml`. Committed to the repo, encrypted — never commit the
+  plaintext.
+- **`user.sops.yaml`** — your own personal credentials (your own
+  GitLab token, your own Jira token). Encrypted to *only your own*
+  key, via a separate, personal `.user.sops.yaml` config you create
+  yourself. Gitignored — this one never gets committed at all, even
+  encrypted.
 
-2. **`sops` access**: decryption here uses your existing SSH keypair
-   as your identity (via `rage`'s SSH-key support), not a separate
-   `age` key you'd need to generate. Before you can decrypt anything,
-   your SSH *public* key needs to be added as a recipient on the
-   target's `.sops.yaml` by someone who can already decrypt it —
-   this is a one-time step, and not something you can do for
-   yourself the first time. Send them your public key
-   (`cat ~/.ssh/id_ed25519.pub`, or whichever key you use), and ask
-   them to add it to `infra/targets/<target>/.sops.yaml`'s `age:`
-   block and run `sops updatekeys infra/targets/<target>/secrets.sops.yaml`
-   (and the same for `user.sops.yaml`, under its own `.user.sops.yaml`
-   config) to re-encrypt with your key included.
+Both use `sops`, both use your existing SSH keypair as your identity
+(via `rage`'s SSH-key support) rather than a separate `age` key you'd
+need to generate — but they're two separate files with two separate
+configs, and mixing them up is the most common source of confusion
+here.
 
-3. If your SSH private key isn't at the default path the devShell
-   assumes, set `SOPS_AGE_SSH_PRIVATE_KEY_FILE` in your own `my.env`
-   to point at it (see `example.env`'s own comment on this).
+#### 1. `my.env`
+
+`cp example.env my.env`, then fill in every value marked `<required>`.
+This file is sourced by `direnv` on shell entry and is gitignored —
+never commit it.
+
+#### 2. Get added as a recipient on the shared `secrets.sops.yaml`
+
+This part you can't do for yourself the first time — someone who can
+already decrypt the target's secrets has to add you.
+
+Send them your SSH *public* key (`cat ~/.ssh/id_ed25519.pub`, or
+whichever key you use) and ask them to:
+
+1. Add it to `infra/targets/<target>/.sops.yaml`'s `age:` block.
+2. Run `sops updatekeys infra/targets/<target>/secrets.sops.yaml` to
+   re-encrypt the existing file with your key now included.
+
+If your SSH private key isn't at the default path the devShell
+assumes, set `SOPS_AGE_SSH_PRIVATE_KEY_FILE` in your own `my.env` to
+point at it (see `example.env`'s own comment on this).
+
+Once you're a listed recipient, you can decrypt and edit
+`secrets.sops.yaml` directly:
+
+```sh
+# Decrypt for inspection:
+SOPS_AGE_KEY_FILE=~/.ssh/id_github sops --decrypt secrets.sops.yaml
+
+# Edit in place (opens your $EDITOR on the decrypted content, re-encrypts on save):
+SOPS_AGE_KEY_FILE=~/.ssh/id_github sops secrets.sops.yaml
+```
+
+`SOPS_AGE_KEY_FILE` here is what tells `sops`/`rage` which private key
+to use for decryption — point it at whichever SSH key you had added
+as a recipient in step 2.
+
+#### 3. Set up your own `user.sops.yaml`
+
+This one you genuinely can do for yourself — it's your own file,
+encrypted only to your own key, and nobody else needs to grant you
+access to it.
+
+1. **Create your own, personal SOPS config.** `user.sops.yaml`'s own
+   config lives in a separate file, `.user.sops.yaml`, scoped to just
+   this one file (mirroring `.sops.yaml`'s own shape, but with a
+   single recipient — you). There's no example file to copy for this
+   step today; create `infra/targets/<target>/.user.sops.yaml`
+   directly, with your own SSH public key as the sole recipient:
+
+   ```yaml
+   creation_rules:
+     - path_regex: user\.sops\.yaml$
+       age: >-
+         ssh-ed25519 AAAA...your own public key here...
+   ```
+
+   This file is gitignored, same as `user.sops.yaml` itself — it's
+   personal to your own machine.
+
+2. **Create your own secrets file from the example.**
+
+   ```sh
+   cp user.sops.yaml.example user.sops.yaml
+   ```
+
+   Fill in your own values (your GitLab token, your Jira token, etc.).
+
+3. **Encrypt it**, pointing `sops` at your own config via
+   `SOPS_CONFIG` rather than `SOPS_AGE_KEY_FILE` — this is the one
+   genuinely different mechanism between the two files, and the part
+   most likely to trip you up if you're used to step 2's own
+   commands:
+
+   ```sh
+   SOPS_CONFIG=.user.sops.yaml sops --encrypt --in-place user.sops.yaml
+   ```
+
+   `SOPS_CONFIG` tells `sops` which `creation_rules` to use (yours,
+   not the shared `.sops.yaml`); `sops` still uses your same SSH key
+   to actually do the encrypting, via the same `rage` SSH-key support
+   as before.
+
+4. **Edit it later** the same way:
+
+   ```sh
+   EDITOR=$(which nvim) SOPS_CONFIG=.user.sops.yaml sops user.sops.yaml
+   ```
+
+   Or decrypt for inspection only:
+
+   ```sh
+   SOPS_CONFIG=.user.sops.yaml sops --decrypt user.sops.yaml
+   ```
+
+#### Quick reference: which mechanism for which file
+
+| File | Config used | Env var |
+|---|---|---|
+| `secrets.sops.yaml` (shared) | `.sops.yaml` (repo-tracked, multi-recipient) | `SOPS_AGE_KEY_FILE=<path to your key>` |
+| `user.sops.yaml` (personal) | `.user.sops.yaml` (gitignored, your own single-recipient config, which you create) | `SOPS_CONFIG=.user.sops.yaml` |
 
 ### Just the container
 

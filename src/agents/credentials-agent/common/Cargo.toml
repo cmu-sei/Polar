@@ -34,6 +34,8 @@ secrecy = "0.10.3"
 sha2.workspace = true
 rsa.workspace = true
 cert-issuer-common = { version = "1.0.0", path = "../../cert-issuer/common" }
+x25519-dalek = { version = "3.0.0", features = ["getrandom"] }
+hkdf = "0.12.4"
 
 [dev-dependencies]
 serde_json.workspace = true
