@@ -330,7 +330,7 @@ impl Actor for HarnessController {
     ) -> Result<Self::State, ActorProcessingErr> {
         info!("HarnessController: Starting {myself:?}");
 
-        let provider = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        let provider = rustls::crypto::ring::default_provider().install_default();
         if provider.is_err() {
             debug!("Crypto provider configured");
         }

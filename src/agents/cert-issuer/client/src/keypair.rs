@@ -7,6 +7,27 @@ pub enum KeyAlgorithm {
     #[default]
     Ed25519,
     EcdsaP256,
+    /// 4096-bit RSA, matching EscrowKeypair::generate()'s own,
+    /// established convention. Genuinely different from Ed25519/
+    /// EcdsaP256: those are signing-only algorithms, right for
+    /// ordinary mTLS client authentication, but incapable of
+    /// encryption. This variant exists for the one case that
+    /// actually needs an encryption-capable key -- an agent's own
+    /// CertType::Service escrow identity, which other agents encrypt
+    /// payloads *to* (KeyUsage: KeyEncipherment, not
+    /// DigitalSignature; see cert-issuer-common's own CertType::Service
+    /// doc comment).
+    ///
+    /// Generated directly via rsa::RsaPrivateKey, not
+    /// rcgen::KeyPair::generate_for -- rcgen's own RSA key generation
+    /// only works with the aws_lc_rs backend, which this workspace
+    /// deliberately doesn't use (a C/C++ build dependency not worth
+    /// taking on; see this crate's own commit history for the
+    /// discussion). The externally-generated key is loaded into
+    /// rcgen via KeyPair::from_pem for the actual CSR signing step,
+    /// the same approach already proven working in
+    /// cert-issuer-common's own public_key.rs tests.
+    Rsa,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -51,13 +72,26 @@ pub fn generate_csr(
         return Err(KeypairError::EmptyIdentity);
     }
 
-    let pkcs = match algorithm {
-        KeyAlgorithm::Ed25519 => &rcgen::PKCS_ED25519,
-        KeyAlgorithm::EcdsaP256 => &rcgen::PKCS_ECDSA_P256_SHA256,
+    let key_pair = match algorithm {
+        KeyAlgorithm::Ed25519 => KeyPair::generate_for(&rcgen::PKCS_ED25519)
+            .map_err(|e| KeypairError::CsrFailed(e.to_string()))?,
+        KeyAlgorithm::EcdsaP256 => KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256)
+            .map_err(|e| KeypairError::CsrFailed(e.to_string()))?,
+        KeyAlgorithm::Rsa => {
+            // Generated directly, not via KeyPair::generate_for --
+            // see KeyAlgorithm::Rsa's own doc comment for why.
+            let mut rng = rsa::rand_core::OsRng;
+            let rsa_private_key = rsa::RsaPrivateKey::new(&mut rng, 4096)
+                .map_err(|e| KeypairError::CsrFailed(e.to_string()))?;
+            let rsa_private_key_pem = rsa::pkcs8::EncodePrivateKey::to_pkcs8_pem(
+                &rsa_private_key,
+                rsa::pkcs8::LineEnding::LF,
+            )
+            .map_err(|e| KeypairError::CsrFailed(e.to_string()))?;
+            KeyPair::from_pem(&rsa_private_key_pem)
+                .map_err(|e| KeypairError::CsrFailed(e.to_string()))?
+        }
     };
-
-    let key_pair =
-        KeyPair::generate_for(pkcs).map_err(|e| KeypairError::CsrFailed(e.to_string()))?;
 
     // Identity SAN is always first and always present.
     let mut sans = vec![identity.to_string()];

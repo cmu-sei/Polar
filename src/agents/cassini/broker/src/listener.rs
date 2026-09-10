@@ -135,7 +135,7 @@ impl Actor for ListenerManager {
         debug!("ListenerManager starting");
 
         // install default crypto provider
-        let provider = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        let provider = rustls::crypto::ring::default_provider().install_default();
         if provider.is_err() {
             debug!("Crypto provider already configured");
         } else {

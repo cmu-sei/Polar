@@ -10,7 +10,7 @@
 //!
 //! ## Current topology
 //!
-//! ```
+//! ```text
 //! polar.provenance.events     ← all agents publish, all consumers subscribe
 //! polar.provenance.discovery  ← observer agents publish, resolver subscribes
 //! polar.git.repositories      ← git observer publishes, git processor subscribes

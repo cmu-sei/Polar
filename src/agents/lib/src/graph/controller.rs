@@ -292,8 +292,13 @@ pub struct Property(pub String, pub GraphValue);
 /// to a single GraphController actor.
 ///
 /// Constructing a GraphOp:
-/// ```rust
-/// use polar::graph::{GraphOp, IntoGraphKey, Property, GraphValue};
+/// ```rust,ignore
+/// // Illustrative only -- KubeNodeKey and CyclopsNodeKey are
+/// // downstream, agent-specific vocabularies (e.g. kubernetes-common,
+/// // cyclops-common), not something this crate itself can import
+/// // without a circular dependency. This example can't genuinely be
+/// // compiled from within polar/lib alone.
+/// use polar::graph::controller::{GraphOp, IntoGraphKey, Property};
 ///
 /// // Using .into_key() from IntoGraphKey
 /// let op = GraphOp::EnsureEdge {

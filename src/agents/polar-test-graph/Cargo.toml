@@ -1,0 +1,13 @@
+[package]
+name = "polar-test-graph"
+version = "1.0.0"
+edition = "2024"
+
+[dependencies]
+neo4rs.workspace = true
+testcontainers.workspace = true
+testcontainers-modules.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread"] }
+rustls = { workspace = true, features = ["ring"] }
+polar = { path = "../lib" }
+libc = "0.2"

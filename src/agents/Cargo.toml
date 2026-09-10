@@ -66,6 +66,7 @@ members = [
     "polar-health",
     "polar-healthcheck",
     "polar-init",
+    "polar-test-graph",
     "policy-config",
     "resolver",
     "build-processor",
@@ -121,8 +122,8 @@ ractor = { version = "0.15.10", features = ["async-trait"] }
 rand = "0.10.0"
 reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
 rkyv = "0.8.15"
-rustls = { version = "0.23.37", default-features = false, features = ["aws-lc-rs", "std", "tls12"] }
-rustls-webpki = { version = "0.103", default-features = false, features = ["aws-lc-rs"] }
+rustls = { version = "0.23.37", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-webpki = { version = "0.103", default-features = false, features = ["ring"] }
 serde = { version = "1", features = ["derive"] }
 serde_dhall = { git = "https://github.com/daveman1010221/dhall-rust", branch = "modernize-rkyv" }
 serde_json = "1.0"
@@ -131,12 +132,12 @@ serde_yaml = "0.9"                                         # used in jira/observ
 sha2 = "^0.10.9"
 socket2 = "0.5"                                            # used in cassini/client
 sysinfo = "0.36"
-tcp-stream = "0.34"
+tcp-stream = { version = "0.34", default-features = false, features = ["rustls-platform-verifier", "rustls--ring", "tokio"] }
 tempfile = "3.26.0"                                        # used in tests
 testcontainers = "0.27.2"
 testcontainers-modules = { version = "0.15.0", features = ["neo4j"] }
 tokio = { version = "1.49.0", features = ["full"] }       # full included for simplicity
-tokio-rustls = "0.26.4"
+tokio-rustls = { version = "0.26.4", default-features = false, features = ["logging", "tls12", "ring"] }
 tokio-util = {version = "0.7.18", features = ["compat"]}
 tracing = "0.1.44"
 tracing-glog = "0.4.1"
@@ -166,13 +167,14 @@ jwt_utils = { path = "jwt-utils" }
 kube-common = { path = "kubernetes/common" }
 polar = { path = "lib" }
 polar-health = { path = "polar-health" }
+polar-test-graph = { path = "polar-test-graph" }
 openapi-common = { path = "openapi/common" }
 time = { version = "0.3.47", features = ["serde"]}
 wiremock = "0.6"
 x509-parser = { version = "0.16", features = ["verify"]}
 rsa = "0.9"
 
-jsonwebtoken = { version = "10.3.0", features = ["aws_lc_rs"] }
+jsonwebtoken = { version = "10.3.0", features = ["rust_crypto"] }
 rcgen = { version = "0.14.7", features = ["x509-parser"] }
 # Remove dhall and serde_dhall from patch – they are now workspace deps
 [patch.crates-io]

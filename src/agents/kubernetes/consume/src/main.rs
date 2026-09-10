@@ -30,7 +30,7 @@ use std::error::Error;
 async fn main() -> Result<(), Box<dyn Error>> {
     init_logging("kubernetes.cluster.consumer.supervisor".to_string());
 
-    rustls::crypto::aws_lc_rs::default_provider()
+    rustls::crypto::ring::default_provider()
         .install_default()
         .expect("Failed to install rustls crypto provider");
 

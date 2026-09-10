@@ -266,7 +266,7 @@ impl Actor for ControlClient {
         info!("Starting TCP Client");
 
         // --- 1. Initialize crypto provider once ---
-        match rustls::crypto::aws_lc_rs::default_provider().install_default() {
+        match rustls::crypto::ring::default_provider().install_default() {
             Ok(_) => warn!("Default crypto provider installed (this should only happen once)"),
             Err(_) => debug!("Crypto provider already configured"),
         }

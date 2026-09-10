@@ -32,6 +32,7 @@ serde_json = { workspace = true, features = ["raw_value"] }
 url.workspace = true
 [dev-dependencies]
 polar.workspace = true
+polar-test-graph.workspace = true
 testcontainers.workspace = true
 testcontainers-modules.workspace = true
 tokio.workspace = true
