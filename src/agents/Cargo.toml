@@ -66,6 +66,7 @@ members = [
     "polar-health",
     "polar-healthcheck",
     "polar-init",
+    "polar-kernel-keyring",
     "polar-test-graph",
     "policy-config",
     "resolver",
