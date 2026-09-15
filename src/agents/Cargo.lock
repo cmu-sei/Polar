@@ -5328,10 +5328,13 @@ dependencies = [
 name = "polar-init"
 version = "1.0.0"
 dependencies = [
+ "cassini-client",
  "cert-client",
  "cert-issuer-common",
  "clap",
+ "polar-crypto",
  "polar-health",
+ "ractor",
  "rustls",
  "thiserror 1.0.69",
  "tokio",

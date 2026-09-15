@@ -170,6 +170,7 @@ polar = { path = "lib" }
 errno = "0.3.14"
 libc = "0.2"
 uninit = "0.3"
+polar-crypto = { path = "polar-crypto" }
 polar-health = { path = "polar-health" }
 polar-kernel-keyring = { path = "polar-kernel-keyring" }
 polar-test-graph = { path = "polar-test-graph" }

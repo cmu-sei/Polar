@@ -188,6 +188,22 @@ pub enum CryptoMessage {
         plaintext: Vec<u8>,
         reply: RpcReplyPort<Result<Vec<u8>, CryptoError>>,
     },
+    /// Runs this identity's own escrow-keypair bootstrap sequence --
+    /// retrieve-first, issuance-as-fallback, real, empirical kernel-
+    /// custody attempt -- as a pure side effect, with no ciphertext
+    /// and no reply payload beyond success/failure. This is the one,
+    /// real reason it exists: polar-init's own, brief lifetime is the
+    /// only point in this agent's entire lifecycle where the
+    /// Kubernetes service-account token (required for real issuance)
+    /// is ever readable at all -- the main, long-running agent
+    /// process never has it mounted. Sending this from polar-init
+    /// guarantees the main process's own, later CryptoActor instance
+    /// can always succeed via the retrieve path alone, the first time
+    /// DecryptOwnMessage or EncryptForRecipient is genuinely used,
+    /// without ever needing issuance itself.
+    EnsureBootstrapped {
+        reply: RpcReplyPort<Result<(), CryptoError>>,
+    },
     /// Internal: a ClientEvent forwarded from the shared
     /// TcpClientActor's own OutputPort, filtered to just the topics
     /// this actor cares about.
@@ -463,6 +479,34 @@ impl Actor for CryptoActor {
                         cached_recipient_public_keys,
                         recipient_identity,
                         plaintext,
+                    )
+                    .await;
+                    let _ = reply.send(result);
+                });
+            }
+            CryptoMessage::EnsureBootstrapped { reply } => {
+                // Same reasoning as StoreSecret's own arm above --
+                // spawned, not awaited inline.
+                let tcp_client = state.tcp_client.clone();
+                let retrieve_agent_escrow_keypair_reply_router =
+                    state.retrieve_agent_escrow_keypair_reply_router.clone();
+                let agent_escrow_issuance_reply_router =
+                    state.agent_escrow_issuance_reply_router.clone();
+                let escrow_key_reply_router = state.escrow_key_reply_router.clone();
+                let store_secret_reply_router = state.store_secret_reply_router.clone();
+                let cached_key = state.cached_credentials_agent_escrow_key.clone();
+                let escrow_keypair_handle = state.escrow_keypair_handle.clone();
+                let own_identity = state.own_identity.clone();
+                tokio::spawn(async move {
+                    let result = handle_ensure_bootstrapped(
+                        tcp_client,
+                        retrieve_agent_escrow_keypair_reply_router,
+                        agent_escrow_issuance_reply_router,
+                        escrow_key_reply_router,
+                        store_secret_reply_router,
+                        cached_key,
+                        escrow_keypair_handle,
+                        own_identity,
                     )
                     .await;
                     let _ = reply.send(result);
@@ -763,17 +807,15 @@ async fn handle_ensure_own_escrow_keypair(
         .map_err(|e| CryptoError::KeyEncoding(e.to_string()))
 }
 
-/// The real handler behind CryptoMessage::DecryptOwnMessage -- see
-/// that variant's own doc comment for the complete, intended
-/// behavior. On first genuine use, runs the full retrieve/issuance-
-/// fallback sequence exactly once (handle_ensure_own_escrow_keypair,
-/// unchanged), then makes one, real, empirical attempt at kernel-
-/// keyring custody -- success caches an opaque KernelBacked handle;
-/// a genuine failure (kernel unavailable on this machine) caches the
-/// raw key itself, InMemory, as the real, correct fallback. Every
-/// later call reuses whichever was cached, without repeating any of
-/// this setup.
-async fn handle_decrypt_own_message(
+/// The real, shared bootstrap logic behind both DecryptOwnMessage and
+/// EnsureBootstrapped -- populates `escrow_keypair_handle` exactly
+/// once (retrieve-first, issuance-as-fallback, then the real,
+/// empirical kernel-custody attempt), if it isn't already populated.
+/// Once set, the handle is never mutated again -- only ever read
+/// afterward -- so a caller re-locking the same mutex separately,
+/// after this returns, to read the now-stable value is genuinely
+/// safe, not a real race.
+async fn ensure_escrow_keypair_bootstrapped(
     tcp_client: ActorRef<TcpClientMessage>,
     retrieve_agent_escrow_keypair_reply_router: Arc<ReplyRouter<RetrieveAgentEscrowKeypairReply>>,
     agent_escrow_issuance_reply_router: Arc<ReplyRouter<AgentEscrowIssuanceReply>>,
@@ -782,8 +824,7 @@ async fn handle_decrypt_own_message(
     cached_key: Arc<tokio::sync::Mutex<Option<String>>>,
     escrow_keypair_handle: Arc<tokio::sync::Mutex<Option<EscrowKeypairHandle>>>,
     own_identity: String,
-    ciphertext: Vec<u8>,
-) -> Result<Vec<u8>, CryptoError> {
+) -> Result<(), CryptoError> {
     let mut handle_guard = escrow_keypair_handle.lock().await;
 
     if handle_guard.is_none() {
@@ -819,7 +860,44 @@ async fn handle_decrypt_own_message(
         *handle_guard = Some(new_handle);
     }
 
-    match handle_guard.as_ref().expect("just populated above if it was empty") {
+    Ok(())
+}
+
+/// The real handler behind CryptoMessage::DecryptOwnMessage -- see
+/// that variant's own doc comment for the complete, intended
+/// behavior. On first genuine use, runs the full retrieve/issuance-
+/// fallback sequence exactly once (handle_ensure_own_escrow_keypair,
+/// unchanged), then makes one, real, empirical attempt at kernel-
+/// keyring custody -- success caches an opaque KernelBacked handle;
+/// a genuine failure (kernel unavailable on this machine) caches the
+/// raw key itself, InMemory, as the real, correct fallback. Every
+/// later call reuses whichever was cached, without repeating any of
+/// this setup.
+async fn handle_decrypt_own_message(
+    tcp_client: ActorRef<TcpClientMessage>,
+    retrieve_agent_escrow_keypair_reply_router: Arc<ReplyRouter<RetrieveAgentEscrowKeypairReply>>,
+    agent_escrow_issuance_reply_router: Arc<ReplyRouter<AgentEscrowIssuanceReply>>,
+    escrow_key_reply_router: Arc<ReplyRouter<credentials_agent_common::escrow_key::EscrowKeyReply>>,
+    store_secret_reply_router: Arc<ReplyRouter<StoreSecretReply>>,
+    cached_key: Arc<tokio::sync::Mutex<Option<String>>>,
+    escrow_keypair_handle: Arc<tokio::sync::Mutex<Option<EscrowKeypairHandle>>>,
+    own_identity: String,
+    ciphertext: Vec<u8>,
+) -> Result<Vec<u8>, CryptoError> {
+    ensure_escrow_keypair_bootstrapped(
+        tcp_client,
+        retrieve_agent_escrow_keypair_reply_router,
+        agent_escrow_issuance_reply_router,
+        escrow_key_reply_router,
+        store_secret_reply_router,
+        cached_key,
+        escrow_keypair_handle.clone(),
+        own_identity,
+    )
+    .await?;
+
+    let handle_guard = escrow_keypair_handle.lock().await;
+    match handle_guard.as_ref().expect("ensure_escrow_keypair_bootstrapped just populated this") {
         EscrowKeypairHandle::KernelBacked(serial) => {
             polar_kernel_keyring::decrypt(*serial, &ciphertext)
                 .map_err(|e| CryptoError::DecryptFailed(e.to_string()))
@@ -828,6 +906,34 @@ async fn handle_decrypt_own_message(
             .decrypt(rsa::Oaep::<sha2_011::Sha256>::new(), &ciphertext)
             .map_err(|e| CryptoError::DecryptFailed(e.to_string())),
     }
+}
+
+/// The real handler behind CryptoMessage::EnsureBootstrapped -- see
+/// that variant's own doc comment for the complete, intended
+/// behavior. Genuinely just the setup half of DecryptOwnMessage,
+/// without the final decrypt dispatch -- no ciphertext, only the
+/// real, side-effecting bootstrap itself.
+async fn handle_ensure_bootstrapped(
+    tcp_client: ActorRef<TcpClientMessage>,
+    retrieve_agent_escrow_keypair_reply_router: Arc<ReplyRouter<RetrieveAgentEscrowKeypairReply>>,
+    agent_escrow_issuance_reply_router: Arc<ReplyRouter<AgentEscrowIssuanceReply>>,
+    escrow_key_reply_router: Arc<ReplyRouter<credentials_agent_common::escrow_key::EscrowKeyReply>>,
+    store_secret_reply_router: Arc<ReplyRouter<StoreSecretReply>>,
+    cached_key: Arc<tokio::sync::Mutex<Option<String>>>,
+    escrow_keypair_handle: Arc<tokio::sync::Mutex<Option<EscrowKeypairHandle>>>,
+    own_identity: String,
+) -> Result<(), CryptoError> {
+    ensure_escrow_keypair_bootstrapped(
+        tcp_client,
+        retrieve_agent_escrow_keypair_reply_router,
+        agent_escrow_issuance_reply_router,
+        escrow_key_reply_router,
+        store_secret_reply_router,
+        cached_key,
+        escrow_keypair_handle,
+        own_identity,
+    )
+    .await
 }
 
 /// The real handler behind CryptoMessage::EncryptForRecipient -- see
@@ -1499,6 +1605,55 @@ mod tests {
             Err(CryptoError::IssuanceRefused(_)) => {}
             other => panic!("expected Err(IssuanceRefused(_)), got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn ensure_bootstrapped_genuinely_issues_and_escrows_a_real_keypair_as_a_pure_side_effect() {
+        let ((crypto_actor, _), last_stored_secret_plaintext, _) =
+            spawn_crypto_actor_with_fake_credentials_agent_configured(FakeCredentialsAgentConfig {
+                stored_escrow_keypair_pem: None,
+                issue_agent_escrow_certificates: true,
+                ..Default::default()
+            })
+            .await;
+
+        let token_file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(token_file.path(), "fake-k8s-service-account-token\n").unwrap();
+        unsafe {
+            std::env::set_var("KUBERNETES_SA_TOKEN", token_file.path());
+        }
+
+        let result = ractor::call!(crypto_actor, |reply| {
+            CryptoMessage::EnsureBootstrapped { reply }
+        })
+        .unwrap();
+
+        unsafe {
+            std::env::remove_var("KUBERNETES_SA_TOKEN");
+        }
+
+        assert!(result.is_ok(), "expected Ok(()), got {result:?}");
+
+        // The real proof this is a genuine bootstrap, not a no-op:
+        // a real StoreSecretRequest was actually submitted, escrowing
+        // a real, newly-issued private key -- exactly the side effect
+        // polar-init depends on.
+        let escrowed_pem = last_stored_secret_plaintext
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("a real StoreSecretRequest must have genuinely been submitted");
+        RsaPrivateKey::from_pkcs8_pem(std::str::from_utf8(&escrowed_pem).unwrap())
+            .expect("the escrowed plaintext must itself be a genuine, valid PKCS8 RSA private key");
+
+        // A second call must genuinely reuse the already-bootstrapped
+        // handle, not attempt issuance again -- proven by simply not
+        // needing the token file (removed above) to still succeed.
+        let second_result = ractor::call!(crypto_actor, |reply| {
+            CryptoMessage::EnsureBootstrapped { reply }
+        })
+        .unwrap();
+        assert!(second_result.is_ok(), "expected Ok(()), got {second_result:?}");
     }
 
     #[tokio::test]

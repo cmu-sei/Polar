@@ -247,6 +247,7 @@ let makePolarInitContainer =
       \(extraMounts : List kubernetes.VolumeMount.Type) ->
       \(depCerts : List Text) ->
       \(certs : List Text) ->
+      \(skipEscrowBootstrap : Bool) ->
         kubernetes.Container::{
         , name            = "polar-init"
         , image           = Some polarInitImage
@@ -254,9 +255,19 @@ let makePolarInitContainer =
         , command         = Some [ "polar-init" ]
         , securityContext = Some Constants.DropAllCapSecurityContext
         , env = Some
-          [ kubernetes.EnvVar::{ name = "POLAR_INIT_CERT_ISSUER_URL", value = Some certIssuerUrl }
-          , kubernetes.EnvVar::{ name = "POLAR_INIT_TOKEN_PATH",      value = Some tokenPath      }
-          ]
+          (   [ kubernetes.EnvVar::{ name = "POLAR_INIT_CERT_ISSUER_URL", value = Some certIssuerUrl }
+              , kubernetes.EnvVar::{ name = "POLAR_INIT_TOKEN_PATH",      value = Some tokenPath      }
+              ]
+            # Constants.commonClientEnv
+            # (   if    skipEscrowBootstrap
+                  then  [ kubernetes.EnvVar::{
+                          , name  = "POLAR_INIT_SKIP_ESCROW_BOOTSTRAP"
+                          , value = Some "true"
+                          }
+                        ]
+                  else  [] : List kubernetes.EnvVar.Type
+              )
+          )
         , args = Some
           (   Prelude.List.concatMap Text Text (\(d : Text) -> ["--check-dep-cert", d]) depCerts
             # Prelude.List.concatMap Text Text (\(c : Text) -> ["--cert", c]) certs

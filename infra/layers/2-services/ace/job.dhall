@@ -99,6 +99,7 @@ let render =
                     [ kubernetes.VolumeMount::{ name = Constants.neo4jClientCertVolumeName, mountPath = Constants.neo4jClientCertPath } ]
                     ([] : List Text)
                     [ "client:${Constants.neo4jClientCertPath}:ecdsa-p256:" ]
+                    True
                 ]
               , containers =
                 [ kubernetes.Container::{

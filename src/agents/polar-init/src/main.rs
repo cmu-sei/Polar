@@ -21,6 +21,7 @@
 use std::str::FromStr;
 use std::time::Duration;
 
+use cassini_client::{TCPClientConfig, TcpClientActor, TcpClientArgs};
 use cert_client::{handshake, output, token};
 use cert_issuer_common::keypair;
 use cert_issuer_common::{
@@ -29,9 +30,21 @@ use cert_issuer_common::{
 };
 use clap::Parser;
 use polar_health::DepCertEndpoint;
+use ractor::{Actor, OutputPort};
 
 const DEFAULT_TOKEN_PATH: &str = "/workspace/token";
 const POLL_INTERVAL_SECS: u64 = 5;
+
+/// If set (to any non-empty value), skips the escrow-keypair
+/// bootstrap phase entirely -- required for the three core services
+/// (the Credentials Agent itself, cert-issuer, and Cassini) whose own
+/// polar-init instance would otherwise create a genuine, unresolvable
+/// circularity: CryptoActor is the single gateway to the Credentials
+/// Agent, so the Credentials Agent's own bootstrap can't depend on it
+/// existing yet. See CryptoMessage::EnsureBootstrapped's own doc
+/// comment (polar-crypto) for the complete, real reasoning behind
+/// this phase existing at all.
+const SKIP_ESCROW_BOOTSTRAP_ENV: &str = "POLAR_INIT_SKIP_ESCROW_BOOTSTRAP";
 
 // ---------------------------------------------------------------------------
 // CertRequest — parsed from --cert <type:dir:key-algorithm:extra-sans>
@@ -243,7 +256,106 @@ async fn main() {
         issue_cert(&cert_issuer_url, &sa_token, &dns_identity, req).await;
     }
 
-    tracing::info!("all certs issued successfully, handing off to main container");
+    tracing::info!("all certs issued");
+
+    // Phase 4: ensure this identity's own escrow keypair genuinely
+    // exists and is escrowed with the Credentials Agent -- skipped
+    // entirely for the three core services (see
+    // SKIP_ESCROW_BOOTSTRAP_ENV's own doc comment for why). This is
+    // the only point in this agent's entire lifecycle where the SA
+    // token read above is ever readable at all; the main, long-
+    // running agent container never has it mounted.
+    let skip_escrow_bootstrap = std::env::var(SKIP_ESCROW_BOOTSTRAP_ENV)
+        .map(|v| !v.is_empty())
+        .unwrap_or(false);
+
+    if skip_escrow_bootstrap {
+        tracing::info!(
+            "{SKIP_ESCROW_BOOTSTRAP_ENV} is set, skipping escrow-keypair bootstrap"
+        );
+    } else {
+        ensure_escrow_bootstrapped(&dns_identity).await;
+    }
+
+    tracing::info!("polar-init complete, handing off to main container");
+}
+
+/// Establishes a real, standalone Cassini connection (using the
+/// just-issued client-type mTLS cert) and a real CryptoActor
+/// instance, sends EnsureBootstrapped, and retries until it succeeds
+/// -- matching this binary's own, established "never exit non-zero
+/// due to a transient failure" philosophy, since this genuinely
+/// depends on the Credentials Agent specifically being reachable,
+/// not just cert-issuer.
+async fn ensure_escrow_bootstrapped(own_identity: &str) {
+    // Reads TLS_CA_CERT/TLS_CLIENT_CERT/TLS_CLIENT_KEY/BROKER_ADDR/
+    // CASSINI_SERVER_NAME from the environment -- the exact same,
+    // established commonClientEnv every agent's own main container
+    // already gets (infra/schema/constants.dhall), now also present
+    // on this init container's own env (see makePolarInitContainer's
+    // own, real Dhall definition).
+    let client_config = loop {
+        match TCPClientConfig::new() {
+            Ok(config) => break config,
+            Err(e) => {
+                tracing::warn!("Cassini client config not yet ready: {e}, retrying...");
+                tokio::time::sleep(Duration::from_secs(POLL_INTERVAL_SECS)).await;
+            }
+        }
+    };
+
+    let events_output = std::sync::Arc::new(OutputPort::default());
+
+    let (tcp_client, _) = loop {
+        match Actor::spawn(
+            None,
+            TcpClientActor,
+            TcpClientArgs {
+                config: client_config.clone(),
+                registration_id: None,
+                events_output: Some(events_output.clone()),
+                event_handler: None,
+            },
+        )
+        .await
+        {
+            Ok(spawned) => break spawned,
+            Err(e) => {
+                tracing::warn!("failed to establish Cassini connection: {e}, retrying...");
+                tokio::time::sleep(Duration::from_secs(POLL_INTERVAL_SECS)).await;
+            }
+        }
+    };
+
+    let (crypto_actor, _) = Actor::spawn(
+        None,
+        polar_crypto::CryptoActor,
+        polar_crypto::CryptoActorArgs {
+            tcp_client,
+            events_output,
+            own_identity: own_identity.to_string(),
+        },
+    )
+    .await
+    .expect("CryptoActor::pre_start does no fallible work of its own -- spawning it can't genuinely fail here");
+
+    loop {
+        match ractor::call!(crypto_actor, |reply| {
+            polar_crypto::CryptoMessage::EnsureBootstrapped { reply }
+        }) {
+            Ok(Ok(())) => {
+                tracing::info!("escrow-keypair bootstrap complete");
+                return;
+            }
+            Ok(Err(e)) => {
+                tracing::warn!("escrow-keypair bootstrap failed: {e}, retrying...");
+            }
+            Err(e) => {
+                tracing::warn!("failed to reach CryptoActor: {e}, retrying...");
+            }
+        }
+        tokio::time::sleep(Duration::from_secs(POLL_INTERVAL_SECS)).await;
+    }
 }
 
 // ---------------------------------------------------------------------------

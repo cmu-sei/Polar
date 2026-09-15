@@ -77,6 +77,7 @@ let render =
                           [ k8s.VolumeMount::{ name = Constants.certVolumeName, mountPath = Constants.tlsPath } ]
                           ([] : List Text)
                           [ "server:${Constants.tlsPath}:ecdsa-p256:${Constants.cassiniDNSName}" ]
+                          True
                       ]
                     , containers =
                       [ k8s.Container::{

@@ -53,6 +53,7 @@ let render =
                     [ kubernetes.VolumeMount::{ name = Constants.certVolumeName, mountPath = Constants.tlsPath } ]
                     ([] : List Text)
                     [ "client:${Constants.tlsPath}:ecdsa-p256:" ]
+                    False
                 ]
               , containers =
                 [ kubernetes.Container::{

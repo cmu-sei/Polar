@@ -6,9 +6,12 @@ license.workspace = true
 authors.workspace = true
 
 [dependencies]
+cassini-client = { workspace = true }
 cert-issuer-common = { path = "../cert-issuer/common" }
 clap = { workspace = true }
+polar-crypto.workspace = true
 polar-health = { path = "../polar-health" }
+ractor = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
