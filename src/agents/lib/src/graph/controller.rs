@@ -93,7 +93,7 @@ pub fn validate_cypher_identifier(s: &str) -> Result<(), CypherIdentifierError> 
     if s.chars().next().unwrap().is_ascii_digit() {
         return Err(CypherIdentifierError::StartsWithDigit(s.to_string()));
     }
-    if !s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+    if !s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == 'Σ') {
         return Err(CypherIdentifierError::InvalidCharacters(s.to_string()));
     }
     if CYPHER_KEYWORD_BLACKLIST.contains(&s.to_ascii_uppercase().as_str()) {

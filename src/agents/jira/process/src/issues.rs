@@ -131,7 +131,7 @@ fn dynamic_field_ops(
     key_prop_value: &str,
     props: Vec<Property>,
 ) {
-    let node_label = format!("JiraIssue_{label}");
+    let node_label = sanitize_label(&format!("JiraIssue_{label}").to_string());
     let dyn_key = match DynamicNodeKey::new(&node_label, "key", key_prop_value) {
         Ok(k) => k,
         Err(e) => {
@@ -179,16 +179,16 @@ fn build_ops_for_issue(issue: &JiraIssue) -> Vec<GraphOp> {
     for (key, value) in issue.fields.iter() {
         match value {
             FieldValue::OptionValue(Some(v)) => {
-                issue_props.push(Property(key.clone(), GraphValue::String(v.clone())));
+                issue_props.push(Property(sanitize_label(&key.clone()), GraphValue::String(v.clone())));
             }
             FieldValue::Number(v) => {
                 issue_props.push(Property(
-                    key.clone(),
+                    sanitize_label(&key.clone()),
                     GraphValue::I64(v.min(i64::MAX as f64) as i64),
                 ));
             }
             FieldValue::Bool(v) => {
-                issue_props.push(Property(key.clone(), GraphValue::Bool(*v)));
+                issue_props.push(Property(sanitize_label(&key.clone()), GraphValue::Bool(*v)));
             }
             FieldValue::List(v) if !v.is_empty() => {
                 let label = sanitize_label(key);
