@@ -20,6 +20,13 @@ rsa.workspace = true
 x25519-dalek = { version = "3.0.0", features = ["getrandom"] }
 cert-issuer-common = { version = "1.0.0", path = "../cert-issuer/common" }
 rand.workspace = true
+polar-kernel-keyring.workspace = true
+# Deliberately not the plain, workspace-managed sha2 (0.10.x) --
+# rsa::Oaep's own generic bounds require digest 0.11.x specifically,
+# matching our rsa fork's own real dependency. See polar-kernel-
+# keyring's and credentials_agent_common's own Cargo.toml for the
+# same, established pattern and full reasoning.
+sha2_011 = { package = "sha2", version = "0.11", default-features = false, features = ["oid"] }
 
 [dev-dependencies]
 tempfile.workspace = true

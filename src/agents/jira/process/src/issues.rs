@@ -555,7 +555,7 @@ mod tests {
             "Summary".to_string(),
             GraphValue::String("Fix the thing".to_string())
         )));
-        assert!(props.contains(&Property("Story Points".to_string(), GraphValue::I64(5))));
+        assert!(props.contains(&Property("Story_Points".to_string(), GraphValue::I64(5))));
         assert!(props.contains(&Property("Flagged".to_string(), GraphValue::Bool(true))));
     }
 

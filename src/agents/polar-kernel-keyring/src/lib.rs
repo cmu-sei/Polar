@@ -83,9 +83,15 @@
 
 use keyutils_raw::{
     KEY_POS_ALL, KEY_SPEC_SESSION_KEYRING, KEY_SPEC_USER_KEYRING, KEY_USR_ALL,
-    KEYCTL_SUPPORTS_DECRYPT, KeyringSerial, add_key, keyctl_link, keyctl_pkey_decrypt,
-    keyctl_pkey_query, keyctl_setperm, keyctl_unlink,
+    KEYCTL_SUPPORTS_DECRYPT, add_key, keyctl_link, keyctl_pkey_decrypt, keyctl_pkey_query,
+    keyctl_setperm, keyctl_unlink,
 };
+// Re-exported so callers holding a serial this crate returned (e.g.
+// try_load_asymmetric_key's own Some(serial)) can genuinely name its
+// type themselves -- without needing their own, direct dependency on
+// keyutils_raw just to write out a real type annotation or struct
+// field.
+pub use keyutils_raw::KeyringSerial;
 
 /// The info string passed to every keyctl_pkey_* call in this crate.
 ///
