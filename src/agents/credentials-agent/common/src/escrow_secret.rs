@@ -93,6 +93,30 @@ impl EscrowedSecret {
         let recipient_public_key = RsaPublicKey::from_public_key_pem(recipient_public_key_pem)
             .map_err(|e| EscrowError::InvalidPublicKey(e.to_string()))?;
 
+        Self::encrypt_to_parsed_key(plaintext, &recipient_public_key, recipient_public_key_pem)
+    }
+
+    /// The same, real operation as `encrypt`, for callers that
+    /// already hold a parsed `RsaPublicKey` -- e.g. a caller with its
+    /// own, real cache keyed by recipient identity, avoiding a real,
+    /// repeated PEM-parse cost on every single call (see
+    /// polar-crypto's own commit history for the actual motivation).
+    ///
+    /// `recipient_public_key_pem` is still required, deliberately:
+    /// `encrypted_to_pem`'s own field is real, meaningful wire
+    /// metadata (letting a holder confirm they have the matching
+    /// private key before attempting decryption at all), not
+    /// something this function can safely omit or re-derive for
+    /// free. Callers with an already-parsed key almost always still
+    /// have the original PEM string sitting right alongside it too
+    /// (from whatever query produced both) -- passing it through
+    /// directly here is genuinely free, unlike re-serializing the
+    /// parsed key back to PEM would be.
+    pub fn encrypt_to_parsed_key(
+        plaintext: &[u8],
+        recipient_public_key: &RsaPublicKey,
+        recipient_public_key_pem: &str,
+    ) -> Result<Self, EscrowError> {
         let aes_key = AesKey::<Aes256Gcm>::generate();
         let nonce = Nonce::generate();
         let cipher = Aes256Gcm::new(&aes_key);
@@ -149,7 +173,7 @@ impl EscrowedSecret {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rsa::pkcs8::EncodePublicKey;
+    use rsa::pkcs8::{DecodePublicKey, EncodePublicKey};
 
     fn test_recipient_keypair() -> (RsaPrivateKey, String) {
         use std::sync::OnceLock;
@@ -243,5 +267,41 @@ mod tests {
         let second = EscrowedSecret::encrypt(plaintext, &public_key_pem).unwrap();
 
         assert_ne!(first.ciphertext, second.ciphertext);
+    }
+
+    #[test]
+    fn encrypt_to_parsed_key_genuinely_decrypts_correctly_with_the_matching_private_key() {
+        // A real, direct proof this alternate constructor -- built
+        // for callers holding an already-parsed RsaPublicKey, e.g.
+        // polar-crypto's own, real per-identity cache -- is genuinely
+        // equivalent to the ordinary encrypt(), not just "compiles
+        // and doesn't panic."
+        let (private_key, public_key_pem) = test_recipient_keypair();
+        let public_key = RsaPublicKey::from_public_key_pem(&public_key_pem).unwrap();
+        let plaintext = b"a real secret, encrypted via the already-parsed-key path";
+
+        let secret =
+            EscrowedSecret::encrypt_to_parsed_key(plaintext, &public_key, &public_key_pem)
+                .unwrap();
+
+        let decrypted = secret.decrypt(&private_key).unwrap();
+        assert_eq!(&*decrypted, plaintext);
+    }
+
+    #[test]
+    fn encrypt_to_parsed_key_genuinely_uses_the_passed_in_pem_string_directly() {
+        // encrypted_to_pem is real, meaningful wire metadata -- this
+        // confirms encrypt_to_parsed_key genuinely stores the exact
+        // string it was handed, not something silently re-derived
+        // from the parsed key (which, being a different, equally
+        // valid PEM encoding of the same key, could still genuinely
+        // differ byte-for-byte from the original).
+        let (_private_key, public_key_pem) = test_recipient_keypair();
+        let public_key = RsaPublicKey::from_public_key_pem(&public_key_pem).unwrap();
+
+        let secret =
+            EscrowedSecret::encrypt_to_parsed_key(b"data", &public_key, &public_key_pem).unwrap();
+
+        assert_eq!(secret.encrypted_to_pem(), public_key_pem);
     }
 }

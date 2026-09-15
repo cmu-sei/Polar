@@ -73,8 +73,8 @@ use credentials_agent_common::{
 };
 use polar::request_reply::{Envelope, ReplyRouter};
 use ractor::{Actor, ActorProcessingErr, ActorRef, OutputPort, RpcReplyPort, async_trait};
-use rsa::RsaPrivateKey;
-use rsa::pkcs8::{DecodePrivateKey, EncodePrivateKey};
+use rsa::{RsaPrivateKey, RsaPublicKey};
+use rsa::pkcs8::{DecodePrivateKey, DecodePublicKey, EncodePrivateKey};
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{error, warn};
@@ -240,14 +240,15 @@ pub struct CryptoActorState {
     /// Other identities' own, real escrow public keys, keyed by
     /// identity -- learned on first use of EncryptForRecipient for
     /// each specific recipient, and reused afterward, same caching
-    /// reasoning as cached_credentials_agent_escrow_key above. Caches
-    /// the real PEM string directly (not a parsed RsaPublicKey), since
-    /// EscrowedSecret::encrypt itself takes a PEM string and parses
-    /// it internally on every call -- a real, existing inefficiency
-    /// this crate deliberately doesn't try to route around locally
-    /// (see this crate's own commit history for the planned, separate
-    /// fix to EscrowedSecret's own API instead).
-    cached_recipient_public_keys: Arc<tokio::sync::Mutex<std::collections::HashMap<String, String>>>,
+    /// reasoning as cached_credentials_agent_escrow_key above.
+    /// Caches both the real, already-parsed RsaPublicKey (so
+    /// EscrowedSecret::encrypt_to_parsed_key can skip a real,
+    /// repeated PEM-parse cost on every single call) and the
+    /// original PEM string alongside it (still required as real wire
+    /// metadata -- see EscrowedSecret::encrypt_to_parsed_key's own
+    /// doc comment).
+    cached_recipient_public_keys:
+        Arc<tokio::sync::Mutex<std::collections::HashMap<String, (RsaPublicKey, String)>>>,
     own_identity: String,
 }
 
@@ -840,14 +841,14 @@ async fn handle_decrypt_own_message(
 async fn handle_encrypt_for_recipient(
     tcp_client: ActorRef<TcpClientMessage>,
     agent_escrow_key_reply_router: Arc<ReplyRouter<AgentEscrowKeyReply>>,
-    cached_recipient_public_keys: Arc<tokio::sync::Mutex<std::collections::HashMap<String, String>>>,
+    cached_recipient_public_keys: Arc<tokio::sync::Mutex<std::collections::HashMap<String, (RsaPublicKey, String)>>>,
     recipient_identity: String,
     plaintext: Vec<u8>,
 ) -> Result<Vec<u8>, CryptoError> {
-    let public_key_pem = {
+    let (public_key, public_key_pem) = {
         let mut cache = cached_recipient_public_keys.lock().await;
         match cache.get(&recipient_identity) {
-            Some(pem) => pem.clone(),
+            Some((key, pem)) => (key.clone(), pem.clone()),
             None => {
                 let reply = publish_agent_escrow_key_request(
                     &tcp_client,
@@ -865,13 +866,20 @@ async fn handle_encrypt_for_recipient(
                     }
                 };
 
-                cache.insert(recipient_identity.clone(), pem.clone());
-                pem
+                // Parsed once, here, on genuine first use for this
+                // identity -- every later call for the same identity
+                // reuses the cached, already-parsed key directly,
+                // never re-parsing the same PEM again.
+                let key = RsaPublicKey::from_public_key_pem(&pem)
+                    .map_err(|e| CryptoError::KeyEncoding(e.to_string()))?;
+
+                cache.insert(recipient_identity.clone(), (key.clone(), pem.clone()));
+                (key, pem)
             }
         }
     };
 
-    let escrowed = EscrowedSecret::encrypt(&plaintext, &public_key_pem)?;
+    let escrowed = EscrowedSecret::encrypt_to_parsed_key(&plaintext, &public_key, &public_key_pem)?;
 
     rkyv::to_bytes::<rkyv::rancor::Error>(&escrowed)
         .map(|b| b.to_vec())
