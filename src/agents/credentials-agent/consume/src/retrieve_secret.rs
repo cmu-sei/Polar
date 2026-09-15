@@ -197,7 +197,7 @@ mod tests {
         let escrow_keypair = crate::escrow::tests::test_keypair();
 
         // Seed a real certificate for the requester.
-        let mut rng = rsa::rand_core::OsRng;
+        let mut rng = rand::rng();
         let requester_private_key = rsa::RsaPrivateKey::new(&mut rng, 2048).unwrap();
         let requester_private_key_pem = rsa::pkcs8::EncodePrivateKey::to_pkcs8_pem(
             &requester_private_key,
@@ -335,7 +335,7 @@ mod tests {
         // specifically about the secret not existing, not about
         // requester validation, so that earlier check must pass
         // first.
-        let mut rng = rsa::rand_core::OsRng;
+        let mut rng = rand::rng();
         let requester_private_key = rsa::RsaPrivateKey::new(&mut rng, 2048).unwrap();
         let requester_private_key_pem = rsa::pkcs8::EncodePrivateKey::to_pkcs8_pem(
             &requester_private_key,

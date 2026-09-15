@@ -75,7 +75,7 @@ mod tests {
 
     #[test]
     fn extracted_public_key_matches_the_original_key_used_to_sign_the_certificate() {
-        let mut rng = rsa::rand_core::OsRng;
+        let mut rng = rand::rng();
         let private_key = rsa::RsaPrivateKey::new(&mut rng, 2048).unwrap();
         let original_public_key_pem = private_key
             .to_public_key()

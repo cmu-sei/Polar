@@ -98,7 +98,7 @@ mod tests {
     use crate::escrow_secret::EscrowedSecret;
 
     fn sample_secret() -> EscrowedSecret {
-        let mut rng = rsa::rand_core::OsRng;
+        let mut rng = rand::rng();
         let private_key = rsa::RsaPrivateKey::new(&mut rng, 4096).unwrap();
         let public_key_pem = rsa::pkcs8::EncodePublicKey::to_public_key_pem(
             &private_key.to_public_key(),

@@ -87,7 +87,7 @@ pub fn generate_csr(
         KeyAlgorithm::Rsa => {
             // Generated directly, not via KeyPair::generate_for --
             // see KeyAlgorithm::Rsa's own doc comment for why.
-            let mut rng = rsa::rand_core::OsRng;
+            let mut rng = rand::rng();
             let rsa_private_key = rsa::RsaPrivateKey::new(&mut rng, 4096)
                 .map_err(|e| KeypairError::CsrFailed(e.to_string()))?;
             let rsa_private_key_pem = rsa::pkcs8::EncodePrivateKey::to_pkcs8_pem(

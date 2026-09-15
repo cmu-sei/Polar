@@ -742,7 +742,7 @@ mod tests {
         static KEYPAIR: OnceLock<(RsaPrivateKey, String)> = OnceLock::new();
         KEYPAIR
             .get_or_init(|| {
-                let mut rng = rsa::rand_core::OsRng;
+                let mut rng = rand::rng();
                 let private_key = RsaPrivateKey::new(&mut rng, 4096).unwrap();
                 let public_key_pem = private_key
                     .to_public_key()
@@ -1129,7 +1129,7 @@ mod tests {
     #[tokio::test]
     async fn ensure_own_escrow_keypair_returns_the_existing_key_without_issuing_when_one_is_already_escrowed()
      {
-        let mut rng = rsa::rand_core::OsRng;
+        let mut rng = rand::rng();
         let previously_escrowed_key = RsaPrivateKey::new(&mut rng, 2048).unwrap();
         let previously_escrowed_key_pem = rsa::pkcs8::EncodePrivateKey::to_pkcs8_pem(
             &previously_escrowed_key,
@@ -1183,7 +1183,7 @@ mod tests {
         // agent had previously escrowed -- its own PKCS8 PEM is what
         // the fake Credentials Agent hands back, genuinely
         // re-encrypted via the real ephemeral exchange for each call.
-        let mut rng = rsa::rand_core::OsRng;
+        let mut rng = rand::rng();
         let previously_escrowed_key = RsaPrivateKey::new(&mut rng, 2048).unwrap();
         let previously_escrowed_key_pem = rsa::pkcs8::EncodePrivateKey::to_pkcs8_pem(
             &previously_escrowed_key,

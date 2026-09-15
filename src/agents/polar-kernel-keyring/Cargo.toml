@@ -6,19 +6,23 @@ license.workspace = true
 authors.workspace = true
 
 [dependencies]
-errno = "0.3.14"
-
-# Our own fork -- crates.io's published 0.4.0 has a real, confirmed
-# bug in PKeyOpParamsKernel (missing the kernel's own required
-# __spare[7] padding, causing every keyctl_pkey_encrypt/decrypt/sign
-# call to genuinely fail with EINVAL). Pinned to a specific commit,
-# not `branch = "master"`, so this dependency can't silently drift if
-# the fork's own master ever moves forward again without us noticing.
-keyutils-raw = { git = "https://github.com/daveman1010221/rust-keyutils.git", rev = "f22e830", package = "keyutils-raw" }
-
+errno.workspace = true
+keyutils-raw.workspace = true
+libc.workspace = true
+rsa.workspace = true
+# Deliberately not workspace-managed -- must match our rsa fork's own
+# real dependency on digest 0.11.x precisely (oaep_decrypt_digest's
+# own generic bounds require it), while the rest of this workspace
+# still depends on the older, real sha2 0.10.x / digest 0.10.x.
+# Cargo genuinely allows both major versions to coexist across
+# independent dependency subtrees -- this crate is new and isolated
+# enough that scoping the newer version here alone is safe, without
+# needing to migrate every other real consumer of sha2/digest across
+# this large workspace at once.
+sha2 = { version = "0.11", default-features = false, features = ["oid"] }
 thiserror.workspace = true
 tracing.workspace = true
-uninit = "0.3"
+uninit.workspace = true
 
 [dev-dependencies]
-rsa.workspace = true
+rand.workspace = true

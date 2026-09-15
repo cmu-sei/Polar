@@ -93,7 +93,7 @@ impl EscrowKeypair {
     }
 
     pub fn generate() -> Result<Self, EscrowKeypairError> {
-        let mut rng = rsa::rand_core::OsRng;
+        let mut rng = rand::rng();
         let private_key = RsaPrivateKey::new(&mut rng, 4096)
             .map_err(|e| EscrowKeypairError::Generation(e.to_string()))?;
         Self::from_private_key(private_key)

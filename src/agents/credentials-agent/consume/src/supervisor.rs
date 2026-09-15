@@ -1249,7 +1249,7 @@ mod agent_escrow_wiring_tests {
 
         // Seed a real requester certificate.
         let certificate_pem = {
-            let mut rng = rsa::rand_core::OsRng;
+            let mut rng = rand::rng();
             let private_key = rsa::RsaPrivateKey::new(&mut rng, 2048).unwrap();
             let private_key_pem =
                 rsa::pkcs8::EncodePrivateKey::to_pkcs8_pem(&private_key, rsa::pkcs8::LineEnding::LF)
@@ -1409,7 +1409,7 @@ mod retrieve_secret_wiring_tests {
         .unwrap();
 
         // Seed a real requester certificate.
-        let mut rng = rsa::rand_core::OsRng;
+        let mut rng = rand::rng();
         let requester_private_key = rsa::RsaPrivateKey::new(&mut rng, 2048).unwrap();
         let requester_private_key_pem = rsa::pkcs8::EncodePrivateKey::to_pkcs8_pem(
             &requester_private_key,

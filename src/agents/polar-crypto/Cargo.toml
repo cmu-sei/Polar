@@ -19,6 +19,7 @@ thiserror.workspace = true
 rsa.workspace = true
 x25519-dalek = { version = "3.0.0", features = ["getrandom"] }
 cert-issuer-common = { version = "1.0.0", path = "../cert-issuer/common" }
+rand.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

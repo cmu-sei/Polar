@@ -89,44 +89,50 @@ use keyutils_raw::{
 
 /// The info string passed to every keyctl_pkey_* call in this crate.
 ///
-/// PKCS1v1.5 padding ("enc=pkcs1"), not OAEP -- confirmed directly,
-/// empirically, against a real kernel during this crate's own
-/// development (see this crate's own commit history): mainline
-/// Linux's in-tree RSA implementation (crypto/rsa-pkcs1pad.c) only
-/// ever implements PKCS1v1.5 padding for encrypt/decrypt -- there is
-/// no OAEP unpadding logic anywhere in the kernel's own crypto
-/// subsystem at all, on any distro or kernel version. This is a
-/// genuine architectural fact about mainline Linux, not a
-/// configuration gap on any specific machine.
+/// Raw mode -- no padding scheme applied by the kernel at all. The
+/// kernel's own RFC patch that introduced this interface documents
+/// this directly: "If omitted or is 'raw', the raw output of the
+/// encryption function is specified."
 ///
-/// This means ciphertext encrypted to a kernel-custody key's public
-/// half must itself be PKCS1v1.5-padded, not OAEP -- the two schemes
-/// produce genuinely different ciphertext byte structures for the
-/// same plaintext and same key, and the kernel's own decrypt step
-/// only knows how to unpad one of them. credentials-agent-common's
-/// own EscrowedSecret deliberately keeps OAEP for its own, existing
-/// use (the in-memory fallback path, where no such kernel constraint
-/// applies) -- callers wrapping a key for genuine kernel custody must
-/// encrypt to it with PKCS1v1.5 specifically, not reuse EscrowedSecret
-/// as-is.
+/// This crate performs the real OAEP unpad itself afterward (see
+/// decrypt()'s own body), using our own fork of the rsa crate's
+/// already-audited oaep_decrypt_digest -- genuinely, mathematically
+/// separate from the raw RSA modular-exponentiation step the kernel
+/// performs here. Mainline Linux's own in-tree RSA implementation
+/// (crypto/rsa-pkcs1pad.c) only ever implements PKCS1v1.5 padding
+/// internally for encrypt/decrypt -- there is no OAEP unpadding logic
+/// anywhere in the kernel's own crypto subsystem at all, on any
+/// distro or kernel version (confirmed directly, empirically, against
+/// a real kernel during this crate's own development -- see this
+/// crate's own commit history). Raw mode is what lets that real,
+/// architectural kernel limitation stay fully contained inside this
+/// one function, rather than forcing credentials-agent-common's own
+/// EscrowedSecret -- and every caller that already depends on it,
+/// including callers whose own keys never touch the kernel at all --
+/// to weaken its own wire protocol to accommodate it.
 ///
-/// PKCS1v1.5 is genuinely, practically vulnerable to Bleichenbacher-
-/// style padding-oracle attacks *when* an attacker can submit many,
-/// adaptively-chosen ciphertexts to the same key and observe a
-/// distinguishable success/failure signal -- the classic scenario
-/// being a network-reachable TLS server. That scenario does not apply
-/// here: this decrypt operation is never exposed as a repeatable,
-/// externally-reachable oracle -- CryptoActor is the sole, deliberate
-/// boundary for every key operation in this system (see polar-crypto's
-/// own commit history for the full reasoning), and its own message
-/// handling for kernel-backed decrypt must collapse every possible
-/// failure (bad padding, wrong key, malformed ciphertext, anything)
-/// into one uniform, non-distinguishing error -- never let "padding
-/// was invalid" be observable as different from any other failure,
-/// in the returned type, any log message, or timing. That discipline,
-/// not the padding scheme choice itself, is the real safety property
-/// this path depends on.
-const ESCROW_PKEY_INFO: &str = "enc=pkcs1";
+/// Real OAEP unpad failures and genuine kernel-level rejections both
+/// collapse into decrypt()'s own, single DecryptFailed variant,
+/// deliberately: PKCS1v1.5's own real, historical vulnerability class
+/// (Bleichenbacher-style padding-oracle attacks) requires an attacker
+/// able to submit many, adaptively-chosen ciphertexts to the same key
+/// and observe a distinguishable success/failure signal. OAEP itself
+/// isn't immune to an analogous risk if its own decode step leaks
+/// which specific validation failed -- so this crate holds itself to
+/// the same discipline regardless of padding scheme: CryptoActor is
+/// the sole, deliberate boundary for every key operation in this
+/// system (see polar-crypto's own commit history for the full
+/// reasoning), and no caller of this function should ever be able to
+/// observe "padding was invalid" as distinguishable from any other
+/// failure, in the returned type, any log message, or timing.
+const ESCROW_PKEY_INFO: &str = "enc=raw";
+
+/// The hash algorithm used for OAEP's own label-hashing and MGF1 mask
+/// generation -- must match credentials-agent-common's own
+/// EscrowedSecret::encrypt exactly (Oaep::new::<Sha256>()), or the
+/// unpad step below genuinely, correctly fails, given it validates
+/// the padding structure against this specific hash.
+type EscrowOaepHash = sha2::Sha256;
 
 #[derive(Debug, thiserror::Error)]
 pub enum KernelKeyringError {
@@ -230,23 +236,28 @@ pub fn try_load_asymmetric_key(description: &str, der_bytes: &[u8]) -> Option<Ke
 }
 
 /// Decrypts `ciphertext` using the kernel-held private key at
-/// `serial` -- the raw private key material never enters this
-/// process's own memory at all; the kernel performs the actual
-/// RSA-OAEP/SHA-256 operation internally and hands back only the
-/// plaintext result.
+/// `serial`. The raw RSA private key material never leaves the
+/// kernel at all -- only the raw, still-OAEP-padded modular-
+/// exponentiation result crosses back into this process's own
+/// memory, and this function then performs the real OAEP unpad step
+/// itself, entirely in userspace, using this crate's own fork of the
+/// rsa crate's already-audited, real oaep_decrypt_digest.
+///
+/// Every possible failure along the way -- a genuine kernel
+/// rejection, a real OAEP padding-validation failure, anything --
+/// collapses into this same DecryptFailed variant, deliberately: see
+/// this crate's own top-level doc comment for why "padding was
+/// invalid" must never be observably distinguishable from any other
+/// failure.
 pub fn decrypt(serial: KeyringSerial, ciphertext: &[u8]) -> Result<Vec<u8>, KernelKeyringError> {
-    // The kernel genuinely, actively validates the supplied out_len
-    // against keyctl_pkey_query's own max_dec_size for this specific
-    // key, and rejects with EINVAL if it's oversized -- confirmed
-    // directly, empirically (see this crate's own commit history):
-    // an oversized buffer is not merely wasteful, it's a hard
-    // rejection, not just an upper bound to stay under. So the real
-    // query result is required here, not a generous, fixed guess --
-    // re-querying per call is a real, small cost, but a correctness
-    // requirement, not an optimization to skip.
-    let query = keyctl_pkey_query(serial, ESCROW_PKEY_INFO)
-        .map_err(KernelKeyringError::DecryptFailed)?;
-    let mut buffer = vec![0u8; query.max_dec_size as usize];
+    let query =
+        keyctl_pkey_query(serial, ESCROW_PKEY_INFO).map_err(KernelKeyringError::DecryptFailed)?;
+
+    // Raw mode's own output is always exactly the key's full
+    // modulus size, in bytes -- there's no padding-removal step
+    // happening inside the kernel at all here to shrink it.
+    let modulus_bytes = (query.key_size as usize).div_ceil(8);
+    let mut buffer = vec![0u8; modulus_bytes];
 
     let written = keyctl_pkey_decrypt(
         serial,
@@ -262,35 +273,56 @@ pub fn decrypt(serial: KeyringSerial, ciphertext: &[u8]) -> Result<Vec<u8>, Kern
             capacity: buffer.len(),
         });
     }
-
     buffer.truncate(written);
-    Ok(buffer)
+
+    // Left-pad to the full modulus width -- the kernel's own raw
+    // output may genuinely come back shorter than the modulus if the
+    // resulting integer's own leading bytes happened to be zero
+    // (ordinary, expected behavior for any big-integer encoding), but
+    // OAEP's own unpad step requires the complete, fixed-width
+    // encoded message block to correctly locate its own leading 0x00
+    // byte.
+    while buffer.len() < modulus_bytes {
+        buffer.insert(0, 0);
+    }
+
+    rsa::oaep::oaep_decrypt_digest::<EscrowOaepHash, EscrowOaepHash>(
+        &mut buffer,
+        None,
+        modulus_bytes,
+    )
+    // Deliberately not preserving the real, underlying OAEP error
+    // detail here -- collapsed into the exact same DecryptFailed
+    // variant, with a synthetic errno, so a genuine padding failure
+    // is never observably different from a real kernel-level
+    // rejection above.
+    .map_err(|_| KernelKeyringError::DecryptFailed(errno::Errno(libc::EBADMSG)))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rsa::Pkcs1v15Encrypt;
     use rsa::pkcs8::EncodePrivateKey;
-    use rsa::{RsaPrivateKey, RsaPublicKey};
+    use rsa::{Oaep, RsaPrivateKey, RsaPublicKey};
 
     /// A real, end-to-end proof this crate's own primitives genuinely
     /// work against the actual, real kernel on whatever machine this
     /// test runs on -- not a mock, not an assumption. Generates a
     /// real RSA key, loads it into the real kernel keyring, encrypts
-    /// a real plaintext to its public half entirely outside the
-    /// kernel (standing in for how a peer, elsewhere, would encrypt
-    /// something to this identity's own escrow public key), then
-    /// decrypts it back via the actual, real keyctl_pkey_decrypt
-    /// syscall -- proving the kernel genuinely holds working private
-    /// key material, not just that add_key() didn't error.
+    /// a real plaintext with real, standard OAEP -- the exact same
+    /// wire format credentials-agent-common's own EscrowedSecret
+    /// actually produces, matching what a real peer would send this
+    /// identity -- entirely outside the kernel, then decrypts it back
+    /// via decrypt()'s own, real split path: the kernel performs only
+    /// the raw RSA modular exponentiation, and this crate performs
+    /// the real OAEP unpad itself afterward.
     ///
     /// If this fails with a kernel-support-related error rather than
     /// a genuine bug, that's real, meaningful information about
     /// whatever machine ran it -- not a test to silently skip.
     #[test]
     fn real_key_genuinely_round_trips_through_the_real_kernel_keyring() {
-        let mut rng = rsa::rand_core::OsRng;
+        let mut rng = rand::rng();
         let private_key =
             RsaPrivateKey::new(&mut rng, 2048).expect("real RSA key generation must succeed");
         let public_key = RsaPublicKey::from(&private_key);
@@ -299,38 +331,37 @@ mod tests {
             .to_pkcs8_der()
             .expect("real PKCS8 DER encoding must succeed");
 
-        std::fs::write("/tmp/pkk-test-key.der", der_bytes.as_bytes())
-            .expect("failed to write diagnostic key file");
-
-        let serial = try_load_asymmetric_key(
-            "polar-kernel-keyring-test",
-            der_bytes.as_bytes(),
-        )
-        .expect(
-            "this test's own machine must genuinely support kernel-keyring asymmetric-key \
-             operations for this crate's real behavior to be verified at all -- if this \
-             panics, check this machine's own kernel config (CONFIG_ASYMMETRIC_KEY_TYPE, \
-             CONFIG_CRYPTO_RSA) rather than assuming a bug in this crate",
-        );
-
-        let plaintext = b"a real secret, encrypted outside the kernel entirely";
-        let ciphertext = public_key
-            .encrypt(&mut rng, Pkcs1v15Encrypt, plaintext)
+        let serial = try_load_asymmetric_key("polar-kernel-keyring-test", der_bytes.as_bytes())
             .expect(
-                "real RSA-PKCS1v1.5 encryption to the public half must succeed -- PKCS1v1.5, \
-                 not OAEP, since that's genuinely all mainline Linux's own kernel crypto \
-                 implements for RSA decrypt; see ESCROW_PKEY_INFO's own doc comment for the \
-                 complete reasoning",
+                "this test's own machine must genuinely support kernel-keyring asymmetric-key \
+                 operations for this crate's real behavior to be verified at all -- if this \
+                 panics, check this machine's own kernel config (CONFIG_ASYMMETRIC_KEY_TYPE, \
+                 CONFIG_CRYPTO_RSA, CONFIG_PKCS8_PRIVATE_KEY_PARSER) rather than assuming a bug \
+                 in this crate",
             );
 
-        let decrypted =
-            decrypt(serial, &ciphertext).expect("the real, kernel-backed decrypt must succeed");
+        let plaintext = b"a real secret, encrypted outside the kernel entirely, with real OAEP";
+
+        // Real, standard OAEP -- exactly what any peer encrypting to
+        // this identity's real escrow public key actually sends,
+        // matching credentials-agent-common's own EscrowedSecret
+        // exactly (Oaep::new::<Sha256>()). Never touches anything
+        // kernel-related; only needs the public key.
+        let ciphertext = public_key
+            .encrypt(&mut rng, Oaep::<EscrowOaepHash>::new(), plaintext)
+            .expect("real OAEP encryption to the public half must succeed");
+
+        let decrypted = decrypt(serial, &ciphertext).expect(
+            "the real, kernel-backed decrypt -- raw RSA inside the kernel, real OAEP unpad \
+             performed here -- must succeed",
+        );
 
         assert_eq!(
             decrypted, plaintext,
-            "the kernel-decrypted plaintext must genuinely match what was encrypted -- proving \
-             the kernel really holds working private key material, not just that add_key() \
-             didn't error"
+            "the split decrypt path's own final plaintext must genuinely match what was \
+             encrypted with real, standard OAEP -- proving both the kernel's own raw RSA \
+             operation and this crate's own, separate OAEP unpad step are each genuinely \
+             correct, not just that add_key() didn't error"
         );
     }
 }

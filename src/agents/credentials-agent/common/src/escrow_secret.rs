@@ -52,7 +52,7 @@ use rkyv::{Archive, Deserialize, Serialize};
 use rsa::pkcs8::DecodePublicKey;
 use rsa::{Oaep, RsaPrivateKey, RsaPublicKey};
 use serde::{Deserialize as SerdeDeserialize, Serialize as SerdeSerialize};
-use sha2::Sha256;
+use sha2_011::Sha256;
 use zeroize::Zeroizing;
 
 #[derive(Debug, thiserror::Error)]
@@ -101,9 +101,9 @@ impl EscrowedSecret {
             .encrypt(&nonce, plaintext)
             .map_err(|_| EscrowError::Encryption)?;
 
-        let mut rng = rsa::rand_core::OsRng;
+        let mut rng = rand::rng();
         let encrypted_key = recipient_public_key
-            .encrypt(&mut rng, Oaep::new::<Sha256>(), aes_key.as_slice())
+            .encrypt(&mut rng, Oaep::<Sha256>::new(), aes_key.as_slice())
             .map_err(|e| EscrowError::KeyWrap(e.to_string()))?;
 
         Ok(Self {
@@ -124,7 +124,7 @@ impl EscrowedSecret {
     /// that this can't be left to Rust's ordinary `Drop`.
     pub fn decrypt(&self, private_key: &RsaPrivateKey) -> Result<Zeroizing<Vec<u8>>, EscrowError> {
         let aes_key_bytes = private_key
-            .decrypt(Oaep::new::<Sha256>(), &self.encrypted_key)
+            .decrypt(Oaep::<Sha256>::new(), &self.encrypted_key)
             .map_err(|e| EscrowError::KeyUnwrap(e.to_string()))?;
         let aes_key_bytes = Zeroizing::new(aes_key_bytes);
 
@@ -156,7 +156,7 @@ mod tests {
         static KEYPAIR: OnceLock<(RsaPrivateKey, String)> = OnceLock::new();
         KEYPAIR
             .get_or_init(|| {
-                let mut rng = rsa::rand_core::OsRng;
+                let mut rng = rand::rng();
                 let private_key = RsaPrivateKey::new(&mut rng, 4096).unwrap();
                 let public_key_pem = private_key
                     .to_public_key()
@@ -202,7 +202,7 @@ mod tests {
         let plaintext = b"a real secret";
         let secret = EscrowedSecret::encrypt(plaintext, &public_key_pem).unwrap();
 
-        let mut rng = rsa::rand_core::OsRng;
+        let mut rng = rand::rng();
         let wrong_private_key = RsaPrivateKey::new(&mut rng, 4096).unwrap();
 
         let result = secret.decrypt(&wrong_private_key);

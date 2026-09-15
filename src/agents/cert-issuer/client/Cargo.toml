@@ -22,6 +22,7 @@ jsonwebtoken.workspace = true
 clap.workspace = true
 
 cert-issuer-common = { path = "../common" }
+rand.workspace = true
 
 
 [[bin]]

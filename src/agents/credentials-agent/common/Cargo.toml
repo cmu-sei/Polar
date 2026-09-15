@@ -31,11 +31,27 @@ clap.workspace = true
 aes-gcm = "0.11.1"
 zeroize = { version = "1.9.0", features = ["aarch64"] }
 secrecy = "0.10.3"
+
+# The older, real sha2 0.10.x / digest 0.10.x -- hkdf 0.12.4 (used by
+# ephemeral_exchange.rs) is itself pinned to this version for exactly
+# this reason (see this crate's own commit history). Kept under its
+# ordinary name, since this is the version every other, pre-existing
+# caller in this crate already expects.
 sha2.workspace = true
+# The newer, real sha2 0.11.x / digest 0.11.x -- our rsa fork's own
+# Oaep/oaep_decrypt_digest genuinely require this specific version's
+# traits. Renamed (not the ordinary `sha2` name) so both versions can
+# coexist explicitly, since this crate genuinely needs two,
+# incompatible "Sha256" types for two, separate, real reasons -- see
+# polar-kernel-keyring's own Cargo.toml for the same, established
+# pattern.
+sha2_011 = { package = "sha2", version = "0.11", default-features = false, features = ["oid"] }
+
 rsa.workspace = true
 cert-issuer-common = { version = "1.0.0", path = "../../cert-issuer/common" }
 x25519-dalek = { version = "3.0.0", features = ["getrandom"] }
 hkdf = "0.12.4"
+rand.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true

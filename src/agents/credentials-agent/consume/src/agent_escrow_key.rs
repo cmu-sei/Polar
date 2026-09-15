@@ -118,7 +118,7 @@ mod tests {
     }
 
     fn real_self_signed_cert_pem() -> String {
-        let mut rng = rsa::rand_core::OsRng;
+        let mut rng = rand::rng();
         let private_key = rsa::RsaPrivateKey::new(&mut rng, 2048).unwrap();
         let private_key_pem = rsa::pkcs8::EncodePrivateKey::to_pkcs8_pem(
             &private_key,

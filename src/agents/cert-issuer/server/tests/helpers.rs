@@ -36,7 +36,7 @@ pub fn ensure_crypto_provider() {
 pub fn primary_keypair() -> &'static RsaPrivateKey {
     static KEY: OnceLock<RsaPrivateKey> = OnceLock::new();
     KEY.get_or_init(|| {
-        let mut rng = rsa::rand_core::OsRng;
+        let mut rng = rand::rng();
         // 2048 bits is the minimum sane RSA size today and is
         // fast enough for test setup.
         RsaPrivateKey::new(&mut rng, 2048).expect("rsa keypair generation")
@@ -47,7 +47,7 @@ pub fn primary_keypair() -> &'static RsaPrivateKey {
 pub fn secondary_keypair() -> &'static RsaPrivateKey {
     static KEY: OnceLock<RsaPrivateKey> = OnceLock::new();
     KEY.get_or_init(|| {
-        let mut rng = rsa::rand_core::OsRng;
+        let mut rng = rand::rng();
         RsaPrivateKey::new(&mut rng, 2048).expect("rsa keypair generation")
     })
 }
@@ -57,8 +57,8 @@ pub fn secondary_keypair() -> &'static RsaPrivateKey {
 /// what we sign with in tests.
 pub fn jwk_for(kid: &str, key: &RsaPrivateKey) -> serde_json::Value {
     let public: RsaPublicKey = key.to_public_key();
-    let n = public.n().to_bytes_be();
-    let e = public.e().to_bytes_be();
+    let n = public.n().to_be_bytes_trimmed_vartime();
+    let e = public.e().to_be_bytes_trimmed_vartime();
     serde_json::json!({
         "kty": "RSA",
         "kid": kid,

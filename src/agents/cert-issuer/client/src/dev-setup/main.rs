@@ -87,7 +87,7 @@ fn main() {
     // ---- Step 2: OIDC signing keypair -------------------------------------
 
     println!("--- Step 2: generating OIDC issuer signing keypair ---");
-    let mut rng = rsa::rand_core::OsRng;
+    let mut rng = rand::rng();
     let oidc_private_key = rsa::RsaPrivateKey::new(&mut rng, 2048).expect("RSA keypair generation");
     let oidc_public_key = oidc_private_key.to_public_key();
 
@@ -95,8 +95,8 @@ fn main() {
 
     println!("--- Step 3: writing JWKS ---");
     let kid = "dev-key-1";
-    let n = URL_SAFE_NO_PAD.encode(oidc_public_key.n().to_bytes_be());
-    let e = URL_SAFE_NO_PAD.encode(oidc_public_key.e().to_bytes_be());
+    let n = URL_SAFE_NO_PAD.encode(oidc_public_key.n().to_be_bytes_trimmed_vartime());
+    let e = URL_SAFE_NO_PAD.encode(oidc_public_key.e().to_be_bytes_trimmed_vartime());
     let jwks = serde_json::json!({
         "keys": [{
             "kty": "RSA",

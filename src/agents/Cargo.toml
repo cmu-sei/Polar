@@ -167,13 +167,35 @@ jira_common = { path = "jira/common" }
 jwt_utils = { path = "jwt-utils" }
 kube-common = { path = "kubernetes/common" }
 polar = { path = "lib" }
+errno = "0.3.14"
+libc = "0.2"
+uninit = "0.3"
 polar-health = { path = "polar-health" }
+polar-kernel-keyring = { path = "polar-kernel-keyring" }
 polar-test-graph = { path = "polar-test-graph" }
 openapi-common = { path = "openapi/common" }
 time = { version = "0.3.47", features = ["serde"]}
 wiremock = "0.6"
 x509-parser = { version = "0.16", features = ["verify"]}
-rsa = "0.9"
+# Our own fork -- crates.io's published rsa crate keeps
+# oaep_decrypt_digest as pub(crate), unreachable from outside the
+# crate. That function is the real, already-audited OAEP-unpad step,
+# genuinely, mathematically separate from the raw RSA modular-
+# exponentiation operation -- exposing it as `pub` is what lets
+# polar-kernel-keyring's own decrypt() perform real OAEP unpadding on
+# the raw, still-padded bytes the kernel hands back (the kernel's own
+# keyctl_pkey_decrypt genuinely, only implements PKCS1v1.5 padding
+# internally; see this fork's own commit history for the full
+# investigation). Pinned to a specific commit, not `branch = "master"`,
+# matching the same, established convention as keyutils-raw below.
+rsa = { git = "https://github.com/daveman1010221/RSA.git", rev = "aa4bc50", features = ["hazmat"] }
+# Our own fork -- crates.io's published 0.4.0 has a real, confirmed
+# bug in PKeyOpParamsKernel (missing the kernel's own required
+# __spare[7] padding, causing every keyctl_pkey_encrypt/decrypt/sign
+# call to genuinely fail with EINVAL). Pinned to a specific commit,
+# not `branch = "master"`, so this dependency can't silently drift if
+# the fork's own master ever moves forward again without us noticing.
+keyutils-raw = { git = "https://github.com/daveman1010221/rust-keyutils.git", rev = "f22e830", package = "keyutils-raw" }
 
 jsonwebtoken = { version = "10.3.0", features = ["rust_crypto"] }
 rcgen = { version = "0.14.7", features = ["x509-parser"] }
