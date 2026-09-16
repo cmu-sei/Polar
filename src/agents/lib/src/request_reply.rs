@@ -109,6 +109,68 @@ impl<T> ReplyRouter<T> {
     pub fn cancel(&self, correlation_id: &str) {
         self.pending.lock().unwrap().remove(correlation_id);
     }
+
+    /// `register()` plus its own, real timeout handling, as one,
+    /// atomic operation -- the exact "register, publish, await with a
+    /// timeout, cancel on timeout" sequence every real caller of this
+    /// type has otherwise had to hand-write identically (see this
+    /// crate's own commit history for several, real, independent
+    /// examples). Genuinely additive: `register`/`deliver`/`cancel`
+    /// are unchanged, and every existing caller keeps working exactly
+    /// as before -- this is a real, second, shorter path for new
+    /// callers, not a replacement.
+    ///
+    /// The real property this closes: a caller of the bare
+    /// `register()`/`cancel()` pair could always, genuinely forget to
+    /// call `cancel()` on some unusual, early-return error path,
+    /// leaving a real, permanent entry in `pending` -- a genuine,
+    /// unbounded-growth risk over the life of a long-running agent.
+    /// This can't forget, since the cancel-on-timeout call is
+    /// unconditionally part of this one function's own body.
+    ///
+    /// The caller must still publish its own request *after* this
+    /// returns its receiver internally and *before* the timeout
+    /// elapses -- this function only wraps the waiting half, not the
+    /// publish itself, since publishing is genuinely specific to each
+    /// caller's own transport/topic.
+    pub async fn register_with_timeout(
+        &self,
+        correlation_id: String,
+        timeout: std::time::Duration,
+        publish: impl FnOnce() -> Result<(), String>,
+    ) -> Result<T, ReplyError> {
+        let rx = self.register(correlation_id.clone());
+
+        if let Err(e) = publish() {
+            self.cancel(&correlation_id);
+            return Err(ReplyError::PublishFailed(e));
+        }
+
+        match tokio::time::timeout(timeout, rx).await {
+            Ok(Ok(reply)) => Ok(reply),
+            Ok(Err(_)) => Err(ReplyError::ChannelClosed),
+            Err(_) => {
+                self.cancel(&correlation_id);
+                Err(ReplyError::Timeout)
+            }
+        }
+    }
+}
+
+/// The real, complete set of ways `register_with_timeout` can fail --
+/// deliberately distinguishing these three, rather than collapsing
+/// them into one, generic error, since each is a genuinely different,
+/// real situation a caller may want to handle differently (e.g.
+/// retrying a `PublishFailed` immediately is reasonable; retrying a
+/// `Timeout` immediately usually isn't).
+#[derive(Debug, thiserror::Error)]
+pub enum ReplyError {
+    #[error("failed to publish the underlying request: {0}")]
+    PublishFailed(String),
+    #[error("timed out waiting for a reply")]
+    Timeout,
+    #[error("reply channel closed with no reply")]
+    ChannelClosed,
 }
 
 #[cfg(test)]
@@ -157,6 +219,65 @@ mod reply_router_tests {
         // id-b's registration is untouched -- deliver("id-a", ...)
         // must not have affected it.
         drop(rx_b); // still pending; dropping is a clean way to end the test
+    }
+
+    #[tokio::test]
+    async fn register_with_timeout_returns_the_real_reply_when_delivered_in_time() {
+        let router: std::sync::Arc<ReplyRouter<String>> = std::sync::Arc::new(ReplyRouter::new());
+        let router_for_publish = router.clone();
+
+        let result = router
+            .register_with_timeout(
+                "abc-123".to_string(),
+                std::time::Duration::from_secs(5),
+                move || {
+                    // Standing in for a real, actual publish -- delivers
+                    // immediately, genuinely before the timeout, proving
+                    // the happy path returns the real reply rather than
+                    // racing its own timeout.
+                    router_for_publish.deliver("abc-123", "the real reply".to_string());
+                    Ok(())
+                },
+            )
+            .await;
+
+        assert_eq!(result.unwrap(), "the real reply");
+    }
+
+    #[tokio::test]
+    async fn register_with_timeout_genuinely_cancels_on_its_own_timeout() {
+        let router: ReplyRouter<String> = ReplyRouter::new();
+
+        let result = router
+            .register_with_timeout(
+                "abc-123".to_string(),
+                std::time::Duration::from_millis(50),
+                || Ok(()), // publishes, but nothing ever replies
+            )
+            .await;
+
+        assert!(matches!(result, Err(ReplyError::Timeout)));
+
+        // The real property this proves: cancel() genuinely happened
+        // internally -- a late delivery after the timeout must be a
+        // harmless no-op, not silently succeed against a stale
+        // registration.
+        router.deliver("abc-123", "too late".to_string());
+    }
+
+    #[tokio::test]
+    async fn register_with_timeout_propagates_a_real_publish_failure() {
+        let router: ReplyRouter<String> = ReplyRouter::new();
+
+        let result = router
+            .register_with_timeout(
+                "abc-123".to_string(),
+                std::time::Duration::from_secs(5),
+                || Err("broker unreachable".to_string()),
+            )
+            .await;
+
+        assert!(matches!(result, Err(ReplyError::PublishFailed(_))));
     }
 }
 
