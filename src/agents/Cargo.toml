@@ -67,6 +67,7 @@ members = [
     "polar-healthcheck",
     "polar-init",
     "polar-kernel-keyring",
+    "polar-router",
     "polar-test-graph",
     "policy-config",
     "resolver",
@@ -173,6 +174,7 @@ uninit = "0.3"
 polar-crypto = { path = "polar-crypto" }
 polar-health = { path = "polar-health" }
 polar-kernel-keyring = { path = "polar-kernel-keyring" }
+polar-router = { path = "polar-router" }
 polar-test-graph = { path = "polar-test-graph" }
 openapi-common = { path = "openapi/common" }
 time = { version = "0.3.47", features = ["serde"]}

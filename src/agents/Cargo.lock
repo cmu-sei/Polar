@@ -5358,6 +5358,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "polar-router"
+version = "1.0.0"
+dependencies = [
+ "cassini-types",
+ "ractor",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "polar-scheduler"
 version = "1.0.0"
 dependencies = [
