@@ -198,6 +198,10 @@
           gitProcessorImage    = polarPkgs.gitAgent.processorImage;
           gitSchedulerImage    = polarPkgs.gitAgent.schedulerImage;
 
+          # ── Credentials agent ────────────────────────────────────────────────
+          credentialsAgentConsumerImage = polarPkgs.credentialsAgent.consumerImage;
+          credentialsAgentObserverImage = polarPkgs.credentialsAgent.observerImage;
+
           buildProcessorImage  = polarPkgs.buildProcessor.buildProcessorImage;
           cloneImage           = polarPkgs.buildOrchestrator.cloneImage;
 

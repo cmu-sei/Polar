@@ -127,6 +127,12 @@ let
       healthcheckDrv = healthcheck;
     };
 
+    credentialsAgent = import ./credentials-agent/package.nix {
+      inherit pkgs craneLib workspaceFileset nix-container-lib inputs system;
+      crateArgs = individualCrateArgs;
+      healthcheckDrv = healthcheck;
+    };
+
     nuInit = import ./nu-init/package.nix {
       inherit pkgs nix-container-lib inputs system;
       certIssuerClient = certIssuer.client;
@@ -148,5 +154,5 @@ let
     };
 in
 {
-    inherit workspacePackages gitlabAgent cassini kubeAgent webAgent ociResolver scheduler jiraAgent gitAgent buildProcessor certIssuer nuInit gitServer polarInit healthcheck;
+        inherit workspacePackages gitlabAgent cassini kubeAgent webAgent ociResolver scheduler jiraAgent gitAgent buildProcessor certIssuer nuInit gitServer polarInit healthcheck credentialsAgent;
 }

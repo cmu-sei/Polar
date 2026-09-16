@@ -93,6 +93,8 @@ build-all:
     nix build {{_nix_flags}} ".#packages.{{platform}}.gitObserverImage"      -o result-git-observer
     nix build {{_nix_flags}} ".#packages.{{platform}}.gitProcessorImage"     -o result-git-processor
     nix build {{_nix_flags}} ".#packages.{{platform}}.gitSchedulerImage"     -o result-git-scheduler
+    nix build {{_nix_flags}} ".#packages.{{platform}}.credentialsAgentConsumerImage" -o result-credentials-agent-consumer
+    nix build {{_nix_flags}} ".#packages.{{platform}}.credentialsAgentObserverImage" -o result-credentials-agent-observer
     nix build {{_nix_flags}} ".#packages.{{platform}}.buildProcessorImage"   -o result-build-processor
     nix build {{_nix_flags}} ".#packages.{{platform}}.nuInitImage"           -o result-nu-init
     nix build {{_nix_flags}} ".#packages.{{platform}}.polarInitImage"        -o result-polar-init
@@ -383,6 +385,34 @@ git-agents target='all':
             just _load result-git-processor
             ;;
         *) echo "Unknown target: {{target}}. Use all, observer, processor, or scheduler." && exit 1 ;;
+    esac
+
+# ── Credentials Agent ────────────────────────────────────────────────────────
+
+# Build credentials agent images
+# Usage: just credentials-agent        (all)
+#        just credentials-agent observer
+#        just credentials-agent consumer
+credentials-agent target='all':
+    #!/usr/bin/env bash
+    set -euo pipefail
+    base=".#packages.{{platform}}.polarPkgs.credentialsAgent"
+    case "{{target}}" in
+        all)
+            nix build {{_nix_flags}} "$base.observerImage" -o result-credentials-agent-observer
+            nix build {{_nix_flags}} "$base.consumerImage" -o result-credentials-agent-consumer
+            just _load result-credentials-agent-observer
+            just _load result-credentials-agent-consumer
+            ;;
+        observer)
+            nix build {{_nix_flags}} "$base.observerImage" -o result-credentials-agent-observer
+            just _load result-credentials-agent-observer
+            ;;
+        consumer)
+            nix build {{_nix_flags}} "$base.consumerImage" -o result-credentials-agent-consumer
+            just _load result-credentials-agent-consumer
+            ;;
+        *) echo "Unknown target: {{target}}. Use all, observer, or consumer." && exit 1 ;;
     esac
 
 # ── Build processor + resolver ──────────────────────────────────────────────
@@ -1141,6 +1171,8 @@ cluster-load-minimal neo4j_result=_neo4j_result: registry-up cluster-load-provis
     _push ./result-jira-observer  "jira-observer:latest"
     _push ./result-jira-processor "jira-processor:latest"
     _push ./result-nu-init        "polar-nu-init:latest"
+    _push ./result-credentials-agent-consumer "credentials-agent-consumer:latest"
+    _push ./result-credentials-agent-observer "credentials-agent-observer:latest"
     echo "Minimal images pushed to {{_registry_host}}:{{_registry_port}}."
 
 # Build and load all core Polar images into the cluster.
@@ -1176,6 +1208,8 @@ cluster-load-all neo4j_result=_neo4j_result: registry-up cluster-load-provisione
     _push ./result-git-observer        "git-observer:latest"
     _push ./result-git-processor       "git-processor:latest"
     _push ./result-git-scheduler       "git-scheduler:latest"
+    _push ./result-credentials-agent-consumer "credentials-agent-consumer:latest"
+    _push ./result-credentials-agent-observer "credentials-agent-observer:latest"
     _push ./result-jira-observer       "jira-observer:latest"
     _push ./result-jira-processor      "jira-processor:latest"
     _push ./result-openapi-observer    "openapi-observer:latest"
