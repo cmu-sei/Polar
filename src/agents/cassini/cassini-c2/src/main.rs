@@ -41,11 +41,14 @@ impl Actor for ShutdownController {
         // Build TCP client config from environment.
         let config = TCPClientConfig::new()?;
 
+        let events_output: std::sync::Arc<ractor::OutputPort<ClientEvent>> =
+            std::sync::Arc::new(ractor::OutputPort::default());
+        events_output.subscribe(forwarder, Some);
+
         let tcp_args = TcpClientArgs {
             config,
             registration_id: None,
-            events_output: None,
-            event_handler: Some(forwarder),
+            delivery: cassini_client::DeliveryMode::Broadcast(events_output),
         };
 
         let (client, _) = Actor::spawn_linked(

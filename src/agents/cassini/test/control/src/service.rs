@@ -143,11 +143,12 @@ impl HarnessController {
         .await?;
 
         let config = TCPClientConfig::new()?;
+        let events_output: Arc<OutputPort<ClientEvent>> = Arc::new(OutputPort::default());
+        events_output.subscribe(forwarder, Some);
         let tcp_args = TcpClientArgs {
             config,
             registration_id: None,
-            events_output: None,
-            event_handler: Some(forwarder),
+            delivery: cassini_client::DeliveryMode::Broadcast(events_output),
         };
 
         match Actor::spawn_linked(

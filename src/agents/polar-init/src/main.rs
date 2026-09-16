@@ -313,8 +313,7 @@ async fn ensure_escrow_bootstrapped(own_identity: &str) {
             TcpClientArgs {
                 config: client_config.clone(),
                 registration_id: None,
-                events_output: Some(events_output.clone()),
-                event_handler: None,
+                delivery: cassini_client::DeliveryMode::Broadcast(events_output.clone()),
             },
         )
         .await

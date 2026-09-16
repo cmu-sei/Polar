@@ -284,11 +284,13 @@ impl Actor for ProducerAgent {
 
         let config = TCPClientConfig::new()?;
         // Prepare TcpClientArgs and spawn the client actor
+        let events_output: Arc<OutputPort<CassiniEvent>> = Arc::new(OutputPort::default());
+        events_output.subscribe(forwarder, Some);
+
         let tcp_args = TcpClientArgs {
             config,
             registration_id: None,
-            events_output: None,
-            event_handler: Some(forwarder),
+            delivery: cassini_client::DeliveryMode::Broadcast(events_output),
         };
 
         let (tcp_client, _) = TcpClientActor::spawn_linked(

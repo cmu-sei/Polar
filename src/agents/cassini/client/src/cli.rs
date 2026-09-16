@@ -1,5 +1,5 @@
 use crate::QueueEntry;
-use crate::{TCPClientConfig, TcpClientActor, TcpClientArgs, TcpClientMessage};
+use crate::{DeliveryMode, TCPClientConfig, TcpClientActor, TcpClientArgs, TcpClientMessage};
 use anyhow::Result;
 use cassini_types::{ClientEvent, ControlError, ControlOp, ControlResult};
 use clap::{Parser, Subcommand, ValueEnum};
@@ -561,14 +561,17 @@ pub async fn register(
     )
     .await?;
 
+    let events_output: Arc<ractor::OutputPort<ClientEvent>> =
+        Arc::new(ractor::OutputPort::default());
+    events_output.subscribe(bridge_ref, Some);
+
     let (client_ref, client_handle) = Actor::spawn(
         Some("cassini.cli.tcp_client".to_string()),
         TcpClientActor,
         TcpClientArgs {
             config: client_config,
             registration_id: None,
-            events_output: None,
-            event_handler: Some(bridge_ref),
+            delivery: DeliveryMode::Broadcast(events_output),
         },
     )
     .await?;

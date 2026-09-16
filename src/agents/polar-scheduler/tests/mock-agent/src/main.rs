@@ -58,8 +58,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         TcpClientArgs {
             config,
             registration_id: None,
-            events_output: Some(events_output),
-            event_handler: None,
+            delivery: cassini_client::DeliveryMode::Broadcast(events_output),
         },
     )
     .await?;

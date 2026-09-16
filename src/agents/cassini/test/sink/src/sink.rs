@@ -183,8 +183,12 @@ impl Actor for SinkAgent {
             TcpClientArgs {
                 config: tcp_cfg,
                 registration_id: None,
-                events_output: None,
-                event_handler: Some(forwarder),
+                delivery: {
+                    let events_output: std::sync::Arc<ractor::OutputPort<ClientEvent>> =
+                        std::sync::Arc::new(ractor::OutputPort::default());
+                    events_output.subscribe(forwarder, Some);
+                    cassini_client::DeliveryMode::Broadcast(events_output)
+                },
             },
             myself.clone().into(),
         )

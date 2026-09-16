@@ -599,8 +599,7 @@ impl Actor for ConsumerSupervisor {
             TcpClientArgs {
                 config: client_config,
                 registration_id: None,
-                events_output: Some(events_output),
-                event_handler: None,
+                delivery: cassini_client::DeliveryMode::Broadcast(events_output),
             },
             myself.clone().into(),
         )

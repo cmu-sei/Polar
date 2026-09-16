@@ -311,7 +311,6 @@ pub enum TcpClientMessage {
     GetSession {
         trace_ctx: Option<WireTraceCtx>,
     },
-    SetEventHandler(ActorRef<ClientEvent>),
     Reconnect,
     Reconnected {
         reader: Option<ReadHalf<TlsStream<TcpStream>>>,
@@ -356,6 +355,41 @@ impl TcpClientMessage {
 
 type TlsWriter = Option<Arc<Mutex<BufWriter<WriteHalf<TlsStream<TcpStream>>>>>>;
 
+/// How a `TcpClientActor` delivers every real, incoming `ClientEvent`
+/// to the rest of its own agent -- the one, real, structural choice
+/// this crate genuinely offers, replacing what were previously two,
+/// independent, always-both-fired fields (`events_output` broadcast
+/// and a direct `event_handler`, see this crate's own, prior history
+/// for the shape this replaced).
+///
+/// `Broadcast` is unchanged, existing behavior -- every current agent
+/// keeps working exactly as before, migrated mechanically to this
+/// enum's own shape.
+///
+/// `Router` is the new, real, per-topic-directed alternative: genuine
+/// `ClientEvent::MessagePublished` events are converted to a real
+/// `polar_router::IncomingMessage` and routed by topic via `router`
+/// (see `polar-router`'s own crate documentation for the complete,
+/// real reasoning); every other, real `ClientEvent` variant --
+/// connection-lifecycle events like `Registered`/`TransportError`,
+/// never genuinely "a message on a topic" in the first place -- goes
+/// directly to `lifecycle` instead, mirroring `TcpClient::spawn`'s
+/// own, existing `map_event` closure pattern.
+#[derive(Clone)]
+pub enum DeliveryMode {
+    Broadcast(Arc<OutputPort<ClientEvent>>),
+    Router {
+        router: ActorRef<polar_router::RouterMessage>,
+        // Arc, not Box -- spawn_reader's own real, spawned read-loop
+        // task needs its own, cloned copy of `delivery` (the same
+        // real reason state.events_output/event_handler were always
+        // cloned out of state before this replaced them), and a
+        // trait-object closure can only be cloned via shared
+        // ownership, never by value.
+        lifecycle: Arc<dyn Fn(ClientEvent) + Send + Sync>,
+    },
+}
+
 /// Actor state for the TCP client
 pub struct TcpClientState {
     bind_addr: String,
@@ -365,19 +399,14 @@ pub struct TcpClientState {
     registration: RegistrationState,
     client_config: Arc<ClientConfig>,
 
-    /// Output port where message payloads and the topic it came from is piped to a dispatcher
-    events_output: Arc<OutputPort<ClientEvent>>,
+    delivery: DeliveryMode,
     abort_handle: Option<AbortHandle>, // abort handle switch for the stream read loop
-    pub event_handler: Option<ActorRef<ClientEvent>>,
 }
 
 pub struct TcpClientArgs {
     pub config: TCPClientConfig,
     pub registration_id: Option<String>,
-    /// If `None`, a default unsubscribed port is created internally.
-    /// Prefer [`event_handler`] via [`ClientEventForwarder`] for reliable delivery.
-    pub events_output: Option<Arc<OutputPort<ClientEvent>>>,
-    pub event_handler: Option<ActorRef<ClientEvent>>,
+    pub delivery: DeliveryMode,
 }
 
 /// TCP client actor
@@ -459,8 +488,7 @@ impl TcpClientActor {
         // Take ownership of the read half exactly once.
         let reader = state.reader.take().expect("Reader already taken");
 
-        let queue_out = state.events_output.clone();
-        let handler = state.event_handler.clone(); // clone the optional direct handler
+        let delivery = state.delivery.clone();
         let broker_addr = state.bind_addr.clone();
 
         let read_loop_span =
@@ -537,14 +565,8 @@ impl TcpClientActor {
                                                         trace_ctx: current_trace_ctx,
                                                         published_by: published_by.clone(),
                                                     };
-                                                    // Send to output port (existing)
-                                                    queue_out.send(event.clone());
-                                                    trace!("TCP client sent MessagePublished to output port for topic {}", topic);
-                                                    // Send to direct handler if present
-                                                    if let Some(ref handler) = handler
-                                                        && let Err(e) = handler.send_message(event) {
-                                                            error!("Failed to send MessagePublished to direct handler: {}", e);
-                                                        }
+                                                    TcpClientActor::dispatch_event(&delivery, event);
+                                                    trace!("TCP client dispatched MessagePublished for topic {}", topic);
                                                 } else {
                                                     warn!("Failed to publish message to topic: {topic}");
                                                 }
@@ -594,16 +616,7 @@ impl TcpClientActor {
                                                 debug!("Received publish ack for topic: {topic}");
 
                                                 let event = ClientEvent::PublishAcknowledged { topic };
-
-                                                // Send to output port
-                                                queue_out.send(event.clone());
-                                                // Send to direct handler if present
-                                                if let Some(ref handler) = handler
-                                                    && let Err(e) = handler.send_message(event) {
-                                                        error!("Failed to send ControlResponse to direct handler: {}", e);
-                                                    }
-
-
+                                                TcpClientActor::dispatch_event(&delivery, event);
                                             }
                                             ClientMessage::ControlResponse { registration_id, result, trace_ctx } => {
                                                 let span = trace_span!("client.handle_control_response");
@@ -618,13 +631,7 @@ impl TcpClientActor {
                                                     result,
                                                     trace_ctx: current_trace_ctx,
                                                 };
-                                                // Send to output port
-                                                queue_out.send(event.clone());
-                                                // Send to direct handler if present
-                                                if let Some(ref handler) = handler
-                                                    && let Err(e) = handler.send_message(event) {
-                                                        error!("Failed to send ControlResponse to direct handler: {}", e);
-                                                    }
+                                                TcpClientActor::dispatch_event(&delivery, event);
                                             }
                                             _ => {
                                                 let _g = trace_span!("client.handle_unknown_message").entered();
@@ -649,11 +656,7 @@ impl TcpClientActor {
                         let event = ClientEvent::TransportError {
                             reason: format!("{UNEXPECTED_DISCONNECT} {e}")
                         };
-                        queue_out.send(event.clone());
-                        if let Some(ref handler) = handler
-                            && let Err(e) = handler.send_message(event) {
-                                error!("Failed to send TransportError to direct handler: {}", e);
-                            }
+                        TcpClientActor::dispatch_event(&delivery, event);
                         // Instead of breaking, send Reconnect to self
                         let _ = myself.send_message(TcpClientMessage::Reconnect);
                         break;
@@ -719,25 +722,54 @@ impl TcpClientActor {
         reason: String,
     ) {
         let _g = warn_span!("tcp_client.transport_error", error = %reason).entered();
-        state.events_output.send(ClientEvent::TransportError {
-            reason: reason.clone(),
-        });
+        Self::dispatch_event(&state.delivery, ClientEvent::TransportError { reason: reason.clone() });
         drop(_g);
         myself.stop(Some(reason));
     }
 
-    // ===== Handler methods =====
-
-    // Handlers for messages that can be processed regardless of registration state
-    async fn handle_set_event_handler(
-        &self,
-        _myself: ActorRef<TcpClientMessage>,
-        state: &mut TcpClientState,
-        handler: ActorRef<ClientEvent>,
-    ) -> Result<(), ActorProcessingErr> {
-        state.event_handler = Some(handler);
-        Ok(())
+    /// The one, real, single place a `ClientEvent` is ever actually
+    /// delivered out of this actor -- replaces four, separate,
+    /// previously near-identical "send to the broadcast port, then
+    /// conditionally also send to a direct handler" call sites (see
+    /// this crate's own, prior history for the shape this replaced).
+    ///
+    /// `MessagePublished` specifically is the one, real variant
+    /// `DeliveryMode::Router` treats differently from every other
+    /// variant -- it's the only one that's genuinely "a message on a
+    /// topic," and the only one converted into a real
+    /// `polar_router::IncomingMessage` and routed by topic. Every
+    /// other, real `ClientEvent` (connection-lifecycle events like
+    /// `Registered`/`TransportError`, never genuinely topic-shaped at
+    /// all) goes directly to `lifecycle` instead.
+    fn dispatch_event(delivery: &DeliveryMode, event: ClientEvent) {
+        match delivery {
+            DeliveryMode::Broadcast(events_output) => {
+                events_output.send(event);
+            }
+            DeliveryMode::Router { router, lifecycle } => match event {
+                ClientEvent::MessagePublished {
+                    topic,
+                    payload,
+                    trace_ctx,
+                    published_by,
+                } => {
+                    if let Err(e) = router.send_message(polar_router::RouterMessage::Route(
+                        polar_router::IncomingMessage {
+                            topic,
+                            payload,
+                            published_by,
+                            trace_ctx,
+                        },
+                    )) {
+                        error!("Failed to route MessagePublished to RouterActor: {e}");
+                    }
+                }
+                other => lifecycle(other),
+            },
+        }
     }
+
+    // ===== Handler methods =====
 
     async fn handle_reconnected(
         &self,
@@ -813,12 +845,7 @@ impl TcpClientActor {
             registration_id: registration_id.clone(),
         };
         let event = ClientEvent::Registered { registration_id };
-        state.events_output.send(event.clone());
-        if let Some(handler) = &state.event_handler
-            && let Err(e) = handler.send_message(event)
-        {
-            error!("Failed to send Registered to direct handler: {}", e);
-        }
+        TcpClientActor::dispatch_event(&state.delivery, event);
         Ok(())
     }
 
@@ -1113,10 +1140,6 @@ impl Actor for TcpClientActor {
 
         // --- 7. Construct final state ---
         // init_span ends when this function returns (no long-lived spawned tasks here)
-        let events_output = args
-            .events_output
-            .unwrap_or_else(|| Arc::new(OutputPort::default()));
-
         let state = TcpClientState {
             bind_addr: args.config.broker_endpoint,
             server_name: args.config.server_name,
@@ -1124,9 +1147,8 @@ impl Actor for TcpClientActor {
             writer: None,
             registration,
             client_config: Arc::new(client_config),
-            events_output,
+            delivery: args.delivery,
             abort_handle: None,
-            event_handler: args.event_handler,
         };
 
         Ok(state)
@@ -1199,12 +1221,6 @@ impl Actor for TcpClientActor {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match (&mut state.registration, message) {
-            // ---- SetEventHandler (always handled) ----
-            (_, TcpClientMessage::SetEventHandler(handler)) => {
-                self.handle_set_event_handler(myself, state, handler)
-                    .await?
-            }
-
             // ---- Reconnected (always handled) ----
             (_, TcpClientMessage::Reconnected { reader, writer }) => {
                 self.handle_reconnected(myself, state, reader, writer)
