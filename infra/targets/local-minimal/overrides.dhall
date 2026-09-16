@@ -57,6 +57,10 @@ in
   , observer = { image = registry ++ "kube-observer:latest" }
   , consumer = { image = registry ++ "kube-consumer:latest" }
   }
+, credentialsAgent =
+  { image            = registry ++ "credentials-agent-consumer:latest"
+  , imagePullSecrets = [] : List { name : Optional Text }
+  }
 , certIssuer =
   { image            = registry ++ "cert-issuer:latest"
   , imagePullSecrets = [] : List { name : Optional Text }

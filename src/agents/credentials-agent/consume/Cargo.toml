@@ -49,3 +49,7 @@ serde_json.workspace = true
 time.workspace = true
 wiremock.workspace = true
 x25519-dalek = { version = "3.0.0", features = ["getrandom"] }
+
+[[bin]]
+name = "credentials-agent-consumer"
+path = "src/main.rs"
