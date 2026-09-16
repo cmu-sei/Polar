@@ -32,5 +32,13 @@ def main [context_nuon: string] {
     dhall-to-yaml --documents --quoted --file $tmp | save --force ($output_dir | path join "credentials-agent-job.yaml")
     rm $tmp
 
+    # Observer -- Job + Service
+    let tmp  = (mktemp --suffix ".dhall")
+    let expr = "let v = " + $merged + " in " + $chart_dir + "/observer.dhall { name = v.observerName, image = v.observerImage, imagePullPolicy = v.imagePullPolicy, imagePullSecrets = v.imagePullSecrets, polarInitImage = \"" + $polar_init_image + "\", certIssuerUrl = \"" + $cert_issuer_url + "\", saTokenAudience = \"" + $sa_audience + "\", port = v.observerPort }"
+    $expr | save --force $tmp
+    print $"  rendering observer.dhall -> credentials-agent-observer.yaml"
+    dhall-to-yaml --documents --quoted --file $tmp | save --force ($output_dir | path join "credentials-agent-observer.yaml")
+    rm $tmp
+
     print $"  credentials-agent: done"
 }

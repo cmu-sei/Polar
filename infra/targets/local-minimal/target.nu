@@ -54,6 +54,7 @@ def main [] {
             "cassini.yaml"
             "credentials-agent-pvc.yaml"
             "credentials-agent-job.yaml"
+            "credentials-agent-observer.yaml"
             "jaeger.yaml"
             "ace-rbac.yaml"
             "ace.yaml"

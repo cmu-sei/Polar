@@ -82,6 +82,7 @@ in
   }
 , credentialsAgent =
   { image            = registry ++ "credentials-agent-consumer:latest"
+  , observerImage    = registry ++ "credentials-agent-observer:latest"
   , imagePullSecrets = [] : List { name : Optional Text }
   }
 , certIssuer =
