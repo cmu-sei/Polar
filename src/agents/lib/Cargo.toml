@@ -15,6 +15,7 @@ opentelemetry-otlp.workspace = true
 opentelemetry_sdk.workspace = true
 opentelemetry.workspace = true
 polar-health.workspace = true
+polar-router.workspace = true
 ractor.workspace = true
 reqwest = { workspace = true, features = ["json", "rustls-tls"] }
 rkyv.workspace = true

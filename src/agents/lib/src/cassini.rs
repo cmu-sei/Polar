@@ -105,7 +105,62 @@ impl TcpClient {
 
         Ok(Self { inner, queue })
     }
+
+    /// Same real, existing purpose as `spawn` -- a real `TcpClient`
+    /// wrapper this agent's own actors keep publishing/subscribing
+    /// through exactly as before -- but backed by
+    /// `DeliveryMode::Router` internally: real, incoming
+    /// `ClientEvent::MessagePublished` events go to `router`, routed
+    /// by topic (see `polar-router`'s own crate documentation), while
+    /// every other, real, connection-lifecycle `ClientEvent` variant
+    /// still reaches `supervisor` exactly as `map_event` describes --
+    /// the same, real mapping shape `spawn` already uses, genuinely
+    /// unchanged for the caller.
+    ///
+    /// `map_event` is wrapped internally into the fire-and-forget
+    /// `Arc<dyn Fn(ClientEvent)>` shape `DeliveryMode::Router`'s own
+    /// `lifecycle` field requires -- the caller never needs to know
+    /// that detail.
+    pub async fn spawn_with_router<M, F>(
+        service_name: &str,
+        supervisor: ActorRef<M>,
+        map_event: F,
+        router: ActorRef<polar_router::RouterMessage>,
+    ) -> Result<Self, ActorProcessingErr>
+    where
+        M: Send + 'static,
+        F: Fn(ClientEvent) -> Option<M> + Send + Sync + 'static,
+    {
+        let supervisor_for_lifecycle = supervisor.clone();
+        let lifecycle: std::sync::Arc<dyn Fn(ClientEvent) + Send + Sync> =
+            std::sync::Arc::new(move |event: ClientEvent| {
+                if let Some(mapped) = map_event(event)
+                    && let Err(e) = supervisor_for_lifecycle.send_message(mapped)
+                {
+                    tracing::warn!("TcpClient: failed to deliver lifecycle event to supervisor: {e}");
+                }
+            });
+
+        let config = TCPClientConfig::new()?;
+
+        let (inner, _) = Actor::spawn_linked(
+            Some(format!("{service_name}.tcp")),
+            TcpClientActor,
+            TcpClientArgs {
+                config,
+                registration_id: None,
+                delivery: cassini_client::DeliveryMode::Router { router, lifecycle },
+            },
+            supervisor.into(),
+        )
+        .await?;
+
+        let queue = MessageQueue::from_env();
+
+        Ok(Self { inner, queue })
+    }
 }
+
 
 #[async_trait]
 impl CassiniClient for TcpClient {

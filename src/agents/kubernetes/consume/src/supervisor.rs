@@ -231,6 +231,45 @@ impl ClusterConsumerSupervisor {
         }
         Ok(())
     }
+
+    /// Registers this agent's own two, real, genuinely-owned topics
+    /// (KUBERNETES_CONSUMER, KUBERNETES_RESOLUTION_EVENTS) with
+    /// `router`. Each topic's own, real deliver closure deliberately
+    /// does the minimal, correct thing -- reconstruct the exact same
+    /// ClientEvent::MessagePublished this agent's own, existing,
+    /// unchanged handle()/deserialize_and_dispatch logic already
+    /// expects, and forward it to `supervisor` as the same, existing
+    /// SupervisorMessage::ClientEvent it already handles. Extracted
+    /// from pre_start specifically so a real test can exercise this
+    /// registration/dispatch behavior directly, without needing the
+    /// real network connection pre_start also, separately, attempts.
+    fn register_kube_topics(
+        router: &ActorRef<polar_router::RouterMessage>,
+        supervisor: &ActorRef<SupervisorMessage>,
+    ) -> Result<(), ActorProcessingErr> {
+        for topic in [KUBERNETES_CONSUMER, KUBERNETES_RESOLUTION_EVENTS] {
+            let supervisor_for_deliver = supervisor.clone();
+            router
+                .send_message(polar_router::RouterMessage::Register {
+                    topic: topic.to_string(),
+                    deliver: Box::new(move |incoming: polar_router::IncomingMessage| {
+                        let event = ClientEvent::MessagePublished {
+                            topic: incoming.topic,
+                            payload: incoming.payload,
+                            trace_ctx: incoming.trace_ctx,
+                            published_by: incoming.published_by,
+                        };
+                        if let Err(e) = supervisor_for_deliver
+                            .send_message(SupervisorMessage::ClientEvent { event })
+                        {
+                            warn!("RouterActor: failed to deliver routed message to supervisor: {e}");
+                        }
+                    }),
+                })
+                .map_err(ActorProcessingErr::from)?;
+        }
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -285,9 +324,31 @@ impl Actor for ClusterConsumerSupervisor {
         .await
         .map_err(|e| ActorProcessingErr::from(e))?;
 
-        match TcpClient::spawn(BROKER_CLIENT_NAME, myself, |event| {
-            Some(SupervisorMessage::ClientEvent { event })
-        })
+        // A real, first, proof-of-concept RouterActor integration --
+        // see polar-router's own crate documentation for the complete
+        // design. RouterActor itself never touches this supervisor's
+        // own, private, mutable state (graph_controller,
+        // projection_cache) directly, since a registered closure runs
+        // inside RouterActor's own actor context, not this one's --
+        // see register_kube_topics's own doc comment for what each
+        // topic's own, real deliver closure does instead.
+        let (router, _) = polar_router::RouterActor::spawn_linked(
+            None,
+            polar_router::RouterActor,
+            (),
+            myself.get_cell(),
+        )
+        .await
+        .map_err(ActorProcessingErr::from)?;
+
+        Self::register_kube_topics(&router, &myself)?;
+
+        match TcpClient::spawn_with_router(
+            BROKER_CLIENT_NAME,
+            myself,
+            |event| Some(SupervisorMessage::ClientEvent { event }),
+            router,
+        )
         .await
         {
             Ok(broker_client) => Ok(ClusterConsumerSupervisorState {
@@ -522,5 +583,147 @@ impl Actor for ClusterConsumerSupervisor {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod router_integration_tests {
+    use super::*;
+    use ractor::{Actor, ActorProcessingErr, async_trait};
+    use std::sync::{Arc, Mutex};
+
+    /// A minimal, real stand-in for ClusterConsumerSupervisor itself
+    /// -- genuinely receives SupervisorMessage, just records what it
+    /// got rather than processing it, since this test's own, real
+    /// purpose is proving RouterActor's delivery reaches a real actor
+    /// correctly, not re-testing this crate's own, separate,
+    /// unchanged handle()/deserialize_and_dispatch logic.
+    struct FakeSupervisor {
+        received: Arc<Mutex<Option<ClientEvent>>>,
+    }
+
+    #[async_trait]
+    impl Actor for FakeSupervisor {
+        type Msg = SupervisorMessage;
+        type State = ();
+        type Arguments = ();
+
+        async fn pre_start(
+            &self,
+            _myself: ActorRef<Self::Msg>,
+            _args: (),
+        ) -> Result<Self::State, ActorProcessingErr> {
+            Ok(())
+        }
+
+        async fn handle(
+            &self,
+            _myself: ActorRef<Self::Msg>,
+            message: Self::Msg,
+            _state: &mut Self::State,
+        ) -> Result<(), ActorProcessingErr> {
+            if let SupervisorMessage::ClientEvent { event } = message {
+                *self.received.lock().unwrap() = Some(event);
+            }
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_message_routed_on_kubernetes_consumer_genuinely_reaches_the_supervisor() {
+        // The real, end-to-end proof this integration is meant to
+        // provide: a raw IncomingMessage on KUBERNETES_CONSUMER,
+        // routed through a real RouterActor via the exact,
+        // production registration function, reconstructed as the
+        // exact same ClientEvent::MessagePublished this agent's own,
+        // real handle() already expects, and genuinely delivered to
+        // the real actor that registered for it.
+        let received = Arc::new(Mutex::new(None));
+        let (fake_supervisor, _) = Actor::spawn(
+            None,
+            FakeSupervisor {
+                received: received.clone(),
+            },
+            (),
+        )
+        .await
+        .unwrap();
+
+        let (router, _) = polar_router::RouterActor::spawn(None, polar_router::RouterActor, ())
+            .await
+            .unwrap();
+
+        ClusterConsumerSupervisor::register_kube_topics(&router, &fake_supervisor).unwrap();
+
+        router
+            .send_message(polar_router::RouterMessage::Route(
+                polar_router::IncomingMessage {
+                    topic: KUBERNETES_CONSUMER.to_string(),
+                    payload: b"a real, raw kube event payload".to_vec(),
+                    published_by: Some("kube-observer".to_string()),
+                    trace_ctx: None,
+                },
+            ))
+            .unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let got = received
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("the fake supervisor must have genuinely received a real ClientEvent");
+        match got {
+            ClientEvent::MessagePublished {
+                topic,
+                payload,
+                published_by,
+                ..
+            } => {
+                assert_eq!(topic, KUBERNETES_CONSUMER);
+                assert_eq!(payload, b"a real, raw kube event payload");
+                assert_eq!(published_by, Some("kube-observer".to_string()));
+            }
+            other => panic!("expected MessagePublished, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_message_on_an_unregistered_topic_never_reaches_the_supervisor() {
+        // The real, other half of the proof: RouterActor's own,
+        // genuine topic-scoping actually holds -- a message on a
+        // topic this agent never registered for must never reach it
+        // at all, not even accidentally.
+        let received = Arc::new(Mutex::new(None));
+        let (fake_supervisor, _) = Actor::spawn(
+            None,
+            FakeSupervisor {
+                received: received.clone(),
+            },
+            (),
+        )
+        .await
+        .unwrap();
+
+        let (router, _) = polar_router::RouterActor::spawn(None, polar_router::RouterActor, ())
+            .await
+            .unwrap();
+
+        ClusterConsumerSupervisor::register_kube_topics(&router, &fake_supervisor).unwrap();
+
+        router
+            .send_message(polar_router::RouterMessage::Route(
+                polar_router::IncomingMessage {
+                    topic: "some-completely-unrelated-topic".to_string(),
+                    payload: b"irrelevant".to_vec(),
+                    published_by: None,
+                    trace_ctx: None,
+                },
+            ))
+            .unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        assert!(received.lock().unwrap().is_none());
     }
 }
