@@ -139,6 +139,67 @@ impl Permission {
     }
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum PermissionExtractionError {
+    #[error("failed to parse certificate PEM: {0}")]
+    InvalidPem(String),
+    #[error("failed to parse certificate DER: {0}")]
+    InvalidDer(String),
+    #[error("failed to parse the certificate's SubjectAlternativeName extension: {0}")]
+    InvalidSanExtension(String),
+}
+
+/// Extracts every real `Permission` embedded in `certificate_pem`'s
+/// own SAN set -- the real, general read-side counterpart to
+/// `Permission::to_san_string`, which only ever writes these in at
+/// issuance time (see cert-issuer/admin's own, real, existing use).
+/// Nothing in this workspace read them back out before this.
+///
+/// Every real SAN entry in a certificate issued via this workspace's
+/// own `generate_csr` is a DNS-name-type entry (see that function's
+/// own, real implementation) -- both this agent's own identity and
+/// any real, embedded permission string are indistinguishable at the
+/// raw X.509 level. `Permission::from_san_string` genuinely, itself,
+/// is the real filtering mechanism: every DNS-name SAN is attempted,
+/// and only the ones that actually parse as a real, valid permission
+/// string are kept -- everything else (this agent's own identity,
+/// any other, ordinary extra SAN) is silently, correctly skipped,
+/// not treated as an error.
+///
+/// General, real infrastructure -- not specific to any one, real
+/// caller. Any agent that needs a certificate holder's own, real,
+/// embedded permissions (Credentials Agent's own, upcoming policy-
+/// authorization work is the first, real caller, but deliberately
+/// not the only one this was built for) can call this directly.
+pub fn extract_permissions(
+    certificate_pem: &str,
+) -> Result<Vec<Permission>, PermissionExtractionError> {
+    let (_, pem) = x509_parser::pem::parse_x509_pem(certificate_pem.as_bytes())
+        .map_err(|e| PermissionExtractionError::InvalidPem(e.to_string()))?;
+    let (_, cert) = x509_parser::parse_x509_certificate(&pem.contents)
+        .map_err(|e| PermissionExtractionError::InvalidDer(e.to_string()))?;
+
+    let Some(san_extension) = cert
+        .tbs_certificate
+        .subject_alternative_name()
+        .map_err(|e| PermissionExtractionError::InvalidSanExtension(e.to_string()))?
+    else {
+        // No SAN extension at all -- genuinely, correctly no
+        // permissions, not an error.
+        return Ok(Vec::new());
+    };
+
+    Ok(san_extension
+        .value
+        .general_names
+        .iter()
+        .filter_map(|name| match name {
+            x509_parser::extensions::GeneralName::DNSName(s) => Permission::from_san_string(s).ok(),
+            _ => None,
+        })
+        .collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -291,5 +352,56 @@ mod tests {
         // ordinary-looking FQDN actually validates.
         let result = Permission::from_san_string("p:s2s:cassini.cluster.local");
         assert!(result.is_ok());
+    }
+
+    fn build_test_certificate(sans: Vec<String>) -> String {
+        let mut rng = rand::rng();
+        let private_key = rsa::RsaPrivateKey::new(&mut rng, 2048).unwrap();
+        let private_key_pem =
+            rsa::pkcs8::EncodePrivateKey::to_pkcs8_pem(&private_key, rsa::pkcs8::LineEnding::LF)
+                .unwrap();
+        let key_pair = rcgen::KeyPair::from_pem(&private_key_pem).unwrap();
+        let params = rcgen::CertificateParams::new(sans).unwrap();
+        params.self_signed(&key_pair).unwrap().pem()
+    }
+
+    #[test]
+    fn extract_permissions_finds_every_real_embedded_permission() {
+        let permission_a = Permission {
+            scope: PermissionScope::ServiceToService,
+            target: None,
+        };
+        let permission_b = Permission {
+            scope: PermissionScope::UserToUser,
+            target: Some("cassini.cluster.local".to_string()),
+        };
+
+        let certificate_pem = build_test_certificate(vec![
+            "test.polar.svc.cluster.local".to_string(),
+            permission_a.to_san_string(),
+            permission_b.to_san_string(),
+        ]);
+
+        let extracted = extract_permissions(&certificate_pem).unwrap();
+
+        assert_eq!(extracted.len(), 2, "the real identity SAN must not be mistaken for a permission");
+        assert!(extracted.contains(&permission_a));
+        assert!(extracted.contains(&permission_b));
+    }
+
+    #[test]
+    fn extract_permissions_returns_empty_when_no_permissions_are_embedded() {
+        let certificate_pem =
+            build_test_certificate(vec!["test.polar.svc.cluster.local".to_string()]);
+
+        let extracted = extract_permissions(&certificate_pem).unwrap();
+
+        assert!(extracted.is_empty());
+    }
+
+    #[test]
+    fn extract_permissions_on_malformed_pem_is_a_real_error_not_a_panic() {
+        let result = extract_permissions("not a real certificate");
+        assert!(matches!(result, Err(PermissionExtractionError::InvalidPem(_))));
     }
 }
