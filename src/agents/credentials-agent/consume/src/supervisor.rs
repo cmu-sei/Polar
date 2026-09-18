@@ -48,6 +48,12 @@ use crate::agent_escrow_keypair_bootstrap_actor::{
     AgentEscrowKeypairBootstrapActor, AgentEscrowKeypairBootstrapActorArgs,
     AgentEscrowKeypairBootstrapDispatch,
 };
+use crate::decrypt_on_behalf_of::DecryptOnBehalfOfHandler;
+use crate::decrypt_on_behalf_of_actor::{
+    DecryptOnBehalfOfActor, DecryptOnBehalfOfActorArgs, DecryptOnBehalfOfDispatch,
+};
+use credentials_agent_common::decrypt_on_behalf_of::DecryptOnBehalfOfRequest;
+use credentials_agent_common::CREDENTIALS_DECRYPT_ON_BEHALF_OF_REQUESTS_TOPIC;
 use credentials_agent_common::CREDENTIALS_CERTIFICATE_REQUESTS_TOPIC;
 use credentials_agent_common::CREDENTIALS_ESCROW_KEY_REQUESTS_TOPIC;
 use credentials_agent_common::CREDENTIALS_STORE_SECRET_REQUESTS_TOPIC;
@@ -110,6 +116,7 @@ const AGENT_ESCROW_KEYPAIR_BOOTSTRAP_ACTOR_NAME: &str =
     "polar.credentials-agent.agent-escrow-keypair-bootstrap";
 const AGENT_ESCROW_ISSUANCE_ACTOR_NAME: &str = "polar.credentials-agent.agent-escrow-issuance";
 const AGENT_ESCROW_KEY_ACTOR_NAME: &str = "polar.credentials-agent.agent-escrow-key";
+const DECRYPT_ON_BEHALF_OF_ACTOR_NAME: &str = "polar.credentials-agent.decrypt-on-behalf-of";
 
 pub struct ConsumerSupervisor;
 
@@ -341,6 +348,32 @@ impl ConsumerSupervisor {
             }
         }
     }
+
+    /// Mirrors dispatch_retrieve_secret_request's own reasoning
+    /// exactly -- see its own doc comment. Deserializes and forwards
+    /// to DecryptOnBehalfOfActor, bundled with the broker-verified
+    /// published_by this dispatch path exists specifically to carry
+    /// -- the requesting identity PolicyActor's own resolution is
+    /// derived from, never self-reported.
+    fn dispatch_decrypt_on_behalf_of_request(payload: Vec<u8>, published_by: Option<String>) {
+        match rkyv::from_bytes::<Envelope<DecryptOnBehalfOfRequest>, rkyv::rancor::Error>(&payload) {
+            Ok(envelope) => {
+                if let Some(actor) = where_is(DECRYPT_ON_BEHALF_OF_ACTOR_NAME.to_string()) {
+                    if let Err(e) = actor.send_message(DecryptOnBehalfOfDispatch {
+                        envelope,
+                        published_by,
+                    }) {
+                        warn!("Failed to forward decrypt-on-behalf-of request to actor: {e}");
+                    }
+                } else {
+                    warn!("Decrypt-on-behalf-of actor not yet registered, dropping request");
+                }
+            }
+            Err(e) => {
+                warn!("Failed to deserialize decrypt-on-behalf-of request: {e}");
+            }
+        }
+    }
 }
 
 #[async_trait]
@@ -559,6 +592,49 @@ impl Actor for ConsumerSupervisor {
         .await
         .map_err(ActorProcessingErr::from)?;
 
+        // PermissionsActor is the sole, real, authoritative source of
+        // what permissions an identity actually holds -- PolicyActor
+        // must never itself resolve permissions, only consume this
+        // actor's own, real resolutions. See polar-permissions's own
+        // crate documentation for the complete, real reasoning.
+        let (permissions_actor, _) = polar_permissions::PermissionsActor::spawn_linked(
+            None,
+            polar_permissions::PermissionsActor,
+            (),
+            myself.get_cell(),
+        )
+        .await
+        .map_err(ActorProcessingErr::from)?;
+
+        // PolicyActor never exists without a real PermissionsActor --
+        // construction requires one, structurally, not optionally.
+        // See polar-policy's own crate documentation for the
+        // complete, real reasoning behind this coupling.
+        let (policy_actor, _) = polar_policy::PolicyActor::spawn_linked(
+            None,
+            polar_policy::PolicyActor,
+            polar_policy::PolicyActorArgs { permissions_actor },
+            myself.get_cell(),
+        )
+        .await
+        .map_err(ActorProcessingErr::from)?;
+
+        let decrypt_on_behalf_of_handler = DecryptOnBehalfOfHandler {
+            escrow_keypair: escrow_keypair.clone(),
+            ledger: ledger.clone(),
+            policy_actor,
+        };
+        let (_decrypt_on_behalf_of_actor, _) = DecryptOnBehalfOfActor::spawn_linked(
+            Some(DECRYPT_ON_BEHALF_OF_ACTOR_NAME.to_string()),
+            DecryptOnBehalfOfActor,
+            DecryptOnBehalfOfActorArgs {
+                handler: decrypt_on_behalf_of_handler,
+            },
+            myself.get_cell(),
+        )
+        .await
+        .map_err(ActorProcessingErr::from)?;
+
         let prepare_shutdown_port = Arc::new(OutputPort::<()>::default());
 
         prepare_shutdown_port.subscribe(myself.clone(), |()| {
@@ -684,6 +760,7 @@ impl Actor for ConsumerSupervisor {
                             CREDENTIALS_RETRIEVE_AGENT_ESCROW_KEYPAIR_REQUESTS_TOPIC,
                             CREDENTIALS_AGENT_ESCROW_ISSUANCE_REQUESTS_TOPIC,
                             CREDENTIALS_AGENT_ESCROW_KEY_REQUESTS_TOPIC,
+                            CREDENTIALS_DECRYPT_ON_BEHALF_OF_REQUESTS_TOPIC,
                         ] {
                             if let Err(e) = client.send_message(TcpClientMessage::Subscribe {
                                 topic: topic.to_string(),
@@ -734,6 +811,16 @@ impl Actor for ConsumerSupervisor {
                         // since it's what AgentEscrowKeypairBootstrapHandler
                         // derives the escrowed-secret lookup name from.
                         ConsumerSupervisor::dispatch_agent_escrow_keypair_bootstrap_request(
+                            payload,
+                            published_by,
+                        );
+                    } else if topic == CREDENTIALS_DECRYPT_ON_BEHALF_OF_REQUESTS_TOPIC {
+                        // Same reasoning as dispatch_retrieve_secret_request
+                        // above -- requested_by must be broker-verified,
+                        // since it's the real, sole input PolicyActor's
+                        // own CheckAuthorization derives the requester's
+                        // resolved permissions from.
+                        ConsumerSupervisor::dispatch_decrypt_on_behalf_of_request(
                             payload,
                             published_by,
                         );
@@ -1749,5 +1836,219 @@ mod identity_normalization_wiring_tests {
         // request count, not just assumed from no panic occurring.
         let received = cert_issuer.received_requests().await.unwrap();
         assert_eq!(received.len(), 1, "cert-issuer's /validate must have been called exactly once");
+    }
+}
+
+#[cfg(test)]
+mod decrypt_on_behalf_of_wiring_tests {
+    use super::*;
+    use crate::decrypt_on_behalf_of::DecryptOnBehalfOfHandler;
+    use crate::decrypt_on_behalf_of_actor::{DecryptOnBehalfOfActor, DecryptOnBehalfOfActorArgs};
+    use credentials_agent_common::decrypt_on_behalf_of::{
+        DecryptOnBehalfOfReply, DecryptOnBehalfOfRequest,
+    };
+    use credentials_agent_common::escrow_secret::EscrowedSecret;
+
+    struct CapturingBrokerClient {
+        captured: std::sync::Arc<tokio::sync::Mutex<Option<Vec<u8>>>>,
+    }
+
+    #[ractor::async_trait]
+    impl ractor::Actor for CapturingBrokerClient {
+        type Msg = TcpClientMessage;
+        type State = ();
+        type Arguments = ();
+
+        async fn pre_start(
+            &self,
+            _myself: ActorRef<Self::Msg>,
+            _args: (),
+        ) -> Result<Self::State, ActorProcessingErr> {
+            Ok(())
+        }
+
+        async fn handle(
+            &self,
+            _myself: ActorRef<Self::Msg>,
+            message: Self::Msg,
+            _state: &mut Self::State,
+        ) -> Result<(), ActorProcessingErr> {
+            if let TcpClientMessage::Publish { payload, .. } = message {
+                *self.captured.lock().await = Some(payload);
+            }
+            Ok(())
+        }
+    }
+
+    async fn spawn_policy_actor_permitting(
+        identity: &str,
+        resource_id: &str,
+    ) -> ActorRef<polar_policy::PolicyMessage> {
+        let (permissions_actor, _) =
+            ractor::Actor::spawn(None, polar_permissions::PermissionsActor, ())
+                .await
+                .unwrap();
+        let (policy_actor, _) = ractor::Actor::spawn(
+            None,
+            polar_policy::PolicyActor,
+            polar_policy::PolicyActorArgs { permissions_actor },
+        )
+        .await
+        .unwrap();
+
+        let policy = format!(
+            r#"
+            permit(
+                principal == Identity::"{identity}",
+                action == Action::"decrypt",
+                resource == {resource_id}
+            );
+            "#
+        );
+        let result = ractor::call!(policy_actor, |reply| polar_policy::PolicyMessage::UpdatePolicy {
+            policy_source: policy,
+            reply,
+        })
+        .unwrap();
+        result.unwrap();
+
+        policy_actor
+    }
+
+    #[tokio::test]
+    async fn full_pipeline_from_raw_bytes_through_the_special_dispatch_path_to_a_real_allowed_reply() {
+        let _guard = super::NAMED_ACTOR_TEST_LOCK.lock().await;
+        // Mirrors retrieve_secret_wiring_tests's own test of the
+        // identical shape -- proves published_by genuinely reaches
+        // this handler too, via this crate's real, new
+        // dispatch_decrypt_on_behalf_of_request path, and that the
+        // real, complete flow (certificate lookup, live PolicyActor
+        // query, decrypt, re-encrypt) actually works end-to-end
+        // through the real dispatch function, not merely the
+        // handler in isolation (already proven directly in
+        // decrypt_on_behalf_of.rs's own test module).
+
+        let captured = std::sync::Arc::new(tokio::sync::Mutex::new(None));
+        let (broker_client, _) = ractor::Actor::spawn(
+            Some(BROKER_CLIENT_NAME.to_string()),
+            CapturingBrokerClient {
+                captured: captured.clone(),
+            },
+            (),
+        )
+        .await
+        .unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let log_path = dir.path().join("events.jsonl");
+        let (ledger, _) = LedgerActor::spawn(
+            Some(LEDGER_ACTOR_NAME.to_string()),
+            LedgerActor,
+            LedgerActorArgs {
+                log_path: log_path.to_str().unwrap().to_string(),
+                projection_actor: crate::projection::tests::fake_projection_actor().await,
+            },
+        )
+        .await
+        .unwrap();
+
+        // Seed a real requester certificate.
+        let mut rng = rand::rng();
+        let requester_private_key = rsa::RsaPrivateKey::new(&mut rng, 2048).unwrap();
+        let requester_private_key_pem = rsa::pkcs8::EncodePrivateKey::to_pkcs8_pem(
+            &requester_private_key,
+            rsa::pkcs8::LineEnding::LF,
+        )
+        .unwrap();
+        let requester_key_pair = rcgen::KeyPair::from_pem(&requester_private_key_pem).unwrap();
+        let requester_params = rcgen::CertificateParams::new(vec![
+            "requester.polar.svc.cluster.local".to_string(),
+        ])
+        .unwrap();
+        let requester_certificate_pem =
+            requester_params.self_signed(&requester_key_pair).unwrap().pem();
+        let _ = ractor::rpc::call(
+            &ledger,
+            |reply| LedgerMessage::Append {
+                event: credentials_agent_common::events::CredentialsEvent::IssuanceCompleted {
+                    identity: "requester".to_string(),
+                    instance_binding: "pod-uid-1".to_string(),
+                    serial: "requester-serial-1".to_string(),
+                    timestamp: 1000,
+                    certificate_pem: requester_certificate_pem,
+                },
+                reply,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+
+        let resource_id = r#"KubeSecret::"namespace/pod/ENV_VAR""#;
+        let policy_actor = spawn_policy_actor_permitting("requester", resource_id).await;
+
+        let escrow_keypair = crate::escrow::tests::test_keypair();
+        let original_plaintext = b"a real, plaintext env var value, via the real dispatch path";
+        let ciphertext =
+            EscrowedSecret::encrypt(original_plaintext, escrow_keypair.public_key_pem()).unwrap();
+
+        let handler = DecryptOnBehalfOfHandler {
+            escrow_keypair,
+            ledger: ledger.clone(),
+            policy_actor,
+        };
+        let (decrypt_on_behalf_of_actor, _) = DecryptOnBehalfOfActor::spawn(
+            Some(DECRYPT_ON_BEHALF_OF_ACTOR_NAME.to_string()),
+            DecryptOnBehalfOfActor,
+            DecryptOnBehalfOfActorArgs { handler },
+        )
+        .await
+        .unwrap();
+
+        let request = DecryptOnBehalfOfRequest {
+            ciphertext,
+            resource_id: resource_id.to_string(),
+        };
+        let envelope = Envelope {
+            correlation_id: "test-correlation-id-decrypt-on-behalf-of".to_string(),
+            payload: request,
+        };
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&envelope)
+            .unwrap()
+            .to_vec();
+
+        // The actual, real, private dispatch function this test
+        // exists to exercise.
+        ConsumerSupervisor::dispatch_decrypt_on_behalf_of_request(
+            bytes,
+            Some("requester".to_string()),
+        );
+
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+        let captured_bytes = captured
+            .lock()
+            .await
+            .clone()
+            .expect("the actor's own reply must have actually been published");
+        let reply_envelope = rkyv::from_bytes::<Envelope<DecryptOnBehalfOfReply>, rkyv::rancor::Error>(
+            &captured_bytes,
+        )
+        .unwrap();
+        assert_eq!(
+            reply_envelope.correlation_id,
+            "test-correlation-id-decrypt-on-behalf-of"
+        );
+        match reply_envelope.payload {
+            DecryptOnBehalfOfReply::Allowed { secret } => {
+                let decrypted = secret.decrypt(&requester_private_key).unwrap();
+                assert_eq!(&*decrypted, original_plaintext);
+            }
+            other => panic!("expected Allowed, got {other:?}"),
+        }
+
+        decrypt_on_behalf_of_actor.stop_and_wait(None, None).await.unwrap();
+        broker_client.stop_and_wait(None, None).await.unwrap();
+        ledger.stop_and_wait(None, None).await.unwrap();
     }
 }
