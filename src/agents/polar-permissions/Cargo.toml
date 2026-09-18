@@ -1,0 +1,18 @@
+[package]
+name = "polar-permissions"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+cert-issuer-common = { path = "../cert-issuer/common" }
+ractor.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
+rand.workspace = true
+rsa.workspace = true
+rcgen.workspace = true

@@ -5643,6 +5643,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "polar-permissions"
+version = "1.0.0"
+dependencies = [
+ "cert-issuer-common",
+ "ractor",
+ "rand 0.10.2",
+ "rcgen",
+ "rsa 0.10.0-rc.18",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "polar-policy"
 version = "1.0.0"
 dependencies = [
