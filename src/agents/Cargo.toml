@@ -67,6 +67,7 @@ members = [
     "polar-healthcheck",
     "polar-init",
     "polar-kernel-keyring",
+    "polar-policy",
     "polar-router",
     "polar-test-graph",
     "policy-config",
@@ -174,6 +175,7 @@ uninit = "0.3"
 polar-crypto = { path = "polar-crypto" }
 polar-health = { path = "polar-health" }
 polar-kernel-keyring = { path = "polar-kernel-keyring" }
+polar-policy = { path = "polar-policy" }
 polar-router = { path = "polar-router" }
 polar-test-graph = { path = "polar-test-graph" }
 openapi-common = { path = "openapi/common" }
