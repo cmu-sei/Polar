@@ -35,6 +35,7 @@ pub mod agent_escrow_key;
 pub mod retrieve_secret;
 pub mod ephemeral_exchange;
 pub mod agent_escrow_keypair_bootstrap;
+pub mod decrypt_on_behalf_of;
 
 /// Published by an admin's tool (polar-admin-grant) to grant or
 /// revoke permissions -- see events.rs's own CredentialsEvent::Grant/
@@ -119,3 +120,16 @@ pub const CREDENTIALS_RETRIEVE_AGENT_ESCROW_KEYPAIR_REQUESTS_TOPIC: &str =
     "credentials-retrieve-agent-escrow-keypair-requests";
 pub const CREDENTIALS_RETRIEVE_AGENT_ESCROW_KEYPAIR_REPLIES_TOPIC: &str =
     "credentials-retrieve-agent-escrow-keypair-replies";
+
+/// Decrypting something a *different* agent encrypted -- see
+/// decrypt_on_behalf_of.rs's own DecryptOnBehalfOfRequest/Reply and
+/// its own module doc for the complete, real reasoning. Genuinely, a
+/// real authorization decision, not merely a retrieve: unlike
+/// CREDENTIALS_RETRIEVE_SECRET_REQUESTS_TOPIC above (where the
+/// requester is always authorized), this requester is genuinely,
+/// potentially a stranger to whatever originally encrypted the
+/// ciphertext being decrypted.
+pub const CREDENTIALS_DECRYPT_ON_BEHALF_OF_REQUESTS_TOPIC: &str =
+    "credentials-decrypt-on-behalf-of-requests";
+pub const CREDENTIALS_DECRYPT_ON_BEHALF_OF_REPLIES_TOPIC: &str =
+    "credentials-decrypt-on-behalf-of-replies";
