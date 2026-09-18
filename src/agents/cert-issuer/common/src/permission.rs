@@ -200,6 +200,60 @@ pub fn extract_permissions(
         .collect())
 }
 
+/// Extracts the certificate holder's own, real workload identity
+/// from `certificate_pem`'s own SAN set -- the real, general
+/// read-side counterpart to `generate_csr`'s own, documented
+/// guarantee that the identity SAN "is always first and always
+/// present," with every other, real, extra SAN entry (permissions
+/// included) purely additive after it. The one, real difference
+/// from `extract_permissions`, above: this takes the first, real
+/// DNS-name SAN entry unconditionally, rather than filtering for
+/// ones that parse as a `Permission` -- the identity SAN is
+/// deliberately, genuinely never itself a `p:`-prefixed permission
+/// string, so the two extractions never collide.
+///
+/// General, real infrastructure -- not specific to any one, real
+/// caller. Any agent whose own, long-running process needs to learn
+/// its own workload identity from its own, already-mounted mTLS
+/// client certificate (kube-consumer's own, upcoming CryptoActor
+/// wiring is the first, real caller) can call this directly, rather
+/// than each caller needing its own, separate, real source for the
+/// same, real identity string `polar-init` already, separately
+/// computed once, at issuance time.
+pub fn extract_own_identity(
+    certificate_pem: &str,
+) -> Result<String, PermissionExtractionError> {
+    let (_, pem) = x509_parser::pem::parse_x509_pem(certificate_pem.as_bytes())
+        .map_err(|e| PermissionExtractionError::InvalidPem(e.to_string()))?;
+    let (_, cert) = x509_parser::parse_x509_certificate(&pem.contents)
+        .map_err(|e| PermissionExtractionError::InvalidDer(e.to_string()))?;
+
+    let Some(san_extension) = cert
+        .tbs_certificate
+        .subject_alternative_name()
+        .map_err(|e| PermissionExtractionError::InvalidSanExtension(e.to_string()))?
+    else {
+        return Err(PermissionExtractionError::InvalidSanExtension(
+            "certificate carries no SAN extension at all -- no identity to extract".to_string(),
+        ));
+    };
+
+    san_extension
+        .value
+        .general_names
+        .iter()
+        .find_map(|name| match name {
+            x509_parser::extensions::GeneralName::DNSName(s) => Some(s.to_string()),
+            _ => None,
+        })
+        .ok_or_else(|| {
+            PermissionExtractionError::InvalidSanExtension(
+                "certificate's SAN set carries no DNS-name entry at all -- no identity to extract"
+                    .to_string(),
+            )
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -402,6 +456,38 @@ mod tests {
     #[test]
     fn extract_permissions_on_malformed_pem_is_a_real_error_not_a_panic() {
         let result = extract_permissions("not a real certificate");
+        assert!(matches!(result, Err(PermissionExtractionError::InvalidPem(_))));
+    }
+
+    #[test]
+    fn extract_own_identity_returns_the_real_identity_san_with_no_permissions_present() {
+        let certificate_pem =
+            build_test_certificate(vec!["kube-consumer.polar.svc.cluster.local".to_string()]);
+
+        let identity = extract_own_identity(&certificate_pem).unwrap();
+
+        assert_eq!(identity, "kube-consumer.polar.svc.cluster.local");
+    }
+
+    #[test]
+    fn extract_own_identity_returns_the_first_san_even_when_real_permissions_follow_it() {
+        let permission = Permission {
+            scope: PermissionScope::ServiceToService,
+            target: None,
+        };
+        let certificate_pem = build_test_certificate(vec![
+            "kube-consumer.polar.svc.cluster.local".to_string(),
+            permission.to_san_string(),
+        ]);
+
+        let identity = extract_own_identity(&certificate_pem).unwrap();
+
+        assert_eq!(identity, "kube-consumer.polar.svc.cluster.local");
+    }
+
+    #[test]
+    fn extract_own_identity_on_malformed_pem_is_a_real_error_not_a_panic() {
+        let result = extract_own_identity("not a real certificate");
         assert!(matches!(result, Err(PermissionExtractionError::InvalidPem(_))));
     }
 }

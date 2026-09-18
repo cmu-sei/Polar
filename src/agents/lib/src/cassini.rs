@@ -159,6 +159,16 @@ impl TcpClient {
 
         Ok(Self { inner, queue })
     }
+
+    /// The real, raw ActorRef<TcpClientMessage> underneath this
+    /// wrapper -- needed by anything constructed separately from
+    /// TcpClient itself but sharing the same, real Cassini
+    /// connection (e.g. polar_crypto::CryptoActorArgs's own
+    /// tcp_client field), rather than going through this struct's
+    /// own, higher-level CassiniClient methods.
+    pub fn as_actor_ref(&self) -> ActorRef<TcpClientMessage> {
+        self.inner.clone()
+    }
 }
 
 
