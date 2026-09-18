@@ -127,7 +127,7 @@ impl RetrieveSecretHandler {
     }
 }
 
-async fn call_check_certificate(
+pub(crate) async fn call_check_certificate(
     ledger: &ActorRef<LedgerMessage>,
     identity: &str,
 ) -> Result<Option<crate::state::CertificateRecord>, String> {

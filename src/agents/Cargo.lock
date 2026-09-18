@@ -1440,6 +1440,8 @@ dependencies = [
  "jwt_utils",
  "neo4rs",
  "polar",
+ "polar-permissions",
+ "polar-policy",
  "ractor",
  "rand 0.10.2",
  "rcgen",

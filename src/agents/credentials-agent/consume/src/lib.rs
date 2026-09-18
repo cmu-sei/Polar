@@ -46,3 +46,4 @@ pub mod retrieve_secret;
 pub mod retrieve_secret_actor;
 pub mod agent_escrow_keypair_bootstrap;
 pub mod agent_escrow_keypair_bootstrap_actor;
+pub mod decrypt_on_behalf_of;
