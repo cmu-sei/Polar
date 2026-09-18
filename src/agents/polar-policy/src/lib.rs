@@ -13,9 +13,23 @@
 //! replaced wholesale (mirroring how policy will genuinely be
 //! distributed -- a complete, real Cedar policy document pushed over
 //! Cassini whenever it changes, not incremental edits). It does not
-//! decide *how* policy gets there, or *what* a given caller's own
-//! real authorization question should be -- both are the caller's
-//! own, real concern.
+//! decide *how* policy gets there -- both are the caller's own, real
+//! concern.
+//!
+//! Deliberately, permanently coupled to a real
+//! polar_permissions::PermissionsActor -- not optional, by design.
+//! Permissions are real, structured *data* about what a principal
+//! has; policy is a genuinely separate set of *rules* over that
+//! data, and this actor must never itself contain permissions-
+//! resolution logic (see polar-permissions's own, top-level doc
+//! comment). More importantly, this coupling closes a real,
+//! structural tampering surface: an earlier design let a caller
+//! supply arbitrary entity JSON directly, meaning a caller could, in
+//! principle, fabricate a principal's own attributes and have them
+//! silently accepted. This actor now derives a principal's own
+//! attributes exclusively from PermissionsActor's own, real
+//! resolution -- there is no path, for any caller, to supply or
+//! influence a principal's own entity data at all.
 
 use cedar_policy::{Authorizer, Context, Entities, EntityUid, PolicySet, Request};
 use ractor::{Actor, ActorProcessingErr, ActorRef, RpcReplyPort, async_trait};
@@ -47,6 +61,8 @@ pub enum PolicyError {
     RequestConstruction(String),
     #[error("no policy set has been loaded yet")]
     NoPolicyLoaded,
+    #[error("failed to resolve the requester's own real permissions: {0}")]
+    PermissionsResolution(String),
 }
 
 pub enum PolicyMessage {
@@ -59,26 +75,24 @@ pub enum PolicyMessage {
         policy_source: String,
         reply: RpcReplyPort<Result<(), PolicyError>>,
     },
-    /// The real, sole authorization query this actor answers.
-    /// `principal`/`action`/`resource` are real Cedar entity UID
-    /// strings (e.g. `Identity::"kube-consumer"`,
-    /// `Action::"decrypt"`, `Secret::"some-secret-name"`) -- parsed
-    /// internally. `context` is an arbitrary, real JSON document
-    /// carrying whatever else a given policy might need to reference
-    /// (e.g. the secret's own, real originating identity). `entities`
-    /// is a real, complete Cedar entities-JSON array -- the actual,
-    /// real attribute data (e.g. a principal's own, real, embedded
-    /// certificate permissions) any policy referencing more than bare
-    /// principal/action/resource equality needs; an empty array is
-    /// genuinely valid when no such policy exists yet.
+    /// The real, sole authorization query this actor answers. Every
+    /// caller supplies only an identity and, optionally, that
+    /// identity's own, real, presented certificate -- never any
+    /// entity/attribute data directly; see this crate's own,
+    /// top-level doc comment for why. `action`/`resource` are real
+    /// Cedar entity UID strings (e.g. `Action::"decrypt"`,
+    /// `Secret::"some-secret-name"`) -- parsed internally.
     CheckAuthorization {
-        principal: String,
+        requester_identity: String,
+        requester_certificate_pem: Option<String>,
         action: String,
         resource: String,
-        context: serde_json::Value,
-        entities: serde_json::Value,
         reply: RpcReplyPort<Result<Decision, PolicyError>>,
     },
+}
+
+pub struct PolicyActorArgs {
+    pub permissions_actor: ActorRef<polar_permissions::PermissionsMessage>,
 }
 
 pub struct PolicyActor;
@@ -86,22 +100,24 @@ pub struct PolicyActor;
 pub struct PolicyActorState {
     policy_set: Option<PolicySet>,
     authorizer: Authorizer,
+    permissions_actor: ActorRef<polar_permissions::PermissionsMessage>,
 }
 
 #[async_trait]
 impl Actor for PolicyActor {
     type Msg = PolicyMessage;
     type State = PolicyActorState;
-    type Arguments = ();
+    type Arguments = PolicyActorArgs;
 
     async fn pre_start(
         &self,
         _myself: ActorRef<Self::Msg>,
-        _args: (),
+        args: PolicyActorArgs,
     ) -> Result<Self::State, ActorProcessingErr> {
         Ok(PolicyActorState {
             policy_set: None,
             authorizer: Authorizer::new(),
+            permissions_actor: args.permissions_actor,
         })
     }
 
@@ -125,15 +141,20 @@ impl Actor for PolicyActor {
                 let _ = reply.send(result);
             }
             PolicyMessage::CheckAuthorization {
-                principal,
+                requester_identity,
+                requester_certificate_pem,
                 action,
                 resource,
-                context,
-                entities,
                 reply,
             } => {
-                let result =
-                    Self::evaluate(state, &principal, &action, &resource, context, entities);
+                let result = Self::evaluate(
+                    state,
+                    &requester_identity,
+                    requester_certificate_pem,
+                    &action,
+                    &resource,
+                )
+                .await;
                 let _ = reply.send(result);
             }
         }
@@ -142,23 +163,57 @@ impl Actor for PolicyActor {
 }
 
 impl PolicyActor {
-    /// The real, synchronous evaluation logic itself -- extracted so
-    /// it's directly, genuinely unit-testable without needing a real
-    /// spawned actor or a real RpcReplyPort round trip at all.
-    fn evaluate(
+    /// Converts a real, resolved `Permission` into its own, real
+    /// Cedar-compatible JSON value -- deliberately not via
+    /// `Permission`'s own, default Serde-derived shape, since that
+    /// would emit a bare JSON `null` for an absent `target`, which
+    /// Cedar's own entity-JSON parser genuinely, always rejects
+    /// (confirmed directly against cedar-policy-core's own, real
+    /// source: "JSON null, which is never valid"). `target` is
+    /// therefore omitted entirely when absent -- a real Cedar policy
+    /// can check for it with `has`, rather than ever receiving null.
+    fn permission_to_json(permission: &cert_issuer_common::permission::Permission) -> serde_json::Value {
+        let mut attrs = serde_json::Map::new();
+        attrs.insert(
+            "scope".to_string(),
+            serde_json::Value::String(format!("{:?}", permission.scope)),
+        );
+        if let Some(target) = &permission.target {
+            attrs.insert("target".to_string(), serde_json::Value::String(target.clone()));
+        }
+        serde_json::Value::Object(attrs)
+    }
+
+    /// The real, complete evaluation flow: resolve `requester_identity`'s
+    /// own, real, authoritative permission set via this actor's own,
+    /// required PermissionsActor, build that principal's own, real
+    /// entity JSON directly from the resolution (never from anything
+    /// a caller supplies), and evaluate. There is no path here for a
+    /// caller to influence the principal's own attributes at all.
+    async fn evaluate(
         state: &PolicyActorState,
-        principal: &str,
+        requester_identity: &str,
+        requester_certificate_pem: Option<String>,
         action: &str,
         resource: &str,
-        context: serde_json::Value,
-        entities: serde_json::Value,
     ) -> Result<Decision, PolicyError> {
         let policy_set = state
             .policy_set
             .as_ref()
             .ok_or(PolicyError::NoPolicyLoaded)?;
 
-        let principal_uid: EntityUid = principal
+        let permissions = ractor::call!(state.permissions_actor, |reply| {
+            polar_permissions::PermissionsMessage::ResolvePermissions {
+                identity: requester_identity.to_string(),
+                certificate_pem: requester_certificate_pem,
+                reply,
+            }
+        })
+        .map_err(|e| PolicyError::PermissionsResolution(e.to_string()))?
+        .map_err(|e| PolicyError::PermissionsResolution(e.to_string()))?;
+
+        let principal_uid_str = format!(r#"Identity::"{requester_identity}""#);
+        let principal_uid: EntityUid = principal_uid_str
             .parse()
             .map_err(|e| PolicyError::RequestConstruction(format!("principal: {e}")))?;
         let action_uid: EntityUid = action
@@ -167,11 +222,20 @@ impl PolicyActor {
         let resource_uid: EntityUid = resource
             .parse()
             .map_err(|e| PolicyError::RequestConstruction(format!("resource: {e}")))?;
-        let context = Context::from_json_value(context, None)
-            .map_err(|e| PolicyError::RequestConstruction(format!("context: {e}")))?;
-        let entities = Entities::from_json_value(entities, None)
+
+        let entities_json = serde_json::json!([
+            {
+                "uid": { "type": "Identity", "id": requester_identity },
+                "attrs": {
+                    "permissions": permissions.iter().map(Self::permission_to_json).collect::<Vec<_>>()
+                },
+                "parents": []
+            }
+        ]);
+        let entities = Entities::from_json_value(entities_json, None)
             .map_err(|e| PolicyError::RequestConstruction(format!("entities: {e}")))?;
 
+        let context = Context::empty();
         let request = Request::new(principal_uid, action_uid, resource_uid, context, None)
             .map_err(|e| PolicyError::RequestConstruction(e.to_string()))?;
 
@@ -184,6 +248,7 @@ impl PolicyActor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cert_issuer_common::permission::{Permission, PermissionScope};
     use ractor::Actor;
 
     const REAL_POLICY: &str = r#"
@@ -194,8 +259,27 @@ mod tests {
         );
     "#;
 
+    async fn spawn_permissions_actor() -> ActorRef<polar_permissions::PermissionsMessage> {
+        let (actor, _) = Actor::spawn(None, polar_permissions::PermissionsActor, ())
+            .await
+            .unwrap();
+        actor
+    }
+
+    async fn spawn_policy_actor() -> ActorRef<PolicyMessage> {
+        let permissions_actor = spawn_permissions_actor().await;
+        let (actor, _) = Actor::spawn(
+            None,
+            PolicyActor,
+            PolicyActorArgs { permissions_actor },
+        )
+        .await
+        .unwrap();
+        actor
+    }
+
     async fn spawn_with_real_policy() -> ActorRef<PolicyMessage> {
-        let (actor, _) = Actor::spawn(None, PolicyActor, ()).await.unwrap();
+        let actor = spawn_policy_actor().await;
 
         let result = ractor::call!(actor, |reply| PolicyMessage::UpdatePolicy {
             policy_source: REAL_POLICY.to_string(),
@@ -212,11 +296,10 @@ mod tests {
         let actor = spawn_with_real_policy().await;
 
         let decision = ractor::call!(actor, |reply| PolicyMessage::CheckAuthorization {
-            principal: r#"Identity::"kube-consumer""#.to_string(),
+            requester_identity: "kube-consumer".to_string(),
+            requester_certificate_pem: None,
             action: r#"Action::"decrypt""#.to_string(),
             resource: r#"Secret::"a-plaintext-env-var""#.to_string(),
-            context: serde_json::json!({}),
-            entities: serde_json::json!([]),
             reply,
         })
         .unwrap()
@@ -230,11 +313,10 @@ mod tests {
         let actor = spawn_with_real_policy().await;
 
         let decision = ractor::call!(actor, |reply| PolicyMessage::CheckAuthorization {
-            principal: r#"Identity::"some-other-agent""#.to_string(),
+            requester_identity: "some-other-agent".to_string(),
+            requester_certificate_pem: None,
             action: r#"Action::"decrypt""#.to_string(),
             resource: r#"Secret::"a-plaintext-env-var""#.to_string(),
-            context: serde_json::json!({}),
-            entities: serde_json::json!([]),
             reply,
         })
         .unwrap()
@@ -248,11 +330,10 @@ mod tests {
         let actor = spawn_with_real_policy().await;
 
         let decision = ractor::call!(actor, |reply| PolicyMessage::CheckAuthorization {
-            principal: r#"Identity::"kube-consumer""#.to_string(),
+            requester_identity: "kube-consumer".to_string(),
+            requester_certificate_pem: None,
             action: r#"Action::"decrypt""#.to_string(),
             resource: r#"Secret::"a-completely-different-secret""#.to_string(),
-            context: serde_json::json!({}),
-            entities: serde_json::json!([]),
             reply,
         })
         .unwrap()
@@ -263,14 +344,13 @@ mod tests {
 
     #[tokio::test]
     async fn querying_before_any_policy_is_loaded_returns_a_real_error() {
-        let (actor, _) = Actor::spawn(None, PolicyActor, ()).await.unwrap();
+        let actor = spawn_policy_actor().await;
 
         let result = ractor::call!(actor, |reply| PolicyMessage::CheckAuthorization {
-            principal: r#"Identity::"kube-consumer""#.to_string(),
+            requester_identity: "kube-consumer".to_string(),
+            requester_certificate_pem: None,
             action: r#"Action::"decrypt""#.to_string(),
             resource: r#"Secret::"a-plaintext-env-var""#.to_string(),
-            context: serde_json::json!({}),
-            entities: serde_json::json!([]),
             reply,
         })
         .unwrap();
@@ -280,7 +360,7 @@ mod tests {
 
     #[tokio::test]
     async fn malformed_policy_source_is_genuinely_rejected() {
-        let (actor, _) = Actor::spawn(None, PolicyActor, ()).await.unwrap();
+        let actor = spawn_policy_actor().await;
 
         let result = ractor::call!(actor, |reply| PolicyMessage::UpdatePolicy {
             policy_source: "this is not real, valid Cedar syntax at all".to_string(),
@@ -315,11 +395,10 @@ mod tests {
         // The original policy's own principal must no longer be
         // permitted at all.
         let old_decision = ractor::call!(actor, |reply| PolicyMessage::CheckAuthorization {
-            principal: r#"Identity::"kube-consumer""#.to_string(),
+            requester_identity: "kube-consumer".to_string(),
+            requester_certificate_pem: None,
             action: r#"Action::"decrypt""#.to_string(),
             resource: r#"Secret::"a-plaintext-env-var""#.to_string(),
-            context: serde_json::json!({}),
-            entities: serde_json::json!([]),
             reply,
         })
         .unwrap()
@@ -328,11 +407,10 @@ mod tests {
 
         // The new policy's own principal must genuinely be permitted.
         let new_decision = ractor::call!(actor, |reply| PolicyMessage::CheckAuthorization {
-            principal: r#"Identity::"a-new-agent""#.to_string(),
+            requester_identity: "a-new-agent".to_string(),
+            requester_certificate_pem: None,
             action: r#"Action::"decrypt""#.to_string(),
             resource: r#"Secret::"a-plaintext-env-var""#.to_string(),
-            context: serde_json::json!({}),
-            entities: serde_json::json!([]),
             reply,
         })
         .unwrap()
@@ -341,13 +419,33 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_policy_can_genuinely_reference_a_principals_own_real_attributes() {
-        // The actual, real property the entities field exists for --
-        // a policy that isn't just principal/action/resource
-        // equality, but a real, attribute-based (ABAC) rule,
-        // mirroring the real, intended use: a principal's own
-        // embedded certificate permissions.
-        let (actor, _) = Actor::spawn(None, PolicyActor, ()).await.unwrap();
+    async fn a_policy_can_genuinely_reference_a_requesters_own_real_resolved_permissions() {
+        // The actual, real, end-to-end proof of the whole, real
+        // design this rewrite exists for: a real ABAC policy
+        // referencing a requester's own permissions, resolved
+        // exclusively through a real PermissionsActor -- never
+        // supplied by the caller directly.
+        let permissions_actor = spawn_permissions_actor().await;
+
+        ractor::call!(permissions_actor, |reply| {
+            polar_permissions::PermissionsMessage::UpdateSupplementalPermissions {
+                identity: "kube-consumer".to_string(),
+                permissions: vec![Permission {
+                    scope: PermissionScope::ServiceToService,
+                    target: None,
+                }],
+                reply,
+            }
+        })
+        .unwrap();
+
+        let (actor, _) = Actor::spawn(
+            None,
+            PolicyActor,
+            PolicyActorArgs { permissions_actor },
+        )
+        .await
+        .unwrap();
 
         let policy = r#"
             permit(
@@ -355,7 +453,7 @@ mod tests {
                 action == Action::"decrypt",
                 resource == Secret::"a-plaintext-env-var"
             ) when {
-                principal.scope == "ServiceToService"
+                principal.permissions.contains({"scope": "ServiceToService"})
             };
         "#;
         let result = ractor::call!(actor, |reply| PolicyMessage::UpdatePolicy {
@@ -365,43 +463,25 @@ mod tests {
         .unwrap();
         result.unwrap();
 
-        let entities = serde_json::json!([
-            {
-                "uid": { "type": "Identity", "id": "kube-consumer" },
-                "attrs": { "scope": "ServiceToService" },
-                "parents": []
-            }
-        ]);
-
         let allowed = ractor::call!(actor, |reply| PolicyMessage::CheckAuthorization {
-            principal: r#"Identity::"kube-consumer""#.to_string(),
+            requester_identity: "kube-consumer".to_string(),
+            requester_certificate_pem: None,
             action: r#"Action::"decrypt""#.to_string(),
             resource: r#"Secret::"a-plaintext-env-var""#.to_string(),
-            context: serde_json::json!({}),
-            entities: entities.clone(),
             reply,
         })
         .unwrap()
         .unwrap();
         assert_eq!(allowed, Decision::Allow);
 
-        // The real, other half of the proof: a principal genuinely
-        // lacking this attribute (or with a different, real value)
-        // must be denied -- confirming this is a real, attribute-
-        // based check, not silently permitting everyone regardless.
-        let entities_wrong_scope = serde_json::json!([
-            {
-                "uid": { "type": "Identity", "id": "kube-consumer" },
-                "attrs": { "scope": "UserToUser" },
-                "parents": []
-            }
-        ]);
+        // A genuinely different requester -- one PermissionsActor
+        // has no real, resolved permissions for at all -- must be
+        // denied, proving this isn't accidentally permitting anyone.
         let denied = ractor::call!(actor, |reply| PolicyMessage::CheckAuthorization {
-            principal: r#"Identity::"kube-consumer""#.to_string(),
+            requester_identity: "some-unrelated-agent".to_string(),
+            requester_certificate_pem: None,
             action: r#"Action::"decrypt""#.to_string(),
             resource: r#"Secret::"a-plaintext-env-var""#.to_string(),
-            context: serde_json::json!({}),
-            entities: entities_wrong_scope,
             reply,
         })
         .unwrap()

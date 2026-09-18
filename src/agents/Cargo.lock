@@ -5661,7 +5661,12 @@ name = "polar-policy"
 version = "1.0.0"
 dependencies = [
  "cedar-policy",
+ "cert-issuer-common",
+ "polar-permissions",
  "ractor",
+ "rand 0.10.2",
+ "rcgen",
+ "rsa 0.10.0-rc.18",
  "serde_json",
  "thiserror 1.0.69",
  "tokio",
