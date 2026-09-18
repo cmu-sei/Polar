@@ -65,12 +65,18 @@ pub enum PolicyMessage {
     /// `Action::"decrypt"`, `Secret::"some-secret-name"`) -- parsed
     /// internally. `context` is an arbitrary, real JSON document
     /// carrying whatever else a given policy might need to reference
-    /// (e.g. the secret's own, real originating identity).
+    /// (e.g. the secret's own, real originating identity). `entities`
+    /// is a real, complete Cedar entities-JSON array -- the actual,
+    /// real attribute data (e.g. a principal's own, real, embedded
+    /// certificate permissions) any policy referencing more than bare
+    /// principal/action/resource equality needs; an empty array is
+    /// genuinely valid when no such policy exists yet.
     CheckAuthorization {
         principal: String,
         action: String,
         resource: String,
         context: serde_json::Value,
+        entities: serde_json::Value,
         reply: RpcReplyPort<Result<Decision, PolicyError>>,
     },
 }
@@ -123,9 +129,11 @@ impl Actor for PolicyActor {
                 action,
                 resource,
                 context,
+                entities,
                 reply,
             } => {
-                let result = Self::evaluate(state, &principal, &action, &resource, context);
+                let result =
+                    Self::evaluate(state, &principal, &action, &resource, context, entities);
                 let _ = reply.send(result);
             }
         }
@@ -143,6 +151,7 @@ impl PolicyActor {
         action: &str,
         resource: &str,
         context: serde_json::Value,
+        entities: serde_json::Value,
     ) -> Result<Decision, PolicyError> {
         let policy_set = state
             .policy_set
@@ -160,11 +169,12 @@ impl PolicyActor {
             .map_err(|e| PolicyError::RequestConstruction(format!("resource: {e}")))?;
         let context = Context::from_json_value(context, None)
             .map_err(|e| PolicyError::RequestConstruction(format!("context: {e}")))?;
+        let entities = Entities::from_json_value(entities, None)
+            .map_err(|e| PolicyError::RequestConstruction(format!("entities: {e}")))?;
 
         let request = Request::new(principal_uid, action_uid, resource_uid, context, None)
             .map_err(|e| PolicyError::RequestConstruction(e.to_string()))?;
 
-        let entities = Entities::empty();
         let response = state.authorizer.is_authorized(&request, policy_set, &entities);
 
         Ok(response.decision().into())
@@ -206,6 +216,7 @@ mod tests {
             action: r#"Action::"decrypt""#.to_string(),
             resource: r#"Secret::"a-plaintext-env-var""#.to_string(),
             context: serde_json::json!({}),
+            entities: serde_json::json!([]),
             reply,
         })
         .unwrap()
@@ -223,6 +234,7 @@ mod tests {
             action: r#"Action::"decrypt""#.to_string(),
             resource: r#"Secret::"a-plaintext-env-var""#.to_string(),
             context: serde_json::json!({}),
+            entities: serde_json::json!([]),
             reply,
         })
         .unwrap()
@@ -240,6 +252,7 @@ mod tests {
             action: r#"Action::"decrypt""#.to_string(),
             resource: r#"Secret::"a-completely-different-secret""#.to_string(),
             context: serde_json::json!({}),
+            entities: serde_json::json!([]),
             reply,
         })
         .unwrap()
@@ -257,6 +270,7 @@ mod tests {
             action: r#"Action::"decrypt""#.to_string(),
             resource: r#"Secret::"a-plaintext-env-var""#.to_string(),
             context: serde_json::json!({}),
+            entities: serde_json::json!([]),
             reply,
         })
         .unwrap();
@@ -305,6 +319,7 @@ mod tests {
             action: r#"Action::"decrypt""#.to_string(),
             resource: r#"Secret::"a-plaintext-env-var""#.to_string(),
             context: serde_json::json!({}),
+            entities: serde_json::json!([]),
             reply,
         })
         .unwrap()
@@ -317,10 +332,80 @@ mod tests {
             action: r#"Action::"decrypt""#.to_string(),
             resource: r#"Secret::"a-plaintext-env-var""#.to_string(),
             context: serde_json::json!({}),
+            entities: serde_json::json!([]),
             reply,
         })
         .unwrap()
         .unwrap();
         assert_eq!(new_decision, Decision::Allow);
+    }
+
+    #[tokio::test]
+    async fn a_policy_can_genuinely_reference_a_principals_own_real_attributes() {
+        // The actual, real property the entities field exists for --
+        // a policy that isn't just principal/action/resource
+        // equality, but a real, attribute-based (ABAC) rule,
+        // mirroring the real, intended use: a principal's own
+        // embedded certificate permissions.
+        let (actor, _) = Actor::spawn(None, PolicyActor, ()).await.unwrap();
+
+        let policy = r#"
+            permit(
+                principal,
+                action == Action::"decrypt",
+                resource == Secret::"a-plaintext-env-var"
+            ) when {
+                principal.scope == "ServiceToService"
+            };
+        "#;
+        let result = ractor::call!(actor, |reply| PolicyMessage::UpdatePolicy {
+            policy_source: policy.to_string(),
+            reply,
+        })
+        .unwrap();
+        result.unwrap();
+
+        let entities = serde_json::json!([
+            {
+                "uid": { "type": "Identity", "id": "kube-consumer" },
+                "attrs": { "scope": "ServiceToService" },
+                "parents": []
+            }
+        ]);
+
+        let allowed = ractor::call!(actor, |reply| PolicyMessage::CheckAuthorization {
+            principal: r#"Identity::"kube-consumer""#.to_string(),
+            action: r#"Action::"decrypt""#.to_string(),
+            resource: r#"Secret::"a-plaintext-env-var""#.to_string(),
+            context: serde_json::json!({}),
+            entities: entities.clone(),
+            reply,
+        })
+        .unwrap()
+        .unwrap();
+        assert_eq!(allowed, Decision::Allow);
+
+        // The real, other half of the proof: a principal genuinely
+        // lacking this attribute (or with a different, real value)
+        // must be denied -- confirming this is a real, attribute-
+        // based check, not silently permitting everyone regardless.
+        let entities_wrong_scope = serde_json::json!([
+            {
+                "uid": { "type": "Identity", "id": "kube-consumer" },
+                "attrs": { "scope": "UserToUser" },
+                "parents": []
+            }
+        ]);
+        let denied = ractor::call!(actor, |reply| PolicyMessage::CheckAuthorization {
+            principal: r#"Identity::"kube-consumer""#.to_string(),
+            action: r#"Action::"decrypt""#.to_string(),
+            resource: r#"Secret::"a-plaintext-env-var""#.to_string(),
+            context: serde_json::json!({}),
+            entities: entities_wrong_scope,
+            reply,
+        })
+        .unwrap()
+        .unwrap();
+        assert_eq!(denied, Decision::Deny);
     }
 }
