@@ -522,122 +522,11 @@ impl TcpClientActor {
 
                                 match rkyv::from_bytes::<ClientMessage, Error>(&buffer) {
                                     Ok(message) => {
-                                        match message {
-                                            ClientMessage::RegistrationResponse { result, trace_ctx } => {
-                                                let span = trace_span!("client.handle_registration_response");
-                                                try_set_parent_wire(&span, trace_ctx);
-                                                let _g = span.enter();
-
-                                                match result {
-                                                    Ok(registration_id) => {
-                                                        myself
-                                                            .send_message(
-                                                                TcpClientMessage::RegistrationResponse(
-                                                                    registration_id,
-                                                                ),
-                                                            )
-                                                            .expect("Could not forward message to {myself:?");
-                                                    }
-                                                    Err(e) => {
-                                                        warn!("Failed to register session with the server. {e}");
-                                                    }
-                                                }
-                                            }
-                                            ClientMessage::PublishResponse {
-                                                topic,
-                                                payload,
-                                                result,
-                                                trace_ctx,
-                                                published_by,
-                                            } => {
-                                                let span = trace_span!("client.handle_publish_response");
-                                                if let Some(wire_ctx) = trace_ctx {
-                                                    tracing::trace!("Received PublishResponse with trace_id: {:02x?}", wire_ctx.trace_id);
-                                                }
-                                                try_set_parent_wire(&span, trace_ctx);
-                                                let _g = span.enter();
-
-                                                if result.is_ok() {
-                                                    let current_trace_ctx = WireTraceCtx::from_current_span();
-                                                    let event = ClientEvent::MessagePublished {
-                                                        topic: topic.clone(),
-                                                        payload: payload.to_vec(),
-                                                        trace_ctx: current_trace_ctx,
-                                                        published_by: published_by.clone(),
-                                                    };
-                                                    TcpClientActor::dispatch_event(&delivery, event);
-                                                    trace!("TCP client dispatched MessagePublished for topic {}", topic);
-                                                } else {
-                                                    warn!("Failed to publish message to topic: {topic}");
-                                                }
-                                            }
-                                            ClientMessage::SubscribeAcknowledgment { topic, result, trace_ctx } => {
-                                                let span = trace_span!("client.handle_subscribe_ack");
-                                                try_set_parent_wire(&span, trace_ctx);
-                                                let _g = span.enter();
-
-                                                if result.is_ok() {
-                                                    info!("Successfully subscribed to topic: {topic}");
-                                                } else {
-                                                    warn!("Failed to subscribe to topic: {topic}, {result:?}");
-                                                }
-                                            }
-
-                                            ClientMessage::UnsubscribeAcknowledgment { topic, result, trace_ctx } => {
-                                                let span = trace_span!("client.handle_unsubscribe_ack");
-                                                try_set_parent_wire(&span, trace_ctx);
-                                                let _g = span.enter();
-
-                                                if result.is_ok() {
-                                                    info!("Successfully unsubscribed from topic: {topic}");
-                                                } else {
-                                                    warn!("Failed to unsubscribe from topic: {topic}");
-                                                }
-                                            }
-                                            ClientMessage::ErrorMessage { error, trace_ctx } => {
-                                                let span = trace_span!("client.handle_error_message").entered();
-                                                try_set_parent_wire(&span, trace_ctx);
-                                                let _g = span.enter();
-                                                warn!("Received error from broker: {error}");
-
-                                                // A session-mismatch response means the broker has no record of
-                                                // our registration_id (e.g. it restarted/rejuvenated). Resuming
-                                                // is impossible; force a fresh registration instead of retrying
-                                                // the same rejected request forever.
-                                                if error.contains("session mismatch") {
-                                                    warn!("Session no longer valid on broker; re-registering fresh");
-                                                    let _ = myself.send_message(TcpClientMessage::SessionInvalidated);
-                                                }
-                                            }
-                                            ClientMessage::PublishRequestAck { topic, trace_ctx } => {
-                                                let span = trace_span!("client.handle_publish_ack");
-                                                try_set_parent_wire(&span, trace_ctx);
-                                                let _g = span.enter();
-                                                debug!("Received publish ack for topic: {topic}");
-
-                                                let event = ClientEvent::PublishAcknowledged { topic };
-                                                TcpClientActor::dispatch_event(&delivery, event);
-                                            }
-                                            ClientMessage::ControlResponse { registration_id, result, trace_ctx } => {
-                                                let span = trace_span!("client.handle_control_response");
-                                                try_set_parent_wire(&span, trace_ctx);
-                                                let _g = span.enter();
-
-                                                trace!("Received control response for registration: {registration_id}, result: {:?}", result);
-
-                                                let current_trace_ctx = WireTraceCtx::from_current_span();
-                                                let event = ClientEvent::ControlResponse {
-                                                    registration_id,
-                                                    result,
-                                                    trace_ctx: current_trace_ctx,
-                                                };
-                                                TcpClientActor::dispatch_event(&delivery, event);
-                                            }
-                                            _ => {
-                                                let _g = trace_span!("client.handle_unknown_message").entered();
-                                                trace!("Received unexpected message type");
-                                            },
-                                        }
+                                        TcpClientActor::process_client_message(
+                                            myself.clone(),
+                                            &delivery,
+                                            message,
+                                        );
                                     }
                                     Err(e) => {
                                         error!(
@@ -668,6 +557,133 @@ impl TcpClientActor {
 
         state.abort_handle = Some(abort);
         Ok(())
+    }
+
+    /// Given an already-parsed, real `ClientMessage` off the wire,
+    /// decides and executes what happens next -- extracted from
+    /// spawn_reader's own, previously-tightly-interleaved read loop
+    /// specifically so this decision logic is directly, genuinely
+    /// unit-testable without needing a real socket or async runtime
+    /// at all: nothing in this function actually awaits anything, it
+    /// was simply nested inside spawn_reader's own, real, async read
+    /// loop before this.
+    fn process_client_message(
+        myself: ActorRef<TcpClientMessage>,
+        delivery: &DeliveryMode,
+        message: ClientMessage,
+    ) {
+        match message {
+            ClientMessage::RegistrationResponse { result, trace_ctx } => {
+                let span = trace_span!("client.handle_registration_response");
+                try_set_parent_wire(&span, trace_ctx);
+                let _g = span.enter();
+
+                match result {
+                    Ok(registration_id) => {
+                        myself
+                            .send_message(TcpClientMessage::RegistrationResponse(registration_id))
+                            .expect("Could not forward message to {myself:?");
+                    }
+                    Err(e) => {
+                        warn!("Failed to register session with the server. {e}");
+                    }
+                }
+            }
+            ClientMessage::PublishResponse {
+                topic,
+                payload,
+                result,
+                trace_ctx,
+                published_by,
+            } => {
+                let span = trace_span!("client.handle_publish_response");
+                if let Some(wire_ctx) = trace_ctx {
+                    tracing::trace!("Received PublishResponse with trace_id: {:02x?}", wire_ctx.trace_id);
+                }
+                try_set_parent_wire(&span, trace_ctx);
+                let _g = span.enter();
+
+                if result.is_ok() {
+                    let current_trace_ctx = WireTraceCtx::from_current_span();
+                    let event = ClientEvent::MessagePublished {
+                        topic: topic.clone(),
+                        payload: payload.to_vec(),
+                        trace_ctx: current_trace_ctx,
+                        published_by: published_by.clone(),
+                    };
+                    TcpClientActor::dispatch_event(delivery, event);
+                    trace!("TCP client dispatched MessagePublished for topic {}", topic);
+                } else {
+                    warn!("Failed to publish message to topic: {topic}");
+                }
+            }
+            ClientMessage::SubscribeAcknowledgment { topic, result, trace_ctx } => {
+                let span = trace_span!("client.handle_subscribe_ack");
+                try_set_parent_wire(&span, trace_ctx);
+                let _g = span.enter();
+
+                if result.is_ok() {
+                    info!("Successfully subscribed to topic: {topic}");
+                } else {
+                    warn!("Failed to subscribe to topic: {topic}, {result:?}");
+                }
+            }
+
+            ClientMessage::UnsubscribeAcknowledgment { topic, result, trace_ctx } => {
+                let span = trace_span!("client.handle_unsubscribe_ack");
+                try_set_parent_wire(&span, trace_ctx);
+                let _g = span.enter();
+
+                if result.is_ok() {
+                    info!("Successfully unsubscribed from topic: {topic}");
+                } else {
+                    warn!("Failed to unsubscribe from topic: {topic}");
+                }
+            }
+            ClientMessage::ErrorMessage { error, trace_ctx } => {
+                let span = trace_span!("client.handle_error_message").entered();
+                try_set_parent_wire(&span, trace_ctx);
+                let _g = span.enter();
+                warn!("Received error from broker: {error}");
+
+                // A session-mismatch response means the broker has no record of
+                // our registration_id (e.g. it restarted/rejuvenated). Resuming
+                // is impossible; force a fresh registration instead of retrying
+                // the same rejected request forever.
+                if error.contains("session mismatch") {
+                    warn!("Session no longer valid on broker; re-registering fresh");
+                    let _ = myself.send_message(TcpClientMessage::SessionInvalidated);
+                }
+            }
+            ClientMessage::PublishRequestAck { topic, trace_ctx } => {
+                let span = trace_span!("client.handle_publish_ack");
+                try_set_parent_wire(&span, trace_ctx);
+                let _g = span.enter();
+                debug!("Received publish ack for topic: {topic}");
+
+                let event = ClientEvent::PublishAcknowledged { topic };
+                TcpClientActor::dispatch_event(delivery, event);
+            }
+            ClientMessage::ControlResponse { registration_id, result, trace_ctx } => {
+                let span = trace_span!("client.handle_control_response");
+                try_set_parent_wire(&span, trace_ctx);
+                let _g = span.enter();
+
+                trace!("Received control response for registration: {registration_id}, result: {:?}", result);
+
+                let current_trace_ctx = WireTraceCtx::from_current_span();
+                let event = ClientEvent::ControlResponse {
+                    registration_id,
+                    result,
+                    trace_ctx: current_trace_ctx,
+                };
+                TcpClientActor::dispatch_event(delivery, event);
+            }
+            _ => {
+                let _g = trace_span!("client.handle_unknown_message").entered();
+                trace!("Received unexpected message type");
+            }
+        }
     }
 
     /// Send a payload to the broker over the write.
@@ -769,6 +785,26 @@ impl TcpClientActor {
         }
     }
 
+    /// The real, single, shared shape behind nine, separate,
+    /// previously near-identical outbound handler functions (each
+    /// built its own real ClientMessage envelope, sent it, and on
+    /// error called emit_transport_err_and_stop -- differing only in
+    /// which envelope variant and fields). Always returns Ok(()) --
+    /// a real send failure is never propagated up as an error, only
+    /// logged and emitted as a real, genuine ClientEvent::TransportError,
+    /// matching every one of the original nine call sites' own,
+    /// existing behavior exactly.
+    async fn send_or_fail(
+        myself: ActorRef<TcpClientMessage>,
+        state: &mut TcpClientState,
+        envelope: ClientMessage,
+    ) -> Result<(), ActorProcessingErr> {
+        if let Err(e) = TcpClientActor::send_message(envelope, state).await {
+            TcpClientActor::emit_transport_err_and_stop(myself, state, e.to_string());
+        }
+        Ok(())
+    }
+
     // ===== Handler methods =====
 
     async fn handle_reconnected(
@@ -829,10 +865,7 @@ impl TcpClientActor {
             registration_id: None,
             trace_ctx: Self::current_trace_ctx(),
         };
-        if let Err(e) = TcpClientActor::send_message(envelope, state).await {
-            TcpClientActor::emit_transport_err_and_stop(myself, state, e.to_string())
-        }
-        Ok(())
+        TcpClientActor::send_or_fail(myself, state, envelope).await
     }
 
     async fn handle_registration_response_unregistered(
@@ -860,10 +893,7 @@ impl TcpClientActor {
             registration_id: Some(registration_id.to_owned()),
             trace_ctx: Self::current_trace_ctx(),
         };
-        if let Err(e) = TcpClientActor::send_message(envelope, state).await {
-            TcpClientActor::emit_transport_err_and_stop(myself, state, e.to_string())
-        }
-        Ok(())
+        TcpClientActor::send_or_fail(myself, state, envelope).await
     }
 
     async fn handle_get_registration_id(
@@ -894,10 +924,7 @@ impl TcpClientActor {
             trace_ctx,
             share_identity,
         };
-        if let Err(e) = TcpClientActor::send_message(envelope, state).await {
-            TcpClientActor::emit_transport_err_and_stop(myself, state, e.to_string());
-        }
-        Ok(())
+        TcpClientActor::send_or_fail(myself, state, envelope).await
     }
 
     async fn handle_subscribe(
@@ -913,10 +940,7 @@ impl TcpClientActor {
             topic,
             trace_ctx,
         };
-        if let Err(e) = TcpClientActor::send_message(envelope, state).await {
-            TcpClientActor::emit_transport_err_and_stop(myself, state, e.to_string());
-        }
-        Ok(())
+        TcpClientActor::send_or_fail(myself, state, envelope).await
     }
 
     async fn handle_unsubscribe_request(
@@ -932,10 +956,7 @@ impl TcpClientActor {
             topic,
             trace_ctx,
         };
-        if let Err(e) = TcpClientActor::send_message(envelope, state).await {
-            TcpClientActor::emit_transport_err_and_stop(myself, state, e.to_string());
-        }
-        Ok(())
+        TcpClientActor::send_or_fail(myself, state, envelope).await
     }
 
     async fn handle_disconnect(
@@ -952,9 +973,7 @@ impl TcpClientActor {
             registration_id: Some(registration_id.to_owned()),
             trace_ctx,
         };
-        if let Err(e) = TcpClientActor::send_message(envelope, state).await {
-            TcpClientActor::emit_transport_err_and_stop(myself.clone(), state, e.to_string());
-        }
+        TcpClientActor::send_or_fail(myself.clone(), state, envelope).await?;
         if let Some(handle) = state.abort_handle.take() {
             handle.abort();
         }
@@ -975,10 +994,7 @@ impl TcpClientActor {
             op,
             trace_ctx,
         };
-        if let Err(e) = TcpClientActor::send_message(envelope, state).await {
-            TcpClientActor::emit_transport_err_and_stop(myself, state, e.to_string());
-        }
-        Ok(())
+        TcpClientActor::send_or_fail(myself, state, envelope).await
     }
 
     async fn handle_list_sessions(
@@ -993,10 +1009,7 @@ impl TcpClientActor {
             op: ControlOp::ListSessions,
             trace_ctx,
         };
-        if let Err(e) = TcpClientActor::send_message(envelope, state).await {
-            TcpClientActor::emit_transport_err_and_stop(myself, state, e.to_string());
-        }
-        Ok(())
+        TcpClientActor::send_or_fail(myself, state, envelope).await
     }
 
     async fn handle_list_topics(
@@ -1011,10 +1024,7 @@ impl TcpClientActor {
             op: ControlOp::ListTopics,
             trace_ctx,
         };
-        if let Err(e) = TcpClientActor::send_message(envelope, state).await {
-            TcpClientActor::emit_transport_err_and_stop(myself, state, e.to_string());
-        }
-        Ok(())
+        TcpClientActor::send_or_fail(myself, state, envelope).await
     }
 
     // Fallback for unregistered state
@@ -1315,5 +1325,211 @@ impl Actor for TcpClientActor {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod process_client_message_tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    /// A minimal, real, fake stand-in for TcpClientActor itself --
+    /// genuinely receives TcpClientMessage, just records what it got
+    /// rather than acting on it. Lets these tests assert on the real,
+    /// specific messages process_client_message forwards to `myself`
+    /// (e.g. SessionInvalidated), without needing a real,
+    /// full TcpClientActor with an actual TLS connection at all.
+    struct FakeTcpClient {
+        received: Arc<Mutex<Vec<TcpClientMessage>>>,
+    }
+
+    #[async_trait]
+    impl Actor for FakeTcpClient {
+        type Msg = TcpClientMessage;
+        type State = ();
+        type Arguments = ();
+
+        async fn pre_start(
+            &self,
+            _myself: ActorRef<Self::Msg>,
+            _args: (),
+        ) -> Result<Self::State, ActorProcessingErr> {
+            Ok(())
+        }
+
+        async fn handle(
+            &self,
+            _myself: ActorRef<Self::Msg>,
+            message: Self::Msg,
+            _state: &mut Self::State,
+        ) -> Result<(), ActorProcessingErr> {
+            self.received.lock().unwrap().push(message);
+            Ok(())
+        }
+    }
+
+    async fn spawn_fake_tcp_client() -> (ActorRef<TcpClientMessage>, Arc<Mutex<Vec<TcpClientMessage>>>) {
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let (actor, _) = Actor::spawn(
+            None,
+            FakeTcpClient {
+                received: received.clone(),
+            },
+            (),
+        )
+        .await
+        .unwrap();
+        (actor, received)
+    }
+
+    async fn broadcast_delivery() -> (DeliveryMode, Arc<Mutex<Vec<ClientEvent>>>) {
+        let captured: Arc<Mutex<Vec<ClientEvent>>> = Arc::new(Mutex::new(Vec::new()));
+        let captured_for_closure = captured.clone();
+        let events_output = Arc::new(OutputPort::default());
+
+        // A real, minimal subscriber actor -- reused here purely as
+        // OutputPort's own, required subscriber target, not itself
+        // under test.
+        struct Sink;
+        #[async_trait]
+        impl Actor for Sink {
+            type Msg = ClientEvent;
+            type State = ();
+            type Arguments = ();
+            async fn pre_start(
+                &self,
+                _myself: ActorRef<Self::Msg>,
+                _args: (),
+            ) -> Result<Self::State, ActorProcessingErr> {
+                Ok(())
+            }
+            async fn handle(
+                &self,
+                _myself: ActorRef<Self::Msg>,
+                _message: Self::Msg,
+                _state: &mut Self::State,
+            ) -> Result<(), ActorProcessingErr> {
+                Ok(())
+            }
+        }
+
+        // The real subscriber closure genuinely runs synchronously,
+        // inline, on send() -- captured directly here rather than via
+        // a second actor hop, since these tests only care about the
+        // real content dispatch_event hands to events_output, not
+        // about a second actor's own, separate mailbox timing.
+        let (sink, _) = Actor::spawn(None, Sink, ()).await.unwrap();
+        events_output.subscribe(sink, move |event: ClientEvent| {
+            captured_for_closure.lock().unwrap().push(event.clone());
+            Some(event)
+        });
+
+        (DeliveryMode::Broadcast(events_output), captured)
+    }
+
+    #[tokio::test]
+    async fn a_successful_publish_response_dispatches_message_published() {
+        let (myself, _received) = spawn_fake_tcp_client().await;
+        let (delivery, captured) = broadcast_delivery().await;
+
+        TcpClientActor::process_client_message(
+            myself,
+            &delivery,
+            ClientMessage::PublishResponse {
+                topic: "a-real-topic".to_string(),
+                payload: b"real payload".to_vec().into(),
+                result: Ok(()),
+                trace_ctx: None,
+                published_by: Some("some-agent".to_string()),
+            },
+        );
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let events = captured.lock().unwrap().clone();
+        assert_eq!(events.len(), 1, "expected exactly one dispatched event");
+        match &events[0] {
+            ClientEvent::MessagePublished { topic, payload, published_by, .. } => {
+                assert_eq!(topic, "a-real-topic");
+                assert_eq!(payload, b"real payload");
+                assert_eq!(published_by, &Some("some-agent".to_string()));
+            }
+            other => panic!("expected MessagePublished, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_failed_publish_response_dispatches_nothing() {
+        let (myself, _received) = spawn_fake_tcp_client().await;
+        let (delivery, captured) = broadcast_delivery().await;
+
+        TcpClientActor::process_client_message(
+            myself,
+            &delivery,
+            ClientMessage::PublishResponse {
+                topic: "a-real-topic".to_string(),
+                payload: b"real payload".to_vec().into(),
+                result: Err("broker rejected it".to_string()),
+                trace_ctx: None,
+                published_by: None,
+            },
+        );
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        assert!(
+            captured.lock().unwrap().is_empty(),
+            "a failed publish must never dispatch a real MessagePublished event"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_session_mismatch_error_message_triggers_session_invalidated() {
+        let (myself, received) = spawn_fake_tcp_client().await;
+        let (delivery, _captured) = broadcast_delivery().await;
+
+        TcpClientActor::process_client_message(
+            myself,
+            &delivery,
+            ClientMessage::ErrorMessage {
+                error: "session mismatch: unknown registration".to_string(),
+                trace_ctx: None,
+            },
+        );
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let messages = received.lock().unwrap();
+        assert!(
+            messages
+                .iter()
+                .any(|m| matches!(m, TcpClientMessage::SessionInvalidated)),
+            "expected SessionInvalidated to have genuinely been forwarded to myself, got {messages:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_ordinary_error_message_never_triggers_session_invalidated() {
+        let (myself, received) = spawn_fake_tcp_client().await;
+        let (delivery, _captured) = broadcast_delivery().await;
+
+        TcpClientActor::process_client_message(
+            myself,
+            &delivery,
+            ClientMessage::ErrorMessage {
+                error: "some other, unrelated broker error".to_string(),
+                trace_ctx: None,
+            },
+        );
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let messages = received.lock().unwrap();
+        assert!(
+            !messages
+                .iter()
+                .any(|m| matches!(m, TcpClientMessage::SessionInvalidated)),
+            "an ordinary error must never trigger a real re-registration"
+        );
     }
 }
