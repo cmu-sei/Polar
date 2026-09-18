@@ -5572,6 +5572,7 @@ dependencies = [
  "credentials_agent_common",
  "polar",
  "polar-kernel-keyring",
+ "polar-router",
  "ractor",
  "rand 0.10.2",
  "rkyv",
@@ -5616,11 +5617,13 @@ name = "polar-init"
 version = "1.0.0"
 dependencies = [
  "cassini-client",
+ "cassini-types",
  "cert-client",
  "cert-issuer-common",
  "clap",
  "polar-crypto",
  "polar-health",
+ "polar-router",
  "ractor",
  "rustls",
  "thiserror 1.0.69",

@@ -30,7 +30,7 @@ use cert_issuer_common::{
 };
 use clap::Parser;
 use polar_health::DepCertEndpoint;
-use ractor::{Actor, OutputPort};
+use ractor::Actor;
 
 const DEFAULT_TOKEN_PATH: &str = "/workspace/token";
 const POLL_INTERVAL_SECS: u64 = 5;
@@ -281,12 +281,22 @@ async fn main() {
 }
 
 /// Establishes a real, standalone Cassini connection (using the
-/// just-issued client-type mTLS cert) and a real CryptoActor
-/// instance, sends EnsureBootstrapped, and retries until it succeeds
-/// -- matching this binary's own, established "never exit non-zero
-/// due to a transient failure" philosophy, since this genuinely
-/// depends on the Credentials Agent specifically being reachable,
-/// not just cert-issuer.
+/// just-issued client-type mTLS cert), a real, bare RouterActor, and
+/// a real CryptoActor instance registered against it, sends
+/// EnsureBootstrapped, and retries until it succeeds -- matching this
+/// binary's own, established "never exit non-zero due to a transient
+/// failure" philosophy, since this genuinely depends on the
+/// Credentials Agent specifically being reachable, not just
+/// cert-issuer.
+///
+/// Constructs TcpClientActor with DeliveryMode::Router directly
+/// (mirroring lib::cassini::TcpClient::spawn_with_router's own,
+/// real, internal shape) rather than calling that helper itself,
+/// since this binary has no real, enclosing supervisor actor to
+/// link against at all -- just a bare main(). The lifecycle closure
+/// is a genuine no-op: this flow never observes a ClientEvent
+/// lifecycle event (Registered, TransportError, etc.) at all, only
+/// CryptoActor's own EnsureBootstrapped reply.
 async fn ensure_escrow_bootstrapped(own_identity: &str) {
     // Reads TLS_CA_CERT/TLS_CLIENT_CERT/TLS_CLIENT_KEY/BROKER_ADDR/
     // CASSINI_SERVER_NAME from the environment -- the exact same,
@@ -304,7 +314,12 @@ async fn ensure_escrow_bootstrapped(own_identity: &str) {
         }
     };
 
-    let events_output = std::sync::Arc::new(OutputPort::default());
+    let (router, _) = Actor::spawn(None, polar_router::RouterActor, ())
+        .await
+        .expect("RouterActor::pre_start does no fallible work of its own -- spawning it can't genuinely fail here");
+
+    let lifecycle: std::sync::Arc<dyn Fn(cassini_types::ClientEvent) + Send + Sync> =
+        std::sync::Arc::new(|_event| {});
 
     let (tcp_client, _) = loop {
         match Actor::spawn(
@@ -313,7 +328,10 @@ async fn ensure_escrow_bootstrapped(own_identity: &str) {
             TcpClientArgs {
                 config: client_config.clone(),
                 registration_id: None,
-                delivery: cassini_client::DeliveryMode::Broadcast(events_output.clone()),
+                delivery: cassini_client::DeliveryMode::Router {
+                    router: router.clone(),
+                    lifecycle: lifecycle.clone(),
+                },
             },
         )
         .await
@@ -331,7 +349,7 @@ async fn ensure_escrow_bootstrapped(own_identity: &str) {
         polar_crypto::CryptoActor,
         polar_crypto::CryptoActorArgs {
             tcp_client,
-            events_output,
+            router,
             own_identity: own_identity.to_string(),
         },
     )

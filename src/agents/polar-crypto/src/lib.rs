@@ -48,9 +48,21 @@
 //! architecture.md's own "Agent escrow bootstrap" section for the
 //! full, intended sequence, and polar-kernel-keyring's own crate for
 //! the real kernel-custody mechanics.
+//!
+//! Delivery: this actor registers its own five, real reply topics
+//! directly with a real, live polar_router::RouterActor -- the same,
+//! single, real RouterActor the consuming supervisor already spawned
+//! for its own topics, sharing one real Cassini connection rather
+//! than requiring a second. This replaced an earlier, real design
+//! built entirely around a broadcast-style Arc<OutputPort<ClientEvent>>,
+//! back when RouterActor didn't yet exist; that mechanism is
+//! structurally incompatible with DeliveryMode::Router (a
+//! ClientEvent::MessagePublished event never reaches any real
+//! OutputPort in that mode at all -- it's routed by topic instead),
+//! which every genuinely router-based consumer (kube-consumer, the
+//! first real one) now uses.
 
 use cassini_client::TcpClientMessage;
-use cassini_types::ClientEvent;
 use cert_issuer_common::keypair::{KeyAlgorithm, KeypairError};
 use credentials_agent_common::agent_escrow_issuance::{
     AgentEscrowIssuanceReply, AgentEscrowIssuanceRequest,
@@ -72,7 +84,7 @@ use credentials_agent_common::{
     CREDENTIALS_STORE_SECRET_REQUESTS_TOPIC,
 };
 use polar::request_reply::{Envelope, ReplyRouter};
-use ractor::{Actor, ActorProcessingErr, ActorRef, OutputPort, RpcReplyPort, async_trait};
+use ractor::{Actor, ActorProcessingErr, ActorRef, RpcReplyPort, async_trait};
 use rsa::{RsaPrivateKey, RsaPublicKey};
 use rsa::pkcs8::{DecodePrivateKey, DecodePublicKey, EncodePrivateKey};
 use std::sync::Arc;
@@ -204,10 +216,19 @@ pub enum CryptoMessage {
     EnsureBootstrapped {
         reply: RpcReplyPort<Result<(), CryptoError>>,
     },
-    /// Internal: a ClientEvent forwarded from the shared
-    /// TcpClientActor's own OutputPort, filtered to just the topics
-    /// this actor cares about.
-    ClientEvent(ClientEvent),
+    /// Internal: a raw, incoming message on one of this actor's own,
+    /// registered reply topics, forwarded by RouterActor. Carries the
+    /// topic alongside the payload -- unlike the earlier,
+    /// broadcast-style design (a single ClientEvent variant, matched
+    /// on internally), RouterActor's own registration is already
+    /// per-topic, so each of the five, real Register calls in
+    /// pre_start builds its own closure knowing exactly which topic
+    /// it's for; this variant exists only because all five, real
+    /// closures share the same underlying delivery shape.
+    RoutedReply {
+        topic: String,
+        payload: Vec<u8>,
+    },
 }
 
 pub struct CryptoActorArgs {
@@ -216,10 +237,14 @@ pub struct CryptoActorArgs {
     /// credentials-agent-architecture.md's own "CryptoActor" section
     /// for why this must stay fire-and-forget in both directions.
     pub tcp_client: ActorRef<TcpClientMessage>,
-    /// The same OutputPort the agent's own TcpClientActor was
-    /// constructed with -- CryptoActor subscribes to it too, so it
-    /// can receive the replies its own requests are waiting on.
-    pub events_output: Arc<OutputPort<ClientEvent>>,
+    /// The consuming supervisor's own, already-spawned RouterActor --
+    /// the same one its own, real topics are already registered
+    /// with, not a second one. CryptoActor registers its own five,
+    /// real reply topics with it directly in pre_start, rather than
+    /// subscribing to a broadcast-style OutputPort<ClientEvent> (the
+    /// earlier, real design, before RouterActor existed) -- see this
+    /// crate's own, top-level doc comment for the full reasoning.
+    pub router: ActorRef<polar_router::RouterMessage>,
     /// This agent's own, real workload identity -- required for
     /// EnsureOwnEscrowKeypair's own issuance-fallback path, since
     /// generate_csr needs a real, non-empty identity for the CSR's
@@ -281,9 +306,38 @@ impl Actor for CryptoActor {
         myself: ActorRef<Self::Msg>,
         args: CryptoActorArgs,
     ) -> Result<Self::State, ActorProcessingErr> {
-        args.events_output.subscribe(myself.clone(), |event| {
-            Some(CryptoMessage::ClientEvent(event))
-        });
+        // Registers each of this actor's own, real reply topics
+        // directly with the shared RouterActor -- CryptoActor is a
+        // requester here, not a responder, so it registers the reply
+        // topics, not the request topics (easy to transpose by
+        // accident, worth being explicit about). Each closure does
+        // the same, minimal, real thing: forward the raw topic and
+        // payload back to this actor as RoutedReply, letting handle()
+        // itself do the real, per-topic deserialization/routing --
+        // mirroring kube-consumer's own, established
+        // register_kube_topics pattern exactly.
+        for topic in [
+            CREDENTIALS_ESCROW_KEY_REPLIES_TOPIC,
+            CREDENTIALS_STORE_SECRET_REPLIES_TOPIC,
+            CREDENTIALS_RETRIEVE_AGENT_ESCROW_KEYPAIR_REPLIES_TOPIC,
+            CREDENTIALS_AGENT_ESCROW_ISSUANCE_REPLIES_TOPIC,
+            CREDENTIALS_AGENT_ESCROW_KEY_REPLIES_TOPIC,
+        ] {
+            let myself_for_deliver = myself.clone();
+            if let Err(e) = args.router.send_message(polar_router::RouterMessage::Register {
+                topic: topic.to_string(),
+                deliver: Box::new(move |incoming: polar_router::IncomingMessage| {
+                    if let Err(e) = myself_for_deliver.send_message(CryptoMessage::RoutedReply {
+                        topic: incoming.topic,
+                        payload: incoming.payload,
+                    }) {
+                        warn!("CryptoActor: failed to deliver routed reply to self: {e}");
+                    }
+                }),
+            }) {
+                error!("CryptoActor failed to register topic {topic} with RouterActor: {e}");
+            }
+        }
 
         // Subscribes to the *_REPLIES_TOPIC constants specifically --
         // CryptoActor is a requester here, not a responder, so it
@@ -343,7 +397,7 @@ impl Actor for CryptoActor {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
-            CryptoMessage::ClientEvent(ClientEvent::MessagePublished { topic, payload, .. })
+            CryptoMessage::RoutedReply { topic, payload }
                 if topic == CREDENTIALS_ESCROW_KEY_REPLIES_TOPIC =>
             {
                 match rkyv::from_bytes::<Envelope<credentials_agent_common::escrow_key::EscrowKeyReply>, rkyv::rancor::Error>(&payload)
@@ -354,7 +408,7 @@ impl Actor for CryptoActor {
                     Err(e) => warn!("CryptoActor failed to deserialize escrow-key reply: {e}"),
                 }
             }
-            CryptoMessage::ClientEvent(ClientEvent::MessagePublished { topic, payload, .. })
+            CryptoMessage::RoutedReply { topic, payload }
                 if topic == CREDENTIALS_STORE_SECRET_REPLIES_TOPIC =>
             {
                 match rkyv::from_bytes::<Envelope<StoreSecretReply>, rkyv::rancor::Error>(&payload)
@@ -365,7 +419,7 @@ impl Actor for CryptoActor {
                     Err(e) => warn!("CryptoActor failed to deserialize store-secret reply: {e}"),
                 }
             }
-            CryptoMessage::ClientEvent(ClientEvent::MessagePublished { topic, payload, .. })
+            CryptoMessage::RoutedReply { topic, payload }
                 if topic == CREDENTIALS_RETRIEVE_AGENT_ESCROW_KEYPAIR_REPLIES_TOPIC =>
             {
                 match rkyv::from_bytes::<Envelope<RetrieveAgentEscrowKeypairReply>, rkyv::rancor::Error>(&payload)
@@ -378,7 +432,7 @@ impl Actor for CryptoActor {
                     ),
                 }
             }
-            CryptoMessage::ClientEvent(ClientEvent::MessagePublished { topic, payload, .. })
+            CryptoMessage::RoutedReply { topic, payload }
                 if topic == CREDENTIALS_AGENT_ESCROW_ISSUANCE_REPLIES_TOPIC =>
             {
                 match rkyv::from_bytes::<Envelope<AgentEscrowIssuanceReply>, rkyv::rancor::Error>(&payload)
@@ -389,7 +443,7 @@ impl Actor for CryptoActor {
                     Err(e) => warn!("CryptoActor failed to deserialize agent escrow-issuance reply: {e}"),
                 }
             }
-            CryptoMessage::ClientEvent(ClientEvent::MessagePublished { topic, payload, .. })
+            CryptoMessage::RoutedReply { topic, payload }
                 if topic == CREDENTIALS_AGENT_ESCROW_KEY_REPLIES_TOPIC =>
             {
                 match rkyv::from_bytes::<Envelope<AgentEscrowKeyReply>, rkyv::rancor::Error>(&payload) {
@@ -399,10 +453,12 @@ impl Actor for CryptoActor {
                     Err(e) => warn!("CryptoActor failed to deserialize agent escrow-key reply: {e}"),
                 }
             }
-            CryptoMessage::ClientEvent(_) => {
-                // Some other topic's event, forwarded to every
-                // subscriber of the shared OutputPort -- not ours,
-                // ignored.
+            CryptoMessage::RoutedReply { .. } => {
+                // A topic this actor didn't itself register for --
+                // RouterActor's own dispatch already guarantees this
+                // never genuinely happens, but kept as an explicit,
+                // harmless no-op arm rather than silently falling
+                // through a wildcard elsewhere.
             }
             CryptoMessage::StoreSecret {
                 name,
@@ -1099,14 +1155,14 @@ mod tests {
     }
 
     /// Intercepts CryptoActor's own outgoing publishes and answers
-    /// them exactly as the real Credentials Agent would, over the
-    /// same shared OutputPort<ClientEvent> CryptoActor itself
-    /// subscribed to at pre_start -- not a direct reply_router.deliver()
-    /// call, since CryptoActor's own reply routers are private,
-    /// internal state, unlike credentials-agent-observer's own
-    /// handler, which holds its router directly.
+    /// them exactly as the real Credentials Agent would, publishing
+    /// its own real replies directly to `router` -- the same, real
+    /// RouterActor CryptoActor itself registered its own reply
+    /// topics with at pre_start. Mirrors the earlier, real,
+    /// broadcast-style FakeCredentialsAgent exactly in every other
+    /// respect; only the delivery mechanism changed.
     struct FakeCredentialsAgent {
-        events_output: Arc<OutputPort<ClientEvent>>,
+        router: ActorRef<polar_router::RouterMessage>,
         escrow_private_key: RsaPrivateKey,
         escrow_public_key_pem: String,
         /// Real, shared call count for the escrow-key branch
@@ -1173,6 +1229,17 @@ mod tests {
                 return Ok(());
             };
 
+            let route = |reply_topic: &str, bytes: Vec<u8>| {
+                let _ = self.router.send_message(polar_router::RouterMessage::Route(
+                    polar_router::IncomingMessage {
+                        topic: reply_topic.to_string(),
+                        payload: bytes,
+                        published_by: None,
+                        trace_ctx: None,
+                    },
+                ));
+            };
+
             if topic == CREDENTIALS_ESCROW_KEY_REQUESTS_TOPIC {
                 if let Ok(envelope) =
                     rkyv::from_bytes::<Envelope<EscrowKeyRequest>, rkyv::rancor::Error>(&payload)
@@ -1188,12 +1255,7 @@ mod tests {
                     let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&reply)
                         .unwrap()
                         .to_vec();
-                    self.events_output.send(ClientEvent::MessagePublished {
-                        topic: CREDENTIALS_ESCROW_KEY_REPLIES_TOPIC.to_string(),
-                        payload: bytes,
-                        published_by: None,
-                        trace_ctx: None,
-                    });
+                    route(CREDENTIALS_ESCROW_KEY_REPLIES_TOPIC, bytes);
                 }
             } else if topic == CREDENTIALS_STORE_SECRET_REQUESTS_TOPIC {
                 if let Ok(envelope) =
@@ -1229,12 +1291,7 @@ mod tests {
                     let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&reply)
                         .unwrap()
                         .to_vec();
-                    self.events_output.send(ClientEvent::MessagePublished {
-                        topic: CREDENTIALS_STORE_SECRET_REPLIES_TOPIC.to_string(),
-                        payload: bytes,
-                        published_by: None,
-                        trace_ctx: None,
-                    });
+                    route(CREDENTIALS_STORE_SECRET_REPLIES_TOPIC, bytes);
                 }
             } else if topic == CREDENTIALS_RETRIEVE_AGENT_ESCROW_KEYPAIR_REQUESTS_TOPIC {
                 if let Ok(envelope) = rkyv::from_bytes::<
@@ -1260,12 +1317,7 @@ mod tests {
                     let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&reply)
                         .unwrap()
                         .to_vec();
-                    self.events_output.send(ClientEvent::MessagePublished {
-                        topic: CREDENTIALS_RETRIEVE_AGENT_ESCROW_KEYPAIR_REPLIES_TOPIC.to_string(),
-                        payload: bytes,
-                        published_by: None,
-                        trace_ctx: None,
-                    });
+                    route(CREDENTIALS_RETRIEVE_AGENT_ESCROW_KEYPAIR_REPLIES_TOPIC, bytes);
                 }
             } else if topic == CREDENTIALS_AGENT_ESCROW_ISSUANCE_REQUESTS_TOPIC {
                 if let Ok(envelope) = rkyv::from_bytes::<Envelope<AgentEscrowIssuanceRequest>, rkyv::rancor::Error>(&payload) {
@@ -1297,12 +1349,7 @@ mod tests {
                     let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&reply)
                         .unwrap()
                         .to_vec();
-                    self.events_output.send(ClientEvent::MessagePublished {
-                        topic: CREDENTIALS_AGENT_ESCROW_ISSUANCE_REPLIES_TOPIC.to_string(),
-                        payload: bytes,
-                        published_by: None,
-                        trace_ctx: None,
-                    });
+                    route(CREDENTIALS_AGENT_ESCROW_ISSUANCE_REPLIES_TOPIC, bytes);
                 }
             } else if topic == CREDENTIALS_AGENT_ESCROW_KEY_REQUESTS_TOPIC {
                 if let Ok(envelope) =
@@ -1323,12 +1370,7 @@ mod tests {
                     let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&reply)
                         .unwrap()
                         .to_vec();
-                    self.events_output.send(ClientEvent::MessagePublished {
-                        topic: CREDENTIALS_AGENT_ESCROW_KEY_REPLIES_TOPIC.to_string(),
-                        payload: bytes,
-                        published_by: None,
-                        trace_ctx: None,
-                    });
+                    route(CREDENTIALS_AGENT_ESCROW_KEY_REPLIES_TOPIC, bytes);
                 }
             }
 
@@ -1366,15 +1408,18 @@ mod tests {
         Arc<std::sync::atomic::AtomicUsize>,
     ) {
         let (private_key, public_key_pem) = test_credentials_agent_keypair();
-        let events_output = Arc::new(OutputPort::default());
         let escrow_key_queries = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let agent_escrow_key_queries = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let last_stored_secret_plaintext = Arc::new(std::sync::Mutex::new(None));
 
+        let (router, _) = Actor::spawn(None, polar_router::RouterActor, ())
+            .await
+            .unwrap();
+
         let (fake_agent, _) = Actor::spawn(
             None,
             FakeCredentialsAgent {
-                events_output: events_output.clone(),
+                router: router.clone(),
                 escrow_private_key: private_key,
                 escrow_public_key_pem: public_key_pem,
                 escrow_key_queries: escrow_key_queries.clone(),
@@ -1394,7 +1439,7 @@ mod tests {
             CryptoActor,
             CryptoActorArgs {
                 tcp_client: fake_agent,
-                events_output,
+                router,
                 own_identity: "test-agent".to_string(),
             },
         )
@@ -1757,3 +1802,4 @@ mod tests {
         }
     }
 }
+
