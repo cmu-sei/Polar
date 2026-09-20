@@ -1,5 +1,6 @@
 use crate::BROKER_CLIENT_NAME;
 use crate::GraphOperable;
+use cassini_client::TcpClientMessage;
 use cassini_types::ClientEvent;
 use k8s_openapi::api::apps::v1::{Deployment, ReplicaSet};
 use k8s_openapi::api::batch::v1::Job;
@@ -278,6 +279,30 @@ impl ClusterConsumerSupervisor {
         }
         Ok(())
     }
+
+    /// Spawns this agent's own, real, first, genuine CryptoActor
+    /// user, registering its own five, real reply topics against the
+    /// same, shared `router` this agent's own two, real topics are
+    /// already registered with (see register_kube_topics, above).
+    /// Extracted from pre_start specifically so a real test can
+    /// exercise this exact, real spawn sequence directly, without
+    /// needing the real network connection pre_start also,
+    /// separately, attempts for broker_client itself.
+    async fn spawn_crypto_actor(
+        router: ActorRef<polar_router::RouterMessage>,
+        tcp_client: ActorRef<TcpClientMessage>,
+        supervisor: ractor::ActorCell,
+    ) -> Result<ActorRef<polar_crypto::CryptoMessage>, ActorProcessingErr> {
+        let (crypto_actor, _) = polar_crypto::CryptoActor::spawn_linked(
+            None,
+            polar_crypto::CryptoActor,
+            polar_crypto::CryptoActorArgs { tcp_client, router },
+            supervisor,
+        )
+        .await
+        .map_err(ActorProcessingErr::from)?;
+        Ok(crypto_actor)
+    }
 }
 
 #[async_trait]
@@ -353,8 +378,8 @@ impl Actor for ClusterConsumerSupervisor {
 
         // Captured before myself is moved into spawn_with_router
         // below (it takes its own supervisor argument by value) --
-        // needed afterward for CryptoActor's own, real spawn_linked
-        // call.
+        // needed afterward for spawn_crypto_actor's own, real
+        // spawn_linked call.
         let myself_cell = myself.get_cell();
 
         let broker_client = TcpClient::spawn_with_router(
@@ -371,20 +396,9 @@ impl Actor for ClusterConsumerSupervisor {
         // after broker_client itself genuinely exists, since
         // CryptoActorArgs needs its own, real, raw
         // ActorRef<TcpClientMessage> (as_actor_ref()), not available
-        // any earlier in this function. spawn_linked, matching every
-        // other real child actor in this supervisor, so its own
-        // lifecycle is genuinely tied to this one's.
-        let (crypto_actor, _) = polar_crypto::CryptoActor::spawn_linked(
-            None,
-            polar_crypto::CryptoActor,
-            polar_crypto::CryptoActorArgs {
-                tcp_client: broker_client.as_actor_ref(),
-                router,
-            },
-            myself_cell,
-        )
-        .await
-        .map_err(ActorProcessingErr::from)?;
+        // any earlier in this function.
+        let crypto_actor =
+            Self::spawn_crypto_actor(router, broker_client.as_actor_ref(), myself_cell).await?;
 
         Ok(ClusterConsumerSupervisorState {
             broker_client,
@@ -759,5 +773,222 @@ mod router_integration_tests {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
         assert!(received.lock().unwrap().is_none());
+    }
+
+    /// Intercepts CryptoActor's own outgoing publishes and answers
+    /// them exactly as the real Credentials Agent would, publishing
+    /// its own real replies back through the same, shared `router`
+    /// CryptoActor itself registered its own reply topics with --
+    /// mirroring polar-crypto's own, established FakeCredentialsAgent
+    /// test helper exactly.
+    struct FakeCredentialsAgent {
+        router: ActorRef<polar_router::RouterMessage>,
+        escrow_public_key_pem: String,
+    }
+
+    #[async_trait]
+    impl Actor for FakeCredentialsAgent {
+        type Msg = TcpClientMessage;
+        type State = ();
+        type Arguments = ();
+
+        async fn pre_start(
+            &self,
+            _myself: ActorRef<Self::Msg>,
+            _args: (),
+        ) -> Result<Self::State, ActorProcessingErr> {
+            Ok(())
+        }
+
+        async fn handle(
+            &self,
+            _myself: ActorRef<Self::Msg>,
+            message: Self::Msg,
+            _state: &mut Self::State,
+        ) -> Result<(), ActorProcessingErr> {
+            let TcpClientMessage::Publish { topic, payload, .. } = message else {
+                return Ok(());
+            };
+
+            let route = |reply_topic: &str, bytes: Vec<u8>| {
+                let _ = self.router.send_message(polar_router::RouterMessage::Route(
+                    polar_router::IncomingMessage {
+                        topic: reply_topic.to_string(),
+                        payload: bytes,
+                        published_by: None,
+                        trace_ctx: None,
+                    },
+                ));
+            };
+
+            if topic == credentials_agent_common::CREDENTIALS_AGENT_ESCROW_KEY_REQUESTS_TOPIC {
+                type AgentEscrowKeyRequestEnvelope = polar::request_reply::Envelope<credentials_agent_common::agent_escrow_key::AgentEscrowKeyRequest>;
+                if let Ok(envelope) = rkyv::from_bytes::<AgentEscrowKeyRequestEnvelope, rkyv::rancor::Error>(&payload) {
+                    let reply = polar::request_reply::Envelope {
+                        correlation_id: envelope.correlation_id,
+                        payload: credentials_agent_common::agent_escrow_key::AgentEscrowKeyReply::Found {
+                            public_key_pem: self.escrow_public_key_pem.clone(),
+                        },
+                    };
+                    let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&reply).unwrap().to_vec();
+                    route(
+                        credentials_agent_common::CREDENTIALS_AGENT_ESCROW_KEY_REPLIES_TOPIC,
+                        bytes,
+                    );
+                }
+            }
+            // Every other, real CryptoActor request topic is
+            // deliberately left unanswered here -- this test's own,
+            // real purpose is proving EncryptForRecipient genuinely
+            // works through kube-consumer's own, exact, real spawn
+            // sequence, not re-proving every one of CryptoActor's
+            // own flows (already, separately proven in polar-crypto's
+            // own test suite).
+
+            Ok(())
+        }
+    }
+
+    /// A real, temporary, self-signed certificate carrying
+    /// "kube-consumer" as its own identity SAN -- CryptoActor's own
+    /// pre_start now reads a real, mounted TLS_CLIENT_CERT to derive
+    /// its own identity (see polar-crypto's own, real
+    /// extract_own_identity-based redesign), so this real,
+    /// end-to-end test needs one too, exactly the same, real way
+    /// polar-crypto's own tests already do.
+    fn write_test_agent_certificate() -> tempfile::NamedTempFile {
+        let mut rng = rand::rng();
+        let private_key = rsa::RsaPrivateKey::new(&mut rng, 2048).unwrap();
+        let private_key_pem = rsa::pkcs8::EncodePrivateKey::to_pkcs8_pem(
+            &private_key,
+            rsa::pkcs8::LineEnding::LF,
+        )
+        .unwrap();
+        let key_pair = rcgen::KeyPair::from_pem(&private_key_pem).unwrap();
+        let params = rcgen::CertificateParams::new(vec!["kube-consumer".to_string()]).unwrap();
+        let certificate_pem = params.self_signed(&key_pair).unwrap().pem();
+
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), certificate_pem).unwrap();
+        file
+    }
+
+    #[tokio::test]
+    async fn crypto_actor_genuinely_works_through_kube_consumers_own_real_spawn_sequence() {
+        // The real, end-to-end proof this whole session's own
+        // RouterActor/CryptoActor migration work exists for:
+        // kube-consumer's own, exact, real spawn_crypto_actor
+        // sequence -- the same, real function pre_start itself
+        // calls -- genuinely produces a working CryptoActor, sharing
+        // the same, real router this agent's own two, genuinely-
+        // owned topics are also registered with, with no conflict
+        // between the two, real sets of topics on that one, shared
+        // router.
+
+        let received = Arc::new(Mutex::new(None));
+        let (fake_supervisor, _) = Actor::spawn(
+            None,
+            FakeSupervisor {
+                received: received.clone(),
+            },
+            (),
+        )
+        .await
+        .unwrap();
+
+        let (router, _) = polar_router::RouterActor::spawn(None, polar_router::RouterActor, ())
+            .await
+            .unwrap();
+
+        // This agent's own, real, genuinely-owned topics, registered
+        // first, exactly as pre_start itself does.
+        ClusterConsumerSupervisor::register_kube_topics(&router, &fake_supervisor).unwrap();
+
+        let mut rng = rand::rng();
+        let escrow_private_key = rsa::RsaPrivateKey::new(&mut rng, 4096).unwrap();
+        let escrow_public_key_pem = rsa::pkcs8::EncodePublicKey::to_public_key_pem(
+            &escrow_private_key.to_public_key(),
+            rsa::pkcs8::LineEnding::LF,
+        )
+        .unwrap();
+
+        let (fake_credentials_agent, _) = Actor::spawn(
+            None,
+            FakeCredentialsAgent {
+                router: router.clone(),
+                escrow_public_key_pem,
+            },
+            (),
+        )
+        .await
+        .unwrap();
+
+        let own_cert_file = write_test_agent_certificate();
+        unsafe {
+            std::env::set_var("TLS_CLIENT_CERT", own_cert_file.path());
+        }
+
+        // The actual, real function this test exists to exercise --
+        // not a reimplementation of it.
+        let crypto_actor = ClusterConsumerSupervisor::spawn_crypto_actor(
+            router.clone(),
+            fake_credentials_agent,
+            fake_supervisor.get_cell(),
+        )
+        .await
+        .unwrap();
+
+        unsafe {
+            std::env::remove_var("TLS_CLIENT_CERT");
+        }
+        drop(own_cert_file);
+
+        // Real proof 1: CryptoActor itself genuinely works through
+        // this exact, real spawn sequence -- a real
+        // EncryptForRecipient round trip, decrypted with the
+        // recipient's own, real private key.
+        let plaintext = b"a real secret, encrypted through kube-consumer's own real wiring";
+        let result = ractor::call!(crypto_actor, |reply| {
+            polar_crypto::CryptoMessage::EncryptForRecipient {
+                recipient_identity: "some-other-agent".to_string(),
+                plaintext: plaintext.to_vec(),
+                reply,
+            }
+        })
+        .unwrap();
+        let wire_bytes = result.expect("EncryptForRecipient must genuinely succeed");
+        let escrowed: credentials_agent_common::escrow_secret::EscrowedSecret =
+            rkyv::from_bytes::<_, rkyv::rancor::Error>(&wire_bytes).unwrap();
+        let decrypted = escrowed.decrypt(&escrow_private_key).unwrap();
+        assert_eq!(&*decrypted, plaintext);
+
+        // Real proof 2: this agent's own, genuinely-owned topics
+        // still, correctly reach the very same fake_supervisor above
+        // -- CryptoActor's own five, real reply topics registering
+        // on the same, shared router caused no real conflict at all.
+        router
+            .send_message(polar_router::RouterMessage::Route(
+                polar_router::IncomingMessage {
+                    topic: KUBERNETES_CONSUMER.to_string(),
+                    payload: b"still works".to_vec(),
+                    published_by: Some("kube-observer".to_string()),
+                    trace_ctx: None,
+                },
+            ))
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let got = received
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("kube-consumer's own topic must still genuinely reach the supervisor");
+        match got {
+            ClientEvent::MessagePublished { topic, payload, .. } => {
+                assert_eq!(topic, KUBERNETES_CONSUMER);
+                assert_eq!(payload, b"still works");
+            }
+            other => panic!("expected MessagePublished, got {other:?}"),
+        }
     }
 }
