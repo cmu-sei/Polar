@@ -245,14 +245,6 @@ pub struct CryptoActorArgs {
     /// earlier, real design, before RouterActor existed) -- see this
     /// crate's own, top-level doc comment for the full reasoning.
     pub router: ActorRef<polar_router::RouterMessage>,
-    /// This agent's own, real workload identity -- required for
-    /// EnsureOwnEscrowKeypair's own issuance-fallback path, since
-    /// generate_csr needs a real, non-empty identity for the CSR's
-    /// own SAN. The consuming supervisor already knows its own
-    /// service-account identity; this is threaded in rather than
-    /// derived here, since CryptoActor itself has no independent way
-    /// to discover it.
-    pub own_identity: String,
 }
 
 pub struct CryptoActorState {
@@ -306,6 +298,26 @@ impl Actor for CryptoActor {
         myself: ActorRef<Self::Msg>,
         args: CryptoActorArgs,
     ) -> Result<Self::State, ActorProcessingErr> {
+        // Derived internally, not threaded in as a real, explicit
+        // argument -- deliberately: this identity is already,
+        // genuinely readable from this agent's own, already-mounted
+        // mTLS client certificate (the same, real TLS_CLIENT_CERT
+        // path TCPClientConfig::new() itself already reads), and
+        // CryptoActor is meant to be the one, sole, real gateway for
+        // every crypto-adjacent concern -- including this one --
+        // rather than every, real caller needing its own, separate
+        // way to learn or compute the same, real identity string.
+        let own_identity = {
+            let path = std::env::var("TLS_CLIENT_CERT").map_err(|e| {
+                ActorProcessingErr::from(format!("TLS_CLIENT_CERT must be set: {e}"))
+            })?;
+            let certificate_pem = std::fs::read_to_string(&path).map_err(|e| {
+                ActorProcessingErr::from(format!("failed to read {path}: {e}"))
+            })?;
+            cert_issuer_common::permission::extract_own_identity(&certificate_pem)
+                .map_err(|e| ActorProcessingErr::from(e.to_string()))?
+        };
+
         // Registers each of this actor's own, real reply topics
         // directly with the shared RouterActor -- CryptoActor is a
         // requester here, not a responder, so it registers the reply
@@ -386,7 +398,7 @@ impl Actor for CryptoActor {
             cached_recipient_public_keys: Arc::new(tokio::sync::Mutex::new(
                 std::collections::HashMap::new(),
             )),
-            own_identity: args.own_identity,
+            own_identity,
         })
     }
 
@@ -1397,6 +1409,30 @@ mod tests {
         recipient_public_key_pem: Option<String>,
     }
 
+    /// pre_start now derives its own identity by reading a real,
+    /// mounted TLS_CLIENT_CERT -- this builds a real, temporary,
+    /// self-signed certificate carrying "test-agent" as its own
+    /// identity SAN (mirroring extract_own_identity's own, real
+    /// test fixtures directly), writes it to a real, temporary file,
+    /// and points the env var at it, so every test in this module
+    /// continues to genuinely exercise "test-agent" as this actor's
+    /// own identity, exactly as before this migration.
+    fn write_test_agent_certificate() -> tempfile::NamedTempFile {
+        let mut rng = rand::rng();
+        let private_key = RsaPrivateKey::new(&mut rng, 2048).unwrap();
+        let private_key_pem =
+            rsa::pkcs8::EncodePrivateKey::to_pkcs8_pem(&private_key, rsa::pkcs8::LineEnding::LF)
+                .unwrap();
+        let key_pair = rcgen::KeyPair::from_pem(&private_key_pem).unwrap();
+        let params =
+            rcgen::CertificateParams::new(vec!["test-agent".to_string()]).unwrap();
+        let certificate_pem = params.self_signed(&key_pair).unwrap().pem();
+
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), certificate_pem).unwrap();
+        file
+    }
+
     async fn spawn_crypto_actor_with_fake_credentials_agent_configured(
         config: FakeCredentialsAgentConfig,
     ) -> (
@@ -1434,17 +1470,29 @@ mod tests {
         .await
         .unwrap();
 
+        let own_cert_file = write_test_agent_certificate();
+        unsafe {
+            std::env::set_var("TLS_CLIENT_CERT", own_cert_file.path());
+        }
+
         let (crypto_actor, _) = Actor::spawn(
             None,
             CryptoActor,
             CryptoActorArgs {
                 tcp_client: fake_agent,
                 router,
-                own_identity: "test-agent".to_string(),
             },
         )
         .await
         .unwrap();
+
+        unsafe {
+            std::env::remove_var("TLS_CLIENT_CERT");
+        }
+        // own_cert_file must outlive pre_start's own, real read of it
+        // above -- explicitly kept alive until here, then dropped
+        // (and its own, temp file deleted) only now.
+        drop(own_cert_file);
 
         (
             (crypto_actor, escrow_key_queries),

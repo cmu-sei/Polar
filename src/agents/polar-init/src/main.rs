@@ -350,7 +350,6 @@ async fn ensure_escrow_bootstrapped(own_identity: &str) {
         polar_crypto::CryptoActorArgs {
             tcp_client,
             router,
-            own_identity: own_identity.to_string(),
         },
     )
     .await

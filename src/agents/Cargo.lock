@@ -5575,6 +5575,7 @@ dependencies = [
  "polar-router",
  "ractor",
  "rand 0.10.2",
+ "rcgen",
  "rkyv",
  "rsa 0.10.0-rc.18",
  "sha2 0.11.0",

@@ -30,4 +30,5 @@ polar-router.workspace = true
 sha2_011 = { package = "sha2", version = "0.11", default-features = false, features = ["oid"] }
 
 [dev-dependencies]
+rcgen.workspace = true
 tempfile.workspace = true
