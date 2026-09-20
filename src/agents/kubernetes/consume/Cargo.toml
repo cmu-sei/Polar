@@ -12,6 +12,7 @@ k8s-openapi = { workspace = true }
 kube-common.workspace = true
 neo4rs.workspace = true
 polar.workspace = true
+polar-crypto.workspace = true
 polar-router.workspace = true
 ractor.workspace = true
 rkyv.workspace = true

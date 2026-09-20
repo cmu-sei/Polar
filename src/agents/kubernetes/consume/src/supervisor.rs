@@ -121,6 +121,14 @@ pub struct ClusterConsumerSupervisorState {
     graph_controller: Option<GraphController>,
     projection_cache: ProjectionCache,
     healthcheck: ActorRef<HealthCheckMessage>,
+    /// The real, first, genuine CryptoActor user -- shares this
+    /// supervisor's own, already-established Cassini connection and
+    /// RouterActor rather than opening a second connection. Not yet
+    /// consumed by anything in this file's own, real projection
+    /// logic; the real, upcoming, plaintext-Kubernetes-secret
+    /// encryption work (see this crate's own, real design
+    /// discussion) is the actual, first real caller.
+    crypto_actor: ActorRef<polar_crypto::CryptoMessage>,
     /// Set true once a fatal failure has triggered the bounded drain window.
     /// While true, incoming messages are logged instead of processed, since
     /// whatever failed (likely the graph controller) can't be trusted, and
@@ -343,25 +351,51 @@ impl Actor for ClusterConsumerSupervisor {
 
         Self::register_kube_topics(&router, &myself)?;
 
-        match TcpClient::spawn_with_router(
+        // Captured before myself is moved into spawn_with_router
+        // below (it takes its own supervisor argument by value) --
+        // needed afterward for CryptoActor's own, real spawn_linked
+        // call.
+        let myself_cell = myself.get_cell();
+
+        let broker_client = TcpClient::spawn_with_router(
             BROKER_CLIENT_NAME,
             myself,
             |event| Some(SupervisorMessage::ClientEvent { event }),
-            router,
+            router.clone(),
         )
         .await
-        {
-            Ok(broker_client) => Ok(ClusterConsumerSupervisorState {
-                broker_client,
-                graph_controller: None,
-                projection_cache: ProjectionCache {
-                    entries: HashMap::new(),
-                },
-                healthcheck,
-                draining: false,
-            }),
-            Err(e) => Err(ActorProcessingErr::from(e)),
-        }
+        .map_err(ActorProcessingErr::from)?;
+
+        // CryptoActor shares this same, real, already-established
+        // Cassini connection and RouterActor -- spawned only now,
+        // after broker_client itself genuinely exists, since
+        // CryptoActorArgs needs its own, real, raw
+        // ActorRef<TcpClientMessage> (as_actor_ref()), not available
+        // any earlier in this function. spawn_linked, matching every
+        // other real child actor in this supervisor, so its own
+        // lifecycle is genuinely tied to this one's.
+        let (crypto_actor, _) = polar_crypto::CryptoActor::spawn_linked(
+            None,
+            polar_crypto::CryptoActor,
+            polar_crypto::CryptoActorArgs {
+                tcp_client: broker_client.as_actor_ref(),
+                router,
+            },
+            myself_cell,
+        )
+        .await
+        .map_err(ActorProcessingErr::from)?;
+
+        Ok(ClusterConsumerSupervisorState {
+            broker_client,
+            graph_controller: None,
+            projection_cache: ProjectionCache {
+                entries: HashMap::new(),
+            },
+            healthcheck,
+            crypto_actor,
+            draining: false,
+        })
     }
 
     async fn handle(
