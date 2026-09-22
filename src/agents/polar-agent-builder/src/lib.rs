@@ -19,6 +19,8 @@
 
 pub mod crypto;
 pub use crypto::{CryptoClient, CryptoHandle};
+pub mod health;
+pub use health::{HealthClient, HealthHandle};
 
 use cassini_client::TcpClientMessage;
 use cassini_types::ClientEvent;
