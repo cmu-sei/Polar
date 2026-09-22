@@ -169,6 +169,19 @@ impl TcpClient {
     pub fn as_actor_ref(&self) -> ActorRef<TcpClientMessage> {
         self.inner.clone()
     }
+
+    /// The exact, real inverse of as_actor_ref -- wraps an
+    /// already-spawned ActorRef<TcpClientMessage> as a real TcpClient,
+    /// with no new, real actor spawned and no real network connection
+    /// attempted at all. The real, genuine reason this exists: a
+    /// caller (a real test's own fake broker stand-in, or any other,
+    /// real, already-spawned TcpClientMessage-compatible actor) that
+    /// already has a real ActorRef can still use this struct's own,
+    /// higher-level CassiniClient methods, rather than being forced
+    /// back down to raw send_message calls.
+    pub fn from_actor_ref(inner: ActorRef<TcpClientMessage>) -> Self {
+        Self { inner, queue: None }
+    }
 }
 
 
