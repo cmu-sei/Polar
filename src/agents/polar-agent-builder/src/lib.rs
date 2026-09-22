@@ -27,7 +27,7 @@ pub use message::{Encrypted, Outbound, Plaintext};
 use cassini_client::TcpClientMessage;
 use cassini_types::ClientEvent;
 use polar::cassini::TcpClient;
-use polar_health::{HealthCheckActor, HealthCheckArgs, HealthCheckMessage};
+use polar_health::{HealthCheckActor, HealthCheckArgs};
 use ractor::{Actor, ActorProcessingErr, ActorRef};
 
 /// Binds a topic to the real, per-message deliver closure RouterActor
@@ -56,11 +56,19 @@ impl Subscription {
 /// The real, complete set of resources a successful build() produces
 /// -- everything an agent's own pre_start needs to finish its own,
 /// remaining, genuinely agent-specific wiring (spawning its own
-/// domain actors, e.g. a graph controller).
+/// domain actors, e.g. a graph controller). Every real handle here
+/// is trait-based (HealthHandle, CryptoHandle), not a raw ActorRef --
+/// the whole, real point of this crate is that an agent's own code
+/// should never need to touch ractor primitives directly at all.
+/// router and tcp_client remain genuinely, deliberately raw: they're
+/// this crate's own, real, foundational building blocks, not
+/// something a higher-level, trait-based wrapper genuinely adds value
+/// over for every, real caller's own use.
 pub struct AgentResources {
     pub router: ActorRef<polar_router::RouterMessage>,
     pub tcp_client: TcpClient,
-    pub healthcheck: Option<ActorRef<HealthCheckMessage>>,
+    pub healthcheck: Option<crate::health::HealthHandle>,
+    pub crypto: Option<crate::crypto::CryptoHandle>,
 }
 
 pub struct AgentBuilder<M: ractor::Message> {
@@ -69,6 +77,7 @@ pub struct AgentBuilder<M: ractor::Message> {
     subscriptions: Vec<Subscription>,
     health_check_args: Option<HealthCheckArgs>,
     map_lifecycle_event: Option<Box<dyn Fn(ClientEvent) -> Option<M> + Send + Sync>>,
+    with_crypto: bool,
 }
 
 impl<M: ractor::Message> AgentBuilder<M> {
@@ -79,11 +88,24 @@ impl<M: ractor::Message> AgentBuilder<M> {
             subscriptions: Vec::new(),
             health_check_args: None,
             map_lifecycle_event: None,
+            with_crypto: false,
         }
     }
 
     pub fn with_health_check(mut self, args: HealthCheckArgs) -> Self {
         self.health_check_args = Some(args);
+        self
+    }
+
+    /// Spawns a real, live CryptoActor alongside this agent's own,
+    /// real router and TcpClient once build() succeeds -- see
+    /// crypto::CryptoHandle's own doc comment for what it exposes.
+    /// Deliberately opt-in: credentials-agent's own, real, existing
+    /// supervisor never needs this at all (it holds its own, direct
+    /// escrow key), so build() genuinely can't assume every real
+    /// caller wants it.
+    pub fn with_crypto(mut self) -> Self {
+        self.with_crypto = true;
         self
     }
 
@@ -169,10 +191,32 @@ impl<M: ractor::Message> AgentBuilder<M> {
         .await
         .map_err(ActorProcessingErr::from)?;
 
+        // CryptoActor spawned only now, after tcp_client itself
+        // genuinely exists -- CryptoActorArgs needs its own, real,
+        // raw ActorRef<TcpClientMessage>, not available any earlier
+        // in this function. spawn_linked, sharing this same router.
+        let crypto = if self.with_crypto {
+            let (crypto_actor, _) = polar_crypto::CryptoActor::spawn_linked(
+                None,
+                polar_crypto::CryptoActor,
+                polar_crypto::CryptoActorArgs {
+                    tcp_client: tcp_client.as_actor_ref(),
+                    router: router.clone(),
+                },
+                myself_cell,
+            )
+            .await
+            .map_err(ActorProcessingErr::from)?;
+            Some(crate::crypto::CryptoHandle::new(crypto_actor))
+        } else {
+            None
+        };
+
         Ok(AgentResources {
             router,
             tcp_client,
-            healthcheck,
+            healthcheck: healthcheck.map(crate::health::HealthHandle::new),
+            crypto,
         })
     }
 }
