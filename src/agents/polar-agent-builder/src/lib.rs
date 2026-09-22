@@ -17,6 +17,9 @@
 //! or vice versa. build() itself is the one, sole, real orchestrator;
 //! nothing it produces can exist in a half-wired state.
 
+pub mod crypto;
+pub use crypto::{CryptoClient, CryptoHandle};
+
 use cassini_client::TcpClientMessage;
 use cassini_types::ClientEvent;
 use polar::cassini::TcpClient;

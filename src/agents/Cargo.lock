@@ -5572,12 +5572,20 @@ dependencies = [
 name = "polar-agent-builder"
 version = "1.0.0"
 dependencies = [
+ "async-trait",
  "cassini-client",
  "cassini-types",
+ "credentials_agent_common",
  "polar",
+ "polar-crypto",
  "polar-health",
  "polar-router",
  "ractor",
+ "rand 0.10.2",
+ "rcgen",
+ "rkyv",
+ "rsa 0.10.0-rc.18",
+ "tempfile",
  "thiserror 1.0.69",
  "tokio",
  "tracing",

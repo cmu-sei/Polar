@@ -6,14 +6,22 @@ license.workspace = true
 authors.workspace = true
 
 [dependencies]
+async-trait.workspace = true
 cassini-client.workspace = true
 cassini-types.workspace = true
+credentials_agent_common.workspace = true
 polar.workspace = true
+polar-crypto.workspace = true
 polar-health = { path = "../polar-health" }
 polar-router.workspace = true
 ractor.workspace = true
+rkyv.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+rand.workspace = true
+rcgen.workspace = true
+rsa.workspace = true
+tempfile.workspace = true
 tokio.workspace = true
