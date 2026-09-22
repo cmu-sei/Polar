@@ -5569,6 +5569,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "polar-agent-builder"
+version = "1.0.0"
+dependencies = [
+ "cassini-client",
+ "cassini-types",
+ "polar",
+ "polar-health",
+ "polar-router",
+ "ractor",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "polar-crypto"
 version = "1.0.0"
 dependencies = [

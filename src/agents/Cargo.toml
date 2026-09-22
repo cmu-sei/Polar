@@ -67,6 +67,7 @@ members = [
     "polar-healthcheck",
     "polar-init",
     "polar-kernel-keyring",
+    "polar-agent-builder",
     "polar-permissions",
     "polar-policy",
     "polar-router",

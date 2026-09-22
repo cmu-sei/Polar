@@ -1,0 +1,19 @@
+[package]
+name = "polar-agent-builder"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+cassini-client.workspace = true
+cassini-types.workspace = true
+polar.workspace = true
+polar-health = { path = "../polar-health" }
+polar-router.workspace = true
+ractor.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
