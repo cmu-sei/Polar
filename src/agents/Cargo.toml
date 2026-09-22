@@ -179,6 +179,7 @@ polar-health = { path = "polar-health" }
 polar-kernel-keyring = { path = "polar-kernel-keyring" }
 polar-permissions = { path = "polar-permissions" }
 polar-policy = { path = "polar-policy" }
+polar-agent-builder = { path = "polar-agent-builder" }
 polar-router = { path = "polar-router" }
 polar-test-graph = { path = "polar-test-graph" }
 openapi-common = { path = "openapi/common" }

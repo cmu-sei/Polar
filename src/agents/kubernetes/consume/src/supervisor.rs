@@ -1,6 +1,5 @@
 use crate::BROKER_CLIENT_NAME;
 use crate::GraphOperable;
-use cassini_client::TcpClientMessage;
 use cassini_types::ClientEvent;
 use k8s_openapi::api::apps::v1::{Deployment, ReplicaSet};
 use k8s_openapi::api::batch::v1::Job;
@@ -15,7 +14,6 @@ use polar::ProvenanceEvent;
 use polar::RkyvError;
 use polar::SupervisorMessage;
 use polar::cassini::CassiniClient;
-use polar::cassini::SubscribeRequest;
 use polar::cassini::TcpClient;
 use polar::graph::controller::{
     GraphController, GraphControllerActor, GraphControllerArgs, GraphControllerMsg, GraphOp,
@@ -23,8 +21,10 @@ use polar::graph::controller::{
 };
 use polar::graph::nodes::builds::ArtifactNodeKey;
 use polar::graph::nodes::kube::KubeNodeKey;
-use polar::health::{DepCertEndpoint, HealthCheckActor, HealthCheckArgs, HealthCheckMessage};
+use polar::health::DepCertEndpoint;
 use polar::topics::KUBERNETES_RESOLUTION_EVENTS;
+use polar::health::HealthCheckArgs;
+use polar_agent_builder::{AgentBuilder, CryptoHandle, HealthClient, HealthHandle, Subscription};
 use ractor::{Actor, OutputPort};
 use ractor::ActorProcessingErr;
 use ractor::ActorRef;
@@ -40,7 +40,6 @@ use tracing::error;
 use tracing::info;
 use tracing::warn;
 
-const HEALTHCHECK_ACTOR_NAME: &str = "polar.healthcheck";
 const DRAIN_WINDOW_SECS: u64 = 5;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -121,7 +120,7 @@ pub struct ClusterConsumerSupervisorState {
     broker_client: TcpClient,
     graph_controller: Option<GraphController>,
     projection_cache: ProjectionCache,
-    healthcheck: ActorRef<HealthCheckMessage>,
+    healthcheck: HealthHandle,
     /// The real, first, genuine CryptoActor user -- shares this
     /// supervisor's own, already-established Cassini connection and
     /// RouterActor rather than opening a second connection. Not yet
@@ -129,7 +128,7 @@ pub struct ClusterConsumerSupervisorState {
     /// logic; the real, upcoming, plaintext-Kubernetes-secret
     /// encryption work (see this crate's own, real design
     /// discussion) is the actual, first real caller.
-    crypto_actor: ActorRef<polar_crypto::CryptoMessage>,
+    crypto: CryptoHandle,
     /// Set true once a fatal failure has triggered the bounded drain window.
     /// While true, incoming messages are logged instead of processed, since
     /// whatever failed (likely the graph controller) can't be trusted, and
@@ -241,67 +240,54 @@ impl ClusterConsumerSupervisor {
         Ok(())
     }
 
-    /// Registers this agent's own two, real, genuinely-owned topics
-    /// (KUBERNETES_CONSUMER, KUBERNETES_RESOLUTION_EVENTS) with
-    /// `router`. Each topic's own, real deliver closure deliberately
-    /// does the minimal, correct thing -- reconstruct the exact same
-    /// ClientEvent::MessagePublished this agent's own, existing,
+    /// Builds this agent's own two, real, genuinely-owned
+    /// Subscriptions (KUBERNETES_CONSUMER, KUBERNETES_RESOLUTION_EVENTS)
+    /// -- each one's own, real deliver closure reconstructs the exact
+    /// same ClientEvent::MessagePublished this agent's own, existing,
     /// unchanged handle()/deserialize_and_dispatch logic already
-    /// expects, and forward it to `supervisor` as the same, existing
-    /// SupervisorMessage::ClientEvent it already handles. Extracted
-    /// from pre_start specifically so a real test can exercise this
-    /// registration/dispatch behavior directly, without needing the
-    /// real network connection pre_start also, separately, attempts.
-    fn register_kube_topics(
-        router: &ActorRef<polar_router::RouterMessage>,
-        supervisor: &ActorRef<SupervisorMessage>,
-    ) -> Result<(), ActorProcessingErr> {
-        for topic in [KUBERNETES_CONSUMER, KUBERNETES_RESOLUTION_EVENTS] {
-            let supervisor_for_deliver = supervisor.clone();
-            router
-                .send_message(polar_router::RouterMessage::Register {
-                    topic: topic.to_string(),
-                    deliver: Box::new(move |incoming: polar_router::IncomingMessage| {
-                        let event = ClientEvent::MessagePublished {
-                            topic: incoming.topic,
-                            payload: incoming.payload,
-                            trace_ctx: incoming.trace_ctx,
-                            published_by: incoming.published_by,
-                        };
-                        if let Err(e) = supervisor_for_deliver
-                            .send_message(SupervisorMessage::ClientEvent { event })
-                        {
-                            warn!("RouterActor: failed to deliver routed message to supervisor: {e}");
-                        }
-                    }),
-                })
-                .map_err(ActorProcessingErr::from)?;
-        }
-        Ok(())
-    }
-
-    /// Spawns this agent's own, real, first, genuine CryptoActor
-    /// user, registering its own five, real reply topics against the
-    /// same, shared `router` this agent's own two, real topics are
-    /// already registered with (see register_kube_topics, above).
-    /// Extracted from pre_start specifically so a real test can
-    /// exercise this exact, real spawn sequence directly, without
-    /// needing the real network connection pre_start also,
-    /// separately, attempts for broker_client itself.
-    async fn spawn_crypto_actor(
-        router: ActorRef<polar_router::RouterMessage>,
-        tcp_client: ActorRef<TcpClientMessage>,
-        supervisor: ractor::ActorCell,
-    ) -> Result<ActorRef<polar_crypto::CryptoMessage>, ActorProcessingErr> {
-        let (crypto_actor, _) = polar_crypto::CryptoActor::spawn_linked(
-            None,
-            polar_crypto::CryptoActor,
-            polar_crypto::CryptoActorArgs { tcp_client, router },
-            supervisor,
-        )
-        .await
-        .map_err(ActorProcessingErr::from)?;
-        Ok(crypto_actor)
+    /// expects, and forwards it to `supervisor` as the same, existing
+    /// SupervisorMessage::ClientEvent it already handles.
+    ///
+    /// Extracted into its own, real, standalone function -- not left
+    /// inlined inside pre_start -- specifically so a real test can
+    /// exercise these two, real, exact closures directly, without
+    /// needing the real network connection pre_start itself,
+    /// separately, attempts. Mirrors this file's own, previous,
+    /// established register_kube_topics's own, real testability
+    /// design exactly; only how the results get registered with
+    /// RouterActor changed (AgentBuilder's own, real
+    /// .with_subscription(...) now owns that part).
+    fn kube_subscriptions(supervisor: &ActorRef<SupervisorMessage>) -> Vec<Subscription> {
+        let supervisor_for_consumer = supervisor.clone();
+        let supervisor_for_resolution = supervisor.clone();
+        vec![
+            Subscription::new(KUBERNETES_CONSUMER, move |incoming| {
+                let event = ClientEvent::MessagePublished {
+                    topic: incoming.topic,
+                    payload: incoming.payload,
+                    trace_ctx: incoming.trace_ctx,
+                    published_by: incoming.published_by,
+                };
+                if let Err(e) =
+                    supervisor_for_consumer.send_message(SupervisorMessage::ClientEvent { event })
+                {
+                    warn!("AgentBuilder: failed to deliver routed message to supervisor: {e}");
+                }
+            }),
+            Subscription::new(KUBERNETES_RESOLUTION_EVENTS, move |incoming| {
+                let event = ClientEvent::MessagePublished {
+                    topic: incoming.topic,
+                    payload: incoming.payload,
+                    trace_ctx: incoming.trace_ctx,
+                    published_by: incoming.published_by,
+                };
+                if let Err(e) =
+                    supervisor_for_resolution.send_message(SupervisorMessage::ClientEvent { event })
+                {
+                    warn!("AgentBuilder: failed to deliver routed message to supervisor: {e}");
+                }
+            }),
+        ]
     }
 }
 
@@ -327,87 +313,73 @@ impl Actor for ClusterConsumerSupervisor {
             Some(SupervisorMessage::PrepareShutdown)
         });
 
-        // Build the OutputPort that GraphControllerActor fires on every
-        // real op's outcome (canary at spawn, and every subsequent write).
-        let graph_signal_port = Arc::new(OutputPort::<GraphSignal>::default());
-        graph_signal_port.subscribe(myself.clone(), |signal| {
-            Some(SupervisorMessage::GraphSignal(signal))
-        });
-
         // Parse dep cert endpoints for this agent:
         // kube-consumer depends on Cassini and Neo4j.
         let dep_cert_endpoints = vec![
             DepCertEndpoint::parse("cassini-ip-svc.polar.svc.cluster.local:8080:300")
-                .map_err(|e| ActorProcessingErr::from(e))?,
+                .map_err(ActorProcessingErr::from)?,
             DepCertEndpoint::parse("polar-db-svc.polar-graph.svc.cluster.local:7687:300")
-                .map_err(|e| ActorProcessingErr::from(e))?,
+                .map_err(ActorProcessingErr::from)?,
         ];
 
-        let (healthcheck, _) = HealthCheckActor::spawn_linked(
-            Some(HEALTHCHECK_ACTOR_NAME.to_string()),
-            HealthCheckActor,
-            HealthCheckArgs {
+        // The real, entire, formerly hand-rolled sequence --
+        // HealthCheckActor, RouterActor, this agent's own two,
+        // genuinely-owned topics (each bound to the real, wire-level
+        // Subscribe AgentBuilder itself now, automatically fires on
+        // ClientEvent::Registered -- see polar-agent-builder's own
+        // Subscription for the complete, real reasoning), TcpClient,
+        // and CryptoActor -- collapsed into one, real, composed call.
+        let mut builder = AgentBuilder::new(myself.clone(), BROKER_CLIENT_NAME)
+            .with_health_check(HealthCheckArgs {
                 expects_graph: true,
                 rejuvenation_threshold_secs: 300,
                 dep_cert_endpoints,
                 prepare_shutdown_port,
+            });
+        for subscription in Self::kube_subscriptions(&myself) {
+            builder = builder.with_subscription(subscription);
+        }
+        let resources = builder
+            .with_lifecycle_handler(|event| Some(SupervisorMessage::ClientEvent { event }))
+            .with_crypto()
+            .build()
+            .await?;
+
+        // Eager graph controller spawn -- this agent's own health
+        // never genuinely needs to wait on Cassini registration
+        // first; a real Neo4j connection is entirely independent of
+        // it (the same, real reasoning credentials-agent's own
+        // supervisor already established). GraphControllerActor::pre_start
+        // only builds real pool config; it doesn't handshake, so
+        // HealthCheckMessage::GraphAvailable (not GraphConnected
+        // alone) is still what genuinely proves real connectivity.
+        let graph_signal_port = Arc::new(OutputPort::<GraphSignal>::default());
+        graph_signal_port.subscribe(myself.clone(), |signal| {
+            Some(SupervisorMessage::GraphSignal(signal))
+        });
+        let (graph_controller, _) = GraphControllerActor::spawn_linked(
+            Some("kubernetes.cluster.graph.controller".to_string()),
+            GraphControllerActor,
+            GraphControllerArgs {
+                signal_port: graph_signal_port,
             },
             myself.get_cell(),
         )
         .await
-        .map_err(|e| ActorProcessingErr::from(e))?;
-
-        // A real, first, proof-of-concept RouterActor integration --
-        // see polar-router's own crate documentation for the complete
-        // design. RouterActor itself never touches this supervisor's
-        // own, private, mutable state (graph_controller,
-        // projection_cache) directly, since a registered closure runs
-        // inside RouterActor's own actor context, not this one's --
-        // see register_kube_topics's own doc comment for what each
-        // topic's own, real deliver closure does instead.
-        let (router, _) = polar_router::RouterActor::spawn_linked(
-            None,
-            polar_router::RouterActor,
-            (),
-            myself.get_cell(),
-        )
-        .await
         .map_err(ActorProcessingErr::from)?;
-
-        Self::register_kube_topics(&router, &myself)?;
-
-        // Captured before myself is moved into spawn_with_router
-        // below (it takes its own supervisor argument by value) --
-        // needed afterward for spawn_crypto_actor's own, real
-        // spawn_linked call.
-        let myself_cell = myself.get_cell();
-
-        let broker_client = TcpClient::spawn_with_router(
-            BROKER_CLIENT_NAME,
-            myself,
-            |event| Some(SupervisorMessage::ClientEvent { event }),
-            router.clone(),
-        )
-        .await
-        .map_err(ActorProcessingErr::from)?;
-
-        // CryptoActor shares this same, real, already-established
-        // Cassini connection and RouterActor -- spawned only now,
-        // after broker_client itself genuinely exists, since
-        // CryptoActorArgs needs its own, real, raw
-        // ActorRef<TcpClientMessage> (as_actor_ref()), not available
-        // any earlier in this function.
-        let crypto_actor =
-            Self::spawn_crypto_actor(router, broker_client.as_actor_ref(), myself_cell).await?;
 
         Ok(ClusterConsumerSupervisorState {
-            broker_client,
-            graph_controller: None,
+            broker_client: resources.tcp_client,
+            graph_controller: Some(graph_controller),
             projection_cache: ProjectionCache {
                 entries: HashMap::new(),
             },
-            healthcheck,
-            crypto_actor,
+            healthcheck: resources
+                .healthcheck
+                .expect("with_health_check was called, so this is always real, genuinely Some"),
+            crypto: resources
+                .crypto
+                .expect("with_crypto was called, so this is always real, genuinely Some"),
             draining: false,
         })
     }
@@ -429,19 +401,17 @@ impl Actor for ClusterConsumerSupervisor {
                     warn!("CONSUMER_SUPERVISOR: unsubscribe failed (continuing): {e}");
                 }
 
-                if let Err(e) = state.healthcheck.cast(HealthCheckMessage::ShutdownAck) {
+                if let Err(e) = state.healthcheck.shutdown_ack() {
                     error!("CONSUMER_SUPERVISOR: failed to send ShutdownAck: {e}");
                 }
             }
 
             SupervisorMessage::GraphSignal(signal) => match signal {
                 GraphSignal::Available => {
-                    let _ = state.healthcheck.cast(HealthCheckMessage::GraphAvailable);
+                    let _ = state.healthcheck.graph_available();
                 }
                 GraphSignal::OpFailed(reason) => {
-                    let _ = state
-                        .healthcheck
-                        .cast(HealthCheckMessage::GraphOpFailed(reason));
+                    let _ = state.healthcheck.graph_op_failed(reason);
                 }
             },
 
@@ -479,53 +449,19 @@ impl Actor for ClusterConsumerSupervisor {
             SupervisorMessage::ClientEvent { event } => {
                 match event {
                     ClientEvent::Registered { .. } => {
-                        let _ = state.healthcheck.cast(HealthCheckMessage::CassiniConnected);
-
-                        if state.graph_controller.is_none() {
-                            let graph_signal_port = Arc::new(OutputPort::<GraphSignal>::default());
-                            graph_signal_port.subscribe(myself.clone(), |signal| {
-                                Some(SupervisorMessage::GraphSignal(signal))
-                            });
-
-                            match GraphControllerActor::spawn_linked(
-                                Some("kubernetes.cluster.graph.controller".to_string()),
-                                GraphControllerActor,
-                                GraphControllerArgs { signal_port: graph_signal_port },
-                                myself.get_cell(),
-                            )
-                            .await
-                            {
-                                Ok((graph_controller, _)) => {
-                                    state.graph_controller = Some(graph_controller);
-                                    let _ = state
-                                        .healthcheck
-                                        .cast(HealthCheckMessage::GraphConnected);
-                                }
-                                Err(e) => {
-                                    error!("Error initializing graph controller! {e}");
-                                    return Err(ActorProcessingErr::from(e));
-                                }
-                            }
-                        } else {
-                            let _ = state.healthcheck.cast(HealthCheckMessage::GraphConnected);
-                        }
-
-                        info!("Subscribing to topics...");
-                        if let Err(e) = state.broker_client.subscribe(SubscribeRequest {
-                            topic: KUBERNETES_CONSUMER.into(),
-                            trace_ctx: None,
-                        }) {
-                            error!("{e}");
-                            return Err(ActorProcessingErr::from(e.to_string()));
-                        }
-
-                        if let Err(e) = state.broker_client.subscribe(SubscribeRequest {
-                            topic: KUBERNETES_RESOLUTION_EVENTS.into(),
-                            trace_ctx: None,
-                        }) {
-                            error!("{e}");
-                            return Err(ActorProcessingErr::from(e.to_string()));
-                        }
+                        // AgentBuilder's own, internal lifecycle
+                        // wiring already, automatically fired the
+                        // real, wire-level Subscribe for both of
+                        // this agent's own topics the moment this
+                        // event genuinely fired -- see Subscription's
+                        // own, real doc comment. The graph controller
+                        // is spawned eagerly in pre_start now, not
+                        // here, so there is no real, conditional
+                        // spawn-on-Registered logic left at all --
+                        // only these two, real, simple health
+                        // signals remain.
+                        let _ = state.healthcheck.cassini_connected();
+                        let _ = state.healthcheck.graph_connected();
                     }
 
                     ClientEvent::MessagePublished { topic, payload, .. } => {
@@ -553,7 +489,7 @@ impl Actor for ClusterConsumerSupervisor {
 
                     ClientEvent::TransportError { reason } => {
                         error!("Transport error occurred! {reason}");
-                        let _ = state.healthcheck.cast(HealthCheckMessage::CassiniDisconnected);
+                        let _ = state.healthcheck.cassini_disconnected();
                     }
 
                     _ => (),
@@ -590,7 +526,17 @@ impl Actor for ClusterConsumerSupervisor {
                 // rejuvenation sequence completed -- begin the same bounded
                 // drain window as a hard failure, rather than exiting
                 // immediately, so any messages still arriving get logged.
-                if actor_name == HEALTHCHECK_ACTOR_NAME && !state.draining {
+                //
+                // Matched by real, genuine actor id, not name --
+                // AgentBuilder spawns HealthCheckActor unnamed (see
+                // its own, real with_health_check implementation), so
+                // a real, direct id comparison against this
+                // supervisor's own, held HealthHandle is both the
+                // only real option available and, genuinely, more
+                // robust than name-matching ever was (ids never
+                // collide across different, real actor types; names,
+                // in principle, could).
+                if actor_cell.get_id() == state.healthcheck.as_actor_ref().get_id() && !state.draining {
                     state.draining = true;
                     info!(
                         "CONSUMER_SUPERVISOR: healthcheck actor terminated cleanly, \
@@ -635,19 +581,19 @@ impl Actor for ClusterConsumerSupervisor {
 }
 
 #[cfg(test)]
-mod router_integration_tests {
+mod subscription_tests {
     use super::*;
-    use ractor::{Actor, ActorProcessingErr, async_trait};
     use std::sync::{Arc, Mutex};
 
     /// A minimal, real stand-in for ClusterConsumerSupervisor itself
     /// -- genuinely receives SupervisorMessage, just records what it
-    /// got rather than processing it, since this test's own, real
-    /// purpose is proving RouterActor's delivery reaches a real actor
-    /// correctly, not re-testing this crate's own, separate,
-    /// unchanged handle()/deserialize_and_dispatch logic.
+    /// got, since this test's own, real purpose is proving
+    /// kube_subscriptions's own, two, real deliver closures
+    /// correctly reconstruct and forward ClientEvent::MessagePublished,
+    /// not re-testing this crate's own, separate, unchanged
+    /// handle()/deserialize_and_dispatch logic.
     struct FakeSupervisor {
-        received: Arc<Mutex<Option<ClientEvent>>>,
+        received: Arc<Mutex<Vec<ClientEvent>>>,
     }
 
     #[async_trait]
@@ -671,22 +617,35 @@ mod router_integration_tests {
             _state: &mut Self::State,
         ) -> Result<(), ActorProcessingErr> {
             if let SupervisorMessage::ClientEvent { event } = message {
-                *self.received.lock().unwrap() = Some(event);
+                self.received.lock().unwrap().push(event);
             }
             Ok(())
         }
     }
 
     #[tokio::test]
-    async fn a_message_routed_on_kubernetes_consumer_genuinely_reaches_the_supervisor() {
-        // The real, end-to-end proof this integration is meant to
-        // provide: a raw IncomingMessage on KUBERNETES_CONSUMER,
-        // routed through a real RouterActor via the exact,
-        // production registration function, reconstructed as the
-        // exact same ClientEvent::MessagePublished this agent's own,
-        // real handle() already expects, and genuinely delivered to
-        // the real actor that registered for it.
-        let received = Arc::new(Mutex::new(None));
+    async fn kube_subscriptions_returns_exactly_this_agents_own_two_real_topics() {
+        let (fake_supervisor, _) = Actor::spawn(
+            None,
+            FakeSupervisor {
+                received: Arc::new(Mutex::new(Vec::new())),
+            },
+            (),
+        )
+        .await
+        .unwrap();
+
+        let subscriptions = ClusterConsumerSupervisor::kube_subscriptions(&fake_supervisor);
+
+        assert_eq!(subscriptions.len(), 2);
+        let topics: Vec<&str> = subscriptions.iter().map(|s| s.topic.as_str()).collect();
+        assert!(topics.contains(&KUBERNETES_CONSUMER));
+        assert!(topics.contains(&KUBERNETES_RESOLUTION_EVENTS));
+    }
+
+    #[tokio::test]
+    async fn each_real_deliver_closure_genuinely_forwards_a_correctly_reconstructed_client_event() {
+        let received = Arc::new(Mutex::new(Vec::new()));
         let (fake_supervisor, _) = Actor::spawn(
             None,
             FakeSupervisor {
@@ -697,298 +656,40 @@ mod router_integration_tests {
         .await
         .unwrap();
 
-        let (router, _) = polar_router::RouterActor::spawn(None, polar_router::RouterActor, ())
-            .await
-            .unwrap();
+        let subscriptions = ClusterConsumerSupervisor::kube_subscriptions(&fake_supervisor);
 
-        ClusterConsumerSupervisor::register_kube_topics(&router, &fake_supervisor).unwrap();
-
-        router
-            .send_message(polar_router::RouterMessage::Route(
-                polar_router::IncomingMessage {
-                    topic: KUBERNETES_CONSUMER.to_string(),
-                    payload: b"a real, raw kube event payload".to_vec(),
-                    published_by: Some("kube-observer".to_string()),
-                    trace_ctx: None,
-                },
-            ))
-            .unwrap();
+        // The real, direct proof: invoke each of the two, real
+        // deliver closures directly -- no RouterActor involved at
+        // all, since this function no longer registers with one
+        // itself (AgentBuilder's own, real .with_subscription(...)
+        // does that now, separately, and is already, separately
+        // tested in polar-agent-builder's own test suite).
+        for subscription in &subscriptions {
+            (subscription.deliver)(polar_router::IncomingMessage {
+                topic: subscription.topic.clone(),
+                payload: format!("payload for {}", subscription.topic).into_bytes(),
+                published_by: Some("kube-observer".to_string()),
+                trace_ctx: None,
+            });
+        }
 
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
-        let got = received
-            .lock()
-            .unwrap()
-            .clone()
-            .expect("the fake supervisor must have genuinely received a real ClientEvent");
-        match got {
-            ClientEvent::MessagePublished {
-                topic,
-                payload,
-                published_by,
-                ..
-            } => {
-                assert_eq!(topic, KUBERNETES_CONSUMER);
-                assert_eq!(payload, b"a real, raw kube event payload");
-                assert_eq!(published_by, Some("kube-observer".to_string()));
-            }
-            other => panic!("expected MessagePublished, got {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn a_message_on_an_unregistered_topic_never_reaches_the_supervisor() {
-        // The real, other half of the proof: RouterActor's own,
-        // genuine topic-scoping actually holds -- a message on a
-        // topic this agent never registered for must never reach it
-        // at all, not even accidentally.
-        let received = Arc::new(Mutex::new(None));
-        let (fake_supervisor, _) = Actor::spawn(
-            None,
-            FakeSupervisor {
-                received: received.clone(),
-            },
-            (),
-        )
-        .await
-        .unwrap();
-
-        let (router, _) = polar_router::RouterActor::spawn(None, polar_router::RouterActor, ())
-            .await
-            .unwrap();
-
-        ClusterConsumerSupervisor::register_kube_topics(&router, &fake_supervisor).unwrap();
-
-        router
-            .send_message(polar_router::RouterMessage::Route(
-                polar_router::IncomingMessage {
-                    topic: "some-completely-unrelated-topic".to_string(),
-                    payload: b"irrelevant".to_vec(),
-                    published_by: None,
-                    trace_ctx: None,
-                },
-            ))
-            .unwrap();
-
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-
-        assert!(received.lock().unwrap().is_none());
-    }
-
-    /// Intercepts CryptoActor's own outgoing publishes and answers
-    /// them exactly as the real Credentials Agent would, publishing
-    /// its own real replies back through the same, shared `router`
-    /// CryptoActor itself registered its own reply topics with --
-    /// mirroring polar-crypto's own, established FakeCredentialsAgent
-    /// test helper exactly.
-    struct FakeCredentialsAgent {
-        router: ActorRef<polar_router::RouterMessage>,
-        escrow_public_key_pem: String,
-    }
-
-    #[async_trait]
-    impl Actor for FakeCredentialsAgent {
-        type Msg = TcpClientMessage;
-        type State = ();
-        type Arguments = ();
-
-        async fn pre_start(
-            &self,
-            _myself: ActorRef<Self::Msg>,
-            _args: (),
-        ) -> Result<Self::State, ActorProcessingErr> {
-            Ok(())
-        }
-
-        async fn handle(
-            &self,
-            _myself: ActorRef<Self::Msg>,
-            message: Self::Msg,
-            _state: &mut Self::State,
-        ) -> Result<(), ActorProcessingErr> {
-            let TcpClientMessage::Publish { topic, payload, .. } = message else {
-                return Ok(());
-            };
-
-            let route = |reply_topic: &str, bytes: Vec<u8>| {
-                let _ = self.router.send_message(polar_router::RouterMessage::Route(
-                    polar_router::IncomingMessage {
-                        topic: reply_topic.to_string(),
-                        payload: bytes,
-                        published_by: None,
-                        trace_ctx: None,
-                    },
-                ));
-            };
-
-            if topic == credentials_agent_common::CREDENTIALS_AGENT_ESCROW_KEY_REQUESTS_TOPIC {
-                type AgentEscrowKeyRequestEnvelope = polar::request_reply::Envelope<credentials_agent_common::agent_escrow_key::AgentEscrowKeyRequest>;
-                if let Ok(envelope) = rkyv::from_bytes::<AgentEscrowKeyRequestEnvelope, rkyv::rancor::Error>(&payload) {
-                    let reply = polar::request_reply::Envelope {
-                        correlation_id: envelope.correlation_id,
-                        payload: credentials_agent_common::agent_escrow_key::AgentEscrowKeyReply::Found {
-                            public_key_pem: self.escrow_public_key_pem.clone(),
-                        },
-                    };
-                    let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&reply).unwrap().to_vec();
-                    route(
-                        credentials_agent_common::CREDENTIALS_AGENT_ESCROW_KEY_REPLIES_TOPIC,
-                        bytes,
-                    );
+        let events = received.lock().unwrap();
+        assert_eq!(events.len(), 2);
+        for event in events.iter() {
+            match event {
+                ClientEvent::MessagePublished {
+                    topic,
+                    payload,
+                    published_by,
+                    ..
+                } => {
+                    assert_eq!(payload, format!("payload for {topic}").as_bytes());
+                    assert_eq!(published_by, &Some("kube-observer".to_string()));
                 }
+                other => panic!("expected MessagePublished, got {other:?}"),
             }
-            // Every other, real CryptoActor request topic is
-            // deliberately left unanswered here -- this test's own,
-            // real purpose is proving EncryptForRecipient genuinely
-            // works through kube-consumer's own, exact, real spawn
-            // sequence, not re-proving every one of CryptoActor's
-            // own flows (already, separately proven in polar-crypto's
-            // own test suite).
-
-            Ok(())
-        }
-    }
-
-    /// A real, temporary, self-signed certificate carrying
-    /// "kube-consumer" as its own identity SAN -- CryptoActor's own
-    /// pre_start now reads a real, mounted TLS_CLIENT_CERT to derive
-    /// its own identity (see polar-crypto's own, real
-    /// extract_own_identity-based redesign), so this real,
-    /// end-to-end test needs one too, exactly the same, real way
-    /// polar-crypto's own tests already do.
-    fn write_test_agent_certificate() -> tempfile::NamedTempFile {
-        let mut rng = rand::rng();
-        let private_key = rsa::RsaPrivateKey::new(&mut rng, 2048).unwrap();
-        let private_key_pem = rsa::pkcs8::EncodePrivateKey::to_pkcs8_pem(
-            &private_key,
-            rsa::pkcs8::LineEnding::LF,
-        )
-        .unwrap();
-        let key_pair = rcgen::KeyPair::from_pem(&private_key_pem).unwrap();
-        let params = rcgen::CertificateParams::new(vec!["kube-consumer".to_string()]).unwrap();
-        let certificate_pem = params.self_signed(&key_pair).unwrap().pem();
-
-        let file = tempfile::NamedTempFile::new().unwrap();
-        std::fs::write(file.path(), certificate_pem).unwrap();
-        file
-    }
-
-    #[tokio::test]
-    async fn crypto_actor_genuinely_works_through_kube_consumers_own_real_spawn_sequence() {
-        // The real, end-to-end proof this whole session's own
-        // RouterActor/CryptoActor migration work exists for:
-        // kube-consumer's own, exact, real spawn_crypto_actor
-        // sequence -- the same, real function pre_start itself
-        // calls -- genuinely produces a working CryptoActor, sharing
-        // the same, real router this agent's own two, genuinely-
-        // owned topics are also registered with, with no conflict
-        // between the two, real sets of topics on that one, shared
-        // router.
-
-        let received = Arc::new(Mutex::new(None));
-        let (fake_supervisor, _) = Actor::spawn(
-            None,
-            FakeSupervisor {
-                received: received.clone(),
-            },
-            (),
-        )
-        .await
-        .unwrap();
-
-        let (router, _) = polar_router::RouterActor::spawn(None, polar_router::RouterActor, ())
-            .await
-            .unwrap();
-
-        // This agent's own, real, genuinely-owned topics, registered
-        // first, exactly as pre_start itself does.
-        ClusterConsumerSupervisor::register_kube_topics(&router, &fake_supervisor).unwrap();
-
-        let mut rng = rand::rng();
-        let escrow_private_key = rsa::RsaPrivateKey::new(&mut rng, 4096).unwrap();
-        let escrow_public_key_pem = rsa::pkcs8::EncodePublicKey::to_public_key_pem(
-            &escrow_private_key.to_public_key(),
-            rsa::pkcs8::LineEnding::LF,
-        )
-        .unwrap();
-
-        let (fake_credentials_agent, _) = Actor::spawn(
-            None,
-            FakeCredentialsAgent {
-                router: router.clone(),
-                escrow_public_key_pem,
-            },
-            (),
-        )
-        .await
-        .unwrap();
-
-        let own_cert_file = write_test_agent_certificate();
-        unsafe {
-            std::env::set_var("TLS_CLIENT_CERT", own_cert_file.path());
-        }
-
-        // The actual, real function this test exists to exercise --
-        // not a reimplementation of it.
-        let crypto_actor = ClusterConsumerSupervisor::spawn_crypto_actor(
-            router.clone(),
-            fake_credentials_agent,
-            fake_supervisor.get_cell(),
-        )
-        .await
-        .unwrap();
-
-        unsafe {
-            std::env::remove_var("TLS_CLIENT_CERT");
-        }
-        drop(own_cert_file);
-
-        // Real proof 1: CryptoActor itself genuinely works through
-        // this exact, real spawn sequence -- a real
-        // EncryptForRecipient round trip, decrypted with the
-        // recipient's own, real private key.
-        let plaintext = b"a real secret, encrypted through kube-consumer's own real wiring";
-        let result = ractor::call!(crypto_actor, |reply| {
-            polar_crypto::CryptoMessage::EncryptForRecipient {
-                recipient_identity: "some-other-agent".to_string(),
-                plaintext: plaintext.to_vec(),
-                reply,
-            }
-        })
-        .unwrap();
-        let wire_bytes = result.expect("EncryptForRecipient must genuinely succeed");
-        let escrowed: credentials_agent_common::escrow_secret::EscrowedSecret =
-            rkyv::from_bytes::<_, rkyv::rancor::Error>(&wire_bytes).unwrap();
-        let decrypted = escrowed.decrypt(&escrow_private_key).unwrap();
-        assert_eq!(&*decrypted, plaintext);
-
-        // Real proof 2: this agent's own, genuinely-owned topics
-        // still, correctly reach the very same fake_supervisor above
-        // -- CryptoActor's own five, real reply topics registering
-        // on the same, shared router caused no real conflict at all.
-        router
-            .send_message(polar_router::RouterMessage::Route(
-                polar_router::IncomingMessage {
-                    topic: KUBERNETES_CONSUMER.to_string(),
-                    payload: b"still works".to_vec(),
-                    published_by: Some("kube-observer".to_string()),
-                    trace_ctx: None,
-                },
-            ))
-            .unwrap();
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-
-        let got = received
-            .lock()
-            .unwrap()
-            .clone()
-            .expect("kube-consumer's own topic must still genuinely reach the supervisor");
-        match got {
-            ClientEvent::MessagePublished { topic, payload, .. } => {
-                assert_eq!(topic, KUBERNETES_CONSUMER);
-                assert_eq!(payload, b"still works");
-            }
-            other => panic!("expected MessagePublished, got {other:?}"),
         }
     }
 }

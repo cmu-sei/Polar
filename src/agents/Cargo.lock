@@ -4003,6 +4003,7 @@ dependencies = [
  "kube-common",
  "neo4rs",
  "polar",
+ "polar-agent-builder",
  "polar-crypto",
  "polar-router",
  "ractor",
