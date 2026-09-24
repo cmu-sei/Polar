@@ -114,11 +114,6 @@ impl Actor for ResolverSupervisor {
     ) -> Result<Self::State, ActorProcessingErr> {
         debug!("{myself:?} starting");
 
-        let prepare_shutdown_port = Arc::new(OutputPort::<()>::default());
-        prepare_shutdown_port.subscribe(myself.clone(), |()| {
-            Some(SupervisorMessage::PrepareShutdown)
-        });
-
         // Resolver never touches Neo4j -- Cassini-only.
         let dep_cert_endpoints = vec![
             DepCertEndpoint::parse("cassini-ip-svc.polar.svc.cluster.local:8080:300")
@@ -132,7 +127,6 @@ impl Actor for ResolverSupervisor {
                 expects_graph: false,
                 rejuvenation_threshold_secs: 300,
                 dep_cert_endpoints,
-                prepare_shutdown_port,
             },
             myself.get_cell(),
         )
@@ -211,12 +205,6 @@ impl Actor for ResolverSupervisor {
                 _ => (),
             },
             SupervisorMessage::Heartbeat => {}
-            SupervisorMessage::PrepareShutdown => {
-                info!("PrepareShutdown received");
-                if let Err(e) = state.healthcheck.cast(HealthCheckMessage::ShutdownAck) {
-                    error!("failed to send ShutdownAck: {e}");
-                }
-            }
             SupervisorMessage::GraphSignal(_) => {}
             SupervisorMessage::ForceExit => {
                 warn!("drain window elapsed, exiting now");

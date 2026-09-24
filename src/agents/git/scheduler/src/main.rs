@@ -106,12 +106,6 @@ impl Actor for RootSupervisor {
     ) -> Result<Self::State, ActorProcessingErr> {
         debug!("{myself:?} starting");
 
-        // --- NEW: healthcheck wiring ---
-        let prepare_shutdown_port = Arc::new(OutputPort::<()>::default());
-        prepare_shutdown_port.subscribe(myself.clone(), |()| {
-            Some(SupervisorMessage::PrepareShutdown)
-        });
-
         // No persistent GraphController here -- each dispatch does its own
         // ad hoc Graph::connect(). No signal path exists to track real
         // graph availability (same limitation as jira-processor's
@@ -131,7 +125,6 @@ impl Actor for RootSupervisor {
                 expects_graph: false,
                 rejuvenation_threshold_secs: 300,
                 dep_cert_endpoints,
-                prepare_shutdown_port,
             },
             myself.get_cell(),
         )
@@ -221,13 +214,6 @@ impl Actor for RootSupervisor {
     ) -> Result<(), ActorProcessingErr> {
         match message {
             SupervisorMessage::Heartbeat => {}
-            // --- NEW ---
-            SupervisorMessage::PrepareShutdown => {
-                info!("PrepareShutdown received");
-                if let Err(e) = state.healthcheck.cast(HealthCheckMessage::ShutdownAck) {
-                    error!("failed to send ShutdownAck: {e}");
-                }
-            }
             SupervisorMessage::GraphSignal(_) => {}
             SupervisorMessage::ForceExit => {
                 warn!("drain window elapsed, exiting now");

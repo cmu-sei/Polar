@@ -8,9 +8,8 @@ use polar::SupervisorMessage;
 use polar::cassini::TcpClient;
 use polar::cassini::CassiniClient;
 use polar::health::{DepCertEndpoint, HealthCheckActor, HealthCheckArgs, HealthCheckMessage};
-use ractor::{Actor, ActorProcessingErr, ActorRef, OutputPort, SupervisionEvent, async_trait};
+use ractor::{Actor, ActorProcessingErr, ActorRef, SupervisionEvent, async_trait};
 use rkyv::from_bytes;
-use std::sync::Arc;
 use tracing::{debug, error, info, instrument, trace, warn};
 
 const HEALTHCHECK_ACTOR_NAME: &str = "polar.healthcheck";
@@ -86,11 +85,6 @@ impl Actor for RootSupervisor {
     ) -> Result<Self::State, ActorProcessingErr> {
         debug!("{myself:?} starting");
 
-        let prepare_shutdown_port = Arc::new(OutputPort::<()>::default());
-        prepare_shutdown_port.subscribe(myself.clone(), |()| {
-            Some(SupervisorMessage::PrepareShutdown)
-        });
-
         let dep_cert_endpoints = vec![
             DepCertEndpoint::parse("cassini-ip-svc.polar.svc.cluster.local:8080:300")
                 .map_err(|e| ActorProcessingErr::from(e))?,
@@ -103,7 +97,6 @@ impl Actor for RootSupervisor {
                 expects_graph: false,
                 rejuvenation_threshold_secs: 300,
                 dep_cert_endpoints,
-                prepare_shutdown_port,
             },
             myself.get_cell(),
         )
@@ -207,12 +200,6 @@ impl Actor for RootSupervisor {
     ) -> Result<(), ActorProcessingErr> {
         match message {
             SupervisorMessage::Heartbeat => {}
-            SupervisorMessage::PrepareShutdown => {
-                info!("PrepareShutdown received");
-                if let Err(e) = state.healthcheck.cast(HealthCheckMessage::ShutdownAck) {
-                    error!("failed to send ShutdownAck: {e}");
-                }
-            }
             SupervisorMessage::GraphSignal(_) => {}
             SupervisorMessage::ForceExit => {
                 warn!("drain window elapsed, exiting now");

@@ -165,11 +165,6 @@ impl Actor for ConsumerSupervisor {
             })
             .await?;
 
-        let prepare_shutdown_port = Arc::new(OutputPort::<()>::default());
-        prepare_shutdown_port.subscribe(myself.clone(), |()| {
-            Some(SupervisorMessage::PrepareShutdown)
-        });
-
         let (healthcheck, _) = Actor::spawn_linked(
             Some("polar.healthcheck".to_string()),
             HealthCheckActor,
@@ -188,7 +183,6 @@ impl Actor for ConsumerSupervisor {
                         min_ttl_secs: 300,
                     },
                 ],
-                prepare_shutdown_port,
             },
             myself.clone().into(),
         )
@@ -213,9 +207,6 @@ impl Actor for ConsumerSupervisor {
     ) -> Result<(), ActorProcessingErr> {
         match message {
             SupervisorMessage::Heartbeat => {}
-            SupervisorMessage::PrepareShutdown => {
-                let _ = state.healthcheck.cast(HealthCheckMessage::ShutdownAck);
-            }
             SupervisorMessage::ClientEvent { event } => match event {
                 ClientEvent::Registered { .. } => {
                     info!("Initializing agent.");

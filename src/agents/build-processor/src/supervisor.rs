@@ -84,11 +84,6 @@ impl Actor for BuildProcessorSupervisor {
     ) -> Result<Self::State, ActorProcessingErr> {
         debug!("BuildProcessorSupervisor starting");
 
-        let prepare_shutdown_port = Arc::new(OutputPort::<()>::default());
-        prepare_shutdown_port.subscribe(myself.clone(), |()| {
-            Some(SupervisorMessage::PrepareShutdown)
-        });
-
         // This supervisor owns a GraphControllerActor directly (via
         // BuildActor/ProvenanceLinker, both writing through it), so real
         // GraphAvailable/GraphOpFailed tracking applies here.
@@ -106,7 +101,6 @@ impl Actor for BuildProcessorSupervisor {
                 expects_graph: true,
                 rejuvenation_threshold_secs: 300,
                 dep_cert_endpoints,
-                prepare_shutdown_port,
             },
             myself.get_cell(),
         )
@@ -238,12 +232,6 @@ impl Actor for BuildProcessorSupervisor {
                 _ => {}
             },
             SupervisorMessage::Heartbeat => {}
-            SupervisorMessage::PrepareShutdown => {
-                info!("PrepareShutdown received");
-                if let Err(e) = state.healthcheck.cast(HealthCheckMessage::ShutdownAck) {
-                    error!("failed to send ShutdownAck: {e}");
-                }
-            }
             SupervisorMessage::GraphSignal(signal) => match signal {
                 GraphSignal::Available => {
                     let _ = state.healthcheck.cast(HealthCheckMessage::GraphAvailable);

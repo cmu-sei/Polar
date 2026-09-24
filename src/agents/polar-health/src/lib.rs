@@ -8,17 +8,24 @@
 //!   - Tracking of connection state (Cassini, graph)
 //!   - Writing the health file read by the polar-healthcheck liveness probe binary
 //!   - Rejuvenation state machine: when approaching cert expiry, waits for dep
-//!     certs to be healthy, applies jitter, then signals the supervisor via an
-//!     OutputPort<()> to prepare for shutdown.
-//!   - On receiving ShutdownAck from supervisor, stops itself cleanly.
-//!     Supervisor handles ActorTerminated for the healthcheck actor by exiting.
+//!     certs to be healthy, applies jitter, then terminates itself directly
+//!     (myself.stop(Some(reason))) -- ordinary, real Ractor supervision is
+//!     the whole, sufficient mechanism here; the supervisor sees this via a
+//!     genuine SupervisionEvent::ActorTerminated, carrying this same, real
+//!     reason string, and reacts by exiting (or, for a supervisor composed
+//!     from polar-agent-builder's own AgentBuilder, by beginning its own,
+//!     real, coordinated shutdown sequence). No separate port/ack handshake
+//!     is needed at all -- an earlier version of this actor had one
+//!     (OutputPort<()> + a real ShutdownAck message), removed as genuine,
+//!     unnecessary machinery once it became clear plain supervision already,
+//!     directly provided everything it existed for.
 //!   - Graph availability deadline: for agents that expect a graph connection,
 //!     tracks time since the last real (canary or app-level) successful graph
 //!     operation. If that exceeds graph_deadline_secs -- whether the graph
 //!     never became available at all, or was available and then went dark --
 //!     the actor fails itself, which the supervisor treats as fatal.
 
-use ractor::{Actor, ActorProcessingErr, ActorRef, OutputPort, async_trait};
+use ractor::{Actor, ActorProcessingErr, ActorRef, async_trait};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::net::TcpStream;
@@ -374,8 +381,6 @@ pub enum RejuvenationPhase {
     /// Deps healthy — jitter timer running. `fire_at_secs` is the Unix
     /// timestamp at which we will signal the supervisor.
     Jittering { fire_at_secs: u64 },
-    /// PrepareShutdown signalled via OutputPort — waiting for ShutdownAck.
-    WaitingForAck,
 }
 
 // ---------------------------------------------------------------------------
@@ -402,8 +407,6 @@ pub enum HealthCheckMessage {
     GraphOpFailed(String),
     /// Internal periodic tick — do not send externally.
     Tick,
-    /// Sent by the supervisor after it has handled PrepareShutdown.
-    ShutdownAck,
 }
 
 // ---------------------------------------------------------------------------
@@ -421,11 +424,6 @@ pub struct HealthCheckArgs {
     /// Dependency TLS endpoints to check during rejuvenation.
     /// Parsed from `"host:port:min_ttl_seconds"`.
     pub dep_cert_endpoints: Vec<DepCertEndpoint>,
-
-    /// OutputPort fired when the HealthCheckActor decides it is time
-    /// for the supervisor to prepare for shutdown. The supervisor
-    /// subscribes to this port at spawn time.
-    pub prepare_shutdown_port: Arc<OutputPort<()>>,
 }
 
 impl std::fmt::Debug for HealthCheckArgs {
@@ -434,7 +432,6 @@ impl std::fmt::Debug for HealthCheckArgs {
             .field("expects_graph", &self.expects_graph)
             .field("rejuvenation_threshold_secs", &self.rejuvenation_threshold_secs)
             .field("dep_cert_endpoints", &self.dep_cert_endpoints)
-            .field("prepare_shutdown_port", &"<OutputPort<()>>")
             .finish()
     }
 }
@@ -453,7 +450,6 @@ pub struct HealthCheckActorState {
     pub cert_paths: Vec<String>,
     pub dep_cert_endpoints: Vec<DepCertEndpoint>,
     pub rejuvenation_phase: RejuvenationPhase,
-    pub prepare_shutdown_port: Arc<OutputPort<()>>,
     /// Seconds an expects_graph agent may go without a real graph success
     /// before HealthCheckActor fails itself.
     pub graph_deadline_secs: u64,
@@ -695,7 +691,6 @@ impl Actor for HealthCheckActor {
             cert_paths,
             dep_cert_endpoints,
             rejuvenation_phase: RejuvenationPhase::Normal,
-            prepare_shutdown_port: args.prepare_shutdown_port,
             graph_deadline_secs,
             last_graph_success_secs: None,
             actor_start_secs: HealthState::now(),
@@ -755,13 +750,6 @@ impl Actor for HealthCheckActor {
                 // Don't fail immediately — a single failed op could be
                 // transient. check_graph_deadline (run every Tick) is what
                 // decides whether this has gone on too long.
-            }
-
-            HealthCheckMessage::ShutdownAck => {
-                tracing::info!(
-                    "healthcheck: received ShutdownAck from supervisor, stopping cleanly"
-                );
-                myself.stop(Some("rejuvenation".to_string()));
             }
 
             HealthCheckMessage::Tick => {
@@ -895,17 +883,19 @@ impl Actor for HealthCheckActor {
                         let now = HealthState::now();
                         if now >= fire_at_secs {
                             tracing::info!(
-                                "healthcheck: jitter elapsed, signalling PrepareShutdown"
+                                "healthcheck: jitter elapsed, terminating for rejuvenation"
                             );
-                            state.prepare_shutdown_port.send(());
-                            state.rejuvenation_phase = RejuvenationPhase::WaitingForAck;
-                            // Reschedule tick only to catch hard deadlines while waiting
-                            let _ = myself
-                                .send_after(
-                                    Duration::from_secs(state.tick_secs),
-                                    || HealthCheckMessage::Tick,
-                                )
-                                .await;
+                            // Ordinary, real Ractor supervision is the
+                            // whole, sufficient mechanism -- our own
+                            // supervisor sees this via a genuine
+                            // SupervisionEvent::ActorTerminated,
+                            // carrying this exact, real reason string,
+                            // with no separate port/ack handshake
+                            // needed at all.
+                            myself.stop(Some(
+                                "rejuvenation: certificate rejuvenation threshold reached"
+                                    .to_string(),
+                            ));
                         } else {
                             let remaining = fire_at_secs.saturating_sub(now);
                             tracing::debug!(
@@ -919,26 +909,9 @@ impl Actor for HealthCheckActor {
                                 .await;
                         }
                     }
-
-                    // ------------------------------------------------------------
-                    // Rejuvenation: waiting for supervisor ShutdownAck
-                    // ------------------------------------------------------------
-                    RejuvenationPhase::WaitingForAck => {
-                        // Nothing to do except reschedule tick to catch hard deadlines.
-                        tracing::debug!(
-                            "healthcheck: waiting for ShutdownAck from supervisor"
-                        );
-                        let _ = myself
-                            .send_after(
-                                Duration::from_secs(state.tick_secs),
-                                || HealthCheckMessage::Tick,
-                            )
-                            .await;
-                    }
                 }
             }
         }
-
         Ok(())
     }
 }

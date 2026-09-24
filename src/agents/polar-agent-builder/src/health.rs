@@ -15,7 +15,6 @@ pub trait HealthClient: Send + Sync {
     fn graph_disconnected(&self) -> Result<(), ractor::MessagingErr<HealthCheckMessage>>;
     fn graph_available(&self) -> Result<(), ractor::MessagingErr<HealthCheckMessage>>;
     fn graph_op_failed(&self, reason: String) -> Result<(), ractor::MessagingErr<HealthCheckMessage>>;
-    fn shutdown_ack(&self) -> Result<(), ractor::MessagingErr<HealthCheckMessage>>;
 }
 
 /// The real, live implementation of HealthClient -- a thin wrapper
@@ -61,10 +60,6 @@ impl HealthClient for HealthHandle {
 
     fn graph_op_failed(&self, reason: String) -> Result<(), ractor::MessagingErr<HealthCheckMessage>> {
         self.actor.cast(HealthCheckMessage::GraphOpFailed(reason))
-    }
-
-    fn shutdown_ack(&self) -> Result<(), ractor::MessagingErr<HealthCheckMessage>> {
-        self.actor.cast(HealthCheckMessage::ShutdownAck)
     }
 }
 
@@ -130,12 +125,11 @@ mod tests {
         handle.graph_disconnected().unwrap();
         handle.graph_available().unwrap();
         handle.graph_op_failed("a real, genuine failure reason".to_string()).unwrap();
-        handle.shutdown_ack().unwrap();
 
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
         let messages = received.lock().unwrap();
-        assert_eq!(messages.len(), 7);
+        assert_eq!(messages.len(), 6);
         assert!(matches!(messages[0], HealthCheckMessage::CassiniConnected));
         assert!(matches!(messages[1], HealthCheckMessage::CassiniDisconnected));
         assert!(matches!(messages[2], HealthCheckMessage::GraphConnected));
@@ -147,6 +141,5 @@ mod tests {
             }
             other => panic!("expected GraphOpFailed, got {other:?}"),
         }
-        assert!(matches!(messages[6], HealthCheckMessage::ShutdownAck));
     }
 }

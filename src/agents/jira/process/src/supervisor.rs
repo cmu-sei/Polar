@@ -183,11 +183,6 @@ impl Actor for ConsumerSupervisor {
     ) -> Result<Self::State, ActorProcessingErr> {
         debug!("{myself:?} starting");
 
-        let prepare_shutdown_port = Arc::new(OutputPort::<()>::default());
-        prepare_shutdown_port.subscribe(myself.clone(), |()| {
-            Some(SupervisorMessage::PrepareShutdown)
-        });
-
         // Graph availability is now tracked properly: the supervisor owns
         // a single shared GraphControllerActor (spawned on first Registered
         // event), and all four child consumers route writes through it
@@ -208,7 +203,6 @@ impl Actor for ConsumerSupervisor {
                 expects_graph: true,
                 rejuvenation_threshold_secs: 300,
                 dep_cert_endpoints,
-                prepare_shutdown_port,
             },
             myself.get_cell(),
         )
@@ -251,12 +245,6 @@ impl Actor for ConsumerSupervisor {
     ) -> Result<(), ActorProcessingErr> {
         match message {
             SupervisorMessage::Heartbeat => {}
-            SupervisorMessage::PrepareShutdown => {
-                info!("CONSUMER_SUPERVISOR: PrepareShutdown received");
-                if let Err(e) = state.healthcheck.cast(HealthCheckMessage::ShutdownAck) {
-                    error!("CONSUMER_SUPERVISOR: failed to send ShutdownAck: {e}");
-                }
-            }
             SupervisorMessage::GraphSignal(signal) => match signal {
                 GraphSignal::Available => {
                     let _ = state.healthcheck.cast(HealthCheckMessage::GraphAvailable);

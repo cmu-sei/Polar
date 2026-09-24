@@ -8,7 +8,6 @@ use polar::health::{DepCertEndpoint, HealthCheckActor, HealthCheckArgs, HealthCh
 use polar_scheduler_common::{AdhocAgentAnnouncement, GitScheduleChange};
 use ractor::{Actor, ActorProcessingErr, ActorRef, OutputPort, SupervisionEvent, async_trait};
 use ractor::concurrency::Duration;
-use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 
 pub const SERVICE_NAME: &str = "polar.scheduler";
@@ -38,11 +37,6 @@ impl Actor for RootSupervisor {
     ) -> Result<Self::State, ActorProcessingErr> {
         debug!("RootSupervisor starting");
 
-        let prepare_shutdown_port = Arc::new(OutputPort::<()>::default());
-        prepare_shutdown_port.subscribe(myself.clone(), |()| {
-            Some(SupervisorMessage::PrepareShutdown)
-        });
-
         let dep_cert_endpoints = vec![
             DepCertEndpoint::parse("cassini-ip-svc.polar.svc.cluster.local:8080:300")
                 .map_err(|e| ActorProcessingErr::from(e))?,
@@ -57,7 +51,6 @@ impl Actor for RootSupervisor {
                 expects_graph: true,
                 rejuvenation_threshold_secs: 300,
                 dep_cert_endpoints,
-                prepare_shutdown_port,
             },
             myself.get_cell(),
         )
@@ -107,12 +100,6 @@ impl Actor for RootSupervisor {
     ) -> Result<(), ActorProcessingErr> {
         match msg {
             SupervisorMessage::Heartbeat => {}
-            SupervisorMessage::PrepareShutdown => {
-                info!("PrepareShutdown received");
-                if let Err(e) = state.healthcheck.cast(HealthCheckMessage::ShutdownAck) {
-                    error!("failed to send ShutdownAck: {e}");
-                }
-            }
             SupervisorMessage::GraphSignal(signal) => match signal {
                 GraphSignal::Available => {
                     let _ = state.healthcheck.cast(HealthCheckMessage::GraphAvailable);

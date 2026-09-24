@@ -91,13 +91,6 @@ impl Actor for ClusterObserverSupervisor {
         // Read Kubernetes credentials and other data from the environment
         info!("{myself:?} starting");
 
-        // Build the OutputPort that HealthCheckActor fires when it wants
-        // the supervisor to prepare for shutdown.
-        let prepare_shutdown_port = Arc::new(OutputPort::<()>::default());
-        prepare_shutdown_port.subscribe(myself.clone(), |()| {
-            Some(SupervisorMessage::PrepareShutdown)
-        });
-
         // Observers only depend on Cassini -- no graph dependency, unlike consumers.
         let dep_cert_endpoints = vec![
             DepCertEndpoint::parse("cassini-ip-svc.polar.svc.cluster.local:8080:300")
@@ -111,7 +104,6 @@ impl Actor for ClusterObserverSupervisor {
                 expects_graph: false,
                 rejuvenation_threshold_secs: 300,
                 dep_cert_endpoints,
-                prepare_shutdown_port,
             },
             myself.get_cell(),
         )
@@ -227,17 +219,6 @@ impl Actor for ClusterObserverSupervisor {
     ) -> Result<(), ActorProcessingErr> {
         match message {
             SupervisorMessage::Heartbeat => {}
-            SupervisorMessage::PrepareShutdown => {
-                info!("CLUSTER_OBSERVER_SUPERVISOR: PrepareShutdown received");
-
-                // Observers only publish -- there's no subscription to unwind
-                // and no discrete queue to drain (the k8s watch streams are
-                // continuous and the actor mailbox already serializes work
-                // one event at a time). Ack immediately.
-                if let Err(e) = state.healthcheck.cast(HealthCheckMessage::ShutdownAck) {
-                    error!("CLUSTER_OBSERVER_SUPERVISOR: failed to send ShutdownAck: {e}");
-                }
-            }
             SupervisorMessage::ClientEvent { event } => match event {
                 ClientEvent::Registered { .. } => {
                     let _ = state.healthcheck.cast(HealthCheckMessage::CassiniConnected);

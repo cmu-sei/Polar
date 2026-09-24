@@ -194,11 +194,6 @@ impl Actor for GitRepoProcessingManager {
         myself: ActorRef<Self::Msg>,
         _: (),
     ) -> Result<Self::State, ActorProcessingErr> {
-        // --- NEW: healthcheck wiring ---
-        let prepare_shutdown_port = Arc::new(OutputPort::<()>::default());
-        prepare_shutdown_port.subscribe(myself.clone(), |()| {
-            Some(SupervisorMessage::PrepareShutdown)
-        });
         // This supervisor owns a GraphControllerActor directly (unlike
         // jira-processor, where children manage their own graph
         // connections), so real GraphAvailable/GraphOpFailed tracking
@@ -216,7 +211,6 @@ impl Actor for GitRepoProcessingManager {
                 expects_graph: true,
                 rejuvenation_threshold_secs: 300,
                 dep_cert_endpoints,
-                prepare_shutdown_port,
             },
             myself.get_cell(),
         )
@@ -253,13 +247,6 @@ impl Actor for GitRepoProcessingManager {
     ) -> Result<(), ActorProcessingErr> {
         match msg {
             SupervisorMessage::Heartbeat => {}
-            // --- NEW ---
-            SupervisorMessage::PrepareShutdown => {
-                info!("PrepareShutdown received");
-                if let Err(e) = state.healthcheck.cast(HealthCheckMessage::ShutdownAck) {
-                    error!("failed to send ShutdownAck: {e}");
-                }
-            }
             SupervisorMessage::GraphSignal(signal) => match signal {
                 GraphSignal::Available => {
                     let _ = state.healthcheck.cast(HealthCheckMessage::GraphAvailable);

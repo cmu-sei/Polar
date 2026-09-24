@@ -72,7 +72,6 @@ pub trait Supervisor {
 pub enum SupervisorMessage {
     ClientEvent { event: ClientEvent },
     Heartbeat,
-    PrepareShutdown,
     /// Graph controller availability/failure signal, translated from
     /// polar::graph::GraphSignal via an OutputPort subscription in
     /// supervisors that hold a graph controller.

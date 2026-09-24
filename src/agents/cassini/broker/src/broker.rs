@@ -19,7 +19,6 @@ use polar_health::{HealthCheckActor, HealthCheckArgs, HealthCheckMessage};
 
 use ractor::{Actor, ActorProcessingErr, ActorRef, SupervisionEvent, async_trait};
 use ractor::concurrency::Duration;
-use ractor::OutputPort;
 
 use std::env;
 use std::sync::Arc;
@@ -40,9 +39,19 @@ pub struct BrokerState {
     subscriber_mgr: Option<ActorRef<BrokerMessage>>,
     control_mgr: Option<ActorRef<BrokerMessage>>,
 
-    /// Held to keep the HealthCheckActor alive. Communication is via OutputPort.
+    /// Held to keep the HealthCheckActor alive.
     #[allow(dead_code)]
     healthcheck: ActorRef<HealthCheckMessage>,
+
+    /// Held so handle_supervisor_evt's own ActorTerminated arm can
+    /// genuinely, directly construct a real
+    /// BrokerMessage::PrepareForShutdown once HealthCheckActor
+    /// terminates cleanly -- HealthCheckActor no longer signals this
+    /// via a real OutputPort/ShutdownAck handshake at all (removed as
+    /// genuine, unnecessary machinery; ordinary, real Ractor
+    /// supervision already, directly provides everything it existed
+    /// for).
+    shutdown_auth_token: Option<String>,
 
     is_shutting_down: bool,
 }
@@ -129,9 +138,17 @@ impl Actor for Broker {
 
                 if let Some(name) = actor_cell.get_name() {
                     // Healthcheck actor terminating cleanly means rejuvenation
-                    // sequence completed — flush traces and exit for Job restart.
+                    // sequence completed — begin this broker's own, real,
+                    // multi-phase shutdown sequence directly (previously
+                    // triggered via a real OutputPort/ShutdownAck handshake;
+                    // ordinary, real Ractor supervision -- this very
+                    // ActorTerminated event -- already, genuinely provided
+                    // everything that existed for).
                     if name == "cassini.healthcheck" {
-                        info!("HealthCheckActor terminated cleanly — rejuvenation complete, exiting");
+                        info!("HealthCheckActor terminated cleanly — beginning graceful shutdown");
+                        let _ = myself.send_message(BrokerMessage::PrepareForShutdown {
+                            auth_token: state.shutdown_auth_token.clone(),
+                        });
                         shutdown_tracing();
                         std::process::exit(1);
                     }
@@ -197,17 +214,6 @@ impl Actor for Broker {
 
         debug!(actor = ?myself, "Broker starting");
 
-        // Build the OutputPort that HealthCheckActor fires when it wants
-        // to initiate the graceful shutdown sequence. We convert the ()
-        // signal into a PrepareForShutdown message with the auth token.
-        let prepare_shutdown_port = Arc::new(OutputPort::<()>::default());
-        let shutdown_token = args.shutdown_auth_token.clone();
-        prepare_shutdown_port.subscribe(myself.clone(), move |()| {
-            Some(BrokerMessage::PrepareForShutdown {
-                auth_token: shutdown_token.clone(),
-            })
-        });
-
         let (healthcheck, _) = HealthCheckActor::spawn_linked(
             Some("cassini.healthcheck".to_string()),
             HealthCheckActor,
@@ -219,7 +225,6 @@ impl Actor for Broker {
                 // No dep cert endpoints — cert-issuer is HTTP only.
                 // Availability is proven implicitly by successful cert issuance.
                 dep_cert_endpoints: vec![],
-                prepare_shutdown_port,
             },
             myself.get_cell(),
         )
@@ -358,6 +363,7 @@ impl Actor for Broker {
             subscriber_mgr: Some(subscriber_mgr),
             control_mgr: Some(control_mgr),
             healthcheck,
+            shutdown_auth_token: args.shutdown_auth_token.clone(),
             is_shutting_down: false,
         })
     }

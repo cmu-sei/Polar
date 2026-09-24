@@ -305,14 +305,6 @@ impl Actor for ClusterConsumerSupervisor {
         debug!("{myself:?} starting");
         info!("Read neo configuration successfully.");
 
-        // Build the OutputPort that HealthCheckActor fires when it wants
-        // the supervisor to prepare for shutdown. We subscribe here so
-        // that the message arrives as a SupervisorMessage::PrepareShutdown.
-        let prepare_shutdown_port = Arc::new(OutputPort::<()>::default());
-        prepare_shutdown_port.subscribe(myself.clone(), |()| {
-            Some(SupervisorMessage::PrepareShutdown)
-        });
-
         // Parse dep cert endpoints for this agent:
         // kube-consumer depends on Cassini and Neo4j.
         let dep_cert_endpoints = vec![
@@ -334,7 +326,6 @@ impl Actor for ClusterConsumerSupervisor {
                 expects_graph: true,
                 rejuvenation_threshold_secs: 300,
                 dep_cert_endpoints,
-                prepare_shutdown_port,
             });
         for subscription in Self::kube_subscriptions(&myself) {
             builder = builder.with_subscription(subscription);
@@ -391,21 +382,6 @@ impl Actor for ClusterConsumerSupervisor {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
-            SupervisorMessage::PrepareShutdown => {
-                info!("CONSUMER_SUPERVISOR: PrepareShutdown received, unsubscribing from Cassini");
-
-                if let Err(e) = state.broker_client.unsubscribe(polar::cassini::UnsubscribeRequest {
-                    topic: KUBERNETES_CONSUMER.to_string(),
-                    trace_ctx: None,
-                }) {
-                    warn!("CONSUMER_SUPERVISOR: unsubscribe failed (continuing): {e}");
-                }
-
-                if let Err(e) = state.healthcheck.shutdown_ack() {
-                    error!("CONSUMER_SUPERVISOR: failed to send ShutdownAck: {e}");
-                }
-            }
-
             SupervisorMessage::GraphSignal(signal) => match signal {
                 GraphSignal::Available => {
                     let _ = state.healthcheck.graph_available();
@@ -540,8 +516,22 @@ impl Actor for ClusterConsumerSupervisor {
                     state.draining = true;
                     info!(
                         "CONSUMER_SUPERVISOR: healthcheck actor terminated cleanly, \
-                         entering drain window before exiting for rejuvenation"
+                         entering drain window before exiting for rejuvenation, \
+                         unsubscribing from Cassini"
                     );
+                    // Genuinely, previously part of a now-dead
+                    // SupervisorMessage::PrepareShutdown handler --
+                    // nothing sends that message here anymore, but
+                    // this real, graceful step (unsubscribe before
+                    // going dark) still, genuinely matters, so it
+                    // moves here, to the actual, real place
+                    // rejuvenation is now detected.
+                    if let Err(e) = state.broker_client.unsubscribe(polar::cassini::UnsubscribeRequest {
+                        topic: KUBERNETES_CONSUMER.to_string(),
+                        trace_ctx: None,
+                    }) {
+                        warn!("CONSUMER_SUPERVISOR: unsubscribe failed (continuing): {e}");
+                    }
                     let _ = myself
                         .send_after(Duration::from_secs(DRAIN_WINDOW_SECS), || {
                             SupervisorMessage::ForceExit

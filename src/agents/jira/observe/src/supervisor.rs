@@ -92,11 +92,6 @@ impl Actor for ObserverSupervisor {
     ) -> Result<Self::State, ActorProcessingErr> {
         debug!("{myself:?} starting");
 
-        let prepare_shutdown_port = Arc::new(OutputPort::<()>::default());
-        prepare_shutdown_port.subscribe(myself.clone(), |()| {
-            Some(SupervisorMessage::PrepareShutdown)
-        });
-
         // Observers only depend on Cassini -- no graph dependency.
         let dep_cert_endpoints = vec![
             DepCertEndpoint::parse("cassini-ip-svc.polar.svc.cluster.local:8080:300")
@@ -110,7 +105,6 @@ impl Actor for ObserverSupervisor {
                 expects_graph: false,
                 rejuvenation_threshold_secs: 300,
                 dep_cert_endpoints,
-                prepare_shutdown_port,
             },
             myself.get_cell(),
         )
@@ -161,14 +155,6 @@ impl Actor for ObserverSupervisor {
     ) -> Result<(), ActorProcessingErr> {
         match message {
             SupervisorMessage::Heartbeat => {}
-            SupervisorMessage::PrepareShutdown => {
-                info!("OBSERVER_SUPERVISOR: PrepareShutdown received");
-                // Observers only publish -- nothing to unsubscribe, no
-                // discrete queue to drain. Ack immediately.
-                if let Err(e) = state.healthcheck.cast(HealthCheckMessage::ShutdownAck) {
-                    error!("OBSERVER_SUPERVISOR: failed to send ShutdownAck: {e}");
-                }
-            }
             SupervisorMessage::GraphSignal(_) => {}
             SupervisorMessage::ForceExit => {
                 warn!("OBSERVER_SUPERVISOR: drain window elapsed, exiting now");
