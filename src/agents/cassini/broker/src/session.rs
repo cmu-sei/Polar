@@ -401,7 +401,7 @@ impl SessionManager {
                 });
                 session_agent
                     .cast(BrokerMessage::InitSession {
-                        client_id,
+                        client_id: client_id.clone(),
                         trace_ctx: Some(span.context()),
                     })
                     .ok();
@@ -411,6 +411,11 @@ impl SessionManager {
                     );
                     return Ok(());
                 };
+                listener_ref.send_message(BrokerMessage::RegistrationResponse {
+                    client_id,
+                    result: Ok(new_id.clone()),
+                    trace_ctx: Some(span.context()),
+                })?;
             }
             Err(e) => {
                 error!(registration_id = %new_id, "failed to spawn session agent: {e}");
