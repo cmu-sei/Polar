@@ -4,7 +4,6 @@ let kubernetes =
 
 let Constants =
       ./constants.dhall
-        sha256:c196abeb0e44d0376a6bd58954ef24b32f392340053a6354cc568202aad80bb6
 
 let Agents =
       ./agents.dhall

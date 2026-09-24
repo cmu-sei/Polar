@@ -4,7 +4,6 @@
 -- The binary reads this at startup via CERT_ISSUER_CONFIG.
 let Constants =
       ../../../schema/constants.dhall
-        sha256:83837b5e87d39846c41a7ae549d5c65b2c2c8a058c6841b28ed1b746f4c976f2
 
 let JSON =
       https://prelude.dhall-lang.org/JSON/package.dhall
