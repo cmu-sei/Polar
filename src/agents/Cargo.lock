@@ -4066,6 +4066,7 @@ dependencies = [
  "kube",
  "kube-common",
  "polar",
+ "polar-agent-builder",
  "ractor",
  "rkyv",
  "rustls",

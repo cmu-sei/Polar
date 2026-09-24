@@ -7,16 +7,18 @@ use kube::ResourceExt;
 use kube::runtime::{watcher, watcher::Event};
 use kube::{Api, Client, api::ListParams};
 use kube_common::{KIND_KUSTOMIZATION, KIND_OCI_REPOSITORY};
-use polar::health::{DepCertEndpoint, HealthCheckActor, HealthCheckArgs, HealthCheckMessage};
-use ractor::{Actor, ActorProcessingErr, ActorRef, OutputPort, SupervisionEvent, async_trait};
+use polar::health::DepCertEndpoint;
+use polar_agent_builder::{
+    AgentBuilder, HealthClient, HealthHandle, InfrastructureEvent, InfrastructureSupervisorMessage,
+};
+use polar::health::HealthCheckArgs;
+use ractor::{Actor, ActorProcessingErr, ActorRef, SupervisionEvent, async_trait};
 use ractor::concurrency::Duration;
 use serde_json::to_value;
 use std::collections::HashMap;
-use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 use tracing::{instrument, trace};
 use polar::cassini::TcpClient;
-use polar::SupervisorMessage;
 
 use crate::{
     GlobalWatcherState, KustomizationWatcher, NamespacedWatcherState, OciRepositoryWatcher,
@@ -25,18 +27,49 @@ use crate::{
 use futures::{StreamExt, TryStreamExt};
 use kube_common::{RESOURCE_APPLIED_ACTION, RESOURCE_DELETED_ACTION, RawKubeEvent};
 
-const HEALTHCHECK_ACTOR_NAME: &str = "polar.healthcheck";
-
 // TODO: establish what kind of messages these receive
 pub type NamespaceWatcherMap = HashMap<String, ActorRef<()>>;
 pub type Watcher = ActorRef<WatcherMsg>;
+
+/// This supervisor's own, real, local message type -- the shared,
+/// core polar::SupervisorMessage can't structurally carry either of
+/// the two, new, real signals this migration needs
+/// (InfrastructureRespawned, PrepareShutdown) without
+/// polar-agent-builder depending back on lib, a genuine circular
+/// dependency. AgentBuilder<M> only requires M: ractor::Message
+/// (automatically satisfied by any Send + 'static type), so a
+/// smaller, local type matching exactly what this supervisor
+/// genuinely needs is the correct, clean fix, not a workaround.
+pub enum ObserverSupervisorMessage {
+    ClientEvent { event: ClientEvent },
+    /// InfrastructureSupervisor's own InfrastructureEvent::Respawned,
+    /// forwarded here -- a real, unexpected TcpClientActor
+    /// termination was detected and a fresh client already, genuinely
+    /// spawned. This agent has no CryptoActor (no with_crypto() call
+    /// below), so InfrastructureEvent::Respawned's own crypto field
+    /// is always, genuinely None here and deliberately dropped.
+    InfrastructureRespawned { tcp_client: TcpClient },
+    /// InfrastructureSupervisor's own InfrastructureEvent::PrepareShutdown,
+    /// forwarded here -- HealthCheckActor (now InfrastructureSupervisor's
+    /// own, direct child, not this supervisor's) has genuinely,
+    /// cleanly terminated for rejuvenation. Coordinate this
+    /// supervisor's own, direct children (the watcher trees) shutting
+    /// down first, then send
+    /// InfrastructureSupervisorMessage::ProceedWithShutdown -- see
+    /// this crate's own, real handle() arm for the complete sequence.
+    PrepareShutdown,
+}
 
 pub struct ClusterObserverSupervisor;
 
 pub struct ClusterObserverSupervisorState {
     kube_client: kube::Client,
     tcp_client: TcpClient,
-    healthcheck: ActorRef<HealthCheckMessage>,
+    healthcheck: HealthHandle,
+    /// Sent InfrastructureSupervisorMessage::ProceedWithShutdown once
+    /// this supervisor's own, direct children have genuinely, fully
+    /// shut down -- see PrepareShutdown's own doc comment above.
+    infrastructure: ActorRef<InfrastructureSupervisorMessage>,
     #[allow(dead_code)]
     node_watcher: Option<Watcher>,
     namespace_watcher: Option<Watcher>,
@@ -47,25 +80,22 @@ pub struct ClusterObserverSupervisorState {
 }
 
 impl ClusterObserverSupervisor {
-    pub async fn init(
+    pub fn init(
         kube_config: Config,
-        myself: ActorRef<SupervisorMessage>,
-        healthcheck: ActorRef<HealthCheckMessage>,
+        tcp_client: TcpClient,
+        healthcheck: HealthHandle,
+        infrastructure: ActorRef<InfrastructureSupervisorMessage>,
     ) -> Result<ClusterObserverSupervisorState, ActorProcessingErr> {
         // try to create a client and auth with the kube api
         match Client::try_from(kube_config) {
             Ok(kube_client) => {
                 debug!("Kubernetes client initialized");
 
-                let tcp_client = TcpClient::spawn(TCP_CLIENT_NAME, myself, |event| {
-                    Some(SupervisorMessage::ClientEvent { event })
-                })
-                .await?;
-
                 Ok(ClusterObserverSupervisorState {
                     kube_client,
                     tcp_client,
                     healthcheck,
+                    infrastructure,
                     namespace_watcher: None,
                     node_watcher: None,
                     oci_repository_watcher: None,
@@ -79,7 +109,7 @@ impl ClusterObserverSupervisor {
 
 #[async_trait]
 impl Actor for ClusterObserverSupervisor {
-    type Msg = SupervisorMessage;
+    type Msg = ObserverSupervisorMessage;
     type State = ClusterObserverSupervisorState;
     type Arguments = ();
 
@@ -97,32 +127,52 @@ impl Actor for ClusterObserverSupervisor {
                 .map_err(|e| ActorProcessingErr::from(e))?,
         ];
 
-        let (healthcheck, _) = HealthCheckActor::spawn_linked(
-            Some(HEALTHCHECK_ACTOR_NAME.to_string()),
-            HealthCheckActor,
-            HealthCheckArgs {
+        // The real, entire, formerly hand-rolled sequence --
+        // HealthCheckActor, RouterActor, TcpClient -- collapsed into
+        // one, real, composed call. No with_crypto(): this agent only
+        // publishes, it never encrypts anything.
+        let resources = AgentBuilder::new(myself.clone(), TCP_CLIENT_NAME)
+            .with_health_check(HealthCheckArgs {
                 expects_graph: false,
                 rejuvenation_threshold_secs: 300,
                 dep_cert_endpoints,
-            },
-            myself.get_cell(),
-        )
-        .await
-        .map_err(|e| ActorProcessingErr::from(e))?;
+            })
+            .with_lifecycle_handler(|event| Some(ObserverSupervisorMessage::ClientEvent { event }))
+            .build()
+            .await?;
+
+        // The real "infra → domain" half of InfrastructureSupervisor's
+        // own, real respawn/shutdown protocol -- subscribed directly,
+        // the same, established pattern every other real port in this
+        // codebase already uses.
+        resources
+            .infrastructure_events
+            .subscribe(myself.clone(), |event| match event {
+                InfrastructureEvent::Respawned { tcp_client, .. } => {
+                    Some(ObserverSupervisorMessage::InfrastructureRespawned { tcp_client })
+                }
+                InfrastructureEvent::PrepareShutdown => {
+                    Some(ObserverSupervisorMessage::PrepareShutdown)
+                }
+            });
 
         // detect deployed environment, otherwise, try to infer configuration from the environment
         if let Ok(kube_config) = kube::Config::incluster() {
             info!("Attempting to infer kube configuration from pod environment...");
-            match ClusterObserverSupervisor::init(kube_config, myself, healthcheck).await {
-                Ok(state) => Ok(state),
-                Err(e) => Err(ActorProcessingErr::from(e)),
-            }
+            ClusterObserverSupervisor::init(
+                kube_config,
+                resources.tcp_client,
+                resources.healthcheck,
+                resources.infrastructure,
+            )
         } else if let Ok(kube_config) = kube::Config::infer().await {
             info!("Attempting to infer kube configuration from local environment...");
-            match ClusterObserverSupervisor::init(kube_config, myself, healthcheck).await {
-                Ok(state) => Ok(state),
-                Err(e) => Err(ActorProcessingErr::from(e)),
-            }
+            ClusterObserverSupervisor::init(
+                kube_config,
+                resources.tcp_client,
+                resources.healthcheck,
+                resources.infrastructure,
+            )
         } else {
             Err(ActorProcessingErr::from(
                 "Failed to configure kubernetes client!",
@@ -132,7 +182,7 @@ impl Actor for ClusterObserverSupervisor {
 
     async fn handle_supervisor_evt(
         &self,
-        myself: ActorRef<Self::Msg>,
+        _myself: ActorRef<Self::Msg>,
         msg: SupervisionEvent,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
@@ -146,47 +196,20 @@ impl Actor for ClusterObserverSupervisor {
                     actor_cell.get_id()
                 );
 
-                // Clean termination of the healthcheck actor means the
-                // rejuvenation sequence completed -- exit so the Job
-                // controller creates a new pod with fresh certs.
-                if actor_name == HEALTHCHECK_ACTOR_NAME {
+                // InfrastructureSupervisor itself -- this supervisor's
+                // one, real, direct, linked child from AgentBuilder's
+                // own build() call. Its own termination is the real,
+                // genuine signal this supervisor's own graceful
+                // shutdown sequence (see PrepareShutdown's own handler
+                // in handle(), below) is now fully, completely done --
+                // exit so the Job controller creates a new pod with
+                // fresh certs. Matched by real, genuine actor id, not
+                // name (InfrastructureSupervisor is spawned unnamed).
+                if actor_cell.get_id() == state.infrastructure.get_id() {
                     info!(
-                        "CLUSTER_SUPERVISOR: healthcheck actor terminated cleanly, exiting for rejuvenation"
+                        "CLUSTER_SUPERVISOR: infrastructure shutdown complete, exiting for rejuvenation"
                     );
                     std::process::exit(1);
-                }
-
-                if actor_name == format!("{TCP_CLIENT_NAME}.tcp") {
-                    warn!("TCP client terminated; tearing down watcher trees and respawning...");
-
-                    // Stop any existing watcher trees — they hold stale TcpClient
-                    // handles baked in at spawn time and can't publish through a
-                    // dead client. Rather than propagate a fresh handle down
-                    // through several actor layers, we just let the Registered
-                    // handler rebuild them fresh once the new client reconnects.
-                    if let Some(w) = state.namespace_watcher.take() {
-                        w.stop(Some("tcp_client_respawn".to_string()));
-                    }
-                    if let Some(w) = state.oci_repository_watcher.take() {
-                        w.stop(Some("tcp_client_respawn".to_string()));
-                    }
-                    if let Some(w) = state.kustomization_watcher.take() {
-                        w.stop(Some("tcp_client_respawn".to_string()));
-                    }
-
-                    match TcpClient::spawn(TCP_CLIENT_NAME, myself.clone(), |event| {
-                        Some(SupervisorMessage::ClientEvent { event })
-                    })
-                    .await
-                    {
-                        Ok(new_client) => {
-                            info!("TCP client respawned successfully");
-                            state.tcp_client = new_client;
-                        }
-                        Err(e) => {
-                            error!("Failed to respawn TCP client: {e}");
-                        }
-                    }
                 }
             }
             SupervisionEvent::ActorFailed(actor_cell, e) => {
@@ -218,10 +241,58 @@ impl Actor for ClusterObserverSupervisor {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
-            SupervisorMessage::Heartbeat => {}
-            SupervisorMessage::ClientEvent { event } => match event {
+            ObserverSupervisorMessage::InfrastructureRespawned { tcp_client } => {
+                warn!(
+                    "TCP client was respawned by InfrastructureSupervisor; tearing down \
+                     watcher trees to rebuild fresh on the next, real reconnect"
+                );
+
+                // Stop any existing watcher trees — they hold stale TcpClient
+                // handles baked in at spawn time and can't publish through a
+                // dead client. Rather than propagate a fresh handle down
+                // through several actor layers, we just let the Registered
+                // handler rebuild them fresh once the new client reconnects.
+                // Exactly this supervisor's own, pre-existing, established
+                // design -- only the real trigger changed (an explicit,
+                // real InfrastructureEvent::Respawned message now, rather
+                // than a direct SupervisionEvent::ActorTerminated match on
+                // TcpClientActor, which is no longer this supervisor's own,
+                // direct child at all).
+                if let Some(w) = state.namespace_watcher.take() {
+                    w.stop(Some("tcp_client_respawn".to_string()));
+                }
+                if let Some(w) = state.oci_repository_watcher.take() {
+                    w.stop(Some("tcp_client_respawn".to_string()));
+                }
+                if let Some(w) = state.kustomization_watcher.take() {
+                    w.stop(Some("tcp_client_respawn".to_string()));
+                }
+
+                state.tcp_client = tcp_client;
+            }
+            ObserverSupervisorMessage::PrepareShutdown => {
+                info!(
+                    "CLUSTER_SUPERVISOR: PrepareShutdown received -- stopping this \
+                     supervisor's own, direct children before infrastructure"
+                );
+
+                if let Some(w) = state.namespace_watcher.take() {
+                    w.stop_and_wait(None, Some(Duration::from_secs(10))).await?;
+                }
+                if let Some(w) = state.oci_repository_watcher.take() {
+                    w.stop_and_wait(None, Some(Duration::from_secs(10))).await?;
+                }
+                if let Some(w) = state.kustomization_watcher.take() {
+                    w.stop_and_wait(None, Some(Duration::from_secs(10))).await?;
+                }
+
+                let _ = state
+                    .infrastructure
+                    .cast(InfrastructureSupervisorMessage::ProceedWithShutdown);
+            }
+            ObserverSupervisorMessage::ClientEvent { event } => match event {
                 ClientEvent::Registered { .. } => {
-                    let _ = state.healthcheck.cast(HealthCheckMessage::CassiniConnected);
+                    let _ = state.healthcheck.cassini_connected();
 
                     if state.namespace_watcher.is_none() {
                         let ns_watcher_state = NamespaceSupervisorState {
@@ -288,12 +359,10 @@ impl Actor for ClusterObserverSupervisor {
                 }
                 ClientEvent::TransportError { reason } => {
                     warn!("Transport error occurred (non-fatal, awaiting reconnect): {reason}");
-                    let _ = state.healthcheck.cast(HealthCheckMessage::CassiniDisconnected);
+                    let _ = state.healthcheck.cassini_disconnected();
                 }
                 _ => (),
-            }
-            SupervisorMessage::GraphSignal(_) => {}
-            SupervisorMessage::ForceExit => {}
+            },
         }
         Ok(())
     }
