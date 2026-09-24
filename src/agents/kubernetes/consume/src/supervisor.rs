@@ -365,9 +365,7 @@ impl Actor for ClusterConsumerSupervisor {
             projection_cache: ProjectionCache {
                 entries: HashMap::new(),
             },
-            healthcheck: resources
-                .healthcheck
-                .expect("with_health_check was called, so this is always real, genuinely Some"),
+            healthcheck: resources.healthcheck,
             crypto: resources
                 .crypto
                 .expect("with_crypto was called, so this is always real, genuinely Some"),

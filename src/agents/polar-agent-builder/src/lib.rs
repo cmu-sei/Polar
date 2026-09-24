@@ -21,14 +21,17 @@ pub mod crypto;
 pub use crypto::{CryptoClient, CryptoHandle};
 pub mod health;
 pub use health::{HealthClient, HealthHandle};
+pub mod infrastructure;
+pub use infrastructure::{InfrastructureEvent, InfrastructureSupervisor, InfrastructureSupervisorMessage};
 pub mod message;
 pub use message::{Encrypted, Outbound, Plaintext};
 
 use cassini_client::TcpClientMessage;
 use cassini_types::ClientEvent;
 use polar::cassini::TcpClient;
-use polar_health::{HealthCheckActor, HealthCheckArgs};
+use polar_health::HealthCheckArgs;
 use ractor::{Actor, ActorProcessingErr, ActorRef};
+use std::sync::Arc;
 
 /// Binds a topic to the real, per-message deliver closure RouterActor
 /// itself already expects -- exactly the same shape every existing,
@@ -64,11 +67,32 @@ impl Subscription {
 /// this crate's own, real, foundational building blocks, not
 /// something a higher-level, trait-based wrapper genuinely adds value
 /// over for every, real caller's own use.
+///
+/// healthcheck is no longer Option -- InfrastructureSupervisor's own
+/// shutdown-coordination mechanism structurally depends on a real
+/// HealthCheckActor existing, so with_health_check is now required,
+/// not optional (build() returns a real error if it was never
+/// called).
+#[derive(Clone)]
 pub struct AgentResources {
     pub router: ActorRef<polar_router::RouterMessage>,
     pub tcp_client: TcpClient,
-    pub healthcheck: Option<crate::health::HealthHandle>,
+    pub healthcheck: crate::health::HealthHandle,
     pub crypto: Option<crate::crypto::CryptoHandle>,
+    /// Every real ClientEvent this agent's own TcpClient produces --
+    /// subscribe with your own, real mapping closure, exactly the
+    /// same, established pattern as prepare_shutdown_port/
+    /// graph_signal_port.
+    pub events_output: Arc<ractor::OutputPort<ClientEvent>>,
+    /// The "infra → domain" half of InfrastructureSupervisor's own,
+    /// real shutdown-coordination and TCP-client-respawn protocol --
+    /// see infrastructure::InfrastructureEvent's own doc comment.
+    pub infrastructure_events: Arc<ractor::OutputPort<crate::infrastructure::InfrastructureEvent>>,
+    /// The real, direct way to send
+    /// infrastructure::InfrastructureSupervisorMessage::ProceedWithShutdown
+    /// once your own, domain-specific children have genuinely, fully
+    /// shut down.
+    pub infrastructure: ActorRef<crate::infrastructure::InfrastructureSupervisorMessage>,
 }
 
 pub struct AgentBuilder<M: ractor::Message> {
@@ -131,93 +155,54 @@ impl<M: ractor::Message> AgentBuilder<M> {
     }
 
     pub async fn build(self) -> Result<AgentResources, ActorProcessingErr> {
+        let health_check_args = self.health_check_args.ok_or_else(|| {
+            ActorProcessingErr::from(
+                "AgentBuilder::build() requires with_health_check -- \
+                 InfrastructureSupervisor's own shutdown-coordination \
+                 mechanism structurally depends on a real HealthCheckActor",
+            )
+        })?;
+
         let myself_cell = self.myself.get_cell();
 
-        let healthcheck = match self.health_check_args {
-            Some(args) => {
-                let (healthcheck, _) = HealthCheckActor::spawn_linked(
-                    None,
-                    HealthCheckActor,
-                    args,
-                    myself_cell.clone(),
-                )
-                .await
-                .map_err(ActorProcessingErr::from)?;
-                Some(healthcheck)
-            }
-            None => None,
-        };
-
-        let (router, _) = polar_router::RouterActor::spawn_linked(
+        // The real, entire, foundational subtree -- HealthCheckActor,
+        // RouterActor, this agent's own subscriptions, TcpClient, and
+        // (if requested) CryptoActor -- collapsed into one, real,
+        // linked child. See infrastructure::InfrastructureSupervisor's
+        // own, top-level doc comment for the complete, real reasoning.
+        let (infrastructure, _) = InfrastructureSupervisor::spawn_linked(
             None,
-            polar_router::RouterActor,
-            (),
-            myself_cell.clone(),
+            InfrastructureSupervisor,
+            infrastructure::InfrastructureSupervisorArgs {
+                service_name: self.service_name.clone(),
+                health_check_args,
+                subscriptions: self.subscriptions,
+                wants_crypto: self.with_crypto,
+            },
+            myself_cell,
         )
         .await
         .map_err(ActorProcessingErr::from)?;
 
-        // Every real, collected topic name, remembered here so the
-        // wrapped lifecycle closure below can fire the real,
-        // wire-level Subscribe for each one automatically, exactly
-        // once, the moment ClientEvent::Registered genuinely fires --
-        // the real, other half of Subscription's own, atomic
-        // guarantee.
-        let subscribed_topics: Vec<String> =
-            self.subscriptions.iter().map(|s| s.topic.clone()).collect();
+        let resources: AgentResources = ractor::call!(infrastructure, |reply| {
+            InfrastructureSupervisorMessage::GetResources { reply }
+        })
+        .map_err(|e| ActorProcessingErr::from(e.to_string()))?;
 
-        for subscription in self.subscriptions {
-            router
-                .send_message(polar_router::RouterMessage::Register {
-                    topic: subscription.topic,
-                    deliver: subscription.deliver,
-                })
-                .map_err(ActorProcessingErr::from)?;
-        }
-
+        // The caller's own, real lifecycle-handling closure --
+        // subscribed directly to InfrastructureSupervisor's own,
+        // real events_output, the same, established pattern every
+        // other real port in this codebase already uses (matching
+        // TcpClient::spawn_with_router's own, previous, direct
+        // parameter exactly, just one real layer removed now).
         let map_lifecycle_event = self
             .map_lifecycle_event
             .unwrap_or_else(|| Box::new(|_event| None));
+        resources
+            .events_output
+            .subscribe(self.myself, move |event| map_lifecycle_event(event));
 
-        let wrapped_lifecycle_handler =
-            build_lifecycle_handler(self.service_name.clone(), subscribed_topics, map_lifecycle_event);
-
-        let tcp_client = TcpClient::spawn_with_router(
-            &self.service_name,
-            self.myself,
-            wrapped_lifecycle_handler,
-            router.clone(),
-        )
-        .await
-        .map_err(ActorProcessingErr::from)?;
-
-        // CryptoActor spawned only now, after tcp_client itself
-        // genuinely exists -- CryptoActorArgs needs its own, real,
-        // raw ActorRef<TcpClientMessage>, not available any earlier
-        // in this function. spawn_linked, sharing this same router.
-        let crypto = if self.with_crypto {
-            let (crypto_actor, _) = polar_crypto::CryptoActor::spawn_linked(
-                None,
-                polar_crypto::CryptoActor,
-                polar_crypto::CryptoActorArgs {
-                    tcp_client: tcp_client.as_actor_ref(),
-                    router: router.clone(),
-                },
-                myself_cell,
-            )
-            .await
-            .map_err(ActorProcessingErr::from)?;
-            Some(crate::crypto::CryptoHandle::new(crypto_actor))
-        } else {
-            None
-        };
-
-        Ok(AgentResources {
-            router,
-            tcp_client,
-            healthcheck: healthcheck.map(crate::health::HealthHandle::new),
-            crypto,
-        })
+        Ok(resources)
     }
 }
 
@@ -232,7 +217,7 @@ impl<M: ractor::Message> AgentBuilder<M> {
 /// Subscription's own, atomic guarantee actually hold, and that a
 /// caller's own, separate lifecycle-handling logic is never silently
 /// dropped.
-fn build_lifecycle_handler<M: ractor::Message>(
+pub(crate) fn build_lifecycle_handler<M: ractor::Message>(
     service_name: String,
     subscribed_topics: Vec<String>,
     map_lifecycle_event: Box<dyn Fn(ClientEvent) -> Option<M> + Send + Sync>,
