@@ -129,6 +129,23 @@ impl Handler {
             }
         };
 
+        // ---- Step 3.5: subject DN merge ----
+        //
+        // Per field: the CSR's own value wins if present (the user
+        // spoke for themselves); otherwise fall back to the admin's
+        // provisioned default, if any; otherwise the field is simply
+        // absent from the issued cert. A default that fails
+        // validation is an internal-caller bug (credentials-agent,
+        // not the CSR/attacker), so it's reported as InternalError,
+        // not InvalidCsr.
+        let subject_dn = match merge_subject_dn(&parsed_csr.subject, request.subject_dn_defaults.as_ref()) {
+            Ok(s) => s,
+            Err(e) => {
+                error!("subject_dn_defaults failed validation: {e}");
+                return error_response(IssueOutcome::InternalError, &e.to_string());
+            }
+        };
+
         // ---- Step 4: session ID ----
         //
         // Fresh UUID per request. Used downstream for audit
@@ -163,6 +180,7 @@ impl Handler {
             sans: all_sans,
             lifetime,
             cert_type: request.cert_type,
+            subject_dn,
         };
 
         let issued = match self.ca.issue(ca_request).await {
@@ -283,6 +301,75 @@ fn map_validation_error(e: &ValidationError) -> IssueOutcome {
         ValidationError::JwksUnavailable(_) => IssueOutcome::InternalError,
         ValidationError::InvalidToken => IssueOutcome::InvalidToken,
     }
+}
+
+/// Plain, ready-to-push Subject DN field values -- every field
+/// already validated, either by the CSR's own extraction
+/// (csr::extract_subject_fields) or here, against the same newtypes,
+/// for an admin-supplied default.
+#[derive(Debug, Clone, Default)]
+pub struct MergedSubjectDn {
+    pub given_name: Option<String>,
+    pub surname: Option<String>,
+    pub title: Option<String>,
+    pub telephone_number: Option<String>,
+}
+
+/// Merges the CSR's own Subject DN fields with an admin's provisioned
+/// defaults, per field: the CSR's value wins when present, the
+/// default fills the gap otherwise. See MergedSubjectDn's own doc
+/// comment for why this exists as a distinct step, and Step 3.5's
+/// own comment above for the fail-closed behavior on a bad default.
+fn merge_subject_dn(
+    csr_fields: &crate::csr::SubjectFields,
+    defaults: Option<&cert_issuer_common::SubjectDnDefaults>,
+) -> Result<MergedSubjectDn, crate::csr::CsrError> {
+    use crate::csr::{JobTitle, PersonalName, PhoneNumber};
+    let d = defaults.cloned().unwrap_or_default();
+
+    let given_name = match &csr_fields.given_name {
+        Some(v) => Some(v.as_str().to_string()),
+        None => d
+            .given_name
+            .as_deref()
+            .map(PersonalName::parse)
+            .transpose()?
+            .map(|v| v.as_str().to_string()),
+    };
+    let surname = match &csr_fields.surname {
+        Some(v) => Some(v.as_str().to_string()),
+        None => d
+            .surname
+            .as_deref()
+            .map(PersonalName::parse)
+            .transpose()?
+            .map(|v| v.as_str().to_string()),
+    };
+    let title = match &csr_fields.title {
+        Some(v) => Some(v.as_str().to_string()),
+        None => d
+            .title
+            .as_deref()
+            .map(JobTitle::parse)
+            .transpose()?
+            .map(|v| v.as_str().to_string()),
+    };
+    let telephone_number = match &csr_fields.telephone_number {
+        Some(v) => Some(v.as_str().to_string()),
+        None => d
+            .telephone_number
+            .as_deref()
+            .map(PhoneNumber::parse)
+            .transpose()?
+            .map(|v| v.as_str().to_string()),
+    };
+
+    Ok(MergedSubjectDn {
+        given_name,
+        surname,
+        title,
+        telephone_number,
+    })
 }
 
 fn error_response(outcome: IssueOutcome, detail: &str) -> HandlerResponse {

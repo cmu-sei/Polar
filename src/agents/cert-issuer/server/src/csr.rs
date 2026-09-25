@@ -44,7 +44,7 @@ use x509_parser::der_parser::oid::Oid;
 use x509_parser::extensions::{GeneralName, ParsedExtension};
 use x509_parser::prelude::*;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ParsedCsr {
     /// matching the workload identity, optionally followed by extra
     /// SANs requested by the client. The identity SAN is always first.
@@ -54,6 +54,13 @@ pub struct ParsedCsr {
     pub key_algorithm: String,
     /// Raw DER bytes of the public key, for forwarding to the CA.
     pub public_key_der: Vec<u8>,
+    /// Subject DN fields (given name, surname, title, telephone
+    /// number) the client's own CSR requested -- standard RFC 4519/
+    /// X.520 attribute types, read from the CSR's own Subject field,
+    /// not a Polar-specific encoding. Independent of `san`; a CSR
+    /// with none of these set is simply `SubjectFields::default()`,
+    /// never an error on its own. See SubjectFields's own doc comment.
+    pub subject: SubjectFields,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -76,6 +83,19 @@ pub enum CsrError {
     InvalidSan(String),
     #[error("IP address SANs are not permitted: {0}")]
     IpSanRejected(String),
+    /// A recognized Subject DN attribute (given name, surname, title,
+    /// telephone number) was present but exceeded its own field's
+    /// length cap.
+    #[error("subject field '{field}' exceeds maximum length of {max} characters")]
+    SubjectFieldTooLong { field: String, max: usize },
+    /// A recognized Subject DN attribute contained a character
+    /// outside that field's allowed set.
+    #[error("subject field '{field}' contains a disallowed character")]
+    SubjectFieldInvalidCharacter { field: String },
+    /// A recognized Subject DN attribute was present in the CSR but
+    /// empty (or all-whitespace) after trimming.
+    #[error("subject field '{field}' is present but empty")]
+    SubjectFieldEmpty { field: String },
 }
 
 // ---------------------------------------------------------------------------
@@ -151,6 +171,14 @@ pub fn parse_csr(pem: &str) -> Result<ParsedCsr, CsrError> {
         _ => {} // one identity SAN + zero or more extras are valid
     }
 
+    // ---- Stage 4.5: subject DN fields ---------------------------------
+    //
+    // Standard RFC 4519/X.520 Subject attributes (given name,
+    // surname, title, telephone number) the client's own CSR may
+    // have set. Independent of the SAN work above -- a CSR with none
+    // of these is not an error, just SubjectFields::default().
+    let subject = extract_subject_fields(&csr)?;
+
     // ---- Stage 5: public key algorithm ------------------------------------
     let pki = &csr.certification_request_info.subject_pki;
     let key_algorithm = identify_key_algorithm(&pki.algorithm.algorithm)?;
@@ -165,7 +193,200 @@ pub fn parse_csr(pem: &str) -> Result<ParsedCsr, CsrError> {
         san: san_strings,
         key_algorithm,
         public_key_der,
+        subject,
     })
+}
+
+/// A validated given name or surname (RFC 4519 givenName/surname
+/// attribute values). Unicode-aware on purpose -- real names
+/// worldwide aren't ASCII-only, so this restricts to a safe-but-
+/// inclusive set (letters in any script, space, hyphen, apostrophe,
+/// period for suffixes like "Jr.") rather than an ASCII-only
+/// allowlist that would reject most of the world's actual names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PersonalName(String);
+
+impl PersonalName {
+    pub const MAX_LEN: usize = 100;
+    const FIELD_NAME: &'static str = "personal name";
+
+    pub fn parse(raw: &str) -> Result<Self, CsrError> {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return Err(CsrError::SubjectFieldEmpty {
+                field: Self::FIELD_NAME.to_string(),
+            });
+        }
+        if trimmed.chars().count() > Self::MAX_LEN {
+            return Err(CsrError::SubjectFieldTooLong {
+                field: Self::FIELD_NAME.to_string(),
+                max: Self::MAX_LEN,
+            });
+        }
+        if !trimmed
+            .chars()
+            .all(|c| c.is_alphabetic() || matches!(c, ' ' | '-' | '\'' | '.'))
+        {
+            return Err(CsrError::SubjectFieldInvalidCharacter {
+                field: Self::FIELD_NAME.to_string(),
+            });
+        }
+        Ok(Self(trimmed.to_string()))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// A validated job title (RFC 4519 title attribute value).
+/// Deliberately not a closed enum -- job titles are organizationally
+/// open-ended, unlike RevocationReason/GrantReason, which are
+/// genuinely closed, Polar-owned domain concepts -- but still
+/// length-capped and charset-restricted, the same bounded-but-open-
+/// text discipline this codebase applies elsewhere.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JobTitle(String);
+
+impl JobTitle {
+    pub const MAX_LEN: usize = 150;
+    const FIELD_NAME: &'static str = "title";
+
+    pub fn parse(raw: &str) -> Result<Self, CsrError> {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return Err(CsrError::SubjectFieldEmpty {
+                field: Self::FIELD_NAME.to_string(),
+            });
+        }
+        if trimmed.chars().count() > Self::MAX_LEN {
+            return Err(CsrError::SubjectFieldTooLong {
+                field: Self::FIELD_NAME.to_string(),
+                max: Self::MAX_LEN,
+            });
+        }
+        // Slightly wider punctuation than PersonalName -- real titles
+        // routinely include commas, slashes, ampersands, and
+        // parentheses ("Staff SRE, Security & Compliance (EMEA)").
+        if !trimmed.chars().all(|c| {
+            c.is_alphanumeric()
+                || matches!(c, ' ' | '-' | '\'' | '.' | ',' | '/' | '&' | '(' | ')')
+        }) {
+            return Err(CsrError::SubjectFieldInvalidCharacter {
+                field: Self::FIELD_NAME.to_string(),
+            });
+        }
+        Ok(Self(trimmed.to_string()))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// A validated telephone number (RFC 4519 telephoneNumber attribute
+/// value). Deliberately *not* full E.164 parsing -- no phone-number
+/// crate exists in this workspace today (checked directly before
+/// writing this), and pulling one in is real, separate future work,
+/// not something to bolt on silently here. This is a bounded,
+/// charset-restricted string only: digits, a single leading `+`,
+/// spaces, hyphens, and parentheses. Genuinely weaker than real
+/// E.164 validation -- named as a limitation, not presented as more
+/// than it is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PhoneNumber(String);
+
+impl PhoneNumber {
+    pub const MAX_LEN: usize = 32;
+    const FIELD_NAME: &'static str = "telephone number";
+
+    pub fn parse(raw: &str) -> Result<Self, CsrError> {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return Err(CsrError::SubjectFieldEmpty {
+                field: Self::FIELD_NAME.to_string(),
+            });
+        }
+        if trimmed.len() > Self::MAX_LEN {
+            return Err(CsrError::SubjectFieldTooLong {
+                field: Self::FIELD_NAME.to_string(),
+                max: Self::MAX_LEN,
+            });
+        }
+        if !trimmed
+            .chars()
+            .all(|c| c.is_ascii_digit() || matches!(c, '+' | ' ' | '-' | '(' | ')'))
+        {
+            return Err(CsrError::SubjectFieldInvalidCharacter {
+                field: Self::FIELD_NAME.to_string(),
+            });
+        }
+        Ok(Self(trimmed.to_string()))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Subject DN fields extracted from a CSR's own Subject field --
+/// standard RFC 4519/X.520 attribute types (givenName, surname,
+/// title, telephoneNumber), not a Polar-specific encoding, unlike
+/// how Permission rides in SANs today (see
+/// cert_issuer_common::permission::Permission's own doc comment).
+/// Every present field is validated at extraction time; an absent
+/// field is simply `None`, never an error on its own.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SubjectFields {
+    pub given_name: Option<PersonalName>,
+    pub surname: Option<PersonalName>,
+    pub title: Option<JobTitle>,
+    pub telephone_number: Option<PhoneNumber>,
+}
+
+// Standard X.520 attribute-type OIDs (RFC 4519 section 2), as plain
+// dotted arcs -- the same shape rcgen's own DnType::CustomDnType
+// expects on the signing side (see ca.rs).
+const OID_GIVEN_NAME: &str = "2.5.4.42";
+const OID_SURNAME: &str = "2.5.4.4";
+const OID_TITLE: &str = "2.5.4.12";
+const OID_TELEPHONE_NUMBER: &str = "2.5.4.20";
+
+/// Extract and validate Subject DN fields from a parsed CSR's own
+/// Subject field. Unrecognized attribute types are silently ignored
+/// -- mirroring extract_dns_sans's own stance on unexpected
+/// GeneralName variants above -- but a *recognized* attribute whose
+/// value fails validation is a hard error: this runs only after the
+/// CSR's self-signature has already been verified (parse_csr's own
+/// stage ordering), so a malformed value here means a buggy client
+/// or tampering, not something to silently drop.
+fn extract_subject_fields(csr: &X509CertificationRequest) -> Result<SubjectFields, CsrError> {
+    let mut fields = SubjectFields::default();
+    for rdn in csr.certification_request_info.subject.iter() {
+        for atv in rdn.iter() {
+            let oid_str = atv.attr_type().to_id_string();
+            let target = match oid_str.as_str() {
+                OID_GIVEN_NAME => "given_name",
+                OID_SURNAME => "surname",
+                OID_TITLE => "title",
+                OID_TELEPHONE_NUMBER => "telephone_number",
+                _ => continue,
+            };
+            let raw: String = atv.attr_value().clone().try_into().map_err(|_| {
+                CsrError::SubjectFieldInvalidCharacter {
+                    field: target.to_string(),
+                }
+            })?;
+            match target {
+                "given_name" => fields.given_name = Some(PersonalName::parse(&raw)?),
+                "surname" => fields.surname = Some(PersonalName::parse(&raw)?),
+                "title" => fields.title = Some(JobTitle::parse(&raw)?),
+                "telephone_number" => fields.telephone_number = Some(PhoneNumber::parse(&raw)?),
+                _ => unreachable!(),
+            }
+        }
+    }
+    Ok(fields)
 }
 
 /// Verify that the CSR's SAN matches the expected workload identity.

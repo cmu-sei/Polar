@@ -1,7 +1,8 @@
 // cert_issuer_init/src/handshake.rs
 
 use cert_issuer_common::{
-    CertType, IssueError, IssueRequest, IssueResponse, ValidateRequest, ValidateResponse,
+    CertType, IssueError, IssueRequest, IssueResponse, SubjectDnDefaults, ValidateRequest,
+    ValidateResponse,
 };
 use thiserror::Error;
 
@@ -65,6 +66,7 @@ impl HandshakeClient {
         csr_pem: &str,
         cert_type: CertType,
         extra_sans: Vec<String>,
+        subject_dn_defaults: Option<SubjectDnDefaults>,
     ) -> Result<IssueResponse, HandshakeError> {
         let url = format!("{}/issue", self.base_url);
 
@@ -72,6 +74,7 @@ impl HandshakeClient {
             csr_pem: csr_pem.to_string(),
             cert_type,
             extra_sans,
+            subject_dn_defaults,
         };
 
         let response = self

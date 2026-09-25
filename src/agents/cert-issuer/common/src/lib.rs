@@ -40,6 +40,24 @@ impl std::fmt::Display for CertType {
     }
 }
 
+/// Admin-provisioned fallback values for Subject DN fields the
+/// user's own CSR didn't set -- see the Polar user-account CSR flow
+/// (credentials-agent-architecture.md's "User self-service issuance"
+/// section and its account-provisioning extension). Plain,
+/// unvalidated strings on the wire, matching IssueRequest's own
+/// convention for extra_sans (also a plain `Vec<String>`); real
+/// validation happens exactly once, in cert-issuer/server's csr
+/// module, via the same PersonalName/JobTitle/PhoneNumber
+/// constructors the CSR's own fields go through -- not duplicated
+/// here.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SubjectDnDefaults {
+    pub given_name: Option<String>,
+    pub surname: Option<String>,
+    pub title: Option<String>,
+    pub telephone_number: Option<String>,
+}
+
 /// Request body for `POST /issue`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IssueRequest {
@@ -49,6 +67,14 @@ pub struct IssueRequest {
     pub cert_type: CertType,
     #[serde(default)]
     pub extra_sans: Vec<String>,
+    /// Admin-provisioned defaults for Subject DN fields (given name,
+    /// surname, title, telephone number), used only for whichever
+    /// fields the CSR itself doesn't set -- the CSR's own value
+    /// always wins when present. `None` for every issuance path that
+    /// has no such defaults (ordinary workload issuance, admin
+    /// bootstrap).
+    #[serde(default)]
+    pub subject_dn_defaults: Option<SubjectDnDefaults>,
 }
 
 /// Successful response body for `POST /issue`.

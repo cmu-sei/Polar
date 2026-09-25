@@ -64,6 +64,12 @@ pub struct CaIssueRequest {
     /// `now + lifetime`.
     pub lifetime: Duration,
     pub cert_type: CertType,
+    /// Subject DN fields to embed, already merged and validated by
+    /// the handler (see handler::merge_subject_dn). Every `Some`
+    /// field becomes a real X.520 Subject DN attribute (RFC 4519) --
+    /// standard, not a Polar-proprietary encoding, unlike how
+    /// Permission rides in SANs today.
+    pub subject_dn: crate::handler::MergedSubjectDn,
 }
 
 #[derive(Debug, Clone)]
@@ -167,6 +173,38 @@ impl CaClient for RcgenCaClient {
                 }
             })
             .collect::<Result<Vec<_>, CaError>>()?;
+
+        // Subject DN fields, beyond the CommonName rcgen's own
+        // CSR-params conversion already sets. Real X.520 attribute
+        // types (RFC 4519 section 2) -- readable by any standard
+        // X.509 tool, not just Polar's own, unlike the SAN-riding
+        // Permission convention above.
+        const OID_GIVEN_NAME: [u64; 4] = [2, 5, 4, 42];
+        const OID_SURNAME: [u64; 4] = [2, 5, 4, 4];
+        const OID_TITLE: [u64; 4] = [2, 5, 4, 12];
+        const OID_TELEPHONE_NUMBER: [u64; 4] = [2, 5, 4, 20];
+
+        if let Some(v) = &req.subject_dn.given_name {
+            csr.params
+                .distinguished_name
+                .push(rcgen::DnType::CustomDnType(OID_GIVEN_NAME.to_vec()), v.clone());
+        }
+        if let Some(v) = &req.subject_dn.surname {
+            csr.params
+                .distinguished_name
+                .push(rcgen::DnType::CustomDnType(OID_SURNAME.to_vec()), v.clone());
+        }
+        if let Some(v) = &req.subject_dn.title {
+            csr.params
+                .distinguished_name
+                .push(rcgen::DnType::CustomDnType(OID_TITLE.to_vec()), v.clone());
+        }
+        if let Some(v) = &req.subject_dn.telephone_number {
+            csr.params.distinguished_name.push(
+                rcgen::DnType::CustomDnType(OID_TELEPHONE_NUMBER.to_vec()),
+                v.clone(),
+            );
+        }
 
         let not_before = OffsetDateTime::now_utc();
         let not_after = not_before + req.lifetime;
@@ -588,6 +626,7 @@ mod tests {
             sans: vec![identity.to_string()],
             lifetime: Duration::from_secs(3600),
             cert_type: CertType::Client,
+            subject_dn: Default::default(),
         }
     }
 
@@ -597,6 +636,7 @@ mod tests {
             sans: vec![identity.to_string()],
             lifetime: Duration::from_secs(3600),
             cert_type: CertType::Server,
+            subject_dn: Default::default(),
         }
     }
 
@@ -656,6 +696,7 @@ mod tests {
             sans: vec![identity.to_string(), permission_san.to_string()],
             lifetime: Duration::from_secs(3600),
             cert_type: CertType::Client,
+            subject_dn: Default::default(),
         };
         let result = client.issue(req).await.expect("must succeed");
 
@@ -706,6 +747,7 @@ mod tests {
             sans: vec![identity.to_string(), extra_hostname.to_string()],
             lifetime: Duration::from_secs(3600),
             cert_type: CertType::Client,
+            subject_dn: Default::default(),
         };
         let result = client.issue(req).await.expect("must succeed");
 
@@ -750,6 +792,7 @@ mod tests {
             sans: vec![identity.to_string(), "café.example.com".to_string()],
             lifetime: Duration::from_secs(3600),
             cert_type: CertType::Client,
+            subject_dn: Default::default(),
         };
 
         let result = client.issue(req).await;
@@ -853,6 +896,7 @@ mod tests {
             sans: vec!["agent.polar.svc.cluster.local".to_string()],
             lifetime,
             cert_type: CertType::Client,
+            subject_dn: Default::default(),
         };
 
         let before = OffsetDateTime::now_utc();
@@ -878,6 +922,7 @@ mod tests {
             sans: vec!["agent.polar.svc.cluster.local".to_string()],
             lifetime: Duration::from_secs(3600),
             cert_type: CertType::Client,
+            subject_dn: Default::default(),
         };
 
         let err = client.issue(req).await.expect_err("must fail");

@@ -40,7 +40,7 @@ async fn issue(
     csr: &str,
     cert_type: CertType,
 ) -> Result<cert_issuer_common::IssueResponse, cert_client::handshake::HandshakeError> {
-    client.issue(token, csr, cert_type, Vec::new()).await
+    client.issue(token, csr, cert_type, Vec::new(), None).await
 }
 
 // ---------------------------------------------------------------------------
@@ -385,6 +385,7 @@ async fn sends_extra_sans_in_request_body() {
             "fake-csr-pem",
             CertType::Client,
             vec!["neo4j.polar.svc.cluster.local".to_string()],
+            None,
         )
         .await
         .expect("must send extra_sans in request body");

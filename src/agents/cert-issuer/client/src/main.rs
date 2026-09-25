@@ -85,6 +85,7 @@ async fn run(args: Args) -> i32 {
             &csr_output.csr_pem,
             args.cert_type,
             args.extra_sans,
+            None,
         )
         .await
     {

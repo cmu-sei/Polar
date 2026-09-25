@@ -448,6 +448,7 @@ async fn issue_cert(
                 &csr_output.csr_pem,
                 req.cert_type.clone(),
                 req.extra_sans.clone(),
+                None,
             )
             .await
         {

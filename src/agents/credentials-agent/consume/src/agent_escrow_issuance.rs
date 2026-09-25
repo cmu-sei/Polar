@@ -181,7 +181,7 @@ impl AgentEscrowIssuanceHandler {
         let extra_sans: Vec<String> = permissions.iter().map(|p| p.to_san_string()).collect();
         let issued = match self
             .cert_issuer
-            .issue(&request.credential, &request.csr_pem, CertType::Service, extra_sans)
+            .issue(&request.credential, &request.csr_pem, CertType::Service, extra_sans, None)
             .await
         {
             Ok(r) => r,
