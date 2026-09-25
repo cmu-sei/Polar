@@ -58,6 +58,10 @@ pub enum CredentialsNodeKey {
     /// caught up with the event log -- there is and only ever will be
     /// exactly one of these.
     ProjectionCheckpoint,
+    /// A Polar user account, keyed on its own durable account_id --
+    /// never on username, which is a human-facing nickname that could
+    /// in principle change, not the identity itself.
+    Account { account_id: String },
 }
 
 impl GraphNodeKey for CredentialsNodeKey {
@@ -82,6 +86,13 @@ impl GraphNodeKey for CredentialsNodeKey {
                 (
                     format!("({prefix}:CredentialsAgentEscrowCertificate {{ serial: ${k} }})"),
                     vec![(k, BoltType::String(serial.clone().into()))],
+                )
+            }
+            CredentialsNodeKey::Account { account_id } => {
+                let k = format!("{prefix}_account_id");
+                (
+                    format!("({prefix}:CredentialsAccount {{ account_id: ${k} }})"),
+                    vec![(k, BoltType::String(account_id.clone().into()))],
                 )
             }
             CredentialsNodeKey::ProjectionCheckpoint => {

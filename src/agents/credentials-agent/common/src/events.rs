@@ -253,6 +253,44 @@ pub enum CredentialsEvent {
         timestamp: i64,
         certificate_pem: String,
     },
+    /// Published by credentials-agent itself once an admin (or the
+    /// one-time bootstrap identity) has provisioned a Polar account --
+    /// mirrors Grant's own shape, but for a durable account rather
+    /// than a permission on an existing identity. Single-use, exactly
+    /// like Grant: consumed the moment a matching
+    /// AccountCertificateIssued is folded.
+    AccountProvisioned {
+        account_id: String,
+        username: String,
+        email: String,
+        permissions: Vec<cert_issuer_common::permission::Permission>,
+        provisioned_by: String,
+        timestamp: i64,
+        reason: GrantReason,
+        /// True only for the one-time admin-bootstrap path -- lets
+        /// CredentialsState enforce "bootstrap happens at most once"
+        /// without hardcoding the bootstrap identity string here.
+        via_bootstrap: bool,
+        given_name: Option<String>,
+        surname: Option<String>,
+        title: Option<String>,
+        telephone_number: Option<String>,
+    },
+    /// Published once a signed certificate has actually been produced
+    /// for a provisioned account. Identity-keyed on account_id, not
+    /// (identity, instance_binding) -- mirrors
+    /// AgentEscrowIssuanceCompleted's own reasoning exactly: an
+    /// account is a durable thing, not a per-pod-instance one.
+    AccountCertificateIssued {
+        account_id: String,
+        /// Carried so CredentialsState::apply can consume the
+        /// matching AccountProvisioned entry (keyed by username) in
+        /// the same fold.
+        username: String,
+        serial: String,
+        timestamp: i64,
+        certificate_pem: String,
+    },
 }
 
 #[cfg(test)]

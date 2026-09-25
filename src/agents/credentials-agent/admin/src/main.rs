@@ -26,7 +26,9 @@ mod publish;
 use cert_issuer_common::permission::Permission;
 use clap::{Parser, Subcommand};
 use credentials_agent_common::events::{CredentialsEvent, GrantReason, RevocationReason};
-use credentials_agent_common::{CREDENTIALS_GRANTS_TOPIC, CREDENTIALS_REVOCATIONS_TOPIC};
+use credentials_agent_common::{
+    CREDENTIALS_ACCOUNT_PROVISIONING_TOPIC, CREDENTIALS_GRANTS_TOPIC, CREDENTIALS_REVOCATIONS_TOPIC,
+};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -71,6 +73,47 @@ enum Command {
         #[arg(long)]
         revoked_by: String,
     },
+    /// Provision a new Polar account -- an admin-side act, mirroring
+    /// Grant's own shape, but for a durable account identity rather
+    /// than a permission on an existing one. The account isn't usable
+    /// until the holder submits a CSR claiming it by username and
+    /// email (see the account-claim flow) -- this only reserves the
+    /// account_id/permissions/field-defaults for that later claim.
+    /// Single-use: a second claim attempt after the first succeeds
+    /// finds nothing, by construction -- no separate check needed.
+    ProvisionAccount {
+        /// The account's own durable identity -- a fresh UUID,
+        /// minted here, never chosen by or made known to the user in
+        /// advance.
+        #[arg(long)]
+        account_id: String,
+        /// The human-facing nickname the user will present, together
+        /// with email, to claim this account. Cross-references
+        /// account_id; not itself the identity.
+        #[arg(long)]
+        username: String,
+        /// Security-sensitive, admin-authoritative -- the actual
+        /// gate on the claim, never user-suppliable at claim time.
+        #[arg(long)]
+        email: String,
+        #[arg(long = "permission", required = true, value_parser = Permission::from_san_string)]
+        permissions: Vec<Permission>,
+        #[arg(long)]
+        provisioned_by: String,
+        #[arg(long, value_enum)]
+        reason: GrantReason,
+        /// Admin-settable defaults for fields the user's own CSR may
+        /// still override -- never used for anything
+        /// security-sensitive.
+        #[arg(long)]
+        given_name: Option<String>,
+        #[arg(long)]
+        surname: Option<String>,
+        #[arg(long)]
+        title: Option<String>,
+        #[arg(long)]
+        telephone_number: Option<String>,
+    },
 }
 
 #[tokio::main]
@@ -108,6 +151,34 @@ fn event_and_topic_from_command(command: Command) -> (CredentialsEvent, &'static
                 timestamp: polar::time::now_millis(),
             },
             CREDENTIALS_REVOCATIONS_TOPIC,
+        ),
+        Command::ProvisionAccount {
+            account_id,
+            username,
+            email,
+            permissions,
+            provisioned_by,
+            reason,
+            given_name,
+            surname,
+            title,
+            telephone_number,
+        } => (
+            CredentialsEvent::AccountProvisioned {
+                account_id,
+                username,
+                email,
+                permissions,
+                provisioned_by,
+                timestamp: polar::time::now_millis(),
+                reason,
+                via_bootstrap: false,
+                given_name,
+                surname,
+                title,
+                telephone_number,
+            },
+            CREDENTIALS_ACCOUNT_PROVISIONING_TOPIC,
         ),
     }
 }

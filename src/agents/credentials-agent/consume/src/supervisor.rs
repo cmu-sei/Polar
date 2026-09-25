@@ -31,67 +31,74 @@
 #[cfg(test)]
 static NAMED_ACTOR_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+// ---- External crates ----
+use cassini_client::{TCPClientConfig, TcpClientActor, TcpClientArgs, TcpClientMessage};
+use cassini_types::{ClientEvent, WireTraceCtx};
+use cert_client::handshake::HandshakeClient;
+use polar::health::{DepCertEndpoint, HealthCheckActor, HealthCheckArgs, HealthCheckMessage};
+use polar::request_reply::Envelope;
+use polar::{Supervisor, SupervisorMessage};
+use ractor::registry::where_is;
+use ractor::{Actor, ActorProcessingErr, ActorRef, OutputPort, SupervisionEvent, async_trait};
+use std::sync::Arc;
+use tracing::{debug, error, info, warn};
+
+// ---- credentials_agent_common: topics ----
+use credentials_agent_common::{
+    CREDENTIALS_ACCOUNT_PROVISIONING_TOPIC, CREDENTIALS_AGENT_ESCROW_ISSUANCE_REQUESTS_TOPIC,
+    CREDENTIALS_AGENT_ESCROW_KEY_REQUESTS_TOPIC, CREDENTIALS_CERTIFICATE_REQUESTS_TOPIC,
+    CREDENTIALS_DECRYPT_ON_BEHALF_OF_REQUESTS_TOPIC, CREDENTIALS_ESCROW_KEY_REQUESTS_TOPIC,
+    CREDENTIALS_GRANTS_TOPIC, CREDENTIALS_IDENTITY_NORMALIZATION_REQUESTS_TOPIC,
+    CREDENTIALS_ISSUANCE_REQUESTS_TOPIC, CREDENTIALS_RETRIEVE_AGENT_ESCROW_KEYPAIR_REQUESTS_TOPIC,
+    CREDENTIALS_RETRIEVE_SECRET_REQUESTS_TOPIC, CREDENTIALS_REVOCATIONS_TOPIC,
+    CREDENTIALS_STORE_SECRET_REQUESTS_TOPIC,
+};
+
+// ---- credentials_agent_common: wire types ----
+use credentials_agent_common::agent_escrow_issuance::AgentEscrowIssuanceRequest;
+use credentials_agent_common::agent_escrow_key::AgentEscrowKeyRequest;
+use credentials_agent_common::agent_escrow_keypair_bootstrap::RetrieveAgentEscrowKeypairRequest;
+use credentials_agent_common::certificate::CertificateRequest;
+use credentials_agent_common::decrypt_on_behalf_of::DecryptOnBehalfOfRequest;
+use credentials_agent_common::escrow_key::EscrowKeyRequest;
+use credentials_agent_common::events::CredentialsEvent;
+use credentials_agent_common::identity::IdentityNormalizationRequest;
+use credentials_agent_common::issuance::IssuanceRequest;
+use credentials_agent_common::retrieve_secret::RetrieveSecretRequest;
+use credentials_agent_common::secret::StoreSecretRequest;
+
+// ---- Local: shared infrastructure ----
+use crate::credential::configured_kubernetes_issuers;
+use crate::introspection::IntrospectionClient;
 use crate::ledger::{LedgerActor, LedgerActorArgs, LedgerMessage};
 use crate::projection::{ProjectionActor, ProjectionActorArgs, ProjectionMessage};
-use crate::identity_normalization::IdentityNormalizationHandler;
-use crate::identity_normalization_actor::{IdentityNormalizationActor, IdentityNormalizationActorArgs};
-use crate::escrow_key::EscrowKeyHandler;
-use crate::certificate::CertificateHandler;
-use crate::certificate_actor::{CertificateActor, CertificateActorArgs};
-use crate::escrow_key_actor::{EscrowKeyActor, EscrowKeyActorArgs};
-use crate::store_secret::StoreSecretHandler;
-use crate::store_secret_actor::{StoreSecretActor, StoreSecretActorArgs, StoreSecretDispatch};
-use crate::retrieve_secret::RetrieveSecretHandler;
-use crate::retrieve_secret_actor::{RetrieveSecretActor, RetrieveSecretActorArgs, RetrieveSecretDispatch};
+
+// ---- Local: handler + actor pairs, one per request/reply flow ----
+use crate::agent_escrow_issuance::AgentEscrowIssuanceHandler;
+use crate::agent_escrow_issuance_actor::{AgentEscrowIssuanceActor, AgentEscrowIssuanceActorArgs};
+use crate::agent_escrow_key::AgentEscrowKeyHandler;
+use crate::agent_escrow_key_actor::{AgentEscrowKeyActor, AgentEscrowKeyActorArgs};
 use crate::agent_escrow_keypair_bootstrap::AgentEscrowKeypairBootstrapHandler;
 use crate::agent_escrow_keypair_bootstrap_actor::{
     AgentEscrowKeypairBootstrapActor, AgentEscrowKeypairBootstrapActorArgs,
     AgentEscrowKeypairBootstrapDispatch,
 };
+use crate::certificate::CertificateHandler;
+use crate::certificate_actor::{CertificateActor, CertificateActorArgs};
 use crate::decrypt_on_behalf_of::DecryptOnBehalfOfHandler;
 use crate::decrypt_on_behalf_of_actor::{
     DecryptOnBehalfOfActor, DecryptOnBehalfOfActorArgs, DecryptOnBehalfOfDispatch,
 };
-use credentials_agent_common::decrypt_on_behalf_of::DecryptOnBehalfOfRequest;
-use credentials_agent_common::CREDENTIALS_DECRYPT_ON_BEHALF_OF_REQUESTS_TOPIC;
-use credentials_agent_common::CREDENTIALS_CERTIFICATE_REQUESTS_TOPIC;
-use credentials_agent_common::CREDENTIALS_ESCROW_KEY_REQUESTS_TOPIC;
-use credentials_agent_common::CREDENTIALS_STORE_SECRET_REQUESTS_TOPIC;
-use credentials_agent_common::certificate::CertificateRequest;
-use credentials_agent_common::escrow_key::EscrowKeyRequest;
-use credentials_agent_common::secret::StoreSecretRequest;
-use credentials_agent_common::retrieve_secret::RetrieveSecretRequest;
-use credentials_agent_common::CREDENTIALS_RETRIEVE_SECRET_REQUESTS_TOPIC;
-use credentials_agent_common::agent_escrow_keypair_bootstrap::RetrieveAgentEscrowKeypairRequest;
-use credentials_agent_common::CREDENTIALS_RETRIEVE_AGENT_ESCROW_KEYPAIR_REQUESTS_TOPIC;
-use cassini_client::{TcpClientMessage, TCPClientConfig, TcpClientActor, TcpClientArgs};
-use cassini_types::{ClientEvent,WireTraceCtx};
-use credentials_agent_common::{CREDENTIALS_GRANTS_TOPIC, CREDENTIALS_REVOCATIONS_TOPIC};
-use credentials_agent_common::events::CredentialsEvent;
-use credentials_agent_common::identity::IdentityNormalizationRequest;
-use credentials_agent_common::CREDENTIALS_IDENTITY_NORMALIZATION_REQUESTS_TOPIC;
-use polar::health::{DepCertEndpoint, HealthCheckActor, HealthCheckArgs, HealthCheckMessage};
-use polar::{Supervisor, SupervisorMessage};
-use ractor::{Actor, ActorProcessingErr, ActorRef, OutputPort, SupervisionEvent, async_trait};
-use ractor::registry::where_is;
-use std::sync::Arc;
-use tracing::{debug, error, info, warn};
-use crate::credential::configured_kubernetes_issuers;
-use crate::introspection::IntrospectionClient;
+use crate::escrow_key::EscrowKeyHandler;
+use crate::escrow_key_actor::{EscrowKeyActor, EscrowKeyActorArgs};
+use crate::identity_normalization::IdentityNormalizationHandler;
+use crate::identity_normalization_actor::{IdentityNormalizationActor, IdentityNormalizationActorArgs};
 use crate::issuance::IssuanceHandler;
 use crate::issuance_actor::{IssuanceActor, IssuanceActorArgs};
-use crate::agent_escrow_issuance::AgentEscrowIssuanceHandler;
-use crate::agent_escrow_issuance_actor::{AgentEscrowIssuanceActor, AgentEscrowIssuanceActorArgs};
-use crate::agent_escrow_key::AgentEscrowKeyHandler;
-use crate::agent_escrow_key_actor::{AgentEscrowKeyActor, AgentEscrowKeyActorArgs};
-use cert_client::handshake::HandshakeClient;
-use credentials_agent_common::CREDENTIALS_ISSUANCE_REQUESTS_TOPIC;
-use credentials_agent_common::CREDENTIALS_AGENT_ESCROW_ISSUANCE_REQUESTS_TOPIC;
-use credentials_agent_common::CREDENTIALS_AGENT_ESCROW_KEY_REQUESTS_TOPIC;
-use credentials_agent_common::issuance::IssuanceRequest;
-use credentials_agent_common::agent_escrow_issuance::AgentEscrowIssuanceRequest;
-use credentials_agent_common::agent_escrow_key::AgentEscrowKeyRequest;
-use polar::request_reply::Envelope;
+use crate::retrieve_secret::RetrieveSecretHandler;
+use crate::retrieve_secret_actor::{RetrieveSecretActor, RetrieveSecretActorArgs, RetrieveSecretDispatch};
+use crate::store_secret::StoreSecretHandler;
+use crate::store_secret_actor::{StoreSecretActor, StoreSecretActorArgs, StoreSecretDispatch};
 
 const HEALTHCHECK_ACTOR_NAME: &str = "polar.credentials-agent.healthcheck";
 const LEDGER_ACTOR_NAME: &str = "polar.credentials-agent.ledger";
@@ -740,6 +747,7 @@ impl Actor for ConsumerSupervisor {
                         for topic in [
                             CREDENTIALS_GRANTS_TOPIC,
                             CREDENTIALS_REVOCATIONS_TOPIC,
+                            CREDENTIALS_ACCOUNT_PROVISIONING_TOPIC,
                             CREDENTIALS_ISSUANCE_REQUESTS_TOPIC,
                             CREDENTIALS_IDENTITY_NORMALIZATION_REQUESTS_TOPIC,
                             CREDENTIALS_ESCROW_KEY_REQUESTS_TOPIC,

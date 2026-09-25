@@ -321,7 +321,7 @@ fn graph_ops_for_event(event: &CredentialsEvent, grant_existed: bool) -> Vec<Gra
                 ],
             )];
 
-            // Same reasoning as IssuanceCompleted's own grant-existed
+        // Same reasoning as IssuanceCompleted's own grant-existed
             // check above -- never create a spurious grant node for
             // the (far more common, given the uniform-permission
             // default) case where no Grant event ever existed for
@@ -340,6 +340,96 @@ fn graph_ops_for_event(event: &CredentialsEvent, grant_existed: bool) -> Vec<Gra
             }
 
             vec![GraphOp::UpsertNodes { items }]
+        }
+        CredentialsEvent::AccountProvisioned {
+            account_id,
+            username,
+            email,
+            provisioned_by,
+            timestamp,
+            reason,
+            via_bootstrap,
+            // Permissions and the CSR-overridable personal-detail
+            // defaults deliberately not projected -- same
+            // metadata-only, observability-only discipline as every
+            // other event here. An operator wanting the full record
+            // reads it from the ledger's own derived state, not the
+            // graph.
+            permissions: _,
+            given_name: _,
+            surname: _,
+            title: _,
+            telephone_number: _,
+        } => {
+            vec![GraphOp::UpsertNodes {
+                items: vec![(
+                    CredentialsNodeKey::Account {
+                        account_id: account_id.clone(),
+                    }
+                    .into_key(),
+                    vec![
+                        Property("username".to_string(), GraphValue::String(username.clone())),
+                        Property("email".to_string(), GraphValue::String(email.clone())),
+                        Property(
+                            "provisioned_by".to_string(),
+                            GraphValue::String(provisioned_by.clone()),
+                        ),
+                        Property("provisioned_at".to_string(), GraphValue::I64(*timestamp)),
+                        Property(
+                            "reason".to_string(),
+                            GraphValue::String(format!("{reason:?}")),
+                        ),
+                        Property("via_bootstrap".to_string(), GraphValue::Bool(*via_bootstrap)),
+                        Property("claimed".to_string(), GraphValue::Bool(false)),
+                    ],
+                )],
+            }]
+        }
+        CredentialsEvent::AccountCertificateIssued {
+            account_id,
+            username,
+            serial,
+            timestamp,
+            // Deliberately not projected, same reasoning as
+            // IssuanceCompleted's own certificate_pem above.
+            certificate_pem: _,
+        } => {
+            vec![GraphOp::UpsertNodes {
+                items: vec![
+                    (
+                        CredentialsNodeKey::Account {
+                            account_id: account_id.clone(),
+                        }
+                        .into_key(),
+                        vec![
+                            Property("claimed".to_string(), GraphValue::Bool(true)),
+                            Property("claimed_at".to_string(), GraphValue::I64(*timestamp)),
+                            Property(
+                                "current_serial".to_string(),
+                                GraphValue::String(serial.clone()),
+                            ),
+                        ],
+                    ),
+                    (
+                        CredentialsNodeKey::Certificate {
+                            serial: serial.clone(),
+                        }
+                        .into_key(),
+                        vec![
+                            Property(
+                                "identity".to_string(),
+                                GraphValue::String(account_id.clone()),
+                            ),
+                            Property(
+                                "username".to_string(),
+                                GraphValue::String(username.clone()),
+                            ),
+                            Property("issued_at".to_string(), GraphValue::I64(*timestamp)),
+                            Property("revoked".to_string(), GraphValue::Bool(false)),
+                        ],
+                    ),
+                ],
+            }]
         }
     }
 }
@@ -417,7 +507,9 @@ fn event_timestamp(event: &CredentialsEvent) -> i64 {
         | CredentialsEvent::Revoke { timestamp, .. }
         | CredentialsEvent::IssuanceCompleted { timestamp, .. }
         | CredentialsEvent::SecretStored { timestamp, .. }
-        | CredentialsEvent::AgentEscrowIssuanceCompleted { timestamp, .. } => *timestamp,
+        | CredentialsEvent::AgentEscrowIssuanceCompleted { timestamp, .. }
+        | CredentialsEvent::AccountProvisioned { timestamp, .. }
+        | CredentialsEvent::AccountCertificateIssued { timestamp, .. } => *timestamp,
     }
 }
 

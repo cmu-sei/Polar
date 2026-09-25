@@ -43,6 +43,7 @@ pub mod decrypt_on_behalf_of;
 /// since these are commands, not queries.
 pub const CREDENTIALS_GRANTS_TOPIC: &str = "credentials-grants";
 pub const CREDENTIALS_REVOCATIONS_TOPIC: &str = "credentials-revocations";
+pub const CREDENTIALS_ACCOUNT_PROVISIONING_TOPIC: &str = "credentials-account-provisioning";
 
 /// The human self-service and admin-bootstrap issuance lifecycles --
 /// see issuance.rs's own IssuanceRequest/Reply. Proxied through the

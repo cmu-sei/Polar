@@ -70,6 +70,34 @@ pub struct AgentEscrowCertificateRecord {
     pub certificate_pem: String,
 }
 
+/// A Polar account an admin (or the bootstrap identity) has
+/// provisioned but that hasn't yet been claimed with a CSR.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProvisionedAccountRecord {
+    pub account_id: String,
+    pub email: String,
+    pub permissions: Vec<cert_issuer_common::permission::Permission>,
+    pub provisioned_by: String,
+    pub timestamp: i64,
+    pub reason: GrantReason,
+    pub given_name: Option<String>,
+    pub surname: Option<String>,
+    pub title: Option<String>,
+    pub telephone_number: Option<String>,
+}
+
+/// A currently-issued certificate for a Polar account, keyed on
+/// account_id alone -- mirrors AgentEscrowCertificateRecord. Does not
+/// track revocation yet, same deliberately-named gap as that record.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AccountCertificateRecord {
+    pub account_id: String,
+    pub username: String,
+    pub serial: String,
+    pub timestamp: i64,
+    pub certificate_pem: String,
+}
+
 /// The Credentials Agent's derived state -- entirely a function of
 /// folding `credentials_agent_common::events::CredentialsEvent`
 /// through `apply()`, in order, from an empty state. Never itself
@@ -108,6 +136,23 @@ pub struct CredentialsState {
     /// own doc comment for why this is a separate map from
     /// valid_certificates, not folded into it.
     agent_escrow_certificates: HashMap<String, AgentEscrowCertificateRecord>,
+
+    /// Provisioned-but-unclaimed Polar accounts, keyed by username --
+    /// single-use, same as active_grants: removed the moment a
+    /// matching AccountCertificateIssued is folded. This IS the
+    /// no-self-renewal enforcement -- a second claim attempt with the
+    /// same username simply finds nothing here, no separate check
+    /// needed.
+    active_provisioned_accounts: HashMap<String, ProvisionedAccountRecord>,
+
+    /// Every currently-issued account certificate, keyed on
+    /// account_id alone.
+    account_certificates: HashMap<String, AccountCertificateRecord>,
+
+    /// True once the one-time admin-bootstrap path has ever
+    /// succeeded -- checked before allowing a via_bootstrap
+    /// AccountProvisioned to fold a second time.
+    bootstrap_completed: bool,
 }
 
 impl CredentialsState {
@@ -245,6 +290,58 @@ impl CredentialsState {
                     },
                 );
             }
+            CredentialsEvent::AccountProvisioned {
+                account_id,
+                username,
+                email,
+                permissions,
+                provisioned_by,
+                timestamp,
+                reason,
+                via_bootstrap,
+                given_name,
+                surname,
+                title,
+                telephone_number,
+            } => {
+                self.active_provisioned_accounts.insert(
+                    username.clone(),
+                    ProvisionedAccountRecord {
+                        account_id: account_id.clone(),
+                        email: email.clone(),
+                        permissions: permissions.clone(),
+                        provisioned_by: provisioned_by.clone(),
+                        timestamp: *timestamp,
+                        reason: *reason,
+                        given_name: given_name.clone(),
+                        surname: surname.clone(),
+                        title: title.clone(),
+                        telephone_number: telephone_number.clone(),
+                    },
+                );
+                if *via_bootstrap {
+                    self.bootstrap_completed = true;
+                }
+            }
+            CredentialsEvent::AccountCertificateIssued {
+                account_id,
+                username,
+                serial,
+                timestamp,
+                certificate_pem,
+            } => {
+                self.active_provisioned_accounts.remove(username);
+                self.account_certificates.insert(
+                    account_id.clone(),
+                    AccountCertificateRecord {
+                        account_id: account_id.clone(),
+                        username: username.clone(),
+                        serial: serial.clone(),
+                        timestamp: *timestamp,
+                        certificate_pem: certificate_pem.clone(),
+                    },
+                );
+            }
         }
         superseded_serials
     }
@@ -303,6 +400,24 @@ impl CredentialsState {
         identity: &str,
     ) -> Option<&AgentEscrowCertificateRecord> {
         self.agent_escrow_certificates.get(identity)
+    }
+
+    /// The provisioned-but-unclaimed account record for `username`,
+    /// if any -- `None` if never provisioned, or already claimed.
+    pub fn provisioned_account_for(&self, username: &str) -> Option<&ProvisionedAccountRecord> {
+        self.active_provisioned_accounts.get(username)
+    }
+
+    /// True once the one-time admin-bootstrap path has ever
+    /// succeeded.
+    pub fn bootstrap_completed(&self) -> bool {
+        self.bootstrap_completed
+    }
+
+    /// The current account certificate record for `account_id`, if
+    /// one has ever been issued.
+    pub fn account_certificate_for(&self, account_id: &str) -> Option<&AccountCertificateRecord> {
+        self.account_certificates.get(account_id)
     }
 }
 

@@ -131,6 +131,20 @@ pub enum LedgerMessage {
         identity: String,
         reply: RpcReplyPort<Option<crate::state::AgentEscrowCertificateRecord>>,
     },
+    /// The provisioned-but-unclaimed account record for `username`,
+    /// if any -- the claim-flow's own analog of CheckGrant. `None`
+    /// means either never provisioned, or already claimed (single-use,
+    /// same as a Grant).
+    CheckProvisionedAccount {
+        username: String,
+        reply: RpcReplyPort<Option<crate::state::ProvisionedAccountRecord>>,
+    },
+    /// Whether the one-time admin-bootstrap path has ever succeeded --
+    /// checked before allowing a via_bootstrap AccountProvisioned to
+    /// fold a second time.
+    CheckBootstrapCompleted {
+        reply: RpcReplyPort<bool>,
+    },
     /// The current, escrowed secret for `name`, if one has ever been
     /// stored -- backs the general secret-retrieve mechanism.
     /// Mirrors CheckCertificate/CheckAgentEscrowKey's own
@@ -248,6 +262,16 @@ impl Actor for LedgerActor {
                     .agent_escrow_certificate_for(&identity)
                     .cloned();
                 let _ = reply.send(record);
+            }
+            LedgerMessage::CheckProvisionedAccount { username, reply } => {
+                let record = state
+                    .credentials_state
+                    .provisioned_account_for(&username)
+                    .cloned();
+                let _ = reply.send(record);
+            }
+            LedgerMessage::CheckBootstrapCompleted { reply } => {
+                let _ = reply.send(state.credentials_state.bootstrap_completed());
             }
             LedgerMessage::CheckSecret { name, reply } => {
                 let secret = state.credentials_state.secret_for(&name).cloned();
