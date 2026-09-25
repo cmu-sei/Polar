@@ -185,7 +185,7 @@ polar-test-graph = { path = "polar-test-graph" }
 openapi-common = { path = "openapi/common" }
 time = { version = "0.3.47", features = ["serde"]}
 wiremock = "0.6"
-x509-parser = { version = "0.16", features = ["verify"]}
+x509-parser = { version = "0.18", features = ["verify"] }
 # Our own fork -- crates.io's published rsa crate keeps
 # oaep_decrypt_digest as pub(crate), unreachable from outside the
 # crate. That function is the real, already-audited OAEP-unpad step,
