@@ -1133,6 +1133,7 @@ cluster-build-all:
     just jira all
     just openapi all
     just build-agents all
+    just credentials-agent all
     just nu-init
     just polar-init
     just ace
@@ -1268,6 +1269,34 @@ registry-load-jaeger: registry-up
         podman exec u7s ctr -n k8s.io images rm "{{_registry_gateway}}:{{_registry_port}}/jaeger:2.13.0" > /dev/null 2>&1 || true
     fi
     echo "jaeger:2.13.0 pushed to {{_registry_host}}:{{_registry_port}}."
+
+registry-load-keycloak: registry-up
+    #!/usr/bin/env bash
+    set -euo pipefail
+    case "$(uname -m)" in
+        x86_64) arch="amd64" ;;
+        aarch64|arm64) arch="arm64" ;;
+        *) arch="$(uname -m)" ;;
+    esac
+    skopeo copy --override-os linux --override-arch "$arch" docker://quay.io/keycloak/keycloak:26.7.1 "docker://{{_registry_host}}:{{_registry_port}}/keycloak:26.7.1" --dest-tls-verify=false
+    if [ "{{_cluster_runtime}}" = "u7s" ]; then
+        podman exec u7s ctr -n k8s.io images rm "{{_registry_gateway}}:{{_registry_port}}/keycloak:26.7.1" > /dev/null 2>&1 || true
+    fi
+    echo "keycloak:26.7.1 pushed to {{_registry_host}}:{{_registry_port}}."
+
+registry-load-postgres: registry-up
+    #!/usr/bin/env bash
+    set -euo pipefail
+    case "$(uname -m)" in
+        x86_64) arch="amd64" ;;
+        aarch64|arm64) arch="arm64" ;;
+        *) arch="$(uname -m)" ;;
+    esac
+    skopeo copy --override-os linux --override-arch "$arch" docker://docker.io/library/postgres:16 "docker://{{_registry_host}}:{{_registry_port}}/postgres:16" --dest-tls-verify=false
+    if [ "{{_cluster_runtime}}" = "u7s" ]; then
+        podman exec u7s ctr -n k8s.io images rm "{{_registry_gateway}}:{{_registry_port}}/postgres:16" > /dev/null 2>&1 || true
+    fi
+    echo "postgres:16 pushed to {{_registry_host}}:{{_registry_port}}."
 
 cluster-load-provisioner:
     #!/usr/bin/env bash
