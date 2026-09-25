@@ -23,11 +23,15 @@ tracing.workspace = true
 async-trait.workspace = true
 rcgen.workspace = true
 jsonwebtoken.workspace = true
+rustls.workspace = true
+rustls-pemfile.workspace = true
+tokio-rustls.workspace = true
 
 axum = "0.7"
 tower = "0.5"
 tower-http = { version = "0.6", features = ["trace"] }
 dashmap = "6"
+hyper-util.workspace = true
 cert-issuer-common = { path = "../common" }
 polar = { path = "../../lib" }
 

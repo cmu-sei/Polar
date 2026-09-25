@@ -137,6 +137,32 @@ pub struct ValidateRequest {
     pub include_normalized_identity: bool,
 }
 
+/// Request body for the internal, mTLS-gated /internal/issue
+/// endpoint. Reachable only over cert-issuer's mTLS listener, from a
+/// caller whose own peer certificate matches the configured
+/// internal-caller allowlist -- there is no bearer token here at all,
+/// unlike IssueRequest. The caller (credentials-agent) has already
+/// done its own authorization work before ever making this call
+/// (a K8s-token check for admin bootstrap, a username/email match
+/// for an account claim); cert-issuer's only remaining job is
+/// verifying the caller's own mTLS identity and then signing exactly
+/// what it's asked to.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InternalIssueRequest {
+    pub csr_pem: String,
+    /// The identity to sign for -- asserted directly by the caller,
+    /// not derived from any token. Every caller of this endpoint
+    /// (account claims, admin bootstrap) has no token asserting an
+    /// identity at all; the caller's own prior authorization work is
+    /// what makes asserting this directly safe.
+    pub identity: String,
+    pub cert_type: CertType,
+    #[serde(default)]
+    pub extra_sans: Vec<String>,
+    #[serde(default)]
+    pub subject_dn_defaults: Option<SubjectDnDefaults>,
+}
+
 /// Error response body. Always returned on non-2xx responses.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct IssueError {
@@ -168,6 +194,11 @@ pub enum IssueOutcome {
     CaUnavailable,
     /// Anything else. Indicates a bug or unexpected infrastructure failure.
     InternalError,
+    /// /internal/issue only: the connection's own verified mTLS peer
+    /// identity is not on the configured internal-caller allowlist --
+    /// or no client certificate was presented at all. Distinct from
+    /// InvalidToken, since no token is involved in this path.
+    CallerNotAuthorized,
 }
 
 #[derive(Debug, Error)]

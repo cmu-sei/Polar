@@ -119,6 +119,30 @@ pub struct ServiceConfig {
     /// the config surface.
     pub issuers: Vec<IssuerConfig>,
     pub ca: CaConfig,
+    pub mtls: MtlsConfig,
+}
+
+/// Config for the mTLS upgrade to the existing listener -- the same
+/// bind_addr above now optionally accepts a client certificate.
+/// /issue and /validate remain reachable with no client cert
+/// presented at all, unchanged; /internal/issue requires one, and
+/// only from an identity in `internal_callers`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MtlsConfig {
+    /// DNS identity embedded in cert-issuer's own TLS server
+    /// certificate -- minted at startup from its own in-process CA
+    /// (the same one issuers.ca.issue already uses for every other
+    /// certificate), never loaded from a file. Configurable per
+    /// deployment domain, not hardcoded.
+    pub server_identity: String,
+    /// Identities allowed to reach /internal/issue, checked against
+    /// the connection's own verified mTLS peer SAN --
+    /// credentials-agent's identity, once it has one, and nothing
+    /// else. Empty by default, meaning the endpoint is unreachable
+    /// until explicitly configured -- a safe default, not an
+    /// oversight.
+    #[serde(default)]
+    pub internal_callers: Vec<String>,
 }
 
 impl ServiceConfig {
@@ -132,6 +156,17 @@ impl ServiceConfig {
     /// serious one first. Every per-issuer check runs across all
     /// configured issuers, not just the first.
     pub fn validate(&self) -> Result<(), ConfigError> {
+        // ---- Empty mTLS server identity ----
+        //
+        // The listener can't mint its own TLS server cert without
+        // this -- unlike internal_callers (fine to leave empty, that
+        // just means the internal endpoint stays unreachable), a
+        // missing server_identity would break every caller, including
+        // the existing /issue and /validate paths.
+        if self.mtls.server_identity.is_empty() {
+            return Err(ConfigError::EmptyMtlsServerIdentity);
+        }
+
         // ---- Empty issuer list ----
         //
         // A service with no trusted issuers can't validate any token
@@ -245,4 +280,6 @@ pub enum ConfigError {
         "issuer '{issuer}' uses the SuffixedClaim identity normalization strategy but has no identity_scope_claim configured"
     )]
     MissingScopeClaim { issuer: String },
+    #[error("mtls.server_identity must be non-empty -- the listener cannot mint its own TLS server certificate without it")]
+    EmptyMtlsServerIdentity,
 }

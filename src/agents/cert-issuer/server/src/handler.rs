@@ -403,5 +403,10 @@ pub fn status_for_outcome(outcome: IssueOutcome) -> u16 {
         IssueOutcome::InvalidCsr => 400,
         IssueOutcome::CaUnavailable => 503,
         IssueOutcome::InternalError => 500,
+        // /internal/issue only -- same 403 as IdentityMismatch, since
+        // both mean "the caller isn't who they'd need to be for this
+        // request to proceed," just checked via different mechanisms
+        // (mTLS peer identity here, token-derived SAN there).
+        IssueOutcome::CallerNotAuthorized => 403,
     }
 }

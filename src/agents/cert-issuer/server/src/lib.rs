@@ -16,7 +16,10 @@ pub mod handler;
 pub mod oidc;
 pub mod server;
 pub mod telemetry;
+pub mod tls;
 
 // Re-export wire types so tests in this crate can use them
 // without depending on the common crate path.
-pub use cert_issuer_common::{IssueError, IssueOutcome, IssueRequest, IssueResponse};
+pub use cert_issuer_common::{
+    InternalIssueRequest, IssueError, IssueOutcome, IssueRequest, IssueResponse,
+};
