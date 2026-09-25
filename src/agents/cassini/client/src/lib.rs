@@ -580,6 +580,7 @@ impl TcpClientActor {
 
                 match result {
                     Ok(registration_id) => {
+                        info!("Registration succeeded: {registration_id}");
                         myself
                             .send_message(TcpClientMessage::RegistrationResponse(registration_id))
                             .expect("Could not forward message to {myself:?");
