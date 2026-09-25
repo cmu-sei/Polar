@@ -9,12 +9,14 @@ use credentials_agent_common::{
 };
 use credentials_agent_observer::handler::{ObserverState, identity, issue};
 use polar::request_reply::{Envelope, ReplyRouter};
-use ractor::{Actor, ActorProcessingErr, ActorRef, OutputPort, async_trait};
+use polar::health::{DepCertEndpoint, HealthCheckActor, HealthCheckArgs, HealthCheckMessage};
+use ractor::{Actor, ActorProcessingErr, ActorRef, OutputPort, async_trait, registry::where_is};
 use std::sync::Arc;
-use tracing::{error, warn};
+use tracing::{error, info, warn};
 
 const SERVICE_NAME: &str = "credentials-agent-observer";
 const BROKER_CLIENT_NAME: &str = "CREDENTIALS_AGENT_OBSERVER_CLIENT";
+const HEALTHCHECK_ACTOR_NAME: &str = "polar.credentials-agent-observer.healthcheck";
 
 /// The one, real job this actor exists for: deliver incoming Cassini
 /// replies on the two reply topics handler.rs's own issue()/identity()
@@ -76,6 +78,13 @@ impl Actor for ReplyRouterActor {
                 }
             }
             ClientEvent::Registered { .. } => {
+                info!("ClientEvent::Registered received — subscribing to reply topics");
+                if let Some(healthcheck) = where_is(HEALTHCHECK_ACTOR_NAME.to_string()) {
+                    let healthcheck: ActorRef<HealthCheckMessage> = healthcheck.into();
+                    let _ = healthcheck.cast(HealthCheckMessage::CassiniConnected);
+                } else {
+                    error!("healthcheck actor not found while attempting to notify it of connection");
+                }
                 if let Some(client) = ractor::registry::where_is(BROKER_CLIENT_NAME.to_string()) {
                     for topic in [
                         CREDENTIALS_ISSUANCE_REPLIES_TOPIC,
@@ -101,6 +110,23 @@ impl Actor for ReplyRouterActor {
 #[tokio::main]
 async fn main() {
     polar::init_logging(SERVICE_NAME.to_string());
+
+    let dep_cert_endpoints = vec![
+        DepCertEndpoint::parse("cassini-ip-svc.polar.svc.cluster.local:8080:300")
+            .expect("cassini dep cert endpoint must parse"),
+    ];
+
+    let (_healthcheck, _) = Actor::spawn(
+        Some(HEALTHCHECK_ACTOR_NAME.to_string()),
+        HealthCheckActor,
+        HealthCheckArgs {
+            expects_graph: false,
+            rejuvenation_threshold_secs: 300,
+            dep_cert_endpoints,
+        },
+    )
+    .await
+    .expect("Expected healthcheck actor to start");
 
     let issuance_reply_router = Arc::new(ReplyRouter::new());
     let identity_reply_router = Arc::new(ReplyRouter::new());
