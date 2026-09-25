@@ -276,6 +276,7 @@ impl Handler {
             body: ValidateHandlerBody::Success(ValidateResponse {
                 workload_identity: claims.workload_identity,
                 instance_binding: claims.instance_binding,
+                jti: claims.jti,
                 normalized_identity,
             }),
         }

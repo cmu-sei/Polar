@@ -1026,6 +1026,7 @@ mod issuance_wiring_tests {
                 cert_issuer_common::ValidateResponse {
                     workload_identity: "system:serviceaccount:polar:admin-tool".to_string(),
                     instance_binding: Some("admin-tool-uid".to_string()),
+                    jti: None,
                     normalized_identity: None,
                 },
             ))
@@ -1174,6 +1175,7 @@ mod agent_escrow_wiring_tests {
                 cert_issuer_common::ValidateResponse {
                     workload_identity: "system:serviceaccount:polar:git-observer".to_string(),
                     instance_binding: Some("pod-uid-1".to_string()),
+                    jti: None,
                     normalized_identity: None,
                 },
             ))
@@ -1775,6 +1777,7 @@ mod identity_normalization_wiring_tests {
                 cert_issuer_common::ValidateResponse {
                     workload_identity: "testuser".to_string(),
                     instance_binding: None,
+                    jti: None,
                     normalized_identity: Some("testuser.polar.keycloak-issuer".to_string()),
                 },
             ))

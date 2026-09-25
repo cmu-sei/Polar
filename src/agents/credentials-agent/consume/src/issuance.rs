@@ -326,6 +326,7 @@ mod tests {
                 cert_issuer_common::ValidateResponse {
                     workload_identity: "system:serviceaccount:polar:admin-tool".to_string(),
                     instance_binding: Some("admin-tool-uid".to_string()),
+                    jti: None,
                     normalized_identity: None,
                 },
             ))
@@ -371,6 +372,7 @@ mod tests {
                 cert_issuer_common::ValidateResponse {
                     workload_identity: "testuser".to_string(),
                     instance_binding: Some("session-1".to_string()),
+                    jti: None,
                     normalized_identity: None,
                 },
             ))
@@ -451,6 +453,7 @@ mod tests {
                 cert_issuer_common::ValidateResponse {
                     workload_identity: "nobody-granted-this-user".to_string(),
                     instance_binding: Some("session-1".to_string()),
+                    jti: None,
                     normalized_identity: None,
                 },
             ))
@@ -493,6 +496,7 @@ mod tests {
                 cert_issuer_common::ValidateResponse {
                     workload_identity: "system:serviceaccount:polar:admin-tool".to_string(),
                     instance_binding: Some("admin-tool-uid".to_string()),
+                    jti: None,
                     normalized_identity: None,
                 },
             ))

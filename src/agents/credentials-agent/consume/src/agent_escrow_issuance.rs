@@ -338,6 +338,7 @@ mod tests {
                 cert_issuer_common::ValidateResponse {
                     workload_identity: "system:serviceaccount:polar:git-observer".to_string(),
                     instance_binding: Some("pod-uid-1".to_string()),
+                    jti: None,
                     normalized_identity: None,
                 },
             ))
@@ -402,6 +403,7 @@ mod tests {
                 cert_issuer_common::ValidateResponse {
                     workload_identity: "system:serviceaccount:polar:git-observer".to_string(),
                     instance_binding: Some("pod-uid-2".to_string()),
+                    jti: None,
                     normalized_identity: None,
                 },
             ))
@@ -472,6 +474,7 @@ mod tests {
                 cert_issuer_common::ValidateResponse {
                     workload_identity: "system:serviceaccount:polar:nobody-granted-this".to_string(),
                     instance_binding: Some("pod-uid-1".to_string()),
+                    jti: None,
                     normalized_identity: None,
                 },
             ))
@@ -512,6 +515,7 @@ mod tests {
                 cert_issuer_common::ValidateResponse {
                     workload_identity: "system:serviceaccount:polar:special-agent".to_string(),
                     instance_binding: Some("pod-uid-1".to_string()),
+                    jti: None,
                     normalized_identity: None,
                 },
             ))

@@ -80,6 +80,17 @@ use tracing::{debug, instrument};
 pub struct ValidatedClaims {
     pub workload_identity: String,
     pub instance_binding: Option<String>,
+    /// The standard JWT `jti` claim (RFC 7519 section 4.1.7), if
+    /// present -- a value the issuer asserts is unique per token
+    /// mint. Extracted unconditionally, with no policy attached here:
+    /// this is generic claim extraction, same as issuer/audience
+    /// below. Currently used by credentials-agent as a fallback
+    /// instance-binding value for the one identity (the dedicated
+    /// admin-bootstrap ServiceAccount) that has no pod-UID claim to
+    /// bind to at all -- see credentials-agent-architecture.md's
+    /// admin-bootstrap section. That's credentials-agent's own,
+    /// narrowly-scoped policy decision, not enforced or assumed here.
+    pub jti: Option<String>,
     pub issuer: String,
     pub audience: String,
     pub raw: serde_json::Value,
@@ -358,6 +369,13 @@ impl Validator {
         let instance_binding =
             extract_optional_string_claim(&raw_claims, &issuer_cfg.instance_binding_claim);
 
+        // `jti` (RFC 7519 4.1.7) is a standard top-level claim, not a
+        // per-issuer-configurable path the way instance_binding_claim
+        // is -- every issuer that sets it at all sets it at this
+        // same, fixed location. See ValidatedClaims::jti's own doc
+        // comment for what this is (and isn't) used for downstream.
+        let jti = extract_optional_string_claim(&raw_claims, "jti");
+
         // Only meaningful for issuers using SuffixedClaim -- None here
         // for KubernetesServiceAccount, whose scoping comes from its
         // own config (cluster_domain), not a second token claim.
@@ -395,6 +413,7 @@ impl Validator {
         Ok(ValidatedClaims {
             workload_identity,
             instance_binding,
+            jti,
             issuer,
             audience,
             raw: raw_claims,

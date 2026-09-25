@@ -109,6 +109,12 @@ pub struct ValidateResponse {
     /// exact raw value, per credentials-agent-architecture.md.
     pub workload_identity: String,
     pub instance_binding: Option<String>,
+    /// The standard JWT `jti` claim, if present. See
+    /// oidc::ValidatedClaims::jti's own doc comment on cert-issuer's
+    /// side for what this is -- generic claim extraction, no policy
+    /// attached here either; credentials-agent decides what (if
+    /// anything) to do with it.
+    pub jti: Option<String>,
     /// The normalized, DNS-safe identity /issue's CSR-matching logic
     /// will actually check against -- computed via the same
     /// normalize_identity call /issue itself uses, so a client

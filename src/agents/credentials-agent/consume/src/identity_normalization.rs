@@ -81,6 +81,7 @@ mod tests {
                 cert_issuer_common::ValidateResponse {
                     workload_identity: "testuser".to_string(),
                     instance_binding: None,
+                    jti: None,
                     normalized_identity: Some("testuser.polar.keycloak-issuer".to_string()),
                 },
             ))
