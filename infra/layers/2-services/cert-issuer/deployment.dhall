@@ -2,6 +2,7 @@
 
 let k8s       = ../../../schema/kubernetes.dhall
 let Constants = ../../../schema/constants.dhall
+let CaProvisioning = ../../../schema/ca-provisioning.dhall
 
 let render =
       \(v :
@@ -13,9 +14,44 @@ let render =
           , caVolumeName    : Text
           , caCertPath      : Text
           , caKeyPath       : Text
+          , caProvisioning  : CaProvisioning
           }
       ) ->
-        k8s.Deployment::{
+        -- Provisioned: mount the operator-created Secret read-only,
+        -- with fsGroup so the container's non-root user can read a key
+        -- the kubelet writes as group-owned. SelfBootstrap: the
+        -- existing PVC, writable, no fsGroup needed since cert-issuer
+        -- itself creates the files.
+        let caVolume =
+              merge
+                { Provisioned =
+                    k8s.Volume::{
+                    , name   = v.caVolumeName
+                    , secret = Some k8s.SecretVolumeSource::{
+                      , secretName  = Some "cert-issuer-ca"
+                      , items       = Some
+                        [ k8s.KeyToPath::{ key = "ca.crt", path = "ca.crt" }
+                        , k8s.KeyToPath::{ key = "ca.key", path = "ca.key" }
+                        ]
+                      , defaultMode = Some 288 -- 0440
+                      }
+                    }
+                , SelfBootstrap =
+                    k8s.Volume::{
+                    , name                  = v.caVolumeName
+                    , persistentVolumeClaim = Some k8s.PersistentVolumeClaimVolumeSource::{ claimName = "${v.name}-ca" }
+                    }
+                }
+                v.caProvisioning
+        let podSecurityContext =
+              merge
+                { Provisioned =
+                    Some k8s.PodSecurityContext::{ fsGroup = Some 1000 }
+                , SelfBootstrap = None k8s.PodSecurityContext.Type
+                }
+                v.caProvisioning
+
+        in  k8s.Deployment::{
         , metadata = k8s.ObjectMeta::{
           , name      = Some v.name
           , namespace = Some Constants.PolarNamespace
@@ -31,19 +67,13 @@ let render =
             , spec = Some k8s.PodSpec::{
               , serviceAccountName = Some v.name
               , automountServiceAccountToken = Some True
+              , securityContext    = podSecurityContext
               , imagePullSecrets = Some v.imagePullSecrets
               , volumes = Some
-                [ k8s.Volume::{
-                  , name                  = v.caVolumeName
-                  , persistentVolumeClaim = Some k8s.PersistentVolumeClaimVolumeSource::{ claimName = "${v.name}-ca" }
-                  }
+                [ caVolume
                 , k8s.Volume::{
                   , name      = "config"
                   , configMap = Some k8s.ConfigMapVolumeSource::{ name = Some "${v.name}-config" }
-                  }
-                , k8s.Volume::{
-                  , name      = "kube-api-ca"
-                  , hostPath  = Some k8s.HostPathVolumeSource::{ path = "/var/run/secrets/kubernetes.io/serviceaccount" }
                   }
                 ]
               , containers =

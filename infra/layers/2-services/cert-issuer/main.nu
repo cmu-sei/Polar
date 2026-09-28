@@ -41,7 +41,7 @@ def main [context_nuon: string] {
 
     # Deployment
     let tmp  = (mktemp --suffix ".dhall")
-    let expr = "let v = " + $merged + " in " + $chart_dir + "/deployment.dhall { name = v.name, image = v.image, imagePullPolicy = v.imagePullPolicy, imagePullSecrets = v.imagePullSecrets, port = v.port, caVolumeName = v.caVolumeName, caCertPath = v.caCertPath, caKeyPath = v.caKeyPath }"
+    let expr = "let v = " + $merged + " in " + $chart_dir + "/deployment.dhall { name = v.name, image = v.image, imagePullPolicy = v.imagePullPolicy, imagePullSecrets = v.imagePullSecrets, port = v.port, caVolumeName = v.caVolumeName, caCertPath = v.caCertPath, caKeyPath = v.caKeyPath, caProvisioning = v.caProvisioning }"
     $expr | save --force $tmp
     print $"  rendering deployment.dhall -> cert-issuer-deployment.yaml"
     dhall-to-yaml --file $tmp | save --force ($output_dir | path join "cert-issuer-deployment.yaml")
