@@ -22,6 +22,8 @@ let Prelude =
 -- without its clusterDomain, no runtime "is this set" check needed.
 let IdentityStrategy = ../../../schema/identity-strategy.dhall
 
+let CaProvisioning = ../../../schema/ca-provisioning.dhall
+
 let IssuerCfg =
       { issuerUrl : Text
       , audience : List Text
@@ -57,6 +59,8 @@ let render =
           -- against the connection's verified mTLS peer SAN. Empty
           -- means the endpoint is unreachable, which is the safe default.
           , mtlsInternalCallers : List Text
+          -- Where cert-issuer's CA comes from. See ca-provisioning.dhall.
+          , caProvisioning : CaProvisioning
           }
         ) ->
         let renderIssuer =
@@ -140,6 +144,12 @@ let render =
                               ( toMap
                                   { ca_cert_path = JSON.string v.caCertPath
                                   , ca_key_path = JSON.string v.caKeyPath
+                                  , provisioning =
+                                      merge
+                                        { Provisioned = JSON.string "provisioned"
+                                        , SelfBootstrap = JSON.string "self_bootstrap"
+                                        }
+                                        v.caProvisioning
                                   , default_lifetime =
                                       JSON.object
                                         ( toMap

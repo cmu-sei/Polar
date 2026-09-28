@@ -1,0 +1,12 @@
+-- infra/schema/ca-provisioning.dhall
+--
+-- How cert-issuer obtains its CA. Mirrors the Rust CaProvisioning enum
+-- (#[serde(rename_all = "snake_case")]) in cert-issuer's config.rs.
+--
+--   Provisioned   an operator generated the CA ahead of time (the admin
+--                 tool's bootstrap-ca) and it is mounted into cert-issuer,
+--                 which only loads it and never generates one.
+--   SelfBootstrap cert-issuer generates its own CA on first start. The
+--                 degraded mode for clusters where no operator ran the
+--                 provisioning step.
+< Provisioned | SelfBootstrap >
