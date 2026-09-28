@@ -41,6 +41,8 @@ let render =
 
         let podSpec = kubernetes.PodSpec::{
               , imagePullSecrets = Some v.imagePullSecrets
+              , serviceAccountName = Some v.name
+              , automountServiceAccountToken = Some False
               , volumes          = Some volumes
               , restartPolicy    = Some "Never"
               , initContainers   = Some

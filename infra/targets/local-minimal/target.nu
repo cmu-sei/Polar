@@ -35,6 +35,7 @@ def main [] {
 
         apply_order : [
             "namespaces.yaml"
+            "serviceaccounts.yaml"
             "local-path-provisioner.yaml"
             "storage-class.yaml"
             "cert-issuer-pvc.yaml"
@@ -75,7 +76,7 @@ def main [] {
         polar_init_image      : "10.0.2.2:5000/polar-init:latest"
         cassini_shutdown_token : ($env.CASSINI_SHUTDOWN_TOKEN? | default "HEYTHERE")
         identity_lifetime_overrides : [
-            { identity: "default.polar-graph.serviceaccount.cluster.local", lifetimeSecs: 31536000 }
+            { identity: "polar-neo4j.polar-graph.serviceaccount.cluster.local", lifetimeSecs: 31536000 }
             { identity: "ace.polar.serviceaccount.cluster.local", lifetimeSecs: 31536000 }
         ]
     } | to nuon

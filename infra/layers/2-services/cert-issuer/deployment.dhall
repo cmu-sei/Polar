@@ -29,6 +29,8 @@ let render =
               , labels = Some [ { mapKey = "name", mapValue = v.name } ]
               }
             , spec = Some k8s.PodSpec::{
+              , serviceAccountName = Some v.name
+              , automountServiceAccountToken = Some True
               , imagePullSecrets = Some v.imagePullSecrets
               , volumes = Some
                 [ k8s.Volume::{

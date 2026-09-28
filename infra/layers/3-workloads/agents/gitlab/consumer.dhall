@@ -53,6 +53,8 @@ let render =
                 , metadata = Some kubernetes.ObjectMeta::{ name = Some v.name, labels = Some [ { mapKey = "name", mapValue = v.name } ] }
                 , spec     = Some kubernetes.PodSpec::{
                   , imagePullSecrets = Some v.imagePullSecrets
+                  , serviceAccountName = Some v.name
+                  , automountServiceAccountToken = Some False
                   , restartPolicy    = Some "Never"
                   , volumes          = Some volumes
                   , initContainers   = Some

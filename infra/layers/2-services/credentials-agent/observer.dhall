@@ -50,6 +50,8 @@ let render =
 
         let podSpec = k8s.PodSpec::{
               , imagePullSecrets = Some v.imagePullSecrets
+              , serviceAccountName = Some v.name
+              , automountServiceAccountToken = Some False
               , restartPolicy    = Some "Never"
               , volumes          = Some volumes
               , initContainers   = Some

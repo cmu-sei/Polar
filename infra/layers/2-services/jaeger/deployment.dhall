@@ -31,6 +31,8 @@ let render =
                     , labels = Some [ { mapKey = "name", mapValue = v.name } ]
                     }
                   , spec = Some k8s.PodSpec::{
+                    , serviceAccountName = Some v.name
+                    , automountServiceAccountToken = Some False
                     , containers =
                       [ k8s.Container::{
                         , name            = v.name

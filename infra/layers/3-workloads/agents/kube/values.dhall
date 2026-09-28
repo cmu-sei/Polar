@@ -13,7 +13,7 @@ in  { name            = "kube-agent"
     , observer =
       { name               = "kube-observer"
       , image              = "polar-kube-observer:latest"
-      , serviceAccountName = "kube-observer-sa"
+      , serviceAccountName = "kube-observer"
       , secretName         = "kube-observer-sa-token"
       }
 

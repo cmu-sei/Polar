@@ -106,6 +106,10 @@ def main [
         print ""
     }
 
+    print "Checking workload ServiceAccounts..."
+    check_and_emit_service_accounts $output_dir
+    print ""
+
     print "=== Render complete ==="
     print $"  output: ($output_dir)"
     print ""
@@ -174,4 +178,84 @@ def apply_manifests [config: record, output_dir: string] {
 
     print ""
     print "Apply complete."
+}
+
+# Splits one rendered file into YAML documents. Anything unparseable is
+# reported, not silently dropped, since a skipped workload would let the
+# check below pass wrongly.
+def docs_in_file [file: string] {
+    open --raw $file
+    | split row --regex '(?m)^---\s*$'
+    | where {|d| ($d | str trim | str length) > 0 }
+    | each {|d|
+        try { $d | from yaml } catch { print $"  WARN: skipped an unparseable document in ($file)"; null }
+    }
+    | where {|d| ($d | describe | str starts-with "record") }
+}
+
+# A workload's ServiceAccount name becomes the SAN in its certificate
+# (<sa>.<namespace>.serviceaccount.cluster.local), so two workloads sharing
+# one, or falling back to `default`, are indistinguishable at the
+# application layer. Fails the render on either, then emits a ServiceAccount
+# for every workload identity no rendered manifest already declares.
+def check_and_emit_service_accounts [output_dir: string] {
+    let files = (ls $output_dir | get name | where {|f| $f | str ends-with ".yaml" })
+    let docs = ($files | reduce --fold [] {|f, acc| $acc ++ (docs_in_file $f) })
+
+    let workloads = (
+        $docs
+        | where {|d| ($d.kind? | default "") in ["Job" "Deployment" "StatefulSet" "DaemonSet"] }
+        | each {|d|
+            let pod = $d.spec.template.spec
+            {
+                kind: $d.kind
+                name: $d.metadata.name
+                namespace: ($d.metadata.namespace? | default "default")
+                sa: ($pod.serviceAccountName? | default "default")
+                automount: ($pod.automountServiceAccountToken? | default false)
+            }
+        }
+        | each {|w| $w | insert identity $"($w.sa).($w.namespace)" }
+    )
+
+    let defaulted = ($workloads | where sa == "default")
+    let dupes = (
+        $workloads
+        | where sa != "default"
+        | group-by identity
+        | transpose identity items
+        | where {|g| ($g.items | length) > 1 }
+    )
+
+    for w in $defaulted {
+        print $"  ERROR: ($w.kind) ($w.namespace)/($w.name) runs as the default ServiceAccount"
+    }
+    for g in $dupes {
+        let who = ($g.items | each {|w| $"($w.kind) ($w.name)" } | str join ", ")
+        print $"  ERROR: identity ($g.identity) is shared by: ($who)"
+    }
+    if ($defaulted | length) > 0 or ($dupes | length) > 0 { exit 1 }
+
+    let declared = (
+        $docs
+        | where {|d| ($d.kind? | default "") == "ServiceAccount" }
+        | each {|d| let ns = ($d.metadata.namespace? | default "default"); $"($d.metadata.name).($ns)" }
+    )
+    let missing = ($workloads | where {|w| not ($w.identity in $declared) })
+
+    if ($missing | length) > 0 {
+        $missing
+        | each {|w|
+            let sa = {
+                apiVersion: "v1"
+                kind: "ServiceAccount"
+                metadata: { name: $w.sa, namespace: $w.namespace }
+                automountServiceAccountToken: $w.automount
+            }
+            "---\n" + ($sa | to yaml) + "\n"
+        }
+        | str join ""
+        | save --force ($output_dir | path join "serviceaccounts.yaml")
+        print $"  emitted ($missing | length) ServiceAccount objects"
+    }
 }

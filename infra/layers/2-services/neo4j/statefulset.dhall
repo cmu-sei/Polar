@@ -139,6 +139,8 @@ let render =
                   , labels = Some [ { mapKey = "name", mapValue = v.name } ]
                   }
                 , spec = Some kubernetes.PodSpec::{
+                  , serviceAccountName = Some v.name
+                  , automountServiceAccountToken = Some False
                   , securityContext = Some kubernetes.PodSecurityContext::{
                     , fsGroup             = Some 7474
                     , fsGroupChangePolicy = Some "OnRootMismatch"

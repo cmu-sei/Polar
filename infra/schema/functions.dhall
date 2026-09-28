@@ -256,6 +256,11 @@ let makePolarInitContainer =
         , env = Some
           (   [ kubernetes.EnvVar::{ name = "POLAR_INIT_CERT_ISSUER_URL", value = Some certIssuerUrl }
               , kubernetes.EnvVar::{ name = "POLAR_INIT_TOKEN_PATH",      value = Some tokenPath      }
+              -- polar-crypto's escrow bootstrap (Phase 4) presents this
+              -- as its Kubernetes credential. Without it, it falls back
+              -- to the automounted token, whose audience is the API
+              -- server's, not cert-issuer's.
+              , kubernetes.EnvVar::{ name = "KUBERNETES_SA_TOKEN",        value = Some tokenPath      }
               ]
             # Constants.commonClientEnv
             # (   if    skipEscrowBootstrap

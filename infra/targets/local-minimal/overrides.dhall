@@ -100,7 +100,7 @@ in
     ]
   , serverLifetimeSecs = 43200
   , identityLifetimeOverrides =
-    [ { identity = "default.polar-graph.serviceaccount.cluster.local", lifetimeSecs = 31536000 } ]
+    [ { identity = "polar-neo4j.polar-graph.serviceaccount.cluster.local", lifetimeSecs = 31536000 } ]
   }
 , postgres =
   { image = registry ++ "postgres:16"
