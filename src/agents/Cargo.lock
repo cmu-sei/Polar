@@ -5497,6 +5497,8 @@ dependencies = [
  "cert-issuer-common",
  "clap",
  "credentials_agent_common",
+ "k8s-openapi",
+ "kube",
  "polar",
  "ractor",
  "rkyv",
