@@ -254,35 +254,10 @@ impl CaClient for RcgenCaClient {
 // CA bootstrap helper
 // ---------------------------------------------------------------------------
 
-/// Generate a fresh CA root keypair and self-signed certificate.
-///
-/// Used at bootstrap time (run once per environment) to produce the
-/// CA materials the cert issuer will load from disk on subsequent
-/// startups. The output is two PEM strings: the CA cert and the CA
-/// key.
-///
-/// Validity defaults to 10 years. CA roots are long-lived; rotation
-/// is a separate operational procedure (see module docs).
-///
-/// This is intentionally exposed as a library function rather than
-/// a separate binary so it can be invoked from a small `cargo run
-/// --bin generate-ca` shim or from a test.
-pub fn bootstrap_ca(common_name: &str) -> Result<(String, String), String> {
-    let mut params: rcgen::CertificateParams = Default::default();
-    params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
-    params
-        .distinguished_name
-        .push(rcgen::DnType::CommonName, common_name);
-    params.not_before = OffsetDateTime::now_utc();
-    params.not_after = OffsetDateTime::now_utc() + time::Duration::days(365 * 10);
-
-    let key_pair = KeyPair::generate().map_err(|e| format!("ca keygen: {e}"))?;
-    let cert = params
-        .self_signed(&key_pair)
-        .map_err(|e| format!("ca self-sign: {e}"))?;
-
-    Ok((cert.pem(), key_pair.serialize_pem()))
-}
+// bootstrap_ca lives in cert-issuer-common (ca_root.rs) so the admin
+// tool can generate a CA without depending on this crate; re-exported
+// here so callers of `ca::bootstrap_ca` are unchanged.
+pub use cert_issuer_common::ca_root::bootstrap_ca;
 
 // ---------------------------------------------------------------------------
 // Load-or-bootstrap entry point
@@ -319,6 +294,20 @@ pub enum CaMaterialsError {
     /// still be trusted by clients in the field.
     #[error("CA cert and key do not match: {detail}")]
     Mismatch { detail: String },
+
+    /// Provisioned mode only: neither file exists. The CA is supposed
+    /// to have been generated ahead of time by an operator; this
+    /// service never makes one up in that mode, because a lost or
+    /// mis-mounted Secret would otherwise quietly become a brand-new
+    /// root that no client trusts.
+    #[error("no provisioned CA found: neither {cert} nor {key} exists")]
+    NotProvisioned { cert: String, key: String },
+
+    /// Provisioned mode only: the key is writable by its group or
+    /// accessible to others. Group-read is allowed because a mounted
+    /// Secret is typically shared with the pod through fsGroup.
+    #[error("provisioned CA key {path} has insecure permissions {mode:o}; group-write and any access for others are forbidden")]
+    InsecureProvisionedKeyPermissions { path: String, mode: u32 },
 
     /// Catch-all for parse failures, IO errors writing, etc.
     /// Wraps the underlying error message because the underlying
@@ -506,6 +495,82 @@ fn check_key_permissions(key_path: &str) -> Result<(), CaMaterialsError> {
 #[cfg(not(unix))]
 fn check_key_permissions(_key_path: &str) -> Result<(), CaMaterialsError> {
     Ok(())
+}
+
+/// Permission check for a provisioned CA key. Looser than
+/// `check_key_permissions`' exact-0600: an operator-provisioned Secret
+/// is mounted by the kubelet, and a non-root pod can only read it when
+/// the file is group-readable. Group-write and any access at all for
+/// others are still refused.
+#[cfg(unix)]
+fn check_provisioned_key_permissions(key_path: &str) -> Result<(), CaMaterialsError> {
+    use std::os::unix::fs::MetadataExt;
+    let metadata = std::fs::metadata(key_path)
+        .map_err(|e| CaMaterialsError::Other(format!("stat {key_path}: {e}")))?;
+    let mode = metadata.mode() & 0o777;
+    if mode & 0o027 != 0 {
+        return Err(CaMaterialsError::InsecureProvisionedKeyPermissions {
+            path: key_path.to_string(),
+            mode,
+        });
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn check_provisioned_key_permissions(_key_path: &str) -> Result<(), CaMaterialsError> {
+    Ok(())
+}
+
+/// Load CA materials an operator provisioned ahead of time (the admin
+/// tool's `bootstrap-ca`). Unlike `load_or_bootstrap_ca`, there is no
+/// generate branch: missing files are an error, so the service can
+/// never silently mint a new root. The cert/key pair is still checked
+/// for consistency, and the key for safe permissions.
+pub fn load_provisioned_ca(
+    cert_path: &str,
+    key_path: &str,
+) -> Result<(String, String), CaMaterialsError> {
+    let cert_exists = std::path::Path::new(cert_path).exists();
+    let key_exists = std::path::Path::new(key_path).exists();
+
+    match (cert_exists, key_exists) {
+        (true, true) => {}
+        (false, false) => {
+            return Err(CaMaterialsError::NotProvisioned {
+                cert: cert_path.to_string(),
+                key: key_path.to_string(),
+            });
+        }
+        (true, false) => {
+            return Err(CaMaterialsError::PartialState {
+                existing: cert_path.to_string(),
+                missing: key_path.to_string(),
+            });
+        }
+        (false, true) => {
+            return Err(CaMaterialsError::PartialState {
+                existing: key_path.to_string(),
+                missing: cert_path.to_string(),
+            });
+        }
+    }
+
+    check_provisioned_key_permissions(key_path)?;
+
+    let cert_pem = std::fs::read_to_string(cert_path)
+        .map_err(|e| CaMaterialsError::Other(format!("read {cert_path}: {e}")))?;
+    let key_pem = std::fs::read_to_string(key_path)
+        .map_err(|e| CaMaterialsError::Other(format!("read {key_path}: {e}")))?;
+
+    validate_pair(&cert_pem, &key_pem)?;
+
+    tracing::info!(
+        cert_path = %cert_path,
+        key_path = %key_path,
+        "loaded provisioned CA materials"
+    );
+    Ok((cert_pem, key_pem))
 }
 
 /// On Unix, set the key file's mode to 0600.

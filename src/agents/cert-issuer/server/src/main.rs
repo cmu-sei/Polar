@@ -31,8 +31,8 @@
 
 use anyhow::{Context, Result};
 use cert_issuer::{
-    ca::{RcgenCaClient, load_or_bootstrap_ca},
-    config::ServiceConfig,
+    ca::{RcgenCaClient, load_or_bootstrap_ca, load_provisioned_ca},
+    config::{CaProvisioning, ServiceConfig},
     handler::Handler,
     oidc::Validator,
     server::build_router,
@@ -75,16 +75,25 @@ async fn main() -> Result<()> {
     // partial state (only one of the two files present, key with
     // bad permissions, etc.) is a hard error rather than something
     // we silently paper over.
-    let (ca_cert_pem, ca_key_pem) = load_or_bootstrap_ca(
-        &config.ca.ca_cert_path,
-        &config.ca.ca_key_path,
-        // CA Common Name. Used only when bootstrapping; loaded CAs
-        // keep whatever CN they were created with. Operators can
-        // override this in the config if they care; the default is
-        // descriptive enough for ad-hoc deployments.
-        "Polar Internal CA",
-    )
-    .context("CA materials")?;
+    let (ca_cert_pem, ca_key_pem) = match config.ca.provisioning {
+        // An operator generated the CA ahead of time (the admin
+        // tool's bootstrap-ca). Only load it: a missing CA is a
+        // startup error here, never a reason to generate a new root.
+        CaProvisioning::Provisioned => {
+            load_provisioned_ca(&config.ca.ca_cert_path, &config.ca.ca_key_path)
+                .context("provisioned CA materials")?
+        }
+        CaProvisioning::SelfBootstrap => load_or_bootstrap_ca(
+            &config.ca.ca_cert_path,
+            &config.ca.ca_key_path,
+            // CA Common Name. Used only when bootstrapping; loaded CAs
+            // keep whatever CN they were created with. Operators can
+            // override this in the config if they care; the default is
+            // descriptive enough for ad-hoc deployments.
+            "Polar Internal CA",
+        )
+        .context("CA materials")?,
+    };
     let ca = RcgenCaClient::new(&ca_cert_pem, &ca_key_pem)
         .map_err(|e| anyhow::anyhow!("constructing CA client: {e}"))?;
 

@@ -107,6 +107,30 @@ pub struct CaConfig {
     /// identity matches a key here. Empty/absent by default.
     #[serde(default)]
     pub identity_lifetime_overrides: std::collections::HashMap<String, Duration>,
+
+    /// Where this instance's CA comes from. Deliberately an explicit
+    /// setting and never inferred from which files happen to exist: a
+    /// lost or mis-mounted CA must be a startup error, not a quiet
+    /// switch to a freshly generated root.
+    #[serde(default)]
+    pub provisioning: CaProvisioning,
+}
+
+/// How cert-issuer obtains its CA.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CaProvisioning {
+    /// The CA was generated ahead of time by an operator with cluster
+    /// admin rights (the admin tool's `bootstrap-ca`) and mounted in.
+    /// cert-issuer only loads it and never generates one. If it is
+    /// missing, startup fails.
+    Provisioned,
+    /// cert-issuer generates its own CA on first start and persists it
+    /// to its own volume. The degraded mode for clusters where no
+    /// operator ran the provisioning step: callers can't verify the
+    /// CA on their very first contact and fetch it once per boot.
+    #[default]
+    SelfBootstrap,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

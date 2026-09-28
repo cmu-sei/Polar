@@ -6,7 +6,9 @@
 //! load time, not at token validation time, so a bad config fails
 //! before any tokens are processed.
 
-use cert_issuer::config::{CaConfig, ConfigError, IssuerConfig, MtlsConfig, ServiceConfig};
+use cert_issuer::config::{
+    CaConfig, CaProvisioning, ConfigError, IssuerConfig, MtlsConfig, ServiceConfig,
+};
 use cert_issuer_common::identity::IdentityNormalization;
 use std::time::Duration;
 
@@ -34,6 +36,7 @@ fn valid_ca() -> CaConfig {
         default_lifetime: Duration::from_secs(3600),
         server_lifetime: Duration::from_secs(3600),
         identity_lifetime_overrides: std::collections::HashMap::new(),
+        provisioning: CaProvisioning::SelfBootstrap,
     }
 }
 
@@ -176,4 +179,28 @@ fn empty_internal_callers_list_is_accepted() {
     let mut cfg = valid_config();
     cfg.mtls.internal_callers = vec![];
     assert!(cfg.validate().is_ok());
+}
+
+
+// ---------------------------------------------------------------------
+// CA provisioning mode
+// ---------------------------------------------------------------------
+
+#[test]
+fn ca_provisioning_defaults_to_self_bootstrap_when_omitted() {
+    let json = r#"{"ca_cert_path":"/c","ca_key_path":"/k",
+        "default_lifetime":{"secs":1,"nanos":0},
+        "server_lifetime":{"secs":1,"nanos":0}}"#;
+    let ca: CaConfig = serde_json::from_str(json).expect("parse");
+    assert_eq!(ca.provisioning, CaProvisioning::SelfBootstrap);
+}
+
+#[test]
+fn ca_provisioning_accepts_provisioned() {
+    let json = r#"{"ca_cert_path":"/c","ca_key_path":"/k",
+        "default_lifetime":{"secs":1,"nanos":0},
+        "server_lifetime":{"secs":1,"nanos":0},
+        "provisioning":"provisioned"}"#;
+    let ca: CaConfig = serde_json::from_str(json).expect("parse");
+    assert_eq!(ca.provisioning, CaProvisioning::Provisioned);
 }

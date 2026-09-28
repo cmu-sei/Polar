@@ -6,6 +6,7 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use time::OffsetDateTime;
+pub mod ca_root;
 pub mod identity;
 pub mod permission;
 pub mod public_key;
