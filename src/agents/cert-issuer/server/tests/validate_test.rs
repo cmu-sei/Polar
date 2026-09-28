@@ -58,6 +58,7 @@ fn test_handler() -> Handler {
         server_lifetime: Duration::from_secs(43200),
         identity_lifetime_overrides: HashMap::new(),
         internal_callers: vec![],
+        ca_cert_pem: String::new(),
     }
 }
 

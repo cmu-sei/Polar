@@ -21,11 +21,11 @@
 
 use crate::handler::{Handler, HandlerBody, HandlerResponse, ValidateHandlerBody, ValidateHandlerResponse};
 use axum::Router;
-use axum::extract::{Json, State};
+use axum::extract::{Extension, Json, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::post;
-use cert_issuer_common::{IssueError, IssueOutcome, IssueRequest};
+use axum::routing::{get, post};
+use cert_issuer_common::{InternalIssueRequest, IssueError, IssueOutcome, IssueRequest};
 use std::sync::Arc;
 use tracing::error;
 
@@ -39,8 +39,22 @@ pub fn build_router(handler: Arc<Handler>) -> Router {
     Router::new()
         .route("/issue", post(issue))
         .route("/validate", post(validate))
+        .route("/internal/issue", post(internal_issue))
+        .route("/ca", get(ca_certificate))
         .with_state(handler)
 }
+
+/// The verified mTLS peer identity (the SAN of the client certificate
+/// the connection presented) for the connection a request arrived on.
+///
+/// Attached to each request as an extension by the TLS accept loop,
+/// from the completed handshake, and by nothing else -- it must never be
+/// derived from a header, a query parameter or the request body, all of
+/// which the caller controls. A request with no such extension came in
+/// without a verified client certificate, and `handle_internal_issue`
+/// refuses it.
+#[derive(Debug, Clone)]
+pub struct PeerIdentity(pub String);
 
 /// Handler for `POST /issue`.
 ///
@@ -73,6 +87,38 @@ async fn issue(
     };
 
     let result = handler.handle(&bearer, request).await;
+    handler_response_to_axum(result)
+}
+
+/// Handler for `GET /ca`.
+///
+/// Returns the CA certificate PEM. Unauthenticated on purpose: it is
+/// public, and its whole job is to be fetchable by a caller that has
+/// no credential and no trust root yet.
+async fn ca_certificate(State(handler): State<Arc<Handler>>) -> Response {
+    (
+        StatusCode::OK,
+        [(axum::http::header::CONTENT_TYPE, "application/x-pem-file")],
+        handler.ca_cert_pem.clone(),
+    )
+        .into_response()
+}
+
+/// Handler for `POST /internal/issue`.
+///
+/// No bearer token: the caller is authenticated by its mTLS peer
+/// identity, which the accept loop attaches as a `PeerIdentity`
+/// extension. A missing extension means no verified client certificate,
+/// and the handler refuses it with `CallerNotAuthorized`. A body that
+/// isn't valid JSON is rejected by the `Json` extractor before the
+/// allowlist is consulted, the same as `/issue`.
+async fn internal_issue(
+    State(handler): State<Arc<Handler>>,
+    peer: Option<Extension<PeerIdentity>>,
+    Json(request): Json<InternalIssueRequest>,
+) -> Response {
+    let peer_identity = peer.as_ref().map(|Extension(p)| p.0.as_str());
+    let result = handler.handle_internal_issue(peer_identity, request).await;
     handler_response_to_axum(result)
 }
 

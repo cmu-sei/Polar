@@ -61,6 +61,12 @@ pub struct Handler {
     /// Empty means that endpoint refuses every caller, which is the
     /// safe default until credentials-agent has its own identity.
     pub internal_callers: Vec<String>,
+    /// PEM of the CA certificate this service signs with, served
+    /// unauthenticated at `GET /ca`. Public by nature: every issuance
+    /// response already carries it, and it is presented in every TLS
+    /// handshake. It exists so a caller on its very first contact can
+    /// obtain the trust root it has no other way to get.
+    pub ca_cert_pem: String,
 }
 
 #[derive(Debug)]

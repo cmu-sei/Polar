@@ -102,6 +102,7 @@ async fn main() -> Result<()> {
         server_lifetime: config.ca.server_lifetime,
         identity_lifetime_overrides: config.ca.identity_lifetime_overrides.clone(),
         internal_callers: config.mtls.internal_callers.clone(),
+        ca_cert_pem: ca_cert_pem.clone(),
     });
 
     // ---- Server ----
