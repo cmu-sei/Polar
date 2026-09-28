@@ -39,7 +39,8 @@ use crate::ca::{CaClient, CaError, CaIssueRequest};
 use crate::csr;
 use crate::oidc::{ValidationError, Validator};
 use cert_issuer_common::{
-    IssueError, IssueOutcome, IssueRequest, IssueResponse, identity::normalize_identity, ValidateRequest,
+    InternalIssueRequest, IssueError, IssueOutcome, IssueRequest, IssueResponse,
+    identity::normalize_identity, ValidateRequest,
 };
 use cert_issuer_common::ValidateResponse;
 use std::sync::Arc;
@@ -55,6 +56,11 @@ pub struct Handler {
     /// to reduce Cassini restart frequency.
     pub server_lifetime: Duration,
     pub identity_lifetime_overrides: std::collections::HashMap<String, Duration>,
+    /// Peer identities (the SAN of the connection's verified mTLS
+    /// client certificate) allowed to call `handle_internal_issue`.
+    /// Empty means that endpoint refuses every caller, which is the
+    /// safe default until credentials-agent has its own identity.
+    pub internal_callers: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -120,8 +126,37 @@ impl Handler {
             return error_response(IssueOutcome::IdentityMismatch, &e.to_string());
         }
 
+        // ---- Steps 3.5-5: shared signing path ----
+        //
+        // Everything past identity verification is identical for
+        // /issue and /internal/issue, so it lives in one place.
+        self.sign_verified(
+            &dns_identity,
+            &parsed_csr,
+            request.csr_pem,
+            request.cert_type,
+            request.extra_sans,
+            request.subject_dn_defaults,
+        )
+        .await
+    }
+
+    /// The signing tail shared by `handle` and `handle_internal_issue`:
+    /// extra-SAN validation, Subject DN merge, lifetime selection, and
+    /// the CA call. Callers must already have authenticated the request
+    /// and verified that the CSR's SAN matches `dns_identity` -- this
+    /// function assumes both and checks neither.
+    async fn sign_verified(
+        &self,
+        dns_identity: &str,
+        parsed_csr: &csr::ParsedCsr,
+        csr_pem: String,
+        cert_type: cert_issuer_common::CertType,
+        extra_sans: Vec<String>,
+        subject_dn_defaults: Option<cert_issuer_common::SubjectDnDefaults>,
+    ) -> HandlerResponse {
         // TODO: pass this in so we get a cert valid for multiple SANs
-        let all_sans = match csr::validate_extra_sans(&dns_identity, &request.extra_sans) {
+        let all_sans = match csr::validate_extra_sans(dns_identity, &extra_sans) {
             Ok(all_sans) => all_sans,
             Err(e) => {
                 error!("{e}");
@@ -138,7 +173,7 @@ impl Handler {
         // validation is an internal-caller bug (credentials-agent,
         // not the CSR/attacker), so it's reported as InternalError,
         // not InvalidCsr.
-        let subject_dn = match merge_subject_dn(&parsed_csr.subject, request.subject_dn_defaults.as_ref()) {
+        let subject_dn = match merge_subject_dn(&parsed_csr.subject, subject_dn_defaults.as_ref()) {
             Ok(s) => s,
             Err(e) => {
                 error!("subject_dn_defaults failed validation: {e}");
@@ -161,9 +196,9 @@ impl Handler {
         // verification work is done.
         let lifetime = self
             .identity_lifetime_overrides
-            .get(&dns_identity)
+            .get(dns_identity)
             .copied()
-            .unwrap_or(match request.cert_type {
+            .unwrap_or(match cert_type {
                 cert_issuer_common::CertType::Server => self.server_lifetime,
                 cert_issuer_common::CertType::Client => self.default_lifetime,
                 // Not short-lived like Client -- the actual security
@@ -176,10 +211,10 @@ impl Handler {
             });
 
         let ca_request = CaIssueRequest {
-            csr_pem: request.csr_pem,
+            csr_pem,
             sans: all_sans,
             lifetime,
-            cert_type: request.cert_type,
+            cert_type,
             subject_dn,
         };
 
@@ -218,6 +253,65 @@ impl Handler {
                 expires_at,
             }),
         }
+    }
+
+    /// Process an `/internal/issue` request. There is no bearer token:
+    /// the caller has already done its own authorization elsewhere
+    /// (credentials-agent verifies a bootstrap token or an account
+    /// claim) and asserts the identity to sign for directly. What this
+    /// function verifies is who is asking -- the verified peer identity
+    /// of the mTLS connection, passed in by the transport layer --
+    /// against `internal_callers`, and then that the CSR's SAN matches
+    /// the asserted identity, exactly as `/issue` does against a token.
+    #[instrument(skip(self))]
+    pub async fn handle_internal_issue(
+        &self,
+        peer_identity: Option<&str>,
+        request: InternalIssueRequest,
+    ) -> HandlerResponse {
+        // ---- Step 1: caller authorization ----
+        //
+        // No client certificate, or one whose identity isn't on the
+        // allowlist, is refused before the CSR is even parsed. The
+        // detail deliberately doesn't say which of the two it was, or
+        // what the allowlist contains.
+        match peer_identity {
+            Some(peer) if self.internal_callers.iter().any(|c| c == peer) => {}
+            other => {
+                warn!(peer_identity = ?other, "internal issuance refused: caller not on allowlist");
+                return error_response(
+                    IssueOutcome::CallerNotAuthorized,
+                    "caller is not authorized for internal issuance",
+                );
+            }
+        }
+
+        // ---- Step 2: CSR parsing ----
+        let parsed_csr = match csr::parse_csr(&request.csr_pem) {
+            Ok(c) => c,
+            Err(e) => return error_response(IssueOutcome::InvalidCsr, &e.to_string()),
+        };
+
+        // ---- Step 3: identity match ----
+        //
+        // Same byte-exact check /issue does, against the identity the
+        // caller asserted instead of one derived from a token.
+        if request.identity.is_empty() {
+            return error_response(IssueOutcome::InvalidCsr, "identity must not be empty");
+        }
+        if let Err(e) = csr::verify_identity(&parsed_csr, &request.identity) {
+            return error_response(IssueOutcome::IdentityMismatch, &e.to_string());
+        }
+
+        self.sign_verified(
+            &request.identity,
+            &parsed_csr,
+            request.csr_pem,
+            request.cert_type,
+            request.extra_sans,
+            request.subject_dn_defaults,
+        )
+        .await
     }
 
     /// Process a `/validate` request -- OIDC validation only, no CSR,

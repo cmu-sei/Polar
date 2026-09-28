@@ -57,6 +57,7 @@ fn test_handler() -> Handler {
         default_lifetime: Duration::from_secs(3600),
         server_lifetime: Duration::from_secs(43200),
         identity_lifetime_overrides: HashMap::new(),
+        internal_callers: vec![],
     }
 }
 
