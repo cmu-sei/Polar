@@ -6,7 +6,7 @@
 //! load time, not at token validation time, so a bad config fails
 //! before any tokens are processed.
 
-use cert_issuer::config::{CaConfig, ConfigError, IssuerConfig, ServiceConfig};
+use cert_issuer::config::{CaConfig, ConfigError, IssuerConfig, MtlsConfig, ServiceConfig};
 use cert_issuer_common::identity::IdentityNormalization;
 use std::time::Duration;
 
@@ -37,11 +37,19 @@ fn valid_ca() -> CaConfig {
     }
 }
 
+fn valid_mtls() -> MtlsConfig {
+    MtlsConfig {
+        server_identity: "cert-issuer.polar.svc.cluster.local".to_string(),
+        internal_callers: vec![],
+    }
+}
+
 fn valid_config() -> ServiceConfig {
     ServiceConfig {
         bind_addr: "0.0.0.0:8443".to_string(),
         issuers: vec![valid_issuer()],
         ca: valid_ca(),
+        mtls: valid_mtls(),
     }
 }
 
@@ -142,4 +150,30 @@ fn duplicate_issuer_urls_are_rejected() {
         .validate()
         .expect_err("two issuers sharing a URL must be rejected");
     assert!(matches!(err, ConfigError::DuplicateIssuer(ref u) if u == &valid_issuer().issuer));
+}
+
+
+// ---------------------------------------------------------------------
+// mTLS config coverage
+// ---------------------------------------------------------------------
+
+#[test]
+fn empty_mtls_server_identity_is_rejected() {
+    // The listener can't mint its own TLS server cert without this,
+    // which would break every caller including /issue and /validate.
+    let mut cfg = valid_config();
+    cfg.mtls.server_identity = String::new();
+    let err = cfg
+        .validate()
+        .expect_err("empty mtls server_identity must be rejected");
+    assert!(matches!(err, ConfigError::EmptyMtlsServerIdentity));
+}
+
+#[test]
+fn empty_internal_callers_list_is_accepted() {
+    // Empty means /internal/issue is unreachable until explicitly
+    // configured -- a safe default, not a misconfiguration.
+    let mut cfg = valid_config();
+    cfg.mtls.internal_callers = vec![];
+    assert!(cfg.validate().is_ok());
 }

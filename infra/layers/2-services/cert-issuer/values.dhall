@@ -30,4 +30,12 @@ in  { name             = "cert-issuer"
           }
     , defaultLifetimeSecs = 3600
     , serverLifetimeSecs  = 3600
+    -- DNS name cert-issuer mints into its own TLS server cert. The
+    -- ".svc.cluster.local" suffix is hardcoded, same as
+    -- constants.dhall's certIssuerUrl; both are covered by the
+    -- pending configurable-domain work.
+    , mtlsServerIdentity = "cert-issuer.${Constants.PolarNamespace}.svc.cluster.local"
+    -- Empty until credentials-agent has its own ServiceAccount to
+    -- match against. Empty means /internal/issue is unreachable.
+    , mtlsInternalCallers = [] : List Text
     }

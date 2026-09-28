@@ -48,6 +48,15 @@ let render =
           , defaultLifetimeSecs : Natural
           , serverLifetimeSecs : Natural
           , identityLifetimeOverrides : List { identity : Text, lifetimeSecs : Natural }
+          -- DNS identity cert-issuer mints into its own TLS server
+          -- certificate at startup. Must be the name callers actually
+          -- connect to. A config value, not hardcoded, so the cluster
+          -- domain stays configurable per deployment.
+          , mtlsServerIdentity : Text
+          -- Identities allowed to reach /internal/issue, matched
+          -- against the connection's verified mTLS peer SAN. Empty
+          -- means the endpoint is unreachable, which is the safe default.
+          , mtlsInternalCallers : List Text
           }
         ) ->
         let renderIssuer =
@@ -172,6 +181,21 @@ let render =
                                   JSON.Type
                                   renderIssuer
                                   v.issuers
+                              )
+                        , mtls =
+                            JSON.object
+                              ( toMap
+                                  { server_identity =
+                                      JSON.string v.mtlsServerIdentity
+                                  , internal_callers =
+                                      JSON.array
+                                        ( Prelude.List.map
+                                            Text
+                                            JSON.Type
+                                            JSON.string
+                                            v.mtlsInternalCallers
+                                        )
+                                  }
                               )
                         }
                     )
