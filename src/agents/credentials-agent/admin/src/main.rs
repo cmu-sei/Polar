@@ -21,6 +21,7 @@
    DM24-0470
 */
 
+mod bootstrap_ca;
 mod publish;
 
 use cert_issuer_common::permission::Permission;
@@ -114,6 +115,29 @@ enum Command {
         #[arg(long)]
         telephone_number: Option<String>,
     },
+    /// Generate the cluster's CA and provision it into Kubernetes: a
+    /// Secret holding the certificate and key for cert-issuer, and a
+    /// ConfigMap holding only the certificate for every pod that has to
+    /// verify it. Run once per cluster, with the cluster admin's own
+    /// kubeconfig, after the namespaces exist and before cert-issuer
+    /// starts in provisioned mode. Unlike every other subcommand it does
+    /// not publish through Cassini -- the CA has to exist before Cassini
+    /// can. It creates and never overwrites.
+    BootstrapCa {
+        /// Common name embedded in the CA certificate.
+        #[arg(long, default_value = "Polar Internal CA")]
+        common_name: String,
+        /// Namespace for the Secret holding the CA key. Only
+        /// cert-issuer should ever mount it.
+        #[arg(long, default_value = "polar")]
+        secret_namespace: String,
+        /// Namespaces to receive the public-certificate ConfigMap. May be
+        /// repeated. Every namespace with a pod that verifies cert-issuer
+        /// needs one, because ConfigMaps can't be shared across
+        /// namespaces.
+        #[arg(long = "configmap-namespace", default_values = ["polar", "polar-graph"])]
+        configmap_namespaces: Vec<String>,
+    },
 }
 
 #[tokio::main]
@@ -180,11 +204,38 @@ fn event_and_topic_from_command(command: Command) -> (CredentialsEvent, &'static
             },
             CREDENTIALS_ACCOUNT_PROVISIONING_TOPIC,
         ),
+        // Handled by run() before this function is ever called: it has
+        // no event to publish, and no Cassini to publish to yet.
+        Command::BootstrapCa { .. } => {
+            unreachable!("bootstrap-ca does not publish an event; run() dispatches it first")
+        }
     }
 }
 
 async fn run(args: Args) -> i32 {
-    let (event, topic) = event_and_topic_from_command(args.command);
+    let command = match args.command {
+        Command::BootstrapCa {
+            common_name,
+            secret_namespace,
+            configmap_namespaces,
+        } => {
+            return match bootstrap_ca::run(bootstrap_ca::BootstrapCaArgs {
+                common_name,
+                secret_namespace,
+                configmap_namespaces,
+            })
+            .await
+            {
+                Ok(()) => 0,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    1
+                }
+            };
+        }
+        other => other,
+    };
+    let (event, topic) = event_and_topic_from_command(command);
 
     match publish::publish_event(event, topic.to_string()).await {
         Ok(()) => {

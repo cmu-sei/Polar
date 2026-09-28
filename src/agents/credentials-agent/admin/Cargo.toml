@@ -27,6 +27,8 @@ cassini-types.workspace = true
 cert-issuer-common = { version = "1.0.0", path = "../../cert-issuer/common" }
 clap = { version = "4.5.60", features = ["derive"] }
 credentials_agent_common.workspace = true
+k8s-openapi.workspace = true
+kube.workspace = true
 polar.workspace = true
 ractor.workspace = true
 rkyv.workspace = true
