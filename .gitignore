@@ -60,3 +60,6 @@ venv/
 *.pkl
 *.pickle
 rustc-ice-*.txt
+*.log
+desktop.ini
+env.sh
