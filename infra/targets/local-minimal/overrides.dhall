@@ -30,7 +30,7 @@ in
   }
 , neo4j =
   { image              = registry ++ "neo4j:5.26.2"
-  , certIssuerUrl      = "http://cert-issuer.polar.svc.cluster.local:8443"
+  , certIssuerUrl      = "https://cert-issuer.polar.svc.cluster.local:8443"
   , certIssuerAudience = "polar-cert-issuer-neo4j.local"
   , certClientImage    = registry ++ "polar-cert-client:latest"
   , nuInitImage        = registry ++ "polar-nu-init:latest"

@@ -31,8 +31,12 @@ let mtls =
       , proxyCertificate = "proxy-ca-cert"
       }
 
-let certIssuerUrl =
-      "http://cert-issuer.${PolarNamespace}.svc.cluster.local:8443"
+-- The name cert-issuer's TLS certificate is issued for and the name every
+-- caller connects to. Callers verify the server against the host in their
+-- URL, so the two must be the same value.
+let certIssuerHost = "cert-issuer.${PolarNamespace}.svc.cluster.local"
+
+let certIssuerUrl = "https://${certIssuerHost}:8443"
 
 let certVolumeName = "polar-certs"
 
@@ -177,6 +181,7 @@ in  { PolarNamespace
     , AuthNamespace
     , tlsPath
     , mtls
+    , certIssuerHost
     , certIssuerUrl
     , certVolumeName
     , saTokenVolumeName

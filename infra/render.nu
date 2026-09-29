@@ -110,6 +110,10 @@ def main [
     check_and_emit_service_accounts $output_dir
     print ""
 
+    print "Checking cert-issuer's TLS identity..."
+    check_cert_issuer_identity $output_dir $cert_issuer_url
+    print ""
+
     print "=== Render complete ==="
     print $"  output: ($output_dir)"
     print ""
@@ -257,5 +261,27 @@ def check_and_emit_service_accounts [output_dir: string] {
         | str join ""
         | save --force ($output_dir | path join "serviceaccounts.yaml")
         print $"  emitted ($missing | length) ServiceAccount objects"
+    }
+}
+
+# cert-issuer's TLS certificate carries mtls.server_identity as its SAN, and
+# every caller verifies the server against the host in its URL. If the two
+# differ, every caller fails the handshake with an error that looks like a
+# network problem, so catch it here, at render time.
+def check_cert_issuer_identity [output_dir: string, cert_issuer_url: string] {
+    let cfg_file = ($output_dir | path join "cert-issuer-configmap.yaml")
+    if not ($cfg_file | path exists) { return }
+
+    let server_identity = (
+        open $cfg_file
+        | get data."cert-issuer.json"
+        | from json
+        | get mtls.server_identity
+    )
+    let url_host = ($cert_issuer_url | url parse | get host)
+
+    if $server_identity != $url_host {
+        print $"  ERROR: cert-issuer's TLS identity is ($server_identity) but callers connect to ($url_host)"
+        exit 1
     }
 }

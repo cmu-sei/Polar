@@ -70,7 +70,7 @@ def main [] {
         jaeger_dns_name       : "http://jaeger-svc.polar.svc.cluster.local:16686/v1/traces"
         scheduler_remote_url  : ""
         enable_tls            : true
-        cert_issuer_url       : "http://cert-issuer.polar.svc.cluster.local:8443"
+        cert_issuer_url       : "https://cert-issuer.polar.svc.cluster.local:8443"
         cert_issuer_audience  : "polar-cert-issuer.local"
         cert_client_image     : "10.0.2.2:5000/polar-cert-client:latest"
         polar_init_image      : "10.0.2.2:5000/polar-init:latest"

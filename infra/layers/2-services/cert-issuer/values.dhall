@@ -36,7 +36,7 @@ in  { name             = "cert-issuer"
     -- ".svc.cluster.local" suffix is hardcoded, same as
     -- constants.dhall's certIssuerUrl; both are covered by the
     -- pending configurable-domain work.
-    , mtlsServerIdentity = "cert-issuer.${Constants.PolarNamespace}.svc.cluster.local"
+    , mtlsServerIdentity = Constants.certIssuerHost
     -- Empty until credentials-agent has its own ServiceAccount to
     -- match against. Empty means /internal/issue is unreachable.
     , mtlsInternalCallers = [] : List Text
