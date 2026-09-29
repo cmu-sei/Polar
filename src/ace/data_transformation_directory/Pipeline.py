@@ -8,7 +8,7 @@
 #   prepare_figure_data()         → figure_df    (long format for Plotly)
 #
 # This is the only file a dashboard developer needs to import from.
-# Allows for easier testing of sub files seen below.  
+# Allows for easier testing of sub files seen below.
 # ---------------------------------------------------------------------------
 
 import datetime
@@ -22,11 +22,13 @@ from data_transformation_directory.Baseline import build_pi_baseline
 from data_transformation_directory.Actuals import build_pi_actuals, _get_done_date, _get_start_date
 from data_transformation_directory.projections import build_projections
 from data_transformation_directory.training_projections import return_stats_df
+from data_transformation_directory.status_summary import build_status_summary
+from data_transformation_directory.increments import build_increment_context
 import inspect
 
 
 # ---------------------------------------------------------------------------
-# Function to dynamically grab outstanding issues.  
+# Function to dynamically grab outstanding issues.
 # ---------------------------------------------------------------------------
 
 ACTIVE_STATES = {
@@ -43,13 +45,13 @@ ACTIVE_STATES = {
 }
 
 '''
-Active states they care about: 
+Active states they care about:
     "Iteration-1", "Iteration-2", "Iteration-3", "Iteration-4", "Iteration-5"
-    **Used for planning.  Part of PI Planning workflow.  
-    For mercs and Thestrals: 
-        *In prog, Ready to Deploy, verify, verifying, validate/validating, acceptance, and Done.  
-        *Do not care about reopened.  
-        *Have metrics stop at verifying.  Outside of dev hands.  
+    **Used for planning.  Part of PI Planning workflow.
+    For mercs and Thestrals:
+        *In prog, Ready to Deploy, verify, verifying, validate/validating, acceptance, and Done.
+        *Do not care about reopened.
+        *Have metrics stop at verifying.  Outside of dev hands.
 '''
 
 EXCLUDED_STATES = {
@@ -57,16 +59,17 @@ EXCLUDED_STATES = {
     "On Hold", "Blocked", "Triage", "Triaging", "Awaiting Approval",
 }
 
+
 def get_remaining_issues(all_issues, as_of_date):
     cutoff = datetime.datetime.strptime(as_of_date, "%Y-%m-%d")
     remaining = []
-    
+
     active_sp   = 0.0
     excluded_sp = 0.0
     todo_sp     = 0.0
     done_sp     = 0.0
     excluded_breakdown = {}
-    
+
     for item in all_issues:
         sp = float(item.weight) if item.weight else 0.0
 
@@ -83,10 +86,10 @@ def get_remaining_issues(all_issues, as_of_date):
         done_dt  = _get_done_date(transitions_as_of)
         start_dt = _get_start_date(transitions_as_of)
 
-        already_done      = done_dt is not None and done_dt <= cutoff
-        has_started       = start_dt is not None
-        in_scope          = item.current_state not in EXCLUDED_STATES  # "Backlog", "Inactive" etc
-        is_todo           = item.current_state == "To Do"
+        already_done = done_dt is not None and done_dt <= cutoff
+        has_started  = start_dt is not None
+        in_scope     = item.current_state not in EXCLUDED_STATES  # "Backlog", "Inactive" etc
+        is_todo      = item.current_state == "To Do"
 
         if already_done:
             done_sp += sp
@@ -104,41 +107,37 @@ def get_remaining_issues(all_issues, as_of_date):
 
     total_sp = done_sp + active_sp + excluded_sp
 
-    print(
-        f"\n[Remaining Issues Scorecard]"
-        f"\n  Done SP        : {done_sp:.1f}  ({done_sp / total_sp * 100:.1f}%)"
-        f"\n  Active SP      : {active_sp:.1f}  ({active_sp / total_sp * 100:.1f}%)"
-        f"\n  Excluded SP    : {excluded_sp:.1f}  ({excluded_sp / total_sp * 100:.1f}%)"
-        f"\n  ─────────────────────────────"
-        f"\n  Total SP       : {total_sp:.1f}  (should match baseline)"
-        f"\n\n  Excluded breakdown by state:"
-        + "".join(
-            f"\n    {state:<25} {sp:.1f} SP"
-            for state, sp in sorted(excluded_breakdown.items(), key=lambda x: -x[1])
+    if total_sp > 0:
+        print(
+            f"\n[Remaining Issues Scorecard]"
+            f"\n  Done SP        : {done_sp:.1f}  ({done_sp / total_sp * 100:.1f}%)"
+            f"\n  Active SP      : {active_sp:.1f}  ({active_sp / total_sp * 100:.1f}%)"
+            f"\n  Excluded SP    : {excluded_sp:.1f}  ({excluded_sp / total_sp * 100:.1f}%)"
+            f"\n  ─────────────────────────────"
+            f"\n  Total SP       : {total_sp:.1f}  (should match baseline)"
+            f"\n\n  Excluded breakdown by state:"
+            + "".join(
+                f"\n    {state:<25} {sp:.1f} SP"
+                for state, sp in sorted(excluded_breakdown.items(), key=lambda x: -x[1])
+            )
         )
-    )
 
     return remaining
 
+
 def return_unlike_issues(all_issues_baseline, all_issues_actual):
     baseline_keys = {issue.key for issue in all_issues_baseline}
-    actual_keys = {issue.key for issue in all_issues_actual}
+    actual_keys   = {issue.key for issue in all_issues_actual}
 
     # In actuals but not baseline
-    in_actual_only = [
-        i for i in all_issues_actual
-        if i.key not in baseline_keys
-    ]
+    in_actual_only = [i for i in all_issues_actual if i.key not in baseline_keys]
 
     # In baseline but not actuals
-    in_baseline_only = [
-        i for i in all_issues_baseline
-        if i.key not in actual_keys
-    ]
+    in_baseline_only = [i for i in all_issues_baseline if i.key not in actual_keys]
 
     # Issues in both but with different SP
     baseline_map = {i.key: i for i in all_issues_baseline}
-    actual_map = {i.key: i for i in all_issues_actual}
+    actual_map   = {i.key: i for i in all_issues_actual}
 
     sp_mismatches = [
         (key, actual_map[key].weight, baseline_map[key].weight)
@@ -146,21 +145,11 @@ def return_unlike_issues(all_issues_baseline, all_issues_actual):
         if actual_map[key].weight != baseline_map[key].weight
     ]
 
-    left_lines = [
-        f"In actuals only ({len(in_actual_only)} issues):"
-    ]
-    left_lines.extend(
-        f"{i.key}  {i.current_state}  {i.weight} SP"
-        for i in in_actual_only
-    )
+    left_lines = [f"In actuals only ({len(in_actual_only)} issues):"]
+    left_lines.extend(f"{i.key}  {i.current_state}  {i.weight} SP" for i in in_actual_only)
 
-    right_lines = [
-        f"In baseline only ({len(in_baseline_only)} issues):"
-    ]
-    right_lines.extend(
-        f"{i.key}  {i.weight} SP"
-        for i in in_baseline_only
-    )
+    right_lines = [f"In baseline only ({len(in_baseline_only)} issues):"]
+    right_lines.extend(f"{i.key}  {i.weight} SP" for i in in_baseline_only)
 
     # Side-by-side section
     col_width = max(len(line) for line in left_lines) + 4
@@ -168,7 +157,7 @@ def return_unlike_issues(all_issues_baseline, all_issues_actual):
     rows = []
     max_rows = max(len(left_lines), len(right_lines))
     for idx in range(max_rows):
-        left = left_lines[idx] if idx < len(left_lines) else ""
+        left  = left_lines[idx]  if idx < len(left_lines)  else ""
         right = right_lines[idx] if idx < len(right_lines) else ""
         rows.append(f"{left:<{col_width}}{right}")
 
@@ -184,37 +173,44 @@ def return_unlike_issues(all_issues_baseline, all_issues_actual):
 
     return "\n".join(rows)
 
+
 # ---------------------------------------------------------------------------
 # Core orchestrator
 # ---------------------------------------------------------------------------
 
- 
 def dataframe_for_initial_graph(
     team: str,
     increment: str,
     as_of_date: str,
     just_stories: bool = True,
-) -> pl.DataFrame:
+):
     """
     Fetch issues, build the piecewise baseline and actuals series, join them
     on a continuous daily spine, and return a single combined DataFrame.
- 
+
     Parameters
     ----------
     team         : Jira team name  (e.g. "Thestrals")
-    increment    : PI label        (e.g. "PI-32")
+    increment    : PI label        (e.g. "PI-32"). Only sprints whose names
+                   contain this label count toward the baseline.
     just_stories : if True, only Story issue types contribute to SP totals
- 
+
     Returns
     -------
-    pl.DataFrame — one row per calendar day, columns:
+    (combined_df, actuals_string, sprint_plan, remaining, wip_dates, sprint_dates, status_summary)
+
+    combined_df — one row per calendar day, columns:
         date, sprint_name,
         baseline_sp, baseline_pct,
         completed_sp, completed_pct, issues_completed,
         in_progress_sp, in_progress_pct, issues_in_progress
+    sprint_plan    — dict from build_pi_baseline; render with
+                     utils.sprint_plan_view.render_sprint_plan
+    status_summary — dict from build_status_summary; render with
+                     utils.status_view.render_status_summary
     """
     start_time = time.time()
- 
+
     all_issues = generate_issues_list(team, increment, just_stories, as_of_date)
     if not all_issues:
         raise ValueError(
@@ -222,22 +218,28 @@ def dataframe_for_initial_graph(
             f"team='{team}', increment='{increment}'."
         )
 
-    all_issues_baseline = generate_issues_list(team, increment, just_stories, as_of_date, baseline = True)
+    all_issues_baseline = generate_issues_list(team, increment, just_stories, as_of_date, baseline=True)
     unlike_issues = return_unlike_issues(all_issues_baseline, all_issues)
 
     print(unlike_issues)
-    
-    baseline_df, baseline_string, sprint_dates = build_pi_baseline(all_issues_baseline, team)
-    
-    actuals_df, actuals_string, wip_dates  = build_pi_actuals(all_issues)
+
+    # Baseline counts only sprints belonging to this team AND this increment
+    baseline_df, sprint_plan, sprint_dates = build_pi_baseline(all_issues_baseline, team, increment)
+
+    # Prior increment dates + issues carried over from earlier increments
+    # (used by the Realtime Alerts tab)
+    sprint_plan["increments"] = build_increment_context(
+        all_issues, all_issues_baseline, team, increment, sprint_plan
+    )
+
+    actuals_df, actuals_string, wip_dates = build_pi_actuals(all_issues)
     remaining = get_remaining_issues(all_issues, as_of_date)
 
-    
     # Truncate to midnight — Neo4j sprint timestamps are not always at 00:00:00
     baseline_df = baseline_df.with_columns(pl.col("date").dt.truncate("1d"))
     actuals_df  = actuals_df.with_columns(pl.col("date").dt.truncate("1d"))
 
-    total_story_points = sum(float(issue.weight) for issue in remaining)
+    total_story_points = sum(float(issue.weight) for issue in remaining if issue.weight)
 
     remaining_issue_string = (
         "Outstanding Issues\n"
@@ -245,7 +247,8 @@ def dataframe_for_initial_graph(
         f"{'Key':<15} {'State':<20} {'Last Transition':<20} {'SP':>5}\n"
         f"{'-'*15} {'-'*20} {'-'*20} {'-'*5}\n"
         + "\n".join(
-            f"{issue.key:<15} {issue.current_state:<20} {issue.last_transition:<20} {float(issue.weight):>5.1f}"
+            f"{issue.key:<15} {issue.current_state:<20} {issue.last_transition:<20} "
+            f"{float(issue.weight or 0):>5.1f}"
             for issue in remaining
         )
         + f"\n\nTotal Story Points Outstanding: {total_story_points:.1f}"
@@ -253,25 +256,24 @@ def dataframe_for_initial_graph(
 
     print(remaining_issue_string)
 
- 
     # ── Full date spine ───────────────────────────────────────────────────────
     all_dates = baseline_df["date"].to_list() + actuals_df["date"].to_list()
     first_day = min(d.replace(tzinfo=None) for d in all_dates)
     last_day  = max(d.replace(tzinfo=None) for d in all_dates)
- 
+
     spine_df = pl.DataFrame(
         [{"date": first_day + timedelta(days=i)} for i in range((last_day - first_day).days + 1)]
     ).with_columns(pl.col("date").cast(pl.Datetime("us")))
- 
+
     # ── Join and impute ───────────────────────────────────────────────────────
     combined_df = (
         spine_df
         .join(baseline_df, on="date", how="left")
         .join(actuals_df,  on="date", how="left")
- 
+
         # Sprint label: forward-fill across gap days (IP sprints, weekends)
         .with_columns(pl.col("sprint_name").forward_fill())
- 
+
         # Actuals: fill nulls before the first event
         .with_columns([
             pl.col("completed_sp").forward_fill().fill_null(0.0),
@@ -286,7 +288,7 @@ def dataframe_for_initial_graph(
             pl.col("baseline_sp").forward_fill().fill_null(0.0),
             pl.col("baseline_pct").forward_fill().fill_null(0.0),
         ])
- 
+
         .select([
             "date", "sprint_name",
             "baseline_sp",    "baseline_pct",
@@ -295,21 +297,26 @@ def dataframe_for_initial_graph(
         ])
         .sort("date")
     )
- 
+
+    # Status as of the projection start date (drives the "remaining issues" card)
+    status_summary = build_status_summary(
+        all_issues, all_issues_baseline, combined_df, as_of_date,
+        planned_total_sp=sprint_plan["total_sp"],
+    )
+
     print(
         f"[Graph] {len(combined_df)} rows | "
         f"{combined_df['date'].min().date()} → {combined_df['date'].max().date()} | "
         f"{time.time() - start_time:.2f}s"
     )
 
-    print(f"[Graph] returning: {type(combined_df).__name__}, actuals_string type={type(actuals_string).__name__!r}, value={actuals_string!r:.80}")
-    return combined_df, actuals_string, baseline_string, remaining, wip_dates, sprint_dates
- 
- 
+    return combined_df, actuals_string, sprint_plan, remaining, wip_dates, sprint_dates, status_summary
+
+
 # ---------------------------------------------------------------------------
 # Figure data preparation
 # ---------------------------------------------------------------------------
- 
+
 def prepare_figure_data(
     combined_df:    pl.DataFrame,
     projections_df: pl.DataFrame,
@@ -319,13 +326,13 @@ def prepare_figure_data(
         pl.col("date").cast(pl.Date).alias("Dates"),
         pl.col("completed_pct").alias("Percent Complete"),
         pl.lit("Actual_Completed").alias("group"),
-    ]).drop_nulls(["Dates", "Percent Complete"])       
+    ]).drop_nulls(["Dates", "Percent Complete"])
 
-    actual_in_progress_df = combined_df.select([        
+    actual_in_progress_df = combined_df.select([
         pl.col("date").cast(pl.Date).alias("Dates"),
         pl.col("in_progress_pct").alias("Percent Complete"),
         pl.lit("Actual_In_Progress").alias("group"),
-    ]).drop_nulls(["Dates", "Percent Complete"])        
+    ]).drop_nulls(["Dates", "Percent Complete"])
 
     baseline_df = combined_df.select([
         pl.col("date").cast(pl.Date).alias("Dates"),
@@ -352,8 +359,8 @@ def prepare_figure_data(
         ])
 
     figure_df = pl.concat([
-        actual_completed_df,                            
-        actual_in_progress_df,                          
+        actual_completed_df,
+        actual_in_progress_df,
         baseline_df,
         _band("median", "projection_median"),
         _band("p05",    "projection_05"),
@@ -368,12 +375,12 @@ def prepare_figure_data(
 
     figure_df.write_csv("figure_df.csv")
     return figure_df
- 
- 
+
+
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
- 
+
 def main():
     team         = "Thestrals"
     increment    = "PI-33"
@@ -389,7 +396,7 @@ def main():
     # Most recent gets the highest weight at decay 0.5.
     training_increments = ["PI-33", "PI-32", "PI-31"]
 
-    combined_df, actuals_string, baseline_string, remaining, wip_dates, sprint_dates = (
+    combined_df, actuals_string, sprint_plan, remaining, wip_dates, sprint_dates, status_summary = (
         dataframe_for_initial_graph(team, increment, sprint_date, just_stories)
     )
     total_sp = float(combined_df["baseline_sp"].max())
@@ -405,7 +412,7 @@ def main():
         proj_count,
         training_df=training_df,
         training_col="days_per_story_point",
-        team_size = team_size,
+        team_size=team_size,
         remaining_issues=remaining,
     )
 
@@ -414,10 +421,9 @@ def main():
     print("\n── Figure Data ───────────────────────────────")
     print(figure_df)
     print(issue_dates_df)
-    
+
     print(f"\n{function_name}: {time.time() - start_time:.2f}s total")
 
 
 if __name__ == "__main__":
     main()
- 

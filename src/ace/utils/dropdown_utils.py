@@ -1,6 +1,5 @@
 from utils.neo4j_client import get_driver
 
-
 def assemble_dropdown_selection():
 
     CYPHER_QUERY = """

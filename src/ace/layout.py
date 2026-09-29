@@ -1,13 +1,94 @@
-from dash import html, dcc, dash_table
+from dash import html, dcc
 from config import app_color
 import dash_bootstrap_components as dbc
-import time
-import inspect
 
-# === Module-level style defaults (overridden by locals inside create_layout) ===
-label_style = {"fontWeight": 600, "display": "block", "marginBottom": 4}
-dropdown_style = {"width": "100%"}
-input_style = {"width": "100%"}
+from utils.forecast_view import render_forecast_summary
+
+
+# =============================================================================
+# Form helpers: every input panel uses these, so fields look and behave alike.
+# Control sizing, borders and focus rings for dcc.Dropdown / DatePickerSingle /
+# Input live in assets/forms.css (those components can't be fully styled inline).
+# =============================================================================
+
+_LABEL = {
+    "display": "block",
+    "fontSize": "13px",
+    "fontWeight": 500,
+    "color": "#374151",
+    "marginBottom": "6px",
+}
+
+_HELP = {
+    "fontSize": "12px",
+    "color": "#6B7280",
+    "margin": "6px 0 0",
+    "lineHeight": 1.4,
+}
+
+_SECTION_TITLE = {
+    "fontSize": "12px",
+    "fontWeight": 600,
+    "color": "#6B7280",
+}
+
+_PANEL = {
+    "flex": "2 1 0",
+    "minWidth": "280px",
+    "alignSelf": "flex-start",
+    "backgroundColor": "#FFFFFF",
+    "borderRadius": "12px",
+    "padding": "20px",
+    "boxShadow": "0 2px 10px rgba(0,0,0,0.08)",
+    "display": "flex",
+    "flexDirection": "column",
+    "gap": "16px",
+}
+
+_PANEL_TITLE = {"fontSize": "15px", "fontWeight": 600, "color": "#1F2937", "margin": 0}
+
+
+def _field(label, control_id, control, help_text=None):
+    """Label above the control, optional help text below it."""
+    return html.Div(style={"minWidth": 0}, children=[
+        html.Label(label, htmlFor=control_id, style=_LABEL),
+        control,
+        html.P(help_text, style=_HELP) if help_text else None,
+    ])
+
+
+def _section(title, children, first=False):
+    """A titled group of fields, separated from the one above by a rule."""
+    return html.Div(
+        style={
+            "display": "flex", "flexDirection": "column", "gap": "14px",
+            "paddingTop": "0" if first else "16px",
+            "borderTop": None if first else "1px solid #E5E7EB",
+        },
+        children=[html.Div(title, style=_SECTION_TITLE), *children],
+    )
+
+
+def _date_picker(control_id, date):
+    return dcc.DatePickerSingle(
+        id=control_id,
+        date=date,
+        display_format="MMM D, YYYY",
+        placeholder="Select a date",
+        className="form-date",
+    )
+
+
+def _primary_button(text, control_id):
+    return html.Button(
+        text, id=control_id, n_clicks=0, className="form-button-primary",
+        style={
+            "width": "100%", "height": "40px", "marginTop": "4px",
+            "backgroundColor": app_color["accent"], "color": "#FFFFFF",
+            "border": "none", "borderRadius": "6px",
+            "fontSize": "14px", "fontWeight": 600, "cursor": "pointer",
+        },
+    )
 
 
 def create_layout(pi_training_options, team_options, pi_display_options):
@@ -20,65 +101,9 @@ def create_layout(pi_training_options, team_options, pi_display_options):
         "boxShadow": "0 2px 10px rgba(0,0,0,0.08)"
     }
 
-    label_style = {
-        "color": app_color["text"],
-        "fontWeight": "bold",
-        "marginBottom": "6px"
-    }
 
-    input_style = {
-        "width": "100%",
-        "backgroundColor": "#E5E9F0",
-        "color": "#1F2937",
-        "border": "1px solid white",
-        "padding": "0 10px",
-        "fontSize": "14px",
-        "borderRadius": "6px",
-        "height": "42px",
-        "lineHeight": "42px"
-    }
 
-    dropdown_style = {
-        "width": "100%",
-        "minWidth": "250px",
-        "backgroundColor": "#E5E9F0",
-        "color": "white",
-        "fontSize": "14px",
-        "border": "1px solid white",
-        "borderRadius": "6px",
-        "height": "42px",
-        "lineHeight": "42px"
-    }
 
-    button_style = {
-        "backgroundColor": app_color["accent"],
-        "color": "white",
-        "border": "none",
-        "padding": "10px 20px",
-        "fontWeight": "bold",
-        "borderRadius": "6px",
-        "cursor": "pointer",
-        "transition": "background-color 0.3s"
-    }
-
-    button_style_alt = {
-        "backgroundColor": "#1F2937",
-        "color": "white",
-        "border": "none",
-        "padding": "10px 20px",
-        "fontWeight": "bold",
-        "borderRadius": "6px",
-        "cursor": "pointer",
-        "transition": "background-color 0.3s"
-    }
-
-    header_style = {
-        "textAlign": "left",
-        "color": "#1F2937",
-        "border": "white",
-        "borderBottom": "2px solid #000000",
-        "paddingBottom": "5px"
-    }
 
     tab_style = {
         "flex": "1",
@@ -106,6 +131,11 @@ def create_layout(pi_training_options, team_options, pi_display_options):
     }
 
     selected_style = {
+        "width": "100%",
+        "display": "flex",
+        "justifyContent": "space-between",
+        "alignItems": "center",
+        "gap": "12px",
         "backgroundColor": "white",
         "color": "#1F2937",
         "border": "none",
@@ -117,6 +147,11 @@ def create_layout(pi_training_options, team_options, pi_display_options):
     }
 
     unselected_style = {
+        "width": "100%",
+        "display": "flex",
+        "justifyContent": "space-between",
+        "alignItems": "center",
+        "gap": "12px",
         "backgroundColor": "transparent",
         "color": "#6B7280",
         "border": "none",
@@ -126,15 +161,27 @@ def create_layout(pi_training_options, team_options, pi_display_options):
         "textAlign": "left",
     }
 
-    datepicker_style = {
-        "display": "block",
-        "width": "100%",
-        "minWidth": "250px",
-        "fontSize": "14px",
+
+    forecast_card_style = {
+        "backgroundColor": "#FFFFFF",
+        "borderRadius": "12px",
+        "padding": "16px 20px",
+        "boxShadow": "0 2px 10px rgba(0,0,0,0.1)",
+        "textAlign": "left",
     }
 
-    dcc.Store(id="training_df"),
-    dcc.Store(id="training_items"),
+    scenario_label_style = {
+        "fontSize": "12px",
+        "color": "#6B7280",
+        "marginBottom": "10px",
+    }
+
+    graph_card_style = {
+        "backgroundColor": "#FFFFFF",
+        "borderRadius": "12px",
+        "padding": "12px",
+        "boxShadow": "0 2px 10px rgba(0,0,0,0.1)",
+    }
 
     layout = html.Div(
         style={"backgroundColor": app_color["background"], "minHeight": "100vh", "fontFamily": "Inter, Segoe UI, sans-serif"},
@@ -216,147 +263,89 @@ def create_layout(pi_training_options, team_options, pi_display_options):
                             children=[
                                 html.Div([
 
-                                    # LEFT SIDE
-                                    html.Div([
+                                    # LEFT SIDE: forecast settings
+                                    html.Div(style=_PANEL, children=[
+                                        html.H5("Forecast settings", style=_PANEL_TITLE),
 
-                                        html.Div([
-                                            html.Div([
-                                                html.Label("Select Team", style=label_style),
-                                                dcc.Dropdown(
-                                                    id="team-dropdown",
-                                                    options=[{"label": t, "value": t} for t in team_options],
-                                                    value=team_options[-2] if team_options else None,
-                                                    multi=False,
-                                                    style=dropdown_style
-                                                ),
-                                                dcc.Interval(
-                                                    id="team-refresh-interval",
-                                                    interval=5 * 60 * 1000,
-                                                    n_intervals=0,
-                                                ),
-                                            ], style={"width": "70%", "padding": "0 10px", "minWidth": "250px"})
-                                        ], style={"display": "flex", "flexWrap": "wrap", "gap": "15px", "marginBottom": "10px"}),
+                                        _section("Scope", first=True, children=[
+                                            _field("Team", "team-dropdown", dcc.Dropdown(
+                                                id="team-dropdown",
+                                                options=[{"label": t, "value": t} for t in team_options],
+                                                value=team_options[-3] if len(team_options) >= 3 else (team_options[0] if team_options else None),
+                                                clearable=False,
+                                                placeholder="Select a team",
+                                                className="form-dropdown",
+                                            )),
+                                            _field("Program increment", "pi-display-dropdown", dcc.Dropdown(
+                                                id="pi-display-dropdown",
+                                                options=pi_display_options,
+                                                value=None,
+                                                clearable=False,
+                                                placeholder="Select a PI",
+                                                className="form-dropdown",
+                                            )),
+                                            dcc.Interval(id="team-refresh-interval", interval=5 * 60 * 1000, n_intervals=0),
+                                        ]),
 
-                                        html.Div([
-                                            html.Div([
-                                                html.Label("Select PI increment to analyze", style=label_style),
-                                                dcc.Dropdown(
-                                                    id="pi-display-dropdown",
-                                                    options=pi_display_options,
-                                                    value="",
-                                                    multi=False,
-                                                    style=dropdown_style
-                                                )
-                                            ], style={"width": "70%", "padding": "0 10px"}),
-
-                                            html.Div([
-                                                html.Label("PI Start Date", style=label_style),
-                                                dcc.DatePickerSingle(
-                                                    id="sprint-startdate-input",
-                                                    date="2024-01-05",
-                                                    display_format="YYYY-MM-DD",
-                                                    placeholder="Select a date",
-                                                    style=datepicker_style
-                                                )
-                                            ], style={"width": "70%", "padding": "0 10px"}),
-
-                                            html.Div([
-                                                html.Label("Committed PI Completion Date", style=label_style),
-                                                dcc.DatePickerSingle(
-                                                    id="estimated-project-completion-date",
-                                                    date="2025-05-28",
-                                                    display_format="YYYY-MM-DD",
-                                                    placeholder="Select a date",
-                                                    style=datepicker_style
-                                                )
-                                            ], style={"width": "70%", "padding": "0 10px"}),
-
-                                            html.Div([
-                                                html.Label("Projection Start Date", style=label_style),
-                                                dcc.DatePickerSingle(
-                                                    id="todays-date",
-                                                    date="2026-04-01",
-                                                    display_format="YYYY-MM-DD",
-                                                    placeholder="Select a date",
-                                                    style=datepicker_style
-                                                ),
-                                                html.Div(id="todays-date-output")
-                                            ], style={"width": "70%", "padding": "0 10px"}),
-
-                                        ], style={"display": "flex", "flexWrap": "wrap", "gap": "15px", "marginBottom": "10px"}),
-
-                                        html.Div([
-                                            dbc.Button(
-                                                "Advanced options",
-                                                id="advanced-button",
-                                                className="mb-2",
-                                                color="secondary",
-                                                outline=True,
-                                                n_clicks=0,
+                                        _section("Dates", children=[
+                                            html.Div(
+                                                style={"display": "grid",
+                                                       "gridTemplateColumns": "repeat(auto-fit, minmax(140px, 1fr))",
+                                                       "gap": "14px"},
+                                                children=[
+                                                    _field("PI start", "sprint-startdate-input",
+                                                           _date_picker("sprint-startdate-input", "2024-01-05")),
+                                                    _field("Committed completion", "estimated-project-completion-date",
+                                                           _date_picker("estimated-project-completion-date", "2025-05-28")),
+                                                ],
                                             ),
-                                            dbc.Collapse(
-                                                id="advanced-collapse",
-                                                is_open=False,
-                                                children=dbc.Card(
-                                                    dbc.CardBody([
+                                            _field("Projection start", "todays-date",
+                                                   _date_picker("todays-date", "2026-04-01"),
+                                                   help_text="The forecast branches from actual progress on this date."),
+                                            html.Div(id="todays-date-output"),
+                                        ]),
 
-                                                        html.Div([
-                                                            html.Label("Choose issues to examine All/Just Stories", style=label_style),
-                                                            dcc.Dropdown(
-                                                                id="issue_type_selection",
-                                                                options=[{"label": x, "value": x} for x in ["Just Stories", "All Issues"]],
-                                                                value="Just Stories",
-                                                                multi=False,
-                                                                style=dropdown_style
-                                                            )
-                                                        ], style={"padding": "0 10px"}),
-
-                                                        html.Div([
-                                                            html.Label("Team Size", style=label_style),
-                                                            dcc.Input(
-                                                                id="team_size",
-                                                                type="number",
-                                                                value=6,
-                                                                placeholder="e.g. 15",
-                                                                style=input_style
-                                                            )
-                                                        ], style={"flex": 1, "padding": "0 10px"}),
-
-                                                        html.Div([
-                                                            html.Label("Select PI(s) to train on", style=label_style),
-                                                            dcc.Dropdown(
-                                                                id="pi-training-dropdown",
-                                                                options=pi_training_options,
-                                                                value="",
-                                                                multi=True,
-                                                                style=dropdown_style
-                                                            )
-                                                        ], style={"flex": "1", "padding": "0 10px", "marginBottom": "50px"})
-                                                    ])
-                                                )
-                                            )
-                                        ], style={"paddingLeft": "10px"}),
-
-                                        html.Div([
+                                        # Advanced settings (toggled by toggle_collapse in callbacks.py)
+                                        html.Div(style={"paddingTop": "16px", "borderTop": "1px solid #E5E7EB"}, children=[
                                             html.Button(
-                                                "Get Graph",
-                                                id="generate-graph-projections-btn",
-                                                n_clicks=0,
-                                                style=button_style
-                                            )
-                                        ], style={"marginBottom": "15px"}),
+                                                [html.Span("Advanced settings"), html.Span("▾", style={"fontSize": "11px"})],
+                                                id="advanced-button", n_clicks=0, className="form-disclosure",
+                                            ),
+                                            dbc.Collapse(id="advanced-collapse", is_open=False, children=html.Div(
+                                                style={"display": "flex", "flexDirection": "column", "gap": "14px", "paddingTop": "14px"},
+                                                children=[
+                                                    _field("Issue types", "issue_type_selection", dcc.Dropdown(
+                                                        id="issue_type_selection",
+                                                        options=[
+                                                            {"label": "Stories only",    "value": "Just Stories"},
+                                                            {"label": "All issue types", "value": "All Issues"},
+                                                        ],
+                                                        value="Just Stories",
+                                                        clearable=False,
+                                                        searchable=False,
+                                                        className="form-dropdown",
+                                                    )),
+                                                    _field("Team size", "team_size", dcc.Input(
+                                                        id="team_size", type="number", value=6, min=1, step=1,
+                                                        className="form-input",
+                                                    ), help_text="People available to work the remaining issues."),
+                                                    _field("Training PIs", "pi-training-dropdown", dcc.Dropdown(
+                                                        id="pi-training-dropdown",
+                                                        options=pi_training_options,
+                                                        value=[],
+                                                        multi=True,
+                                                        placeholder="Select past PIs",
+                                                        className="form-dropdown",
+                                                    ), help_text="Past PIs used to estimate velocity. Defaults to the two before the selected PI."),
+                                                ],
+                                            )),
+                                        ]),
+
+                                        _primary_button("Run forecast", "generate-graph-projections-btn"),
 
                                         dcc.Store(id="stored-projection-data"),
-                                        dcc.Store(id='pi-data-all-issues')
-
-                                    ], style={
-                                        "flex": "2 1 0",
-                                        "minWidth": "300px",
-                                        "paddingLeft": "16px",
-                                        "display": "flex",
-                                        "flexDirection": "column",
-                                        "gap": "12px"
-                                    }),
+                                        dcc.Store(id="pi-data-all-issues"),
+                                    ]),
 
                                     # RIGHT SIDE
                                     html.Div(
@@ -370,77 +359,17 @@ def create_layout(pi_training_options, team_options, pi_display_options):
                                         },
                                         children=[
 
+                                            # Forecast summary (verdict + three figures)
                                             html.Div(
-                                                style={
-                                                    "display": "flex",
-                                                    "gap": "12px",
-                                                    "minHeight": "100px",
-                                                },
-                                                children=[
-                                                    html.Div(
-                                                        style={
-                                                            "flex": "1",
-                                                            "display": "grid",
-                                                            "gridTemplateColumns": "1fr 1fr 1fr",
-                                                            "gridTemplateRows": "1fr",
-                                                            "gap": "8px",
-                                                        },
-                                                        children=[
-                                                            html.Div(
-                                                                id="mini-card-1",
-                                                                style={
-                                                                    "backgroundColor": "#FFFFFF",
-                                                                    "borderRadius": "8px",
-                                                                    "padding": "12px",
-                                                                    "boxShadow": "0 2px 6px rgba(0,0,0,0.1)",
-                                                                    "textAlign": "center",
-                                                                },
-                                                                children=[
-                                                                    html.H5("Probability of finishing by PI end date"),
-                                                                    html.H1(id="probability_finishing_by_completion_date")
-                                                                ]
-                                                            ),
-                                                            html.Div(
-                                                                id="mini-card-2",
-                                                                style={
-                                                                    "backgroundColor": "#FFFFFF",
-                                                                    "borderRadius": "8px",
-                                                                    "padding": "12px",
-                                                                    "boxShadow": "0 2px 6px rgba(0,0,0,0.1)",
-                                                                    "textAlign": "center",
-                                                                },
-                                                                children=[
-                                                                    html.H5("Projected date of completion"),
-                                                                    html.H3(id="completion-date"),
-                                                                ]
-                                                            ),
-                                                            html.Div(
-                                                                id="mini-card-3",
-                                                                style={
-                                                                    "backgroundColor": "#FFFFFF",
-                                                                    "borderRadius": "8px",
-                                                                    "padding": "12px",
-                                                                    "boxShadow": "0 2px 6px rgba(0,0,0,0.1)",
-                                                                    "textAlign": "center",
-                                                                },
-                                                                children=[
-                                                                    html.H5("Projected percent complete at PI end date"),
-                                                                    html.H1(id="projected-projection-completion"),
-                                                                ]
-                                                            ),
-                                                        ]
-                                                    ),
-                                                ]
+                                                id="forecast-summary",
+                                                style=forecast_card_style,
+                                                children=render_forecast_summary(None),
                                             ),
 
+                                            # Main chart
                                             html.Div(
                                                 id="graph-container-projection",
-                                                style={
-                                                    "backgroundColor": "#FFFFFF",
-                                                    "borderRadius": "12px",
-                                                    "padding": "12px",
-                                                    "boxShadow": "0 2px 10px rgba(0,0,0,0.1)",
-                                                },
+                                                style=graph_card_style,
                                                 children=[
                                                     dcc.Loading(
                                                         id="graph-loading",
@@ -451,43 +380,44 @@ def create_layout(pi_training_options, team_options, pi_display_options):
                                                 ]
                                             ),
 
+                                            # Bottom cards: remaining issues + sprint plan
                                             html.Div(
                                                 style={
                                                     "flex": "1",
                                                     "display": "grid",
-                                                    "gridTemplateColumns": "1fr 1fr",
+                                                    "gridTemplateColumns": "1fr 1.3fr",
                                                     "gridTemplateRows": "1fr",
                                                     "gap": "8px",
                                                 },
                                                 children=[
                                                     html.Div(
-                                                        id = "incomplete_issue_display",
-                                                        style = {
+                                                        id="incomplete_issue_display",
+                                                        style={
                                                             "backgroundColor": "#FFFFFF",
                                                             "borderRadius": "8px",
-                                                            "padding": "12px",
+                                                            "padding": "12px 16px",
                                                             "boxShadow": "0 2px 6px rgba(0,0,0,0.1)",
                                                             "textAlign": "left",
+                                                            "minWidth": 0,
                                                         },
                                                         children=[
-                                                            html.H5("Status of remaining issues"),
-                                                            html.P(id="remaining_issue_display"),
-                                                            html.H5("Deviance of issues actually completed vs in sprint log")
+                                                            html.H5("Status of remaining issues", style={"marginBottom": "8px"}),
+                                                            html.Div(id="remaining_issue_display", style={"fontSize": "13px"}),
                                                         ]
                                                     ),
                                                     html.Div(
-                                                        id = "sprint_plan_display",
-                                                        style = {
+                                                        id="sprint_plan_display",
+                                                        style={
                                                             "backgroundColor": "#FFFFFF",
                                                             "borderRadius": "8px",
-                                                            "padding": "12px",
+                                                            "padding": "12px 16px",
                                                             "boxShadow": "0 2px 6px rgba(0,0,0,0.1)",
                                                             "textAlign": "left",
+                                                            "minWidth": 0,   # lets the table scroll inside the cell
                                                         },
                                                         children=[
-                                                            html.H5("Sprint Plan"),
-                                                            html.Pre(id="sprint_plan_display_string", 
-                                                                     style={"margin": 0, "fontFamily": "inherit", "fontSize": "inherit"})
+                                                            html.H5("Sprint Plan", style={"marginBottom": "8px"}),
+                                                            html.Div(id="sprint_plan_display_string", style={"fontSize": "13px"}),
                                                         ]
                                                     ),
                                                 ]
@@ -510,6 +440,8 @@ def create_layout(pi_training_options, team_options, pi_display_options):
                             children=[
 
                                 dcc.Store(id="selected-option", data=0),
+                                dcc.Store(id="alerts-store"),
+                                dcc.Store(id="scenario1-store"),
 
                                 html.Div(
                                     style={
@@ -520,18 +452,22 @@ def create_layout(pi_training_options, team_options, pi_display_options):
                                     },
                                     children=[
 
-                                        # LEFT SIDE
+                                        # LEFT SIDE: rule list with live status
                                         html.Div(
                                             style={
                                                 "flex": "2 1 0",
-                                                "minWidth": "300px",
+                                                "minWidth": "260px",
                                                 "paddingLeft": "16px",
                                                 "display": "flex",
                                                 "flexDirection": "column",
                                                 "gap": "8px",
                                             },
                                             children=[
-                                                html.H3("Rules tracked:", style={"margin": "0", "color": "#1F2937"}),
+                                                html.H5("Alert rules", style={"margin": "0", "color": "#1F2937"}),
+                                                html.P(
+                                                    "Checked as of the Projection Start Date each time you run Get Graph.",
+                                                    style={"margin": "0 0 4px", "fontSize": "13px", "color": "#6B7280"},
+                                                ),
                                                 html.Div(
                                                     id="vertical-selector",
                                                     style={
@@ -543,80 +479,47 @@ def create_layout(pi_training_options, team_options, pi_display_options):
                                                         "gap": "4px",
                                                     },
                                                     children=[
-                                                        html.Button("WIP",            id={"type": "v-option", "index": 0}, style=selected_style),
-                                                        html.Button("Sprint Plan Deviance",   id={"type": "v-option", "index": 1}, style=unselected_style),
+                                                        html.Button(
+                                                            [html.Span("Work in progress"), html.Span(id="rule-status-wip")],
+                                                            id={"type": "v-option", "index": 0}, style=selected_style,
+                                                        ),
+                                                        html.Button(
+                                                            [html.Span("Sprint load"), html.Span(id="rule-status-sprint")],
+                                                            id={"type": "v-option", "index": 1}, style=unselected_style,
+                                                        ),
                                                     ]
                                                 ),
                                             ]
                                         ),
 
-                                        # RIGHT SIDE
-
-                                        dcc.Store(id = "wip-figure-store"), 
-                                        dcc.Store(id = "sprint-figure-store"), 
-
+                                        # RIGHT SIDE: alert message + supporting chart
                                         html.Div(
                                             style={
-                                                'display': 'flex',
-                                                'flexDirection': 'column',
-                                                'gap': '20px',
-                                                'flex': '5 1 0',
-                                                'minWidth': '300px',
-                                                'paddingLeft': '16px',
+                                                "display": "flex",
+                                                "flexDirection": "column",
+                                                "gap": "16px",
+                                                "flex": "5 1 0",
+                                                "minWidth": "300px",
+                                                "paddingLeft": "16px",
                                             },
                                             children=[
-
+                                                html.Div(id="alert-card"),
                                                 html.Div(
-                                                    style={
-                                                        "display": "flex",
-                                                        "gap": "12px",
-                                                        "minHeight": "100px",
-                                                    },
+                                                    id="graph-container-projection-tab2",
+                                                    style=graph_card_style,
                                                     children=[
-                                                        html.Div(
-                                                            id="top-left-card-tab2",
-                                                            style={
-                                                                "flex": "2",
-                                                                "backgroundColor": "rgba(255, 0, 0, 0.15)",
-                                                                "borderRadius": "12px",
-                                                                "padding": "16px",
-                                                                "boxShadow": "0 2px 10px rgba(0,0,0,0.1)",
-                                                                "border": "1px solid #FF0000",
-                                                            },
-                                                            children=[
-                                                                html.H3("WIP Delay:"),
-                                                                html.P("Threshold of work in progress items exceeded. This will delay project completion unless resolved.")
-                                                            ]
-                                                        ),
-                                                    ]
-                                                ),
-
-                                                html.Div(
-                                                    style={"flex": "4"},
-                                                    children=[
-                                                        html.Div(
-                                                            id="graph-container-projection-tab2",
-                                                            style={
-                                                                "backgroundColor": "#FFFFFF",
-                                                                "borderRadius": "12px",
-                                                                "padding": "12px",
-                                                                "boxShadow": "0 2px 10px rgba(0,0,0,0.1)",
-                                                            },
-                                                            children=[
-                                                                dcc.Loading(
-                                                                    id="graph-loading-tab2",
-                                                                    type="default",
-                                                                    color="#3B82F6",
-                                                                    children=dcc.Graph(id="progress-graph-projection-tab2", style={"minHeight": 380})
-                                                                )
-                                                            ]
+                                                        dcc.Loading(
+                                                            id="graph-loading-tab2",
+                                                            type="default",
+                                                            color="#3B82F6",
+                                                            children=dcc.Graph(id="progress-graph-projection-tab2", style={"minHeight": 420})
                                                         )
                                                     ]
-                                                )
-
+                                                ),
+                                                # Shown only when work carried over from an earlier increment
+                                                html.Div(id="carryover-notice", style={"display": "none"}),
                                             ]
-                                        )
-
+                                        ),
                                     ]
                                 )
                             ]
@@ -633,81 +536,49 @@ def create_layout(pi_training_options, team_options, pi_display_options):
                             children=[
                                 html.Div([
 
-                                    # LEFT SIDE — only team size
-                                    html.Div([
-                                        html.Div([
-                                            html.Div([
-                                                html.Label("Team Size", style=label_style),
-                                                dcc.Input(
-                                                    id="team_size-tab3",
-                                                    type="number",
-                                                    value=6,
-                                                    placeholder="e.g. 15",
-                                                    style=input_style
-                                                )
-                                            ], style={"flex": 1, "padding": "0 10px"}),
-
-                                        ], style={"display": "flex", "flexWrap": "wrap", "gap": "15px", "marginBottom": "10px"}),
-
-                                        html.Div([
-                                            html.Button(
-                                                "Get Graph",
-                                                id="generate-graph-projections-btn-tab3",
-                                                n_clicks=0,
-                                                style=button_style
-                                            )
-                                        ], style={"marginBottom": "15px"}),
-
-                                    ], style={
-                                        "flex": "2 1 0",
-                                        "minWidth": "300px",
-                                        "paddingLeft": "16px",
-                                        "display": "flex",
-                                        "flexDirection": "column",
-                                        "gap": "12px"
-                                    }),
+                                    # LEFT SIDE: scenario settings
+                                    html.Div(style=_PANEL, children=[
+                                        html.H5("Scenario settings", style=_PANEL_TITLE),
+                                        _section("Scenario 2", first=True, children=[
+                                            _field("Team size", "team_size-tab3", dcc.Input(
+                                                id="team_size-tab3", type="number", value=6, min=1, step=1,
+                                                className="form-input",
+                                            ), help_text="Scenario 1 uses the team size from the Projection Chart tab. "
+                                                         "Team, PI and dates also come from that tab."),
+                                        ]),
+                                        _primary_button("Run comparison", "generate-graph-projections-btn-tab3"),
+                                    ]),
 
                                     # RIGHT SIDE
                                     html.Div([
-                                        html.H4("Comparison Table: Scenario 1 vs Scenario 2 Metrics"),
+                                        html.H4("Scenario comparison"),
                                         html.Div(
                                             style={
-                                                "flex": "1",
                                                 "display": "grid",
-                                                "gridTemplateColumns": "1fr 1fr 1fr",
-                                                "gridTemplateRows": "1fr 1fr",
-                                                "gap": "8px",
+                                                "gridTemplateColumns": "repeat(auto-fit, minmax(320px, 1fr))",
+                                                "gap": "12px",
+                                                "marginBottom": "16px",
                                             },
                                             children=[
-                                                html.Div(id="mini-card-1-team1-tab3", style={"backgroundColor": "#FFFFFF", "borderRadius": "8px", "padding": "12px", "boxShadow": "0 2px 6px rgba(0,0,0,0.1)", "textAlign": "center"},
-                                                    children=[html.P("Probability of finishing by PI end date"), html.H1(id="probability_finishing_by_completion_date-team1-tab3")]),
-                                                html.Div(id="mini-card-2-team1-tab3", style={"backgroundColor": "#FFFFFF", "borderRadius": "8px", "padding": "12px", "boxShadow": "0 2px 6px rgba(0,0,0,0.1)", "textAlign": "center"},
-                                                    children=[html.P("Projected date of completion"), html.H3(id="completion-date-team1-tab3")]),
-                                                html.Div(id="mini-card-3-team1-tab3", style={"backgroundColor": "#FFFFFF", "borderRadius": "8px", "padding": "12px", "boxShadow": "0 2px 6px rgba(0,0,0,0.1)", "textAlign": "center"},
-                                                    children=[html.P("Projected percent complete at PI end date"), html.H1(id="projected-projection-completion-team1-tab3")]),
-                                                html.Div(id="mini-card-1-team2-tab3", style={"backgroundColor": "#FFFFFF", "borderRadius": "8px", "padding": "12px", "boxShadow": "0 2px 6px rgba(0,0,0,0.1)", "textAlign": "center"},
-                                                    children=[html.P("Probability of finishing by PI end date"), html.H1(id="probability_finishing_by_completion_date-team2-tab3")]),
-                                                html.Div(id="mini-card-2-team2-tab3", style={"backgroundColor": "#FFFFFF", "borderRadius": "8px", "padding": "12px", "boxShadow": "0 2px 6px rgba(0,0,0,0.1)", "textAlign": "center"},
-                                                    children=[html.P("Projected date of completion"), html.H3(id="completion-date-team2-tab3")]),
-                                                html.Div(id="mini-card-3-team2-tab3", style={"backgroundColor": "#FFFFFF", "borderRadius": "8px", "padding": "12px", "boxShadow": "0 2px 6px rgba(0,0,0,0.1)", "textAlign": "center"},
-                                                    children=[html.P("Projected percent complete at PI end date"), html.H1(id="projected-projection-completion-team2-tab3")]),
+                                                html.Div(style=forecast_card_style, children=html.Div(
+                                                    id="forecast-summary-tab3-team1",
+                                                    children=[html.Div("Scenario 1: team size from the Projection Chart tab", style=scenario_label_style),
+                                                              render_forecast_summary(None)],
+                                                )),
+                                                html.Div(style=forecast_card_style, children=html.Div(
+                                                    id="forecast-summary-tab3-team2",
+                                                    children=[html.Div("Scenario 2: team size set here", style=scenario_label_style),
+                                                              render_forecast_summary(None)],
+                                                )),
                                             ]
                                         ),
 
-                                        html.H4("Scenario 1"),
+                                        # Both scenarios' projections on one chart
                                         html.Div(
-                                            id="graph-container-projection-tab3-team1",
-                                            style={"backgroundColor": "#FFFFFF", "borderRadius": "12px", "padding": "12px", "boxShadow": "0 2px 10px rgba(0,0,0,0.1)", "marginBottom": "10px"},
-                                            children=[dcc.Loading(id="graph-loading-tab3-team1", type="default", color="#3B82F6",
-                                            children=dcc.Graph(id="progress-graph-projection-tab3-team1", style={"minHeight": 380}))]
-                                        ),
-
-                                        html.H4("Scenario 2"),
-                                        html.Div(
-                                            id="graph-container-projection-tab3-team2",
-                                            style={"backgroundColor": "#FFFFFF", "borderRadius": "12px", "padding": "12px", "boxShadow": "0 2px 10px rgba(0,0,0,0.1)"},
-                                            children=[dcc.Loading(id="graph-loading-tab3-team2", type="default", color="#3B82F6",
-                                                children=dcc.Graph(id="progress-graph-projection-tab3-team2", style={"minHeight": 380}))]
+                                            id="graph-container-projection-tab3",
+                                            style=graph_card_style,
+                                            children=[dcc.Loading(id="graph-loading-tab3", type="default", color="#3B82F6",
+                                                children=dcc.Graph(id="progress-graph-projection-tab3", style={"minHeight": 440}))]
                                         ),
 
                                     ], style={"flex": "5 1 0", "minWidth": "300px", "paddingLeft": "16px"}),

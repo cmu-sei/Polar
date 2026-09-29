@@ -3,24 +3,26 @@
 # =============================================================================
 
 # === Standard Library Imports ===
-import os
 import re
 import datetime
-from typing import Iterable, List, Dict, Optional, Tuple
-from collections.abc import Iterable
+import time
+from typing import Iterable, List, Optional, Tuple
 
 # === Third-Party Libraries ===
 import polars as pl
-import dash
 from dash import ALL, Input, Output, State, ctx, no_update
-import time
+from dash.exceptions import PreventUpdate
 
 # === App-Specific Modules ===
-from utils.figures import build_figure_pi_display, build_figure_pi_display_initial
+from utils.figures import build_figure_pi_display, build_figure_scenario_comparison
+from utils.alerts import build_alerts, render_alert_card, render_carryover_notice, rule_status
 from utils.dropdown_utils import assemble_pi_selection_initial, assemble_pi_selection_training, assemble_dropdown_selection
 from utils.restraints_check import get_earliest_and_latest_date, get_projection_start_date
+from utils.sprint_plan_view import render_sprint_plan
+from utils.status_view import render_status_summary
+from utils.forecast_view import render_forecast_summary, render_scenario_card
 
-# ── New pipeline (replaces team_projections + projections_beta calls) ─────────
+# ── Pipeline ──────────────────────────────────────────────────────────────────
 from data_transformation_directory.Pipeline import (
     dataframe_for_initial_graph,
     prepare_figure_data,
@@ -28,17 +30,9 @@ from data_transformation_directory.Pipeline import (
 from data_transformation_directory.projections import build_projections
 from data_transformation_directory.training_projections import return_stats_df
 
-# ── Still needed for dropdown helpers ─────────────────────────────────────────
-from data_transformation_directory.WorkItem.jira_map import IN_PROGRESS_STATE
-from data_transformation_directory.WorkItem.helper import (
-    get_work_hours,
-    is_late_story,
-)
-
 # === Neo4j credentials -- delivered via environment variables (Kubernetes
 # Secret/ConfigMap injection, or exported shell vars locally). No .env file
 # is read anywhere in this application. ===
-
 
 
 # =============================================================================
@@ -46,6 +40,11 @@ from data_transformation_directory.WorkItem.helper import (
 # =============================================================================
 
 _SELECTED_STYLE = {
+    "width": "100%",
+    "display": "flex",
+    "justifyContent": "space-between",
+    "alignItems": "center",
+    "gap": "12px",
     "backgroundColor": "white",
     "color": "#1F2937",
     "border": "none",
@@ -56,6 +55,11 @@ _SELECTED_STYLE = {
 }
 
 _UNSELECTED_STYLE = {
+    "width": "100%",
+    "display": "flex",
+    "justifyContent": "space-between",
+    "alignItems": "center",
+    "gap": "12px",
     "backgroundColor": "transparent",
     "color": "#6B7280",
     "border": "none",
@@ -95,6 +99,102 @@ def _apply_dark_text(fig):
         )
     return fig
 
+
+def _compute_completion_stats(projections_df, estimated_project_completion_date):
+    """Median % complete and probability of 100% at the committed completion date."""
+    # None means "no projection data on that date" (e.g. the committed date
+    # falls before the projection start), which the view shows as "—".
+    completion_percentage = None
+    likelihood_percentage = None
+
+    if not estimated_project_completion_date:
+        return completion_percentage, likelihood_percentage
+
+    try:
+        comp_date = datetime.datetime.strptime(
+            str(estimated_project_completion_date)[:10], "%Y-%m-%d"
+        ).date()
+
+        proj_at_comp = projections_df.filter(pl.col("date").cast(pl.Date) == comp_date)
+
+        if not proj_at_comp.is_empty():
+            completion_percentage = round(float(proj_at_comp["completed_pct"].median()), 2)
+            likelihood_percentage = round(
+                float((proj_at_comp["completed_pct"] >= 99.9999).mean() * 100), 4
+            )
+    except Exception as e:
+        print(f"[Simulation] stat computation failed: {e}")
+
+    return completion_percentage, likelihood_percentage
+
+
+def _median_peak(figure_df):
+    """Highest % the median projection reaches, or None."""
+    rows = figure_df.filter(pl.col("group") == "projection_median")
+    return float(rows["Percent Complete"].max()) if rows.height else None
+
+
+def _forecast_dict(completion_pct, likelihood_pct, date_value, target_date, figure_df, projection_count):
+    """Everything render_forecast_summary needs, JSON-safe."""
+    return {
+        "likelihood_pct":   likelihood_pct,
+        "completion_pct":   completion_pct,
+        "finish_date":      str(date_value) if date_value is not None else None,
+        "target_date":      str(target_date)[:10] if target_date else None,
+        "median_peak":      _median_peak(figure_df),
+        "projection_count": int(projection_count),
+    }
+
+
+def _figure_df_to_store(figure_df: pl.DataFrame) -> dict:
+    """figure_df → JSON-safe dict for a dcc.Store."""
+    return figure_df.with_columns(pl.col("Dates").cast(pl.Utf8)).to_dict(as_series=False)
+
+
+def _figure_df_from_store(data: dict) -> pl.DataFrame:
+    """
+    Rebuild figure_df from a dcc.Store. The store round-trips through the
+    browser, and JavaScript has one number type, so 0.0 comes back as 0.
+    Pin the column types instead of letting polars guess from the first rows.
+    """
+    return (
+        pl.DataFrame(
+            data,
+            schema_overrides={"Dates": pl.Utf8, "Percent Complete": pl.Float64, "group": pl.Utf8},
+            strict=False,
+        )
+        .with_columns(pl.col("Dates").str.to_date())
+    )
+
+
+def _scenario_params(todays_date, team, main_increment, training_increments,
+                     estimated_project_completion_date, team_size, issue_option) -> dict:
+    """Inputs that define a scenario run; used to tell whether a stored run is still current."""
+    return {
+        "todays_date":  str(todays_date),
+        "team":         team,
+        "increment":    main_increment,
+        "training":     sorted(training_increments or []),
+        "target":       str(estimated_project_completion_date),
+        "team_size":    team_size,
+        "issue_option": issue_option,
+    }
+
+
+def _median_completion_date(figure_df):
+    """First date the median projection reaches 100%, or None."""
+    median_complete = (
+        figure_df
+        .filter(
+            (pl.col("group") == "projection_median") &
+            (pl.col("Percent Complete") >= 100.0)
+        )
+        .sort("Dates")
+        .head(1)
+    )
+    return median_complete["Dates"][0] if not median_complete.is_empty() else None
+
+
 def _run_simulation_initial(
     todays_date:                       str,
     team:                              str,
@@ -105,12 +205,14 @@ def _run_simulation_initial(
     issue_option:                      str,
     projection_count:                  int   = 1000,
     recency_decay:                     float = 0.5,
-) -> Tuple[Optional[object], Optional[object], float, float]:
+) -> Optional[dict]:
     """
-    Run the projection simulation using the new pipeline and return
-    (plot_figure, date_value, completion_pct, likelihood_pct).
+    Run the projection simulation for Tab 1 / Tab 2.
 
-    Returns (None, None, 0.0, 0.0) if any step produces no data.
+    Returns a dict with keys:
+        plot_figure, alerts, date_value,
+        completion_pct, likelihood_pct, actual_string, sprint_plan, status_summary
+    or None if any step produces no data.
 
     Pipeline
     --------
@@ -119,40 +221,32 @@ def _run_simulation_initial(
     3. build_projections            — run N Monte-Carlo paths from todays_date
     4. compute stats                — median % and likelihood at comp date
     5. prepare_figure_data          — collapse runs → p05 / median / p95 bands
-    6. build_figure_pi_display      — render the Plotly figure
+    6. build_figure_pi_display      — render the Plotly figures
     """
     just_stories = (issue_option == "Just Stories")
 
     # ── 1. Build combined actuals + piecewise baseline ────────────────────────
     try:
-        combined_df, actual_string, baseline_string, remaining, wip_dates, sprint_dates = dataframe_for_initial_graph(
-            team, main_increment, todays_date, just_stories
+        combined_df, actual_string, sprint_plan, remaining, wip_dates, sprint_dates, status_summary = (
+            dataframe_for_initial_graph(team, main_increment, todays_date, just_stories)
         )
-    except Exception as e:
+    except Exception:
         import traceback
         traceback.print_exc()
-        return None, None, None, None, 0.0, 0.0, None, None
+        return None
 
     total_sp = float(combined_df["baseline_sp"].max())
     if total_sp == 0:
         print("[Simulation] total_sp is 0 — no story points found.")
-        return None, None, None, None, 0.0, 0.0, None, None
+        return None
 
-    # ── 2. Weighted PERT velocity from historical training increments ──────────
-    #
+    # ── 2. Weighted PERT velocity from historical training increments ─────────
     # recency_decay=0.5 → most-recent PI weight 1.0, each prior PI * 0.5.
-    # Set recency_decay=0.0 to treat all training PIs equally.
-
     if not training_increments:
         print("[Simulation] no training increments selected/available — no data.")
-        return None, None, None, None, 0.0, 0.0, None, None
+        return None
 
-    training_df = return_stats_df(
-        team,
-        training_increments,
-        just_stories,
-        recency_decay=recency_decay,
-    )
+    training_df = return_stats_df(team, training_increments, just_stories, recency_decay=recency_decay)
 
     # ── 3. Run N projection paths branching from todays_date ──────────────────
     try:
@@ -162,76 +256,44 @@ def _run_simulation_initial(
             total_sp         = total_sp,
             projection_count = int(projection_count),
             training_df      = training_df,
-            team_size        = team_size, 
-            remaining_issues = remaining, 
+            team_size        = team_size,
+            remaining_issues = remaining,
         )
     except ValueError as e:
         print(f"[Simulation] build_projections failed: {e}")
-        return None, None, None, None, 0.0, 0.0, None, None
+        return None
 
-    # ── 4. Compute completion % and likelihood at the target date ─────────────
-    completion_percentage = 0.0
-    likelihood_percentage = 0.0
+    # ── 4. Completion % and likelihood at the target date ─────────────────────
+    completion_pct, likelihood_pct = _compute_completion_stats(
+        projections_df, estimated_project_completion_date
+    )
 
-    if estimated_project_completion_date:
-        try:
-            comp_date = datetime.datetime.strptime(
-                estimated_project_completion_date, "%Y-%m-%d"
-            ).date()
-
-            proj_at_comp = projections_df.filter(
-                pl.col("date").cast(pl.Date) == comp_date
-            )
-
-            if not proj_at_comp.is_empty():
-                completion_percentage = round(
-                    float(proj_at_comp["completed_pct"].median()), 2
-                )
-                likelihood_percentage = round(
-                    float(
-                        (proj_at_comp["completed_pct"] >= 99.9999).mean() * 100
-                    ),
-                    4,
-                )
-        except Exception as e:
-            print(f"[Simulation] stat computation failed: {e}")
-
-    # ── 5. Collapse N runs → p05 / median / p95 bands for the figure ──────────
-    #
-    # prepare_figure_data produces the long-format DataFrame with columns
-    # [Dates, Percent Complete, group] that build_figure_pi_display expects.
+    # ── 5. Collapse N runs → p05 / median / p95 bands ─────────────────────────
     figure_df = prepare_figure_data(combined_df, projections_df)
 
-    # ── 6. Find when the median projection first reaches 100 % ────────────────
-    median_complete = (
-        figure_df
-        .filter(
-            (pl.col("group") == "projection_median") &
-            (pl.col("Percent Complete") >= 100.0)
-        )
-        .sort("Dates")
-        .head(1)
-    )
-    date_value = (
-        median_complete["Dates"][0]
-        if not median_complete.is_empty()
-        else None
-    )
+    # ── 6. When the median projection first reaches 100 % ─────────────────────
+    date_value     = _median_completion_date(figure_df)
+    proj_comp_date = str(date_value) if date_value is not None else None
 
-    # ── 7. Render the Plotly figure ───────────────────────────────────────────
-    proj_comp_date = (
-        str(date_value)
-        if date_value is not None
-        else None
-    )
+    # ── 7. Render the Plotly figures ──────────────────────────────────────────
+    plot_figure = build_figure_pi_display(figure_df, todays_date, proj_comp_date)
 
-    plot_figure, wip_figure, sprint_figure = build_figure_pi_display_initial(figure_df, todays_date, proj_comp_date, wip_dates, sprint_dates)
+    # ── 8. Alert rules for the Realtime Alerts tab ────────────────────────────
+    alerts = build_alerts(combined_df, sprint_plan, todays_date)
 
-    plot_figure   = _apply_dark_text(plot_figure)
-    wip_figure    = _apply_dark_text(wip_figure)
-    sprint_figure = _apply_dark_text(sprint_figure)
- 
-    return plot_figure, wip_figure, sprint_figure, date_value, completion_percentage, likelihood_percentage, actual_string, baseline_string, 
+    return {
+        "plot_figure":    _apply_dark_text(plot_figure),
+        "figure_df":      figure_df,
+        "alerts":         alerts,
+        "date_value":     date_value,
+        "completion_pct": completion_pct,
+        "likelihood_pct": likelihood_pct,
+        "actual_string":  actual_string,
+        "sprint_plan":    sprint_plan,
+        "status_summary": status_summary,
+        "forecast":       _forecast_dict(completion_pct, likelihood_pct, date_value,
+                                         estimated_project_completion_date, figure_df, projection_count),
+    }
 
 
 def _run_simulation(
@@ -244,131 +306,69 @@ def _run_simulation(
     issue_option:                      str,
     projection_count:                  int   = 1000,
     recency_decay:                     float = 0.5,
-) -> Tuple[Optional[object], Optional[object], float, float]:
+) -> Optional[dict]:
     """
-    Run the projection simulation using the new pipeline and return
-    (plot_figure, date_value, completion_pct, likelihood_pct).
+    Run one projection scenario for Tab 3 (data only; the comparison chart is
+    drawn by the callback once both scenarios are available).
 
-    Returns (None, None, 0.0, 0.0) if any step produces no data.
-
-    Pipeline
-    --------
-    1. dataframe_for_initial_graph  — fetch issues, build baseline + actuals
-    2. return_stats_df              — fit PERT velocity from weighted history
-    3. build_projections            — run N Monte-Carlo paths from todays_date
-    4. compute stats                — median % and likelihood at comp date
-    5. prepare_figure_data          — collapse runs → p05 / median / p95 bands
-    6. build_figure_pi_display      — render the Plotly figure
+    Returns a dict with keys:
+        figure_df, date_value, completion_pct, likelihood_pct, forecast
+    or None if any step produces no data.
     """
     just_stories = (issue_option == "Just Stories")
 
     # ── 1. Build combined actuals + piecewise baseline ────────────────────────
     try:
-        combined_df, actual_string, baseline_string, remaining, _, _ = dataframe_for_initial_graph(
+        combined_df, _, _, remaining, _, _, _ = dataframe_for_initial_graph(
             team, main_increment, todays_date, just_stories
         )
-    except Exception as e:
+    except Exception:
         import traceback
         traceback.print_exc()
-        return None, None, 0.0, 0.0, None, None
+        return None
 
     total_sp = float(combined_df["baseline_sp"].max())
     if total_sp == 0:
         print("[Simulation] total_sp is 0 — no story points found.")
-        return None, None, 0.0, 0.0, None, None
+        return None
 
-    # ── 2. Weighted PERT velocity from historical training increments ──────────
-    #
-    # recency_decay=0.5 → most-recent PI weight 1.0, each prior PI * 0.5.
-    # Set recency_decay=0.0 to treat all training PIs equally.
-
+    # ── 2. Weighted PERT velocity from historical training increments ─────────
     if not training_increments:
         print("[Simulation] no training increments selected/available — no data.")
-        return None, None, 0.0, 0.0, None, None
+        return None
 
-    training_df = return_stats_df(
-        team,
-        training_increments,
-        just_stories,
-        recency_decay=recency_decay,
-    )
+    training_df = return_stats_df(team, training_increments, just_stories, recency_decay=recency_decay)
 
     # ── 3. Run N projection paths branching from todays_date ──────────────────
     try:
         projections_df, issue_dates_df = build_projections(
             combined_df      = combined_df,
-            sprint_date      = todays_date,     # projection branch point
+            sprint_date      = todays_date,
             total_sp         = total_sp,
             projection_count = int(projection_count),
             training_df      = training_df,
-            team_size        = team_size, 
-            remaining_issues = remaining, 
+            team_size        = team_size,
+            remaining_issues = remaining,
         )
     except ValueError as e:
         print(f"[Simulation] build_projections failed: {e}")
-        return None, None, 0.0, 0.0, None, None
+        return None
 
-    # ── 4. Compute completion % and likelihood at the target date ─────────────
-    completion_percentage = 0.0
-    likelihood_percentage = 0.0
-
-    if estimated_project_completion_date:
-        try:
-            comp_date = datetime.datetime.strptime(
-                estimated_project_completion_date, "%Y-%m-%d"
-            ).date()
-
-            proj_at_comp = projections_df.filter(
-                pl.col("date").cast(pl.Date) == comp_date
-            )
-
-            if not proj_at_comp.is_empty():
-                completion_percentage = round(
-                    float(proj_at_comp["completed_pct"].median()), 2
-                )
-                likelihood_percentage = round(
-                    float(
-                        (proj_at_comp["completed_pct"] >= 99.9999).mean() * 100
-                    ),
-                    4,
-                )
-        except Exception as e:
-            print(f"[Simulation] stat computation failed: {e}")
-
-    # ── 5. Collapse N runs → p05 / median / p95 bands for the figure ──────────
-    #
-    # prepare_figure_data produces the long-format DataFrame with columns
-    # [Dates, Percent Complete, group] that build_figure_pi_display expects.
-    figure_df = prepare_figure_data(combined_df, projections_df)
-
-    # ── 6. Find when the median projection first reaches 100 % ────────────────
-    median_complete = (
-        figure_df
-        .filter(
-            (pl.col("group") == "projection_median") &
-            (pl.col("Percent Complete") >= 100.0)
-        )
-        .sort("Dates")
-        .head(1)
+    # ── 4–6. Stats, bands, median completion date ─────────────────────────────
+    completion_pct, likelihood_pct = _compute_completion_stats(
+        projections_df, estimated_project_completion_date
     )
-    date_value = (
-        median_complete["Dates"][0]
-        if not median_complete.is_empty()
-        else None
-    )
+    figure_df  = prepare_figure_data(combined_df, projections_df)
+    date_value = _median_completion_date(figure_df)
 
-    # ── 7. Render the Plotly figure ───────────────────────────────────────────
-    proj_comp_date = (
-        str(date_value)
-        if date_value is not None
-        else None
-    )
-
-    plot_figure = _apply_dark_text(
-        build_figure_pi_display(figure_df, todays_date, proj_comp_date)
-    )
-
-    return plot_figure, date_value, completion_percentage, likelihood_percentage, actual_string, baseline_string, 
+    return {
+        "figure_df":      figure_df,
+        "date_value":     date_value,
+        "completion_pct": completion_pct,
+        "likelihood_pct": likelihood_pct,
+        "forecast":       _forecast_dict(completion_pct, likelihood_pct, date_value,
+                                         estimated_project_completion_date, figure_df, projection_count),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -511,37 +511,31 @@ def register_callbacks(app):
         Output("estimated-project-completion-date", "date"),
         Input("pi-display-dropdown", "value"),
         State("team-dropdown", "value"),
-        State("issue_type_selection", "value")
+        State("issue_type_selection", "value"),
     )
-    def autofill_start_date(selected_pi, team, just_stories):
+    def autofill_pi_dates(selected_pi, team, just_stories):
         if not team or not selected_pi or not just_stories:
-            return no_update, no_update
+            raise PreventUpdate
         start_date, end_date = get_earliest_and_latest_date(team, selected_pi, just_stories)
         return str(start_date), str(end_date)
-        
+
     @app.callback(
         Output("todays-date", "date"),
         Input("pi-display-dropdown", "value"),
         State("team-dropdown", "value"),
-        State("issue_type_selection", "value")
+        State("issue_type_selection", "value"),
     )
-    def autofill_start_date(selected_pi, team, just_stories):
+    def autofill_projection_start(selected_pi, team, just_stories):
         if not team or not selected_pi or not just_stories:
-            return no_update, no_update
+            raise PreventUpdate
         projection_start = get_projection_start_date(team, selected_pi, just_stories)
         return str(projection_start)
 
     @app.callback(
         Output("progress-graph-projection", "figure"),
-        Output("wip-figure-store", "data"),
-        Output("sprint-figure-store", "data"),
-        Output("progress-graph-projection-tab3-team1", "figure"),
-        Output("completion-date", "children"),
-        Output("completion-date-team1-tab3", "children"),
-        Output("projected-projection-completion", "children"),
-        Output("projected-projection-completion-team1-tab3", "children"),
-        Output("probability_finishing_by_completion_date", "children"),
-        Output("probability_finishing_by_completion_date-team1-tab3", "children"),
+        Output("alerts-store", "data"),
+        Output("scenario1-store", "data"),
+        Output("forecast-summary", "children"),
         Output("remaining_issue_display", "children"),
         Output("sprint_plan_display_string", "children"),
         Input("generate-graph-projections-btn", "n_clicks"),
@@ -561,21 +555,31 @@ def register_callbacks(app):
     ):
         start_time = time.time()
 
-        plot_figure, wip_figure, sprint_figure, date_value, completion_pct, likelihood_pct, actual_string, baseline_string = _run_simulation_initial(
+        result = _run_simulation_initial(
             todays_date, team, main_increment, training_increments,
             estimated_project_completion_date,
-            team_size, issue_option
+            team_size, issue_option,
         )
 
-        if plot_figure is None:
-            return no_update
+        if result is None:
+            raise PreventUpdate
 
         print(f"update_projection_parameters took {time.time() - start_time:.2f}s")
+        # Keep this run so the Team Impact tab can reuse it as Scenario 1
+        scenario1 = {
+            "params":    _scenario_params(todays_date, team, main_increment, training_increments,
+                                          estimated_project_completion_date, team_size, issue_option),
+            "figure_df": _figure_df_to_store(result["figure_df"]),
+            "forecast":  result["forecast"],
+        }
+
         return (
-            plot_figure, wip_figure, sprint_figure, plot_figure,
-            date_value, date_value,
-            completion_pct, completion_pct,
-            likelihood_pct, likelihood_pct, actual_string, baseline_string
+            result["plot_figure"],
+            result["alerts"],
+            scenario1,
+            render_forecast_summary(result["forecast"]),
+            render_status_summary(result["status_summary"]),
+            render_sprint_plan(result["sprint_plan"], todays_date),
         )
 
     # -------------------------------------------------------------------------
@@ -590,59 +594,99 @@ def register_callbacks(app):
         prevent_initial_call=True,
     )
     def update_selection(n_clicks, current_selected):
-        triggered   = ctx.triggered_id
+        triggered    = ctx.triggered_id
         new_selected = triggered["index"] if triggered else current_selected
         styles = [
             _SELECTED_STYLE if i == new_selected else _UNSELECTED_STYLE
             for i in range(len(n_clicks))
         ]
         return styles, new_selected
-    
+
     @app.callback(
-    Output("progress-graph-projection-tab2", "figure"),
-    Input("selected-option", "data"),
-    Input("wip-figure-store", "data"),
-    Input("sprint-figure-store", "data"),
+        Output("progress-graph-projection-tab2", "figure"),
+        Output("alert-card", "children"),
+        Output("alert-card", "style"),
+        Output("rule-status-wip", "children"),
+        Output("rule-status-sprint", "children"),
+        Output("carryover-notice", "children"),
+        Output("carryover-notice", "style"),
+        Input("selected-option", "data"),
+        Input("alerts-store", "data"),
     )
-    def render_selected_figure(selected_index, wip_fig, sprint_fig):
-        if selected_index == 0:
-            return wip_fig or {}
-        return sprint_fig or {}
+    def render_selected_alert(selected_index, alerts):
+        alerts   = alerts or {}
+        selected = alerts.get("wip" if selected_index == 0 else "sprint")
+        card, style = render_alert_card(selected)
+        figure = selected["figure"] if selected else {}
+        notice, notice_style = render_carryover_notice(alerts.get("increments"))
+        return (
+            figure, card, style,
+            rule_status(alerts.get("wip")),
+            rule_status(alerts.get("sprint")),
+            notice, notice_style,
+        )
 
     # -------------------------------------------------------------------------
     # Tab 3: Team Impact Adjustment
     # -------------------------------------------------------------------------
 
     @app.callback(
-        Output("progress-graph-projection-tab3-team2", "figure"),
-        Output("completion-date-team2-tab3", "children"),
-        Output("projected-projection-completion-team2-tab3", "children"),
-        Output("probability_finishing_by_completion_date-team2-tab3", "children"),
+        Output("progress-graph-projection-tab3", "figure"),
+        Output("forecast-summary-tab3-team1", "children"),
+        Output("forecast-summary-tab3-team2", "children"),
         Input("generate-graph-projections-btn-tab3", "n_clicks"),
         State("todays-date", "date"),
         State("team-dropdown", "value"),
         State("pi-display-dropdown", "value"),
         State("pi-training-dropdown", "value"),
         State("estimated-project-completion-date", "date"),
+        State("team_size", "value"),
         State("team_size-tab3", "value"),
         State("issue_type_selection", "value"),
+        State("scenario1-store", "data"),
         prevent_initial_call=True,
     )
-    def update_projection_parameters_tab3(
+    def update_scenario_comparison(
         n_clicks, todays_date, team, main_increment, training_increments,
         estimated_project_completion_date,
-        team_size, issue_option,
+        team_size_1, team_size_2, issue_option, scenario1_store,
     ):
         start_time = time.time()
+        common = (todays_date, team, main_increment, training_increments,
+                  estimated_project_completion_date)
 
-        plot_figure, date_value, completion_pct, likelihood_pct, _, _= _run_simulation(
-            todays_date, team, main_increment, training_increments,
-            estimated_project_completion_date,
-             team_size, issue_option,
+        # ── Scenario 1: reuse the Projection Chart run if its inputs still match
+        params_1 = _scenario_params(*common, team_size_1, issue_option)
+        if scenario1_store and scenario1_store.get("params") == params_1:
+            figure_df_1 = _figure_df_from_store(scenario1_store["figure_df"])
+            forecast_1  = scenario1_store["forecast"]
+        else:
+            run_1 = _run_simulation(*common, team_size_1, issue_option)
+            if run_1 is None:
+                raise PreventUpdate
+            figure_df_1, forecast_1 = run_1["figure_df"], run_1["forecast"]
+
+        # ── Scenario 2: the adjusted team size
+        run_2 = _run_simulation(*common, team_size_2, issue_option)
+        if run_2 is None:
+            raise PreventUpdate
+
+        label_1 = f"Scenario 1: {team_size_1} people"
+        label_2 = f"Scenario 2: {team_size_2} people"
+
+        # Not passed through _apply_dark_text: that recolors every annotation
+        # black, and the end-of-line labels need their scenario colors.
+        figure = build_figure_scenario_comparison(
+            [
+                {"label": label_1, "figure_df": figure_df_1},
+                {"label": label_2, "figure_df": run_2["figure_df"]},
+            ],
+            todays_date,
         )
 
-        if plot_figure is None:
-            return no_update
-
-        print(f"update_projection_parameters_tab3 took {time.time() - start_time:.2f}s")
-        return plot_figure, date_value, completion_pct, likelihood_pct
+        print(f"update_scenario_comparison took {time.time() - start_time:.2f}s")
+        return (
+            figure,
+            render_scenario_card(0, label_1, forecast_1),
+            render_scenario_card(1, label_2, run_2["forecast"]),
+        )

@@ -1,0 +1,14 @@
+services:
+  neo4j-latest:
+    user: 7474:7474
+    image: neo4j:5.26.2-community
+    restart: unless-stopped
+    environment:
+      - NEO4J_AUTH:neo4j/chang3It
+    ports:
+      - '7474:7474'
+      - '7687:7687'
+    volumes:
+      - ./latest_var/neo4j_volumes/data:/var/lib/neo4j/data
+      - ./latest_var/neo4j_volumes/data/plugin:/var/lib/neo4j/plugins
+      - ./latest_var/logs:/var/lib/neo4j/logs
