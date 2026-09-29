@@ -87,7 +87,6 @@ in
   }
 , certIssuer =
   { image            = registry ++ "cert-issuer:latest"
-  , certClientImage  = registry ++ "polar-cert-client:latest"
   , polarInitImage   = registry ++ "polar-init:latest"
   , imagePullSecrets = [] : List { name : Optional Text }
   , issuers =

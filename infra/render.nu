@@ -68,7 +68,6 @@ def main [
     let cert_issuer_url      = $config.cert_issuer_url
     let cert_issuer_audience = $config.cert_issuer_audience
     let cert_issuer_ca_configmap = ($config.cert_issuer_ca_configmap? | default "")
-    let cert_client_image    = $config.cert_client_image
     let polar_init_image      = $config.polar_init_image
 
     let cassini_shutdown_token = $config.cassini_shutdown_token

@@ -5,7 +5,7 @@
 --
 -- Secrets (NEO4J_AUTH) are not here — they are threaded in by render.nu
 -- at render time. TLS certs are now issued by the cert-issuer at pod
--- startup via the cert-client init container.
+-- startup via the polar-init init container.
 
 { name               = "polar-neo4j"
 -- The ServiceAccount, and so the certificate identity
@@ -19,7 +19,6 @@
 , imagePullPolicy    = "IfNotPresent"
 , configVolume       = "neo4j-config-copy"
 , certIssuerUrl      = ""
-, certClientImage    = "polar-cert-client:latest"
 , nuInitImage        = "polar-nu-init:latest"
 , certIssuerAudience = ""
 , neo4jSans          = [] : List Text

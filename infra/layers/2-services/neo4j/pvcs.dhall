@@ -2,7 +2,7 @@
 --
 -- Neo4j PersistentVolumeClaims: data and logs.
 -- The certs PVC has been removed — TLS certs are now issued by the
--- cert-issuer and written to an emptyDir by the cert-client init container.
+-- cert-issuer and written to an emptyDir by the polar-init init container.
 
 let kubernetes = ../../../schema/kubernetes.dhall
 

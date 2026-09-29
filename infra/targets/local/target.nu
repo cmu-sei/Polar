@@ -86,7 +86,6 @@ def main [] {
         cert_issuer_url       : "http://cert-issuer.polar.svc.cluster.local:8443"
         cert_issuer_audience  : "polar-cert-issuer.local"
         cert_issuer_ca_configmap : ""
-        cert_client_image     : "polar-cert-client:latest"
         polar_init_image      : "polar-init:latest"
     } | to nuon
 }

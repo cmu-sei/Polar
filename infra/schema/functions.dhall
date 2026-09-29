@@ -183,60 +183,6 @@ let DockerRegistrySecret =
           [ { mapKey = ".dockerconfigjson", mapValue = dockerconfig_b64 } ]
         }
 
-let makeCertInitContainer =
-      \(containerName : Text) ->
-      \(certIssuerUrl : Text) ->
-      \(certClientImage : Text) ->
-      \(certType : Text) ->
-      \(certDir : Text) ->
-      \(volumeName : Text) ->
-      \(saTokenVolName : Text) ->
-      \(keyAlgorithm : Text) ->
-      \(extraSans : List Text) ->
-        kubernetes.Container::{
-        , name  = containerName
-        , image = Some certClientImage
-        , imagePullPolicy = Some "IfNotPresent"
-        , args  = Some
-          (   [ "--cert-issuer-url", certIssuerUrl
-              , "--token-path",      "/workspace/token"
-              , "--cert-dir",        certDir
-              , "--cert-type",       certType
-              , "--key-algorithm",   keyAlgorithm
-              ]
-            # Prelude.List.concatMap Text Text (\(san : Text) -> ["--extra-san", san]) extraSans
-          )
-        , securityContext = Some Constants.DropAllCapSecurityContext
-        , volumeMounts = Some
-          [ kubernetes.VolumeMount::{ name = volumeName,     mountPath = certDir      }
-          , kubernetes.VolumeMount::{ name = saTokenVolName, mountPath = "/workspace" }
-          ]
-        }
-
-let makeCertClientInitContainer =
-      \(certIssuerUrl : Text) ->
-      \(certClientImage : Text) ->
-      \(audience : Text) ->
-        makeCertInitContainer
-          "cert-client"
-          certIssuerUrl certClientImage
-          "client" "/etc/tls/certs"
-          Constants.certVolumeName Constants.saTokenVolumeName
-          "ecdsa-p256"
-          ([] : List Text)
-
-let makeCertServerInitContainer =
-      \(certIssuerUrl : Text) ->
-      \(certClientImage : Text) ->
-      \(extraSans : List Text) ->
-        makeCertInitContainer
-          "cert-client-server"
-          certIssuerUrl certClientImage
-          "server" "/etc/neo4j-tls"
-          "neo4j-tls" "neo4j-sa-token"
-          "ecdsa-p256"
-          extraSans
-
 -- No extra environment for polar-init. A named value, so the callers that
 -- have nothing to add don't each spell out a typed empty list.
 let noEnv = [] : List kubernetes.EnvVar.Type
@@ -297,9 +243,6 @@ in  { makeGraphEnv
     , ProxyMount
     , ProxyEnv
     , GraphProxyEnv
-    , makeCertClientInitContainer
-    , makeCertServerInitContainer
-    , makeCertInitContainer
     , makePolarInitContainer
     , noEnv
     }

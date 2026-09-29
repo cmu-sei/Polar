@@ -8,14 +8,14 @@
 #   1. Copy neo4j.conf from the ConfigMap mount to $NEO4J_HOME/conf/
 #      (Neo4j requires the config file to be writable; ConfigMap mounts
 #      are read-only in Kubernetes.)
-#   2. Write TLS certificates from the cert-client emptyDir mount into
+#   2. Write TLS certificates from the polar-init emptyDir mount into
 #      the directory structure Neo4j expects for mTLS on both HTTPS and Bolt.
 #   3. Ensure neo4j (uid/gid 7474) owns all writable directories.
 #
 # Certificate source:
-#   /etc/neo4j-tls/cert.pem  — server certificate (written by cert-client)
-#   /etc/neo4j-tls/key.pem   — server private key  (written by cert-client)
-#   /etc/neo4j-tls/ca.pem    — CA certificate       (written by cert-client)
+#   /etc/neo4j-tls/cert.pem  — server certificate (written by polar-init)
+#   /etc/neo4j-tls/key.pem   — server private key  (written by polar-init)
+#   /etc/neo4j-tls/ca.pem    — CA certificate       (written by polar-init)
 #
 # Certificate layout written by this script:
 #   $NEO4J_HOME/certificates/

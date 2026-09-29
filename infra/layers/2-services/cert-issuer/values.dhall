@@ -6,7 +6,6 @@ let CaProvisioning = ../../../schema/ca-provisioning.dhall
 
 in  { name             = "cert-issuer"
     , image            = "cert-issuer:latest"
-    , certClientImage  = "polar-cert-client:latest"
     , imagePullPolicy  = "IfNotPresent"
     , imagePullSecrets = [] : List { name : Optional Text }
     , port             = 8443

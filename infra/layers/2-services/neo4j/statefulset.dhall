@@ -2,7 +2,7 @@
 --
 -- Neo4j StatefulSet.
 -- Init containers (in order):
---   1. cert-client: requests a server TLS cert from the cert-issuer,
+--   1. polar-init: requests a server TLS cert from the cert-issuer,
 --      writes cert.pem, key.pem, ca.pem to the neo4j-tls emptyDir.
 --   2. neo4j-init: reads certs from neo4j-tls, writes them into the
 --      neo4j certificate directory structure, and copies neo4j.conf.
