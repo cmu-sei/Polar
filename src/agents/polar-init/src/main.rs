@@ -17,6 +17,10 @@
 //!   POLAR_INIT_CERT_ISSUER_URL   URL of the cert issuer service (required)
 //!   POLAR_INIT_TOKEN_PATH        Path to projected SA token
 //!                                (default: /workspace/token)
+//!   POLAR_INIT_CA_CERT           Path to the Polar CA certificate (PEM),
+//!                                verified against from the first request.
+//!                                If unset, the CA is fetched once from
+//!                                GET /ca without verification and pinned.
 
 use std::str::FromStr;
 use std::time::Duration;
@@ -252,8 +256,36 @@ async fn main() {
     tracing::info!("identity: {dns_identity}");
 
     // Phase 3: issue all requested certs.
+    // Phase 3: issue all requested certs.
+    //
+    // The trust decision is made once, here. With POLAR_INIT_CA_CERT set the
+    // client verifies cert-issuer against that file from its first request;
+    // without it, the CA is fetched once and pinned (the degraded mode).
+    let ca_path = handshake::HandshakeClient::ca_path_from_env("POLAR_INIT_CA_CERT");
+    let client = loop {
+        match handshake::HandshakeClient::for_trust_mode(
+            cert_issuer_url.clone(),
+            ca_path.as_deref(),
+        )
+        .await
+        {
+            Ok(c) => break c,
+            // A configured but unreadable or malformed CA needs an
+            // operator, and retrying can't fix it.
+            Err(e) if ca_path.is_some() => {
+                eprintln!("error: cannot establish trust in cert-issuer: {e}");
+                std::process::exit(1);
+            }
+            // Fetch mode: cert-issuer not being up yet is transient, and
+            // this binary never exits non-zero for transient failures.
+            Err(e) => {
+                tracing::warn!("cannot fetch the CA from cert-issuer: {e}, retrying...");
+                tokio::time::sleep(Duration::from_secs(POLL_INTERVAL_SECS)).await;
+            }
+        }
+    };
     for req in &cert_requests {
-        issue_cert(&cert_issuer_url, &sa_token, &dns_identity, req).await;
+        issue_cert(&client, &sa_token, &dns_identity, req).await;
     }
 
     tracing::info!("all certs issued");
@@ -414,7 +446,7 @@ async fn wait_for_dep_certs(endpoints: &[DepCertEndpoint]) {
 // ---------------------------------------------------------------------------
 
 async fn issue_cert(
-    cert_issuer_url: &str,
+    client: &handshake::HandshakeClient,
     sa_token: &str,
     dns_identity: &str,
     req: &CertRequest,
@@ -438,8 +470,6 @@ async fn issue_cert(
             }
         }
     };
-
-    let client = handshake::HandshakeClient::new(cert_issuer_url.to_string());
 
     let response = loop {
         match client

@@ -113,6 +113,13 @@ const CREDENTIALS_EVENT_LOG_PATH_ENV: &str = "CREDENTIALS_EVENT_LOG_PATH";
 const CREDENTIALS_EVENT_LOG_PATH_DEFAULT: &str = "/var/lib/credentials-agent/events.jsonl";
 
 const CERT_ISSUER_URL_ENV: &str = "CREDENTIALS_AGENT_CERT_ISSUER_URL";
+
+/// Path to the Polar CA certificate (PEM) this consumer verifies
+/// cert-issuer against from its first request. If unset, the CA is
+/// fetched once from GET /ca without verification and pinned -- the
+/// degraded self-bootstrap mode. A path that is set but unreadable is a
+/// startup error and never falls back.
+const CERT_ISSUER_CA_CERT_ENV: &str = "CREDENTIALS_AGENT_CA_CERT";
 const ISSUANCE_ACTOR_NAME: &str = "polar.credentials-agent.issuance";
 const IDENTITY_NORMALIZATION_ACTOR_NAME: &str = "polar.credentials-agent.identity-normalization";
 const ESCROW_KEY_ACTOR_NAME: &str = "polar.credentials-agent.escrow-key";
@@ -444,6 +451,23 @@ impl Actor for ConsumerSupervisor {
             ActorProcessingErr::from(format!("{CERT_ISSUER_URL_ENV} must be set"))
         })?;
 
+        // How this consumer trusts cert-issuer. With the CA path set it
+        // verifies against that file from its first request; without it,
+        // the CA is fetched once from GET /ca and pinned (the degraded
+        // self-bootstrap mode). Each handler owns its own client, so the
+        // trust setup runs once per handler.
+        let cert_issuer_ca_path = HandshakeClient::ca_path_from_env(CERT_ISSUER_CA_CERT_ENV);
+        let make_cert_issuer_client = || async {
+            HandshakeClient::for_trust_mode(
+                cert_issuer_url.clone(),
+                cert_issuer_ca_path.as_deref(),
+            )
+            .await
+            .map_err(|e| {
+                ActorProcessingErr::from(format!("cannot establish trust in cert-issuer: {e}"))
+            })
+        };
+
         let escrow_keypair = {
             let escrow_key_path = std::env::var(crate::escrow::CREDENTIALS_ESCROW_KEY_PATH_ENV)
                 .unwrap_or_else(|_| {
@@ -457,7 +481,7 @@ impl Actor for ConsumerSupervisor {
 
         let issuance_handler = IssuanceHandler {
             ledger: ledger.clone(),
-            cert_issuer: HandshakeClient::new(cert_issuer_url.clone()),
+            cert_issuer: make_cert_issuer_client().await?,
             // Introspection is genuinely optional at the deployment
             // level -- a cluster that never has LikelyIdp credentials
             // in practice doesn't need it configured. If one does
@@ -482,7 +506,7 @@ impl Actor for ConsumerSupervisor {
 
         let agent_escrow_issuance_handler = AgentEscrowIssuanceHandler {
             ledger: ledger.clone(),
-            cert_issuer: HandshakeClient::new(cert_issuer_url.clone()),
+            cert_issuer: make_cert_issuer_client().await?,
             known_kubernetes_issuers: configured_kubernetes_issuers(),
             escrow_keypair: escrow_keypair.clone(),
         };
@@ -512,7 +536,7 @@ impl Actor for ConsumerSupervisor {
         .map_err(ActorProcessingErr::from)?;
 
         let identity_normalization_handler = IdentityNormalizationHandler {
-            cert_issuer: HandshakeClient::new(cert_issuer_url.clone()),
+            cert_issuer: make_cert_issuer_client().await?,
         };
 
         let (_identity_normalization_actor, _) = IdentityNormalizationActor::spawn_linked(

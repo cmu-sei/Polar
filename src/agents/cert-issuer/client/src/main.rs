@@ -18,6 +18,11 @@ struct Args {
     /// Path to the projected service account token
     #[arg(long, default_value = "/workspace/token")]
     token_path: String,
+    /// Path to the Polar CA certificate (PEM) to verify the cert issuer
+    /// against from the first request. If omitted, the CA is fetched once
+    /// from GET /ca without verification and pinned -- the degraded mode.
+    #[arg(long)]
+    ca_cert: Option<String>,
     /// Directory to write cert.pem, key.pem, and ca.pem into
     #[arg(long, default_value = "/etc/tls/certs")]
     cert_dir: String,
@@ -78,7 +83,18 @@ async fn run(args: Args) -> i32 {
                 return 3;
             }
         };
-    let client = handshake::HandshakeClient::new(args.cert_issuer_url);
+    let client = match handshake::HandshakeClient::for_trust_mode(
+        args.cert_issuer_url,
+        args.ca_cert.as_deref(),
+    )
+    .await
+    {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("error: cannot establish trust in cert issuer: {e}");
+            return 2;
+        }
+    };
     let response = match client
         .issue(
             &sa_token,

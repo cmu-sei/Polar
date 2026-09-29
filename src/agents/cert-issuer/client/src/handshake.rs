@@ -67,6 +67,35 @@ impl HandshakeClient {
         Ok(Self { base_url, http })
     }
 
+    /// Read an optional CA-path environment variable. Unset and empty
+    /// both mean "no path configured", so an empty value in a manifest
+    /// can't silently select a different trust mode than an absent one.
+    pub fn ca_path_from_env(var: &str) -> Option<String> {
+        std::env::var(var).ok().filter(|p| !p.is_empty())
+    }
+
+    /// Choose how to trust cert-issuer, in one place for every caller.
+    ///
+    /// `ca_path` set: read that file and trust only it. A configured
+    /// path that is missing or malformed is an error and never falls back
+    /// to fetching, because silently degrading a configured trust root
+    /// defeats the point of provisioning one.
+    ///
+    /// `ca_path` unset: the degraded self-bootstrap mode. Fetch the CA
+    /// once from `GET /ca` without verifying the server, then trust only
+    /// what came back.
+    pub async fn for_trust_mode(
+        base_url: String,
+        ca_path: Option<&str>,
+    ) -> Result<Self, String> {
+        let pem = match ca_path {
+            Some(path) => std::fs::read(path)
+                .map_err(|e| format!("reading CA certificate from {path}: {e}"))?,
+            None => Self::fetch_ca_pem(&base_url).await?.into_bytes(),
+        };
+        Self::with_root_ca(base_url, &pem)
+    }
+
     /// Fetch the CA certificate from `GET /ca` WITHOUT verifying the
     /// server. Only for the degraded self-bootstrap mode, where no CA was
     /// provisioned ahead of time. The request carries no credential, and
