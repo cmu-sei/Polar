@@ -108,17 +108,15 @@ dev-container:
     nix build {{_nix_flags}} ".#packages.{{platform}}.devContainer" -o result-dev-container
     just _load result-dev-container
 
-# Build cert-issuer and cert-client images
+# Build the cert-issuer image
 # Usage: just cert-issuer          (all)
-#        just cert-issuer server
-#        just cert-issuer client
+#        just cert-issuer serverImage
 cert-issuer target='all':
     #!/usr/bin/env bash
     set -euo pipefail
     case "{{target}}" in
         all)
             nix build {{_nix_flags}} ".#polarPkgs.certIssuer.server" -o result-cert-issuer-server
-            nix build {{_nix_flags}} ".#polarPkgs.certIssuer.clientImage" -o result-cert-client
             nix build {{_nix_flags}} ".#polarPkgs.certIssuer.setupBin" -o result-cert-setup-bin
             nix build {{_nix_flags}} ".#packages.{{platform}}.certIssuerImage" -o result-cert-issuer-image
             just _load result-cert-issuer-image
@@ -127,10 +125,7 @@ cert-issuer target='all':
             nix build {{_nix_flags}} ".#packages.{{platform}}.certIssuerImage" -o result-cert-issuer
             just _load result-cert-issuer
             ;;
-        client)
-            nix build {{_nix_flags}} ".#polarPkgs.certIssuer.clientImage" -o result-cert-client
-            ;;
-        *) echo "Unknown target: {{target}}. Use all, server, or client." && exit 1 ;;
+        *) echo "Unknown target: {{target}}. Use all or serverImage." && exit 1 ;;
     esac
 
 # ── Cassini ───────────────────────────────────────────────────────────────────
@@ -1164,7 +1159,6 @@ cluster-load-minimal neo4j_result=_neo4j_result: registry-up cluster-load-provis
     # Minimal-target images only
     _push ./result-cassini-image  "cassini:latest"
     _push ./result-cert-issuer-image "cert-issuer:latest"
-    _push ./result-cert-client    "polar-cert-client:latest"
     _push ./result-polar-init     "polar-init:latest"
     _push ./result-kube-observer  "kube-observer:latest"
     _push ./result-ace            "ace-viz:latest"
@@ -1201,7 +1195,6 @@ cluster-load-all neo4j_result=_neo4j_result: registry-up cluster-load-provisione
     # Polar images — all from nix result symlinks
     _push ./result-cassini-image       "cassini:latest"
     _push ./result-cert-issuer-image    "cert-issuer:latest"
-    _push ./result-cert-client         "polar-cert-client:latest"
     _push ./result-gitlab-observer     "gitlab-observer:latest"
     _push ./result-gitlab-consumer     "gitlab-consumer:latest"
     _push ./result-kube-observer       "kube-observer:latest"

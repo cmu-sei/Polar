@@ -164,7 +164,6 @@
 
           # ── Certificate Issuer ───────────────────────────────────────────────
           certIssuerImage         = polarPkgs.certIssuer.serverImage;
-          certClientImage         = polarPkgs.certIssuer.clientImage;
 
           # ── Cassini ──────────────────────────────────────────────────────────
           cassiniImage         = polarPkgs.cassini.cassiniImage;
