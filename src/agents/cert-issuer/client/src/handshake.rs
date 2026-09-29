@@ -51,6 +51,45 @@ impl HandshakeClient {
         }
     }
 
+    /// Build a client that trusts only the given CA certificate (PEM), with
+    /// the platform's built-in roots turned off. For callers that were
+    /// handed the Polar CA ahead of time (a mounted ConfigMap): they verify
+    /// cert-issuer's server certificate from the very first request.
+    pub fn with_root_ca(base_url: String, ca_pem: &[u8]) -> Result<Self, String> {
+        let cert = reqwest::Certificate::from_pem(ca_pem)
+            .map_err(|e| format!("invalid CA certificate PEM: {e}"))?;
+        let http = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .tls_built_in_root_certs(false)
+            .add_root_certificate(cert)
+            .build()
+            .map_err(|e| format!("building HTTP client: {e}"))?;
+        Ok(Self { base_url, http })
+    }
+
+    /// Fetch the CA certificate from `GET /ca` WITHOUT verifying the
+    /// server. Only for the degraded self-bootstrap mode, where no CA was
+    /// provisioned ahead of time. The request carries no credential, and
+    /// the caller must pin the result and verify every later request
+    /// against it (`with_root_ca`). It trusts in-cluster name resolution
+    /// for this one fetch, which is the accepted trade-off there.
+    pub async fn fetch_ca_pem(base_url: &str) -> Result<String, String> {
+        let http = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .danger_accept_invalid_certs(true)
+            .build()
+            .map_err(|e| format!("building HTTP client: {e}"))?;
+        let response = http
+            .get(format!("{base_url}/ca"))
+            .send()
+            .await
+            .map_err(|e| format!("GET /ca failed: {e}"))?;
+        if !response.status().is_success() {
+            return Err(format!("GET /ca returned {}", response.status()));
+        }
+        response.text().await.map_err(|e| format!("reading /ca body: {e}"))
+    }
+
     /// Execute the issuance handshake: POST the CSR with the SA token
     /// as the Bearer credential, return the issued cert response.
     ///

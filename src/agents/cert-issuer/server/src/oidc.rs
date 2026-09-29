@@ -501,7 +501,7 @@ struct JwksDoc {
 /// A JSON Web Key as published in a JWKS document. We deserialize
 /// only the fields we use; unknown fields are ignored.
 /// TODO: We haven't found a use for "alg" and "crv" fields _yet_,
-/// but we still want to deserailzie them just in case we stumble upon a token with the fields set.
+/// but we still want to deserialize them just in case we stumble upon a token with the fields set.
 /// If it becomes necessary to use them, remove the underscores and serde field attributes
 #[derive(Debug, Deserialize)]
 struct Jwk {
@@ -654,7 +654,7 @@ impl HttpJwksSource {
             if let Ok(ca_bytes) = std::fs::read(&ca_path) {
                 if let Ok(cert) = reqwest::Certificate::from_pem(&ca_bytes) {
                     builder = builder.add_root_certificate(cert);
-                    debug!("Loaded additonal CA certificate for web client from: {ca_path}");
+                    debug!("Loaded additional CA certificate for web client from: {ca_path}");
                 }
             }
         }

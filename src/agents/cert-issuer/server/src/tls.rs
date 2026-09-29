@@ -53,7 +53,12 @@ use rustls::{RootCertStore, ServerConfig};
 use std::sync::Arc;
 use tokio_rustls::server::TlsStream;
 use tokio::net::TcpStream;
-use tracing::warn;
+use hyper_util::rt::{TokioExecutor, TokioIo};
+use hyper_util::server::conn::auto::Builder;
+use hyper_util::service::TowerToHyperService;
+use tokio::net::TcpListener;
+use tokio_rustls::TlsAcceptor;
+use tracing::{debug, warn};
 
 /// Mint cert-issuer's own TLS server certificate from its own
 /// in-process CA and build the mTLS-capable ServerConfig. Called once
@@ -158,4 +163,55 @@ pub fn extract_peer_identity(stream: &TlsStream<TcpStream>) -> Option<String> {
         }
     }
     None
+}
+
+
+/// Serve `app` over TLS, forever. Every connection completes a TLS
+/// handshake; a client certificate is optional (see build_server_config).
+/// When one was presented and verified against our CA, its peer identity
+/// is attached to that connection's requests as a `PeerIdentity`
+/// extension, and by nothing else -- never from a header or the body,
+/// which the caller controls. Connections without a verified client
+/// certificate get no extension, and `/internal/issue` refuses them.
+///
+/// A plain-HTTP client fails the handshake and is dropped here.
+pub async fn serve_tls(listener: TcpListener, acceptor: TlsAcceptor, app: axum::Router) {
+    loop {
+        let (tcp, remote) = match listener.accept().await {
+            Ok(conn) => conn,
+            Err(e) => {
+                warn!(error = %e, "TCP accept failed");
+                // Avoid a hot loop if the failure persists (fd exhaustion).
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                continue;
+            }
+        };
+
+        let acceptor = acceptor.clone();
+        let app = app.clone();
+        tokio::spawn(async move {
+            let tls = match acceptor.accept(tcp).await {
+                Ok(s) => s,
+                Err(e) => {
+                    warn!(%remote, error = %e, "TLS handshake failed");
+                    return;
+                }
+            };
+
+            // Read before the stream is handed to hyper -- the peer
+            // certificate is only reachable through the TlsStream.
+            let app = match extract_peer_identity(&tls) {
+                Some(identity) => app.layer(axum::Extension(crate::server::PeerIdentity(identity))),
+                None => app,
+            };
+
+            let service = TowerToHyperService::new(app);
+            if let Err(e) = Builder::new(TokioExecutor::new())
+                .serve_connection_with_upgrades(TokioIo::new(tls), service)
+                .await
+            {
+                debug!(%remote, error = %e, "connection closed with error");
+            }
+        });
+    }
 }

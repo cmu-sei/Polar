@@ -36,6 +36,7 @@ use cert_issuer::{
     handler::Handler,
     oidc::Validator,
     server::build_router,
+    tls::{build_server_config, serve_tls},
 };
 use std::sync::Arc;
 use tracing::{debug, info, instrument};
@@ -97,7 +98,15 @@ async fn main() -> Result<()> {
     let ca = RcgenCaClient::new(&ca_cert_pem, &ca_key_pem)
         .map_err(|e| anyhow::anyhow!("constructing CA client: {e}"))?;
 
-    debug!("Internal certificate authroity initialized.");
+    debug!("Internal certificate authority initialized.");
+
+    // ---- TLS ----
+    //
+    // cert-issuer mints its own server certificate from its own CA. Done
+    // before `ca` moves into the Handler below.
+    let tls_config = build_server_config(&ca, &ca_cert_pem, &config.mtls.server_identity)
+        .await
+        .map_err(|e| anyhow::anyhow!("building TLS server config: {e}"))?;
 
     // ---- OIDC validator ----
     let validator = Validator::new(config.issuers.clone());
@@ -120,8 +129,8 @@ async fn main() -> Result<()> {
         .await
         .with_context(|| format!("binding {}", config.bind_addr))?;
 
-    info!(bind_addr = %config.bind_addr, "listening");
-    axum::serve(listener, app).await.context("axum serve")?;
+    info!(bind_addr = %config.bind_addr, "listening (TLS; client certificate optional)");
+    serve_tls(listener, tokio_rustls::TlsAcceptor::from(tls_config), app).await;
 
     Ok(())
 }
