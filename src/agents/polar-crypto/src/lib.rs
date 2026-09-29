@@ -162,6 +162,13 @@ enum EscrowKeypairHandle {
 }
 
 pub enum CryptoMessage {
+    /// The Cassini client has registered (or re-registered after a
+    /// reconnect). The client drops any Subscribe sent before
+    /// registration completes, so this actor's reply-topic
+    /// subscriptions are sent in response to this message, never at
+    /// construction. Sent on every registration, so a reconnect
+    /// restores them too. Subscribing again is harmless.
+    ClientRegistered,
     /// A general secret to escrow -- e.g. an access token an observer
     /// holds and wants the Credentials Agent to store on its behalf.
     /// Not the agent's own escrow private key -- see
@@ -351,41 +358,10 @@ impl Actor for CryptoActor {
             }
         }
 
-        // Subscribes to the *_REPLIES_TOPIC constants specifically --
-        // CryptoActor is a requester here, not a responder, so it
-        // needs the reply topics, not the request topics (easy to
-        // transpose by accident, worth being explicit about).
-        if let Err(e) = args.tcp_client.send_message(TcpClientMessage::Subscribe {
-            topic: CREDENTIALS_ESCROW_KEY_REPLIES_TOPIC.to_string(),
-            trace_ctx: None,
-        }) {
-            error!("CryptoActor failed to subscribe to escrow-key replies: {e}");
-        }
-        if let Err(e) = args.tcp_client.send_message(TcpClientMessage::Subscribe {
-            topic: CREDENTIALS_STORE_SECRET_REPLIES_TOPIC.to_string(),
-            trace_ctx: None,
-        }) {
-            error!("CryptoActor failed to subscribe to store-secret replies: {e}");
-        }
-        if let Err(e) = args.tcp_client.send_message(TcpClientMessage::Subscribe {
-            topic: CREDENTIALS_RETRIEVE_AGENT_ESCROW_KEYPAIR_REPLIES_TOPIC.to_string(),
-            trace_ctx: None,
-        }) {
-            error!("CryptoActor failed to subscribe to agent escrow-keypair retrieve replies: {e}");
-        }
-        if let Err(e) = args.tcp_client.send_message(TcpClientMessage::Subscribe {
-            topic: CREDENTIALS_AGENT_ESCROW_ISSUANCE_REPLIES_TOPIC.to_string(),
-            trace_ctx: None,
-        }) {
-            error!("CryptoActor failed to subscribe to agent escrow-issuance replies: {e}");
-        }
-        if let Err(e) = args.tcp_client.send_message(TcpClientMessage::Subscribe {
-            topic: CREDENTIALS_AGENT_ESCROW_KEY_REPLIES_TOPIC.to_string(),
-            trace_ctx: None,
-        }) {
-            error!("CryptoActor failed to subscribe to agent escrow-key replies: {e}");
-        }
-
+        // Subscriptions are not sent here: the Cassini client drops any
+        // Subscribe sent before registration completes, and this actor
+        // is spawned while the client is still registering. They are
+        // sent on CryptoMessage::ClientRegistered instead.
         Ok(CryptoActorState {
             tcp_client: args.tcp_client,
             escrow_key_reply_router: Arc::new(ReplyRouter::new()),
@@ -409,6 +385,26 @@ impl Actor for CryptoActor {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
+            CryptoMessage::ClientRegistered => {
+                // Subscribes to the *_REPLIES_TOPIC constants specifically --
+                // CryptoActor is a requester here, not a responder, so it
+                // needs the reply topics, not the request topics (easy to
+                // transpose by accident, worth being explicit about).
+                for topic in [
+                    CREDENTIALS_ESCROW_KEY_REPLIES_TOPIC,
+                    CREDENTIALS_STORE_SECRET_REPLIES_TOPIC,
+                    CREDENTIALS_RETRIEVE_AGENT_ESCROW_KEYPAIR_REPLIES_TOPIC,
+                    CREDENTIALS_AGENT_ESCROW_ISSUANCE_REPLIES_TOPIC,
+                    CREDENTIALS_AGENT_ESCROW_KEY_REPLIES_TOPIC,
+                ] {
+                    if let Err(e) = state.tcp_client.send_message(TcpClientMessage::Subscribe {
+                        topic: topic.to_string(),
+                        trace_ctx: None,
+                    }) {
+                        error!("CryptoActor failed to subscribe to {topic}: {e}");
+                    }
+                }
+            }
             CryptoMessage::RoutedReply { topic, payload }
                 if topic == CREDENTIALS_ESCROW_KEY_REPLIES_TOPIC =>
             {

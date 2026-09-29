@@ -203,6 +203,20 @@ impl Actor for InfrastructureSupervisor {
     ) -> Result<(), ActorProcessingErr> {
         match message {
             InfrastructureSupervisorMessage::ClientEvent(event) => {
+                // CryptoActor subscribes to its reply topics only once told
+                // the client has registered; the client drops any Subscribe
+                // sent earlier. Sent on every Registered, so a reconnect
+                // restores them too.
+                if let ClientEvent::Registered { .. } = &event {
+                    if let Some(crypto) = &state.crypto {
+                        if let Err(e) = crypto
+                            .as_actor_ref()
+                            .send_message(polar_crypto::CryptoMessage::ClientRegistered)
+                        {
+                            tracing::warn!("failed to tell CryptoActor the client registered: {e}");
+                        }
+                    }
+                }
                 state.events_output.send(event);
             }
             InfrastructureSupervisorMessage::ProceedWithShutdown => {

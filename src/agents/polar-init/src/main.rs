@@ -380,12 +380,26 @@ async fn ensure_escrow_bootstrapped(own_identity: &str) {
         None,
         polar_crypto::CryptoActor,
         polar_crypto::CryptoActorArgs {
-            tcp_client,
+            tcp_client: tcp_client.clone(),
             router,
         },
     )
     .await
     .expect("CryptoActor::pre_start does no fallible work of its own -- spawning it can't genuinely fail here");
+
+    // The client drops any Subscribe sent before it has registered, so
+    // wait for a registration id before telling CryptoActor to subscribe.
+    // This binary has no supervisor to forward ClientEvent::Registered,
+    // and its lifecycle closure above is a no-op.
+    loop {
+        match ractor::call!(tcp_client, cassini_client::TcpClientMessage::GetRegistrationId) {
+            Ok(Some(_)) => break,
+            _ => tokio::time::sleep(Duration::from_millis(200)).await,
+        }
+    }
+    if let Err(e) = crypto_actor.send_message(polar_crypto::CryptoMessage::ClientRegistered) {
+        tracing::warn!("failed to tell CryptoActor the client registered: {e}");
+    }
 
     loop {
         match ractor::call!(crypto_actor, |reply| {
