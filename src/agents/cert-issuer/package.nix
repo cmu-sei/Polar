@@ -10,7 +10,7 @@ let
   server = craneLib.buildPackage (crateArgs // {
     pname = "cert-issuer";
     cargoExtraArgs = "--bin cert-issuer --locked";
-    src = workspaceFileset ./cert-issuer/agent;
+    src = workspaceFileset ./cert-issuer/server;
     doCheck = false;
   });
 
