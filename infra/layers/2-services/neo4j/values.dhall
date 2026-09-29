@@ -8,6 +8,11 @@
 -- startup via the cert-client init container.
 
 { name               = "polar-neo4j"
+-- The ServiceAccount, and so the certificate identity
+-- (<sa>.<ns>.serviceaccount.cluster.local). Deliberately not `name`: that
+-- names the StatefulSet, its pod labels and its pods, which the Service
+-- selector and several Justfile recipes depend on.
+, serviceAccountName = "graph"
 , hostName           = "neo4j"
 , namespace          = "polar-graph"
 , image              = "neo4j:5.26.2"

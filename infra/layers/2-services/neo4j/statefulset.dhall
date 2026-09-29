@@ -11,6 +11,10 @@ let kubernetes = ../../../schema/kubernetes.dhall
 let Constants  = ../../../schema/constants.dhall
 let Functions = ../../../schema/functions.dhall
 
+let Prelude =
+      https://prelude.dhall-lang.org/package.dhall
+        sha256:931cbfae9d746c4611b07633ab1e547637ab4ba138b16bf65ef1b9ad66a60b7f
+
 let VolumeSpec =
       { name             : Text
       , storageClassName : Optional Text
@@ -24,9 +28,10 @@ let render =
           , image               : Text
           , imagePullPolicy     : Text
           , namespace           : Text
+          , serviceAccountName  : Text
           , configVolume        : Text
           , certIssuerUrl       : Text
-          , certClientImage     : Text
+          , polarInitImage      : Text
           , nuInitImage          : Text
           , certIssuerAudience  : Text
           , neo4jSans           : List Text
@@ -139,14 +144,28 @@ let render =
                   , labels = Some [ { mapKey = "name", mapValue = v.name } ]
                   }
                 , spec = Some kubernetes.PodSpec::{
-                  , serviceAccountName = Some v.name
+                  , serviceAccountName = Some v.serviceAccountName
                   , automountServiceAccountToken = Some False
                   , securityContext = Some kubernetes.PodSecurityContext::{
                     , fsGroup             = Some 7474
                     , fsGroupChangePolicy = Some "OnRootMismatch"
                     }
                   , initContainers = Some
-                    [ Functions.makeCertServerInitContainer v.certIssuerUrl v.certClientImage v.neo4jSans
+                    [ Functions.makePolarInitContainer
+                        v.polarInitImage
+                        v.imagePullPolicy
+                        "neo4j-sa-token"
+                        v.certIssuerUrl
+                        Functions.noEnv
+                        "/workspace/token"
+                        [ kubernetes.VolumeMount::{ name = "neo4j-tls", mountPath = "/etc/neo4j-tls" } ]
+                        ([] : List Text)
+                        [ "server:/etc/neo4j-tls:ecdsa-p256:${Prelude.Text.concatSep "," v.neo4jSans}" ]
+                        -- Neo4j is storage, not an agent: it has no Cassini
+                        -- connection, and the credentials agent needs Neo4j up
+                        -- before it can answer. Skipping escrow bootstrap here
+                        -- breaks what would otherwise be a startup deadlock.
+                        True
                     , kubernetes.Container::{
                       , name            = "neo4j-init"
                       , image           = Some v.nuInitImage
