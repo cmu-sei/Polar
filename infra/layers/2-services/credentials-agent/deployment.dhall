@@ -26,18 +26,54 @@ let render =
           , saTokenAudience  : Text
           , neo4jBoltAddr    : Text
           , dataVolumeName   : Text
+          -- Name of the ConfigMap holding the Polar CA certificate, or None
+          -- while cert-issuer self-bootstraps. When set, this pod verifies
+          -- cert-issuer against it from its first request.
+          , caConfigMap      : Optional Text
           }
       ) ->
+        let caVolumes =
+              merge
+                { Some = \(cm : Text) ->
+                    [ k8s.Volume::{
+                      , name      = "polar-ca"
+                      , configMap = Some k8s.ConfigMapVolumeSource::{ name = Some cm }
+                      }
+                    ]
+                , None = [] : List k8s.Volume.Type
+                }
+                v.caConfigMap
+        let caInitMounts =
+              merge
+                { Some = \(_ : Text) ->
+                    [ k8s.VolumeMount::{ name = "polar-ca", mountPath = "/etc/polar-ca", readOnly = Some True } ]
+                , None = [] : List k8s.VolumeMount.Type
+                }
+                v.caConfigMap
+        let caInitEnv =
+              merge
+                { Some = \(_ : Text) ->
+                    [ k8s.EnvVar::{ name = "POLAR_INIT_CA_CERT", value = Some "/etc/polar-ca/ca.pem" } ]
+                , None = [] : List k8s.EnvVar.Type
+                }
+                v.caConfigMap
+        let caMainEnv =
+              merge
+                { Some = \(_ : Text) ->
+                    [ k8s.EnvVar::{ name = "CREDENTIALS_AGENT_CA_CERT", value = Some "/etc/polar-ca/ca.pem" } ]
+                , None = [] : List k8s.EnvVar.Type
+                }
+                v.caConfigMap
         let volumes =
               [ Constants.certEmptyDirVolume
               , Constants.saTokenVolume v.saTokenAudience
               , k8s.Volume::{ name = Constants.neo4jClientCertVolumeName, emptyDir = Some k8s.EmptyDirVolumeSource::{=} }
               , k8s.Volume::{ name = "polar-health", emptyDir = Some k8s.EmptyDirVolumeSource::{=} }
-              , k8s.Volume::{
-                , name                  = v.dataVolumeName
-                , persistentVolumeClaim = Some k8s.PersistentVolumeClaimVolumeSource::{ claimName = "${v.name}-data" }
-                }
-              ]
+                , k8s.Volume::{
+                 , name                  = v.dataVolumeName
+                 , persistentVolumeClaim = Some k8s.PersistentVolumeClaimVolumeSource::{ claimName = "${v.name}-data" }
+                 }
+              ] # caVolumes
 
         let env =
               Constants.commonClientEnv
@@ -49,13 +85,14 @@ let render =
                 , k8s.EnvVar::{ name = "POLAR_HEALTH_TICK_SECS",     value = Some "30" }
                 , k8s.EnvVar::{ name = "POLAR_HEALTH_DEP_ENDPOINTS", value = Some "${Constants.cassiniDNSName}:${Natural/show Constants.cassiniPort}:300,${Constants.neo4jDNSName}:7687:300" }
                 ]
+              # caMainEnv
 
         let mounts =
               [ Constants.certVolumeMount
               , k8s.VolumeMount::{ name = Constants.neo4jClientCertVolumeName, mountPath = Constants.neo4jClientCertPath, readOnly = Some True }
               , k8s.VolumeMount::{ name = "polar-health", mountPath = "/var/run/polar-health" }
               , k8s.VolumeMount::{ name = v.dataVolumeName, mountPath = "/var/lib/credentials-agent" }
-              ]
+              ] # caInitMounts
 
         let podSpec = k8s.PodSpec::{
               , imagePullSecrets = Some v.imagePullSecrets
@@ -69,10 +106,13 @@ let render =
                     v.imagePullPolicy
                     Constants.saTokenVolumeName
                     v.certIssuerUrl
+                    caInitEnv
                     Constants.saTokenPath
-                    [ k8s.VolumeMount::{ name = Constants.certVolumeName,            mountPath = Constants.tlsPath             }
-                    , k8s.VolumeMount::{ name = Constants.neo4jClientCertVolumeName, mountPath = Constants.neo4jClientCertPath }
-                    ]
+                    (   [ k8s.VolumeMount::{ name = Constants.certVolumeName,            mountPath = Constants.tlsPath             }
+                        , k8s.VolumeMount::{ name = Constants.neo4jClientCertVolumeName, mountPath = Constants.neo4jClientCertPath }
+                        ]
+                      # caInitMounts
+                    )
                     ([] : List Text)
                     [ "client:${Constants.tlsPath}:ecdsa-p256:"
                     , "client:${Constants.neo4jClientCertPath}:ecdsa-p256:"

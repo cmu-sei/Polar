@@ -25,13 +25,41 @@ let render =
           , certIssuerUrl    : Text
           , saTokenAudience  : Text
           , port             : Natural
+          -- Name of the ConfigMap holding the Polar CA certificate, or None
+          -- while cert-issuer self-bootstraps. See deployment.dhall.
+          , caConfigMap      : Optional Text
           }
       ) ->
+        let caVolumes =
+              merge
+                { Some = \(cm : Text) ->
+                    [ k8s.Volume::{
+                      , name      = "polar-ca"
+                      , configMap = Some k8s.ConfigMapVolumeSource::{ name = Some cm }
+                      }
+                    ]
+                , None = [] : List k8s.Volume.Type
+                }
+                v.caConfigMap
+        let caMounts =
+              merge
+                { Some = \(_ : Text) ->
+                    [ k8s.VolumeMount::{ name = "polar-ca", mountPath = "/etc/polar-ca", readOnly = Some True } ]
+                , None = [] : List k8s.VolumeMount.Type
+                }
+                v.caConfigMap
+        let caInitEnv =
+              merge
+                { Some = \(_ : Text) ->
+                    [ k8s.EnvVar::{ name = "POLAR_INIT_CA_CERT", value = Some "/etc/polar-ca/ca.pem" } ]
+                , None = [] : List k8s.EnvVar.Type
+                }
+                v.caConfigMap
         let volumes =
               [ Constants.certEmptyDirVolume
               , Constants.saTokenVolume v.saTokenAudience
               , k8s.Volume::{ name = "polar-health", emptyDir = Some k8s.EmptyDirVolumeSource::{=} }
-              ]
+              ] # caVolumes
 
         let env =
               Constants.commonClientEnv
@@ -60,8 +88,9 @@ let render =
                     v.imagePullPolicy
                     Constants.saTokenVolumeName
                     v.certIssuerUrl
+                    caInitEnv
                     Constants.saTokenPath
-                    [ k8s.VolumeMount::{ name = Constants.certVolumeName, mountPath = Constants.tlsPath } ]
+                    ([ k8s.VolumeMount::{ name = Constants.certVolumeName, mountPath = Constants.tlsPath } ] # caMounts)
                     ([] : List Text)
                     [ "client:${Constants.tlsPath}:ecdsa-p256:" ]
                     -- Same, real core-service exception as the

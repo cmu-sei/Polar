@@ -80,11 +80,12 @@ def main [] {
         scheduler_remote_url  : ($env.POLAR_SCHEDULER_REMOTE_URL? | default "https://github.com/daveman1010221/polar-schedules.git")
         cassini_shutdown_token : ($env.CASSINI_SHUTDOWN_TOKEN? | default "HEYTHERE")
         identity_lifetime_overrides : [
-            { identity: "polar-neo4j.polar-graph.serviceaccount.cluster.local", lifetimeSecs: 31536000 }
+            { identity: "graph.polar-graph.serviceaccount.cluster.local", lifetimeSecs: 31536000 }
         ]
         enable_tls            : true
         cert_issuer_url       : "http://cert-issuer.polar.svc.cluster.local:8443"
         cert_issuer_audience  : "polar-cert-issuer.local"
+        cert_issuer_ca_configmap : ""
         cert_client_image     : "polar-cert-client:latest"
         polar_init_image      : "polar-init:latest"
     } | to nuon

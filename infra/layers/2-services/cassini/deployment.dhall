@@ -75,6 +75,7 @@ let render =
                           v.imagePullPolicy
                           Constants.saTokenVolumeName
                           v.certIssuerUrl
+                          functions.noEnv
                           Constants.saTokenPath
                           [ k8s.VolumeMount::{ name = Constants.certVolumeName, mountPath = Constants.tlsPath } ]
                           ([] : List Text)

@@ -62,6 +62,7 @@ let render =
                     v.imagePullPolicy
                     Constants.saTokenVolumeName
                     v.certIssuerUrl
+                    functions.noEnv
                     Constants.saTokenPath
                     [ kubernetes.VolumeMount::{ name = Constants.certVolumeName, mountPath = Constants.tlsPath } ]
                     ([] : List Text)

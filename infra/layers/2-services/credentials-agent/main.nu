@@ -8,6 +8,9 @@ def main [context_nuon: string] {
     let overrides        = $context.overrides
     let neo4j_addr       = $context.neo4jBoltAddr
     let cert_issuer_url  = $context.certIssuerUrl
+    # Empty means cert-issuer self-bootstraps: no CA ConfigMap to mount.
+    let ca_configmap_raw = ($context.caConfigMap? | default "")
+    let ca_configmap = if ($ca_configmap_raw | is-empty) { "None Text" } else { $"Some \"($ca_configmap_raw)\"" }
     let polar_init_image = $context.polarInitImage
     let sa_audience      = $context.certIssuerAudience
 
@@ -26,7 +29,7 @@ def main [context_nuon: string] {
 
     # Job
     let tmp  = (mktemp --suffix ".dhall")
-    let expr = "let v = " + $merged + " in " + $chart_dir + "/deployment.dhall { name = v.name, image = v.image, imagePullPolicy = v.imagePullPolicy, imagePullSecrets = v.imagePullSecrets, polarInitImage = \"" + $polar_init_image + "\", certIssuerUrl = \"" + $cert_issuer_url + "\", saTokenAudience = \"" + $sa_audience + "\", neo4jBoltAddr = \"" + $neo4j_addr + "\", dataVolumeName = v.dataVolumeName }"
+    let expr = "let v = " + $merged + " in " + $chart_dir + "/deployment.dhall { name = v.name, image = v.image, imagePullPolicy = v.imagePullPolicy, imagePullSecrets = v.imagePullSecrets, polarInitImage = \"" + $polar_init_image + "\", certIssuerUrl = \"" + $cert_issuer_url + "\", saTokenAudience = \"" + $sa_audience + "\", neo4jBoltAddr = \"" + $neo4j_addr + "\", dataVolumeName = v.dataVolumeName, caConfigMap = " + $ca_configmap + " }"
     $expr | save --force $tmp
     print $"  rendering deployment.dhall -> credentials-agent-job.yaml"
     dhall-to-yaml --documents --quoted --file $tmp | save --force ($output_dir | path join "credentials-agent-job.yaml")
@@ -34,7 +37,7 @@ def main [context_nuon: string] {
 
     # Observer -- Job + Service
     let tmp  = (mktemp --suffix ".dhall")
-    let expr = "let v = " + $merged + " in " + $chart_dir + "/observer.dhall { name = v.observerName, image = v.observerImage, imagePullPolicy = v.imagePullPolicy, imagePullSecrets = v.imagePullSecrets, polarInitImage = \"" + $polar_init_image + "\", certIssuerUrl = \"" + $cert_issuer_url + "\", saTokenAudience = \"" + $sa_audience + "\", port = v.observerPort }"
+    let expr = "let v = " + $merged + " in " + $chart_dir + "/observer.dhall { name = v.observerName, image = v.observerImage, imagePullPolicy = v.imagePullPolicy, imagePullSecrets = v.imagePullSecrets, polarInitImage = \"" + $polar_init_image + "\", certIssuerUrl = \"" + $cert_issuer_url + "\", saTokenAudience = \"" + $sa_audience + "\", port = v.observerPort, caConfigMap = " + $ca_configmap + " }"
     $expr | save --force $tmp
     print $"  rendering observer.dhall -> credentials-agent-observer.yaml"
     dhall-to-yaml --documents --quoted --file $tmp | save --force ($output_dir | path join "credentials-agent-observer.yaml")

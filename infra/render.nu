@@ -67,6 +67,7 @@ def main [
     let scheduler_remote_url = $config.scheduler_remote_url
     let cert_issuer_url      = $config.cert_issuer_url
     let cert_issuer_audience = $config.cert_issuer_audience
+    let cert_issuer_ca_configmap = ($config.cert_issuer_ca_configmap? | default "")
     let cert_client_image    = $config.cert_client_image
     let polar_init_image      = $config.polar_init_image
 
@@ -87,6 +88,7 @@ def main [
         let chart_context = ($base_context | merge { chart_dir: $chart_dir } | merge (
             match $chart_name {
                 "cert-issuer" => { identityLifetimeOverrides: $identity_lifetime_overrides }
+                "neo4j" => { polarInitImage: $polar_init_image }
                 "cassini" => { jaegerDNSName: $jaeger_dns_name, certIssuerUrl: $cert_issuer_url, certIssuerAudience: $cert_issuer_audience, polarInitImage: $polar_init_image, cassiniShutdownToken: $cassini_shutdown_token }
                 "gitlab" => { neo4jBoltAddr: $neo4j_bolt_addr, certIssuerUrl: $cert_issuer_url, certIssuerAudience: $cert_issuer_audience, polarInitImage: $polar_init_image }
                 "kube" => { neo4jBoltAddr: $neo4j_bolt_addr, certIssuerUrl: $cert_issuer_url, certIssuerAudience: $cert_issuer_audience, polarInitImage: $polar_init_image }
@@ -97,7 +99,7 @@ def main [
                 "scheduler"   => { neo4jBoltAddr: $neo4j_bolt_addr, remoteUrl: $scheduler_remote_url, certIssuerUrl: $cert_issuer_url, certIssuerAudience: $cert_issuer_audience, polarInitImage: $polar_init_image }
                 "openapi"     => { neo4jBoltAddr: $neo4j_bolt_addr, certIssuerUrl: $cert_issuer_url, certIssuerAudience: $cert_issuer_audience, polarInitImage: $polar_init_image }
                 "ace"         => { neo4jBoltAddr: $neo4j_bolt_addr, certIssuerUrl: $cert_issuer_url, certIssuerAudience: $cert_issuer_audience, polarInitImage: $polar_init_image }
-                "credentials-agent" => { neo4jBoltAddr: $neo4j_bolt_addr, certIssuerUrl: $cert_issuer_url, certIssuerAudience: $cert_issuer_audience, polarInitImage: $polar_init_image }
+                "credentials-agent" => { neo4jBoltAddr: $neo4j_bolt_addr, certIssuerUrl: $cert_issuer_url, certIssuerAudience: $cert_issuer_audience, polarInitImage: $polar_init_image, caConfigMap: $cert_issuer_ca_configmap }
                 _             => { _placeholder: "" }
             }
         ))
@@ -112,6 +114,10 @@ def main [
 
     print "Checking cert-issuer's TLS identity..."
     check_cert_issuer_identity $output_dir $cert_issuer_url
+    print ""
+
+    print "Checking CA provisioning consistency..."
+    check_ca_provisioning $output_dir $cert_issuer_ca_configmap
     print ""
 
     print "=== Render complete ==="
@@ -282,6 +288,30 @@ def check_cert_issuer_identity [output_dir: string, cert_issuer_url: string] {
 
     if $server_identity != $url_host {
         print $"  ERROR: cert-issuer's TLS identity is ($server_identity) but callers connect to ($url_host)"
+        exit 1
+    }
+}
+
+# Callers mount the Polar CA ConfigMap only when one is configured, and a pod
+# that mounts a ConfigMap which doesn't exist never starts. That ConfigMap is
+# created by bootstrap-ca, and cert-issuer only loads a provisioned CA. So a
+# configured ConfigMap with cert-issuer still self-bootstrapping is the
+# failure to catch here. The opposite (cert-issuer provisioned, callers not
+# mounting) is harmless: callers fetch and pin.
+def check_ca_provisioning [output_dir: string, ca_configmap: string] {
+    let cfg_file = ($output_dir | path join "cert-issuer-configmap.yaml")
+    if not ($cfg_file | path exists) { return }
+
+    let provisioning = (
+        open $cfg_file
+        | get data."cert-issuer.json"
+        | from json
+        | get ca.provisioning
+    )
+
+    if ($ca_configmap | is-not-empty) and $provisioning != "provisioned" {
+        print $"  ERROR: callers mount the ConfigMap '($ca_configmap)', but cert-issuer's ca.provisioning is '($provisioning)'."
+        print "  That ConfigMap only exists once bootstrap-ca has run, and cert-issuer must load that CA (Provisioned) for callers to verify against it."
         exit 1
     }
 }

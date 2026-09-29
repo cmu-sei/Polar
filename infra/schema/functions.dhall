@@ -237,11 +237,16 @@ let makeCertServerInitContainer =
           "ecdsa-p256"
           extraSans
 
+-- No extra environment for polar-init. A named value, so the callers that
+-- have nothing to add don't each spell out a typed empty list.
+let noEnv = [] : List kubernetes.EnvVar.Type
+
 let makePolarInitContainer =
       \(polarInitImage : Text) ->
       \(imagePullPolicy : Text) ->
       \(saTokenVolName : Text) ->
       \(certIssuerUrl : Text) ->
+      \(extraEnv : List kubernetes.EnvVar.Type) ->
       \(tokenPath : Text) ->
       \(extraMounts : List kubernetes.VolumeMount.Type) ->
       \(depCerts : List Text) ->
@@ -263,6 +268,7 @@ let makePolarInitContainer =
               , kubernetes.EnvVar::{ name = "KUBERNETES_SA_TOKEN",        value = Some tokenPath      }
               ]
             # Constants.commonClientEnv
+            # extraEnv
             # (   if    skipEscrowBootstrap
                   then  [ kubernetes.EnvVar::{
                           , name  = "POLAR_INIT_SKIP_ESCROW_BOOTSTRAP"
@@ -295,4 +301,5 @@ in  { makeGraphEnv
     , makeCertServerInitContainer
     , makeCertInitContainer
     , makePolarInitContainer
+    , noEnv
     }
