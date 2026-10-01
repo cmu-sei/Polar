@@ -140,24 +140,31 @@ image references, hostnames, and other per-deployment values.
 
 ### Deploy
 
-Create the namespaces, bootstrap the cluster's certificate authority,
-then render and apply the target:
+Render the target and bring the cluster up with the orchestrator, from the
+repo root with `KUBECONFIG` pointing at the cluster:
 
 ```bash
-kubectl apply -f manifests/namespaces.yaml
-(cd src/agents && cargo run -p polar-admin-grant -- bootstrap-ca)
-nu infra/render.nu local-minimal --apply
+nu infra/up.nu local-minimal --dev --user <name> --email <email>
 ```
 
-`bootstrap-ca` needs a Kubernetes admin credential. It creates the
-cluster's own CA once (the `cert-issuer-ca` Secret and the `polar-ca`
-ConfigMap) and refuses to run again if they already exist, so replacing
-a CA means rebuilding the cluster. Everything else in the deployment
-gets its certificates from that CA.
+`infra/render.nu` only renders (it never touches a cluster); `infra/up.nu`
+renders and then applies. It is driven by the target's own config, so it runs
+only the steps that target needs and prints the plan first, with the reason for
+every skipped step. For `local-minimal` that is: images (`--dev`), namespaces,
+the cluster CA, secrets and manifests in the target's apply order, a wait for
+the core pods, the port-forwards, the admin flow and the browser certificate.
+It stops only where a person is needed (closing the browser, the Neo4j
+password), and every step checks whether it is already done, so after a
+failure you re-run the same command to resume.
 
-Swap `local-minimal` for whichever target you've set up. `--apply`
-renders every chart to `manifests/` and applies them to whatever
-cluster your current `$KUBECONFIG` points at, in dependency order.
+The CA step runs `polar-admin-grant bootstrap-ca`, which needs a Kubernetes
+admin credential. It creates the cluster's own CA once (the `cert-issuer-ca`
+Secret and the `polar-ca` ConfigMap) and refuses to run again if they already
+exist, so replacing a CA means rebuilding the cluster. Everything else in the
+deployment gets its certificates from that CA.
+
+Swap `local-minimal` for whichever target you've set up. To only render, run
+`nu infra/render.nu <target>`; it writes every chart to `manifests/`.
 
 For `local-minimal` specifically, this deploys the full stack: Neo4j,
 Cassini, `cert-issuer`, the credentials-agent and its observer, ACE,
@@ -304,9 +311,9 @@ To deploy against your own cluster:
    means, especially `identityStrategy`'s `clusterDomain` (only needed
    if your cluster's kubelet runs with a non-default
    `--cluster-domain`).
-4. Create the namespaces and the CA, then deploy (see **Deploy**,
-   above): `kubectl apply -f manifests/namespaces.yaml`, `bootstrap-ca`,
-   then `nu infra/render.nu <your-target> --apply`.
+4. Bring it up (see **Deploy**, above): `nu infra/up.nu <your-target>`. It
+   creates the namespaces and the CA, applies the target, and runs the admin
+   flow, skipping whatever your target doesn't deploy.
 5. Reach your cluster's credentials-agent observer however suits your
    setup and run the admin flow (see **Admin access and your user
    certificate**). The Justfile wrappers default to the dev port-forward

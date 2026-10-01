@@ -296,7 +296,7 @@ In a cluster, the `TLS_*` variables point at files that `polar-init` writes from
 
 ### Kubernetes
 
-Deployments use the layered Dhall charts in `infra/`, rendered to Kubernetes manifests and applied in dependency order:
+Layered Dhall charts rendered to Kubernetes manifests by `nu infra/render.nu <target>` and brought up, in dependency order and with the CA, secrets and admin flow, by `nu infra/up.nu <target>`.
 
 ```bash
 kubectl apply -f manifests/namespaces.yaml
