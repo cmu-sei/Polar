@@ -23,6 +23,7 @@
 
 mod bootstrap;
 mod bootstrap_ca;
+mod claim;
 mod publish;
 
 use cert_issuer_common::capability::Capability;
@@ -171,6 +172,21 @@ enum Command {
         #[arg(long, default_value = "bootstrap-admin.key")]
         key_out: PathBuf,
     },
+    /// Claim a provisioned account: generate a keypair here, have the CA sign
+    /// it, and write the certificate. The username and email must match what
+    /// the admin provisioned. Requires --observer-url.
+    Claim {
+        #[arg(long)]
+        username: String,
+        #[arg(long)]
+        email: String,
+        /// Where to write the certificate.
+        #[arg(long)]
+        cert_out: PathBuf,
+        /// Where to write the private key. Never overwritten.
+        #[arg(long)]
+        key_out: PathBuf,
+    },
 }
 
 /// A path from an environment variable, treating unset and empty alike (the
@@ -228,8 +244,8 @@ fn action_from_command(command: Command) -> AdminAction {
             title,
             telephone_number,
         },
-        Command::BootstrapCa { .. } | Command::Bootstrap { .. } => {
-            unreachable!("bootstrap and bootstrap-ca are not admin actions; run() dispatches them first")
+        Command::BootstrapCa { .. } | Command::Bootstrap { .. } | Command::Claim { .. } => {
+            unreachable!("bootstrap, bootstrap-ca and claim are not admin actions; run() dispatches them first")
         }
     }
 }
@@ -283,6 +299,30 @@ async fn run(args: Args) -> i32 {
             namespace,
             service_account,
             audience,
+            observer_url,
+            cert_out,
+            key_out,
+        })
+        .await
+        {
+            Ok(()) => 0,
+            Err(e) => {
+                eprintln!("error: {e}");
+                1
+            }
+        };
+    }
+
+    if let Command::Claim {
+        username,
+        email,
+        cert_out,
+        key_out,
+    } = command
+    {
+        return match claim::run(claim::ClaimArgs {
+            username,
+            email,
             observer_url,
             cert_out,
             key_out,

@@ -146,7 +146,7 @@ async fn mint_token(args: &BootstrapArgs) -> Result<String, String> {
         .ok_or_else(|| "the API server returned no token".to_string())
 }
 
-async fn post(
+pub(crate) async fn post(
     http: &reqwest::Client,
     url: &str,
     request: &AccountRequest,
@@ -169,7 +169,7 @@ async fn post(
 }
 
 /// Creates the file, failing if it exists, with the given Unix mode.
-fn write_new(path: &Path, bytes: &[u8], mode: u32) -> Result<(), String> {
+pub(crate) fn write_new(path: &Path, bytes: &[u8], mode: u32) -> Result<(), String> {
     use std::os::unix::fs::OpenOptionsExt;
     let mut file = std::fs::OpenOptions::new()
         .write(true)
@@ -182,7 +182,7 @@ fn write_new(path: &Path, bytes: &[u8], mode: u32) -> Result<(), String> {
         .map_err(|e| format!("cannot write {}: {e}", path.display()))
 }
 
-fn emit_fallback(certificate_pem: &str, ca_chain_pem: &str) {
+pub(crate) fn emit_fallback(certificate_pem: &str, ca_chain_pem: &str) {
     println!("{certificate_pem}");
     println!("{ca_chain_pem}");
 }
