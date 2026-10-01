@@ -63,7 +63,7 @@ impl HandshakeClient {
             .tls_built_in_root_certs(false)
             .add_root_certificate(cert)
             .build()
-            .map_err(|e| format!("building HTTP client: {e}"))?;
+            .map_err(|e| format!("building HTTP client: {}", Self::describe_error(&e)))?;
         Ok(Self { base_url, http })
     }
 
@@ -84,10 +84,14 @@ impl HandshakeClient {
         let http = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
             .tls_built_in_root_certs(false)
+            // Both TLS backends are compiled in (the workspace enables
+            // rustls-tls on top of the default), and the default backend
+            // is native-tls, which cannot use a PEM identity. Say so.
+            .use_rustls_tls()
             .add_root_certificate(ca)
             .identity(identity)
             .build()
-            .map_err(|e| format!("building HTTP client: {e}"))?;
+            .map_err(|e| format!("building HTTP client: {}", Self::describe_error(&e)))?;
         Ok(Self { base_url, http })
     }
 
@@ -96,6 +100,20 @@ impl HandshakeClient {
     /// can't silently select a different trust mode than an absent one.
     pub fn ca_path_from_env(var: &str) -> Option<String> {
         std::env::var(var).ok().filter(|p| !p.is_empty())
+    }
+
+    /// An error and every cause beneath it, joined. `reqwest` reports a
+    /// builder failure as just "builder error" and keeps the reason in
+    /// `source()`, which `{e}` alone drops.
+    fn describe_error(error: &dyn std::error::Error) -> String {
+        let mut message = error.to_string();
+        let mut source = error.source();
+        while let Some(cause) = source {
+            message.push_str(": ");
+            message.push_str(&cause.to_string());
+            source = cause.source();
+        }
+        message
     }
 
     /// Choose how to trust cert-issuer, in one place for every caller.
@@ -157,7 +175,7 @@ impl HandshakeClient {
             .timeout(std::time::Duration::from_secs(30))
             .danger_accept_invalid_certs(true)
             .build()
-            .map_err(|e| format!("building HTTP client: {e}"))?;
+            .map_err(|e| format!("building HTTP client: {}", Self::describe_error(&e)))?;
         let response = http
             .get(format!("{base_url}/ca"))
             .send()
@@ -303,5 +321,28 @@ mod identity_tests {
             b"not an identity",
         );
         assert!(result.is_err());
+    }
+}
+
+#[cfg(test)]
+mod identity_build_tests {
+    use super::*;
+
+    /// The real build path, not just the file reading: a client with a
+    /// client identity must actually construct. A CA certificate and key
+    /// stand in for any PEM identity, since the builder only needs a
+    /// parseable certificate followed by a PKCS#8 key.
+    #[test]
+    fn a_client_carrying_an_identity_builds() {
+        let (cert, key) = cert_issuer_common::ca_root::bootstrap_ca("Test CA").unwrap();
+        let identity = format!("{cert}\n{key}");
+
+        let built = HandshakeClient::with_root_ca_and_identity(
+            "https://cert-issuer.invalid:8443".to_string(),
+            cert.as_bytes(),
+            identity.as_bytes(),
+        );
+
+        assert!(built.is_ok(), "client with identity did not build: {:?}", built.err());
     }
 }
