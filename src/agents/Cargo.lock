@@ -5497,17 +5497,13 @@ dependencies = [
 name = "polar-admin-grant"
 version = "1.0.0"
 dependencies = [
- "cassini-client",
- "cassini-types",
  "cert-issuer-common",
  "clap",
  "credentials_agent_common",
  "k8s-openapi",
  "kube",
- "polar",
- "ractor",
  "reqwest 0.12.28",
- "rkyv",
+ "serde_json",
  "tokio",
  "uuid",
 ]
