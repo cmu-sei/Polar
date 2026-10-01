@@ -36,9 +36,14 @@ in  { name             = "cert-issuer"
     -- constants.dhall's certIssuerUrl; both are covered by the
     -- pending configurable-domain work.
     , mtlsServerIdentity = Constants.certIssuerHost
-    -- Empty until credentials-agent has its own ServiceAccount to
-    -- match against. Empty means /internal/issue is unreachable.
-    , mtlsInternalCallers = [] : List Text
+    -- Identities allowed to reach /internal/issue, matched against the
+    -- verified mTLS peer SAN. Only the credentials agent: it is the one
+    -- service allowed to ask for capability-bearing, account-bound
+    -- certificates, and only after its ledger-backed checks pass. The
+    -- ".serviceaccount.cluster.local" suffix is hardcoded, like
+    -- mtlsServerIdentity above, pending the configurable-domain work.
+    , mtlsInternalCallers =
+        [ "credentials-agent.${Constants.PolarNamespace}.serviceaccount.cluster.local" ]
     -- Stays SelfBootstrap until bootstrap-ca exists and the Deployment
     -- mounts its Secret. Switching this without that mount makes
     -- cert-issuer refuse to start, by design.
