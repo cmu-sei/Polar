@@ -31,6 +31,10 @@ in  { name             = "cert-issuer"
           }
     , defaultLifetimeSecs = 3600
     , serverLifetimeSecs  = 3600
+    -- Account (user) certificates, such as the one loaded into a browser.
+    -- One year: a new one is an admin action, not something the holder
+    -- renews by themselves.
+    , userLifetimeSecs    = 31536000
     -- DNS name cert-issuer mints into its own TLS server cert. The
     -- ".svc.cluster.local" suffix is hardcoded, same as
     -- constants.dhall's certIssuerUrl; both are covered by the

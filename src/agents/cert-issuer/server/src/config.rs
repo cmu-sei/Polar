@@ -101,6 +101,13 @@ pub struct CaConfig {
     /// infrastructure certs without affecting client cert TTL.
     pub server_lifetime: Duration,
 
+    /// Lifetime for account (user) certificates: the ones issued through
+    /// `/internal/issue` with an account subject, including the one a browser
+    /// holds. Deliberately separate from `default_lifetime`, which is the
+    /// short, rotated lifetime of workload client certs. Required, with no
+    /// built-in default: a missing value is a configuration error.
+    pub user_lifetime: Duration,
+
     /// Per-identity lifetime overrides, keyed by the exact workload
     /// identity string embedded in the CSR's SAN. Takes precedence over
     /// both default_lifetime and server_lifetime when the requesting

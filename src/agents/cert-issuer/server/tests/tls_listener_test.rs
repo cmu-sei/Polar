@@ -56,6 +56,7 @@ async fn start() -> Fixture {
         ca: ca.clone(),
         default_lifetime: Duration::from_secs(3600),
         server_lifetime: Duration::from_secs(43200),
+        user_lifetime: Duration::from_secs(43200),
         identity_lifetime_overrides: HashMap::new(),
         internal_callers: vec![ALLOWED.to_string()],
         ca_cert_pem: ca_cert_pem.clone(),

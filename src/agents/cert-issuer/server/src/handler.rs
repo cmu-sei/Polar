@@ -55,6 +55,9 @@ pub struct Handler {
     /// Lifetime for server certs. Typically longer than client certs
     /// to reduce Cassini restart frequency.
     pub server_lifetime: Duration,
+    /// Lifetime for account (user) certificates, issued with an
+    /// `account_subject`. Long by design: it is what a person's browser holds.
+    pub user_lifetime: Duration,
     pub identity_lifetime_overrides: std::collections::HashMap<String, Duration>,
     /// Peer identities (the SAN of the connection's verified mTLS
     /// client certificate) allowed to call `handle_internal_issue`.
@@ -243,16 +246,23 @@ impl Handler {
             .identity_lifetime_overrides
             .get(dns_identity)
             .copied()
-            .unwrap_or(match cert_type {
-                cert_issuer_common::CertType::Server => self.server_lifetime,
-                cert_issuer_common::CertType::Client => self.default_lifetime,
-                // Not short-lived like Client -- the actual security
-                // mechanism protecting a service's own durable
-                // identity is scheduled rotation plus real
-                // revocation (once implemented), not a tight expiry
-                // window, matching server_lifetime's own existing
-                // "not meant to expire in an hour" reasoning exactly.
-                cert_issuer_common::CertType::Service => self.server_lifetime,
+            .unwrap_or(if account_subject.is_some() {
+                // An account certificate: the person's own identity, which
+                // lives as long as `user_lifetime` says, whatever CertType
+                // the credentials agent asked for.
+                self.user_lifetime
+            } else {
+                match cert_type {
+                    cert_issuer_common::CertType::Server => self.server_lifetime,
+                    cert_issuer_common::CertType::Client => self.default_lifetime,
+                    // Not short-lived like Client -- the actual security
+                    // mechanism protecting a service's own durable
+                    // identity is scheduled rotation plus real
+                    // revocation (once implemented), not a tight expiry
+                    // window, matching server_lifetime's own existing
+                    // "not meant to expire in an hour" reasoning exactly.
+                    cert_issuer_common::CertType::Service => self.server_lifetime,
+                }
             });
 
         let ca_request = CaIssueRequest {

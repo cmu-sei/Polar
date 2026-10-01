@@ -56,6 +56,7 @@ fn test_handler() -> Handler {
         ca: Arc::new(NeverCalledCa),
         default_lifetime: Duration::from_secs(3600),
         server_lifetime: Duration::from_secs(43200),
+        user_lifetime: Duration::from_secs(43200),
         identity_lifetime_overrides: HashMap::new(),
         internal_callers: vec![],
         ca_cert_pem: String::new(),

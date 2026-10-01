@@ -49,6 +49,7 @@ let render =
           , issuers : List IssuerCfg
           , defaultLifetimeSecs : Natural
           , serverLifetimeSecs : Natural
+          , userLifetimeSecs : Natural
           , identityLifetimeOverrides : List { identity : Text, lifetimeSecs : Natural }
           -- DNS identity cert-issuer mints into its own TLS server
           -- certificate at startup. Must be the name callers actually
@@ -161,6 +162,13 @@ let render =
                                       JSON.object
                                         ( toMap
                                             { secs = JSON.natural v.serverLifetimeSecs
+                                            , nanos = JSON.natural 0
+                                            }
+                                        )
+                                  , user_lifetime =
+                                      JSON.object
+                                        ( toMap
+                                            { secs = JSON.natural v.userLifetimeSecs
                                             , nanos = JSON.natural 0
                                             }
                                         )
