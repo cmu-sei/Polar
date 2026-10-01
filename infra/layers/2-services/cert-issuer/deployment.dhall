@@ -29,10 +29,15 @@ let render =
                     , name   = v.caVolumeName
                     , secret = Some k8s.SecretVolumeSource::{
                       , secretName  = Some "cert-issuer-ca"
-                      , items       = Some
-                        [ k8s.KeyToPath::{ key = "ca.crt", path = "ca.crt" }
-                        , k8s.KeyToPath::{ key = "ca.key", path = "ca.key" }
-                        ]
+                       -- Paths are relative to the mount at /home/polar and
+                       -- must land where values.dhall's caCertPath/caKeyPath
+                       -- point (/home/polar/ca/...). In SelfBootstrap mode the
+                       -- ca/ directory is created by cert-issuer itself on the
+                       -- PVC; here nothing creates it, so the Secret does.
+                       , items       = Some
+                         [ k8s.KeyToPath::{ key = "ca.crt", path = "ca/ca.crt" }
+                         , k8s.KeyToPath::{ key = "ca.key", path = "ca/ca.key" }
+                         ]
                       , defaultMode = Some 288 -- 0440
                       }
                     }
