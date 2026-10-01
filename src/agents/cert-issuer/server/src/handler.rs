@@ -98,7 +98,10 @@ pub struct ValidateHandlerResponse {
 
 impl Handler {
     /// Process an `/issue` request.
-    #[instrument(skip(self))]
+    // skip_all: the bearer token is a live credential and the request carries
+    // the CSR. Neither belongs in a span field, and the debug log would
+    // otherwise print both in full.
+    #[instrument(skip_all)]
     pub async fn handle(&self, bearer_token: &str, request: IssueRequest) -> HandlerResponse {
         // ---- Step 1: OIDC validation ----
         let claims = match self.validator.validate(bearer_token).await {
@@ -318,7 +321,9 @@ impl Handler {
     /// of the mTLS connection, passed in by the transport layer --
     /// against `internal_callers`, and then that the CSR's SAN matches
     /// the asserted identity, exactly as `/issue` does against a token.
-    #[instrument(skip(self))]
+    // skip_all for the same reason as `handle`; the verified peer identity is
+    // the one safe, useful value, so it is recorded explicitly.
+    #[instrument(skip_all, fields(peer_identity = ?peer_identity))]
     pub async fn handle_internal_issue(
         &self,
         peer_identity: Option<&str>,
@@ -376,7 +381,7 @@ impl Handler {
     /// (for a grant lookup and the renewal-prevention check) *before*
     /// it has anything to embed into a CSR's SAN set, since permitted
     /// SANs come from the grant, not known upfront.
-    #[instrument(skip(self))]
+    #[instrument(skip_all)]
         pub async fn handle_validate(
         &self,
         bearer_token: &str,
