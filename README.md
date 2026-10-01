@@ -140,18 +140,30 @@ image references, hostnames, and other per-deployment values.
 
 ### Deploy
 
+Create the namespaces, bootstrap the cluster's certificate authority,
+then render and apply the target:
+
 ```bash
+kubectl apply -f manifests/namespaces.yaml
+(cd src/agents && cargo run -p polar-admin-grant -- bootstrap-ca)
 nu infra/render.nu local-minimal --apply
 ```
+
+`bootstrap-ca` needs a Kubernetes admin credential. It creates the
+cluster's own CA once (the `cert-issuer-ca` Secret and the `polar-ca`
+ConfigMap) and refuses to run again if they already exist, so replacing
+a CA means rebuilding the cluster. Everything else in the deployment
+gets its certificates from that CA.
 
 Swap `local-minimal` for whichever target you've set up. `--apply`
 renders every chart to `manifests/` and applies them to whatever
 cluster your current `$KUBECONFIG` points at, in dependency order.
 
 For `local-minimal` specifically, this deploys the full stack: Neo4j,
-Cassini, `cert-issuer`, ACE, the ingestion agents, and — as of this
-week — Keycloak and its own Postgres backing store, used for
-human-facing (as opposed to Kubernetes-workload) certificate issuance.
+Cassini, `cert-issuer`, the credentials-agent and its observer, ACE,
+the ingestion agents, and Keycloak with its own Postgres backing store
+(an optional identity-provider route for human-facing certificate
+issuance).
 
 ACE runs as a Kubernetes `Job` (not a `Deployment`): it requests a
 long-lived mTLS client certificate from the cluster's certificate
@@ -159,6 +171,10 @@ infrastructure via an init container on every pod creation, which is
 what lets it recover automatically if its certificate or environment
 ever needs to be refreshed. It authenticates to Neo4j over mutual TLS
 and holds no other cluster permissions.
+
+Wait for the pods to come up (`kubectl -n polar get pods -w`) before
+continuing with **Accessing the deployment** and **Admin access and
+your user certificate**, below.
 
 ### Loading data into Neo4j
 
@@ -184,7 +200,8 @@ port-forwards for everything you'd normally want reachable from your
 own machine:
 
 ```bash
-just port-forwards-up       # neo4j (7473/7687), keycloak (8080), ace (8050)
+just port-forwards-up       # neo4j (7473/7687), keycloak (8080), ace (8050),
+                            # jaeger (4318/16686), credentials-agent observer (8081)
 just port-forwards-down     # stop them
 ```
 
@@ -193,8 +210,61 @@ occasional dropped connection — a normal one-time step per session,
 not something to leave running in a dedicated terminal.
 
 - ACE's dashboard: `http://localhost:8050`
-- Neo4j Browser: `http://localhost:7473`
+- Neo4j Browser: `https://localhost:7473` (requires your user
+  certificate; see below)
 - Keycloak admin console: `http://localhost:8080`
+- Jaeger traces: `http://localhost:16686`
+- Credentials-agent observer (used by the admin tools): `http://localhost:8081`
+
+### Admin access and your user certificate
+
+People reach Neo4j Browser and the admin tools with a personal client
+certificate, valid for one year and issued through the credentials-agent.
+The certificate is tied to an account an admin provisions for you, and
+your private key is generated on your own machine and never leaves it.
+With the pods running and `just port-forwards-up` active:
+
+```bash
+just admin-bootstrap                    # once per cluster
+just admin-provision <user> <email>
+just admin-claim <user> <email>
+just user-cert-install <user>           # imports into Librewolf
+```
+
+- `admin-bootstrap` fetches the cluster CA into `~/.config/polar-admin/`
+  and redeems the one-time bootstrap credential, writing
+  `bootstrap-admin.crt` and `.key`. It works once per cluster.
+- `admin-provision` signs, with the bootstrap certificate, the
+  provisioning of the first (normal) admin account. The bootstrap
+  certificate can provision exactly one account. Provisioning further
+  accounts uses `polar-admin-grant provision-account` signed with an
+  existing admin's claimed certificate (`--cert`/`--key`); a Justfile
+  wrapper for that is planned.
+- `admin-claim` runs as the account holder: it generates an ECDSA P-256
+  keypair locally, claims the provisioned account, and writes
+  `<user>.crt` and `<user>.key` next to the CA.
+- `user-cert-install` bundles the certificate and imports it, together
+  with the Polar CA, into Librewolf's certificate store (close the
+  browser first). It is the only browser-specific step; for another
+  browser, import the same files by hand.
+
+Then browse to `https://localhost:7473` and log in to Neo4j. On a fresh
+cluster the `neo4j` user still has its default password, and the agents
+cannot connect until it matches the cluster's secret. Print the value
+and set it in the browser when prompted:
+
+```bash
+kubectl get secret -n polar-graph neo4j-secret -o jsonpath='{.data.secret}' | base64 -d | cut -d/ -f2
+```
+
+(`just neo4j-load-dump` sets this automatically.) Avoid repeated logins
+with a wrong password: Neo4j rate-limits failed logins per user.
+
+A new certificate always involves an admin; certificates do not
+self-renew. After a cluster rebuild the old CA is gone, so move
+`~/.config/polar-admin` aside before starting over. Keep a backup of the
+bootstrap and user keys: losing the bootstrap material means rebuilding
+the cluster.
 
 ### Bootstrapping Keycloak
 
@@ -234,9 +304,17 @@ To deploy against your own cluster:
    means, especially `identityStrategy`'s `clusterDomain` (only needed
    if your cluster's kubelet runs with a non-default
    `--cluster-domain`).
-4. `nu infra/render.nu <your-target> --apply`.
+4. Create the namespaces and the CA, then deploy (see **Deploy**,
+   above): `kubectl apply -f manifests/namespaces.yaml`, `bootstrap-ca`,
+   then `nu infra/render.nu <your-target> --apply`.
+5. Reach your cluster's credentials-agent observer however suits your
+   setup and run the admin flow (see **Admin access and your user
+   certificate**). The Justfile wrappers default to the dev port-forward
+   at `http://localhost:8081`; set `POLAR_OBSERVER_URL` to point them
+   elsewhere. The admin tool itself has no default and always takes an
+   explicit `--observer-url`.
 
-Some recipes in the `Justfile` (`cluster-up`, `cluster-status`, and a
+Some recipes in the `Justfile` (`cluster-reset`, `cluster-status`, and a
 few others) are conveniences for this repo's own local development
 cluster and aren't required for deploying elsewhere.
 
@@ -380,7 +458,7 @@ podman run -p 8080:8080 \
   ace-viz:latest
 ```
 
-### Local development without a cluster
+### Iterating on an agent
 
 There is no static, offline-generated dev PKI any more: every certificate
 comes from `cert-issuer`, signed by the cluster's own CA. To iterate on an
@@ -395,17 +473,19 @@ kubectl -n polar delete pod -l job-name=<agent>
 ```
 
 Human access (Neo4j Browser and the admin tools) uses a user certificate
-claimed through the admin flow; see the startup sequence in the `Justfile`
-(`just admin-bootstrap`, `admin-provision`, `admin-claim`, `user-cert-install`).
+claimed through the admin flow; see **Admin access and your user
+certificate**, above.
 
-## Validating human certificate issuance
+## Validating Keycloak certificate issuance
 
 Kubernetes workloads (ACE, the ingestion agents) get their certificates
-automatically, with no manual steps. A **human**, authenticating
-against Keycloak, is a newer path this week's work added — there's no
-polished client tool for it yet, so this is a manual walkthrough of the
-real, verified sequence, useful for confirming the deployment is
-actually working end to end.
+automatically, with no manual steps. People normally get theirs through
+the admin flow (see **Admin access and your user certificate**).
+Separately, `cert-issuer` can issue a certificate to a **human
+authenticated against Keycloak** (or another configured identity
+provider). There is no polished client tool for that route yet, so this
+is a manual walkthrough of the real, verified sequence, useful for
+confirming the deployment is actually working end to end.
 
 1. Get a token from Keycloak (after `just port-forwards-up` and `just
    keycloak-bootstrap`, using the same test credentials from
@@ -442,19 +522,25 @@ actually working end to end.
 
 4. Port-forward `cert-issuer` itself (not brought up by
    `port-forwards-up`, since workloads reach it in-cluster and this is
-   only needed for this kind of manual, from-your-laptop check):
+   only needed for this kind of manual, from-your-laptop check), and
+   save the cluster CA so you can verify its certificate:
 
 ```bash
    kubectl port-forward -n polar svc/cert-issuer 8443:8443 &
+   kubectl -n polar get configmap polar-ca -o jsonpath='{.data.ca\.pem}' > ca.pem
 ```
 
-5. Request the certificate:
+5. Request the certificate. `cert-issuer` only speaks TLS, and its
+   certificate is issued for its in-cluster name, so verify against that
+   name with `--resolve`:
 
 ```bash
    CSR_JSON=$(jq -n --arg csr "$(cat csr.pem)" \
      '{csr_pem: $csr, cert_type: "CLIENT", extra_sans: []}')
 
-   curl -s -X POST http://localhost:8443/issue \
+   curl -s --cacert ca.pem \
+     --resolve cert-issuer.polar.svc.cluster.local:8443:127.0.0.1 \
+     -X POST https://cert-issuer.polar.svc.cluster.local:8443/issue \
      -H "Authorization: Bearer $TOKEN" \
      -H "Content-Type: application/json" \
      -d "$CSR_JSON" \

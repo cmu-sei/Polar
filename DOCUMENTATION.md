@@ -17,6 +17,7 @@ Polar is a knowledge graph framework that collects infrastructure data and loads
 /workspace
 ├── README.md                    # Main project overview
 ├── SECURITY.md                  # Security policy
+├── Justfile                     # Build, cluster and admin-flow recipes
 ├── maskfile.md                  # shortcuts for common dev operations
 ├── flake.nix                    # Nix flake for reproducible builds
 ├── flake.lock                   # Locked Nix dependencies
@@ -29,9 +30,10 @@ Polar is a knowledge graph framework that collects infrastructure data and loads
 ├── DOCUMENTATION.md             # This file
 ├── pi/                          # (Ignored per user request)
 ├── src/                         # Source code and agents
+├── infra/                       # Layered Kubernetes deployment (render.nu, targets, charts)
 ├── docs/                        # Project documentation
 ├── scripts/                     # Utility scripts
-├── var/                         # Runtime variable data (certs, volumes)
+├── var/                         # Runtime variable data (volumes)
 ├── examples/                    # Example applications
 ├── .devcontainer/              # VSCode Dev Container configuration
 ├── .direnv/                    # direnv configuration
@@ -59,7 +61,9 @@ Contains the main Rust workspace with multiple agents:
   - `broker/` - Message broker server
   - `client/` - Client library for connecting to the broker
   - `test/` - Test harness for broker validation
+- **cert-issuer/** - Certificate authority service: issues short-lived workload certificates from Kubernetes or IdP tokens, and signs account certificates for the credentials-agent
 - **config-ops/** - Configuration operations
+- **credentials-agent/** - Account and credential management: event-sourced, hash-chained ledger; HTTP observer; consumer that verifies signed admin actions; `polar-admin-grant` admin CLI
 - **git/** - Git repository agents
 - **gitlab/** - GitLab integration agents
   - Observer - Collects GitLab data
@@ -88,18 +92,27 @@ Contains configuration for running a local stack with Docker Compose.
 
 #### `src/deploy/` - Kubernetes Deployments
 
-Dhall configurations for generating Kubernetes manifests with GitOps workflows.
+Older Dhall configurations for generating Kubernetes manifests with GitOps workflows. The current deployment pipeline is `infra/`.
 
 #### `src/flake/` - Nix Build Configurations
 
 Nix-related build files including:
 - Agent container definitions
-- TLS certificate generation
 - CI/CD pipeline configurations
 
 #### `src/git-hooks/` - Git Hooks
 
 Git pre-commit hooks for static analysis.
+
+### `infra/` - Deployment Pipeline
+
+Layered Dhall charts rendered to Kubernetes manifests and applied in dependency order by `nu infra/render.nu <target> --apply`.
+
+- `layers/` - Charts grouped by layer (for example `2-services/` holds cert-issuer, cassini, neo4j and the agents)
+- `targets/<name>/` - Deployment profiles (`local-minimal`, ...): `target.nu` lists what a target deploys, `overrides.dhall` holds per-deployment values, `secrets.sops.yaml` holds encrypted cluster secrets
+- `schema/` - Shared Dhall types and constants (namespaces, hostnames, certificate paths)
+
+See `README.md` for the full deployment walkthrough.
 
 ### `docs/` - Documentation
 
@@ -111,6 +124,7 @@ Comprehensive documentation including architecture and operational guides.
 - `attestation_and_issuance.md` - Secure attestation protocol
 - `cassini_testing.md` - Testing documentation for Cassini
 - `git/` - Git-specific architecture docs
+- `identity-and-bootstrap-update.md` - Workload identity, cert-issuer, accounts, claims and admin bootstrap
 - `kubernetes/` - Kubernetes architecture docs
 - `polar-logical-architecture.md` - Logical architecture model
 - `secrets-management.md` - Secrets management documentation
@@ -134,8 +148,6 @@ Documentation for the CI/CD pipeline using Nix and GitLab CI.
 
 Runtime data including:
 - `neo4j_volumes/` - Neo4j database volumes
-- `ssl/` - SSL/TLS certificates (CA, client, server)
-- `tls-gen/` - TLS certificate generation data
 
 ### `examples/` - Example Applications
 
@@ -168,6 +180,18 @@ Polar uses a modular agent system:
 4. **Configuration Agent** - Serves runtime configurations to agents
 
 All communication happens via the Cassini message broker using mTLS.
+
+### Identity and Certificates
+
+Every certificate in a deployment comes from the cluster's own CA, held by `cert-issuer`:
+
+- **Workloads** get short-lived client or server certificates from the `polar-init` init container, which presents the pod's projected ServiceAccount token to `cert-issuer`. The certificate's identity is `<serviceaccount>.<namespace>.serviceaccount.cluster.local`.
+- **People** use a personal client certificate (ECDSA P-256, one year) tied to an account that an admin provisioned. The credentials-agent verifies the claim and has `cert-issuer` sign the certificate; the private key is generated on the holder's machine.
+- **Credentials-agent** keeps accounts, certificates, grants and revocations in an event-sourced, hash-chained ledger. Admin actions are signed with the author's certificate key and verified by the consumer, which is the only gate.
+- **Observer** (`credentials-agent-observer`) is an HTTP-to-Cassini relay that exposes `/issue`, `/identity`, `/account` and `/admin-action`. It decides nothing.
+- **`polar-admin-grant`** is the admin CLI: `bootstrap-ca`, `bootstrap`, `claim`, and signed admin actions such as `provision-account`. The Justfile wraps it as `admin-bootstrap`, `admin-provision`, `admin-claim` and `user-cert-install`.
+
+See `docs/architecture/identity-and-bootstrap-update.md` for the design and `README.md` for the walkthrough.
 
 ### Provenance Tracking
 
@@ -248,6 +272,8 @@ Environment variables are used for configuration. See `example.env` for required
 - GitLab/Jira API tokens
 - Kubernetes cluster access
 
+In a cluster, the `TLS_*` variables point at files that `polar-init` writes from certificates issued by `cert-issuer`; there is no static, pre-generated certificate set.
+
 ### Key Environment Variables
 
 | Variable | Purpose |
@@ -270,12 +296,15 @@ Environment variables are used for configuration. See `example.env` for required
 
 ### Kubernetes
 
-Deployments use Dhall configurations rendered to Kubernetes manifests :
+Deployments use the layered Dhall charts in `infra/`, rendered to Kubernetes manifests and applied in dependency order:
 
 ```bash
-# Generate manifests
-sh scripts/render-manifests.sh src/deploy/<environment> <output-dir>
+kubectl apply -f manifests/namespaces.yaml
+(cd src/agents && cargo run -p polar-admin-grant -- bootstrap-ca)
+nu infra/render.nu local-minimal --apply
 ```
+
+`bootstrap-ca` creates the cluster's CA once and needs a Kubernetes admin credential. After the pods are running, `just port-forwards-up` exposes the services locally, and the admin flow (`just admin-bootstrap`, `admin-provision`, `admin-claim`, `user-cert-install`) issues a personal certificate for Neo4j Browser and the admin tools. `README.md` has the full walkthrough.
 
 ### GitOps Workflow
 
@@ -287,7 +316,7 @@ sh scripts/render-manifests.sh src/deploy/<environment> <output-dir>
 ### Agent Deployment Requirements
 
 Each agent requires:
-- mTLS certificates (certificate, private key, CA cert)
+- mTLS certificates (certificate, private key, CA cert), issued automatically by `cert-issuer` through the `polar-init` init container
 - Environment variables for credentials
 - Access to the Cassini message broker
 - Network access to target systems (GitLab, Jira, Kubernetes API)
@@ -295,20 +324,19 @@ Each agent requires:
 ## Security
 
 - **mTLS**: All service communication uses mutual TLS
-- **Certificate Management**: Certificates generated via Nix or tls-gen
-- **Attestation Protocol**: Secure short-lived certificate issuance for containers
+- **Certificate Management**: Certificates are issued by `cert-issuer` from the cluster's own CA; workload certificates are short-lived and reissued on every pod start
+- **Workload Attestation**: Pods prove identity with projected ServiceAccount tokens
 - **Rate Limiting**: Protection against excessive requests
-- **Logging**: Comprehensive logging with anomaly detection
+- **Logging**: Comprehensive logging with anomaly detection; bearer tokens and CSRs are not written to logs
 - **Credential Provider Abstraction**: Clean separation of authentication logic
 
-### Attestation Protocol
+### Identity and Issuance
 
-The system implements a secure attestation protocol for containerized services:
-- Challenge-response mechanism to prevent replay attacks
-- Ephemeral secrets bound to running instances
-- HMAC signatures for request integrity
-- Runtime introspection via SSH to verify container existence
-- Rate limiting and anomaly detection
+- Workloads present a projected ServiceAccount token; `cert-issuer` validates it against its trusted issuers (the Kubernetes API and, optionally, an external IdP such as Keycloak) and signs a certificate whose identity must match the CSR byte for byte
+- Neo4j requires a client certificate on both Bolt and HTTPS and trusts only the cluster CA for client authentication
+- People hold personal client certificates (ECDSA P-256, one year). A certificate is never self-renewed: replacing one always involves an admin
+- Admin actions (provisioning, grants, revocations) are signed with the author's certificate key and verified by the credentials-agent consumer, which looks up the author's permissions in its own ledger; the transport and the broker are not trusted for authorization
+- The one-time bootstrap credential can provision exactly one account, after which it is spent
 
 ## Resources
 
