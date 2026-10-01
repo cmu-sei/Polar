@@ -946,9 +946,13 @@ cluster-status:
 
 
 # Start detached, auto-restarting port-forwards for local dev (neo4j
-# browser/bolt, keycloak admin console, ace dashboard, jaeger traces/UI).
-# Fully detached via setsid -- survives terminal close, does not appear
-# in `jobs`. Logs go to /tmp/pf-*.log; stop with `just port-forwards-down`.
+# browser/bolt, keycloak admin console, ace dashboard, jaeger traces/UI,
+# credentials-agent observer). Fully detached via setsid -- survives
+# terminal close, does not appear in `jobs`. Logs go to /tmp/pf-*.log; stop
+# with `just port-forwards-down`.
+#
+# The observer is on local 8081, not 8080: keycloak already owns 8080, and
+# a forward that loses that race silently talks to the wrong service.
 port-forwards-up:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -957,12 +961,13 @@ port-forwards-up:
         setsid bash -c "while true; do kubectl port-forward -n $ns svc/$svc $ports > $logfile 2>&1; sleep 1; done" < /dev/null > /dev/null 2>&1 &
         disown
     }
-    start_pf polar-graph polar-db-svc "7473:7473 7687:7687" /tmp/pf-neo4j.log
-    start_pf polar-auth  keycloak-svc "8080:8080"            /tmp/pf-keycloak.log
-    start_pf polar       ace-svc      "8050:8050"             /tmp/pf-ace.log
-    start_pf polar       jaeger-svc   "4318:4318 16686:16686" /tmp/pf-jaeger.log
-    echo "Port-forwards started (neo4j: 7473/7687, keycloak: 8080, ace: 8050, jaeger: 4318/16686)."
-    echo "Logs: /tmp/pf-neo4j.log /tmp/pf-keycloak.log /tmp/pf-ace.log /tmp/pf-jaeger.log"
+    start_pf polar-graph polar-db-svc                 "7473:7473 7687:7687"   /tmp/pf-neo4j.log
+    start_pf polar-auth  keycloak-svc                 "8080:8080"             /tmp/pf-keycloak.log
+    start_pf polar       ace-svc                      "8050:8050"             /tmp/pf-ace.log
+    start_pf polar       jaeger-svc                   "4318:4318 16686:16686" /tmp/pf-jaeger.log
+    start_pf polar       credentials-agent-observer   "8081:8080"             /tmp/pf-credentials-observer.log
+    echo "Port-forwards started (neo4j: 7473/7687, keycloak: 8080, ace: 8050, jaeger: 4318/16686, credentials-agent observer: 8081)."
+    echo "Logs: /tmp/pf-neo4j.log /tmp/pf-keycloak.log /tmp/pf-ace.log /tmp/pf-jaeger.log /tmp/pf-credentials-observer.log"
 
 # Stop all detached port-forwards started by port-forwards-up.
 port-forwards-down:
@@ -971,6 +976,7 @@ port-forwards-down:
     pkill -f "port-forward -n polar-auth svc/keycloak-svc" 2>/dev/null || true
     pkill -f "port-forward -n polar svc/ace-svc" 2>/dev/null || true
     pkill -f "port-forward -n polar svc/jaeger-svc" 2>/dev/null || true
+    pkill -f "port-forward -n polar svc/credentials-agent-observer" 2>/dev/null || true
     echo "Port-forwards stopped."
 
 # Idempotent Keycloak bootstrap: realm, public client (PKCE, Authorization
