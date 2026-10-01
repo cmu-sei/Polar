@@ -11,7 +11,7 @@ use cert_issuer::ca::{CaClient, CaError, CaIssueRequest, IssuedCert, RcgenCaClie
 use cert_issuer::handler::{Handler, HandlerBody};
 use cert_issuer::oidc::Validator;
 use cert_issuer_common::keypair::{KeyAlgorithm, generate_csr};
-use cert_issuer_common::{CertType, InternalIssueRequest, IssueOutcome};
+use cert_issuer_common::{AccountSubject, CertType, InternalIssueRequest, IssueOutcome};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -65,6 +65,7 @@ fn request_for(csr_identity: &str, asserted_identity: &str) -> InternalIssueRequ
         cert_type: CertType::Client,
         extra_sans: vec![],
         subject_dn_defaults: None,
+        account_subject: None,
     }
 }
 
@@ -169,5 +170,141 @@ async fn an_empty_asserted_identity_is_rejected() {
     match response.body {
         HandlerBody::Error(e) => assert_eq!(e.outcome, IssueOutcome::InvalidCsr),
         other => panic!("expected an error, got {other:?}"),
+    }
+}
+
+// ---- authoritative account subject (uid, mail) ----
+
+const OID_UID: &str = "0.9.2342.19200300.100.1.1";
+const OID_MAIL: &str = "0.9.2342.19200300.100.1.3";
+
+fn request_with_subject(username: &str, email: &str) -> InternalIssueRequest {
+    let mut request = request_for(TARGET_IDENTITY, TARGET_IDENTITY);
+    request.account_subject = Some(AccountSubject {
+        username: username.to_string(),
+        email: email.to_string(),
+    });
+    request
+}
+
+fn certificate_of(body: HandlerBody) -> String {
+    match body {
+        HandlerBody::Success(issued) => issued.certificate_pem,
+        other => panic!("expected success, got {other:?}"),
+    }
+}
+
+/// The value of one Subject DN attribute in the (leaf) certificate.
+fn subject_attribute(certificate_pem: &str, oid: &str) -> Option<String> {
+    let (_, pem) = x509_parser::pem::parse_x509_pem(certificate_pem.as_bytes()).unwrap();
+    let (_, cert) = x509_parser::parse_x509_certificate(&pem.contents).unwrap();
+    for rdn in cert.subject().iter() {
+        for atv in rdn.iter() {
+            if atv.attr_type().to_id_string() == oid {
+                return atv.as_str().ok().map(String::from);
+            }
+        }
+    }
+    None
+}
+
+#[tokio::test]
+async fn an_account_subject_becomes_uid_and_mail_in_the_certificate() {
+    let h = handler(real_ca(), vec![ALLOWED_CALLER]);
+    let response = h
+        .handle_internal_issue(
+            Some(ALLOWED_CALLER),
+            request_with_subject("alice", "alice@example.com"),
+        )
+        .await;
+
+    assert_eq!(response.status, 200);
+    let pem = certificate_of(response.body);
+    assert_eq!(subject_attribute(&pem, OID_UID).as_deref(), Some("alice"));
+    assert_eq!(
+        subject_attribute(&pem, OID_MAIL).as_deref(),
+        Some("alice@example.com")
+    );
+}
+
+#[tokio::test]
+async fn without_an_account_subject_the_certificate_has_no_uid_or_mail() {
+    let h = handler(real_ca(), vec![ALLOWED_CALLER]);
+    let response = h
+        .handle_internal_issue(
+            Some(ALLOWED_CALLER),
+            request_for(TARGET_IDENTITY, TARGET_IDENTITY),
+        )
+        .await;
+
+    assert_eq!(response.status, 200);
+    let pem = certificate_of(response.body);
+    assert_eq!(subject_attribute(&pem, OID_UID), None);
+    assert_eq!(subject_attribute(&pem, OID_MAIL), None);
+}
+
+#[tokio::test]
+async fn a_csr_cannot_claim_its_own_uid_or_mail() {
+    // A CSR that puts uid and mail in its own subject is the user speaking
+    // for themselves about fields that are admin-authoritative. Both are
+    // ignored: with an account subject the caller's values win, and
+    // without one the certificate carries neither.
+    let key = rcgen::KeyPair::generate().unwrap();
+    let mut params = rcgen::CertificateParams::new(vec![TARGET_IDENTITY.to_string()]).unwrap();
+    params.distinguished_name.push(
+        rcgen::DnType::CustomDnType(vec![0, 9, 2342, 19200300, 100, 1, 1]),
+        "attacker",
+    );
+    params.distinguished_name.push(
+        rcgen::DnType::CustomDnType(vec![0, 9, 2342, 19200300, 100, 1, 3]),
+        "attacker@evil.example",
+    );
+    let csr_pem = params.serialize_request(&key).unwrap().pem().unwrap();
+
+    let h = handler(real_ca(), vec![ALLOWED_CALLER]);
+
+    let mut with_subject = request_with_subject("alice", "alice@example.com");
+    with_subject.csr_pem = csr_pem.clone();
+    let response = h
+        .handle_internal_issue(Some(ALLOWED_CALLER), with_subject)
+        .await;
+    assert_eq!(response.status, 200);
+    let pem = certificate_of(response.body);
+    assert_eq!(subject_attribute(&pem, OID_UID).as_deref(), Some("alice"));
+    assert_eq!(
+        subject_attribute(&pem, OID_MAIL).as_deref(),
+        Some("alice@example.com")
+    );
+
+    let mut without_subject = request_for(TARGET_IDENTITY, TARGET_IDENTITY);
+    without_subject.csr_pem = csr_pem;
+    let response = h
+        .handle_internal_issue(Some(ALLOWED_CALLER), without_subject)
+        .await;
+    assert_eq!(response.status, 200);
+    let pem = certificate_of(response.body);
+    assert_eq!(subject_attribute(&pem, OID_UID), None);
+    assert_eq!(subject_attribute(&pem, OID_MAIL), None);
+}
+
+#[tokio::test]
+async fn a_malformed_account_subject_is_an_internal_error_and_never_reaches_the_ca() {
+    for (username, email) in [
+        ("alice", "not-an-email"),
+        ("alice", "a@b@c"),
+        ("alice", "al ice@example.com"),
+        ("", "alice@example.com"),
+        ("ali\nce", "alice@example.com"),
+    ] {
+        let h = handler(Arc::new(PanicCa), vec![ALLOWED_CALLER]);
+        let response = h
+            .handle_internal_issue(Some(ALLOWED_CALLER), request_with_subject(username, email))
+            .await;
+
+        assert_eq!(response.status, 500, "{username:?} / {email:?}");
+        match response.body {
+            HandlerBody::Error(e) => assert_eq!(e.outcome, IssueOutcome::InternalError),
+            other => panic!("expected an error, got {other:?}"),
+        }
     }
 }

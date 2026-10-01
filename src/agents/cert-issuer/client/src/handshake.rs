@@ -1,8 +1,8 @@
 // cert_issuer_init/src/handshake.rs
 
 use cert_issuer_common::{
-    CertType, IssueError, IssueRequest, IssueResponse, SubjectDnDefaults, ValidateRequest,
-    ValidateResponse,
+    CertType, InternalIssueRequest, IssueError, IssueRequest, IssueResponse, SubjectDnDefaults,
+    ValidateRequest, ValidateResponse,
 };
 use thiserror::Error;
 
@@ -67,6 +67,30 @@ impl HandshakeClient {
         Ok(Self { base_url, http })
     }
 
+    /// Like `with_root_ca`, but the client also presents a certificate on
+    /// the TLS handshake. `/internal/issue` needs this: cert-issuer derives
+    /// the caller's identity from the verified peer certificate and checks
+    /// it against its `internal_callers` allowlist. `identity_pem` is the
+    /// certificate chain followed by its PKCS#8 private key, both PEM.
+    pub fn with_root_ca_and_identity(
+        base_url: String,
+        ca_pem: &[u8],
+        identity_pem: &[u8],
+    ) -> Result<Self, String> {
+        let ca = reqwest::Certificate::from_pem(ca_pem)
+            .map_err(|e| format!("invalid CA certificate PEM: {e}"))?;
+        let identity = reqwest::Identity::from_pem(identity_pem)
+            .map_err(|e| format!("invalid client identity PEM: {e}"))?;
+        let http = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .tls_built_in_root_certs(false)
+            .add_root_certificate(ca)
+            .identity(identity)
+            .build()
+            .map_err(|e| format!("building HTTP client: {e}"))?;
+        Ok(Self { base_url, http })
+    }
+
     /// Read an optional CA-path environment variable. Unset and empty
     /// both mean "no path configured", so an empty value in a manifest
     /// can't silently select a different trust mode than an absent one.
@@ -94,6 +118,32 @@ impl HandshakeClient {
             None => Self::fetch_ca_pem(&base_url).await?.into_bytes(),
         };
         Self::with_root_ca(base_url, &pem)
+    }
+
+    /// `for_trust_mode`, plus a client certificate presented on the
+    /// handshake -- what `/internal/issue` needs. `cert_path` and
+    /// `key_path` are the PEM files the agent's own mTLS identity already
+    /// lives in (TLS_CLIENT_CERT, TLS_CLIENT_KEY). Missing or malformed
+    /// files are errors; there is no fallback to an anonymous client.
+    pub async fn for_trust_mode_with_identity(
+        base_url: String,
+        ca_path: Option<&str>,
+        cert_path: &str,
+        key_path: &str,
+    ) -> Result<Self, String> {
+        let ca_pem = match ca_path {
+            Some(path) => std::fs::read(path)
+                .map_err(|e| format!("reading CA certificate from {path}: {e}"))?,
+            None => Self::fetch_ca_pem(&base_url).await?.into_bytes(),
+        };
+        let mut identity_pem = std::fs::read(cert_path)
+            .map_err(|e| format!("reading client certificate from {cert_path}: {e}"))?;
+        identity_pem.push(b'\n');
+        identity_pem.extend(
+            std::fs::read(key_path)
+                .map_err(|e| format!("reading client key from {key_path}: {e}"))?,
+        );
+        Self::with_root_ca_and_identity(base_url, &ca_pem, &identity_pem)
     }
 
     /// Fetch the CA certificate from `GET /ca` WITHOUT verifying the
@@ -188,6 +238,29 @@ impl HandshakeClient {
 
         parse_response(response).await
     }
+
+    /// `POST /internal/issue`: no bearer token. The caller has already done
+    /// its own authorization (a Kubernetes-token check for bootstrap, a
+    /// username/email match for a claim) and asserts the identity to sign
+    /// for. Only works on a client built with an identity
+    /// (`with_root_ca_and_identity`), and only for a caller on cert-issuer's
+    /// `internal_callers` allowlist.
+    pub async fn issue_internal(
+        &self,
+        request: InternalIssueRequest,
+    ) -> Result<IssueResponse, HandshakeError> {
+        let url = format!("{}/internal/issue", self.base_url);
+
+        let response = self
+            .http
+            .post(&url)
+            .json(&request)
+            .send()
+            .await
+            .map_err(|e| HandshakeError::Unreachable(e.to_string()))?;
+
+        parse_response(response).await
+    }
 }
 
 /// Shared response-parsing tail for both `/issue` and `/validate`:
@@ -215,5 +288,20 @@ async fn parse_response<T: serde::de::DeserializeOwned>(
             ))
         })?;
         Err(HandshakeError::Rejected(issue_error))
+    }
+}
+
+#[cfg(test)]
+mod identity_tests {
+    use super::*;
+
+    #[test]
+    fn a_client_identity_that_is_not_pem_is_refused_up_front() {
+        let result = HandshakeClient::with_root_ca_and_identity(
+            "https://cert-issuer.invalid".to_string(),
+            b"not a certificate",
+            b"not an identity",
+        );
+        assert!(result.is_err());
     }
 }

@@ -132,6 +132,25 @@ impl Handler {
             return error_response(IssueOutcome::IdentityMismatch, &e.to_string());
         }
 
+        // ---- Step 3.2: administrative capabilities are not requestable here ----
+        //
+        // Extra SANs on /issue are caller-supplied, a weaker claim than
+        // the identity. A `c:` capability SAN asserts authority over the
+        // Credentials Agent itself, so it may only be issued on
+        // /internal/issue, where the caller is the allowlisted
+        // credentials-agent.
+        if let Some(san) = request
+            .extra_sans
+            .iter()
+            .find(|san| san.trim().to_ascii_lowercase().starts_with("c:"))
+        {
+            warn!(identity = %dns_identity, san = %san, "capability SAN requested on /issue: refused");
+            return error_response(
+                IssueOutcome::InvalidCsr,
+                &format!("capability SANs cannot be requested on /issue: {san}"),
+            );
+        }
+
         // ---- Steps 3.5-5: shared signing path ----
         //
         // Everything past identity verification is identical for
@@ -143,6 +162,7 @@ impl Handler {
             request.cert_type,
             request.extra_sans,
             request.subject_dn_defaults,
+            None,
         )
         .await
     }
@@ -152,6 +172,7 @@ impl Handler {
     /// the CA call. Callers must already have authenticated the request
     /// and verified that the CSR's SAN matches `dns_identity` -- this
     /// function assumes both and checks neither.
+    #[allow(clippy::too_many_arguments)]
     async fn sign_verified(
         &self,
         dns_identity: &str,
@@ -160,6 +181,7 @@ impl Handler {
         cert_type: cert_issuer_common::CertType,
         extra_sans: Vec<String>,
         subject_dn_defaults: Option<cert_issuer_common::SubjectDnDefaults>,
+        account_subject: Option<cert_issuer_common::AccountSubject>,
     ) -> HandlerResponse {
         // TODO: pass this in so we get a cert valid for multiple SANs
         let all_sans = match csr::validate_extra_sans(dns_identity, &extra_sans) {
@@ -170,6 +192,18 @@ impl Handler {
             }
         };
 
+        // ---- Step 3.4: account subject ----
+        //
+        // Authoritative username and email, from the internal caller. A
+        // value that fails validation is an internal-caller bug, not a
+        // CSR problem, so it's an InternalError.
+        if let Some(subject) = &account_subject {
+            if let Err(e) = validate_account_subject(subject) {
+                error!("account_subject failed validation: {e}");
+                return error_response(IssueOutcome::InternalError, &e);
+            }
+        }
+
         // ---- Step 3.5: subject DN merge ----
         //
         // Per field: the CSR's own value wins if present (the user
@@ -178,8 +212,13 @@ impl Handler {
         // absent from the issued cert. A default that fails
         // validation is an internal-caller bug (credentials-agent,
         // not the CSR/attacker), so it's reported as InternalError,
-        // not InvalidCsr.
-        let subject_dn = match merge_subject_dn(&parsed_csr.subject, subject_dn_defaults.as_ref()) {
+        // not InvalidCsr. Username and email are the exception: they
+        // come only from `account_subject`, never from the CSR.
+        let subject_dn = match merge_subject_dn(
+            &parsed_csr.subject,
+            subject_dn_defaults.as_ref(),
+            account_subject.as_ref(),
+        ) {
             Ok(s) => s,
             Err(e) => {
                 error!("subject_dn_defaults failed validation: {e}");
@@ -316,6 +355,7 @@ impl Handler {
             request.cert_type,
             request.extra_sans,
             request.subject_dn_defaults,
+            request.account_subject,
         )
         .await
     }
@@ -407,13 +447,17 @@ fn map_validation_error(e: &ValidationError) -> IssueOutcome {
 /// Plain, ready-to-push Subject DN field values -- every field
 /// already validated, either by the CSR's own extraction
 /// (csr::extract_subject_fields) or here, against the same newtypes,
-/// for an admin-supplied default.
+/// for an admin-supplied default. `username` and `email` are the
+/// authoritative account attributes (`uid`, `mail`): they are never taken
+/// from the CSR.
 #[derive(Debug, Clone, Default)]
 pub struct MergedSubjectDn {
     pub given_name: Option<String>,
     pub surname: Option<String>,
     pub title: Option<String>,
     pub telephone_number: Option<String>,
+    pub username: Option<String>,
+    pub email: Option<String>,
 }
 
 /// Merges the CSR's own Subject DN fields with an admin's provisioned
@@ -421,9 +465,12 @@ pub struct MergedSubjectDn {
 /// default fills the gap otherwise. See MergedSubjectDn's own doc
 /// comment for why this exists as a distinct step, and Step 3.5's
 /// own comment above for the fail-closed behavior on a bad default.
+/// The authoritative account subject, if any, is copied through as is
+/// (it was validated in Step 3.4).
 fn merge_subject_dn(
     csr_fields: &crate::csr::SubjectFields,
     defaults: Option<&cert_issuer_common::SubjectDnDefaults>,
+    account_subject: Option<&cert_issuer_common::AccountSubject>,
 ) -> Result<MergedSubjectDn, crate::csr::CsrError> {
     use crate::csr::{JobTitle, PersonalName, PhoneNumber};
     let d = defaults.cloned().unwrap_or_default();
@@ -470,7 +517,38 @@ fn merge_subject_dn(
         surname,
         title,
         telephone_number,
+        username: account_subject.map(|s| s.username.clone()),
+        email: account_subject.map(|s| s.email.clone()),
     })
+}
+
+/// Checks the authoritative account subject before it goes into a
+/// certificate. `mail` is an IA5String (RFC 4524), so the email must be
+/// ASCII. Returned as a plain message: any failure here is a bug in the
+/// internal caller, reported as an InternalError, not a CSR problem.
+fn validate_account_subject(subject: &cert_issuer_common::AccountSubject) -> Result<(), String> {
+    const MAX_LEN: usize = 256;
+    for (field, value) in [("username", &subject.username), ("email", &subject.email)] {
+        if value.is_empty() {
+            return Err(format!("{field} must not be empty"));
+        }
+        if value.len() > MAX_LEN {
+            return Err(format!("{field} is longer than {MAX_LEN} bytes"));
+        }
+        if value.chars().any(|c| c.is_control()) {
+            return Err(format!("{field} contains a control character"));
+        }
+    }
+    let email = &subject.email;
+    if !email.is_ascii()
+        || email.chars().any(char::is_whitespace)
+        || email.matches('@').count() != 1
+        || email.starts_with('@')
+        || email.ends_with('@')
+    {
+        return Err("email must be ASCII, without whitespace, with exactly one interior '@'".to_string());
+    }
+    Ok(())
 }
 
 fn error_response(outcome: IssueOutcome, detail: &str) -> HandlerResponse {

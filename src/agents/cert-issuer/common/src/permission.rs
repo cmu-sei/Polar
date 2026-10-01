@@ -174,6 +174,20 @@ pub enum PermissionExtractionError {
 pub fn extract_permissions(
     certificate_pem: &str,
 ) -> Result<Vec<Permission>, PermissionExtractionError> {
+    Ok(san_strings(certificate_pem)?
+        .iter()
+        .filter_map(|s| Permission::from_san_string(s).ok())
+        .collect())
+}
+
+/// Every DNS-name and URI SAN value in the certificate, in order. cert-issuer
+/// issues `p:` and `c:` entries as URI SANs (see ca.rs); DNS names are read
+/// too so certificates issued before that change still resolve. Anything
+/// else (IP, email) is skipped. A certificate with no SAN extension yields
+/// an empty list, not an error.
+pub(crate) fn san_strings(
+    certificate_pem: &str,
+) -> Result<Vec<String>, PermissionExtractionError> {
     let (_, pem) = x509_parser::pem::parse_x509_pem(certificate_pem.as_bytes())
         .map_err(|e| PermissionExtractionError::InvalidPem(e.to_string()))?;
     let (_, cert) = x509_parser::parse_x509_certificate(&pem.contents)
@@ -184,8 +198,6 @@ pub fn extract_permissions(
         .subject_alternative_name()
         .map_err(|e| PermissionExtractionError::InvalidSanExtension(e.to_string()))?
     else {
-        // No SAN extension at all -- genuinely, correctly no
-        // permissions, not an error.
         return Ok(Vec::new());
     };
 
@@ -194,7 +206,8 @@ pub fn extract_permissions(
         .general_names
         .iter()
         .filter_map(|name| match name {
-            x509_parser::extensions::GeneralName::DNSName(s) => Permission::from_san_string(s).ok(),
+            x509_parser::extensions::GeneralName::DNSName(s)
+            | x509_parser::extensions::GeneralName::URI(s) => Some(s.to_string()),
             _ => None,
         })
         .collect())
@@ -489,5 +502,48 @@ mod tests {
     fn extract_own_identity_on_malformed_pem_is_a_real_error_not_a_panic() {
         let result = extract_own_identity("not a real certificate");
         assert!(matches!(result, Err(PermissionExtractionError::InvalidPem(_))));
+    }
+}
+
+#[cfg(test)]
+mod uri_san_tests {
+    use super::*;
+    use crate::capability::{Capability, extract_capabilities};
+
+    /// A certificate laid out the way cert-issuer's ca.rs issues one:
+    /// identity as a DNS SAN, `p:` and `c:` entries as URI SANs.
+    fn issued_like_cert_issuer() -> String {
+        let key = rcgen::KeyPair::generate().unwrap();
+        let mut params = rcgen::CertificateParams::new(vec!["acct-1".to_string()]).unwrap();
+        params.subject_alt_names.push(rcgen::SanType::URI(
+            "p:u2s".to_string().try_into().unwrap(),
+        ));
+        params.subject_alt_names.push(rcgen::SanType::URI(
+            Capability::ProvisionAccount.to_san_string().try_into().unwrap(),
+        ));
+        params.self_signed(&key).unwrap().pem()
+    }
+
+    #[test]
+    fn permissions_are_read_from_uri_sans() {
+        let permissions = extract_permissions(&issued_like_cert_issuer()).unwrap();
+        assert_eq!(
+            permissions,
+            vec![Permission::from_san_string("p:u2s").unwrap()]
+        );
+    }
+
+    #[test]
+    fn capabilities_are_read_from_uri_sans_and_not_confused_with_permissions() {
+        let capabilities = extract_capabilities(&issued_like_cert_issuer()).unwrap();
+        assert_eq!(capabilities, vec![Capability::ProvisionAccount]);
+    }
+
+    #[test]
+    fn the_identity_is_still_the_dns_san() {
+        assert_eq!(
+            extract_own_identity(&issued_like_cert_issuer()).unwrap(),
+            "acct-1"
+        );
     }
 }

@@ -11,6 +11,10 @@ pub mod identity;
 pub mod permission;
 pub mod public_key;
 pub mod keypair;
+pub mod serial;
+pub mod capability;
+pub mod csr_san;
+pub mod key_match;
 
 // cert_issuer_common/src/lib.rs — add to IssueRequest
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, clap::ValueEnum,)]
@@ -138,6 +142,17 @@ pub struct ValidateRequest {
     pub include_normalized_identity: bool,
 }
 
+/// The account an internally-issued certificate belongs to, written into
+/// its Subject DN as the standard `uid` and `mail` attributes. Unlike
+/// `SubjectDnDefaults`, these are authoritative: they come only from the
+/// caller (credentials-agent, which matched them against the ledger), never
+/// from the CSR, and a CSR that claims its own `uid` or `mail` is ignored.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AccountSubject {
+    pub username: String,
+    pub email: String,
+}
+
 /// Request body for the internal, mTLS-gated /internal/issue
 /// endpoint. Reachable only over cert-issuer's mTLS listener, from a
 /// caller whose own peer certificate matches the configured
@@ -162,6 +177,10 @@ pub struct InternalIssueRequest {
     pub extra_sans: Vec<String>,
     #[serde(default)]
     pub subject_dn_defaults: Option<SubjectDnDefaults>,
+    /// Authoritative username and email for an account certificate.
+    /// `None` for every other internal issuance.
+    #[serde(default)]
+    pub account_subject: Option<AccountSubject>,
 }
 
 /// Error response body. Always returned on non-2xx responses.

@@ -156,17 +156,16 @@ impl CaClient for RcgenCaClient {
                     .clone()
                     .try_into()
                     .map_err(|e| CaError::Malformed(format!("SAN: {e}")))?;
-                // A Permission's own SAN-string form (see
-                // cert_issuer_common::permission::Permission::to_san_string)
-                // is not hostname-shaped -- it's deliberately terse,
-                // colon-delimited metadata (p:s2s:cassini.cluster.local),
-                // which DnsName's own semantic expectations don't fit,
-                // even though the underlying Ia5String type itself
-                // permits the characters. URI carries no such
-                // hostname expectation; a colon is ordinary,
-                // defining syntax there. Every other extra SAN keeps
-                // its existing DnsName treatment.
-                if s.starts_with("p:") {
+                // A Permission's (`p:`) or Capability's (`c:`) own SAN-string
+                // form is not hostname-shaped -- it's deliberately terse,
+                // colon-delimited metadata (p:s2s:cassini.cluster.local,
+                // c:provision-account), which DnsName's own semantic
+                // expectations don't fit, even though the underlying
+                // Ia5String type itself permits the characters. URI carries
+                // no such hostname expectation; a colon is ordinary,
+                // defining syntax there. Every other extra SAN keeps its
+                // existing DnsName treatment.
+                if s.starts_with("p:") || s.starts_with("c:") {
                     Ok(rcgen::SanType::URI(ia5))
                 } else {
                     Ok(rcgen::SanType::DnsName(ia5))
@@ -183,6 +182,11 @@ impl CaClient for RcgenCaClient {
         const OID_SURNAME: [u64; 4] = [2, 5, 4, 4];
         const OID_TITLE: [u64; 4] = [2, 5, 4, 12];
         const OID_TELEPHONE_NUMBER: [u64; 4] = [2, 5, 4, 20];
+        // The account's own username and email: `uid` (RFC 4519) and `mail`
+        // (RFC 4524), both standard, both under the same 0.9.2342.19200300.100.1
+        // arc. Authoritative -- see handler::MergedSubjectDn.
+        const OID_UID: [u64; 7] = [0, 9, 2342, 19200300, 100, 1, 1];
+        const OID_MAIL: [u64; 7] = [0, 9, 2342, 19200300, 100, 1, 3];
 
         if let Some(v) = &req.subject_dn.given_name {
             csr.params
@@ -203,6 +207,34 @@ impl CaClient for RcgenCaClient {
             csr.params.distinguished_name.push(
                 rcgen::DnType::CustomDnType(OID_TELEPHONE_NUMBER.to_vec()),
                 v.clone(),
+            );
+        }
+        // rcgen starts from the CSR's own Subject, so whatever the CSR claims
+        // for these two authoritative attributes would otherwise survive into
+        // the certificate. Clear them first; only the caller's values below
+        // may ever be written.
+        csr.params
+            .distinguished_name
+            .remove(rcgen::DnType::CustomDnType(OID_UID.to_vec()));
+        csr.params
+            .distinguished_name
+            .remove(rcgen::DnType::CustomDnType(OID_MAIL.to_vec()));
+
+        if let Some(v) = &req.subject_dn.username {
+            csr.params
+                .distinguished_name
+                .push(rcgen::DnType::CustomDnType(OID_UID.to_vec()), v.clone());
+        }
+        if let Some(v) = &req.subject_dn.email {
+            // `mail` is an IA5String, not the UTF8String rcgen would pick
+            // by default for a plain string value.
+            let ia5 = v
+                .clone()
+                .try_into()
+                .map_err(|e| CaError::Malformed(format!("email: {e}")))?;
+            csr.params.distinguished_name.push(
+                rcgen::DnType::CustomDnType(OID_MAIL.to_vec()),
+                rcgen::DnValue::Ia5String(ia5),
             );
         }
 
@@ -239,7 +271,8 @@ impl CaClient for RcgenCaClient {
 
         let certificate_pem = cert.pem();
         let serial_number =
-            parse_serial_from_pem(&certificate_pem).unwrap_or_else(|| "unknown".to_string());
+            cert_issuer_common::serial::serial_from_pem(&certificate_pem)
+                .unwrap_or_else(|| "unknown".to_string());
 
         Ok(IssuedCert {
             certificate_pem,
@@ -631,26 +664,6 @@ fn validate_pair(cert_pem: &str, key_pem: &str) -> Result<(), CaMaterialsError> 
     }
 
     Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/// Extract the serial number from a PEM-encoded certificate as
-/// hex-encoded big-endian bytes. The format matches what
-/// `openssl x509 -text -noout` and audit logs conventionally
-/// display.
-fn parse_serial_from_pem(pem: &str) -> Option<String> {
-    let (_, pem_block) = x509_parser::pem::parse_x509_pem(pem.as_bytes()).ok()?;
-    let (_, cert) = x509_parser::parse_x509_certificate(&pem_block.contents).ok()?;
-    let serial_bytes = cert.tbs_certificate.raw_serial();
-    Some(
-        serial_bytes
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect::<String>(),
-    )
 }
 
 // ---------------------------------------------------------------------------

@@ -154,6 +154,7 @@ fn internal_body() -> String {
         cert_type: CertType::Client,
         extra_sans: vec![],
         subject_dn_defaults: None,
+        account_subject: None,
     })
     .unwrap()
 }
