@@ -44,13 +44,19 @@ use std::time::Duration;
 struct Args {
     /// The admin's own certificate (PEM). Its key signs every action; the
     /// credentials agent looks the author up by this certificate's serial.
-    /// Falls back to $TLS_CLIENT_CERT when absent or empty.
+    /// Falls back to the TLS_CLIENT_CERT environment variable when unset.
     #[arg(long, global = true)]
     cert: Option<PathBuf>,
-    /// The private key (PEM) matching --cert. Falls back to $TLS_CLIENT_KEY
-    /// when absent or empty.
+    /// The private key (PEM) matching --cert.
+    /// Falls back to the TLS_CLIENT_KEY environment variable when unset.
     #[arg(long, global = true)]
     key: Option<PathBuf>,
+    /// Base URL of the credentials-agent observer, e.g.
+    /// `--observer-url http://localhost:8081`. Required by every command that
+    /// talks to the cluster. There is deliberately no default: a default that
+    /// suits one environment points somewhere wrong in another.
+    #[arg(long, global = true)]
+    observer_url: Option<String>,
     #[command(subcommand)]
     command: Command,
 }
@@ -125,7 +131,7 @@ enum Command {
     /// verify it. Run once per cluster, with the cluster admin's own
     /// kubeconfig, after the namespaces exist and before cert-issuer
     /// starts in provisioned mode. Unlike every other subcommand it does
-    /// not go through Cassini -- the CA has to exist before Cassini
+    /// not go through the observer -- the CA has to exist before Cassini
     /// can. It creates and never overwrites.
     BootstrapCa {
         /// Common name embedded in the CA certificate.
@@ -142,30 +148,43 @@ enum Command {
         #[arg(long = "configmap-namespace", default_values = ["polar", "polar-graph"])]
         configmap_namespaces: Vec<String>,
     },
-    /// Claim the bootstrap admin account, once per cluster. Mints a
-    /// short-lived token for the bootstrap ServiceAccount with your own
-    /// kubeconfig, proves it to the credentials agent through the observer,
-    /// and writes the resulting admin certificate and key to disk. Run it
-    /// after the observer is reachable, e.g. behind
-    /// `kubectl -n polar port-forward svc/credentials-agent-observer 8080`.
-    /// The claim succeeds exactly once: back the files up, because losing
-    /// them means rebuilding the cluster. Refuses to overwrite existing files.
+    /// Claim the bootstrap admin account with the cluster's own Kubernetes
+    /// identity. Mints a short-lived ServiceAccount token, asks the observer
+    /// to offer the bootstrap account, generates the keypair locally and has
+    /// the CA sign it. The resulting certificate is valid for exactly one
+    /// `provision-account`: use it to create the first real admin, then put it
+    /// away. Requires --observer-url.
     Bootstrap {
+        /// Namespace holding the bootstrap ServiceAccount.
         #[arg(long, default_value = "polar-bootstrap")]
         namespace: String,
+        /// The bootstrap ServiceAccount whose token is presented.
         #[arg(long, default_value = "polar-admin-bootstrap")]
         service_account: String,
-        /// Audience the token is minted for; must be the one cert-issuer's
-        /// token validation expects.
+        /// Audience requested for the ServiceAccount token.
         #[arg(long, default_value = "polar-cert-issuer.local")]
         audience: String,
-        #[arg(long, default_value = "http://localhost:8080")]
-        observer_url: String,
+        /// Where to write the certificate.
         #[arg(long, default_value = "bootstrap-admin.crt")]
         cert_out: PathBuf,
+        /// Where to write the private key. Never overwritten.
         #[arg(long, default_value = "bootstrap-admin.key")]
         key_out: PathBuf,
     },
+}
+
+/// A path from an environment variable, treating unset and empty alike (the
+/// dev shell exports empty TLS_CLIENT_* values).
+fn path_from_env(name: &str) -> Option<PathBuf> {
+    std::env::var_os(name)
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+}
+
+fn require_observer_url(observer_url: Option<String>) -> Result<String, String> {
+    observer_url
+        .filter(|u| !u.trim().is_empty())
+        .ok_or_else(|| "--observer-url is required (e.g. http://localhost:8081)".to_string())
 }
 
 #[tokio::main]
@@ -210,49 +229,18 @@ fn action_from_command(command: Command) -> AdminAction {
             telephone_number,
         },
         Command::BootstrapCa { .. } | Command::Bootstrap { .. } => {
-            unreachable!("bootstrap commands are not admin actions; run() dispatches them first")
+            unreachable!("bootstrap and bootstrap-ca are not admin actions; run() dispatches them first")
         }
     }
 }
 
-/// A path from the environment, treating unset and empty alike. Read only by
-/// the commands that sign, so a stray empty variable in the shell cannot
-/// break the ones that never need a certificate.
-fn path_from_env(name: &str) -> Option<PathBuf> {
-    std::env::var_os(name)
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-}
-
 async fn run(args: Args) -> i32 {
-    let Args { cert, key, command } = args;
-
-    if let Command::Bootstrap {
-        namespace,
-        service_account,
-        audience,
+    let Args {
+        cert,
+        key,
         observer_url,
-        cert_out,
-        key_out,
-    } = command
-    {
-        return match bootstrap::run(bootstrap::BootstrapArgs {
-            namespace,
-            service_account,
-            audience,
-            observer_url,
-            cert_out,
-            key_out,
-        })
-        .await
-        {
-            Ok(()) => 0,
-            Err(e) => {
-                eprintln!("error: {e}");
-                1
-            }
-        };
-    }
+        command,
+    } = args;
 
     if let Command::BootstrapCa {
         common_name,
@@ -264,6 +252,40 @@ async fn run(args: Args) -> i32 {
             common_name,
             secret_namespace,
             configmap_namespaces,
+        })
+        .await
+        {
+            Ok(()) => 0,
+            Err(e) => {
+                eprintln!("error: {e}");
+                1
+            }
+        };
+    }
+
+    let observer_url = match require_observer_url(observer_url) {
+        Ok(u) => u,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return 1;
+        }
+    };
+
+    if let Command::Bootstrap {
+        namespace,
+        service_account,
+        audience,
+        cert_out,
+        key_out,
+    } = command
+    {
+        return match bootstrap::run(bootstrap::BootstrapArgs {
+            namespace,
+            service_account,
+            audience,
+            observer_url,
+            cert_out,
+            key_out,
         })
         .await
         {
@@ -309,7 +331,9 @@ async fn run(args: Args) -> i32 {
         }
     };
 
-    match publish::request_admin_action(signed, Duration::from_secs(30)).await {
+    // Longer than the observer's own 100s ceiling, so its 504 arrives before
+    // this gives up.
+    match publish::request_admin_action(&observer_url, &signed, Duration::from_secs(120)).await {
         Ok(AdminActionReply::Recorded) => {
             eprintln!("recorded");
             0

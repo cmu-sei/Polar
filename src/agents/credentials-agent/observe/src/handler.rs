@@ -34,6 +34,10 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use cassini_client::TcpClientMessage;
 use credentials_agent_common::CREDENTIALS_ACCOUNT_REQUESTS_TOPIC;
+use credentials_agent_common::CREDENTIALS_ADMIN_ACTION_REQUESTS_TOPIC;
+use credentials_agent_common::admin_action::{
+    AdminActionRefusal, AdminActionReply, SignedAdminAction,
+};
 use credentials_agent_common::CREDENTIALS_ISSUANCE_REQUESTS_TOPIC;
 use credentials_agent_common::CREDENTIALS_IDENTITY_NORMALIZATION_REQUESTS_TOPIC;
 use credentials_agent_common::account_claim::{
@@ -59,6 +63,7 @@ pub struct ObserverState {
     pub issuance_reply_router: Arc<ReplyRouter<IssuanceReply>>,
     pub identity_reply_router: Arc<ReplyRouter<IdentityNormalizationReply>>,
     pub account_reply_router: Arc<ReplyRouter<AccountReply>>,
+    pub admin_action_reply_router: Arc<ReplyRouter<AdminActionReply>>,
 }
 
 pub async fn issue(
@@ -257,6 +262,82 @@ fn account_reply_to_response(reply: AccountReply) -> Response {
     (status, Json(reply)).into_response()
 }
 
+/// POST /admin-action -- a signed admin action, relayed blindly. The action is
+/// self-authenticating: the consumer looks the author up by certificate
+/// serial, verifies the signature and checks the capability against the
+/// ledger. The observer makes no trust decision and needs to know nothing
+/// about who is calling, which is why a laptop with no Cassini identity can
+/// use it.
+pub async fn admin_action(
+    State(state): State<Arc<ObserverState>>,
+    Json(signed): Json<SignedAdminAction>,
+) -> Response {
+    // No credential to read a lifetime from, so wait the full ceiling.
+    let timeout = Duration::from_secs(MAX_TIMEOUT_SECS as u64);
+
+    let correlation_id = uuid::Uuid::new_v4().to_string();
+    let rx = state
+        .admin_action_reply_router
+        .register(correlation_id.clone());
+
+    let envelope = Envelope {
+        correlation_id: correlation_id.clone(),
+        payload: signed,
+    };
+    let payload = match rkyv::to_bytes::<rkyv::rancor::Error>(&envelope) {
+        Ok(bytes) => bytes.to_vec(),
+        Err(e) => {
+            state.admin_action_reply_router.cancel(&correlation_id);
+            error!("Failed to serialize admin action envelope: {e}");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "internal error").into_response();
+        }
+    };
+
+    if let Err(e) = state.broker_client.send_message(TcpClientMessage::publish(
+        CREDENTIALS_ADMIN_ACTION_REQUESTS_TOPIC.to_string(),
+        payload,
+        None,
+    )) {
+        state.admin_action_reply_router.cancel(&correlation_id);
+        error!("Failed to publish admin action: {e}");
+        return (StatusCode::SERVICE_UNAVAILABLE, "failed to reach the broker").into_response();
+    }
+
+    match tokio::time::timeout(timeout, rx).await {
+        Ok(Ok(reply)) => admin_action_reply_to_response(reply),
+        Ok(Err(_)) => {
+            warn!("Reply channel closed with no reply for correlation_id {correlation_id}");
+            (StatusCode::GATEWAY_TIMEOUT, "no reply received").into_response()
+        }
+        Err(_) => {
+            state.admin_action_reply_router.cancel(&correlation_id);
+            (StatusCode::GATEWAY_TIMEOUT, "timed out waiting for a reply").into_response()
+        }
+    }
+}
+
+fn admin_action_reply_to_response(reply: AdminActionReply) -> Response {
+    let status = match &reply {
+        AdminActionReply::Recorded => StatusCode::OK,
+        AdminActionReply::Failed { .. } => StatusCode::SERVICE_UNAVAILABLE,
+        AdminActionReply::Refused { reason } => match reason {
+            AdminActionRefusal::UnknownAuthor | AdminActionRefusal::BadSignature => {
+                StatusCode::UNAUTHORIZED
+            }
+            AdminActionRefusal::AuthorRevoked
+            | AdminActionRefusal::MissingCapability { .. }
+            | AdminActionRefusal::ReservedUsername
+            | AdminActionRefusal::BootstrapCertificateSpent => StatusCode::FORBIDDEN,
+            AdminActionRefusal::MalformedPayload => StatusCode::BAD_REQUEST,
+            AdminActionRefusal::Replay
+            | AdminActionRefusal::AccountAlreadyExists
+            | AdminActionRefusal::AccountAlreadyPending => StatusCode::CONFLICT,
+            AdminActionRefusal::NotYetSupported => StatusCode::NOT_IMPLEMENTED,
+        },
+    };
+    (status, Json(reply)).into_response()
+}
+
 /// `min(token_remaining_lifetime / 3, 100s)`, computed by peeking the
 /// unverified `exp` claim -- an operational read for timing purposes
 /// only, the same category of operation as `jwt_utils::peek_claim`
@@ -416,6 +497,7 @@ mod tests {
             issuance_reply_router: reply_router,
             identity_reply_router: Arc::new(ReplyRouter::new()),
             account_reply_router: Arc::new(ReplyRouter::new()),
+            admin_action_reply_router: Arc::new(ReplyRouter::new()),
         });
 
         let response = issue(
@@ -445,6 +527,7 @@ mod tests {
             issuance_reply_router: reply_router,
             identity_reply_router: Arc::new(ReplyRouter::new()),
             account_reply_router: Arc::new(ReplyRouter::new()),
+            admin_action_reply_router: Arc::new(ReplyRouter::new()),
         });
 
         let response = issue(
@@ -472,6 +555,7 @@ mod tests {
             issuance_reply_router: reply_router,
             identity_reply_router: Arc::new(ReplyRouter::new()),
             account_reply_router: Arc::new(ReplyRouter::new()),
+            admin_action_reply_router: Arc::new(ReplyRouter::new()),
         });
 
         let response = issue(
@@ -521,6 +605,7 @@ mod tests {
             issuance_reply_router: reply_router,
             identity_reply_router: Arc::new(ReplyRouter::new()),
             account_reply_router: Arc::new(ReplyRouter::new()),
+            admin_action_reply_router: Arc::new(ReplyRouter::new()),
         });
 
         // A credential with no readable exp claim falls back to the
@@ -636,6 +721,7 @@ mod tests {
             issuance_reply_router: Arc::new(ReplyRouter::new()),
             identity_reply_router,
             account_reply_router: Arc::new(ReplyRouter::new()),
+            admin_action_reply_router: Arc::new(ReplyRouter::new()),
         });
 
         let response = identity(
@@ -662,6 +748,7 @@ mod tests {
             issuance_reply_router: Arc::new(ReplyRouter::new()),
             identity_reply_router,
             account_reply_router: Arc::new(ReplyRouter::new()),
+            admin_action_reply_router: Arc::new(ReplyRouter::new()),
         });
 
         let response = identity(
@@ -706,6 +793,7 @@ mod tests {
             issuance_reply_router: Arc::new(ReplyRouter::new()),
             identity_reply_router: Arc::new(ReplyRouter::new()),
             account_reply_router: Arc::new(ReplyRouter::new()),
+            admin_action_reply_router: Arc::new(ReplyRouter::new()),
         });
 
         tokio::time::pause();
@@ -831,6 +919,7 @@ mod account_tests {
             issuance_reply_router: Arc::new(ReplyRouter::new()),
             identity_reply_router: Arc::new(ReplyRouter::new()),
             account_reply_router,
+            admin_action_reply_router: Arc::new(ReplyRouter::new()),
         })
     }
 
@@ -968,5 +1057,42 @@ mod account_tests {
             claimant_timeout(&native()),
             Duration::from_secs(MAX_TIMEOUT_SECS as u64)
         );
+    }
+}
+
+#[cfg(test)]
+mod admin_action_status_tests {
+    use super::*;
+
+    #[test]
+    fn each_admin_action_reply_maps_to_its_status() {
+        let refused = |reason| AdminActionReply::Refused { reason };
+        for (reply, expected) in [
+            (AdminActionReply::Recorded, StatusCode::OK),
+            (
+                AdminActionReply::Failed { detail: "x".to_string() },
+                StatusCode::SERVICE_UNAVAILABLE,
+            ),
+            (refused(AdminActionRefusal::UnknownAuthor), StatusCode::UNAUTHORIZED),
+            (refused(AdminActionRefusal::BadSignature), StatusCode::UNAUTHORIZED),
+            (refused(AdminActionRefusal::AuthorRevoked), StatusCode::FORBIDDEN),
+            (refused(AdminActionRefusal::ReservedUsername), StatusCode::FORBIDDEN),
+            (
+                refused(AdminActionRefusal::BootstrapCertificateSpent),
+                StatusCode::FORBIDDEN,
+            ),
+            (refused(AdminActionRefusal::MalformedPayload), StatusCode::BAD_REQUEST),
+            (refused(AdminActionRefusal::Replay), StatusCode::CONFLICT),
+            (refused(AdminActionRefusal::AccountAlreadyExists), StatusCode::CONFLICT),
+            (refused(AdminActionRefusal::AccountAlreadyPending), StatusCode::CONFLICT),
+            (refused(AdminActionRefusal::NotYetSupported), StatusCode::NOT_IMPLEMENTED),
+        ] {
+            let label = format!("{reply:?}");
+            assert_eq!(
+                admin_action_reply_to_response(reply).status(),
+                expected,
+                "for {label}"
+            );
+        }
     }
 }

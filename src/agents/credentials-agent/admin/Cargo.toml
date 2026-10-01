@@ -22,19 +22,18 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-cassini-client.workspace = true
-cassini-types.workspace = true
 cert-issuer-common = { version = "1.0.0", path = "../../cert-issuer/common" }
 clap = { version = "4.5.60", features = ["derive", "env"] }
 credentials_agent_common.workspace = true
 k8s-openapi.workspace = true
 kube.workspace = true
-polar.workspace = true
-ractor.workspace = true
 reqwest = { workspace = true, features = ["json"] }
-rkyv.workspace = true
+serde_json.workspace = true
 tokio.workspace = true
 uuid.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
 
 [[bin]]
 name = "polar-admin-grant"
