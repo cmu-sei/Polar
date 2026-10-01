@@ -6,19 +6,17 @@
 #
 # Usage:
 #   nu infra/render.nu <target>
-#   nu infra/render.nu local
-#   nu infra/render.nu sandbox
+#   nu infra/render.nu local-minimal
 #
-# Output goes to the directory specified in target.nu's output_dir.
-# After rendering, apply with:
-#   nu infra/render.nu local --apply
+# Output goes to the directory specified in target.nu's output_dir. This script
+# only renders; it never touches a cluster. To apply the result and bring a
+# cluster up, run:
+#   nu infra/up.nu <target>
 
 use validate.nu *
 
 def main [
     target: string        # Target name: local, sandbox, ace
-    --apply               # Apply rendered manifests after rendering
-    --dry-run             # Render but do not apply
 ] {
     let infra_root  = ($env.PWD | path join "infra")
     let target_file = ($infra_root | path join $"targets/($target)/target.nu")
@@ -123,70 +121,12 @@ def main [
     print $"  output: ($output_dir)"
     print ""
 
-    # ── Apply ─────────────────────────────────────────────────────────────────
-    if $apply and not $dry_run {
-        print "Applying manifests..."
-        apply_manifests $config $output_dir
-    } else if $dry_run {
-        print "(dry-run: skipping apply)"
-    } else {
-        print "To apply:"
-        print $"  nu infra/render.nu ($target) --apply"
-        print ""
-        print "Or apply manually in order:"
-        for f in $config.apply_order {
-            print $"  kubectl apply -f ($output_dir)/($f)"
-        }
-    }
-}
-
-# Apply rendered manifests in the order declared by target.nu
-def apply_manifests [config: record, output_dir: string] {
-    let kubeconfig = (
-        $env.KUBECONFIG?
-        | default ($env.HOME | path join "Documents/projects/nix-usernetes/kubeconfig")
-    )
-
-    let apply = {|filename|
-        let manifest = ($output_dir | path join $filename)
-        if ($manifest | path exists) {
-            print $"  applying ($filename)..."
-            # Jobs have immutable pod templates — delete before apply if exists
-            let is_job = (open --raw $manifest | str contains "kind: Job")
-            if $is_job {
-                run-external "kubectl" "--kubeconfig" $kubeconfig "delete" "--ignore-not-found" "-f" $manifest
-            }
-            run-external "kubectl" "--kubeconfig" $kubeconfig "apply" "-f" $manifest
-        } else {
-            print $"  skipping ($filename) — not found"
-        }
-    }
-
-    # Phase 1: namespaces first — secrets depend on them
-    do $apply "namespaces.yaml"
-
-    # Phase 2: secrets — agents depend on them
-    let secrets_script = ($config.target_dir | path join "secrets.nu")
-    if ($secrets_script | path exists) {
-        print "  creating secrets..."
-        nu $secrets_script $config.target_dir $config.repo_root
-    }
-
-    # Phase 3: everything else
-    for filename in ($config.apply_order | skip 1) {
-        do $apply $filename
-    }
-
-    # SA token ordering fix
+    # ── Next step ─────────────────────────────────────────────────────────────
+    # Rendering never touches the cluster. `infra/up.nu` applies the result and
+    # walks the rest of the bring-up (CA, secrets, admin flow).
+    print "To bring up a cluster from this render:"
+    print $"  nu infra/up.nu ($target)"
     print ""
-    print "  waiting 5s for SA token controller..."
-    sleep 5sec
-    for filename in ["kube-agent-rbac.yaml"] {
-        do $apply $filename
-    }
-
-    print ""
-    print "Apply complete."
 }
 
 # Splits one rendered file into YAML documents. Anything unparseable is

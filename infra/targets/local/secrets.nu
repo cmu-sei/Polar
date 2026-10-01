@@ -5,7 +5,7 @@
 # Reads encrypted secrets from secrets.sops.yaml (shared team secrets)
 # and user.sops.yaml (user-specific secrets), decrypting with SOPS.
 #
-# Called by render.nu --apply after namespaces are created.
+# Called by infra/up.nu after namespaces are created.
 
 def kubectl_upsert_secret [
     name: string

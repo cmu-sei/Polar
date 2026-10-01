@@ -1,0 +1,51 @@
+# infra/images.nuon
+#
+# Every image Polar knows how to produce: name, tag, and where it comes from.
+# The rendered manifests decide which of these a target needs (infra/images.nu
+# reads their `image:` fields and joins them against this table), so adding a
+# workload means adding one row here and nothing else.
+#
+# The tag must equal the tag in the Dhall that deploys the image; a mismatch
+# (or a manifest image with no row) fails before anything is built.
+#
+# kind: nix       built from the flake:  nix build .#packages.<platform>.<attr>
+#                 columns: attr
+# kind: mirror    third-party image copied into the local registry
+#                 columns: upstream
+# kind: external  built outside this repo; an existing docker-archive
+#                 columns: path (~ allowed), env (variable that overrides path)
+[
+  # ── Infrastructure ──────────────────────────────────────────────────────
+  {image: "neo4j",    tag: "5.26.2", kind: "external", path: "~/Documents/projects/nix-neo4j/result-neo4j-image", env: "POLAR_NEO4J_IMAGE"}
+  {image: "jaeger",   tag: "2.13.0", kind: "mirror", upstream: "cr.jaegertracing.io/jaegertracing/jaeger:2.13.0"}
+  {image: "keycloak", tag: "26.7.1", kind: "mirror", upstream: "quay.io/keycloak/keycloak:26.7.1"}
+  {image: "postgres", tag: "16",     kind: "mirror", upstream: "docker.io/library/postgres:16"}
+  {image: "busybox",  tag: "latest", kind: "mirror", upstream: "docker.io/library/busybox:latest"}
+  {image: "local-path-provisioner", tag: "v0.0.35", kind: "mirror", upstream: "docker.io/rancher/local-path-provisioner:v0.0.35"}
+
+  # ── Core ────────────────────────────────────────────────────────────────
+  {image: "cassini",     tag: "latest", kind: "nix", attr: "polarPkgs.cassini.cassiniImage"}
+  {image: "cert-issuer", tag: "latest", kind: "nix", attr: "certIssuerImage"}
+  {image: "polar-init",     tag: "latest", kind: "nix", attr: "polarInitImage"}
+  {image: "polar-nu-init",  tag: "latest", kind: "nix", attr: "nuInitImage"}
+  {image: "ace-viz",        tag: "latest", kind: "nix", attr: "aceImage"}
+
+  # ── Agents ──────────────────────────────────────────────────────────────
+  {image: "credentials-agent-observer", tag: "latest", kind: "nix", attr: "polarPkgs.credentialsAgent.observerImage"}
+  {image: "credentials-agent-consumer", tag: "latest", kind: "nix", attr: "polarPkgs.credentialsAgent.consumerImage"}
+  {image: "kube-observer",   tag: "latest", kind: "nix", attr: "polarPkgs.kubeAgent.observerImage"}
+  {image: "kube-consumer",   tag: "latest", kind: "nix", attr: "polarPkgs.kubeAgent.consumerImage"}
+  {image: "jira-observer",   tag: "latest", kind: "nix", attr: "polarPkgs.jiraAgent.observerImage"}
+  {image: "jira-processor",  tag: "latest", kind: "nix", attr: "polarPkgs.jiraAgent.processorImage"}
+  {image: "gitlab-observer", tag: "latest", kind: "nix", attr: "polarPkgs.gitlabAgent.observerImage"}
+  {image: "gitlab-consumer", tag: "latest", kind: "nix", attr: "polarPkgs.gitlabAgent.consumerImage"}
+
+  # ── Cassini test harness (not deployed by any target; `just image <name>`) ──
+  {image: "harness-producer", tag: "latest", kind: "nix", attr: "polarPkgs.cassini.producerImage"}
+  {image: "harness-sink",     tag: "latest", kind: "nix", attr: "polarPkgs.cassini.sinkImage"}
+
+  # TODO: git-observer, git-processor, git-scheduler, openapi-observer,
+  # openapi-processor, oci-resolver, scheduler-observer, scheduler-processor,
+  # build-processor. Their attrs live in the `git-agents`, `openapi`,
+  # `scheduler` and `build-agents` Justfile recipes.
+]
