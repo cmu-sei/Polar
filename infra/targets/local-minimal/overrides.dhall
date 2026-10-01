@@ -16,6 +16,8 @@ let registry = "10.0.2.2:5000/"
 
 let IdentityStrategy = ../../schema/identity-strategy.dhall
 
+let CaProvisioning = ../../schema/ca-provisioning.dhall
+
 in
 { namespaces  = {=}
 , storage     = {=}
@@ -98,6 +100,11 @@ in
       }
     ]
   , serverLifetimeSecs = 43200
+  -- The CA is created by `polar-admin-grant bootstrap-ca` with the cluster
+  -- admin's own kubeconfig and mounted from a Secret. Callers verify against
+  -- the polar-ca ConfigMap (cert_issuer_ca_configmap in target.nu); render.nu
+  -- refuses to render if the two disagree.
+  , caProvisioning = CaProvisioning.Provisioned
   , identityLifetimeOverrides =
     [ { identity = "graph.polar-graph.serviceaccount.cluster.local", lifetimeSecs = 31536000 } ]
   }

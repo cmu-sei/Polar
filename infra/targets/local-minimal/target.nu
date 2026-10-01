@@ -72,7 +72,11 @@ def main [] {
         enable_tls            : true
         cert_issuer_url       : "https://cert-issuer.polar.svc.cluster.local:8443"
         cert_issuer_audience  : "polar-cert-issuer.local"
-        cert_issuer_ca_configmap : ""
+        # Name of the ConfigMap `polar-admin-grant bootstrap-ca` creates. Non-empty
+        # means callers verify cert-issuer against it from their first request,
+        # and render.nu then requires cert-issuer's ca.provisioning to be
+        # "provisioned" (check_ca_provisioning).
+        cert_issuer_ca_configmap : "polar-ca"
         polar_init_image      : "10.0.2.2:5000/polar-init:latest"
         cassini_shutdown_token : ($env.CASSINI_SHUTDOWN_TOKEN? | default "HEYTHERE")
         identity_lifetime_overrides : [
