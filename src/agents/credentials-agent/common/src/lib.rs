@@ -36,11 +36,23 @@ pub mod retrieve_secret;
 pub mod ephemeral_exchange;
 pub mod agent_escrow_keypair_bootstrap;
 pub mod decrypt_on_behalf_of;
+pub mod account_claim;
+pub mod admin_action;
+pub mod admin_signing;
 
 /// Published by an admin's tool (polar-admin-grant) to grant or
 /// revoke permissions -- see events.rs's own CredentialsEvent::Grant/
 /// Revoke. Fire-and-forget from the publisher's side; no reply topic,
 /// since these are commands, not queries.
+/// Signed admin actions (provision, grant, revoke, policy update) --
+/// see admin_action.rs. A request/reply pair, so a refusal (bad
+/// signature, missing capability, replay) reaches the admin's tool.
+/// Replaces the three unauthenticated topics below once the
+/// consumer's signed-action handler lands.
+pub const CREDENTIALS_ADMIN_ACTION_REQUESTS_TOPIC: &str = "credentials-admin-action-requests";
+pub const CREDENTIALS_ADMIN_ACTION_REPLIES_TOPIC: &str = "credentials-admin-action-replies";
+pub const CREDENTIALS_ACCOUNT_REQUESTS_TOPIC: &str = "credentials-account-requests";
+pub const CREDENTIALS_ACCOUNT_REPLIES_TOPIC: &str = "credentials-account-replies";
 pub const CREDENTIALS_GRANTS_TOPIC: &str = "credentials-grants";
 pub const CREDENTIALS_REVOCATIONS_TOPIC: &str = "credentials-revocations";
 pub const CREDENTIALS_ACCOUNT_PROVISIONING_TOPIC: &str = "credentials-account-provisioning";

@@ -52,6 +52,10 @@ cert-issuer-common = { version = "1.0.0", path = "../../cert-issuer/common" }
 x25519-dalek = { version = "3.0.0", features = ["getrandom"] }
 hkdf = "0.12.4"
 rand.workspace = true
+x509-parser.workspace = true
+ed25519-dalek.workspace = true
+p256.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true
+rcgen.workspace = true

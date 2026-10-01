@@ -2,12 +2,14 @@ use axum::Router;
 use axum::routing::post;
 use cassini_client::{TCPClientConfig, TcpClientActor, TcpClientArgs, TcpClientMessage};
 use cassini_types::ClientEvent;
+use credentials_agent_common::account_claim::AccountReply;
 use credentials_agent_common::identity::IdentityNormalizationReply;
 use credentials_agent_common::issuance::IssuanceReply;
 use credentials_agent_common::{
-    CREDENTIALS_IDENTITY_NORMALIZATION_REPLIES_TOPIC, CREDENTIALS_ISSUANCE_REPLIES_TOPIC,
+    CREDENTIALS_ACCOUNT_REPLIES_TOPIC, CREDENTIALS_IDENTITY_NORMALIZATION_REPLIES_TOPIC,
+    CREDENTIALS_ISSUANCE_REPLIES_TOPIC,
 };
-use credentials_agent_observer::handler::{ObserverState, identity, issue};
+use credentials_agent_observer::handler::{ObserverState, account, identity, issue};
 use polar::request_reply::{Envelope, ReplyRouter};
 use polar::health::{DepCertEndpoint, HealthCheckActor, HealthCheckArgs, HealthCheckMessage};
 use ractor::{Actor, ActorProcessingErr, ActorRef, OutputPort, async_trait, registry::where_is};
@@ -18,15 +20,14 @@ const SERVICE_NAME: &str = "credentials-agent-observer";
 const BROKER_CLIENT_NAME: &str = "CREDENTIALS_AGENT_OBSERVER_CLIENT";
 const HEALTHCHECK_ACTOR_NAME: &str = "polar.credentials-agent-observer.healthcheck";
 
-/// The one, real job this actor exists for: deliver incoming Cassini
-/// replies on the two reply topics handler.rs's own issue()/identity()
-/// functions are actually waiting on, into their real ReplyRouters --
-/// mirroring polar-crypto's own, established ClientEvent-subscription
-/// pattern, minimized to just what this observer's own two, real
-/// dispatch paths need.
+/// Delivers incoming Cassini replies on the reply topics that handler.rs's
+/// `issue()`, `identity()` and `account()` are waiting on into their
+/// `ReplyRouter`s. The observer is a blind relay: it never interprets a
+/// reply, it only matches it to the correlation id of the waiting request.
 struct ReplyRouterActor {
     issuance_reply_router: Arc<ReplyRouter<IssuanceReply>>,
     identity_reply_router: Arc<ReplyRouter<IdentityNormalizationReply>>,
+    account_reply_router: Arc<ReplyRouter<AccountReply>>,
 }
 
 enum ReplyRouterMessage {
@@ -89,6 +90,7 @@ impl Actor for ReplyRouterActor {
                     for topic in [
                         CREDENTIALS_ISSUANCE_REPLIES_TOPIC,
                         CREDENTIALS_IDENTITY_NORMALIZATION_REPLIES_TOPIC,
+                        CREDENTIALS_ACCOUNT_REPLIES_TOPIC,
                     ] {
                         if let Err(e) = client.send_message(TcpClientMessage::Subscribe {
                             topic: topic.to_string(),
@@ -99,6 +101,16 @@ impl Actor for ReplyRouterActor {
                     }
                 } else {
                     error!("broker client not found while attempting to subscribe");
+                }
+            }
+            ClientEvent::MessagePublished { topic, payload, .. }
+                if topic == CREDENTIALS_ACCOUNT_REPLIES_TOPIC =>
+            {
+                match rkyv::from_bytes::<Envelope<AccountReply>, rkyv::rancor::Error>(&payload) {
+                    Ok(envelope) => self
+                        .account_reply_router
+                        .deliver(&envelope.correlation_id, envelope.payload),
+                    Err(e) => warn!("failed to deserialize account reply: {e}"),
                 }
             }
             _ => {}
@@ -130,12 +142,14 @@ async fn main() {
 
     let issuance_reply_router = Arc::new(ReplyRouter::new());
     let identity_reply_router = Arc::new(ReplyRouter::new());
+    let account_reply_router = Arc::new(ReplyRouter::new());
 
     let (reply_router_actor, _) = Actor::spawn(
         Some(format!("{SERVICE_NAME}.reply-router")),
         ReplyRouterActor {
             issuance_reply_router: issuance_reply_router.clone(),
             identity_reply_router: identity_reply_router.clone(),
+            account_reply_router: account_reply_router.clone(),
         },
         (),
     )
@@ -165,11 +179,13 @@ async fn main() {
         broker_client,
         issuance_reply_router,
         identity_reply_router,
+        account_reply_router,
     });
 
     let app = Router::new()
         .route("/issue", post(issue))
         .route("/identity", post(identity))
+        .route("/account", post(account))
         .with_state(state);
 
     let port = std::env::var("CREDENTIALS_AGENT_OBSERVER_PORT").unwrap_or_else(|_| "8080".to_string());

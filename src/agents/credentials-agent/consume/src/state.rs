@@ -22,7 +22,7 @@
 */
 
 use credentials_agent_common::events::{CredentialsEvent, GrantReason, RevocationReason};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// A grant currently available to be consumed by a matching issuance.
 #[derive(Debug, Clone, PartialEq)]
@@ -77,9 +77,15 @@ pub struct ProvisionedAccountRecord {
     pub account_id: String,
     pub email: String,
     pub permissions: Vec<cert_issuer_common::permission::Permission>,
+    pub capabilities: Vec<cert_issuer_common::capability::Capability>,
     pub provisioned_by: String,
     pub timestamp: i64,
     pub reason: GrantReason,
+    /// True only for the one-time bootstrap account. Carried to the
+    /// certificate record when the claim succeeds, and what makes
+    /// `bootstrap_completed` true then -- not at provisioning, so a
+    /// claim that fails can be retried.
+    pub via_bootstrap: bool,
     pub given_name: Option<String>,
     pub surname: Option<String>,
     pub title: Option<String>,
@@ -87,8 +93,10 @@ pub struct ProvisionedAccountRecord {
 }
 
 /// A currently-issued certificate for a Polar account, keyed on
-/// account_id alone -- mirrors AgentEscrowCertificateRecord. Does not
-/// track revocation yet, same deliberately-named gap as that record.
+/// account_id alone. Carries the permissions the account was
+/// provisioned with (copied from the pending record when the
+/// certificate is folded, so they survive the claim) and is marked
+/// revoked in place, never removed, so the audit trail survives.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AccountCertificateRecord {
     pub account_id: String,
@@ -96,6 +104,21 @@ pub struct AccountCertificateRecord {
     pub serial: String,
     pub timestamp: i64,
     pub certificate_pem: String,
+    pub permissions: Vec<cert_issuer_common::permission::Permission>,
+    pub capabilities: Vec<cert_issuer_common::capability::Capability>,
+    /// True for the one-time bootstrap account's certificate. The
+    /// bootstrap cert is valid for exactly one provisioning; the admin-action
+    /// handler counts what it has already authorised.
+    pub via_bootstrap: bool,
+    /// How many `ProvisionAccount` admin actions this account's certificate
+    /// has authorised. Counted when the action is recorded, whether or
+    /// not its derived effect then succeeds: a recorded action is a spent
+    /// one. The bootstrap certificate is valid for exactly one.
+    pub provisionings_made: u32,
+    pub revoked: bool,
+    pub revoked_reason: Option<RevocationReason>,
+    pub revoked_by: Option<String>,
+    pub revoked_at: Option<i64>,
 }
 
 /// The Credentials Agent's derived state -- entirely a function of
@@ -149,10 +172,19 @@ pub struct CredentialsState {
     /// account_id alone.
     account_certificates: HashMap<String, AccountCertificateRecord>,
 
+    /// `serial -> account_id`, so a `Revoke` (which only carries a
+    /// serial) and a signed-action lookup can find an account's
+    /// certificate without a scan.
+    account_serial_index: HashMap<String, String>,
+
     /// True once the one-time admin-bootstrap path has ever
     /// succeeded -- checked before allowing a via_bootstrap
     /// AccountProvisioned to fold a second time.
     bootstrap_completed: bool,
+
+    /// Hex hashes of every admin-action payload already recorded --
+    /// what refuses a replayed signed action. Rebuilt by replay.
+    admin_action_hashes: HashSet<String>,
 }
 
 impl CredentialsState {
@@ -265,6 +297,15 @@ impl CredentialsState {
                     record.revoked_by = Some(revoked_by.clone());
                     record.revoked_at = Some(*timestamp);
                 }
+                if let Some(account_id) = self.account_serial_index.get(serial)
+                    && let Some(record) = self.account_certificates.get_mut(account_id)
+                    && record.serial == *serial
+                {
+                    record.revoked = true;
+                    record.revoked_reason = Some(*reason);
+                    record.revoked_by = Some(revoked_by.clone());
+                    record.revoked_at = Some(*timestamp);
+                }
             }
             CredentialsEvent::SecretStored { name, secret, .. } => {
                 // Overwrites any prior entry for this name -- the
@@ -295,6 +336,7 @@ impl CredentialsState {
                 username,
                 email,
                 permissions,
+                capabilities,
                 provisioned_by,
                 timestamp,
                 reason,
@@ -310,18 +352,17 @@ impl CredentialsState {
                         account_id: account_id.clone(),
                         email: email.clone(),
                         permissions: permissions.clone(),
+                        capabilities: capabilities.clone(),
                         provisioned_by: provisioned_by.clone(),
                         timestamp: *timestamp,
                         reason: *reason,
+                        via_bootstrap: *via_bootstrap,
                         given_name: given_name.clone(),
                         surname: surname.clone(),
                         title: title.clone(),
                         telephone_number: telephone_number.clone(),
                     },
                 );
-                if *via_bootstrap {
-                    self.bootstrap_completed = true;
-                }
             }
             CredentialsEvent::AccountCertificateIssued {
                 account_id,
@@ -330,7 +371,25 @@ impl CredentialsState {
                 timestamp,
                 certificate_pem,
             } => {
-                self.active_provisioned_accounts.remove(username);
+                // Carry the provisioned permissions and capabilities
+                // across the claim. A missing pending record can't
+                // happen through the handlers, and if it ever did, none
+                // is the safe default.
+                let (permissions, capabilities, via_bootstrap) = self
+                    .active_provisioned_accounts
+                    .remove(username)
+                    .map(|pending| {
+                        (pending.permissions, pending.capabilities, pending.via_bootstrap)
+                    })
+                    .unwrap_or_default();
+                // Bootstrap is complete when its certificate exists, not
+                // when its account was provisioned: a claim that failed
+                // part-way leaves the pending record and can be retried.
+                if via_bootstrap {
+                    self.bootstrap_completed = true;
+                }
+                self.account_serial_index
+                    .insert(serial.clone(), account_id.clone());
                 self.account_certificates.insert(
                     account_id.clone(),
                     AccountCertificateRecord {
@@ -339,8 +398,41 @@ impl CredentialsState {
                         serial: serial.clone(),
                         timestamp: *timestamp,
                         certificate_pem: certificate_pem.clone(),
+                        permissions,
+                        capabilities,
+                        via_bootstrap,
+                        provisionings_made: 0,
+                        revoked: false,
+                        revoked_reason: None,
+                        revoked_by: None,
+                        revoked_at: None,
                     },
                 );
+            }
+            CredentialsEvent::AdminActionRecorded {
+                payload_hash,
+                signed,
+                author_account_id,
+                ..
+            } => {
+                self.admin_action_hashes.insert(payload_hash.clone());
+                // Count provisionings per author certificate, so the
+                // bootstrap certificate can be held to exactly one.
+                if let Ok(body) = signed.decode_body()
+                    && matches!(
+                        body.action,
+                        credentials_agent_common::admin_action::AdminAction::ProvisionAccount { .. }
+                    )
+                    && let Some(author) = self.account_certificates.get_mut(author_account_id)
+                {
+                    author.provisionings_made += 1;
+                }
+                // The effect is derived, never stored separately: one
+                // append, one fold. Also returns any serials the
+                // derived event superseded, for the projection.
+                if let Some(effect) = event.admin_effect() {
+                    superseded_serials = self.apply(&effect);
+                }
             }
         }
         superseded_serials
@@ -418,6 +510,31 @@ impl CredentialsState {
     /// one has ever been issued.
     pub fn account_certificate_for(&self, account_id: &str) -> Option<&AccountCertificateRecord> {
         self.account_certificates.get(account_id)
+    }
+
+    /// The account certificate with this serial, revoked or not: the
+    /// caller decides what a revoked one means. Backs signed-admin-action
+    /// verification, which arrives carrying only the author's serial.
+    pub fn account_certificate_by_serial(&self, serial: &str) -> Option<&AccountCertificateRecord> {
+        self.account_serial_index
+            .get(serial)
+            .and_then(|account_id| self.account_certificates.get(account_id))
+            .filter(|record| record.serial == serial)
+    }
+
+    /// The account that holds (or last held) this username, if any.
+    /// Re-provisioning after a revocation reuses its account_id, so the
+    /// identity survives credential replacement.
+    pub fn account_for_username(&self, username: &str) -> Option<&AccountCertificateRecord> {
+        self.account_certificates
+            .values()
+            .find(|record| record.username == username)
+    }
+
+    /// True if a signed admin action with this payload hash was already
+    /// recorded -- the replay check.
+    pub fn admin_action_seen(&self, payload_hash: &str) -> bool {
+        self.admin_action_hashes.contains(payload_hash)
     }
 }
 
@@ -616,5 +733,366 @@ mod tests {
         let record = state.agent_escrow_certificate_for("git-observer").unwrap();
         assert_eq!(record.serial, "service-serial-2");
         assert_eq!(record.instance_binding, "pod-uid-2");
+    }
+
+    fn provisioned(username: &str, account_id: &str) -> CredentialsEvent {
+        CredentialsEvent::AccountProvisioned {
+            account_id: account_id.to_string(),
+            username: username.to_string(),
+            email: format!("{username}@example.org"),
+            permissions: vec![cert_issuer_common::permission::Permission {
+                scope: cert_issuer_common::permission::PermissionScope::ServiceToService,
+                target: None,
+            }],
+            capabilities: vec![cert_issuer_common::capability::Capability::Grant],
+            provisioned_by: "admin".to_string(),
+            timestamp: 1000,
+            reason: GrantReason::UserOnboarding,
+            via_bootstrap: false,
+            given_name: None,
+            surname: None,
+            title: None,
+            telephone_number: None,
+        }
+    }
+
+    fn account_issued(username: &str, account_id: &str, serial: &str) -> CredentialsEvent {
+        CredentialsEvent::AccountCertificateIssued {
+            account_id: account_id.to_string(),
+            username: username.to_string(),
+            serial: serial.to_string(),
+            timestamp: 2000,
+            certificate_pem: "-----BEGIN CERTIFICATE-----\nfake-account\n-----END CERTIFICATE-----\n"
+                .to_string(),
+        }
+    }
+
+    #[test]
+    fn account_certificate_keeps_the_provisioned_capabilities_after_the_claim() {
+        let mut state = CredentialsState::new();
+        state.apply(&provisioned("dana", "acct-1"));
+        state.apply(&account_issued("dana", "acct-1", "s1"));
+
+        let record = state.account_certificate_by_serial("s1").unwrap();
+        assert_eq!(
+            record.capabilities,
+            vec![cert_issuer_common::capability::Capability::Grant]
+        );
+    }
+
+    #[test]
+    fn account_certificate_keeps_the_provisioned_permissions_after_the_claim() {
+        let mut state = CredentialsState::new();
+        state.apply(&provisioned("dana", "acct-1"));
+        state.apply(&account_issued("dana", "acct-1", "s1"));
+
+        assert!(state.provisioned_account_for("dana").is_none());
+        let record = state.account_certificate_by_serial("s1").unwrap();
+        assert_eq!(record.account_id, "acct-1");
+        assert_eq!(record.permissions.len(), 1);
+        assert!(!record.revoked);
+    }
+
+    #[test]
+    fn revoking_an_account_serial_marks_it_revoked_in_place() {
+        let mut state = CredentialsState::new();
+        state.apply(&provisioned("dana", "acct-1"));
+        state.apply(&account_issued("dana", "acct-1", "s1"));
+        state.apply(&revoked("s1"));
+
+        let record = state.account_certificate_by_serial("s1").unwrap();
+        assert!(record.revoked);
+        assert_eq!(record.revoked_by.as_deref(), Some("admin"));
+    }
+
+    #[test]
+    fn a_stale_revocation_does_not_revoke_the_replacement_certificate() {
+        let mut state = CredentialsState::new();
+        // Dana's first certificate is issued, then revoked.
+        state.apply(&provisioned("dana", "acct-1"));
+        state.apply(&account_issued("dana", "acct-1", "s1"));
+        state.apply(&revoked("s1"));
+        // An admin re-provisions Dana (same account_id); certificate s2 is issued.
+        state.apply(&provisioned("dana", "acct-1"));
+        state.apply(&account_issued("dana", "acct-1", "s2"));
+        // The old revocation for s1 arrives again.
+        state.apply(&revoked("s1"));
+
+        assert!(!state.account_certificate_by_serial("s2").unwrap().revoked);
+    }
+
+    #[test]
+    fn a_replaced_certificates_serial_no_longer_resolves_to_an_account() {
+        let mut state = CredentialsState::new();
+        state.apply(&provisioned("dana", "acct-1"));
+        state.apply(&account_issued("dana", "acct-1", "s1"));
+        state.apply(&revoked("s1"));
+        state.apply(&provisioned("dana", "acct-1"));
+        state.apply(&account_issued("dana", "acct-1", "s2"));
+
+        assert!(state.account_certificate_by_serial("s1").is_none());
+        assert_eq!(
+            state.account_certificate_by_serial("s2").unwrap().account_id,
+            "acct-1"
+        );
+    }
+
+    #[test]
+    fn account_for_username_survives_revocation() {
+        let mut state = CredentialsState::new();
+        state.apply(&provisioned("dana", "acct-1"));
+        state.apply(&account_issued("dana", "acct-1", "s1"));
+        state.apply(&revoked("s1"));
+
+        assert_eq!(state.account_for_username("dana").unwrap().account_id, "acct-1");
+        assert!(state.account_for_username("nobody").is_none());
+    }
+
+    #[test]
+    fn a_recorded_grant_takes_effect_and_its_hash_is_remembered_across_replay() {
+        use credentials_agent_common::admin_action::{AdminAction, AdminActionBody, SignedAdminAction};
+        let payload = AdminActionBody {
+            nonce: "n1".to_string(),
+            action: AdminAction::Grant {
+                target_identity: "alice".to_string(),
+                permissions: vec![],
+                reason: GrantReason::UserOnboarding,
+            },
+        }
+        .to_payload()
+        .unwrap();
+        let signed = SignedAdminAction {
+            payload,
+            author_serial: "a1".to_string(),
+            signature: vec![],
+        };
+        let hash = signed.payload_hash();
+        let event = CredentialsEvent::AdminActionRecorded {
+            payload_hash: hash.clone(),
+            signed,
+            author_account_id: "admin-acct".to_string(),
+            timestamp: 5000,
+            account_id: None,
+        };
+
+        let state = CredentialsState::from_events(&[event]);
+
+        assert_eq!(state.grant_for("alice").unwrap().granted_by, "admin-acct");
+        assert!(state.admin_action_seen(&hash));
+        assert!(!state.admin_action_seen("some-other-hash"));
+    }
+}
+
+#[cfg(test)]
+mod bootstrap_tests {
+    use super::*;
+    use credentials_agent_common::events::GrantReason;
+
+    fn bootstrap_provisioned() -> CredentialsEvent {
+        CredentialsEvent::AccountProvisioned {
+            account_id: "acct-1".to_string(),
+            username: "bootstrap".to_string(),
+            email: "bootstrap@polar.invalid".to_string(),
+            permissions: vec![],
+            capabilities: vec![cert_issuer_common::capability::Capability::ProvisionAccount],
+            provisioned_by: "bootstrap".to_string(),
+            timestamp: 1,
+            reason: GrantReason::UserOnboarding,
+            via_bootstrap: true,
+            given_name: None,
+            surname: None,
+            title: None,
+            telephone_number: None,
+        }
+    }
+
+    fn bootstrap_certificate() -> CredentialsEvent {
+        CredentialsEvent::AccountCertificateIssued {
+            account_id: "acct-1".to_string(),
+            username: "bootstrap".to_string(),
+            serial: "aa".to_string(),
+            timestamp: 2,
+            certificate_pem: "pem".to_string(),
+        }
+    }
+
+    #[test]
+    fn provisioning_the_bootstrap_account_does_not_complete_bootstrap() {
+        let mut state = CredentialsState::default();
+        state.apply(&bootstrap_provisioned());
+        assert!(!state.bootstrap_completed());
+    }
+
+    #[test]
+    fn issuing_the_bootstrap_certificate_completes_bootstrap() {
+        let mut state = CredentialsState::default();
+        state.apply(&bootstrap_provisioned());
+        state.apply(&bootstrap_certificate());
+        assert!(state.bootstrap_completed());
+    }
+
+    #[test]
+    fn the_bootstrap_certificate_record_remembers_where_it_came_from() {
+        let mut state = CredentialsState::default();
+        state.apply(&bootstrap_provisioned());
+        state.apply(&bootstrap_certificate());
+        let record = state
+            .account_certificate_by_serial("aa")
+            .expect("the certificate resolves by serial");
+        assert!(record.via_bootstrap);
+    }
+}
+
+#[cfg(test)]
+mod provisioning_count_tests {
+    use super::*;
+    use cert_issuer_common::capability::Capability;
+    use credentials_agent_common::admin_action::{AdminAction, AdminActionBody, SignedAdminAction};
+    use credentials_agent_common::events::GrantReason;
+
+    fn bootstrap_account_with_certificate() -> CredentialsState {
+        let mut state = CredentialsState::new();
+        state.apply(&CredentialsEvent::AccountProvisioned {
+            account_id: "acct-boot".to_string(),
+            username: "polar-bootstrap".to_string(),
+            email: "bootstrap@polar.invalid".to_string(),
+            permissions: vec![],
+            capabilities: vec![Capability::ProvisionAccount],
+            provisioned_by: "polar-bootstrap".to_string(),
+            timestamp: 1,
+            reason: GrantReason::UserOnboarding,
+            via_bootstrap: true,
+            given_name: None,
+            surname: None,
+            title: None,
+            telephone_number: None,
+        });
+        state.apply(&CredentialsEvent::AccountCertificateIssued {
+            account_id: "acct-boot".to_string(),
+            username: "polar-bootstrap".to_string(),
+            serial: "b1".to_string(),
+            timestamp: 2,
+            certificate_pem: "-----BEGIN CERTIFICATE-----\nfake\n-----END CERTIFICATE-----\n"
+                .to_string(),
+        });
+        state
+    }
+
+    fn recorded(
+        action: AdminAction,
+        nonce: &str,
+        author_account_id: &str,
+        account_id: Option<&str>,
+    ) -> CredentialsEvent {
+        let payload = AdminActionBody {
+            nonce: nonce.to_string(),
+            action,
+        }
+        .to_payload()
+        .unwrap();
+        let signed = SignedAdminAction {
+            payload,
+            author_serial: "b1".to_string(),
+            signature: vec![],
+        };
+        CredentialsEvent::AdminActionRecorded {
+            payload_hash: signed.payload_hash(),
+            signed,
+            author_account_id: author_account_id.to_string(),
+            timestamp: 3,
+            account_id: account_id.map(str::to_string),
+        }
+    }
+
+    fn provision(username: &str) -> AdminAction {
+        AdminAction::ProvisionAccount {
+            username: username.to_string(),
+            email: format!("{username}@example.org"),
+            permissions: vec![],
+            capabilities: vec![Capability::ProvisionAccount],
+            reason: GrantReason::UserOnboarding,
+            given_name: None,
+            surname: None,
+            title: None,
+            telephone_number: None,
+        }
+    }
+
+    fn grant() -> AdminAction {
+        AdminAction::Grant {
+            target_identity: "alice".to_string(),
+            permissions: vec![],
+            reason: GrantReason::UserOnboarding,
+        }
+    }
+
+    #[test]
+    fn a_new_certificate_has_authorised_nothing() {
+        let state = bootstrap_account_with_certificate();
+        let record = state.account_certificate_by_serial("b1").unwrap();
+        assert!(record.via_bootstrap);
+        assert_eq!(record.provisionings_made, 0);
+    }
+
+    #[test]
+    fn a_recorded_provisioning_is_counted_against_its_author() {
+        let mut state = bootstrap_account_with_certificate();
+        state.apply(&recorded(provision("alice"), "n1", "acct-boot", Some("acct-2")));
+
+        let record = state.account_certificate_by_serial("b1").unwrap();
+        assert_eq!(record.provisionings_made, 1);
+    }
+
+    #[test]
+    fn other_actions_are_not_counted_as_provisionings() {
+        let mut state = bootstrap_account_with_certificate();
+        state.apply(&recorded(grant(), "n1", "acct-boot", None));
+
+        let record = state.account_certificate_by_serial("b1").unwrap();
+        assert_eq!(record.provisionings_made, 0);
+    }
+
+    #[test]
+    fn the_count_is_rebuilt_by_replaying_the_log() {
+        let mut live = bootstrap_account_with_certificate();
+        let event = recorded(provision("alice"), "n1", "acct-boot", Some("acct-2"));
+        live.apply(&event);
+
+        // A restart folds the same events again from empty.
+        let replayed = CredentialsState::from_events(&[
+            CredentialsEvent::AccountProvisioned {
+                account_id: "acct-boot".to_string(),
+                username: "polar-bootstrap".to_string(),
+                email: "bootstrap@polar.invalid".to_string(),
+                permissions: vec![],
+                capabilities: vec![Capability::ProvisionAccount],
+                provisioned_by: "polar-bootstrap".to_string(),
+                timestamp: 1,
+                reason: GrantReason::UserOnboarding,
+                via_bootstrap: true,
+                given_name: None,
+                surname: None,
+                title: None,
+                telephone_number: None,
+            },
+            CredentialsEvent::AccountCertificateIssued {
+                account_id: "acct-boot".to_string(),
+                username: "polar-bootstrap".to_string(),
+                serial: "b1".to_string(),
+                timestamp: 2,
+                certificate_pem: "-----BEGIN CERTIFICATE-----\nfake\n-----END CERTIFICATE-----\n"
+                    .to_string(),
+            },
+            event,
+        ]);
+
+        assert_eq!(
+            replayed.account_certificate_by_serial("b1").unwrap().provisionings_made,
+            live.account_certificate_by_serial("b1").unwrap().provisionings_made
+        );
+        assert_eq!(
+            replayed.account_certificate_by_serial("b1").unwrap().provisionings_made,
+            1
+        );
     }
 }

@@ -97,6 +97,10 @@ use crate::issuance::IssuanceHandler;
 use crate::issuance_actor::{IssuanceActor, IssuanceActorArgs};
 use crate::retrieve_secret::RetrieveSecretHandler;
 use crate::retrieve_secret_actor::{RetrieveSecretActor, RetrieveSecretActorArgs, RetrieveSecretDispatch};
+use crate::account::{AccountHandler, DEFAULT_BOOTSTRAP_IDENTITY};
+use crate::account_actor::{AccountActor, AccountActorArgs};
+use crate::admin_action::AdminActionHandler;
+use crate::admin_action_actor::{AdminActionActor, AdminActionActorArgs};
 use crate::store_secret::StoreSecretHandler;
 use crate::store_secret_actor::{StoreSecretActor, StoreSecretActorArgs, StoreSecretDispatch};
 
@@ -125,6 +129,11 @@ const IDENTITY_NORMALIZATION_ACTOR_NAME: &str = "polar.credentials-agent.identit
 const ESCROW_KEY_ACTOR_NAME: &str = "polar.credentials-agent.escrow-key";
 const CERTIFICATE_ACTOR_NAME: &str = "polar.credentials-agent.certificate";
 const STORE_SECRET_ACTOR_NAME: &str = "polar.credentials-agent.store-secret";
+const ADMIN_ACTION_ACTOR_NAME: &str = "polar.credentials-agent.admin-action";
+const ACCOUNT_ACTOR_NAME: &str = "polar.credentials-agent.account";
+/// Overrides the Kubernetes identity allowed to bootstrap. Unset means the
+/// well-known `polar-admin-bootstrap` service account.
+const BOOTSTRAP_IDENTITY_ENV: &str = "CREDENTIALS_AGENT_BOOTSTRAP_IDENTITY";
 const RETRIEVE_SECRET_ACTOR_NAME: &str = "polar.credentials-agent.retrieve-secret";
 const AGENT_ESCROW_KEYPAIR_BOOTSTRAP_ACTOR_NAME: &str =
     "polar.credentials-agent.agent-escrow-keypair-bootstrap";
@@ -151,7 +160,45 @@ pub struct ConsumerSupervisorState {
 
 impl Supervisor for ConsumerSupervisor {
     fn deserialize_and_dispatch(topic: String, payload: Vec<u8>) {
-        if topic == CREDENTIALS_ISSUANCE_REQUESTS_TOPIC {
+        if topic == credentials_agent_common::CREDENTIALS_ADMIN_ACTION_REQUESTS_TOPIC {
+            match rkyv::from_bytes::<
+                Envelope<credentials_agent_common::admin_action::SignedAdminAction>,
+                rkyv::rancor::Error,
+            >(&payload)
+            {
+                Ok(envelope) => {
+                    if let Some(actor) = where_is(ADMIN_ACTION_ACTOR_NAME.to_string()) {
+                        if let Err(e) = actor.send_message(envelope) {
+                            warn!("Failed to forward admin action to actor: {e}");
+                        }
+                    } else {
+                        warn!("Admin action actor not yet registered, dropping admin action");
+                    }
+                }
+                Err(e) => {
+                    warn!("Failed to deserialize admin action request: {e}");
+                }
+            }
+        } else if topic == credentials_agent_common::CREDENTIALS_ACCOUNT_REQUESTS_TOPIC {
+            match rkyv::from_bytes::<
+                Envelope<credentials_agent_common::account_claim::AccountRequest>,
+                rkyv::rancor::Error,
+            >(&payload)
+            {
+                Ok(envelope) => {
+                    if let Some(actor) = where_is(ACCOUNT_ACTOR_NAME.to_string()) {
+                        if let Err(e) = actor.send_message(envelope) {
+                            warn!("Failed to forward account request to actor: {e}");
+                        }
+                    } else {
+                        warn!("Account actor not yet registered, dropping account request");
+                    }
+                }
+                Err(e) => {
+                    warn!("Failed to deserialize account request: {e}");
+                }
+            }
+        } else if topic == CREDENTIALS_ISSUANCE_REQUESTS_TOPIC {
             match rkyv::from_bytes::<Envelope<IssuanceRequest>, rkyv::rancor::Error>(&payload) {
                 Ok(envelope) => {
                     if let Some(issuance_actor) = where_is(ISSUANCE_ACTOR_NAME.to_string()) {
@@ -593,6 +640,59 @@ impl Actor for ConsumerSupervisor {
         .await
         .map_err(ActorProcessingErr::from)?;
 
+        let admin_action_handler = AdminActionHandler {
+            ledger: ledger.clone(),
+        };
+        let (_admin_action_actor, _) = AdminActionActor::spawn_linked(
+            Some(ADMIN_ACTION_ACTOR_NAME.to_string()),
+            AdminActionActor,
+            AdminActionActorArgs {
+                handler: admin_action_handler,
+            },
+            myself.get_cell(),
+        )
+        .await
+        .map_err(ActorProcessingErr::from)?;
+
+        // The account claim signs through /internal/issue, which identifies
+        // its caller by the client certificate on the connection: this is
+        // the agent's own mTLS identity, the same files its Cassini client
+        // uses.
+        let own_cert_path = std::env::var("TLS_CLIENT_CERT").map_err(|_| {
+            ActorProcessingErr::from("TLS_CLIENT_CERT must be set".to_string())
+        })?;
+        let own_key_path = std::env::var("TLS_CLIENT_KEY").map_err(|_| {
+            ActorProcessingErr::from("TLS_CLIENT_KEY must be set".to_string())
+        })?;
+        let account_cert_issuer = HandshakeClient::for_trust_mode_with_identity(
+            cert_issuer_url.clone(),
+            cert_issuer_ca_path.as_deref(),
+            &own_cert_path,
+            &own_key_path,
+        )
+        .await
+        .map_err(|e| {
+            ActorProcessingErr::from(format!("cannot establish trust in cert-issuer: {e}"))
+        })?;
+        let account_handler = AccountHandler {
+            ledger: ledger.clone(),
+            cert_issuer: account_cert_issuer,
+            bootstrap_identity: std::env::var(BOOTSTRAP_IDENTITY_ENV)
+                .ok()
+                .filter(|v| !v.is_empty())
+                .unwrap_or_else(|| DEFAULT_BOOTSTRAP_IDENTITY.to_string()),
+        };
+        let (_account_actor, _) = AccountActor::spawn_linked(
+            Some(ACCOUNT_ACTOR_NAME.to_string()),
+            AccountActor,
+            AccountActorArgs {
+                handler: account_handler,
+            },
+            myself.get_cell(),
+        )
+        .await
+        .map_err(ActorProcessingErr::from)?;
+
         let retrieve_secret_handler = RetrieveSecretHandler {
             escrow_keypair: escrow_keypair.clone(),
             ledger: ledger.clone(),
@@ -772,6 +872,8 @@ impl Actor for ConsumerSupervisor {
                             CREDENTIALS_GRANTS_TOPIC,
                             CREDENTIALS_REVOCATIONS_TOPIC,
                             CREDENTIALS_ACCOUNT_PROVISIONING_TOPIC,
+                            credentials_agent_common::CREDENTIALS_ADMIN_ACTION_REQUESTS_TOPIC,
+                            credentials_agent_common::CREDENTIALS_ACCOUNT_REQUESTS_TOPIC,
                             CREDENTIALS_ISSUANCE_REQUESTS_TOPIC,
                             CREDENTIALS_IDENTITY_NORMALIZATION_REQUESTS_TOPIC,
                             CREDENTIALS_ESCROW_KEY_REQUESTS_TOPIC,

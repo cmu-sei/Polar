@@ -145,6 +145,25 @@ pub enum LedgerMessage {
     CheckBootstrapCompleted {
         reply: RpcReplyPort<bool>,
     },
+    /// The account certificate with this serial, revoked or not.
+    CheckAccountCertificateBySerial {
+        serial: String,
+        reply: RpcReplyPort<Option<crate::state::AccountCertificateRecord>>,
+    },
+    /// The account holding (or last holding) this username, if any.
+    CheckAccountForUsername {
+        username: String,
+        reply: RpcReplyPort<Option<crate::state::AccountCertificateRecord>>,
+    },
+    /// Records a signature-verified admin action atomically: refused
+    /// (`Ok(false)`) if its payload hash was already recorded, appended
+    /// and folded (`Ok(true)`) otherwise. The check and the append are
+    /// one message on the single-writer actor, so two identical
+    /// submissions can never both be recorded.
+    RecordAdminAction {
+        event: CredentialsEvent,
+        reply: RpcReplyPort<Result<bool, String>>,
+    },
     /// The current, escrowed secret for `name`, if one has ever been
     /// stored -- backs the general secret-retrieve mechanism.
     /// Mirrors CheckCertificate/CheckAgentEscrowKey's own
@@ -204,33 +223,25 @@ impl Actor for LedgerActor {
     ) -> Result<(), ActorProcessingErr> {
         match message {
             LedgerMessage::Append { event, reply } => {
-                let result = match state.event_log.append(&event) {
-                    Ok(()) => {
-                        let superseded_serials = state.credentials_state.apply(&event);
-                        let hash = state.event_log.current_hash().to_string();
-                        let _ = state.projection_actor.cast(ProjectionMessage::ProjectEvent {
-                            hash,
-                            event: event.clone(),
-                            superseded_serials,
-                        });
-                        Ok(())
-                    }
-                    Err(e) => Err(e.to_string()),
-                };
+                let result = append_and_project(state, &event);
                 let _ = reply.send(result);
             }
             LedgerMessage::AppendNoReply(event) => {
-                if let Err(e) = state.event_log.append(&event) {
+                if let Err(e) = append_and_project(state, &event) {
                     tracing::error!("Failed to append event to ledger: {e}. Event: {event:?}");
-                } else {
-                    let superseded_serials = state.credentials_state.apply(&event);
-                    let hash = state.event_log.current_hash().to_string();
-                    let _ = state.projection_actor.cast(ProjectionMessage::ProjectEvent {
-                        hash,
-                        event,
-                        superseded_serials,
-                    });
                 }
+            }
+            LedgerMessage::RecordAdminAction { event, reply } => {
+                let CredentialsEvent::AdminActionRecorded { payload_hash, .. } = &event else {
+                    let _ = reply.send(Err("not an AdminActionRecorded event".to_string()));
+                    return Ok(());
+                };
+                if state.credentials_state.admin_action_seen(payload_hash) {
+                    let _ = reply.send(Ok(false));
+                    return Ok(());
+                }
+                let result = append_and_project(state, &event).map(|()| true);
+                let _ = reply.send(result);
             }
             LedgerMessage::CheckGrant { identity, reply } => {
                 let grant = state.credentials_state.grant_for(&identity).cloned();
@@ -273,6 +284,20 @@ impl Actor for LedgerActor {
             LedgerMessage::CheckBootstrapCompleted { reply } => {
                 let _ = reply.send(state.credentials_state.bootstrap_completed());
             }
+            LedgerMessage::CheckAccountCertificateBySerial { serial, reply } => {
+                let record = state
+                    .credentials_state
+                    .account_certificate_by_serial(&serial)
+                    .cloned();
+                let _ = reply.send(record);
+            }
+            LedgerMessage::CheckAccountForUsername { username, reply } => {
+                let record = state
+                    .credentials_state
+                    .account_for_username(&username)
+                    .cloned();
+                let _ = reply.send(record);
+            }
             LedgerMessage::CheckSecret { name, reply } => {
                 let secret = state.credentials_state.secret_for(&name).cloned();
                 let _ = reply.send(secret);
@@ -284,6 +309,21 @@ impl Actor for LedgerActor {
         }
         Ok(())
     }
+}
+
+/// Appends `event` durably, folds it into derived state, and notifies
+/// the projection -- in that order, so a reader can never observe a
+/// state change that isn't yet durable.
+fn append_and_project(state: &mut LedgerActorState, event: &CredentialsEvent) -> Result<(), String> {
+    state.event_log.append(event).map_err(|e| e.to_string())?;
+    let superseded_serials = state.credentials_state.apply(event);
+    let hash = state.event_log.current_hash().to_string();
+    let _ = state.projection_actor.cast(ProjectionMessage::ProjectEvent {
+        hash,
+        event: event.clone(),
+        superseded_serials,
+    });
+    Ok(())
 }
 
 #[cfg(test)]
@@ -591,5 +631,64 @@ pub(crate) mod tests {
         );
 
         respawned.stop(None);
+    }
+
+    pub(crate) async fn record_admin_action(
+        ledger: &ActorRef<LedgerMessage>,
+        event: CredentialsEvent,
+    ) -> Result<bool, String> {
+        match ractor::rpc::call(ledger, |reply| LedgerMessage::RecordAdminAction { event, reply }, None)
+            .await
+            .expect("call should succeed")
+        {
+            ractor::rpc::CallResult::Success(result) => result,
+            other => panic!("expected Success, got {other:?}"),
+        }
+    }
+
+    fn recorded_grant(nonce: &str) -> CredentialsEvent {
+        use credentials_agent_common::admin_action::{AdminAction, AdminActionBody, SignedAdminAction};
+        let payload = AdminActionBody {
+            nonce: nonce.to_string(),
+            action: AdminAction::Grant {
+                target_identity: "alice".to_string(),
+                permissions: vec![],
+                reason: GrantReason::UserOnboarding,
+            },
+        }
+        .to_payload()
+        .unwrap();
+        let signed = SignedAdminAction {
+            payload,
+            author_serial: "a1".to_string(),
+            signature: vec![],
+        };
+        CredentialsEvent::AdminActionRecorded {
+            payload_hash: signed.payload_hash(),
+            signed,
+            author_account_id: "admin-acct".to_string(),
+            timestamp: 5000,
+            account_id: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_recorded_admin_action_takes_effect_once_and_a_replay_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("events.jsonl");
+        let ledger = spawn_ledger(path.to_str().unwrap()).await;
+
+        assert_eq!(record_admin_action(&ledger, recorded_grant("n1")).await, Ok(true));
+        assert_eq!(
+            check_grant(&ledger, "alice").await.unwrap().granted_by,
+            "admin-acct"
+        );
+
+        // The identical signed payload is a replay.
+        assert_eq!(record_admin_action(&ledger, recorded_grant("n1")).await, Ok(false));
+        // The same action with a fresh nonce is a legitimate repeat.
+        assert_eq!(record_admin_action(&ledger, recorded_grant("n2")).await, Ok(true));
+
+        ledger.stop(None);
     }
 }

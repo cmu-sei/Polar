@@ -264,6 +264,11 @@ pub enum CredentialsEvent {
         username: String,
         email: String,
         permissions: Vec<cert_issuer_common::permission::Permission>,
+        /// Administrative capabilities the account holds once claimed.
+        /// Absent on events written before capabilities existed, which
+        /// replay as none.
+        #[serde(default)]
+        capabilities: Vec<cert_issuer_common::capability::Capability>,
         provisioned_by: String,
         timestamp: i64,
         reason: GrantReason,
@@ -291,6 +296,93 @@ pub enum CredentialsEvent {
         timestamp: i64,
         certificate_pem: String,
     },
+    /// One accepted, signature-verified admin action -- the only way an
+    /// admin's provision/grant/revoke reaches the ledger. Carries the
+    /// whole signed action, so anyone holding the ledger can re-verify
+    /// it. Its effect is not a separate event: folding this event
+    /// derives the effect (see `admin_effect`), so acceptance and
+    /// effect are one atomic append, and the hash below is what refuses
+    /// a replay.
+    AdminActionRecorded {
+        /// Hex SHA-256 of `signed.payload`.
+        payload_hash: String,
+        signed: crate::admin_action::SignedAdminAction,
+        /// The author's account_id, from the ledger's own record of the
+        /// certificate that signed this -- never from the payload.
+        author_account_id: String,
+        timestamp: i64,
+        /// The account_id the consumer minted for a ProvisionAccount
+        /// action; None for every other action.
+        account_id: Option<String>,
+    },
+}
+
+impl CredentialsEvent {
+    /// The effect event an `AdminActionRecorded` stands for, or `None`
+    /// for any other event (and for an action with no effect yet).
+    /// State and the graph projection both fold this, so there is one
+    /// derivation and the two cannot drift.
+    pub fn admin_effect(&self) -> Option<CredentialsEvent> {
+        use crate::admin_action::AdminAction;
+        let CredentialsEvent::AdminActionRecorded {
+            signed,
+            author_account_id,
+            timestamp,
+            account_id,
+            ..
+        } = self
+        else {
+            return None;
+        };
+        let body = signed.decode_body().ok()?;
+        Some(match body.action {
+            AdminAction::ProvisionAccount {
+                username,
+                email,
+                permissions,
+                capabilities,
+                reason,
+                given_name,
+                surname,
+                title,
+                telephone_number,
+            } => CredentialsEvent::AccountProvisioned {
+                account_id: account_id.clone()?,
+                username,
+                email,
+                permissions,
+                capabilities,
+                provisioned_by: author_account_id.clone(),
+                timestamp: *timestamp,
+                reason,
+                via_bootstrap: false,
+                given_name,
+                surname,
+                title,
+                telephone_number,
+            },
+            AdminAction::Grant {
+                target_identity,
+                permissions,
+                reason,
+            } => CredentialsEvent::Grant {
+                target_identity,
+                permissions,
+                granted_by: author_account_id.clone(),
+                timestamp: *timestamp,
+                reason,
+            },
+            AdminAction::Revoke { serial, reason } => CredentialsEvent::Revoke {
+                serial,
+                reason,
+                revoked_by: author_account_id.clone(),
+                timestamp: *timestamp,
+            },
+            // Recorded for audit, but there is no policy state to fold
+            // it into yet.
+            AdminAction::PolicyUpdate { .. } => return None,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -395,5 +487,141 @@ mod tests {
         let restored: CredentialsEvent =
             rkyv::from_bytes::<CredentialsEvent, rkyv::rancor::Error>(&bytes).unwrap();
         assert_eq!(original, restored);
+    }
+
+    fn recorded(action: crate::admin_action::AdminAction, minted: Option<&str>) -> CredentialsEvent {
+        use crate::admin_action::{AdminActionBody, SignedAdminAction};
+        let payload = AdminActionBody {
+            nonce: "n1".to_string(),
+            action,
+        }
+        .to_payload()
+        .unwrap();
+        let signed = SignedAdminAction {
+            payload,
+            author_serial: "a1".to_string(),
+            signature: vec![],
+        };
+        CredentialsEvent::AdminActionRecorded {
+            payload_hash: signed.payload_hash(),
+            signed,
+            author_account_id: "admin-acct".to_string(),
+            timestamp: 4242,
+            account_id: minted.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn a_recorded_grant_derives_a_grant_stamped_with_the_verified_author() {
+        use crate::admin_action::AdminAction;
+        let event = recorded(
+            AdminAction::Grant {
+                target_identity: "jdoe".to_string(),
+                permissions: vec![],
+                reason: GrantReason::UserOnboarding,
+            },
+            None,
+        );
+        match event.admin_effect() {
+            Some(CredentialsEvent::Grant {
+                target_identity,
+                granted_by,
+                timestamp,
+                ..
+            }) => {
+                assert_eq!(target_identity, "jdoe");
+                assert_eq!(granted_by, "admin-acct");
+                assert_eq!(timestamp, 4242);
+            }
+            other => panic!("expected Grant, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_recorded_revoke_derives_a_revoke_stamped_with_the_verified_author() {
+        use crate::admin_action::AdminAction;
+        let event = recorded(
+            AdminAction::Revoke {
+                serial: "abc123".to_string(),
+                reason: RevocationReason::Compromised,
+            },
+            None,
+        );
+        match event.admin_effect() {
+            Some(CredentialsEvent::Revoke {
+                serial, revoked_by, ..
+            }) => {
+                assert_eq!(serial, "abc123");
+                assert_eq!(revoked_by, "admin-acct");
+            }
+            other => panic!("expected Revoke, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_recorded_provision_derives_account_provisioned_with_the_minted_id() {
+        use crate::admin_action::AdminAction;
+        let event = recorded(
+            AdminAction::ProvisionAccount {
+                username: "dana".to_string(),
+                email: "dana@example.org".to_string(),
+                permissions: vec![],
+                capabilities: vec![cert_issuer_common::capability::Capability::Grant],
+                reason: GrantReason::UserOnboarding,
+                given_name: None,
+                surname: None,
+                title: None,
+                telephone_number: None,
+            },
+            Some("acct-9"),
+        );
+        match event.admin_effect() {
+            Some(CredentialsEvent::AccountProvisioned {
+                account_id,
+                provisioned_by,
+                via_bootstrap,
+                capabilities,
+                ..
+            }) => {
+                assert_eq!(account_id, "acct-9");
+                assert_eq!(provisioned_by, "admin-acct");
+                assert!(!via_bootstrap, "only the internal bootstrap path may set this");
+                assert_eq!(capabilities.len(), 1);
+            }
+            other => panic!("expected AccountProvisioned, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_recorded_provision_without_a_minted_id_derives_nothing() {
+        use crate::admin_action::AdminAction;
+        let event = recorded(
+            AdminAction::ProvisionAccount {
+                username: "dana".to_string(),
+                email: "dana@example.org".to_string(),
+                permissions: vec![],
+                capabilities: vec![],
+                reason: GrantReason::UserOnboarding,
+                given_name: None,
+                surname: None,
+                title: None,
+                telephone_number: None,
+            },
+            None,
+        );
+        assert!(event.admin_effect().is_none());
+    }
+
+    #[test]
+    fn a_policy_update_and_an_ordinary_event_derive_nothing() {
+        use crate::admin_action::AdminAction;
+        let policy = recorded(
+            AdminAction::PolicyUpdate {
+                document: "permit(principal, action, resource);".to_string(),
+            },
+            None,
+        );
+        assert!(policy.admin_effect().is_none());
+        assert!(sample_grant().admin_effect().is_none());
     }
 }

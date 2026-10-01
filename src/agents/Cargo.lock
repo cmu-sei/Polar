@@ -1431,6 +1431,7 @@ dependencies = [
  "time",
  "tokio",
  "tracing",
+ "uuid",
  "wiremock",
  "x25519-dalek",
 ]
@@ -1465,10 +1466,13 @@ dependencies = [
  "aes-gcm",
  "cert-issuer-common",
  "clap",
+ "ed25519-dalek",
  "hkdf",
  "neo4rs",
+ "p256",
  "polar",
  "rand 0.10.3",
+ "rcgen",
  "rkyv",
  "rsa 0.10.0-rc.18",
  "secrecy",
@@ -1478,6 +1482,7 @@ dependencies = [
  "sha2 0.11.0",
  "thiserror 1.0.69",
  "x25519-dalek",
+ "x509-parser",
  "zeroize",
 ]
 
@@ -5501,8 +5506,10 @@ dependencies = [
  "kube",
  "polar",
  "ractor",
+ "reqwest 0.12.28",
  "rkyv",
  "tokio",
+ "uuid",
 ]
 
 [[package]]

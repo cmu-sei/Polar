@@ -21,37 +21,53 @@
    DM24-0470
 */
 
-//! Connects to Cassini using the admin's own Polar client cert (mTLS,
-//! via TCPClientConfig::new() -- same env-var convention every other
-//! Cassini-connected agent already uses), publishes exactly one
-//! CredentialsEvent, and signals completion. A one-shot tool, not a
-//! long-running agent -- no supervisor, no healthcheck, no graph
-//! controller.
+//! Connects to Cassini with the admin's own Polar client cert (mTLS, via
+//! TCPClientConfig::new() -- the same env-var convention every other
+//! Cassini-connected agent uses), publishes one signed admin action on the
+//! requests topic, and waits for the credentials-agent's correlated reply.
+//! A one-shot tool, not a long-running agent -- no supervisor, no
+//! healthcheck, no graph controller.
+//!
+//! The reply is the only confirmation there is: the consumer is the gate, so
+//! "published" means nothing until it says Recorded or Refused.
 
 use cassini_client::{TCPClientConfig, TcpClientActor, TcpClientArgs, TcpClientMessage};
-use cassini_types::ClientEvent;
-use credentials_agent_common::events::CredentialsEvent;
+use cassini_types::{ClientEvent, WireTraceCtx};
+use credentials_agent_common::admin_action::{AdminActionReply, SignedAdminAction};
+use credentials_agent_common::{
+    CREDENTIALS_ADMIN_ACTION_REPLIES_TOPIC, CREDENTIALS_ADMIN_ACTION_REQUESTS_TOPIC,
+};
+use polar::request_reply::Envelope;
 use ractor::{Actor, ActorProcessingErr, ActorRef, OutputPort, async_trait};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::oneshot;
 
 pub struct PublishSupervisor;
 
 pub struct PublishSupervisorArgs {
-    pub event: CredentialsEvent,
-    pub topic: String,
-    pub done: oneshot::Sender<Result<(), String>>,
+    pub correlation_id: String,
+    pub request_bytes: Vec<u8>,
+    pub done: oneshot::Sender<Result<AdminActionReply, String>>,
 }
 
 pub struct PublishSupervisorState {
     client: ActorRef<TcpClientMessage>,
-    event: Option<CredentialsEvent>,
-    topic: String,
-    done: Option<oneshot::Sender<Result<(), String>>>,
+    correlation_id: String,
+    request_bytes: Option<Vec<u8>>,
+    done: Option<oneshot::Sender<Result<AdminActionReply, String>>>,
 }
 
 pub enum PublishMessage {
     ClientEvent { event: ClientEvent },
+}
+
+impl PublishSupervisorState {
+    fn finish(&mut self, result: Result<AdminActionReply, String>) {
+        if let Some(done) = self.done.take() {
+            let _ = done.send(result);
+        }
+    }
 }
 
 #[async_trait]
@@ -86,8 +102,8 @@ impl Actor for PublishSupervisor {
 
         Ok(PublishSupervisorState {
             client,
-            event: Some(args.event),
-            topic: args.topic,
+            correlation_id: args.correlation_id,
+            request_bytes: Some(args.request_bytes),
             done: Some(args.done),
         })
     }
@@ -99,52 +115,85 @@ impl Actor for PublishSupervisor {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         let PublishMessage::ClientEvent { event } = message;
-        if let ClientEvent::Registered { .. } = event
-            && let Some(event) = state.event.take()
-        {
-            let result = match rkyv::to_bytes::<rkyv::rancor::Error>(&event) {
-                Ok(bytes) => state
-                    .client
-                    .send_message(TcpClientMessage::publish(
-                        state.topic.clone(),
-                        bytes.to_vec(),
-                        None,
-                    ))
-                    .map_err(|e| e.to_string()),
-                Err(e) => Err(format!("serialization failed: {e}")),
-            };
-            if let Some(done) = state.done.take() {
-                let _ = done.send(result);
+        match event {
+            // Subscribe to replies first, then publish the request, so the
+            // reply can't be produced before this client is listening.
+            ClientEvent::Registered { .. } => {
+                let Some(bytes) = state.request_bytes.take() else {
+                    return Ok(());
+                };
+                if let Err(e) = state.client.send_message(TcpClientMessage::Subscribe {
+                    topic: CREDENTIALS_ADMIN_ACTION_REPLIES_TOPIC.to_string(),
+                    trace_ctx: WireTraceCtx::from_current_span(),
+                }) {
+                    state.finish(Err(format!("subscribe failed: {e}")));
+                    return Ok(());
+                }
+                if let Err(e) = state.client.send_message(TcpClientMessage::publish(
+                    CREDENTIALS_ADMIN_ACTION_REQUESTS_TOPIC.to_string(),
+                    bytes,
+                    None,
+                )) {
+                    state.finish(Err(format!("publish failed: {e}")));
+                }
             }
+            ClientEvent::MessagePublished { topic, payload, .. }
+                if topic == CREDENTIALS_ADMIN_ACTION_REPLIES_TOPIC =>
+            {
+                // Replies for other admins' requests share this topic;
+                // only the one carrying our correlation id is ours.
+                if let Ok(envelope) =
+                    rkyv::from_bytes::<Envelope<AdminActionReply>, rkyv::rancor::Error>(&payload)
+                    && envelope.correlation_id == state.correlation_id
+                {
+                    state.finish(Ok(envelope.payload));
+                }
+            }
+            _ => {}
         }
         Ok(())
     }
 }
 
-/// Connects, publishes `event` to `topic`, and waits for confirmation
-/// that the publish was actually enqueued -- not confirmation of
-/// delivery, which `TcpClientMessage::Publish` doesn't provide at
-/// all. Callers should allow a brief additional delay after this
-/// returns before the process exits, so the underlying TCP client has
-/// a real chance to flush the bytes over the wire.
-pub async fn publish_event(event: CredentialsEvent, topic: String) -> Result<(), String> {
+/// Connects, publishes the signed action, and waits for the credentials
+/// agent's reply to exactly this request.
+pub async fn request_admin_action(
+    signed: SignedAdminAction,
+    timeout: Duration,
+) -> Result<AdminActionReply, String> {
+    let correlation_id = uuid::Uuid::new_v4().to_string();
+    let envelope = Envelope {
+        correlation_id: correlation_id.clone(),
+        payload: signed,
+    };
+    let request_bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&envelope)
+        .map_err(|e| format!("serialization failed: {e}"))?
+        .to_vec();
+
     let (done_tx, done_rx) = oneshot::channel();
 
-    let (_supervisor, _) = Actor::spawn(
+    let (supervisor, handle) = Actor::spawn(
         None,
         PublishSupervisor,
         PublishSupervisorArgs {
-            event,
-            topic,
+            correlation_id,
+            request_bytes,
             done: done_tx,
         },
     )
     .await
     .map_err(|e| format!("failed to spawn publish supervisor: {e}"))?;
 
-    match tokio::time::timeout(std::time::Duration::from_secs(30), done_rx).await {
+    let outcome = match tokio::time::timeout(timeout, done_rx).await {
         Ok(Ok(result)) => result,
         Ok(Err(_)) => Err("publish supervisor exited without reporting a result".to_string()),
-        Err(_) => Err("timed out waiting to register with Cassini".to_string()),
-    }
+        Err(_) => Err(format!(
+            "no reply from the credentials agent within {}s",
+            timeout.as_secs()
+        )),
+    };
+
+    supervisor.stop(None);
+    let _ = handle.await;
+    outcome
 }

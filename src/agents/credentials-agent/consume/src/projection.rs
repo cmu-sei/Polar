@@ -297,6 +297,12 @@ fn graph_ops_for_event(event: &CredentialsEvent, grant_existed: bool) -> Vec<Gra
         // full cert PEM does. Lookup goes through LedgerActor's own
         // CredentialsState directly, not the graph.
         CredentialsEvent::SecretStored { .. } => vec![],
+        // An admin action projects exactly what its derived effect
+        // does: the same single derivation state folds.
+        CredentialsEvent::AdminActionRecorded { .. } => match event.admin_effect() {
+            Some(effect) => graph_ops_for_event(&effect, grant_existed),
+            None => vec![],
+        },
         CredentialsEvent::AgentEscrowIssuanceCompleted {
             identity,
             instance_binding,
@@ -349,13 +355,14 @@ fn graph_ops_for_event(event: &CredentialsEvent, grant_existed: bool) -> Vec<Gra
             timestamp,
             reason,
             via_bootstrap,
-            // Permissions and the CSR-overridable personal-detail
-            // defaults deliberately not projected -- same
+            // Permissions, capabilities and the CSR-overridable
+            // personal-detail defaults deliberately not projected -- same
             // metadata-only, observability-only discipline as every
             // other event here. An operator wanting the full record
             // reads it from the ledger's own derived state, not the
             // graph.
             permissions: _,
+            capabilities: _,
             given_name: _,
             surname: _,
             title: _,
@@ -509,7 +516,8 @@ fn event_timestamp(event: &CredentialsEvent) -> i64 {
         | CredentialsEvent::SecretStored { timestamp, .. }
         | CredentialsEvent::AgentEscrowIssuanceCompleted { timestamp, .. }
         | CredentialsEvent::AccountProvisioned { timestamp, .. }
-        | CredentialsEvent::AccountCertificateIssued { timestamp, .. } => *timestamp,
+        | CredentialsEvent::AccountCertificateIssued { timestamp, .. }
+        | CredentialsEvent::AdminActionRecorded { timestamp, .. } => *timestamp,
     }
 }
 
@@ -773,5 +781,38 @@ pub(crate) mod tests {
             ),
             other => panic!("expected UpsertNodes, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn graph_ops_for_a_recorded_grant_match_the_derived_grant() {
+        use credentials_agent_common::admin_action::{AdminAction, AdminActionBody, SignedAdminAction};
+        let payload = AdminActionBody {
+            nonce: "n1".to_string(),
+            action: AdminAction::Grant {
+                target_identity: "alice".to_string(),
+                permissions: vec![],
+                reason: GrantReason::UserOnboarding,
+            },
+        }
+        .to_payload()
+        .unwrap();
+        let signed = SignedAdminAction {
+            payload,
+            author_serial: "a1".to_string(),
+            signature: vec![],
+        };
+        let recorded = CredentialsEvent::AdminActionRecorded {
+            payload_hash: signed.payload_hash(),
+            signed,
+            author_account_id: "admin-acct".to_string(),
+            timestamp: 5000,
+            account_id: None,
+        };
+        let derived = recorded.admin_effect().unwrap();
+
+        let from_recorded = graph_ops_for_event(&recorded, false);
+        let from_derived = graph_ops_for_event(&derived, false);
+        assert!(!from_recorded.is_empty());
+        assert_eq!(from_recorded.len(), from_derived.len());
     }
 }

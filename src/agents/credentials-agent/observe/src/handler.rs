@@ -33,8 +33,12 @@ use axum::extract::{Json, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use cassini_client::TcpClientMessage;
+use credentials_agent_common::CREDENTIALS_ACCOUNT_REQUESTS_TOPIC;
 use credentials_agent_common::CREDENTIALS_ISSUANCE_REQUESTS_TOPIC;
 use credentials_agent_common::CREDENTIALS_IDENTITY_NORMALIZATION_REQUESTS_TOPIC;
+use credentials_agent_common::account_claim::{
+    AccountRefusal, AccountReply, AccountRequest, Claimant,
+};
 use credentials_agent_common::identity::{
     IdentityNormalizationReply, IdentityNormalizationRefusalReason, IdentityNormalizationRequest,
 };
@@ -44,7 +48,7 @@ use polar::request_reply::{Envelope, ReplyRouter};
 use ractor::ActorRef;
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::{error, warn};
+use tracing::{warn, error};
 
 /// Hard ceiling on a single attempt's wait, per
 /// cassini-request-reply-protocol.md: `min(token_remaining_lifetime / 3, 100s)`.
@@ -54,6 +58,7 @@ pub struct ObserverState {
     pub broker_client: ActorRef<TcpClientMessage>,
     pub issuance_reply_router: Arc<ReplyRouter<IssuanceReply>>,
     pub identity_reply_router: Arc<ReplyRouter<IdentityNormalizationReply>>,
+    pub account_reply_router: Arc<ReplyRouter<AccountReply>>,
 }
 
 pub async fn issue(
@@ -161,6 +166,92 @@ fn identity_reply_to_response(reply: IdentityNormalizationReply) -> Response {
         IdentityNormalizationReply::Normalized { .. } => StatusCode::OK,
         IdentityNormalizationReply::Refused { reason } => match reason {
             IdentityNormalizationRefusalReason::TokenInvalid => StatusCode::UNAUTHORIZED,
+        },
+    };
+    (status, Json(reply)).into_response()
+}
+
+/// POST /account -- both phases of the account claim, native and bootstrap
+/// alike, relayed blindly. The observer checks well-formedness (a CSR has to
+/// parse) and never a trust decision: who may claim what is the consumer's
+/// call, from the ledger.
+pub async fn account(
+    State(state): State<Arc<ObserverState>>,
+    Json(request): Json<AccountRequest>,
+) -> Response {
+    if let AccountRequest::Complete { csr_pem, .. } = &request
+        && let Err(e) = cert_issuer::csr::parse_csr(csr_pem)
+    {
+        let rejection = ObserverRejection::MalformedCsr(e.to_string());
+        return (StatusCode::BAD_REQUEST, Json(rejection)).into_response();
+    }
+
+    let claimant = match &request {
+        AccountRequest::Begin { claimant } | AccountRequest::Complete { claimant, .. } => claimant,
+    };
+    let timeout = claimant_timeout(claimant);
+
+    let correlation_id = uuid::Uuid::new_v4().to_string();
+    let rx = state.account_reply_router.register(correlation_id.clone());
+
+    let envelope = Envelope {
+        correlation_id: correlation_id.clone(),
+        payload: request,
+    };
+    let payload = match rkyv::to_bytes::<rkyv::rancor::Error>(&envelope) {
+        Ok(bytes) => bytes.to_vec(),
+        Err(e) => {
+            state.account_reply_router.cancel(&correlation_id);
+            error!("Failed to serialize account request envelope: {e}");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "internal error").into_response();
+        }
+    };
+
+    if let Err(e) = state.broker_client.send_message(TcpClientMessage::publish(
+        CREDENTIALS_ACCOUNT_REQUESTS_TOPIC.to_string(),
+        payload,
+        None,
+    )) {
+        state.account_reply_router.cancel(&correlation_id);
+        error!("Failed to publish account request: {e}");
+        return (StatusCode::SERVICE_UNAVAILABLE, "failed to reach the broker").into_response();
+    }
+
+    match tokio::time::timeout(timeout, rx).await {
+        Ok(Ok(reply)) => account_reply_to_response(reply),
+        Ok(Err(_)) => {
+            warn!("Reply channel closed with no reply for correlation_id {correlation_id}");
+            (StatusCode::GATEWAY_TIMEOUT, "no reply received").into_response()
+        }
+        Err(_) => {
+            state.account_reply_router.cancel(&correlation_id);
+            (StatusCode::GATEWAY_TIMEOUT, "timed out waiting for a reply").into_response()
+        }
+    }
+}
+
+/// A bootstrap claim carries a token, so it waits as long as an issuance
+/// does. A native claim has no credential to read a lifetime from and gets
+/// the full ceiling.
+fn claimant_timeout(claimant: &Claimant) -> Duration {
+    match claimant {
+        Claimant::Bootstrap { credential } => compute_timeout(credential),
+        Claimant::Native { .. } => Duration::from_secs(MAX_TIMEOUT_SECS as u64),
+    }
+}
+
+fn account_reply_to_response(reply: AccountReply) -> Response {
+    let status = match &reply {
+        AccountReply::Offered { .. } | AccountReply::Issued { .. } => StatusCode::OK,
+        AccountReply::Refused { reason } => match reason {
+            AccountRefusal::TokenInvalid => StatusCode::UNAUTHORIZED,
+            AccountRefusal::NoMatchingProvisioning
+            | AccountRefusal::NotTheBootstrapIdentity
+            | AccountRefusal::BootstrapAlreadyDone => StatusCode::FORBIDDEN,
+            AccountRefusal::CsrInvalid => StatusCode::BAD_REQUEST,
+            AccountRefusal::SigningFailed | AccountRefusal::Unavailable => {
+                StatusCode::SERVICE_UNAVAILABLE
+            }
         },
     };
     (status, Json(reply)).into_response()
@@ -324,6 +415,7 @@ mod tests {
             broker_client: broker,
             issuance_reply_router: reply_router,
             identity_reply_router: Arc::new(ReplyRouter::new()),
+            account_reply_router: Arc::new(ReplyRouter::new()),
         });
 
         let response = issue(
@@ -352,6 +444,7 @@ mod tests {
             broker_client: broker,
             issuance_reply_router: reply_router,
             identity_reply_router: Arc::new(ReplyRouter::new()),
+            account_reply_router: Arc::new(ReplyRouter::new()),
         });
 
         let response = issue(
@@ -378,6 +471,7 @@ mod tests {
             broker_client: broker,
             issuance_reply_router: reply_router,
             identity_reply_router: Arc::new(ReplyRouter::new()),
+            account_reply_router: Arc::new(ReplyRouter::new()),
         });
 
         let response = issue(
@@ -426,6 +520,7 @@ mod tests {
             broker_client: broker,
             issuance_reply_router: reply_router,
             identity_reply_router: Arc::new(ReplyRouter::new()),
+            account_reply_router: Arc::new(ReplyRouter::new()),
         });
 
         // A credential with no readable exp claim falls back to the
@@ -540,6 +635,7 @@ mod tests {
             broker_client: broker,
             issuance_reply_router: Arc::new(ReplyRouter::new()),
             identity_reply_router,
+            account_reply_router: Arc::new(ReplyRouter::new()),
         });
 
         let response = identity(
@@ -565,6 +661,7 @@ mod tests {
             broker_client: broker,
             issuance_reply_router: Arc::new(ReplyRouter::new()),
             identity_reply_router,
+            account_reply_router: Arc::new(ReplyRouter::new()),
         });
 
         let response = identity(
@@ -608,6 +705,7 @@ mod tests {
             broker_client: broker,
             issuance_reply_router: Arc::new(ReplyRouter::new()),
             identity_reply_router: Arc::new(ReplyRouter::new()),
+            account_reply_router: Arc::new(ReplyRouter::new()),
         });
 
         tokio::time::pause();
@@ -624,5 +722,251 @@ mod tests {
         let response = handle.await.unwrap();
 
         assert_eq!(response.status(), StatusCode::GATEWAY_TIMEOUT);
+    }
+}
+
+#[cfg(test)]
+mod account_tests {
+    use super::*;
+    use ractor::{Actor, ActorProcessingErr, async_trait};
+
+    /// Stands in for the broker: on a publish, decodes the account request
+    /// and delivers a canned reply through the same router.
+    struct FakeAccountBroker {
+        reply_router: Arc<ReplyRouter<AccountReply>>,
+        canned_reply: AccountReply,
+    }
+
+    #[async_trait]
+    impl Actor for FakeAccountBroker {
+        type Msg = TcpClientMessage;
+        type State = ();
+        type Arguments = ();
+
+        async fn pre_start(
+            &self,
+            _myself: ActorRef<Self::Msg>,
+            _args: (),
+        ) -> Result<Self::State, ActorProcessingErr> {
+            Ok(())
+        }
+
+        async fn handle(
+            &self,
+            _myself: ActorRef<Self::Msg>,
+            message: Self::Msg,
+            _state: &mut Self::State,
+        ) -> Result<(), ActorProcessingErr> {
+            if let TcpClientMessage::Publish { payload, .. } = message
+                && let Ok(envelope) =
+                    rkyv::from_bytes::<Envelope<AccountRequest>, rkyv::rancor::Error>(&payload)
+            {
+                self.reply_router
+                    .deliver(&envelope.correlation_id, self.canned_reply.clone());
+            }
+            Ok(())
+        }
+    }
+
+    /// Never answers, and fails the test if it is even asked.
+    struct PanickingBroker;
+
+    #[async_trait]
+    impl Actor for PanickingBroker {
+        type Msg = TcpClientMessage;
+        type State = ();
+        type Arguments = ();
+
+        async fn pre_start(
+            &self,
+            _myself: ActorRef<Self::Msg>,
+            _args: (),
+        ) -> Result<Self::State, ActorProcessingErr> {
+            Ok(())
+        }
+
+        async fn handle(
+            &self,
+            _myself: ActorRef<Self::Msg>,
+            _message: Self::Msg,
+            _state: &mut Self::State,
+        ) -> Result<(), ActorProcessingErr> {
+            panic!("the broker must never be called for a malformed CSR");
+        }
+    }
+
+    /// Receives the publish and never replies.
+    struct SilentBroker;
+
+    #[async_trait]
+    impl Actor for SilentBroker {
+        type Msg = TcpClientMessage;
+        type State = ();
+        type Arguments = ();
+
+        async fn pre_start(
+            &self,
+            _myself: ActorRef<Self::Msg>,
+            _args: (),
+        ) -> Result<Self::State, ActorProcessingErr> {
+            Ok(())
+        }
+
+        async fn handle(
+            &self,
+            _myself: ActorRef<Self::Msg>,
+            _message: Self::Msg,
+            _state: &mut Self::State,
+        ) -> Result<(), ActorProcessingErr> {
+            Ok(())
+        }
+    }
+
+    fn state_with(
+        broker: ActorRef<TcpClientMessage>,
+        account_reply_router: Arc<ReplyRouter<AccountReply>>,
+    ) -> Arc<ObserverState> {
+        Arc::new(ObserverState {
+            broker_client: broker,
+            issuance_reply_router: Arc::new(ReplyRouter::new()),
+            identity_reply_router: Arc::new(ReplyRouter::new()),
+            account_reply_router,
+        })
+    }
+
+    fn well_formed_csr() -> String {
+        let params = rcgen::CertificateParams::new(vec!["acct-1".to_string()]).unwrap();
+        let key_pair = rcgen::KeyPair::generate().unwrap();
+        params.serialize_request(&key_pair).unwrap().pem().unwrap()
+    }
+
+    fn native() -> Claimant {
+        Claimant::Native {
+            username: "alice".to_string(),
+            email: "alice@example.com".to_string(),
+        }
+    }
+
+    async fn broker_replying(
+        reply: AccountReply,
+    ) -> (ActorRef<TcpClientMessage>, Arc<ReplyRouter<AccountReply>>) {
+        let router = Arc::new(ReplyRouter::new());
+        let (broker, _) = Actor::spawn(
+            None,
+            FakeAccountBroker {
+                reply_router: router.clone(),
+                canned_reply: reply,
+            },
+            (),
+        )
+        .await
+        .unwrap();
+        (broker, router)
+    }
+
+    #[tokio::test]
+    async fn a_malformed_csr_is_rejected_before_anything_is_published() {
+        let (broker, _) = Actor::spawn(None, PanickingBroker, ()).await.unwrap();
+        let state = state_with(broker, Arc::new(ReplyRouter::new()));
+
+        let response = account(
+            State(state),
+            Json(AccountRequest::Complete {
+                claimant: native(),
+                csr_pem: "not a real CSR".to_string(),
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn begin_needs_no_csr_and_an_offer_comes_back_as_200() {
+        let (broker, router) = broker_replying(AccountReply::Offered {
+            account_id: "acct-1".to_string(),
+        })
+        .await;
+        let state = state_with(broker, router);
+
+        let response = account(
+            State(state),
+            Json(AccountRequest::Begin { claimant: native() }),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn complete_with_a_well_formed_csr_returns_the_issued_certificate() {
+        let (broker, router) = broker_replying(AccountReply::Issued {
+            certificate_pem: "fake-cert".to_string(),
+            ca_chain_pem: "fake-chain".to_string(),
+        })
+        .await;
+        let state = state_with(broker, router);
+
+        let response = account(
+            State(state),
+            Json(AccountRequest::Complete {
+                claimant: native(),
+                csr_pem: well_formed_csr(),
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn each_refusal_maps_to_its_status() {
+        for (reason, expected) in [
+            (AccountRefusal::TokenInvalid, StatusCode::UNAUTHORIZED),
+            (AccountRefusal::NoMatchingProvisioning, StatusCode::FORBIDDEN),
+            (AccountRefusal::NotTheBootstrapIdentity, StatusCode::FORBIDDEN),
+            (AccountRefusal::BootstrapAlreadyDone, StatusCode::FORBIDDEN),
+            (AccountRefusal::CsrInvalid, StatusCode::BAD_REQUEST),
+            (AccountRefusal::SigningFailed, StatusCode::SERVICE_UNAVAILABLE),
+            (AccountRefusal::Unavailable, StatusCode::SERVICE_UNAVAILABLE),
+        ] {
+            let (broker, router) = broker_replying(AccountReply::Refused { reason }).await;
+            let state = state_with(broker, router);
+
+            let response = account(
+                State(state),
+                Json(AccountRequest::Begin { claimant: native() }),
+            )
+            .await;
+
+            assert_eq!(response.status(), expected, "for {reason:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn no_reply_at_all_times_out() {
+        let (broker, _) = Actor::spawn(None, SilentBroker, ()).await.unwrap();
+        let state = state_with(broker, Arc::new(ReplyRouter::new()));
+
+        tokio::time::pause();
+        let handle = tokio::spawn(async move {
+            account(
+                State(state),
+                Json(AccountRequest::Begin { claimant: native() }),
+            )
+            .await
+        });
+        tokio::time::advance(Duration::from_secs(101)).await;
+        let response = handle.await.unwrap();
+
+        assert_eq!(response.status(), StatusCode::GATEWAY_TIMEOUT);
+    }
+
+    #[test]
+    fn a_native_claim_waits_the_full_ceiling() {
+        assert_eq!(
+            claimant_timeout(&native()),
+            Duration::from_secs(MAX_TIMEOUT_SECS as u64)
+        );
     }
 }

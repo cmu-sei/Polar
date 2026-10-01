@@ -21,22 +21,34 @@
    DM24-0470
 */
 
+mod bootstrap;
 mod bootstrap_ca;
 mod publish;
 
+use cert_issuer_common::capability::Capability;
 use cert_issuer_common::permission::Permission;
 use clap::{Parser, Subcommand};
-use credentials_agent_common::events::{CredentialsEvent, GrantReason, RevocationReason};
-use credentials_agent_common::{
-    CREDENTIALS_ACCOUNT_PROVISIONING_TOPIC, CREDENTIALS_GRANTS_TOPIC, CREDENTIALS_REVOCATIONS_TOPIC,
+use credentials_agent_common::admin_action::{
+    AdminAction, AdminActionBody, AdminActionReply,
 };
+use credentials_agent_common::admin_signing;
+use credentials_agent_common::events::{GrantReason, RevocationReason};
+use std::path::PathBuf;
+use std::time::Duration;
 
 #[derive(Parser, Debug)]
 #[command(
     name = "polar-admin-grant",
-    about = "Publish grants and revocations to the Credentials Agent"
+    about = "Sign administrative actions and submit them to the Credentials Agent"
 )]
 struct Args {
+    /// The admin's own certificate (PEM). Its key signs every action; the
+    /// credentials agent looks the author up by this certificate's serial.
+    #[arg(long, global = true, env = "TLS_CLIENT_CERT")]
+    cert: Option<PathBuf>,
+    /// The private key (PEM) matching --cert.
+    #[arg(long, global = true, env = "TLS_CLIENT_KEY")]
+    key: Option<PathBuf>,
     #[command(subcommand)]
     command: Command,
 }
@@ -59,8 +71,6 @@ enum Command {
         /// same way it will be when the certificate itself is parsed.
         #[arg(long = "permission", required = true, value_parser = Permission::from_san_string)]
         permissions: Vec<Permission>,
-        #[arg(long)]
-        granted_by: String,
         #[arg(long, value_enum)]
         reason: GrantReason,
     },
@@ -71,26 +81,16 @@ enum Command {
         serial: String,
         #[arg(long, value_enum)]
         reason: RevocationReason,
-        #[arg(long)]
-        revoked_by: String,
     },
-    /// Provision a new Polar account -- an admin-side act, mirroring
-    /// Grant's own shape, but for a durable account identity rather
-    /// than a permission on an existing one. The account isn't usable
-    /// until the holder submits a CSR claiming it by username and
-    /// email (see the account-claim flow) -- this only reserves the
-    /// account_id/permissions/field-defaults for that later claim.
-    /// Single-use: a second claim attempt after the first succeeds
-    /// finds nothing, by construction -- no separate check needed.
+    /// Provision a new Polar account. The account isn't usable until the
+    /// holder submits a CSR claiming it by username and email -- this only
+    /// reserves the permissions, capabilities and field defaults for that
+    /// later claim. The credentials agent mints the account's UUID; it is
+    /// never supplied here.
     ProvisionAccount {
-        /// The account's own durable identity -- a fresh UUID,
-        /// minted here, never chosen by or made known to the user in
-        /// advance.
-        #[arg(long)]
-        account_id: String,
         /// The human-facing nickname the user will present, together
-        /// with email, to claim this account. Cross-references
-        /// account_id; not itself the identity.
+        /// with email, to claim this account. Cross-references the
+        /// account's UUID; not itself the identity.
         #[arg(long)]
         username: String,
         /// Security-sensitive, admin-authoritative -- the actual
@@ -99,8 +99,10 @@ enum Command {
         email: String,
         #[arg(long = "permission", required = true, value_parser = Permission::from_san_string)]
         permissions: Vec<Permission>,
-        #[arg(long)]
-        provisioned_by: String,
+        /// Administrative capability the account holds, e.g.
+        /// `--capability c:grant`. May be repeated. Omit for none.
+        #[arg(long = "capability", value_parser = Capability::from_san_string)]
+        capabilities: Vec<Capability>,
         #[arg(long, value_enum)]
         reason: GrantReason,
         /// Admin-settable defaults for fields the user's own CSR may
@@ -121,7 +123,7 @@ enum Command {
     /// verify it. Run once per cluster, with the cluster admin's own
     /// kubeconfig, after the namespaces exist and before cert-issuer
     /// starts in provisioned mode. Unlike every other subcommand it does
-    /// not publish through Cassini -- the CA has to exist before Cassini
+    /// not go through Cassini -- the CA has to exist before Cassini
     /// can. It creates and never overwrites.
     BootstrapCa {
         /// Common name embedded in the CA certificate.
@@ -138,6 +140,30 @@ enum Command {
         #[arg(long = "configmap-namespace", default_values = ["polar", "polar-graph"])]
         configmap_namespaces: Vec<String>,
     },
+    /// Claim the bootstrap admin account, once per cluster. Mints a
+    /// short-lived token for the bootstrap ServiceAccount with your own
+    /// kubeconfig, proves it to the credentials agent through the observer,
+    /// and writes the resulting admin certificate and key to disk. Run it
+    /// after the observer is reachable, e.g. behind
+    /// `kubectl -n polar port-forward svc/credentials-agent-observer 8080`.
+    /// The claim succeeds exactly once: back the files up, because losing
+    /// them means rebuilding the cluster. Refuses to overwrite existing files.
+    Bootstrap {
+        #[arg(long, default_value = "polar-bootstrap")]
+        namespace: String,
+        #[arg(long, default_value = "polar-admin-bootstrap")]
+        service_account: String,
+        /// Audience the token is minted for; must be the one cert-issuer's
+        /// token validation expects.
+        #[arg(long, default_value = "polar-cert-issuer.local")]
+        audience: String,
+        #[arg(long, default_value = "http://localhost:8080")]
+        observer_url: String,
+        #[arg(long, default_value = "bootstrap-admin.crt")]
+        cert_out: PathBuf,
+        #[arg(long, default_value = "bootstrap-admin.key")]
+        key_out: PathBuf,
+    },
 }
 
 #[tokio::main]
@@ -146,106 +172,142 @@ async fn main() {
     std::process::exit(run(args).await);
 }
 
-fn event_and_topic_from_command(command: Command) -> (CredentialsEvent, &'static str) {
+/// The admin action a subcommand asks for. BootstrapCa is handled by run()
+/// before this is ever called: it is not an admin action.
+fn action_from_command(command: Command) -> AdminAction {
     match command {
         Command::Grant {
             target_identity,
             permissions,
-            granted_by,
             reason,
-        } => (
-            CredentialsEvent::Grant {
-                target_identity,
-                permissions,
-                granted_by,
-                timestamp: polar::time::now_millis(),
-                reason,
-            },
-            CREDENTIALS_GRANTS_TOPIC,
-        ),
-        Command::Revoke {
-            serial,
+        } => AdminAction::Grant {
+            target_identity,
+            permissions,
             reason,
-            revoked_by,
-        } => (
-            CredentialsEvent::Revoke {
-                serial,
-                reason,
-                revoked_by,
-                timestamp: polar::time::now_millis(),
-            },
-            CREDENTIALS_REVOCATIONS_TOPIC,
-        ),
+        },
+        Command::Revoke { serial, reason } => AdminAction::Revoke { serial, reason },
         Command::ProvisionAccount {
-            account_id,
             username,
             email,
             permissions,
-            provisioned_by,
+            capabilities,
             reason,
             given_name,
             surname,
             title,
             telephone_number,
-        } => (
-            CredentialsEvent::AccountProvisioned {
-                account_id,
-                username,
-                email,
-                permissions,
-                provisioned_by,
-                timestamp: polar::time::now_millis(),
-                reason,
-                via_bootstrap: false,
-                given_name,
-                surname,
-                title,
-                telephone_number,
-            },
-            CREDENTIALS_ACCOUNT_PROVISIONING_TOPIC,
-        ),
-        // Handled by run() before this function is ever called: it has
-        // no event to publish, and no Cassini to publish to yet.
-        Command::BootstrapCa { .. } => {
-            unreachable!("bootstrap-ca does not publish an event; run() dispatches it first")
+        } => AdminAction::ProvisionAccount {
+            username,
+            email,
+            permissions,
+            capabilities,
+            reason,
+            given_name,
+            surname,
+            title,
+            telephone_number,
+        },
+        Command::BootstrapCa { .. } | Command::Bootstrap { .. } => {
+            unreachable!("bootstrap commands are not admin actions; run() dispatches them first")
         }
     }
 }
 
 async fn run(args: Args) -> i32 {
-    let command = match args.command {
-        Command::BootstrapCa {
+    let Args { cert, key, command } = args;
+
+    if let Command::Bootstrap {
+        namespace,
+        service_account,
+        audience,
+        observer_url,
+        cert_out,
+        key_out,
+    } = command
+    {
+        return match bootstrap::run(bootstrap::BootstrapArgs {
+            namespace,
+            service_account,
+            audience,
+            observer_url,
+            cert_out,
+            key_out,
+        })
+        .await
+        {
+            Ok(()) => 0,
+            Err(e) => {
+                eprintln!("error: {e}");
+                1
+            }
+        };
+    }
+
+    if let Command::BootstrapCa {
+        common_name,
+        secret_namespace,
+        configmap_namespaces,
+    } = command
+    {
+        return match bootstrap_ca::run(bootstrap_ca::BootstrapCaArgs {
             common_name,
             secret_namespace,
             configmap_namespaces,
-        } => {
-            return match bootstrap_ca::run(bootstrap_ca::BootstrapCaArgs {
-                common_name,
-                secret_namespace,
-                configmap_namespaces,
-            })
-            .await
-            {
-                Ok(()) => 0,
-                Err(e) => {
-                    eprintln!("error: {e}");
-                    1
-                }
-            };
-        }
-        other => other,
-    };
-    let (event, topic) = event_and_topic_from_command(command);
+        })
+        .await
+        {
+            Ok(()) => 0,
+            Err(e) => {
+                eprintln!("error: {e}");
+                1
+            }
+        };
+    }
 
-    match publish::publish_event(event, topic.to_string()).await {
-        Ok(()) => {
-            // A brief, deliberate delay: Publish is fire-and-forget at
-            // the TcpClientMessage level -- this gives the underlying
-            // TCP client a real chance to flush the bytes over the
-            // wire before the process exits out from under it.
-            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-            eprintln!("published to {topic}");
+    let (Some(cert), Some(key)) = (cert, key) else {
+        eprintln!("error: --cert and --key (or TLS_CLIENT_CERT and TLS_CLIENT_KEY) are required");
+        return 1;
+    };
+
+    let cert_pem = match std::fs::read_to_string(&cert) {
+        Ok(pem) => pem,
+        Err(e) => {
+            eprintln!("error: cannot read {}: {e}", cert.display());
+            return 1;
+        }
+    };
+    let key_pem = match std::fs::read_to_string(&key) {
+        Ok(pem) => pem,
+        Err(e) => {
+            eprintln!("error: cannot read {}: {e}", key.display());
+            return 1;
+        }
+    };
+
+    let body = AdminActionBody {
+        nonce: uuid::Uuid::new_v4().to_string(),
+        action: action_from_command(command),
+    };
+    let signed = match admin_signing::sign(&body, &cert_pem, &key_pem) {
+        Ok(signed) => signed,
+        Err(e) => {
+            eprintln!("error: cannot sign: {e}");
+            return 1;
+        }
+    };
+
+    match publish::request_admin_action(signed, Duration::from_secs(30)).await {
+        Ok(AdminActionReply::Recorded) => {
+            eprintln!("recorded");
             0
+        }
+        Ok(AdminActionReply::Refused { reason }) => {
+            eprintln!("refused: {reason:?}");
+            1
+        }
+        Ok(AdminActionReply::Failed { detail }) => {
+            eprintln!("failed: {detail}");
+            1
         }
         Err(e) => {
             eprintln!("error: {e}");
@@ -259,25 +321,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn grant_command_produces_the_right_event_and_topic() {
-        let command = Command::Grant {
+    fn grant_command_becomes_a_grant_action() {
+        let action = action_from_command(Command::Grant {
             target_identity: "testuser".to_string(),
             permissions: vec![
                 Permission::from_san_string("p:s2s:cassini.cluster.local").unwrap(),
                 Permission::from_san_string("p:u2s").unwrap(),
             ],
-            granted_by: "admin".to_string(),
             reason: GrantReason::UserOnboarding,
-        };
+        });
 
-        let (event, topic) = event_and_topic_from_command(command);
-
-        assert_eq!(topic, CREDENTIALS_GRANTS_TOPIC);
-        match event {
-            CredentialsEvent::Grant {
+        match action {
+            AdminAction::Grant {
                 target_identity,
                 permissions,
-                granted_by,
                 ..
             } => {
                 assert_eq!(target_identity, "testuser");
@@ -288,35 +345,51 @@ mod tests {
                         Permission::from_san_string("p:u2s").unwrap(),
                     ]
                 );
-                assert_eq!(granted_by, "admin");
             }
             other => panic!("expected Grant, got {other:?}"),
         }
     }
 
     #[test]
-    fn revoke_command_produces_the_right_event_and_topic() {
-        let command = Command::Revoke {
+    fn revoke_command_becomes_a_revoke_action() {
+        let action = action_from_command(Command::Revoke {
             serial: "abc123".to_string(),
             reason: RevocationReason::Compromised,
-            revoked_by: "admin".to_string(),
-        };
+        });
 
-        let (event, topic) = event_and_topic_from_command(command);
-
-        assert_eq!(topic, CREDENTIALS_REVOCATIONS_TOPIC);
-        match event {
-            CredentialsEvent::Revoke {
-                serial,
-                reason,
-                revoked_by,
-                ..
-            } => {
+        match action {
+            AdminAction::Revoke { serial, reason } => {
                 assert_eq!(serial, "abc123");
                 assert_eq!(reason, RevocationReason::Compromised);
-                assert_eq!(revoked_by, "admin");
             }
             other => panic!("expected Revoke, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn provision_command_carries_capabilities_and_no_account_id() {
+        let action = action_from_command(Command::ProvisionAccount {
+            username: "alice".to_string(),
+            email: "alice@example.com".to_string(),
+            permissions: vec![Permission::from_san_string("p:u2s").unwrap()],
+            capabilities: vec![Capability::ProvisionAccount],
+            reason: GrantReason::UserOnboarding,
+            given_name: None,
+            surname: None,
+            title: None,
+            telephone_number: None,
+        });
+
+        match action {
+            AdminAction::ProvisionAccount {
+                username,
+                capabilities,
+                ..
+            } => {
+                assert_eq!(username, "alice");
+                assert_eq!(capabilities, vec![Capability::ProvisionAccount]);
+            }
+            other => panic!("expected ProvisionAccount, got {other:?}"),
         }
     }
 }
