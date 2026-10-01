@@ -75,7 +75,6 @@ build-all:
     nix build {{_nix_flags}} ".#packages.{{platform}}.agentContainer"        -o result-agent-container
     nix build {{_nix_flags}} ".#packages.{{platform}}.agentContainerRocm"    -o result-agent-container-rocm
     nix build {{_nix_flags}} ".#packages.{{platform}}.agentContainerVulkan"  -o result-agent-container-vulkan
-    nix build {{_nix_flags}} ".#packages.{{platform}}.tlsCerts"              -o result-tls-certs
     nix build {{_nix_flags}} ".#packages.{{platform}}.cassiniImage"          -o result-cassini
     nix build {{_nix_flags}} ".#packages.{{platform}}.cassiniProducerImage"  -o result-harness-producer
     nix build {{_nix_flags}} ".#packages.{{platform}}.cassiniSinkImage"      -o result-harness-sink
@@ -498,11 +497,6 @@ scheduler target='all':
 agents:
     nix build {{_nix_flags}} ".#packages.{{platform}}.default" -o polar
 
-# Build TLS certificates for local testing
-tls:
-    nix build {{_nix_flags}} ".#packages.{{platform}}.tlsCerts" -o result-tls-certs
-    ls -alh result-tls-certs
-
 # Build the nu-init infrastructure container
 nu-init:
     echo "Building nu-init container..."
@@ -831,47 +825,79 @@ ci:
         polar-dev:0.1.0 \
         bash -c "start.sh; chmod +x scripts/gitlab-ci.sh; chmod +x scripts/static-tools.sh; scripts/gitlab-ci.sh"
 
-# Install neo4j mTLS client cert into the browser's NSS certificate store.
-# Fetches fresh certs from the running cluster and imports into Librewolf.
-# Usage: just neo4j-install-certs
-neo4j-install-certs:
+# Import your claimed user certificate (and the Polar CA) into Librewolf.
+# Reads ~/.config/polar-admin/<username>.{crt,key} and ca.pem, which `claim`
+# and `bootstrap` wrote. Close Librewolf first so the NSS db is not locked.
+# Usage: just user-cert-install            (defaults to djshepard)
+#        just user-cert-install alice
+user-cert-install username="djshepard":
     #!/usr/bin/env bash
     set -euo pipefail
-    echo "Waiting for a Running Neo4j-client pod..."
-    AGENT_POD=""
-    AGENT_CONTAINER=""
-    for i in $(seq 1 30); do
-        for LABEL in kube-consumer jira-processor build-processor git-repo-consumer polar-gitlab-consumer artifact-linker polar-scheduler; do
-            CANDIDATE=$(kubectl get pod -n polar -l name="$LABEL" --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
-            if [ -n "$CANDIDATE" ]; then
-                AGENT_POD="$CANDIDATE"
-                AGENT_CONTAINER="$LABEL"
-                break 2
-            fi
-        done
-        sleep 2
+    DIR="$HOME/.config/polar-admin"
+    for f in "{{username}}.crt" "{{username}}.key" "ca.pem"; do
+        [ -f "$DIR/$f" ] || { echo "ERROR: missing $DIR/$f" >&2; exit 1; }
     done
-    if [ -z "$AGENT_POD" ]; then
-        echo "ERROR: no Running Neo4j-client pod found after 60s" >&2
-        exit 1
-    fi
-    echo "Fetching certs from $AGENT_POD (container: $AGENT_CONTAINER)..."
-    kubectl exec -n polar "$AGENT_POD" -c "$AGENT_CONTAINER" -- cat /etc/neo4j-client-tls/cert.pem > /tmp/neo4j-client-cert.pem
-    kubectl exec -n polar "$AGENT_POD" -c "$AGENT_CONTAINER" -- cat /etc/neo4j-client-tls/key.pem  > /tmp/neo4j-client-key.pem
-    kubectl exec -n polar-graph polar-neo4j-0 -- cat /var/lib/neo4j/certificates/https/trusted/ca.pem > /tmp/neo4j-ca.pem
-    echo "Bundling PKCS12..."
+    NSS_DB=$(find "$HOME/.librewolf" -maxdepth 2 -name cert9.db -printf '%h\n' | head -1)
+    [ -n "$NSS_DB" ] || { echo "ERROR: no Librewolf profile with cert9.db found" >&2; exit 1; }
+    TMP=$(mktemp -d)
+    trap 'rm -rf "$TMP"' EXIT
     openssl pkcs12 -export \
-        -out /tmp/neo4j-client.p12 \
-        -inkey /tmp/neo4j-client-key.pem \
-        -in /tmp/neo4j-client-cert.pem \
-        -certfile /tmp/neo4j-ca.pem \
-        -name "Polar Neo4j Client" \
+        -inkey "$DIR/{{username}}.key" \
+        -in "$DIR/{{username}}.crt" \
+        -certfile "$DIR/ca.pem" \
+        -name "Polar {{username}}" \
+        -out "$TMP/user.p12" \
         -passout pass:changeit
-    NSS_DB=~/.librewolf/$(ls ~/.librewolf/ | head -1)
-    echo "Importing into Librewolf NSS db at $NSS_DB..."
-    nix-shell -p nssTools --run "pk12util -i /tmp/neo4j-client.p12 -d '$NSS_DB' -W changeit"
-    nix-shell -p nssTools --run "certutil -M -n 'Polar Internal CA' -t 'CT,,' -d '$NSS_DB'"
-    echo "Done. Port-forward and browse to https://localhost:7473"
+    echo "Importing into $NSS_DB ..."
+    nix-shell -p nssTools --run "
+        pk12util -i '$TMP/user.p12' -d 'sql:$NSS_DB' -W changeit
+        certutil -D -n 'Polar Internal CA' -d 'sql:$NSS_DB' 2>/dev/null || true
+        certutil -A -n 'Polar Internal CA' -t 'CT,,' -a -i '$DIR/ca.pem' -d 'sql:$NSS_DB'
+    "
+    echo "Done. just port-forwards-up, then browse to https://localhost:7473"
+
+# ── polar-admin-grant wrappers ───────────────────────────────────────────────
+#
+# The observer URL is the port-forward from `just port-forwards-up`. Override
+# for another cluster:  POLAR_OBSERVER_URL=https://... just admin-claim ...
+# (product code has no default; this is only the dev convenience.)
+
+_admin_dir    := env_var('HOME') + "/.config/polar-admin"
+_observer_url := env_var_or_default('POLAR_OBSERVER_URL', 'http://localhost:8081')
+
+# Step 1: fetch the CA, then redeem the one-shot bootstrap credential.
+# Writes ~/.config/polar-admin/{ca.pem,bootstrap-admin.crt,bootstrap-admin.key}.
+admin-bootstrap:
+    mkdir -p {{_admin_dir}}
+    chmod 700 {{_admin_dir}}
+    kubectl -n polar get configmap polar-ca -o jsonpath='{.data.ca\.pem}' > {{_admin_dir}}/ca.pem
+    cd src/agents && cargo run -q -p polar-admin-grant -- \
+        --observer-url {{_observer_url}} bootstrap \
+        --cert-out {{_admin_dir}}/bootstrap-admin.crt \
+        --key-out  {{_admin_dir}}/bootstrap-admin.key
+
+# Step 2: provision a normal admin account, signed with the bootstrap cert.
+# Usage: just admin-provision djshepard djshepard@sei.cmu.edu
+admin-provision username email:
+    cd src/agents && cargo run -q -p polar-admin-grant -- \
+        --cert {{_admin_dir}}/bootstrap-admin.crt \
+        --key  {{_admin_dir}}/bootstrap-admin.key \
+        --observer-url {{_observer_url}} provision-account \
+        --username {{username}} --email {{email}} \
+        --permission p:u2s:polar-db-svc.polar-graph.svc.cluster.local \
+        --permission p:u2s:credentials-agent-observer.polar.svc.cluster.local \
+        --capability c:provision-account --capability c:grant \
+        --reason user-onboarding
+
+# Step 3: claim the provisioned account. Generates the keypair locally (the
+# key never leaves this machine) and writes ~/.config/polar-admin/<username>.{crt,key}.
+# Usage: just admin-claim djshepard djshepard@sei.cmu.edu
+admin-claim username email:
+    cd src/agents && cargo run -q -p polar-admin-grant -- \
+        --observer-url {{_observer_url}} claim \
+        --username {{username}} --email {{email}} \
+        --cert-out {{_admin_dir}}/{{username}}.crt \
+        --key-out  {{_admin_dir}}/{{username}}.key
 
 # Load a neo4j dump file into the cluster database.
 # Scales down neo4j, runs a loader pod as root, chowns the data, scales back up,
@@ -916,21 +942,45 @@ neo4j-load-dump dump_path:
     kubectl exec -n polar-graph polar-neo4j-0 -- /nix/store/qbds1qr8sf5qkzz8cady90bwhcnw05xf-neo4j-community-src-2025.8.0/opt/neo4j/bin/cypher-shell \
         -u neo4j -p "$NEO4J_PASSWORD" \
         "ALTER USER neo4j SET PASSWORD '$NEO4J_PASSWORD' CHANGE NOT REQUIRED"
-    echo "Done. Run 'just neo4j-install-certs' to update browser certs."
+    echo "Done. If you changed users, re-run: just user-cert-install"
 
 # ── nix-usernetes (local cluster) ────────────────────────────────────────────
 #
-# Full cluster startup sequence (for developers using nix-usernetes locally;
-# users bringing their own cluster should skip this section entirely):
+# Full startup sequence. Steps marked [dev] are for developers using
+# nix-usernetes locally; users bringing their own cluster skip those and
+# need their images in a registry the cluster can pull from.
 #
-#   cd ~/Documents/projects/nix-usernetes
-#   just load-node-image   # after every nix build
-#   just reset && just up && just init && just kubeconfig
-#   export KUBECONFIG=$(pwd)/kubeconfig
+#   1. [dev] Fresh cluster
+#        cd ~/Documents/projects/nix-usernetes
+#        just reset && just up && just init && just kubeconfig
+#        set -gx KUBECONFIG (pwd)/kubeconfig      # fish
+#        cd ~/Documents/projects/Polar
 #
-#   cd ~/Documents/projects/Polar
-#   just cluster-build-all && just cluster-load-all
-#   nu infra/render.nu local-minimal --apply
+#   2. [dev] Build and load images into the local registry
+#        just cluster-build-all && just cluster-load-all
+#
+#   3. Namespaces, CA, infra
+#        kubectl apply -f manifests/namespaces.yaml
+#        (cd src/agents && cargo run -p polar-admin-grant -- bootstrap-ca)
+#        nu infra/render.nu local-minimal --apply
+#
+#   4. Forwards; wait for cert-issuer, cassini, credentials-agent and
+#      credentials-agent-observer to be Running
+#        just port-forwards-up
+#        kubectl -n polar get pods -w
+#
+#   5. Admin material in ~/.config/polar-admin (chmod 700), starting with the CA
+#        kubectl -n polar get configmap polar-ca -o jsonpath='{.data.ca\.pem}' \
+#          > ~/.config/polar-admin/ca.pem
+#
+#   6. From src/agents, with --observer-url http://localhost:8081:
+#        polar-admin-grant bootstrap          (writes bootstrap-admin.{crt,key})
+#        polar-admin-grant provision-account  (signed with the bootstrap cert)
+#        polar-admin-grant claim              (writes <user>.{crt,key})
+#
+#   7. Browser, then Neo4j
+#        just user-cert-install
+#        browse to https://localhost:7473 and change the Neo4j password
 
 _u7s_dir      := env_var('HOME') + "/Documents/projects/nix-usernetes"
 _u7s_kubeconf := _u7s_dir + "/kubeconfig"

@@ -131,9 +131,6 @@
           inherit pkgs crane;
         };
 
-        # ── TLS certificates ───────────────────────────────────────────────────
-        tlsCerts = pkgs.callPackage ./src/flake/gen-certs.nix { inherit pkgs; };
-
         pkgsCuda = import nixpkgs {
           inherit system;
           config = {
@@ -152,7 +149,7 @@
         packages = {
           # ── Workspace binaries ───────────────────────────────────────────────
           default     = polarPkgs.workspacePackages;
-          inherit polarPkgs tlsCerts;
+          inherit polarPkgs;
 
           # ── Dev / CI / Agent containers ──────────────────────────────────────
           devContainer         = container.image;
@@ -226,25 +223,32 @@
             export HARNESS_SERVER_NAME="localhost"
             export CASSINI_SHUTDOWN_TOKEN="HEYTHERE"
 
-            export RUST_LOG=trace
+            export RUST_LOG=info
             export JAEGER_ENABLE_TRACING=1
             export JAEGER_OTLP_ENDPOINT="http://localhost:4318/v1/traces"
 
             export TMPDIR=$(mktemp -d)
 
-            export POLAR_SCHEDULER_LOCAL_PATH="~/Documents/projects/polar-sched-test"
+            export POLAR_SCHEDULER_LOCAL_PATH="$HOME/Documents/projects/polar-sched-test"
             export POLAR_SCHEDULER_REMOTE_URL="https://github.com/daveman1010221/polar-schedules.git"
             export POLAR_SCHEDULER_SYNC_INTERVAL="120"
 
             echo ""
-            echo "Polar dev shell — cluster startup sequence:"
-            echo "  cd ~/Documents/projects/nix-usernetes"
-            echo "  just load-node-image && just reset && just up && just init && just kubeconfig"
-            echo "  export KUBECONFIG=\$(pwd)/kubeconfig"
-            echo "  cd ~/Documents/projects/Polar"
-            echo "  just cluster-install-cert-manager"
-            echo "  just cluster-build-all && just cluster-load-all"
+            echo "Polar dev shell — startup sequence (steps marked [dev] are for nix-usernetes users):"
+            echo "  [dev] cd ~/Documents/projects/nix-usernetes"
+            echo "  [dev] just load-node-image && just reset && just up && just init && just kubeconfig"
+            echo "  [dev] set -gx KUBECONFIG (pwd)/kubeconfig   # fish;  bash: export KUBECONFIG=\$(pwd)/kubeconfig"
+            echo "  [dev] cd ~/Documents/projects/Polar"
+            echo "  [dev] just cluster-build-all && just cluster-load-all"
+            echo "  kubectl apply -f manifests/namespaces.yaml"
+            echo "  (cd src/agents && cargo run -p polar-admin-grant -- bootstrap-ca)"
             echo "  nu infra/render.nu local-minimal --apply"
+            echo "  just port-forwards-up        # then wait: kubectl -n polar get pods -w"
+            echo "  just admin-bootstrap"
+            echo "  just admin-provision <user> <email>"
+            echo "  just admin-claim <user> <email>"
+            echo "  just user-cert-install <user>"
+            echo "  # then browse to https://localhost:7473 and change the Neo4j password"
             echo ""
             export SOPS_AGE_BINARY=$(which rage)
             export SOPS_AGE_SSH_PRIVATE_KEY_FILE=~/.ssh/id_github
