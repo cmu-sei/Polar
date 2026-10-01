@@ -41,9 +41,7 @@ Polar is a knowledge graph framework that collects infrastructure data and loads
 ├── dev/                        # Development resources
 ├── dev-container/             # Dev container specifications
 ├── pipeline-out/              # Pipeline output artifacts
-├── result-agent-container     # Symlink to agent container image
-├── result-tls-certs            # Symlink to TLS certificates
-└── ca_certificates/           # CA certificate storage
+└── result-agent-container     # Symlink to agent container image
 ```
 
 ## Key Files and Directories
@@ -210,9 +208,6 @@ Agents for discovering, fetching, and consuming OpenAPI specifications:
 ```bash
 # Build all components
 nix build
-
-# Generate TLS certificates
-nix build .#tlsCerts -o certs
 
 # Build specific components
 nix build .#polarPkgs.gitlabObserver.observer -o gitlab-observer

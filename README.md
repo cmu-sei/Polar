@@ -382,50 +382,21 @@ podman run -p 8080:8080 \
 
 ### Local development without a cluster
 
-To hack on an individual agent or Cassini itself with plain `cargo
-build`/`cargo run` — no Kubernetes, no `cert-issuer`, no Keycloak — use
-a static, offline-generated CA and matching certificate pairs instead
-of the dynamic issuance flow:
+There is no static, offline-generated dev PKI any more: every certificate
+comes from `cert-issuer`, signed by the cluster's own CA. To iterate on an
+agent, rebuild its image, reload the images and bounce its pod; Jobs create a
+fresh pod, and `polar-init` fetches a new certificate from `cert-issuer`
+on startup:
 
 ```bash
-just tls   # one-time; the generated certs are valid for years
+(cd src/agents && just <agent> all)
+just cluster-load-all
+kubectl -n polar delete pod -l job-name=<agent>
 ```
 
-This produces `result-tls-certs/`, entirely separate from any cluster's
-own CA, with a matching cert pair for Cassini and for Neo4j.
-
-Run the broker directly:
-
-```bash
-export TLS_SERVER_CERT_CHAIN=$PWD/result-tls-certs/server/server_cassini_certificate.pem
-export TLS_SERVER_KEY=$PWD/result-tls-certs/server/server_cassini_key.pem
-export TLS_CA_CERT=$PWD/result-tls-certs/ca_certificates/ca_certificate.pem
-
-cargo run -p cassini-broker
-```
-
-And any client connecting to it, on the same machine:
-
-```bash
-export TLS_CLIENT_CERT=$PWD/result-tls-certs/client/client_cassini_certificate.pem
-export TLS_CLIENT_KEY=$PWD/result-tls-certs/client/client_cassini_key.pem
-export TLS_CA_CERT=$PWD/result-tls-certs/ca_certificates/ca_certificate.pem
-
-cargo run -p <agent-binary>
-```
-
-A local Neo4j instance can use `result-tls-certs/neo4j/`'s server/client
-pair the same way, signed by its own dedicated CA (kept separate from
-Cassini's, matching how the two are also isolated in a real
-deployment).
-
-**What you actually need depends on which kind of agent you're
-running:** an observer only needs to talk to Cassini, so the Cassini
-cert pair above is enough. A consumer additionally connects to Neo4j,
-so it also needs the matching `TLS_*` env vars pointed at
-`result-tls-certs/neo4j/`'s certificates (consult that binary's own
-source/config for its exact Neo4j-side env var names, which may differ
-from Cassini's).
+Human access (Neo4j Browser and the admin tools) uses a user certificate
+claimed through the admin flow; see the startup sequence in the `Justfile`
+(`just admin-bootstrap`, `admin-provision`, `admin-claim`, `user-cert-install`).
 
 ## Validating human certificate issuance
 
