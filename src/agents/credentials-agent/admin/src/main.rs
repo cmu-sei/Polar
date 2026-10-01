@@ -44,10 +44,12 @@ use std::time::Duration;
 struct Args {
     /// The admin's own certificate (PEM). Its key signs every action; the
     /// credentials agent looks the author up by this certificate's serial.
-    #[arg(long, global = true, env = "TLS_CLIENT_CERT")]
+    /// Falls back to $TLS_CLIENT_CERT when absent or empty.
+    #[arg(long, global = true)]
     cert: Option<PathBuf>,
-    /// The private key (PEM) matching --cert.
-    #[arg(long, global = true, env = "TLS_CLIENT_KEY")]
+    /// The private key (PEM) matching --cert. Falls back to $TLS_CLIENT_KEY
+    /// when absent or empty.
+    #[arg(long, global = true)]
     key: Option<PathBuf>,
     #[command(subcommand)]
     command: Command,
@@ -213,6 +215,15 @@ fn action_from_command(command: Command) -> AdminAction {
     }
 }
 
+/// A path from the environment, treating unset and empty alike. Read only by
+/// the commands that sign, so a stray empty variable in the shell cannot
+/// break the ones that never need a certificate.
+fn path_from_env(name: &str) -> Option<PathBuf> {
+    std::env::var_os(name)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+}
+
 async fn run(args: Args) -> i32 {
     let Args { cert, key, command } = args;
 
@@ -264,6 +275,8 @@ async fn run(args: Args) -> i32 {
         };
     }
 
+    let cert = cert.or_else(|| path_from_env("TLS_CLIENT_CERT"));
+    let key = key.or_else(|| path_from_env("TLS_CLIENT_KEY"));
     let (Some(cert), Some(key)) = (cert, key) else {
         eprintln!("error: --cert and --key (or TLS_CLIENT_CERT and TLS_CLIENT_KEY) are required");
         return 1;
