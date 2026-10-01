@@ -189,7 +189,7 @@ let render =
                         }
                       , command = Some [ "/bin/sh", "-c" ]
                       , args = Some
-                      [ "JAVA_HOME=$(dirname $(dirname $(readlink -f /bin/java))) && cp $JAVA_HOME/lib/security/cacerts /var/lib/neo4j/conf/cacerts && chmod u+w /var/lib/neo4j/conf/cacerts && /bin/keytool -import -noprompt -alias polar-internal-ca -file /var/lib/neo4j/certificates/https/trusted/ca.pem -keystore /var/lib/neo4j/conf/cacerts -storepass changeit"
+                      [ "rm -f /var/lib/neo4j/conf/cacerts && /bin/keytool -import -noprompt -alias polar-internal-ca -file /var/lib/neo4j/certificates/https/trusted/ca.pem -keystore /var/lib/neo4j/conf/cacerts -storepass changeit -storetype PKCS12"
                       ]
                       , volumeMounts = Some
                         [ kubernetes.VolumeMount::{ name = v.configVolume,       mountPath = "/var/lib/neo4j/conf"        }
