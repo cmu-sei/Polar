@@ -12,18 +12,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     polar::init_logging("kubernetes.cluster.observer.supervisor".to_string());
 
-    match Actor::spawn(
+    let (_, handle) = Actor::spawn(
         Some("kubernetes.cluster.observer.supervisor".to_string()),
         ClusterObserverSupervisor,
         (),
     )
     .await
-    {
-        Ok((_, handle)) => handle.await.expect("Something went wrong"),
-        Err(e) => {
-            error!("{e}");
-            return Err(format!("kube-observer failed to start: {e}").into());
-        }
-    }
-    Ok(())
+    .map_err(|e| {
+        error!("{e}");
+        format!("kube-observer failed to start: {e}")
+    })?;
+
+    handle
+        .await
+        .map_err(|e| format!("kube-observer supervisor task failed: {e}"))?;
+
+    // The supervisor stopping is never a success: an observer that is no
+    // longer observing must be restarted. Exit non-zero so the Job does.
+    Err("kube-observer supervisor stopped; exiting non-zero so the Job restarts it".into())
 }

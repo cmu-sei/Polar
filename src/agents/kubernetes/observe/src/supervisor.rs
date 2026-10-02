@@ -220,7 +220,7 @@ impl Actor for ClusterObserverSupervisor {
                 // agent / OTel trace once that's wired up.
                 std::process::exit(1);
             }
-            SupervisionEvent::ProcessGroupChanged(..) => todo!(),
+            SupervisionEvent::ProcessGroupChanged(..) => {}
         }
 
         Ok(())
