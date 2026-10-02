@@ -21,21 +21,17 @@
    DM24-0470
 */
 use crate::{
-    BROKER_CLIENT_NAME, Command, JiraObserverArgs, JiraObserverMessage, JiraObserverState,
-    handle_backoff, JiraDeployment
+    Command, JiraDeployment, JiraObserverArgs, JiraObserverMessage, JiraObserverState,
+    handle_backoff, publish_data,
 };
-use std::sync::LazyLock;
-use std::env;
-use cassini_client::TcpClientMessage;
-use cassini_types::ClientMessage;
 use jira_common::JIRA_ISSUES_CONSUMER_TOPIC;
 use jira_common::types::{JiraData, JiraField, JsonString};
-use ractor::{Actor, ActorProcessingErr, ActorRef, async_trait, registry::where_is};
-use rkyv::rancor::Error;
+use ractor::{Actor, ActorProcessingErr, ActorRef, async_trait};
+use std::env;
+use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
-use cassini_types::WireTraceCtx;
 use serde_json::Value;
 use std::collections::HashMap;
 
@@ -84,7 +80,7 @@ impl Actor for JiraIssueObserver {
             args.auth,
             args.deployment,
             args.web_client,
-            args.registration_id,
+            args.tcp_client,
             Duration::from_secs(args.base_interval),
             Duration::from_secs(args.max_backoff),
         );
@@ -286,29 +282,13 @@ fn publish_issues(
                 fields.as_object_mut().unwrap().remove(key);
             }
 
-            let tcp_client =
-                where_is(BROKER_CLIENT_NAME.to_string()).expect("Expected to find client");
-            let wrap = JiraData::Issues(JsonString {
-                json: cloned_issue.to_string(),
-            });
-            let bytes = rkyv::to_bytes::<Error>(&wrap).unwrap();
-
-            let msg = ClientMessage::PublishRequest {
-                topic: JIRA_ISSUES_CONSUMER_TOPIC.to_string(),
-                payload: bytes.to_vec().into(),
-                registration_id: state.registration_id.clone(),
-                trace_ctx: None,
-                share_identity: true,
-            };
-
-            let payload = rkyv::to_bytes::<rkyv::rancor::Error>(&msg)
-                .expect("Failed to serialize ClientMessage::PublishRequest");
-
-            tcp_client.send_message(TcpClientMessage::publish(
-                JIRA_ISSUES_CONSUMER_TOPIC.to_string(),
-                payload.into_vec(),
-                WireTraceCtx::from_current_span(),
-            ))?;
+            publish_data(
+                &state.tcp_client,
+                JIRA_ISSUES_CONSUMER_TOPIC,
+                &JiraData::Issues(JsonString {
+                    json: cloned_issue.to_string(),
+                }),
+            )?;
             count += 1;
         }
     }

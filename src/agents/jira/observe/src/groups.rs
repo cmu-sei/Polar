@@ -21,16 +21,11 @@
    DM24-0470
 */
 use crate::{
-    BROKER_CLIENT_NAME, Command, JiraObserverArgs, JiraObserverMessage, JiraObserverState,
-    handle_backoff,
+    Command, JiraObserverArgs, JiraObserverMessage, JiraObserverState, handle_backoff, publish_data,
 };
-use cassini_client::TcpClientMessage;
-use cassini_types::ClientMessage;
-use cassini_types::WireTraceCtx;
 use jira_common::JIRA_GROUPS_CONSUMER_TOPIC;
 use jira_common::types::{JiraData, JiraGroup};
-use ractor::{Actor, ActorProcessingErr, ActorRef, async_trait, registry::where_is};
-use rkyv::rancor::Error;
+use ractor::{Actor, ActorProcessingErr, ActorRef, async_trait};
 use std::time::Duration;
 use tracing::{debug, info};
 
@@ -77,7 +72,7 @@ impl Actor for JiraGroupObserver {
             args.auth,
             args.deployment,
             args.web_client,
-            args.registration_id,
+            args.tcp_client,
             Duration::from_secs(args.base_interval),
             Duration::from_secs(args.max_backoff),
         );
@@ -140,30 +135,11 @@ impl Actor for JiraGroupObserver {
                         start_at += fetched;
                     }
 
-                    let tcp_client =
-                        where_is(BROKER_CLIENT_NAME.to_string()).expect("Expected to find client");
-
-                    let data = JiraData::Groups(all_groups.clone());
-
-                    let bytes = rkyv::to_bytes::<Error>(&data).unwrap();
-
-                    let msg = ClientMessage::PublishRequest {
-                        topic: JIRA_GROUPS_CONSUMER_TOPIC.to_string(),
-                        payload: bytes.to_vec().into(),
-                        registration_id: state.registration_id.clone(),
-                        trace_ctx: None,
-                        share_identity: true,
-                    };
-
-                    // Serialize the inner client message before sending
-                    let payload = rkyv::to_bytes::<rkyv::rancor::Error>(&msg)
-                        .expect("Failed to serialize ClientMessage::PublishRequest");
-
-                    tcp_client.send_message(TcpClientMessage::publish(
-                        JIRA_GROUPS_CONSUMER_TOPIC.to_string(),
-                        payload.into_vec(),
-                        WireTraceCtx::from_current_span(),
-                    ))?
+                    publish_data(
+                        &state.tcp_client,
+                        JIRA_GROUPS_CONSUMER_TOPIC,
+                        &JiraData::Groups(all_groups),
+                    )?;
                 }
             }
             JiraObserverMessage::Backoff(reason) => {

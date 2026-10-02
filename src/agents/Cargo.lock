@@ -3612,6 +3612,7 @@ dependencies = [
  "log",
  "parse_link_header",
  "polar",
+ "polar-agent-builder",
  "ractor",
  "rand 0.10.3",
  "reqwest 0.12.28",

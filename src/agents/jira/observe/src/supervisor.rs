@@ -1,48 +1,61 @@
-use crate::BROKER_CLIENT_NAME;
-use crate::JIRA_GROUP_OBSERVER;
-use crate::JIRA_ISSUE_OBSERVER;
-use crate::JIRA_PROJECT_OBSERVER;
-use crate::JIRA_USER_OBSERVER;
-use crate::JiraAuth;
-use crate::JiraDeployment;
-use crate::JiraObserverArgs;
 use crate::groups::JiraGroupObserver;
 use crate::issues::JiraIssueObserver;
 use crate::projects::JiraProjectObserver;
 use crate::users::JiraUserObserver;
-use cassini_client::{TCPClientConfig, TcpClientActor, TcpClientArgs};
+use crate::{
+    BROKER_CLIENT_NAME, JIRA_GROUP_OBSERVER, JIRA_ISSUE_OBSERVER, JIRA_PROJECT_OBSERVER,
+    JIRA_USER_OBSERVER, JiraAuth, JiraDeployment, JiraObserverArgs, JiraObserverMessage,
+};
 use cassini_types::ClientEvent;
 use jira_common::get_file_as_byte_vec;
-use polar::SupervisorMessage;
-use polar::health::{DepCertEndpoint, HealthCheckActor, HealthCheckArgs, HealthCheckMessage};
-use ractor::Actor;
-use ractor::ActorProcessingErr;
-use ractor::ActorRef;
-use ractor::OutputPort;
-use ractor::SupervisionEvent;
-use ractor::async_trait;
+use polar::cassini::TcpClient;
+use polar_agent_builder::{
+    AgentBuilder, HealthClient, HealthHandle, InfrastructureEvent, InfrastructureSupervisorMessage,
+};
 use ractor::concurrency::Duration;
-use reqwest::Certificate;
-use reqwest::Client;
-use reqwest::ClientBuilder;
-use std::sync::Arc;
-use tracing::error;
-use tracing::{debug, info, warn};
+use ractor::{Actor, ActorId, ActorProcessingErr, ActorRef, SupervisionEvent, async_trait};
+use reqwest::{Certificate, Client, ClientBuilder};
+use tracing::{debug, error, info, warn};
 
-const HEALTHCHECK_ACTOR_NAME: &str = "polar.healthcheck";
-const DRAIN_WINDOW_SECS: u64 = 5;
+/// How long a child observer gets to stop before the supervisor moves on.
+/// An observer in the middle of a Jira pull only sees the stop between
+/// messages, so this has to be bounded.
+const OBSERVER_STOP_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// This supervisor's own message type. polar::SupervisorMessage cannot carry
+/// the infrastructure signals without polar-agent-builder depending back on
+/// lib, so the builder is generic over the message (see kube-observer).
+pub enum ObserverSupervisorMessage {
+    ClientEvent {
+        event: ClientEvent,
+    },
+    /// InfrastructureSupervisor replaced the TcpClient after an unexpected
+    /// termination. The observers hold the old handle, so they are stopped
+    /// and rebuilt on the next Registered.
+    InfrastructureRespawned { tcp_client: TcpClient },
+    /// The HealthCheckActor, a child of InfrastructureSupervisor, has
+    /// terminated for rejuvenation. Stop the observers, then send
+    /// InfrastructureSupervisorMessage::ProceedWithShutdown.
+    PrepareShutdown,
+}
 
 pub struct ObserverSupervisor;
 
 pub struct ObserverSupervisorState {
-    pub jira_url: String,
-    pub auth: JiraAuth,
-    pub deployment: JiraDeployment,
-    pub base_interval: u64,
-    pub max_backoff_secs: u64,
-    pub proxy_ca_cert_file: Option<String>,
-    healthcheck: ActorRef<HealthCheckMessage>,
-    draining: bool,
+    jira_url: String,
+    auth: JiraAuth,
+    deployment: JiraDeployment,
+    base_interval: u64,
+    max_backoff_secs: u64,
+    web_client: Client,
+    tcp_client: TcpClient,
+    healthcheck: HealthHandle,
+    /// Sent ProceedWithShutdown once the observers have stopped.
+    infrastructure: ActorRef<InfrastructureSupervisorMessage>,
+    projects: Option<ActorRef<JiraObserverMessage>>,
+    groups: Option<ActorRef<JiraObserverMessage>>,
+    users: Option<ActorRef<JiraObserverMessage>>,
+    issues: Option<ActorRef<JiraObserverMessage>>,
 }
 
 pub struct ObserverSupervisorArgs {
@@ -54,34 +67,134 @@ pub struct ObserverSupervisorArgs {
     pub max_backoff_secs: u64,
 }
 
-impl ObserverSupervisor {
-    /// Build reqwest client, optionally with a proxy CA certificate
-    fn get_client(proxy_ca_cert_path: Option<String>) -> Client {
-        match proxy_ca_cert_path {
-            Some(path) => {
-                let cert_data = get_file_as_byte_vec(&path)
-                    .expect("Expected to find a proxy CA certificate at {path}");
-                let root_cert = Certificate::from_pem(&cert_data)
-                    .expect("Expected {path} to be in PEM format.");
-
-                info!("Found PROXY_CA_CERT at: {path}, Configuring web client...");
-
-                ClientBuilder::new()
-                    .add_root_certificate(root_cert)
-                    .use_rustls_tls()
-                    .build()
-                    .expect("Expected to build web client with proxy CA certificate")
-            }
-            None => ClientBuilder::new()
-                .build()
-                .expect("Expected to build web client."),
+impl ObserverSupervisorState {
+    fn observer_args(&self) -> JiraObserverArgs {
+        JiraObserverArgs {
+            jira_url: self.jira_url.clone(),
+            auth: self.auth.clone(),
+            deployment: self.deployment,
+            tcp_client: self.tcp_client.clone(),
+            web_client: self.web_client.clone(),
+            base_interval: self.base_interval,
+            max_backoff: self.max_backoff_secs,
         }
+    }
+
+    /// True if this is one of the observers the supervisor currently expects
+    /// to be running. Observers it stopped on purpose have already been
+    /// taken out of their slot, so their termination is not an error.
+    fn tracks(&self, id: ActorId) -> bool {
+        [&self.projects, &self.groups, &self.users, &self.issues]
+            .into_iter()
+            .any(|slot| slot.as_ref().is_some_and(|o| o.get_id() == id))
+    }
+
+    fn take_observers(&mut self) -> Vec<ActorRef<JiraObserverMessage>> {
+        [
+            self.projects.take(),
+            self.groups.take(),
+            self.users.take(),
+            self.issues.take(),
+        ]
+        .into_iter()
+        .flatten()
+        .collect()
+    }
+
+    /// Stops every running observer and waits for each, bounded. A timeout
+    /// is logged rather than fatal: the process is about to exit or the
+    /// observers are about to be rebuilt either way.
+    async fn stop_observers(&mut self, reason: &str) {
+        for observer in self.take_observers() {
+            if let Err(e) = observer
+                .stop_and_wait(Some(reason.to_string()), Some(OBSERVER_STOP_TIMEOUT))
+                .await
+            {
+                warn!("OBSERVER_SUPERVISOR: observer did not stop cleanly: {e:?}");
+            }
+        }
+    }
+}
+
+impl ObserverSupervisor {
+    /// Build reqwest client, optionally with a proxy CA certificate.
+    fn get_client(proxy_ca_cert_path: Option<&str>) -> Result<Client, ActorProcessingErr> {
+        let mut builder = ClientBuilder::new();
+
+        if let Some(path) = proxy_ca_cert_path {
+            let cert_data = get_file_as_byte_vec(&path.to_string()).map_err(|e| {
+                ActorProcessingErr::from(format!(
+                    "failed to read proxy CA certificate at {path}: {e}"
+                ))
+            })?;
+            let root_cert = Certificate::from_pem(&cert_data).map_err(|e| {
+                ActorProcessingErr::from(format!("{path} is not a PEM certificate: {e}"))
+            })?;
+
+            info!("Found PROXY_CA_CERT at: {path}, configuring web client...");
+            builder = builder.add_root_certificate(root_cert).use_rustls_tls();
+        }
+
+        builder
+            .build()
+            .map_err(|e| ActorProcessingErr::from(format!("failed to build web client: {e}")))
+    }
+
+    /// Starts whichever observers are not running. Safe to call on every
+    /// Registered: a reconnect finds the slots full and starts nothing.
+    async fn spawn_observers(
+        myself: &ActorRef<ObserverSupervisorMessage>,
+        state: &mut ObserverSupervisorState,
+    ) -> Result<(), ActorProcessingErr> {
+        let args = state.observer_args();
+
+        if state.projects.is_none() {
+            let (observer, _) = Actor::spawn_linked(
+                Some(JIRA_PROJECT_OBSERVER.to_string()),
+                JiraProjectObserver,
+                args.clone(),
+                myself.clone().into(),
+            )
+            .await?;
+            state.projects = Some(observer);
+        }
+        if state.groups.is_none() {
+            let (observer, _) = Actor::spawn_linked(
+                Some(JIRA_GROUP_OBSERVER.to_string()),
+                JiraGroupObserver,
+                args.clone(),
+                myself.clone().into(),
+            )
+            .await?;
+            state.groups = Some(observer);
+        }
+        if state.users.is_none() {
+            let (observer, _) = Actor::spawn_linked(
+                Some(JIRA_USER_OBSERVER.to_string()),
+                JiraUserObserver,
+                args.clone(),
+                myself.clone().into(),
+            )
+            .await?;
+            state.users = Some(observer);
+        }
+        if state.issues.is_none() {
+            let (observer, _) = Actor::spawn_linked(
+                Some(JIRA_ISSUE_OBSERVER.to_string()),
+                JiraIssueObserver,
+                args,
+                myself.clone().into(),
+            )
+            .await?;
+            state.issues = Some(observer);
+        }
+        Ok(())
     }
 }
 
 #[async_trait]
 impl Actor for ObserverSupervisor {
-    type Msg = SupervisorMessage;
+    type Msg = ObserverSupervisorMessage;
     type State = ObserverSupervisorState;
     type Arguments = ObserverSupervisorArgs;
 
@@ -92,59 +205,43 @@ impl Actor for ObserverSupervisor {
     ) -> Result<Self::State, ActorProcessingErr> {
         debug!("{myself:?} starting");
 
-        // Observers only depend on Cassini -- no graph dependency.
-        let dep_cert_endpoints = vec![
-            DepCertEndpoint::parse("cassini-ip-svc.polar.svc.cluster.local:8080:300")
-                .map_err(|e| ActorProcessingErr::from(e))?,
-        ];
+        // Fail on a bad proxy CA before anything is started.
+        let web_client = ObserverSupervisor::get_client(args.proxy_ca_cert_file.as_deref())?;
 
-        let (healthcheck, _) = HealthCheckActor::spawn_linked(
-            Some(HEALTHCHECK_ACTOR_NAME.to_string()),
-            HealthCheckActor,
-            HealthCheckArgs {
-                expects_graph: false,
-                rejuvenation_threshold_secs: 300,
-                dep_cert_endpoints,
-            },
-            myself.get_cell(),
-        )
-        .await
-        .map_err(|e| ActorProcessingErr::from(e))?;
+        // Health check, router and broker client in one call. Observers only
+        // depend on Cassini, which is the default capability, so there is
+        // nothing to declare beyond the lifecycle handler.
+        let resources = AgentBuilder::new(myself.clone(), BROKER_CLIENT_NAME)
+            .with_lifecycle_handler(|event| Some(ObserverSupervisorMessage::ClientEvent { event }))
+            .build()
+            .await?;
 
-        let events_output = std::sync::Arc::new(OutputPort::default());
-        events_output.subscribe(myself.clone(), |event| {
-            Some(SupervisorMessage::ClientEvent { event })
-        });
+        resources
+            .infrastructure_events
+            .subscribe(myself.clone(), |event| match event {
+                InfrastructureEvent::Respawned { tcp_client, .. } => {
+                    Some(ObserverSupervisorMessage::InfrastructureRespawned { tcp_client })
+                }
+                InfrastructureEvent::PrepareShutdown => {
+                    Some(ObserverSupervisorMessage::PrepareShutdown)
+                }
+            });
 
-        let config = TCPClientConfig::new()?;
-
-        match Actor::spawn_linked(
-            Some(BROKER_CLIENT_NAME.to_string()),
-            TcpClientActor,
-            TcpClientArgs {
-                config,
-                registration_id: None,
-                delivery: cassini_client::DeliveryMode::Broadcast(events_output),
-            },
-            myself.clone().into(),
-        )
-        .await
-        {
-            Ok(_) => Ok(ObserverSupervisorState {
-                jira_url: args.jira_url.clone(),
-                auth: args.auth.clone(),
-                deployment: args.deployment,
-                base_interval: args.base_interval,
-                max_backoff_secs: args.max_backoff_secs,
-                proxy_ca_cert_file: args.proxy_ca_cert_file,
-                healthcheck,
-                draining: false,
-            }),
-            Err(e) => {
-                error!("{e}");
-                Err(ActorProcessingErr::from(e))
-            }
-        }
+        Ok(ObserverSupervisorState {
+            jira_url: args.jira_url,
+            auth: args.auth,
+            deployment: args.deployment,
+            base_interval: args.base_interval,
+            max_backoff_secs: args.max_backoff_secs,
+            web_client,
+            tcp_client: resources.tcp_client,
+            healthcheck: resources.healthcheck,
+            infrastructure: resources.infrastructure,
+            projects: None,
+            groups: None,
+            users: None,
+            issues: None,
+        })
     }
 
     async fn handle(
@@ -154,79 +251,36 @@ impl Actor for ObserverSupervisor {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
-            SupervisorMessage::Heartbeat => {}
-            SupervisorMessage::GraphSignal(_) => {}
-            SupervisorMessage::ForceExit => {
-                warn!("OBSERVER_SUPERVISOR: drain window elapsed, exiting now");
-                std::process::exit(1);
+            ObserverSupervisorMessage::InfrastructureRespawned { tcp_client } => {
+                warn!(
+                    "TCP client was respawned by InfrastructureSupervisor; stopping observers \
+                     so they are rebuilt with the new handle on the next Registered"
+                );
+                state.stop_observers("tcp_client_respawn").await;
+                state.tcp_client = tcp_client;
             }
-            SupervisorMessage::ClientEvent { event } => match event {
-                ClientEvent::Registered { registration_id } => {
-                    let _ = state.healthcheck.cast(HealthCheckMessage::CassiniConnected);
+            ObserverSupervisorMessage::PrepareShutdown => {
+                info!(
+                    "OBSERVER_SUPERVISOR: PrepareShutdown received, stopping observers \
+                     before infrastructure"
+                );
+                state.stop_observers("rejuvenation").await;
 
-                    let args = JiraObserverArgs {
-                        jira_url: state.jira_url.clone(),
-                        auth: state.auth.clone(),
-                        deployment: state.deployment,
-                        registration_id: registration_id.clone(),
-                        web_client: ObserverSupervisor::get_client(
-                            state.proxy_ca_cert_file.clone(),
-                        ),
-                        base_interval: state.base_interval,
-                        max_backoff: state.max_backoff_secs,
-                    };
-                    if let Err(e) = Actor::spawn_linked(
-                        Some(JIRA_PROJECT_OBSERVER.to_string()),
-                        JiraProjectObserver,
-                        args.clone(),
-                        myself.clone().into(),
-                    )
-                    .await
-                    {
-                        warn!("failed to start project observer {e}")
-                    }
-
-                    if let Err(e) = Actor::spawn_linked(
-                        Some(JIRA_GROUP_OBSERVER.to_string()),
-                        JiraGroupObserver,
-                        args.clone(),
-                        myself.clone().into(),
-                    )
-                    .await
-                    {
-                        warn!("failed to start group observer {e}")
-                    }
-                    if let Err(e) = Actor::spawn_linked(
-                        Some(JIRA_USER_OBSERVER.to_string()),
-                        JiraUserObserver,
-                        args.clone(),
-                        myself.clone().into(),
-                    )
-                    .await
-                    {
-                        warn!("failed to start user observer {e}")
-                    }
-                    if let Err(e) = Actor::spawn_linked(
-                        Some(JIRA_ISSUE_OBSERVER.to_string()),
-                        JiraIssueObserver,
-                        args.clone(),
-                        myself.clone().into(),
-                    )
-                    .await
-                    {
-                        warn!("failed to start issue observer {e}")
-                    }
+                let _ = state
+                    .infrastructure
+                    .cast(InfrastructureSupervisorMessage::ProceedWithShutdown);
+            }
+            ObserverSupervisorMessage::ClientEvent { event } => match event {
+                ClientEvent::Registered { .. } => {
+                    let _ = state.healthcheck.cassini_connected();
+                    ObserverSupervisor::spawn_observers(&myself, state).await?;
                 }
                 ClientEvent::MessagePublished { .. } => {
-                    if state.draining {
-                        warn!("OBSERVER_SUPERVISOR: draining -- ignoring unexpected message");
-                    } else {
-                        warn!("OBSERVER_SUPERVISOR: unexpected MessagePublished event received, ignoring");
-                    }
+                    warn!("OBSERVER_SUPERVISOR: unexpected MessagePublished event, ignoring");
                 }
                 ClientEvent::TransportError { reason } => {
                     warn!("Transport error occurred (non-fatal, awaiting reconnect): {reason}");
-                    let _ = state.healthcheck.cast(HealthCheckMessage::CassiniDisconnected);
+                    let _ = state.healthcheck.cassini_disconnected();
                 }
                 _ => (),
             },
@@ -236,7 +290,7 @@ impl Actor for ObserverSupervisor {
 
     async fn handle_supervisor_evt(
         &self,
-        myself: ActorRef<Self::Msg>,
+        _myself: ActorRef<Self::Msg>,
         msg: SupervisionEvent,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
@@ -244,46 +298,29 @@ impl Actor for ObserverSupervisor {
             SupervisionEvent::ActorStarted(_) => (),
             SupervisionEvent::ActorTerminated(actor_cell, _, reason) => {
                 let actor_name = actor_cell.get_name().unwrap_or_default();
-                error!(
-                    "OBSERVER_SUPERVISOR: {0:?}:{1:?} terminated. {reason:?}",
-                    actor_name,
-                    actor_cell.get_id()
-                );
 
-                if actor_name == HEALTHCHECK_ACTOR_NAME {
-                    if !state.draining {
-                        state.draining = true;
-                        info!(
-                            "OBSERVER_SUPERVISOR: healthcheck actor terminated cleanly, \
-                             entering drain window before exiting for rejuvenation"
-                        );
-                        let _ = myself
-                            .send_after(Duration::from_secs(DRAIN_WINDOW_SECS), || {
-                                SupervisorMessage::ForceExit
-                            })
-                            .await;
-                    }
-                    return Ok(());
-                }
-
-                // At time of writing, any other observer terminating is a
-                // likely unrecoverable state (invalid Jira token, malformed
-                // query) requiring admin intervention. Preserve that
-                // existing behavior, but route through the same bounded
-                // drain window rather than stopping outright with no exit
-                // trigger.
-                if !state.draining {
-                    state.draining = true;
-                    warn!(
-                        "OBSERVER_SUPERVISOR: entering drain window before exit; \
-                         likely unrecoverable state (see terminated actor above)"
+                // InfrastructureSupervisor finishing is the end of the
+                // shutdown handshake. Exit non-zero so the Job controller
+                // starts a new pod with fresh certs.
+                if actor_cell.get_id() == state.infrastructure.get_id() {
+                    info!(
+                        "OBSERVER_SUPERVISOR: infrastructure shutdown complete, exiting for rejuvenation"
                     );
-                    let _ = myself
-                        .send_after(Duration::from_secs(DRAIN_WINDOW_SECS), || {
-                            SupervisorMessage::ForceExit
-                        })
-                        .await;
+                    std::process::exit(1);
                 }
+
+                // An observer we still expect to be running stopped on its
+                // own, typically after exhausting its backoff or hitting bad
+                // credentials. That needs an admin, and a visible pod
+                // restart is the signal.
+                if state.tracks(actor_cell.get_id()) {
+                    error!(
+                        "OBSERVER_SUPERVISOR: observer {actor_name:?} stopped unexpectedly: {reason:?}"
+                    );
+                    std::process::exit(1);
+                }
+
+                debug!("OBSERVER_SUPERVISOR: {actor_name:?} stopped as requested: {reason:?}");
             }
             SupervisionEvent::ActorFailed(actor_cell, e) => {
                 error!(
@@ -291,22 +328,9 @@ impl Actor for ObserverSupervisor {
                     actor_cell.get_name(),
                     actor_cell.get_id()
                 );
-                if !state.draining {
-                    state.draining = true;
-                    warn!(
-                        "OBSERVER_SUPERVISOR: entering drain window before exit; \
-                         any messages that arrive will be ignored"
-                    );
-                    let _ = myself
-                        .send_after(Duration::from_secs(DRAIN_WINDOW_SECS), || {
-                            SupervisorMessage::ForceExit
-                        })
-                        .await;
-                }
+                std::process::exit(1);
             }
-            SupervisionEvent::ProcessGroupChanged(..) => {
-                todo!("Investigate how this would/could happen and how to respond.")
-            }
+            SupervisionEvent::ProcessGroupChanged(..) => (),
         }
 
         Ok(())

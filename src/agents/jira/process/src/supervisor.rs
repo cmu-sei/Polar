@@ -1,6 +1,6 @@
 use crate::BROKER_CLIENT_NAME;
 use crate::{groups, issues, projects, users};
-use cassini_types::{ClientEvent, ClientMessage};
+use cassini_types::ClientEvent;
 use jira_common::types::JiraData;
 use jira_common::{
     JIRA_GROUPS_CONSUMER_TOPIC, JIRA_ISSUES_CONSUMER_TOPIC, JIRA_PROJECTS_CONSUMER_TOPIC,
@@ -67,30 +67,14 @@ pub struct ConsumerSupervisorState {
     shutting_down: bool,
 }
 
-/// Unwraps what an observer published: the payload of the event is a
-/// serialized ClientMessage::PublishRequest whose own payload is the
+/// Decodes what an observer published: the payload of the event is the
 /// serialized JiraData. Anything that does not decode is logged and
 /// dropped, never fatal.
 pub fn decode_payload(payload: &[u8]) -> Option<JiraData> {
-    let message = match rkyv::from_bytes::<ClientMessage, rkyv::rancor::Error>(payload) {
-        Ok(message) => message,
+    match rkyv::from_bytes::<JiraData, rkyv::rancor::Error>(payload) {
+        Ok(data) => Some(data),
         Err(e) => {
-            warn!("Failed to deserialize message: {e:?}");
-            return None;
-        }
-    };
-    match message {
-        ClientMessage::PublishRequest { payload, .. } => {
-            match rkyv::from_bytes::<JiraData, rkyv::rancor::Error>(&payload) {
-                Ok(data) => Some(data),
-                Err(e) => {
-                    warn!("Failed to deserialize jira data: {e:?}");
-                    None
-                }
-            }
-        }
-        other => {
-            warn!("Received unexpected ClientMessage variant: {other:?}");
+            warn!("Failed to deserialize jira data: {e:?}");
             None
         }
     }
@@ -374,18 +358,10 @@ mod tests {
     use super::*;
     use jira_common::types::JiraProject;
 
-    /// What an observer puts on the wire for this agent: a serialized
-    /// PublishRequest wrapping the serialized JiraData.
+    /// What an observer puts on the wire for this agent: the serialized
+    /// JiraData, nothing else.
     fn as_published(data: &JiraData) -> Vec<u8> {
-        let inner = rkyv::to_bytes::<rkyv::rancor::Error>(data).unwrap();
-        let message = ClientMessage::PublishRequest {
-            topic: JIRA_PROJECTS_CONSUMER_TOPIC.to_string(),
-            payload: inner.to_vec().into(),
-            registration_id: "test".to_string(),
-            trace_ctx: None,
-            share_identity: true,
-        };
-        rkyv::to_bytes::<rkyv::rancor::Error>(&message)
+        rkyv::to_bytes::<rkyv::rancor::Error>(data)
             .unwrap()
             .into_vec()
     }

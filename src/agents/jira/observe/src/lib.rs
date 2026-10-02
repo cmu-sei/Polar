@@ -27,7 +27,12 @@ pub mod projects;
 pub mod supervisor;
 pub mod users;
 
+use cassini_client::{OfflineBehavior, PublishRequest};
+use cassini_types::WireTraceCtx;
+use jira_common::types::JiraData;
 use parse_link_header::parse_with_rel;
+use polar::cassini::{CassiniClient, TcpClient};
+use ractor::ActorProcessingErr;
 use ractor::concurrency::Duration;
 use rand::RngExt;
 use reqwest::RequestBuilder;
@@ -127,9 +132,11 @@ pub struct JiraObserverState {
     pub deployment: JiraDeployment,
     /// HTTP client
     pub web_client: Client,
-    /// ID of the agent's session with the broker
-    pub registration_id: String,
-    /// amount of time in seconds the observer will wait before next tick, updated internally by backoff
+    /// Handle to the agent's broker client. The infrastructure supervisor
+    /// owns the client; observers publish through this handle and nothing
+    /// looks it up by name.
+    pub tcp_client: TcpClient,
+    /// amount of time in seconds
     backoff_interval: Duration,
     /// Max amount of time the observer will wait before ticking
     max_backoff: Duration,
@@ -148,7 +155,7 @@ impl JiraObserverState {
         auth: JiraAuth,
         deployment: JiraDeployment,
         web_client: Client,
-        registration_id: String,
+        tcp_client: TcpClient,
         base_interval: Duration,
         max_backoff: Duration,
     ) -> Self {
@@ -157,7 +164,7 @@ impl JiraObserverState {
             auth,
             deployment,
             web_client,
-            registration_id,
+            tcp_client,
             max_backoff,
             base_interval,
             backoff_interval: base_interval,
@@ -191,10 +198,33 @@ pub struct JiraObserverArgs {
     pub jira_url: String,
     pub auth: JiraAuth,
     pub deployment: JiraDeployment,
-    pub registration_id: String,
+    pub tcp_client: TcpClient,
     pub web_client: Client,
     pub max_backoff: u64,
     pub base_interval: u64,
+}
+
+/// Publishes one JiraData value on a topic through the agent's client.
+/// The payload is the serialized JiraData and nothing else: the client
+/// actor adds the broker framing and the registration itself.
+pub fn publish_data(
+    tcp_client: &TcpClient,
+    topic: &str,
+    data: &JiraData,
+) -> Result<(), ActorProcessingErr> {
+    let payload = rkyv::to_bytes::<rkyv::rancor::Error>(data)
+        .map_err(|e| ActorProcessingErr::from(format!("failed to serialize {topic} payload: {e}")))?
+        .into_vec();
+
+    tcp_client
+        .publish(PublishRequest {
+            topic: topic.to_string(),
+            trace_ctx: WireTraceCtx::from_current_span(),
+            payload,
+            offline_behavior: OfflineBehavior::default(),
+            share_identity: true,
+        })
+        .map_err(|e| ActorProcessingErr::from(format!("failed to publish on {topic}: {e:?}")))
 }
 
 pub enum Command {
