@@ -21,19 +21,14 @@
    DM24-0470
 */
 
-use crate::{JiraConsumerArgs, JiraConsumerState, subscribe_to_topic};
-
-use jira_common::JIRA_ISSUES_CONSUMER_TOPIC;
 use jira_common::graph::JiraNodeKey;
-use jira_common::types::JiraData;
 use jira_common::types::{FieldValue, FirstTierField, JiraIssue, NestedListTypes};
 use polar::graph::controller::{
-    DynamicNodeKey, GraphControllerMsg, GraphOp, GraphValue, IntoGraphKey, Property,
+    DynamicNodeKey, GraphController, GraphControllerMsg, GraphOp, GraphValue, IntoGraphKey,
+    Property,
 };
-use ractor::{Actor, ActorProcessingErr, ActorRef, async_trait};
-use tracing::{debug, error, info, warn};
-
-pub struct JiraIssueConsumer;
+use ractor::ActorProcessingErr;
+use tracing::{debug, warn};
 
 /// Sanitizes a raw Jira field name into something safe to embed as a
 /// dynamic node label / relationship-type fragment. Best-effort cleanup
@@ -406,81 +401,39 @@ fn build_ops_for_issue(issue: &JiraIssue) -> Vec<GraphOp> {
     ops
 }
 
-#[async_trait]
-impl Actor for JiraIssueConsumer {
-    type Msg = JiraData;
-    type State = JiraConsumerState;
-    type Arguments = JiraConsumerArgs;
-
-    async fn pre_start(
-        &self,
-        myself: ActorRef<Self::Msg>,
-        args: JiraConsumerArgs,
-    ) -> Result<Self::State, ActorProcessingErr> {
-        debug!("{myself:?} starting, connecting to broker");
-        match subscribe_to_topic(
-            args.registration_id,
-            JIRA_ISSUES_CONSUMER_TOPIC.to_string(),
-            args.graph_controller,
-        )
-        .await
-        {
-            Ok(state) => Ok(state),
-            Err(e) => {
-                let err_msg = format!("Error starting actor: \"{JIRA_ISSUES_CONSUMER_TOPIC}\" {e}");
-                Err(ActorProcessingErr::from(err_msg))
-            }
-        }
-    }
-
-    async fn post_start(
-        &self,
-        myself: ActorRef<Self::Msg>,
-        _: &mut Self::State,
-    ) -> Result<(), ActorProcessingErr> {
-        info!("{:?} waiting to consume", myself.get_name());
-
-        Ok(())
-    }
-
-        async fn handle(
-        &self,
-        myself: ActorRef<Self::Msg>,
-        message: Self::Msg,
-        state: &mut Self::State,
-    ) -> Result<(), ActorProcessingErr> {
-        let JiraData::Issues(issue_json) = message else {
+/// Writes one decoded issue (the raw JSON the observer sent) to the graph
+/// as a single transaction. A payload that does not deserialize is logged
+/// and skipped, not fatal.
+///
+/// Fire-and-forget: an error here means the graph controller actor itself
+/// is gone, not that this specific write failed. Real write failures
+/// surface asynchronously via GraphSignal::OpFailed -> the supervisor's
+/// healthcheck path, not synchronously at this call site.
+pub fn handle_issue(
+    issue_json: &str,
+    graph_controller: &GraphController,
+) -> Result<(), ActorProcessingErr> {
+    let issue: JiraIssue = match serde_json::from_str(issue_json) {
+        Ok(i) => i,
+        Err(e) => {
+            warn!("Failed to deserialize issue: {e}");
             return Ok(());
-        };
-
-        let issue: JiraIssue = match serde_json::from_str(&issue_json.json) {
-            Ok(i) => i,
-            Err(e) => {
-                warn!("Failed to deserialize issue: {e}");
-                return Ok(());
-            }
-        };
-        debug!("Processing issue: {}", &issue.key);
-
-        let ops = build_ops_for_issue(&issue);
-        let op_count = ops.len();
-        debug!("Dispatching {op_count} ops for issue {}", issue.key);
-
-        // Fire-and-forget: a failure here means the graph controller
-        // actor itself is gone, not that this specific write failed.
-        // Real write failures surface asynchronously via
-        // GraphSignal::OpFailed -> the supervisor's healthcheck path,
-        // not synchronously at this call site.
-        if let Err(e) = state
-            .graph_controller
-            .cast(GraphControllerMsg::Op(GraphOp::Transaction { ops }))
-        {
-            error!("Failed to send graph transaction for issue {}: {e}", issue.key);
-            myself.stop(Some(format!("graph controller unavailable: {e}")));
         }
+    };
+    debug!("Processing issue: {}", &issue.key);
 
-        Ok(())
-    }
+    let ops = build_ops_for_issue(&issue);
+    debug!("Dispatching {} ops for issue {}", ops.len(), issue.key);
+
+    graph_controller
+        .cast(GraphControllerMsg::Op(GraphOp::Transaction { ops }))
+        .map_err(|e| {
+            ActorProcessingErr::from(format!(
+                "graph controller unavailable while writing issue {}: {e}",
+                issue.key
+            ))
+        })?;
+    Ok(())
 }
 
 #[cfg(test)]

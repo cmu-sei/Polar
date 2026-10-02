@@ -21,16 +21,13 @@
    DM24-0470
 */
 
-use crate::{JiraConsumerArgs, JiraConsumerState, subscribe_to_topic};
-
-use jira_common::JIRA_PROJECTS_CONSUMER_TOPIC;
 use jira_common::graph::JiraNodeKey;
-use jira_common::types::{JiraData, JiraProject};
-use polar::graph::controller::{GraphControllerMsg, GraphOp, GraphValue, IntoGraphKey, Property};
-use ractor::{Actor, ActorProcessingErr, ActorRef, async_trait};
-use tracing::{debug, error, info};
-
-pub struct JiraProjectConsumer;
+use jira_common::types::JiraProject;
+use polar::graph::controller::{
+    GraphController, GraphControllerMsg, GraphOp, GraphValue, IntoGraphKey, Property,
+};
+use ractor::ActorProcessingErr;
+use tracing::debug;
 
 /// Builds the single UpsertNodes op for a batch of projects, as a pure
 /// function of already-deserialized data -- extracted specifically so
@@ -68,68 +65,22 @@ fn build_ops_for_projects(projects: &[JiraProject]) -> GraphOp {
     GraphOp::UpsertNodes { items }
 }
 
-#[async_trait]
-impl Actor for JiraProjectConsumer {
-    type Msg = JiraData;
-    type State = JiraConsumerState;
-    type Arguments = JiraConsumerArgs;
-
-    async fn pre_start(
-        &self,
-        myself: ActorRef<Self::Msg>,
-        args: JiraConsumerArgs,
-    ) -> Result<Self::State, ActorProcessingErr> {
-        debug!("{myself:?} starting, connecting to broker");
-        match subscribe_to_topic(
-            args.registration_id,
-            JIRA_PROJECTS_CONSUMER_TOPIC.to_string(),
-            args.graph_controller,
-        )
-        .await
-        {
-            Ok(state) => Ok(state),
-            Err(e) => {
-                let err_msg =
-                    format!("Error starting actor: \"{JIRA_PROJECTS_CONSUMER_TOPIC}\" {e}");
-                Err(ActorProcessingErr::from(err_msg))
-            }
-        }
-    }
-
-    async fn post_start(
-        &self,
-        myself: ActorRef<Self::Msg>,
-        _: &mut Self::State,
-    ) -> Result<(), ActorProcessingErr> {
-        info!("{:?} waiting to consume", myself.get_name());
-
-        Ok(())
-    }
-
-    async fn handle(
-        &self,
-        myself: ActorRef<Self::Msg>,
-        message: Self::Msg,
-        state: &mut Self::State,
-    ) -> Result<(), ActorProcessingErr> {
-        if let JiraData::Projects(projects) = message {
-            let project_count = projects.len();
-            let op = build_ops_for_projects(&projects);
-
-            // Fire-and-forget: a failure here means the graph controller
-            // actor itself is gone, not that this specific write failed.
-            // Real write failures surface asynchronously via
-            // GraphSignal::OpFailed -> the supervisor's healthcheck path,
-            // not synchronously at this call site.
-            if let Err(e) = state.graph_controller.cast(GraphControllerMsg::Op(op)) {
-                error!("Failed to send graph op for projects: {e}");
-                myself.stop(Some(format!("graph controller unavailable: {e}")));
-            } else {
-                debug!("Dispatched UpsertNodes op for {project_count} projects.");
-            }
-        }
-        Ok(())
-    }
+/// Writes one decoded batch of projects to the graph.
+///
+/// Fire-and-forget: an error here means the graph controller actor itself
+/// is gone, not that this specific write failed. Real write failures
+/// surface asynchronously via GraphSignal::OpFailed -> the supervisor's
+/// healthcheck path, not synchronously at this call site.
+pub fn handle_projects(
+    projects: &[JiraProject],
+    graph_controller: &GraphController,
+) -> Result<(), ActorProcessingErr> {
+    let op = build_ops_for_projects(projects);
+    graph_controller
+        .cast(GraphControllerMsg::Op(op))
+        .map_err(|e| ActorProcessingErr::from(format!("graph controller unavailable: {e}")))?;
+    debug!("Dispatched UpsertNodes op for {} projects.", projects.len());
+    Ok(())
 }
 
 #[cfg(test)]

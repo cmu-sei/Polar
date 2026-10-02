@@ -21,12 +21,6 @@
    DM24-0470
 */
 
-use cassini_client::TcpClientMessage;
-use cassini_types::WireTraceCtx;
-use polar::graph::controller::GraphController;
-use ractor::registry::where_is;
-use std::error::Error;
-
 pub mod groups;
 pub mod issues;
 pub mod projects;
@@ -36,39 +30,6 @@ pub mod users;
 pub const BROKER_CLIENT_NAME: &str = "JIRA_CONSUMER_CLIENT";
 pub const JIRA_USER_CONSUMER: &str = "users";
 pub const JIRA_ISSUE_CONSUMER: &str = "issues";
-
-pub struct JiraConsumerState {
-    pub registration_id: String,
-    pub graph_controller: GraphController,
-}
-#[derive(Clone)]
-pub struct JiraConsumerArgs {
-    pub registration_id: String,
-    pub graph_controller: GraphController,
-}
-
-///
-/// Helper fn to set up consumer state and subscribe to a given topic.
-/// No longer connects to the graph database directly -- the supervisor
-/// owns the single shared GraphControllerActor and injects a reference to
-/// it via JiraConsumerArgs.graph_controller instead.
-pub async fn subscribe_to_topic(
-    registration_id: String,
-    topic: String,
-    graph_controller: GraphController,
-) -> Result<JiraConsumerState, Box<dyn Error>> {
-    let client = where_is(BROKER_CLIENT_NAME.to_string()).expect("Expected to find TCP client.");
-
-    client.send_message(TcpClientMessage::Subscribe {
-        topic,
-        trace_ctx: WireTraceCtx::from_current_span(),
-    })?;
-
-    Ok(JiraConsumerState {
-        registration_id,
-        graph_controller,
-    })
-}
 
 #[derive(Debug)]
 pub enum CrashReason {

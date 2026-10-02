@@ -37,6 +37,7 @@ futures-lite.workspace = true
 jira_common.workspace = true
 neo4rs.workspace = true
 polar.workspace = true
+polar-agent-builder.workspace = true
 ractor.workspace = true
 rkyv.workspace = true
 serde_json.workspace = true

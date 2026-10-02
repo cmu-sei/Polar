@@ -3641,6 +3641,7 @@ dependencies = [
  "neo4rs",
  "once_cell",
  "polar",
+ "polar-agent-builder",
  "ractor",
  "regex",
  "rkyv",
