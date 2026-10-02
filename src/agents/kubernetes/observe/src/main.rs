@@ -20,7 +20,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .await
     {
         Ok((_, handle)) => handle.await.expect("Something went wrong"),
-        Err(e) => error!("{e}"),
+        Err(e) => {
+            error!("{e}");
+            return Err(format!("kube-observer failed to start: {e}").into());
+        }
     }
     Ok(())
 }

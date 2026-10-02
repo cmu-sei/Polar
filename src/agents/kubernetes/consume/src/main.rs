@@ -40,7 +40,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         (),
     )
     .await
-    .expect("Expected to start observer agent");
+    .map_err(|e| format!("kube-consumer failed to start: {e}"))?;
     let _ = handle.await;
 
     Ok(())
