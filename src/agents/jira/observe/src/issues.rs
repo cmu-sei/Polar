@@ -22,7 +22,7 @@
 */
 use crate::{
     Command, JiraDeployment, JiraObserverArgs, JiraObserverMessage, JiraObserverState,
-    handle_backoff, publish_data,
+    publish_data,
 };
 use jira_common::JIRA_ISSUES_CONSUMER_TOPIC;
 use jira_common::types::{JiraData, JiraField, JsonString};
@@ -40,28 +40,17 @@ pub struct JiraIssueObserver;
 static START_TIME: LazyLock<Instant> = LazyLock::new(Instant::now);
 
 impl JiraIssueObserver {
-    fn observe(
-        myself: ActorRef<JiraObserverMessage>,
-        state: &mut JiraObserverState,
-        _duration: Duration,
-    ) {
-        info!(
-            "Observing every {} seconds",
-            state.backoff_interval.as_secs()
-        );
+    fn observe(myself: &ActorRef<JiraObserverMessage>, state: &JiraObserverState) {
+        info!("Observing every {} seconds", state.base_interval.as_secs());
 
-        let handle = myself
-            .send_interval(state.backoff_interval, || {
-                //build query
-                let op = "/rest/api/2/search?";
-                // pass query in message
-                JiraObserverMessage::Tick(Command::GetIssues(op.to_string()))
-            })
-            .abort_handle();
-
-        state.task_handle = Some(handle);
+        // The interval task ends on its own once this actor has stopped and
+        // the cast fails, so there is no handle to keep.
+        myself.send_interval(state.base_interval, || {
+            JiraObserverMessage::Tick(Command::GetIssues("/rest/api/2/search?".to_string()))
+        });
     }
 }
+
 #[async_trait]
 impl Actor for JiraIssueObserver {
     type Msg = JiraObserverMessage;
@@ -82,7 +71,6 @@ impl Actor for JiraIssueObserver {
             args.web_client,
             args.tcp_client,
             Duration::from_secs(args.base_interval),
-            Duration::from_secs(args.max_backoff),
         );
         Ok(state)
     }
@@ -92,17 +80,16 @@ impl Actor for JiraIssueObserver {
         myself: ActorRef<Self::Msg>,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        let _ = myself.send_message(
-            JiraObserverMessage::Tick(
-                Command::GetIssues("/rest/api/2/search?".to_string())
-                ));
-        JiraIssueObserver::observe(myself, state, state.base_interval);
+        let _ = myself.send_message(JiraObserverMessage::Tick(Command::GetIssues(
+            "/rest/api/2/search?".to_string(),
+        )));
+        JiraIssueObserver::observe(&myself, state);
         Ok(())
     }
 
     async fn handle(
         &self,
-        myself: ActorRef<Self::Msg>,
+        _myself: ActorRef<Self::Msg>,
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
@@ -226,19 +213,6 @@ impl Actor for JiraIssueObserver {
                             warn!("Error pulling fields, going to retry: {}", e);
                             std::thread::sleep(Duration::from_secs(2));
                         }
-                    }
-                }
-            }
-            JiraObserverMessage::Backoff(reason) => {
-                // cancel old event loop and start a new one with updated state, if observer hasn't stopped
-                if let Some(handle) = &state.task_handle {
-                    handle.abort();
-                    // start new loop
-                    match handle_backoff(state, reason) {
-                        Ok(duration) => {
-                            JiraIssueObserver::observe(myself, state, duration);
-                        }
-                        Err(e) => myself.stop(Some(e.to_string())),
                     }
                 }
             }

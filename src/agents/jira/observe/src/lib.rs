@@ -30,30 +30,16 @@ pub mod users;
 use cassini_client::{OfflineBehavior, PublishRequest};
 use cassini_types::WireTraceCtx;
 use jira_common::types::JiraData;
-use parse_link_header::parse_with_rel;
 use polar::cassini::{CassiniClient, TcpClient};
 use ractor::ActorProcessingErr;
 use ractor::concurrency::Duration;
-use rand::RngExt;
-use reqwest::RequestBuilder;
-use reqwest::Client;
-use reqwest::Error;
-use reqwest::Method;
-use reqwest::Response;
-use reqwest::header::LINK;
-use serde::Deserialize;
-use tokio::task::AbortHandle;
-use tracing::{debug, error};
+use reqwest::{Client, RequestBuilder};
 
 const JIRA_PROJECT_OBSERVER: &str = "jira.observer.projects";
 const JIRA_GROUP_OBSERVER: &str = "jira.observer.groups";
 const JIRA_USER_OBSERVER: &str = "jira.observer.users";
 const JIRA_ISSUE_OBSERVER: &str = "jira.observer.issues";
 pub const BROKER_CLIENT_NAME: &str = "jira:observer:web_client";
-const PRIVATE_TOKEN_HEADER_STR: &str = "PRIVATE-TOKEN";
-pub const BACKOFF_RECEIVED_LOG: &str = "{myself:?} received backoff message...";
-pub const TOKEN_EXPIRED_BACKOFF_LOG: &str = "{myself:?} stopping due to bad credentials";
-pub const MESSAGE_FORWARDING_FAILED: &str = "Expected to forward a message to self.";
 
 /// Authentication mode for the Jira REST API.
 ///
@@ -136,16 +122,8 @@ pub struct JiraObserverState {
     /// owns the client; observers publish through this handle and nothing
     /// looks it up by name.
     pub tcp_client: TcpClient,
-    /// amount of time in seconds
-    backoff_interval: Duration,
-    /// Max amount of time the observer will wait before ticking
-    max_backoff: Duration,
-    /// Times we failed to query jira for one reason or another
-    failed_attempts: u64,
-    /// minimum amount of time an observer will wait between queries
-    base_interval: Duration,
-    /// thread handle containing the observer loop
-    task_handle: Option<AbortHandle>,
+    /// Time between polls of Jira
+    pub base_interval: Duration,
 }
 
 impl JiraObserverState {
@@ -157,7 +135,6 @@ impl JiraObserverState {
         web_client: Client,
         tcp_client: TcpClient,
         base_interval: Duration,
-        max_backoff: Duration,
     ) -> Self {
         JiraObserverState {
             jira_url,
@@ -165,30 +142,8 @@ impl JiraObserverState {
             deployment,
             web_client,
             tcp_client,
-            max_backoff,
             base_interval,
-            backoff_interval: base_interval,
-            failed_attempts: 0,
-            task_handle: None,
         }
-    }
-
-    /// Get the current backoff interval
-    pub fn backoff_interval(&self) -> Duration {
-        self.backoff_interval
-    }
-
-    /// Increase backoff interval with exponential backoff and jitter
-    pub fn apply_backoff(&mut self) {
-        let jitter = Duration::from_secs(rand::rng().random_range(0..30));
-        let new_interval = self.backoff_interval * 2 + jitter;
-        self.backoff_interval = std::cmp::min(new_interval, self.max_backoff);
-        self.failed_attempts += 1;
-    }
-
-    /// Reset backoff interval to base
-    pub fn reset_backoff(&mut self) {
-        self.backoff_interval = self.base_interval;
     }
 }
 
@@ -200,7 +155,6 @@ pub struct JiraObserverArgs {
     pub deployment: JiraDeployment,
     pub tcp_client: TcpClient,
     pub web_client: Client,
-    pub max_backoff: u64,
     pub base_interval: u64,
 }
 
@@ -235,118 +189,6 @@ pub enum Command {
 }
 
 /// Messages that observers send themselves to prompt the retrieval of resources
-
-pub enum BackoffReason {
-    FatalError(String),
-    JiraUnreachable(String),
-    TokenInvalid(String),
-}
 pub enum JiraObserverMessage {
     Tick(Command),
-    Backoff(BackoffReason),
-}
-
-/// helper function for our observers to respond to backoff messages
-/// either returns a new duration, or
-pub fn handle_backoff(
-    state: &mut JiraObserverState,
-    reason: BackoffReason,
-) -> Result<Duration, String> {
-    match reason {
-        BackoffReason::JiraUnreachable(_) => {
-            // If jira is unreachable, it *could* come back, but we should only hang around so much before giving up
-            if state.failed_attempts < 5 {
-                state.apply_backoff();
-                Ok(state.backoff_interval())
-            } else {
-                let error = "Backoff limit reached! Stopping".to_string();
-                error!(error);
-                Err(error)
-            }
-        }
-        BackoffReason::FatalError(error) => {
-            error!("Encountered a fatal error message! {error}");
-            Err(error)
-        }
-        _ => todo!(),
-    }
-}
-
-/**
- * Makes a request for to a given url using provided credentials to retrieve elements from a single page.
- */
-async fn get_elements(client: &Client, token: String, url: String) -> Result<Response, Error> {
-    match client
-        .request(Method::GET, url.clone())
-        .header(PRIVATE_TOKEN_HEADER_STR, token)
-        .send()
-        .await
-    {
-        Ok(response) => Ok(response),
-        Err(e) => {
-            error!("could not make request to {}, {}", url, e);
-            Err(e)
-        }
-    }
-}
-/**
- * Makes one or a series of requests to a given url using provided credentials to retrieve as many items as possible.
- * Uses LINK header to crawl pages and retrieve multiple items as JSON elements that are then converted into a given type.
- */
-pub async fn get_all_elements<T: for<'a> Deserialize<'a>>(
-    client: &Client,
-    token: String,
-    url: String,
-) -> Option<Vec<T>> {
-    let mut elements: Vec<T> = Vec::new();
-    debug!("Getting all elements from {}", url);
-    let resp = match get_elements(client, token.clone(), url.clone()).await {
-        Ok(resp) => resp,
-        Err(_) => return None,
-    };
-
-    if !resp.status().is_success() {
-        //TODO: make message elaborate on what each code could mean, 401, 403, etc.
-        error!(
-            "Error code: {} received at {}",
-            resp.status().as_str(),
-            url.clone()
-        );
-        return None;
-    }
-
-    let mut headers = resp.headers().clone();
-    //get data from first page, if any
-    match resp.json::<Vec<T>>().await {
-        Ok(mut vec) => {
-            elements.append(&mut vec);
-        }
-        Err(e) => {
-            error!("Could not deserialize elements from json, {}", e);
-        }
-    }
-
-    let mut link_map = parse_with_rel(headers.get(LINK).unwrap().to_str().unwrap()).unwrap();
-
-    //Crawl pages, appending all elements to the list
-    while let Some(link) = link_map.get("next") {
-        let resp = match get_elements(client, token.clone(), link.raw_uri.clone()).await {
-            Ok(resp) => resp,
-            Err(_) => return None,
-        };
-
-        headers = resp.headers().clone();
-        match resp.json::<Vec<T>>().await {
-            Ok(mut vec) => {
-                elements.append(&mut vec);
-            }
-            Err(e) => {
-                error!("Could not deserialize elements from json, {}", e);
-                //TODO: we got bad data here, continue or break?
-            }
-        }
-        link_map = parse_with_rel(headers.get(LINK).unwrap().to_str().unwrap()).unwrap();
-    }
-
-    Some(elements)
 }

@@ -32,19 +32,14 @@ description = "Observer agent for Jira — polls APIs, publishes updates via Cas
 [dependencies]
 cassini-client.workspace = true
 cassini-types.workspace = true
-chrono.workspace = true
-clokwerk.workspace = true
 jira_common.workspace = true
 log.workspace = true
-parse_link_header.workspace = true
 polar.workspace = true
 polar-agent-builder.workspace = true
 ractor.workspace = true
-rand.workspace = true
 reqwest = { workspace = true, features = ["json", "rustls-tls"] }
 rkyv.workspace = true
 serde_json.workspace = true
-serde_path_to_error.workspace = true
 serde.workspace = true
 serde_yaml.workspace = true
 tokio.workspace = true

@@ -20,9 +20,7 @@
 
    DM24-0470
 */
-use crate::{
-    Command, JiraObserverArgs, JiraObserverMessage, JiraObserverState, handle_backoff, publish_data,
-};
+use crate::{Command, JiraObserverArgs, JiraObserverMessage, JiraObserverState, publish_data};
 use jira_common::JIRA_PROJECTS_CONSUMER_TOPIC;
 use jira_common::types::{JiraData, JiraProject};
 use ractor::{Actor, ActorProcessingErr, ActorRef, async_trait};
@@ -32,28 +30,17 @@ use tracing::{debug, info};
 pub struct JiraProjectObserver;
 
 impl JiraProjectObserver {
-    fn observe(
-        myself: ActorRef<JiraObserverMessage>,
-        state: &mut JiraObserverState,
-        _duration: Duration,
-    ) {
-        info!(
-            "Observing every {} seconds",
-            state.backoff_interval.as_secs()
-        );
+    fn observe(myself: &ActorRef<JiraObserverMessage>, state: &JiraObserverState) {
+        info!("Observing every {} seconds", state.base_interval.as_secs());
 
-        let handle = myself
-            .send_interval(state.backoff_interval, || {
-                //build query
-                let op = "/rest/api/2/project";
-                // pass query in message
-                JiraObserverMessage::Tick(Command::GetProjects(op.to_string()))
-            })
-            .abort_handle();
-
-        state.task_handle = Some(handle);
+        // The interval task ends on its own once this actor has stopped and
+        // the cast fails, so there is no handle to keep.
+        myself.send_interval(state.base_interval, || {
+            JiraObserverMessage::Tick(Command::GetProjects("/rest/api/2/project".to_string()))
+        });
     }
 }
+
 #[async_trait]
 impl Actor for JiraProjectObserver {
     type Msg = JiraObserverMessage;
@@ -67,16 +54,14 @@ impl Actor for JiraProjectObserver {
     ) -> Result<Self::State, ActorProcessingErr> {
         debug!("{myself:?} starting, connecting to instance");
 
-        let state = JiraObserverState::new(
+        Ok(JiraObserverState::new(
             args.jira_url,
             args.auth,
             args.deployment,
             args.web_client,
             args.tcp_client,
             Duration::from_secs(args.base_interval),
-            Duration::from_secs(args.max_backoff),
-        );
-        Ok(state)
+        ))
     }
 
     async fn post_start(
@@ -84,13 +69,13 @@ impl Actor for JiraProjectObserver {
         myself: ActorRef<Self::Msg>,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        JiraProjectObserver::observe(myself, state, state.base_interval);
+        JiraProjectObserver::observe(&myself, state);
         Ok(())
     }
 
     async fn handle(
         &self,
-        myself: ActorRef<Self::Msg>,
+        _myself: ActorRef<Self::Msg>,
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
@@ -112,19 +97,6 @@ impl Actor for JiraProjectObserver {
                         JIRA_PROJECTS_CONSUMER_TOPIC,
                         &JiraData::Projects(res),
                     )?;
-                }
-            }
-            JiraObserverMessage::Backoff(reason) => {
-                // cancel old event loop and start a new one with updated state, if observer hasn't stopped
-                if let Some(handle) = &state.task_handle {
-                    handle.abort();
-                    // start new loop
-                    match handle_backoff(state, reason) {
-                        Ok(duration) => {
-                            JiraProjectObserver::observe(myself, state, duration);
-                        }
-                        Err(e) => myself.stop(Some(e.to_string())),
-                    }
                 }
             }
         }

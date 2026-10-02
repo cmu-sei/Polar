@@ -46,7 +46,6 @@ pub struct ObserverSupervisorState {
     auth: JiraAuth,
     deployment: JiraDeployment,
     base_interval: u64,
-    max_backoff_secs: u64,
     web_client: Client,
     tcp_client: TcpClient,
     healthcheck: HealthHandle,
@@ -64,7 +63,6 @@ pub struct ObserverSupervisorArgs {
     pub deployment: JiraDeployment,
     pub proxy_ca_cert_file: Option<String>,
     pub base_interval: u64,
-    pub max_backoff_secs: u64,
 }
 
 impl ObserverSupervisorState {
@@ -76,7 +74,6 @@ impl ObserverSupervisorState {
             tcp_client: self.tcp_client.clone(),
             web_client: self.web_client.clone(),
             base_interval: self.base_interval,
-            max_backoff: self.max_backoff_secs,
         }
     }
 
@@ -232,7 +229,6 @@ impl Actor for ObserverSupervisor {
             auth: args.auth,
             deployment: args.deployment,
             base_interval: args.base_interval,
-            max_backoff_secs: args.max_backoff_secs,
             web_client,
             tcp_client: resources.tcp_client,
             healthcheck: resources.healthcheck,
