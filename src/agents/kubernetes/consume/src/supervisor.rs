@@ -12,7 +12,6 @@ use kube_common::{KUBERNETES_CONSUMER, RawKubeEvent};
 use polar::DiscoverySourceRef;
 use polar::ProvenanceEvent;
 use polar::RkyvError;
-use polar::SupervisorMessage;
 use polar::cassini::CassiniClient;
 use polar::cassini::TcpClient;
 use polar::graph::controller::{
@@ -22,7 +21,10 @@ use polar::graph::controller::{
 use polar::graph::nodes::builds::ArtifactNodeKey;
 use polar::graph::nodes::kube::KubeNodeKey;
 use polar::topics::KUBERNETES_RESOLUTION_EVENTS;
-use polar_agent_builder::{AgentBuilder, CryptoHandle, HealthClient, HealthHandle, Subscription};
+use polar_agent_builder::{
+    AgentBuilder, CryptoHandle, HealthClient, HealthHandle, InfrastructureEvent,
+    InfrastructureSupervisorMessage, Subscription,
+};
 use ractor::{Actor, OutputPort};
 use ractor::ActorProcessingErr;
 use ractor::ActorRef;
@@ -39,6 +41,33 @@ use tracing::info;
 use tracing::warn;
 
 const DRAIN_WINDOW_SECS: u64 = 5;
+
+/// This supervisor's own message type. The shared `polar::SupervisorMessage`
+/// cannot carry the two infrastructure signals (respawn, prepare-shutdown)
+/// without `polar-agent-builder` depending back on `polar`, so, like
+/// kube-observer and jira-processor, the consumer defines exactly the
+/// messages it handles.
+pub enum ConsumerSupervisorMessage {
+    ClientEvent {
+        event: ClientEvent,
+    },
+    GraphSignal(GraphSignal),
+    /// InfrastructureSupervisor replaced a TcpClient that terminated
+    /// unexpectedly (and its CryptoActor with it).
+    InfrastructureRespawned {
+        tcp_client: TcpClient,
+        crypto: Option<CryptoHandle>,
+    },
+    /// HealthCheckActor, a child of the InfrastructureSupervisor, terminated
+    /// cleanly for rejuvenation. The infrastructure now waits for this
+    /// supervisor to finish its own shutdown and answer with
+    /// `InfrastructureSupervisorMessage::ProceedWithShutdown`.
+    PrepareShutdown,
+    /// The drain window has elapsed. After a hard failure this exits the
+    /// process; after `PrepareShutdown` it flushes the graph controller and
+    /// completes the handshake.
+    DrainElapsed,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StateFingerprint {
@@ -127,11 +156,20 @@ pub struct ClusterConsumerSupervisorState {
     /// encryption work (see this crate's own, real design
     /// discussion) is the actual, first real caller.
     crypto: CryptoHandle,
-    /// Set true once a fatal failure has triggered the bounded drain window.
-    /// While true, incoming messages are logged instead of processed, since
-    /// whatever failed (likely the graph controller) can't be trusted, and
-    /// we're exiting shortly regardless.
+    /// The InfrastructureSupervisor (HealthCheckActor, RouterActor,
+    /// TcpClientActor, CryptoActor) this supervisor's builder spawned. Its
+    /// termination means the shutdown handshake is complete (or that
+    /// infrastructure died), and either way this process must exit.
+    infrastructure: ActorRef<InfrastructureSupervisorMessage>,
+    /// Set true once a drain window has begun, either after a fatal failure
+    /// or for rejuvenation. While true, incoming messages are logged instead
+    /// of processed, since whatever failed (likely the graph controller)
+    /// can't be trusted, and we're exiting shortly regardless.
     draining: bool,
+    /// Set true when the drain was started by `PrepareShutdown`, so the end
+    /// of the drain completes the handshake with the infrastructure instead
+    /// of exiting directly.
+    rejuvenating: bool,
 }
 
 impl ClusterConsumerSupervisor {
@@ -244,7 +282,7 @@ impl ClusterConsumerSupervisor {
     /// same ClientEvent::MessagePublished this agent's own, existing,
     /// unchanged handle()/deserialize_and_dispatch logic already
     /// expects, and forwards it to `supervisor` as the same, existing
-    /// SupervisorMessage::ClientEvent it already handles.
+    /// ConsumerSupervisorMessage::ClientEvent it already handles.
     ///
     /// Extracted into its own, real, standalone function -- not left
     /// inlined inside pre_start -- specifically so a real test can
@@ -255,7 +293,9 @@ impl ClusterConsumerSupervisor {
     /// design exactly; only how the results get registered with
     /// RouterActor changed (AgentBuilder's own, real
     /// .with_subscription(...) now owns that part).
-    fn kube_subscriptions(supervisor: &ActorRef<SupervisorMessage>) -> Vec<Subscription> {
+    fn kube_subscriptions(
+        supervisor: &ActorRef<ConsumerSupervisorMessage>,
+    ) -> Vec<Subscription> {
         let supervisor_for_consumer = supervisor.clone();
         let supervisor_for_resolution = supervisor.clone();
         vec![
@@ -266,8 +306,8 @@ impl ClusterConsumerSupervisor {
                     trace_ctx: incoming.trace_ctx,
                     published_by: incoming.published_by,
                 };
-                if let Err(e) =
-                    supervisor_for_consumer.send_message(SupervisorMessage::ClientEvent { event })
+                if let Err(e) = supervisor_for_consumer
+                    .send_message(ConsumerSupervisorMessage::ClientEvent { event })
                 {
                     warn!("AgentBuilder: failed to deliver routed message to supervisor: {e}");
                 }
@@ -279,19 +319,41 @@ impl ClusterConsumerSupervisor {
                     trace_ctx: incoming.trace_ctx,
                     published_by: incoming.published_by,
                 };
-                if let Err(e) =
-                    supervisor_for_resolution.send_message(SupervisorMessage::ClientEvent { event })
+                if let Err(e) = supervisor_for_resolution
+                    .send_message(ConsumerSupervisorMessage::ClientEvent { event })
                 {
                     warn!("AgentBuilder: failed to deliver routed message to supervisor: {e}");
                 }
             }),
         ]
     }
+
+    /// Schedules `DrainElapsed` after the drain window. Not awaited: the
+    /// timer runs detached, so this supervisor keeps handling (and logging)
+    /// messages while the window is open.
+    fn schedule_drain_end(myself: &ActorRef<ConsumerSupervisorMessage>) {
+        let _ = myself.send_after(Duration::from_secs(DRAIN_WINDOW_SECS), || {
+            ConsumerSupervisorMessage::DrainElapsed
+        });
+    }
+
+    /// Tells the broker this agent is going dark, so it stops routing
+    /// messages here. Failures are logged and do not stop the shutdown.
+    fn unsubscribe_from_topics(client: &TcpClient) {
+        for topic in [KUBERNETES_CONSUMER, KUBERNETES_RESOLUTION_EVENTS] {
+            if let Err(e) = client.unsubscribe(polar::cassini::UnsubscribeRequest {
+                topic: topic.to_string(),
+                trace_ctx: None,
+            }) {
+                warn!("CONSUMER_SUPERVISOR: unsubscribe from '{topic}' failed (continuing): {e}");
+            }
+        }
+    }
 }
 
 #[async_trait]
 impl Actor for ClusterConsumerSupervisor {
-    type Msg = SupervisorMessage;
+    type Msg = ConsumerSupervisorMessage;
     type State = ClusterConsumerSupervisorState;
     type Arguments = ();
 
@@ -317,10 +379,24 @@ impl Actor for ClusterConsumerSupervisor {
             builder = builder.with_subscription(subscription);
         }
         let resources = builder
-            .with_lifecycle_handler(|event| Some(SupervisorMessage::ClientEvent { event }))
+            .with_lifecycle_handler(|event| Some(ConsumerSupervisorMessage::ClientEvent { event }))
             .with_encryption()
             .build()
             .await?;
+
+        // The "infrastructure -> domain" half of the respawn/shutdown
+        // protocol. Without this subscription the InfrastructureSupervisor
+        // would wait forever for a ProceedWithShutdown after rejuvenation.
+        resources
+            .infrastructure_events
+            .subscribe(myself.clone(), |event| match event {
+                InfrastructureEvent::Respawned { tcp_client, crypto } => {
+                    Some(ConsumerSupervisorMessage::InfrastructureRespawned { tcp_client, crypto })
+                }
+                InfrastructureEvent::PrepareShutdown => {
+                    Some(ConsumerSupervisorMessage::PrepareShutdown)
+                }
+            });
 
         // Eager graph controller spawn -- this agent's own health
         // never genuinely needs to wait on Cassini registration
@@ -332,7 +408,7 @@ impl Actor for ClusterConsumerSupervisor {
         // alone) is still what genuinely proves real connectivity.
         let graph_signal_port = Arc::new(OutputPort::<GraphSignal>::default());
         graph_signal_port.subscribe(myself.clone(), |signal| {
-            Some(SupervisorMessage::GraphSignal(signal))
+            Some(ConsumerSupervisorMessage::GraphSignal(signal))
         });
         let (graph_controller, _) = GraphControllerActor::spawn_linked(
             Some("kubernetes.cluster.graph.controller".to_string()),
@@ -345,6 +421,10 @@ impl Actor for ClusterConsumerSupervisor {
         .await
         .map_err(ActorProcessingErr::from)?;
 
+        let crypto = resources.crypto.ok_or_else(|| {
+            ActorProcessingErr::from("with_encryption() was called but the builder returned no CryptoHandle")
+        })?;
+
         Ok(ClusterConsumerSupervisorState {
             broker_client: resources.tcp_client,
             graph_controller: Some(graph_controller),
@@ -352,10 +432,10 @@ impl Actor for ClusterConsumerSupervisor {
                 entries: HashMap::new(),
             },
             healthcheck: resources.healthcheck,
-            crypto: resources
-                .crypto
-                .expect("with_encryption was called, so this is always real, genuinely Some"),
+            crypto,
+            infrastructure: resources.infrastructure,
             draining: false,
+            rejuvenating: false,
         })
     }
 
@@ -366,7 +446,7 @@ impl Actor for ClusterConsumerSupervisor {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
-            SupervisorMessage::GraphSignal(signal) => match signal {
+            ConsumerSupervisorMessage::GraphSignal(signal) => match signal {
                 GraphSignal::Available => {
                     let _ = state.healthcheck.graph_available();
                 }
@@ -375,8 +455,39 @@ impl Actor for ClusterConsumerSupervisor {
                 }
             },
 
-            SupervisorMessage::ForceExit => {
-                warn!("CONSUMER_SUPERVISOR: drain window elapsed, beginning graceful shutdown");
+            ConsumerSupervisorMessage::InfrastructureRespawned { tcp_client, crypto } => {
+                // Everything that held the old client is stale; the builder's
+                // lifecycle handler re-subscribes both topics when the new
+                // client registers.
+                warn!("CONSUMER_SUPERVISOR: TCP client was respawned by the infrastructure supervisor");
+                state.broker_client = tcp_client;
+                if let Some(crypto) = crypto {
+                    state.crypto = crypto;
+                }
+            }
+
+            ConsumerSupervisorMessage::PrepareShutdown => {
+                if state.draining {
+                    // A hard failure already started a drain that ends in
+                    // exit(1); the handshake is moot.
+                    warn!(
+                        "CONSUMER_SUPERVISOR: PrepareShutdown received while already draining; \
+                         the pending exit will end the process"
+                    );
+                } else {
+                    state.draining = true;
+                    state.rejuvenating = true;
+                    info!(
+                        "CONSUMER_SUPERVISOR: PrepareShutdown received (rejuvenation), \
+                         unsubscribing from Cassini and entering drain window"
+                    );
+                    Self::unsubscribe_from_topics(&state.broker_client);
+                    Self::schedule_drain_end(&myself);
+                }
+            }
+
+            ConsumerSupervisorMessage::DrainElapsed => {
+                warn!("CONSUMER_SUPERVISOR: drain window elapsed, beginning shutdown");
 
                 if let Some(controller) = state.graph_controller.take() {
                     warn!(
@@ -402,11 +513,28 @@ impl Actor for ClusterConsumerSupervisor {
                     }
                 }
 
-                warn!("CONSUMER_SUPERVISOR: exiting now");
-                std::process::exit(1);
+                if state.rejuvenating {
+                    // Our own children are down; let the infrastructure stop.
+                    // Its termination (handled in handle_supervisor_evt)
+                    // exits the process with a non-zero status.
+                    info!("CONSUMER_SUPERVISOR: domain shutdown complete, releasing infrastructure");
+                    if let Err(e) = state
+                        .infrastructure
+                        .cast(InfrastructureSupervisorMessage::ProceedWithShutdown)
+                    {
+                        error!(
+                            "CONSUMER_SUPERVISOR: could not tell infrastructure to proceed ({e}); \
+                             exiting now"
+                        );
+                        std::process::exit(1);
+                    }
+                } else {
+                    warn!("CONSUMER_SUPERVISOR: exiting now");
+                    std::process::exit(1);
+                }
             }
 
-            SupervisorMessage::ClientEvent { event } => {
+            ConsumerSupervisorMessage::ClientEvent { event } => {
                 match event {
                     ClientEvent::Registered { .. } => {
                         // AgentBuilder's own, internal lifecycle
@@ -455,8 +583,6 @@ impl Actor for ClusterConsumerSupervisor {
                     _ => (),
                 }
             }
-
-            SupervisorMessage::Heartbeat => {}
         }
         Ok(())
     }
@@ -482,45 +608,19 @@ impl Actor for ClusterConsumerSupervisor {
                     actor_name,
                     actor_cell.get_id()
                 );
-                // Clean termination of the healthcheck actor means the
-                // rejuvenation sequence completed -- begin the same bounded
-                // drain window as a hard failure, rather than exiting
-                // immediately, so any messages still arriving get logged.
-                //
-                // Matched by real, genuine actor id, not name --
-                // AgentBuilder spawns HealthCheckActor unnamed (see
-                // its own, real build() implementation), so
-                // a real, direct id comparison against this
-                // supervisor's own, held HealthHandle is both the
-                // only real option available and, genuinely, more
-                // robust than name-matching ever was (ids never
-                // collide across different, real actor types; names,
-                // in principle, could).
-                if actor_cell.get_id() == state.healthcheck.as_actor_ref().get_id() && !state.draining {
-                    state.draining = true;
+                // The InfrastructureSupervisor is this supervisor's direct
+                // child (the builder spawned it linked); the health check
+                // is its child, not ours, so rejuvenation reaches us as
+                // PrepareShutdown, not as a termination event. Infrastructure
+                // terminating is the end of the handshake -- or infrastructure
+                // dying on its own -- and in both cases the process exits so
+                // the Job starts a new pod with fresh certs. Matched by id,
+                // since the actor is spawned unnamed.
+                if actor_cell.get_id() == state.infrastructure.get_id() {
                     info!(
-                        "CONSUMER_SUPERVISOR: healthcheck actor terminated cleanly, \
-                         entering drain window before exiting for rejuvenation, \
-                         unsubscribing from Cassini"
+                        "CONSUMER_SUPERVISOR: infrastructure terminated, exiting so the Job restarts the pod"
                     );
-                    // Genuinely, previously part of a now-dead
-                    // SupervisorMessage::PrepareShutdown handler --
-                    // nothing sends that message here anymore, but
-                    // this real, graceful step (unsubscribe before
-                    // going dark) still, genuinely matters, so it
-                    // moves here, to the actual, real place
-                    // rejuvenation is now detected.
-                    if let Err(e) = state.broker_client.unsubscribe(polar::cassini::UnsubscribeRequest {
-                        topic: KUBERNETES_CONSUMER.to_string(),
-                        trace_ctx: None,
-                    }) {
-                        warn!("CONSUMER_SUPERVISOR: unsubscribe failed (continuing): {e}");
-                    }
-                    let _ = myself
-                        .send_after(Duration::from_secs(DRAIN_WINDOW_SECS), || {
-                            SupervisorMessage::ForceExit
-                        })
-                        .await;
+                    std::process::exit(1);
                 }
             }
             SupervisionEvent::ActorFailed(actor_cell, e) => {
@@ -533,21 +633,17 @@ impl Actor for ClusterConsumerSupervisor {
                 // Any child actor failure is fatal, but don't exit
                 // immediately -- give the mailbox loop a bounded window to
                 // keep logging any in-flight messages (handle() branches on
-                // state.draining above) before ForceExit actually exits.
+                // state.draining above) before DrainElapsed actually exits.
                 if !state.draining {
                     state.draining = true;
                     warn!(
                         "CONSUMER_SUPERVISOR: entering drain window before exit; \
                          any messages that arrive will be logged, not processed"
                     );
-                    let _ = myself
-                        .send_after(Duration::from_secs(DRAIN_WINDOW_SECS), || {
-                            SupervisorMessage::ForceExit
-                        })
-                        .await;
+                    Self::schedule_drain_end(&myself);
                 }
             }
-            SupervisionEvent::ProcessGroupChanged(..) => todo!(),
+            SupervisionEvent::ProcessGroupChanged(..) => {}
         }
 
         Ok(())
@@ -560,7 +656,7 @@ mod subscription_tests {
     use std::sync::{Arc, Mutex};
 
     /// A minimal, real stand-in for ClusterConsumerSupervisor itself
-    /// -- genuinely receives SupervisorMessage, just records what it
+    /// -- genuinely receives ConsumerSupervisorMessage, just records what it
     /// got, since this test's own, real purpose is proving
     /// kube_subscriptions's own, two, real deliver closures
     /// correctly reconstruct and forward ClientEvent::MessagePublished,
@@ -572,7 +668,7 @@ mod subscription_tests {
 
     #[async_trait]
     impl Actor for FakeSupervisor {
-        type Msg = SupervisorMessage;
+        type Msg = ConsumerSupervisorMessage;
         type State = ();
         type Arguments = ();
 
@@ -590,7 +686,7 @@ mod subscription_tests {
             message: Self::Msg,
             _state: &mut Self::State,
         ) -> Result<(), ActorProcessingErr> {
-            if let SupervisorMessage::ClientEvent { event } = message {
+            if let ConsumerSupervisorMessage::ClientEvent { event } = message {
                 self.received.lock().unwrap().push(event);
             }
             Ok(())

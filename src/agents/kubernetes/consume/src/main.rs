@@ -41,7 +41,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
     )
     .await
     .map_err(|e| format!("kube-consumer failed to start: {e}"))?;
-    let _ = handle.await;
 
-    Ok(())
+    handle
+        .await
+        .map_err(|e| format!("kube-consumer supervisor task failed: {e}"))?;
+
+    // The supervisor stopping is never a success: a consumer that is no
+    // longer consuming must be restarted. Exit non-zero so the Job does.
+    Err("kube-consumer supervisor stopped; exiting non-zero so the Job restarts it".into())
 }

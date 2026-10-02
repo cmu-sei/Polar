@@ -135,7 +135,7 @@ Facts learned from the jira migration:
   by id). Each supervisor keeps a local message enum, since `polar::SupervisorMessage`
   cannot carry infrastructure signals. On `InfrastructureEvent::Respawned` the new
   `TcpClient` handle is stored and observers are rebuilt on the next registration.
-  jira-processor lacked the second half before its migration; kube-consumer still does.
+  jira-processor lacked the second half before its migration; kube-consumer lacked it too until it was fixed the same way.
 - **Environment.** Everything the pod needs comes from the catalog entry plus the
   target layer; the Rust side reads `JIRA_URL`, `JIRA_EMAIL`, `JIRA_TOKEN` and fails
   with a message, not a panic, when one is missing.
