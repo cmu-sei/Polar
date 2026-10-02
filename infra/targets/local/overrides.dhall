@@ -42,20 +42,10 @@ in
   { image           = registry ++ "cassini:latest"
   , imagePullSecrets = [] : List { name : Optional Text }
   }
-, jira =
-  { imagePullSecrets = [] : List { name : Optional Text }
-  , observer  = { image = registry ++ "jira-observer:latest", jiraUrl = "https://daveman1010220.atlassian.net", jiraEmail = Some "daveman1010220@gmail.com" }
-  , processor = { image = registry ++ "jira-processor:latest" }
-  }
 , gitlab =
   { imagePullSecrets = [] : List { name : Optional Text }
   , observer = { image = registry ++ "gitlab-observer:latest" }
   , consumer = { image = registry ++ "gitlab-consumer:latest" }
-  }
-, kube =
-  { imagePullSecrets = [] : List { name : Optional Text }
-  , observer = { image = registry ++ "kube-observer:latest" }
-  , consumer = { image = registry ++ "kube-consumer:latest" }
   }
 , git =
   { imagePullSecrets = [] : List { name : Optional Text }
