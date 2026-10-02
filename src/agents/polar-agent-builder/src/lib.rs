@@ -17,6 +17,8 @@
 //! or vice versa. build() itself is the one, sole, real orchestrator;
 //! nothing it produces can exist in a half-wired state.
 
+pub mod capability;
+pub use capability::Capability;
 pub mod crypto;
 pub use crypto::{CryptoClient, CryptoHandle};
 pub mod health;
@@ -68,11 +70,13 @@ impl Subscription {
 /// something a higher-level, trait-based wrapper genuinely adds value
 /// over for every, real caller's own use.
 ///
-/// healthcheck is no longer Option -- InfrastructureSupervisor's own
+/// healthcheck is never Option -- InfrastructureSupervisor's own
 /// shutdown-coordination mechanism structurally depends on a real
-/// HealthCheckActor existing, so with_health_check is now required,
-/// not optional (build() returns a real error if it was never
-/// called).
+/// HealthCheckActor existing, so build() always spawns one. Its
+/// configuration is derived from the capabilities this agent
+/// requires and from the deployment's own environment
+/// (POLAR_HEALTH_DEP_ENDPOINTS and the other POLAR_HEALTH_* variables
+/// HealthCheckActor already reads), not passed in by the agent.
 #[derive(Clone)]
 pub struct AgentResources {
     pub router: ActorRef<polar_router::RouterMessage>,
@@ -95,13 +99,17 @@ pub struct AgentResources {
     pub infrastructure: ActorRef<crate::infrastructure::InfrastructureSupervisorMessage>,
 }
 
+/// Seconds before its own certificate expires that an agent enters
+/// rejuvenation mode. The same for every agent today.
+const DEFAULT_REJUVENATION_THRESHOLD_SECS: i64 = 300;
+
 pub struct AgentBuilder<M: ractor::Message> {
     myself: ActorRef<M>,
     service_name: String,
     subscriptions: Vec<Subscription>,
-    health_check_args: Option<HealthCheckArgs>,
+    requires: Vec<Capability>,
     map_lifecycle_event: Option<Box<dyn Fn(ClientEvent) -> Option<M> + Send + Sync>>,
-    with_crypto: bool,
+    wants_crypto: bool,
 }
 
 impl<M: ractor::Message> AgentBuilder<M> {
@@ -110,27 +118,42 @@ impl<M: ractor::Message> AgentBuilder<M> {
             myself,
             service_name: service_name.into(),
             subscriptions: Vec::new(),
-            health_check_args: None,
+            requires: Vec::new(),
             map_lifecycle_event: None,
-            with_crypto: false,
+            wants_crypto: false,
         }
     }
 
-    pub fn with_health_check(mut self, args: HealthCheckArgs) -> Self {
-        self.health_check_args = Some(args);
+    /// Declares a capability this agent's own code needs from its
+    /// deployment, beyond the ones a with_* method below already
+    /// declares (for example Capability::KubeApiRead, which the builder
+    /// itself does nothing for). build() checks everything declared
+    /// against what the deployment says it provides
+    /// (POLAR_CAPABILITIES) and refuses to start on a mismatch.
+    pub fn requires(mut self, capability: Capability) -> Self {
+        if !self.requires.contains(&capability) {
+            self.requires.push(capability);
+        }
         self
+    }
+
+    /// This agent writes to the graph over mTLS: its own health check
+    /// then also watches the graph connection.
+    pub fn with_graph_write(self) -> Self {
+        self.requires(Capability::GraphWrite)
     }
 
     /// Spawns a real, live CryptoActor alongside this agent's own,
     /// real router and TcpClient once build() succeeds -- see
     /// crypto::CryptoHandle's own doc comment for what it exposes.
-    /// Deliberately opt-in: credentials-agent's own, real, existing
-    /// supervisor never needs this at all (it holds its own, direct
-    /// escrow key), so build() genuinely can't assume every real
-    /// caller wants it.
-    pub fn with_crypto(mut self) -> Self {
-        self.with_crypto = true;
-        self
+    /// Deliberately opt-in: an agent that never encrypts a payload
+    /// (the observers) does not declare it, and credentials-agent's
+    /// own, real, existing supervisor holds its own, direct escrow
+    /// key, so build() genuinely can't assume every real caller
+    /// wants it.
+    pub fn with_encryption(mut self) -> Self {
+        self.wants_crypto = true;
+        self.requires(Capability::Encryption)
     }
 
     pub fn with_subscription(mut self, subscription: Subscription) -> Self {
@@ -155,13 +178,43 @@ impl<M: ractor::Message> AgentBuilder<M> {
     }
 
     pub async fn build(self) -> Result<AgentResources, ActorProcessingErr> {
-        let health_check_args = self.health_check_args.ok_or_else(|| {
-            ActorProcessingErr::from(
-                "AgentBuilder::build() requires with_health_check -- \
-                 InfrastructureSupervisor's own shutdown-coordination \
-                 mechanism structurally depends on a real HealthCheckActor",
-            )
-        })?;
+        // Every agent built here is a Cassini client; the rest are what
+        // its own code declared. Checked before anything is spawned, so
+        // a mismatch with the deployment is one clear, immediate,
+        // non-zero exit instead of a half-started agent.
+        let mut required = self.requires.clone();
+        if !required.contains(&Capability::Cassini) {
+            required.insert(0, Capability::Cassini);
+        }
+        let provided = std::env::var(capability::PROVIDED_ENV).ok();
+        match capability::check(&required, provided.as_deref()) {
+            capability::CapabilityCheck::Satisfied => {}
+            capability::CapabilityCheck::NotDeclared => {
+                tracing::warn!(
+                    "{} is not set: the deployment did not declare its capabilities, so \
+                     this agent's requirements ({}) cannot be checked",
+                    capability::PROVIDED_ENV,
+                    required.iter().map(|c| c.as_str()).collect::<Vec<_>>().join(", ")
+                );
+            }
+            capability::CapabilityCheck::Missing(missing) => {
+                return Err(ActorProcessingErr::from(capability::missing_message(
+                    &missing,
+                    provided.as_deref(),
+                )));
+            }
+        }
+
+        // Derived, not passed in: whether to watch the graph follows
+        // from the capabilities. The dependency endpoints are read by
+        // HealthCheckActor from POLAR_HEALTH_DEP_ENDPOINTS, which the
+        // deployment sets from the same `needs`, so there is no
+        // endpoint list to keep in sync with the manifest here.
+        let health_check_args = HealthCheckArgs {
+            expects_graph: required.contains(&Capability::GraphWrite),
+            rejuvenation_threshold_secs: DEFAULT_REJUVENATION_THRESHOLD_SECS,
+            dep_cert_endpoints: Vec::new(),
+        };
 
         let myself_cell = self.myself.get_cell();
 
@@ -177,7 +230,7 @@ impl<M: ractor::Message> AgentBuilder<M> {
                 service_name: self.service_name.clone(),
                 health_check_args,
                 subscriptions: self.subscriptions,
-                wants_crypto: self.with_crypto,
+                wants_crypto: self.wants_crypto,
             },
             myself_cell,
         )

@@ -202,6 +202,9 @@ export def resolve [name: string, target: string = $DEFAULT_TARGET] {
         { name: "POLAR_HEALTH_EXPIRY_SECS", value: ($h.expiry_secs | into string) }
         { name: "POLAR_HEALTH_TICK_SECS", value: ($h.tick_secs | into string) }
         { name: "POLAR_HEALTH_DEP_ENDPOINTS", value: $dep_list }
+        # What this deployment provides. The agent builder compares it with
+        # what the code requires and refuses to start on a mismatch.
+        { name: "POLAR_CAPABILITIES", value: ($needs | str join ",") }
     ] {
         $env_list = ($env_list | append (env_entry $e $vars "kind" $name))
     }

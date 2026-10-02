@@ -14,6 +14,6 @@
     name: "kube-consumer"
     kind: "agent"
     image: "kube-consumer"
-    needs: ["neo4j"]
+    needs: ["graph-write", "encryption"]
   }
 ]

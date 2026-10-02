@@ -39,7 +39,10 @@
     resources: {}
   }
 
-  neo4j: {
+  # The agent writes to the graph (Neo4j) over mTLS. The Rust builder's
+  # `.with_graph_write()` requires this. Named for what the code needs, not for
+  # the service that provides it, so a read-only variant can differ later.
+  graph-write: {
     pod: {
       env: [
         { name: "GRAPH_ENDPOINT",    value: "bolt+s://{neo4j.addr}" }
@@ -53,6 +56,19 @@
     }
     identity: { certs: [ { dir: "/etc/neo4j-client-tls", volume: "neo4j-client-tls", read_only: true } ] }
     dependency: { service: "neo4j", ttl_secs: 300 }
+    resources: {}
+  }
+
+  # The agent uses CryptoActor to encrypt payloads (the Rust builder's
+  # `.with_encryption()`). Opt-in: observers publish without encrypting.
+  # No footprint of its own yet: polar-init's escrow-keypair bootstrap, which
+  # polar-crypto needs, currently runs for every agent. When the mTLS
+  # integration through the builder lands, decide whether encryption becomes
+  # baseline (then the kind lists it) or the bootstrap derives from it.
+  encryption: {
+    pod: {}
+    identity: {}
+    dependency: {}
     resources: {}
   }
 

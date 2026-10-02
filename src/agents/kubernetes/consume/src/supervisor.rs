@@ -21,9 +21,7 @@ use polar::graph::controller::{
 };
 use polar::graph::nodes::builds::ArtifactNodeKey;
 use polar::graph::nodes::kube::KubeNodeKey;
-use polar::health::DepCertEndpoint;
 use polar::topics::KUBERNETES_RESOLUTION_EVENTS;
-use polar::health::HealthCheckArgs;
 use polar_agent_builder::{AgentBuilder, CryptoHandle, HealthClient, HealthHandle, Subscription};
 use ractor::{Actor, OutputPort};
 use ractor::ActorProcessingErr;
@@ -305,15 +303,6 @@ impl Actor for ClusterConsumerSupervisor {
         debug!("{myself:?} starting");
         info!("Read neo configuration successfully.");
 
-        // Parse dep cert endpoints for this agent:
-        // kube-consumer depends on Cassini and Neo4j.
-        let dep_cert_endpoints = vec![
-            DepCertEndpoint::parse("cassini-ip-svc.polar.svc.cluster.local:8080:300")
-                .map_err(ActorProcessingErr::from)?,
-            DepCertEndpoint::parse("polar-db-svc.polar-graph.svc.cluster.local:7687:300")
-                .map_err(ActorProcessingErr::from)?,
-        ];
-
         // The real, entire, formerly hand-rolled sequence --
         // HealthCheckActor, RouterActor, this agent's own two,
         // genuinely-owned topics (each bound to the real, wire-level
@@ -322,17 +311,14 @@ impl Actor for ClusterConsumerSupervisor {
         // Subscription for the complete, real reasoning), TcpClient,
         // and CryptoActor -- collapsed into one, real, composed call.
         let mut builder = AgentBuilder::new(myself.clone(), BROKER_CLIENT_NAME)
-            .with_health_check(HealthCheckArgs {
-                expects_graph: true,
-                rejuvenation_threshold_secs: 300,
-                dep_cert_endpoints,
-            });
+            .with_graph_write();
+
         for subscription in Self::kube_subscriptions(&myself) {
             builder = builder.with_subscription(subscription);
         }
         let resources = builder
             .with_lifecycle_handler(|event| Some(SupervisorMessage::ClientEvent { event }))
-            .with_crypto()
+            .with_encryption()
             .build()
             .await?;
 
@@ -368,7 +354,7 @@ impl Actor for ClusterConsumerSupervisor {
             healthcheck: resources.healthcheck,
             crypto: resources
                 .crypto
-                .expect("with_crypto was called, so this is always real, genuinely Some"),
+                .expect("with_encryption was called, so this is always real, genuinely Some"),
             draining: false,
         })
     }
@@ -503,7 +489,7 @@ impl Actor for ClusterConsumerSupervisor {
                 //
                 // Matched by real, genuine actor id, not name --
                 // AgentBuilder spawns HealthCheckActor unnamed (see
-                // its own, real with_health_check implementation), so
+                // its own, real build() implementation), so
                 // a real, direct id comparison against this
                 // supervisor's own, held HealthHandle is both the
                 // only real option available and, genuinely, more

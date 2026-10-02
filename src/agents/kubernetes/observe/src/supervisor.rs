@@ -7,11 +7,10 @@ use kube::ResourceExt;
 use kube::runtime::{watcher, watcher::Event};
 use kube::{Api, Client, api::ListParams};
 use kube_common::{KIND_KUSTOMIZATION, KIND_OCI_REPOSITORY};
-use polar::health::DepCertEndpoint;
 use polar_agent_builder::{
-    AgentBuilder, HealthClient, HealthHandle, InfrastructureEvent, InfrastructureSupervisorMessage,
+    AgentBuilder, Capability, HealthClient, HealthHandle, InfrastructureEvent,
+    InfrastructureSupervisorMessage,
 };
-use polar::health::HealthCheckArgs;
 use ractor::{Actor, ActorProcessingErr, ActorRef, SupervisionEvent, async_trait};
 use ractor::concurrency::Duration;
 use serde_json::to_value;
@@ -45,7 +44,7 @@ pub enum ObserverSupervisorMessage {
     /// InfrastructureSupervisor's own InfrastructureEvent::Respawned,
     /// forwarded here -- a real, unexpected TcpClientActor
     /// termination was detected and a fresh client already, genuinely
-    /// spawned. This agent has no CryptoActor (no with_crypto() call
+    /// spawned. This agent has no CryptoActor (no with_encryption() call
     /// below), so InfrastructureEvent::Respawned's own crypto field
     /// is always, genuinely None here and deliberately dropped.
     InfrastructureRespawned { tcp_client: TcpClient },
@@ -121,22 +120,15 @@ impl Actor for ClusterObserverSupervisor {
         // Read Kubernetes credentials and other data from the environment
         info!("{myself:?} starting");
 
-        // Observers only depend on Cassini -- no graph dependency, unlike consumers.
-        let dep_cert_endpoints = vec![
-            DepCertEndpoint::parse("cassini-ip-svc.polar.svc.cluster.local:8080:300")
-                .map_err(|e| ActorProcessingErr::from(e))?,
-        ];
-
         // The real, entire, formerly hand-rolled sequence --
         // HealthCheckActor, RouterActor, TcpClient -- collapsed into
-        // one, real, composed call. No with_crypto(): this agent only
-        // publishes, it never encrypts anything.
+        // one, real, composed call. No with_encryption(): this agent
+        // only publishes observations, it never encrypts a payload.
+        // It does need the Kubernetes API, which the deployment
+        // provisions (ClusterRole, binding, token); the builder checks
+        // that against POLAR_CAPABILITIES before anything starts.
         let resources = AgentBuilder::new(myself.clone(), TCP_CLIENT_NAME)
-            .with_health_check(HealthCheckArgs {
-                expects_graph: false,
-                rejuvenation_threshold_secs: 300,
-                dep_cert_endpoints,
-            })
+            .requires(Capability::KubeApiRead)
             .with_lifecycle_handler(|event| Some(ObserverSupervisorMessage::ClientEvent { event }))
             .build()
             .await?;
