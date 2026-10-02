@@ -130,6 +130,21 @@ pub struct JiraObserverState {
     pub full_pull_done: bool,
 }
 
+/// Renders an error together with every cause beneath it. reqwest reports
+/// only "error sending request" at the top; the reason (DNS, TLS, refused,
+/// timed out) is in a source, and without it a network failure cannot be
+/// told apart from any other.
+fn error_chain(e: &dyn std::error::Error) -> String {
+    let mut out = e.to_string();
+    let mut source = e.source();
+    while let Some(cause) = source {
+        out.push_str(": ");
+        out.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    out
+}
+
 impl JiraObserverState {
     /// Create a new JiraObserverState
     pub fn new(
@@ -161,7 +176,9 @@ impl JiraObserverState {
             .apply(self.web_client.get(url))
             .send()
             .await
-            .map_err(|e| ActorProcessingErr::from(format!("request to {url} failed: {e}")))?;
+            .map_err(|e| {
+                ActorProcessingErr::from(format!("request to {url} failed: {}", error_chain(&e)))
+            })?;
 
         let status = response.status();
         if !status.is_success() {
@@ -171,7 +188,10 @@ impl JiraObserverState {
         }
 
         response.json::<T>().await.map_err(|e| {
-            ActorProcessingErr::from(format!("could not decode the response from {url}: {e}"))
+            ActorProcessingErr::from(format!(
+                "could not decode the response from {url}: {}",
+                error_chain(&e)
+            ))
         })
     }
 }
