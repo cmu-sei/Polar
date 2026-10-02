@@ -1,0 +1,24 @@
+# infra/config/workloads/jira.nuon
+#
+# Jira agents. The observer polls the Jira REST API and publishes what it finds
+# to Cassini; the processor reads those topics and writes to the graph.
+#
+# The Jira site itself (JIRA_URL, JIRA_EMAIL) is a fact about the target, not
+# about the agent, so it lives in targets/<target>/config.nuon.
+[
+  {
+    name: "jira-observer"
+    kind: "agent"
+    image: "jira-observer"
+    env: [
+      { name: "JIRA_TOKEN", secret: "jira-secret", key: "token" }
+    ]
+  }
+
+  {
+    name: "jira-processor"
+    kind: "agent"
+    image: "jira-processor"
+    needs: ["graph-write"]
+  }
+]

@@ -5,5 +5,12 @@
 #   workloads  per-workload fields, keyed by workload name
 {
   cluster: {}
-  workloads: {}
+  workloads: {
+    jira-observer: {
+      env: [
+        { name: "JIRA_URL", value: "https://daveman1010220.atlassian.net" }
+        { name: "JIRA_EMAIL", value: "daveman1010220@gmail.com" }
+      ]
+    }
+  }
 }

@@ -29,7 +29,6 @@ def main [] {
             ($layers | path join "2-services/keycloak/main.nu")
             ($layers | path join "2-services/cassini/main.nu")
             ($layers | path join "2-services/credentials-agent/main.nu")
-            ($layers | path join "3-workloads/agents/jira/main.nu")
         ]
 
         apply_order : [
