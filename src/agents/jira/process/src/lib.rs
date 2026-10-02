@@ -28,12 +28,3 @@ pub mod supervisor;
 pub mod users;
 
 pub const BROKER_CLIENT_NAME: &str = "JIRA_CONSUMER_CLIENT";
-pub const JIRA_USER_CONSUMER: &str = "users";
-pub const JIRA_ISSUE_CONSUMER: &str = "issues";
-
-#[derive(Debug)]
-pub enum CrashReason {
-    CaCertReadError(String), // error when reading CA cert
-    SubscriptionError(String), // error when subscribing to the topic
-                             // Add other error types as necessary
-}

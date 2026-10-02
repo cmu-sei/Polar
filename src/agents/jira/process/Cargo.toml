@@ -30,8 +30,6 @@ license.workspace = true
 
 [dependencies]
 async-global-executor = "3.1.0"
-cassini-backoff.workspace = true
-cassini-client.workspace = true
 cassini-types.workspace = true
 futures-lite.workspace = true
 jira_common.workspace = true

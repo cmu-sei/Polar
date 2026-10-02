@@ -1,3 +1,25 @@
+/*
+   Polar (OSS)
+
+   Copyright 2024 Carnegie Mellon University.
+
+   NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+   FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND,
+   EITHER EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS
+   FOR PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL.
+   CARNEGIE MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM
+   PATENT, TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+
+   Licensed under a MIT-style license, please see license.txt or contact permission@sei.cmu.edu for
+   full terms.
+
+   [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+   distribution.  Please see Copyright notice for non-US Government use and distribution.
+
+   This Software includes and/or makes use of Third-Party Software each subject to its own license.
+
+   DM24-0470
+*/
 use crate::groups::JiraGroupObserver;
 use crate::issues::JiraIssueObserver;
 use crate::projects::JiraProjectObserver;
@@ -7,7 +29,7 @@ use crate::{
     JIRA_USER_OBSERVER, JiraAuth, JiraDeployment, JiraObserverArgs, JiraObserverMessage,
 };
 use cassini_types::ClientEvent;
-use jira_common::get_file_as_byte_vec;
+use polar::async_get_file_as_byte_vec;
 use polar::cassini::TcpClient;
 use polar_agent_builder::{
     AgentBuilder, HealthClient, HealthHandle, InfrastructureEvent, InfrastructureSupervisorMessage,
@@ -115,11 +137,11 @@ impl ObserverSupervisorState {
 
 impl ObserverSupervisor {
     /// Build reqwest client, optionally with a proxy CA certificate.
-    fn get_client(proxy_ca_cert_path: Option<&str>) -> Result<Client, ActorProcessingErr> {
+    async fn get_client(proxy_ca_cert_path: Option<&str>) -> Result<Client, ActorProcessingErr> {
         let mut builder = ClientBuilder::new();
 
         if let Some(path) = proxy_ca_cert_path {
-            let cert_data = get_file_as_byte_vec(&path.to_string()).map_err(|e| {
+            let cert_data = async_get_file_as_byte_vec(path).await.map_err(|e| {
                 ActorProcessingErr::from(format!(
                     "failed to read proxy CA certificate at {path}: {e}"
                 ))
@@ -203,7 +225,7 @@ impl Actor for ObserverSupervisor {
         debug!("{myself:?} starting");
 
         // Fail on a bad proxy CA before anything is started.
-        let web_client = ObserverSupervisor::get_client(args.proxy_ca_cert_file.as_deref())?;
+        let web_client = ObserverSupervisor::get_client(args.proxy_ca_cert_file.as_deref()).await?;
 
         // Health check, router and broker client in one call. Observers only
         // depend on Cassini, which is the default capability, so there is
