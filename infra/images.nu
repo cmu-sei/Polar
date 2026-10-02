@@ -17,9 +17,14 @@
 #   POLAR_NEO4J_IMAGE      path to the Neo4j docker-archive (overrides the table)
 
 const TABLE = (path self | path dirname | path join "images.nuon")
+const CLUSTER = (path self | path dirname | path join "config" "cluster.nuon")
 
 def registry [] { $env.POLAR_REGISTRY? | default "localhost:5000" }
 def runtime [] { $env.POLAR_CLUSTER_RUNTIME? | default "u7s" }
+
+# The registry address as the cluster nodes see it, which is not the address this
+# machine pushes to. A node's cached image is named with this one.
+def node_registry [] { open $CLUSTER | get registry }
 
 def load_table [] { open $TABLE }
 
@@ -75,7 +80,8 @@ export def needed [files: list<string>] {
     $found | uniq-by image
 }
 
-# Table rows by name (for building by hand). No cache invalidation: ref is empty.
+# Table rows by name (for building by hand). ref is empty; a node's cached copy is
+# evicted by name and tag, not through ref.
 export def named [names: list<string>] {
     let rows = (load_table)
     let unknown = ($names | where {|n| $n not-in ($rows | get image) })
@@ -152,9 +158,20 @@ export def sync [rows: list] {
                 ^skopeo copy $"docker-archive:($a)" $"docker://(registry)/(dest $row)" --dest-tls-verify=false
                 skopeo_ok $row.image
                 # Nodes keep a pulled :latest and never re-pull it (IfNotPresent),
-                # so drop their copy of what was just rebuilt.
-                if (runtime) == "u7s" and ($row.ref | is-not-empty) {
-                    try { do { ^podman exec u7s ctr -n k8s.io images rm $row.ref } | complete | ignore }
+                # so drop their copy of what was just rebuilt. The name is the one
+                # the node knows the image by, built from the row, so every path
+                # (by name, --all, from manifests) evicts. A failure is reported:
+                # a stale cache here looks exactly like running the new code.
+                if (runtime) == "u7s" {
+                    let node_ref = $"(node_registry)/(dest $row)"
+                    try {
+                        let r = (do { ^podman exec u7s ctr -n k8s.io images rm $node_ref } | complete)
+                        if $r.exit_code != 0 and not ($r.stderr | str contains "not found") {
+                            print $"      could not evict ($node_ref) from the node: ($r.stderr | str trim)"
+                        }
+                    } catch {|e|
+                        print $"      could not evict ($node_ref) from the node: ($e.msg)"
+                    }
                 }
             }
         }
