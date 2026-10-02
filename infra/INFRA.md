@@ -58,8 +58,8 @@ the data, applies layering and capabilities, and produces one fully resolved
 record per workload. It is a pure function: no cluster, no network, no files
 written. That is what makes it testable and what makes `explain` possible.
 
-**Variation between agents is data.** An agent that needs Neo4j says
-`needs: ["neo4j"]`. It does not get a `hasGraph` flag in a template. If you want a
+**Variation between agents is data.** An agent that writes to the graph says
+`needs: ["graph-write"]`. It does not get a `hasGraph` flag in a template. If you want a
 boolean in a template to make one workload fit, stop: either the variation belongs
 in a capability (data), or the workload is a custom chart (see
 [the escape hatch](#add-a-custom-chart-the-escape-hatch)).
@@ -235,12 +235,16 @@ every **facet**:
 | `dependency` | the service whose certificate must be valid before the agent starts, and for how long |
 | `resources` | Kubernetes objects that live alongside the workload (cluster roles, token Secrets) |
 
-Today's capabilities are `cassini`, `neo4j` and `kube-api-read`. Every `agent`
-gets `cassini` from its kind. From a workload's `needs` the resolver derives,
-without anyone writing them per agent:
+Today's capabilities are `cassini`, `graph-write`, `encryption` and
+`kube-api-read`. Every `agent` gets `cassini` from its kind. `encryption` is an
+opt-in marker with no footprint yet (see
+[Capabilities and the Rust agent builder](#capabilities-and-the-rust-agent-builder)).
+From a workload's `needs` the resolver derives, without anyone writing them per
+agent:
 
 - the init container's `--check-dep-cert host:port:ttl` arguments (don't start an agent whose dependency's certificate is about to expire)
 - `POLAR_HEALTH_DEP_ENDPOINTS` and `POLAR_HEALTH_CERTS` for the health actor
+- `POLAR_CAPABILITIES`, the comma-joined `needs`, which the agent's own builder checks at startup
 - the volumes, mounts and `--cert` specs for every client certificate
 
 ### Layering
@@ -342,8 +346,10 @@ described is empty and unused; secrets are per target now.)
 ### Add an agent to the catalog
 
 Prerequisite: the agent's image builds from the flake. If it is not on
-`polar-agent-builder` yet, migrate it first; the manifest side assumes the
-capability names will line up with the builder's.
+`polar-agent-builder` yet, migrate it first. The builder declares what the code
+needs (`.with_graph_write()`, `.requires(...)`), and your `needs` must provide
+at least that or the agent refuses to start (see
+[Capabilities and the Rust agent builder](#capabilities-and-the-rust-agent-builder)).
 
 1. **Add the image row** to `infra/images.nuon` (one row; nothing else needs to know):
    ```nuon
@@ -355,7 +361,7 @@ capability names will line up with the builder's.
      name: "foo-observer"
      kind: "agent"
      image: "foo-observer"          # a row of images.nuon; its tag is used
-     needs: ["neo4j"]               # on top of what the kind gives: cassini
+     needs: ["graph-write"]         # on top of what the kind gives: cassini
      env: [
        { name: "FOO_URL",   value: "https://foo.example.com" }
        { name: "FOO_TOKEN", secret: "foo-secret", key: "token" }
@@ -397,9 +403,43 @@ permission, a credential.
    answered, a dependency names a service that does not exist, or a placeholder
    cannot be resolved. You cannot forget a case.
 
-Name it for what the code *requires*: the Rust agent builder's capability methods
-should use the same names (`.with_graph_write()`, `.with_encryption()`). That link
-is planned but not enforced yet; see [Known limits](#known-limits).
+Name it for what the code *requires*, and add the same name to the Rust
+`Capability` enum in `polar-agent-builder` (`src/capability.rs`). A unit test
+(`names_match_the_deployment_catalog`) compares the two name sets in both
+directions, so a rename on one side fails the other side's tests.
+
+### Capabilities and the Rust agent builder
+
+One vocabulary, two enforcement points:
+
+| Where | When | What it does |
+|---|---|---|
+| `resolve.nu check` | render time | an unknown `needs` entry, or a capability that does not answer every facet, fails |
+| `AgentBuilder::build()` | agent startup | the agent's declared requirements must be a subset of `POLAR_CAPABILITIES`, else it exits non-zero (a Job restarts) |
+
+In Rust an agent declares what its own code needs:
+
+```rust
+AgentBuilder::new(myself.clone(), TCP_CLIENT_NAME)
+    .with_graph_write()            // requires Capability::GraphWrite; health also watches the graph
+    .with_encryption()             // requires Capability::Encryption; spawns the CryptoActor
+    .requires(Capability::KubeApiRead)   // a requirement the builder itself does nothing for
+```
+
+Every builder agent implicitly requires `cassini`. The deployment states what it
+provides by setting `POLAR_CAPABILITIES` (derived from `needs`, never written by
+hand). If the variable is unset, for example when running outside the cluster,
+the builder logs a warning and starts anyway; it only refuses on a real mismatch.
+
+`encryption` is **opt-in**: an agent that never encrypts a payload (the observers)
+does not declare it. It currently contributes nothing to the manifest (all facets
+are `{}`), because polar-init's escrow bootstrap for polar-crypto runs for every
+agent. When the builder's mTLS integration through the CryptoActor lands, decide
+whether encryption becomes a baseline or stays derived from a capability.
+
+Health configuration is no longer passed from Rust: the builder derives
+`expects_graph` from the capabilities and reads the dependency endpoints from
+`POLAR_HEALTH_DEP_ENDPOINTS`, which the catalog derives from the same `needs`.
 
 ### Add a service
 
@@ -565,7 +605,8 @@ nushell gotchas that have bitten this pipeline:
 - **Only `agent` is a catalog kind, and only the kube agents are in the catalog.** Everything else is a custom chart.
 - **`apply_order` is hand-maintained** in each `target.nu`. It should be derived from the catalog (resources before the Job).
 - **`render.nu` passes cluster facts to custom charts through a `match` on the chart name,** and `target.nu` carries values (`cert_issuer_url`, `polar_init_image`, ...) that the catalog derives elsewhere. That is data written as control flow, and a duplicated fact.
-- **Capability names are meant to be shared with the Rust agent builder** (one declaration driving both the manifest and a startup check that the deployment provides what the code requires). Neither the rename nor the check exists yet.
+- **Only the kube agents declare capabilities in Rust.** Other agents still hard-code health arguments and Cassini/Neo4j endpoints; they move to the builder one pair at a time.
+- **`POLAR_CAPABILITIES` unset is a warning, not an error,** so an agent run outside the cluster still starts. A deployment that forgets to set it is therefore not caught by the builder; the catalog sets it for every workload it renders.
 - **The cluster domain drives catalog addresses,** but custom charts still hard-code `svc.cluster.local`, and `polar-init --cluster-domain` is not passed.
 - **`src/deploy/`** is the old system. Confirm it is dead and remove it, or mark it.
 

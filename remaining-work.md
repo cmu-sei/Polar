@@ -41,9 +41,11 @@ Design: `docs/architecture/config-catalog-design.md`. Pattern per agent: migrate
 - [ ] jira pair: migrate jira-observer and jira-processor Rust to `polar-agent-builder`, add `workloads/jira.nuon` (JIRA_URL / JIRA_EMAIL come from the target layer, JIRA_TOKEN from a secret env entry), golden-diff (expect only the added `--check-dep-cert` args), remove the jira chart
 - [ ] credentials-agent (lives under `2-services`): the first real test of the escape hatch; decide which parts fit `agent` and which stay a custom chart
 - [ ] Remaining agents (gitlab, git, scheduler, openapi, build-processor, resolver, ace); each needs its builder migration first
-- [ ] Rename the Rust builder methods to capability names (`.with_graph_write()`, `.with_encryption()`) BEFORE migrating more agents, so each migrates once
-- [ ] Shared-name test: capability names in the Rust builder vs `config/capabilities.nuon` (fails in both directions)
-- [ ] Startup cross-check: deployment declares the capabilities it provides, the builder checks `requires` is a subset and exits non-zero otherwise
+- [x] Rust builder uses capability names (`.with_graph_write()`, `.with_encryption()`, `.requires(Capability)`); `with_health_check` removed, health args derived from capabilities and `POLAR_HEALTH_DEP_ENDPOINTS`
+- [x] Shared-name test (`names_match_the_deployment_catalog`) fails in both directions
+- [x] Startup cross-check: catalog sets `POLAR_CAPABILITIES`; `AgentBuilder::build()` exits non-zero when requirements are not a subset (warns when unset)
+- [ ] Decide baseline vs derived `encryption` and the polar-init escrow bootstrap (runs for every agent today) when mTLS integration through the builder lands; the builder spawns the CryptoActor, but TcpClient does not offload mTLS to it yet
+- [ ] Remove the dead dep-endpoint literals and `HealthCheckArgs` from the remaining agents as each migrates to the builder
 - [ ] Move other agents' RBAC (`ace-rbac`, etc.) into the `resources` facet; add further facets as needed (the resolver check enforces every capability answers every facet)
 - [ ] Derive `apply_order` from the catalog (resources before the Job) instead of the hand-typed list in `target.nu`
 - [ ] Replace the `render.nu` `match $chart_name` table (nine arms pass the same four values) with data

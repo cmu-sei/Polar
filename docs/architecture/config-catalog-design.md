@@ -1,6 +1,6 @@
 # Configuration catalog: design record
 
-Status: stage 1 built and verified (resolver + kube slice); stage 2 (agent.dhall, resources.dhall, render wiring, compare script) written, awaiting the golden diff on the user's machine (Dhall untested by the author).
+Status: stages 1 and 2 built, verified and applied to the live cluster (kube pair rendered via the catalog); builder-capability slice (`graph-write`, `encryption`, `POLAR_CAPABILITIES` cross-check) in review.
 Branch: `feat/ace-integration`. Written 2026-10-02 so the design does not live only in a chat.
 
 ## 1. Goal
@@ -65,10 +65,11 @@ later without changing the facet shape.
 History: an earlier version of this design dropped the visitor ("footprints are data")
 because only one operation, the pod fragments, was in view. The kube RBAC chart was
 then left behind as a custom chart, which showed the second operation (`resources`)
-and the gap. Current vocabulary: `cassini`, `neo4j`, `kube-api-read` (ClusterRole +
-binding + token Secret + KUBE_TOKEN env + token mount). Planned: `graph-write`,
-`encryption`, `logger`/tracing. Names are meant to match the Rust builder's capability
-methods.
+and the gap. Current vocabulary: `cassini`, `graph-write` (renamed from `neo4j`:
+named for what the code needs, not the service that provides it), `encryption`
+(opt-in marker, no footprint yet), `kube-api-read` (ClusterRole + binding + token
+Secret + KUBE_TOKEN env + token mount). Planned: `logger`/tracing. Names match the
+Rust builder's `Capability` enum, enforced by a test.
 
 Derived, never hand-written per agent:
 - `POLAR_HEALTH_CERTS` = comma-joined client cert paths of the needs
@@ -86,16 +87,22 @@ Derived, never hand-written per agent:
   `Outbound -> Encrypted/Plaintext`. Only kube-observer and kube-consumer use it today.
 - **Manifest builder (resolver + generic `agent.dhall`)**: deployment wiring at render time.
 
-Agreed properties:
-1. Names are checked in both directions: a test compares the Rust builder's
-   capability names against the vocabulary, so a rename on one side fails on the other.
+Agreed properties (all implemented as of the builder-capability slice):
+1. Names are checked in both directions: `names_match_the_deployment_catalog` in
+   `polar-agent-builder` compares the `Capability` enum against `capabilities.nuon`.
 2. Mismatches fail loudly on both sides: the manifest builder rejects a need with no
    footprint at render time; the agent builder rejects a capability the deployment
    did not provision at startup with a **non-zero exit** (fits the no-graceful-exit rule).
-3. Proposed (user onboard): the deployment declares the capabilities it provides
-   (e.g. one env var) and the builder cross-checks `requires ⊆ provides`. It could
-   also derive dependency endpoints from the same facts, removing cluster-domain
-   literals from Rust.
+3. The deployment declares the capabilities it provides in `POLAR_CAPABILITIES`
+   (derived from `needs`) and `AgentBuilder::build()` checks `requires ⊆ provides`,
+   exiting non-zero on a mismatch and warning if the variable is unset. Dependency
+   endpoints are no longer in Rust for builder agents: the builder reads
+   `POLAR_HEALTH_DEP_ENDPOINTS`, derived from the same `needs`, and derives
+   `expects_graph` from `graph-write`. `with_health_check` was removed.
+   `encryption` is opt-in (observers do not declare it): polar-crypto serves escrow
+   keys and mTLS, but observers never encrypt payloads; polar-init's escrow bootstrap
+   still runs for every agent and is revisited when the builder's mTLS integration
+   through the CryptoActor lands.
 4. The vocabulary starts with what exists and grows with the builder; catalog entries
    use capability names from the start so a later Rust rename does not touch the
    deployment side.
@@ -152,6 +159,7 @@ agent's Dhall (all 19 files) sets `dep_cert_endpoints`, except kube-consumer.
 kube slice (verified in stage 1; these are the only differences):
 - kube-consumer: + `POLAR_HEALTH_DEP_ENDPOINTS` = cassini + neo4j, ttl 300 (no-op vs the Rust fallback)
 - kube-observer: + init `--check-dep-cert` for cassini
+- builder-capability slice: both kube Jobs gain `POLAR_CAPABILITIES` (observer `cassini,kube-api-read`; consumer `cassini,graph-write,encryption`)
 
 jira slice (expected, not yet built): jira-observer and jira-processor each gain
 `--check-dep-cert` args.
@@ -171,8 +179,8 @@ Then: jira (after its Rust migration), credentials-agent (tests the escape hatch
 
 ## 9. Open items
 
-- Capability rename in the Rust builder before migrating the remaining agents (migrate once, to the final vocabulary).
-- Confirm `HealthCheckArgs` hard-coding was convenience, not a decision.
+- (done) Capability rename and `POLAR_CAPABILITIES` cross-check in the Rust builder; `HealthCheckArgs` is derived inside the builder (polar-health keeps its own struct).
+- Decide baseline vs derived `encryption`, and the polar-init escrow bootstrap, when mTLS integration through the builder lands.
 - Pass `--cluster-domain` to polar-init from `cluster.domain`.
 - Derive init env (currently `Constants.commonClientEnv`) from the cassini capability.
 - Static check: rejuvenation > expiry.
