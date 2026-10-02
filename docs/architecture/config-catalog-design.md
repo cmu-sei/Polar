@@ -1,6 +1,6 @@
 # Configuration catalog: design record
 
-Status: stages 1 and 2 built, verified and applied to the live cluster (kube pair rendered via the catalog); builder-capability slice (`graph-write`, `encryption`, `POLAR_CAPABILITIES` cross-check) in review.
+Status: stages 1 to 3 built and verified (kube pair applied to the live cluster; jira pair rendered via the catalog on both local targets, its chart removed, awaiting a positive end-to-end test); builder-capability slice (`graph-write`, `encryption`, `POLAR_CAPABILITIES` cross-check) in review.
 Branch: `feat/ace-integration`. Written 2026-10-02 so the design does not live only in a chat.
 
 ## 1. Goal
@@ -34,8 +34,10 @@ Capabilities (`needs`) *union* into list-valued fields (env, volumes, mounts, ce
 dependency checks) in declared order. `explain` shows provenance per value, like
 `git config --show-origin`: `[kind]`, `[entry]`, `[cassini]`, `[derived]`.
 
-Target-specific values (e.g. `JIRA_URL`, `JIRA_EMAIL`, today in `overrides.dhall`)
-come from the target layer, not the workload entry.
+Target-specific values (e.g. `JIRA_URL`, `JIRA_EMAIL`) come from the target layer,
+not the workload entry: each target's `config.nuon` carries
+`workloads.<name>.env`, appended after the capability env. Secrets are referenced,
+never stored: `{ name: "JIRA_TOKEN", secret: "jira-secret", key: "token" }`.
 
 ## 3. The capability vocabulary (the shared contract)
 
@@ -74,6 +76,7 @@ Rust builder's `Capability` enum, enforced by a test.
 Derived, never hand-written per agent:
 - `POLAR_HEALTH_CERTS` = comma-joined client cert paths of the needs
 - `POLAR_HEALTH_DEP_ENDPOINTS` = comma-joined `host:port:ttl` of the needs' dependencies
+- `POLAR_CAPABILITIES` = comma-joined capability names (kind default first)
 - init `--check-dep-cert host:port:ttl` and `--cert type:dir:alg[:sans]`
 - a workload's ServiceAccount is uniform: render.nu emits one for every workload
   identity no manifest declares (the catalog does not need to).
@@ -84,7 +87,8 @@ Derived, never hand-written per agent:
   `AgentBuilder` composes `InfrastructureSupervisor` (HealthCheckActor, RouterActor,
   TcpClientActor, optional CryptoActor; respawn; PrepareShutdown/ProceedWithShutdown
   handshake), `Subscription`, `HealthHandle`, `CryptoHandle`, type-state
-  `Outbound -> Encrypted/Plaintext`. Only kube-observer and kube-consumer use it today.
+  `Outbound -> Encrypted/Plaintext`. kube-observer, kube-consumer, jira-observer and
+  jira-processor use it today.
 - **Manifest builder (resolver + generic `agent.dhall`)**: deployment wiring at render time.
 
 Agreed properties (all implemented as of the builder-capability slice):
@@ -112,7 +116,29 @@ falls back to `HealthCheckArgs` (`POLAR_HEALTH_DEP_ENDPOINTS`, `_CERTS`,
 `_REJUVENATION_SECS`, `_EXPIRY_SECS`, `_TICK_SECS`, `_GRAPH_DEADLINE_SECS`); it
 validates rejuvenation > expiry. Builder migration does **not** change the manifest
 contract (kube-observer is migrated and its Dhall still sets the env var). Every
-agent's Dhall (all 19 files) sets `dep_cert_endpoints`, except kube-consumer.
+agent's Dhall (all 19 files, counted before the kube and jira charts were removed)
+sets `dep_cert_endpoints`, except kube-consumer.
+
+Facts learned from the jira migration:
+- **Wire format.** Observers publish the bare rkyv-serialized `JiraData` through the
+  builder's `TcpClient` (`publish_data`); the processor decodes once. The old path
+  wrapped the payload twice. Observer and processor must be deployed together.
+- **Error policy.** An observer tick error propagates (`?`), the actor fails, the
+  domain supervisor sees `ActorFailed` and exits non-zero, and the Job restarts the
+  pod (`restartPolicy: Never`, large `backoff_limit`). This replaced the hand-written
+  backoff machinery, which was removed. The entrypoint also returns an error when the
+  supervisor stops, so nothing exits 0.
+- **Shutdown handshake.** HealthCheckActor termination ->
+  `InfrastructureEvent::PrepareShutdown` -> the domain supervisor stops its own
+  children, then casts `ProceedWithShutdown` to the InfrastructureSupervisor -> the
+  domain supervisor exits non-zero when the infrastructure actor terminates (matched
+  by id). Each supervisor keeps a local message enum, since `polar::SupervisorMessage`
+  cannot carry infrastructure signals. On `InfrastructureEvent::Respawned` the new
+  `TcpClient` handle is stored and observers are rebuilt on the next registration.
+  jira-processor lacked the second half before its migration; kube-consumer still does.
+- **Environment.** Everything the pod needs comes from the catalog entry plus the
+  target layer; the Rust side reads `JIRA_URL`, `JIRA_EMAIL`, `JIRA_TOKEN` and fails
+  with a message, not a panic, when one is missing.
 
 ## 5. Decisions
 
@@ -120,7 +146,8 @@ agent's Dhall (all 19 files) sets `dep_cert_endpoints`, except kube-consumer.
   for every agent. Intent (user): don't start an agent whose dependency certs are
   about to expire.
 - Pair per agent: migrate the Rust agent to the builder, add its catalog entry,
-  golden-diff. Order: kube pair (local-minimal) -> jira -> credentials-agent.
+  golden-diff, remove the chart. Order: kube pair (local-minimal, done) -> jira
+  (done) -> credentials-agent.
 - **Rendered manifests are the contract.** Render with the old pipeline, render from
   the catalog, diff. List order is non-semantic (multiset compare).
 - Escape hatch stays: anything that does not fit the generic agent template remains a
@@ -153,16 +180,22 @@ agent's Dhall (all 19 files) sets `dep_cert_endpoints`, except kube-consumer.
 - Four inconsistent pods: kube-consumer lacks `POLAR_HEALTH_DEP_ENDPOINTS`; only
   kube-consumer has `--check-dep-cert`; only kube-observer leaves
   `automountServiceAccountToken` unset (deliberate: `sa_token_secret`).
+- Orphans after a chart moved to the catalog: the `match $chart_name` arms in
+  `render.nu` and the `kube-agent-rbac.yaml` branch in `up.nu` outlived their charts
+  until someone went looking. Removing a chart now includes its render arm.
 
-## 7. Expected golden-diff deltas
+## 7. Golden-diff deltas
 
-kube slice (verified in stage 1; these are the only differences):
+These were the only differences between the old render and the catalog render.
+
+kube slice (verified in stage 1):
 - kube-consumer: + `POLAR_HEALTH_DEP_ENDPOINTS` = cassini + neo4j, ttl 300 (no-op vs the Rust fallback)
 - kube-observer: + init `--check-dep-cert` for cassini
 - builder-capability slice: both kube Jobs gain `POLAR_CAPABILITIES` (observer `cassini,kube-api-read`; consumer `cassini,graph-write,encryption`)
 
-jira slice (expected, not yet built): jira-observer and jira-processor each gain
-`--check-dep-cert` args.
+jira slice (verified on `local-minimal` and `local`):
+- jira-observer and jira-processor each gain init `--check-dep-cert` args
+- both gain `POLAR_CAPABILITIES` (observer `cassini`; processor `cassini,graph-write`)
 
 ## 8. Stages
 
@@ -170,17 +203,23 @@ Stage 1 (done): `infra/config/{cluster,services,capabilities,kinds}.nuon`,
 `config/workloads/kube.nuon`, `targets/local-minimal/config.nuon`, `infra/resolve.nu`
 (`list`, `check`, `explain`, `json`, `diff`). Verified against golden manifests.
 
-Stage 2: generic `schema/agent.dhall` reusing `functions.makePolarInitContainer`
+Stage 2 (done): generic `schema/agent.dhall` reusing `functions.makePolarInitContainer`
 (10 args) and the Proxy* helpers; render wiring (resolve -> JSON -> `json-to-dhall` ->
-`dhall-to-yaml`) coexisting with legacy charts; `kube/main.nu` reduced to RBAC only;
-golden-diff harness. Dhall is untested by the author (no toolchain in the sandbox).
+`dhall-to-yaml`) coexisting with legacy charts; `kube/main.nu` reduced to RBAC only,
+then the whole kube chart removed; golden-diff harness (`compare-manifests.nu`).
 
-Then: jira (after its Rust migration), credentials-agent (tests the escape hatch).
+Stage 3 (done): jira pair. Both Rust agents migrated to the builder, `workloads/jira.nuon`,
+target-layer env in both local targets' `config.nuon`, golden-diffed, jira chart and
+its render arm removed. Outstanding: a positive end-to-end run (observer -> processor ->
+graph) once the Atlassian site is reachable.
+
+Then: credentials-agent (tests the escape hatch).
 
 ## 9. Open items
 
 - (done) Capability rename and `POLAR_CAPABILITIES` cross-check in the Rust builder; `HealthCheckArgs` is derived inside the builder (polar-health keeps its own struct).
 - Decide baseline vs derived `encryption`, and the polar-init escrow bootstrap, when mTLS integration through the builder lands.
+- Move the graph controller into the builder as infrastructure (`.with_graph_write()` spawning it, wiring `GraphSignal`, owning the flush) and make the shutdown handshake builder-owned, so a migrated agent cannot forget its half of it (kube-consumer did).
 - Pass `--cluster-domain` to polar-init from `cluster.domain`.
 - Derive init env (currently `Constants.commonClientEnv`) from the cassini capability.
 - Static check: rejuvenation > expiry.
