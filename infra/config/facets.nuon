@@ -1,0 +1,16 @@
+# infra/config/facets.nuon
+#
+# The operations a capability takes part in. Every capability in
+# capabilities.nuon must answer EVERY facet listed here (an explicit `{}`
+# where it has nothing to add), and may answer no facet that is not listed.
+# `nu infra/resolve.nu check` enforces both directions, so adding a capability
+# or adding a facet cannot leave a cell of the grid forgotten.
+#
+# To add a facet: list it here, give each existing capability an answer, and
+# teach resolve.nu and a template to use it.
+{
+  pod: "env, volumes and mounts the agent container gets"
+  identity: "client certificates polar-init obtains from cert-issuer (each also adds its volume, mounts and a health-checked cert path)"
+  dependency: "the service whose certificate must be valid before the agent starts, and for how long (feeds polar-init --check-dep-cert and POLAR_HEALTH_DEP_ENDPOINTS)"
+  resources: "Kubernetes objects that exist alongside the workload (RBAC, token Secrets)"
+}

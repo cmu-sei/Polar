@@ -1,0 +1,19 @@
+# infra/config/workloads/kube.nuon
+#
+# Kubernetes agents. The observer watches the cluster API and publishes to
+# Cassini; the consumer reads Cassini topics and writes to the graph.
+[
+  {
+    name: "kube-observer"
+    kind: "agent"
+    image: "kube-observer"
+    needs: ["kube-api-read"]
+  }
+
+  {
+    name: "kube-consumer"
+    kind: "agent"
+    image: "kube-consumer"
+    needs: ["neo4j"]
+  }
+]

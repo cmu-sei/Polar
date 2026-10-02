@@ -29,7 +29,6 @@ def main [] {
             ($layers | path join "2-services/keycloak/main.nu")
             ($layers | path join "2-services/cassini/main.nu")
             ($layers | path join "2-services/credentials-agent/main.nu")
-            ($layers | path join "3-workloads/agents/kube/main.nu")
             ($layers | path join "3-workloads/agents/jira/main.nu")
         ]
 
@@ -59,7 +58,7 @@ def main [] {
             "jaeger.yaml"
             "ace-rbac.yaml"
             "ace.yaml"
-            "kube-agent-rbac.yaml"
+            "kube-observer-resources.yaml"
             "kube-observer.yaml"
             "kube-consumer.yaml"
             "jira-observer.yaml"

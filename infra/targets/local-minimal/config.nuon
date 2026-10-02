@@ -1,0 +1,9 @@
+# infra/targets/local-minimal/config.nuon
+#
+# Overrides applied on top of infra/config for this target:
+#   cluster    any field of cluster.nuon
+#   workloads  per-workload fields, keyed by workload name
+{
+  cluster: {}
+  workloads: {}
+}

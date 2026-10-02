@@ -1,0 +1,10 @@
+# infra/config/services.nuon
+#
+# In-cluster services other workloads connect to. One entry per service:
+# its Service name, its namespace (a key of cluster.namespaces) and port.
+# Addresses are derived as <dns_name>.<namespace>.svc.<cluster.domain>:<port>.
+{
+  cassini:     { dns_name: "cassini-ip-svc", namespace: "polar", port: 8080 }
+  neo4j:       { dns_name: "polar-db-svc",   namespace: "graph", port: 7687 }
+  cert-issuer: { dns_name: "cert-issuer",    namespace: "polar", port: 8443, scheme: "https" }
+}

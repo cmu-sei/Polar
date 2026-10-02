@@ -1,0 +1,77 @@
+# infra/config/capabilities.nuon
+#
+# What an agent gets by declaring a need. An agent lists capabilities in
+# `needs`; the resolver unions what each one contributes. Nothing here is
+# code: adding a capability means adding an entry here, and an unknown name in
+# `needs` fails the resolver.
+#
+# Each capability answers every facet in facets.nuon (checked by
+# `nu infra/resolve.nu check`):
+#
+#   pod         env: [{ name, value | secret+key }]
+#               volumes: [{ name, secret? }]      (no secret = emptyDir)
+#               mounts: [{ name, path, read_only }]
+#   identity    certs: [{ dir, volume, read_only }]
+#                 dir/volume: where the cert lives; read_only in the agent
+#                 container (polar-init always writes)
+#   dependency  service, ttl_secs
+#                 service: a key of services.nuon; ttl_secs: minimum remaining
+#                 lifetime of its certificate
+#   resources   sa_token_secret: name of a service-account-token Secret
+#               cluster_roles: [{ name, rules: [{ api_groups, resources, verbs }] }]
+#                 (each role is bound to the workload's ServiceAccount)
+#
+# Text values may use {<service>.dns}, {<service>.port}, {<service>.addr} and
+# {workload}, the workload's own name.
+{
+  cassini: {
+    pod: {
+      env: [
+        { name: "TLS_CA_CERT",         value: "/etc/tls/certs/ca.pem" }
+        { name: "TLS_CLIENT_CERT",     value: "/etc/tls/certs/cert.pem" }
+        { name: "TLS_CLIENT_KEY",      value: "/etc/tls/certs/key.pem" }
+        { name: "BROKER_ADDR",         value: "{cassini.addr}" }
+        { name: "CASSINI_SERVER_NAME", value: "{cassini.dns}" }
+      ]
+    }
+    identity: { certs: [ { dir: "/etc/tls/certs", volume: "polar-certs", read_only: false } ] }
+    dependency: { service: "cassini", ttl_secs: 300 }
+    resources: {}
+  }
+
+  neo4j: {
+    pod: {
+      env: [
+        { name: "GRAPH_ENDPOINT",    value: "bolt+s://{neo4j.addr}" }
+        { name: "GRAPH_DB",          value: "neo4j" }
+        { name: "GRAPH_USER",        value: "neo4j" }
+        { name: "GRAPH_PASSWORD",    secret: "polar-graph-pw", key: "secret" }
+        { name: "GRAPH_CLIENT_CERT", value: "/etc/neo4j-client-tls/cert.pem" }
+        { name: "GRAPH_CLIENT_KEY",  value: "/etc/neo4j-client-tls/key.pem" }
+        { name: "GRAPH_CA_CERT",     value: "/etc/neo4j-client-tls/ca.pem" }
+      ]
+    }
+    identity: { certs: [ { dir: "/etc/neo4j-client-tls", volume: "neo4j-client-tls", read_only: true } ] }
+    dependency: { service: "neo4j", ttl_secs: 300 }
+    resources: {}
+  }
+
+  # Read access to the Kubernetes API with the workload's own ServiceAccount
+  # token (a Secret, mounted where Kubernetes clients look for it). The Job
+  # leaves automountServiceAccountToken unset because of this mount.
+  kube-api-read: {
+    pod: {
+      env: [ { name: "KUBE_TOKEN", secret: "{workload}-sa-token", key: "token" } ]
+      volumes: [ { name: "{workload}-sa-token", secret: "{workload}-sa-token" } ]
+      mounts: [ { name: "{workload}-sa-token", path: "/var/run/secrets/kubernetes.io/serviceaccount", read_only: false } ]
+    }
+    identity: {}
+    dependency: {}
+    resources: {
+      sa_token_secret: "{workload}-sa-token"
+      cluster_roles: [
+        { name: "{workload}-read", rules: [ { api_groups: ["*"], resources: ["*"], verbs: ["get", "list", "watch"] } ] }
+      ]
+    }
+  }
+}

@@ -1,0 +1,23 @@
+# infra/config/cluster.nuon
+#
+# Facts about the cluster Polar runs in. A target may override any of these in
+# infra/targets/<target>/config.nuon under the key `cluster`.
+{
+  # DNS domain of the cluster (kubelet --cluster-domain). Every in-cluster
+  # service address is built from this, so changing it here changes them all.
+  domain: "cluster.local"
+
+  # Short names used by services.nuon, mapped to real namespaces.
+  namespaces: {
+    polar: "polar"
+    graph: "polar-graph"
+    auth: "polar-auth"
+  }
+
+  # Registry as the cluster's nodes reach it. For u7s this is the slirp4netns
+  # gateway to the host registry started by `just registry-up`.
+  registry: "10.0.2.2:5000"
+
+  # Audience of the projected ServiceAccount token presented to cert-issuer.
+  sa_token_audience: "polar-cert-issuer.local"
+}
