@@ -34,6 +34,7 @@ use polar::cassini::{CassiniClient, TcpClient};
 use ractor::ActorProcessingErr;
 use ractor::concurrency::Duration;
 use reqwest::{Client, RequestBuilder};
+use serde::de::DeserializeOwned;
 
 const JIRA_PROJECT_OBSERVER: &str = "jira.observer.projects";
 const JIRA_GROUP_OBSERVER: &str = "jira.observer.groups";
@@ -124,6 +125,9 @@ pub struct JiraObserverState {
     pub tcp_client: TcpClient,
     /// Time between polls of Jira
     pub base_interval: Duration,
+    /// Set by the issue observer once a full pull has completed, after
+    /// which it only pulls what changed. The other observers ignore it.
+    pub full_pull_done: bool,
 }
 
 impl JiraObserverState {
@@ -143,7 +147,32 @@ impl JiraObserverState {
             web_client,
             tcp_client,
             base_interval,
+            full_pull_done: false,
         }
+    }
+
+    /// GETs a Jira URL with this agent's credentials and decodes the JSON
+    /// body. Anything other than a success status is an error: a revoked
+    /// token or a rejected query otherwise comes back as a JSON error
+    /// body that decodes fine and reads as an empty result.
+    pub async fn get_json<T: DeserializeOwned>(&self, url: &str) -> Result<T, ActorProcessingErr> {
+        let response = self
+            .auth
+            .apply(self.web_client.get(url))
+            .send()
+            .await
+            .map_err(|e| ActorProcessingErr::from(format!("request to {url} failed: {e}")))?;
+
+        let status = response.status();
+        if !status.is_success() {
+            return Err(ActorProcessingErr::from(format!(
+                "{url} returned {status}"
+            )));
+        }
+
+        response.json::<T>().await.map_err(|e| {
+            ActorProcessingErr::from(format!("could not decode the response from {url}: {e}"))
+        })
     }
 }
 

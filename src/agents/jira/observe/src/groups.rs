@@ -27,17 +27,28 @@ use ractor::{Actor, ActorProcessingErr, ActorRef, async_trait};
 use std::time::Duration;
 use tracing::{debug, info};
 
+const GROUPS_OP: &str = "/rest/api/2/groups/picker";
+
 pub struct JiraGroupObserver;
 
 impl JiraGroupObserver {
-    fn observe(myself: &ActorRef<JiraObserverMessage>, state: &JiraObserverState) {
+    fn tick() -> JiraObserverMessage {
+        JiraObserverMessage::Tick(Command::GetGroups(GROUPS_OP.to_string()))
+    }
+
+    fn observe(
+        myself: &ActorRef<JiraObserverMessage>,
+        state: &JiraObserverState,
+    ) -> Result<(), ActorProcessingErr> {
         info!("Observing every {} seconds", state.base_interval.as_secs());
 
-        // The interval task ends on its own once this actor has stopped and
-        // the cast fails, so there is no handle to keep.
-        myself.send_interval(state.base_interval, || {
-            JiraObserverMessage::Tick(Command::GetGroups("/rest/api/2/groups/picker".to_string()))
-        });
+        // Poll straight away rather than leaving the graph empty for a
+        // whole interval after every start. The interval task ends on its
+        // own once this actor has stopped and the cast fails, so there is
+        // no handle to keep.
+        myself.cast(Self::tick())?;
+        myself.send_interval(state.base_interval, Self::tick);
+        Ok(())
     }
 }
 
@@ -69,8 +80,7 @@ impl Actor for JiraGroupObserver {
         myself: ActorRef<Self::Msg>,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        JiraGroupObserver::observe(&myself, state);
-        Ok(())
+        JiraGroupObserver::observe(&myself, state)
     }
 
     async fn handle(
@@ -82,7 +92,7 @@ impl Actor for JiraGroupObserver {
         match message {
             JiraObserverMessage::Tick(command) => {
                 if let Command::GetGroups(op) = command {
-                    debug!("{}", op.to_string());
+                    debug!("{op}");
 
                     let mut all_groups = Vec::new();
                     let mut start_at = 0;
@@ -95,14 +105,9 @@ impl Actor for JiraGroupObserver {
                             state.jira_url, op, query_string, start_at, max_results
                         );
 
-                        let res = state
-                            .auth
-                            .apply(state.web_client.get(&url))
-                            .send()
-                            .await?
-                            .json::<serde_json::Value>()
-                            .await?;
-                        debug!("Group Data {}", res["groups"].to_string());
+                        let res: serde_json::Value = state.get_json(&url).await?;
+                        debug!("Group Data {}", res["groups"]);
+
                         let groups: Vec<JiraGroup> = if res["groups"].is_null() {
                             Vec::new()
                         } else {
@@ -113,7 +118,9 @@ impl Actor for JiraGroupObserver {
 
                         all_groups.extend(groups);
 
-                        if (start_at + fetched) >= total as usize {
+                        // An empty page ends the walk: with a non-zero
+                        // total it would otherwise never advance.
+                        if fetched == 0 || (start_at + fetched) >= total as usize {
                             break;
                         }
 

@@ -27,17 +27,28 @@ use ractor::{Actor, ActorProcessingErr, ActorRef, async_trait};
 use std::time::Duration;
 use tracing::{debug, info};
 
+const USERS_OP: &str = "/rest/api/2/user/picker";
+
 pub struct JiraUserObserver;
 
 impl JiraUserObserver {
-    fn observe(myself: &ActorRef<JiraObserverMessage>, state: &JiraObserverState) {
+    fn tick() -> JiraObserverMessage {
+        JiraObserverMessage::Tick(Command::GetUsers(USERS_OP.to_string()))
+    }
+
+    fn observe(
+        myself: &ActorRef<JiraObserverMessage>,
+        state: &JiraObserverState,
+    ) -> Result<(), ActorProcessingErr> {
         info!("Observing every {} seconds", state.base_interval.as_secs());
 
-        // The interval task ends on its own once this actor has stopped and
-        // the cast fails, so there is no handle to keep.
-        myself.send_interval(state.base_interval, || {
-            JiraObserverMessage::Tick(Command::GetUsers("/rest/api/2/user/picker".to_string()))
-        });
+        // Poll straight away rather than leaving the graph empty for a
+        // whole interval after every start. The interval task ends on its
+        // own once this actor has stopped and the cast fails, so there is
+        // no handle to keep.
+        myself.cast(Self::tick())?;
+        myself.send_interval(state.base_interval, Self::tick);
+        Ok(())
     }
 }
 
@@ -69,8 +80,7 @@ impl Actor for JiraUserObserver {
         myself: ActorRef<Self::Msg>,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        JiraUserObserver::observe(&myself, state);
-        Ok(())
+        JiraUserObserver::observe(&myself, state)
     }
 
     async fn handle(
@@ -92,15 +102,9 @@ impl Actor for JiraUserObserver {
                             "{}{}?query={}&startAt={}&maxResults={}",
                             state.jira_url, op, query_string, start_at, max_results
                         );
-                        debug!("{}", url.to_string());
-                        let res = state
-                            .auth
-                            .apply(state.web_client.get(&url))
-                            .send()
-                            .await?
-                            .json::<serde_json::Value>()
-                            .await?;
+                        debug!("{url}");
 
+                        let res: serde_json::Value = state.get_json(&url).await?;
                         debug!("User picker response: {res}");
 
                         let users: Vec<JiraUser> = if res["users"].is_null() {
@@ -113,7 +117,9 @@ impl Actor for JiraUserObserver {
 
                         all_users.extend(users);
 
-                        if (start_at + fetched) >= total as usize {
+                        // An empty page ends the walk: with a non-zero
+                        // total it would otherwise never advance.
+                        if fetched == 0 || (start_at + fetched) >= total as usize {
                             break;
                         }
 
