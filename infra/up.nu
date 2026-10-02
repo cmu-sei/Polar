@@ -249,12 +249,6 @@ def step_infra [config: record] {
     for filename in ($config.apply_order | skip 1) {
         apply_file $output_dir $filename
     }
-    # The SA token controller needs a moment before the kube-agent RBAC applies cleanly.
-    if "kube-agent-rbac.yaml" in $config.apply_order {
-        print "  waiting 5s for the SA token controller..."
-        sleep 5sec
-        apply_file $output_dir "kube-agent-rbac.yaml"
-    }
     ok "manifests applied"
 }
 

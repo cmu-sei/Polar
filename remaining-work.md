@@ -23,7 +23,6 @@ Last updated: 2026-10-02.
 ## Next: orchestration and Justfile
 
 - [ ] Real fresh-cluster `up.nu` run end to end (provision + claim path has only been exercised on the resume path); confirm wait selectors (`job-name=...`), `polar-neo4j` statefulset, `pgrep -f svc/<name>`; record the user's `nu --version`
-- [ ] `up.nu` still has a `kube-agent-rbac.yaml` branch (around line 253: the "SA token ordering" re-apply) that can never fire, because that file is now `kube-observer-resources.yaml`. Decide whether the re-apply is still needed for the resources file and fix or delete it
 - [ ] `images.nuon`: add rows for git-observer/processor/scheduler, openapi-observer/processor, oci-resolver, scheduler-observer/processor, build-processor (attrs are in the `git-agents`, `openapi`, `scheduler`, `build-agents` recipes); then delete those four recipes
 - [ ] Justfile: the `Agent containers` recipe (hardcoded `nix build ... -o result-*` list) duplicates the image table; replace with `nu infra/images.nu push --all` once the table is complete
 - [ ] Justfile: remove stale dev-PKI recipes (`setup-cert-issuer`, `issue-dev-certs`, `run-jwks`, `run-cert-issuer`) and their comment block; fix leftover references (startup comment `just cluster-build-all && ...`, comment mentioning `just cluster-load-*`, orphaned "Pull and push the local-path provisioner" comment)
