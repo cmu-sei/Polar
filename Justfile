@@ -945,6 +945,23 @@ keycloak-bootstrap:
     fi
 
     echo "keycloak-bootstrap: done"
+
+# Regenerate licenses/THIRD_PARTY_LICENSES.md from the agents workspace
+licenses:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    manifest=src/agents/Cargo.toml
+    tmp=$(mktemp -d)
+    cargo metadata --no-deps --format-version 1 --manifest-path "$manifest" \
+      | python3 -c 'import json,sys; [print(p["name"]) for p in json.load(sys.stdin)["packages"]]' > "$tmp/own-crates.txt"
+    cargo about generate --manifest-path "$manifest" --config licenses/about.toml --format json > "$tmp/about.json"
+    python3 licenses/licenses_md.py "$tmp/about.json" --exclude "$tmp/own-crates.txt" > licenses/THIRD_PARTY_LICENSES.md
+    rm -rf "$tmp"
+
+# Fail if any dependency has a license outside licenses/about.toml's allowlist
+licenses-check:
+    cargo about generate --manifest-path src/agents/Cargo.toml --config licenses/about.toml --format json > /dev/null
+
 # Print nix-usernetes kubeconfig export command (dev convenience only).
 cluster-ctx:
     @echo "Run: export KUBECONFIG={{_u7s_kubeconf}}"
