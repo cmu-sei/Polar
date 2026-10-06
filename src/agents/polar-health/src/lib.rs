@@ -33,6 +33,10 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use x509_parser::prelude::*;
 
+pub mod config;
+
+pub use config::HealthConfig;
+
 // ---------------------------------------------------------------------------
 // Environment variable constants
 // ---------------------------------------------------------------------------
@@ -625,73 +629,19 @@ impl Actor for HealthCheckActor {
         _myself: ActorRef<Self::Msg>,
         args: HealthCheckArgs,
     ) -> Result<Self::State, ActorProcessingErr> {
-        let cert_paths = std::env::var(POLAR_HEALTH_CERTS_ENV)
-            .unwrap_or_default()
-            .split(',')
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(String::from)
-            .collect();
-
-        // Dep cert endpoints: prefer the env var (comma-separated host:port:ttl
-        // triples) so this is a Dhall/config change per agent, not a Rust code
-        // change. Fall back to whatever the caller passed in HealthCheckArgs,
-        // so existing call sites that haven't migrated their Dhall yet still work.
-        let dep_cert_endpoints = match std::env::var(POLAR_HEALTH_DEP_ENDPOINTS_ENV) {
-            Ok(raw) if !raw.trim().is_empty() => raw
-                .split(',')
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(DepCertEndpoint::parse)
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(ActorProcessingErr::from)?,
-            _ => args.dep_cert_endpoints,
-        };
-
-        let rejuvenation_threshold_secs = std::env::var(POLAR_HEALTH_REJUVENATION_SECS_ENV)
-            .ok()
-            .and_then(|s| s.parse::<i64>().ok())
-            .unwrap_or(args.rejuvenation_threshold_secs);
-
-        let expiry_threshold_secs = std::env::var(POLAR_HEALTH_EXPIRY_SECS_ENV)
-            .ok()
-            .and_then(|s| s.parse::<i64>().ok())
-            .unwrap_or(DEFAULT_EXPIRY_THRESHOLD_SECS);
-
-        let tick_secs = std::env::var(POLAR_HEALTH_TICK_SECS_ENV)
-            .ok()
-            .and_then(|s| s.parse::<u64>().ok())
-            .unwrap_or(DEFAULT_TICK_SECS);
-
-        let graph_deadline_secs = std::env::var(POLAR_HEALTH_GRAPH_DEADLINE_SECS_ENV)
-            .ok()
-            .and_then(|s| s.parse::<u64>().ok())
-            .unwrap_or(DEFAULT_GRAPH_DEADLINE_SECS);
-
-        if expiry_threshold_secs <= 0 {
-            return Err(ActorProcessingErr::from(format!(
-                "POLAR_HEALTH_EXPIRY_SECS must be positive, got {expiry_threshold_secs}"
-            )));
-        }
-
-        if rejuvenation_threshold_secs <= expiry_threshold_secs {
-            return Err(ActorProcessingErr::from(format!(
-                "rejuvenation_threshold_secs ({}) must be greater than expiry_threshold_secs ({})",
-                rejuvenation_threshold_secs, expiry_threshold_secs
-            )));
-        }
+        let config = HealthConfig::load(args).map_err(ActorProcessingErr::from)?;
 
         Ok(HealthCheckActorState {
             cassini_connected: false,
             graph_connected: false,
-            expects_graph: args.expects_graph,
-            expiry_threshold_secs,
-            rejuvenation_threshold_secs,
-            tick_secs,
-            cert_paths,
-            dep_cert_endpoints,
+            expects_graph: config.expects_graph,
+            expiry_threshold_secs: config.expiry_threshold_secs,
+            rejuvenation_threshold_secs: config.rejuvenation_threshold_secs,
+            tick_secs: config.tick_secs,
+            cert_paths: config.cert_paths,
+            dep_cert_endpoints: config.dep_cert_endpoints,
             rejuvenation_phase: RejuvenationPhase::Normal,
-            graph_deadline_secs,
+            graph_deadline_secs: config.graph_deadline_secs,
             last_graph_success_secs: None,
             actor_start_secs: HealthState::now(),
         })
