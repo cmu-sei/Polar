@@ -3,10 +3,11 @@
 //! without spawning an actor or touching the process environment.
 
 use crate::{
-    DEFAULT_EXPIRY_THRESHOLD_SECS, DEFAULT_GRAPH_DEADLINE_SECS, DEFAULT_TICK_SECS, DepCertEndpoint,
-    HealthCheckArgs, POLAR_HEALTH_CERTS_ENV, POLAR_HEALTH_DEP_ENDPOINTS_ENV,
-    POLAR_HEALTH_EXPIRY_SECS_ENV, POLAR_HEALTH_GRAPH_DEADLINE_SECS_ENV,
-    POLAR_HEALTH_REJUVENATION_SECS_ENV, POLAR_HEALTH_TICK_SECS_ENV,
+    DEFAULT_CASSINI_DEADLINE_SECS, DEFAULT_EXPIRY_THRESHOLD_SECS, DEFAULT_GRAPH_DEADLINE_SECS,
+    DEFAULT_TICK_SECS, DepCertEndpoint, HealthCheckArgs, POLAR_HEALTH_CASSINI_DEADLINE_SECS_ENV,
+    POLAR_HEALTH_CERTS_ENV, POLAR_HEALTH_DEP_ENDPOINTS_ENV, POLAR_HEALTH_EXPIRY_SECS_ENV,
+    POLAR_HEALTH_GRAPH_DEADLINE_SECS_ENV, POLAR_HEALTH_REJUVENATION_SECS_ENV,
+    POLAR_HEALTH_TICK_SECS_ENV,
 };
 
 /// Everything the health actor is configured with.
@@ -21,6 +22,9 @@ pub struct HealthConfig {
     pub tick_secs: u64,
     /// How long an `expects_graph` agent may go without a real graph success.
     pub graph_deadline_secs: u64,
+    /// How long the agent may go without a Cassini connection before the actor
+    /// gives a verdict.
+    pub cassini_deadline_secs: u64,
     /// The agent's own client certificates.
     pub cert_paths: Vec<String>,
     /// Dependency endpoints whose certificates must be healthy before rejuvenating.
@@ -75,6 +79,9 @@ impl HealthConfig {
             graph_deadline_secs: lookup(POLAR_HEALTH_GRAPH_DEADLINE_SECS_ENV)
                 .and_then(|s| s.parse::<u64>().ok())
                 .unwrap_or(DEFAULT_GRAPH_DEADLINE_SECS),
+            cassini_deadline_secs: lookup(POLAR_HEALTH_CASSINI_DEADLINE_SECS_ENV)
+                .and_then(|s| s.parse::<u64>().ok())
+                .unwrap_or(DEFAULT_CASSINI_DEADLINE_SECS),
             cert_paths,
             dep_cert_endpoints,
         };
@@ -130,6 +137,7 @@ mod tests {
         assert_eq!(c.expiry_threshold_secs, DEFAULT_EXPIRY_THRESHOLD_SECS);
         assert_eq!(c.tick_secs, DEFAULT_TICK_SECS);
         assert_eq!(c.graph_deadline_secs, DEFAULT_GRAPH_DEADLINE_SECS);
+        assert_eq!(c.cassini_deadline_secs, DEFAULT_CASSINI_DEADLINE_SECS);
         assert!(c.cert_paths.is_empty());
         assert_eq!(c.dep_cert_endpoints.len(), 1);
         assert_eq!(c.dep_cert_endpoints[0].host, "from-args.example");
@@ -142,8 +150,10 @@ mod tests {
             (POLAR_HEALTH_EXPIRY_SECS_ENV, "120"),
             (POLAR_HEALTH_TICK_SECS_ENV, "5"),
             (POLAR_HEALTH_GRAPH_DEADLINE_SECS_ENV, "40"),
+            (POLAR_HEALTH_CASSINI_DEADLINE_SECS_ENV, "90"),
         ])
         .unwrap();
+        assert_eq!(c.cassini_deadline_secs, 90);
         assert_eq!(c.rejuvenation_threshold_secs, 900);
         assert_eq!(c.expiry_threshold_secs, 120);
         assert_eq!(c.tick_secs, 5);

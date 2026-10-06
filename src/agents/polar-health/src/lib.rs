@@ -57,6 +57,7 @@ pub const POLAR_HEALTH_TICK_SECS_ENV: &str = "POLAR_HEALTH_TICK_SECS";
 pub const POLAR_HEALTH_DEP_ENDPOINTS_ENV: &str = "POLAR_HEALTH_DEP_ENDPOINTS";
 pub const POLAR_HEALTH_REJUVENATION_SECS_ENV: &str = "POLAR_HEALTH_REJUVENATION_SECS";
 pub const POLAR_HEALTH_GRAPH_DEADLINE_SECS_ENV: &str = "POLAR_HEALTH_GRAPH_DEADLINE_SECS";
+pub const POLAR_HEALTH_CASSINI_DEADLINE_SECS_ENV: &str = "POLAR_HEALTH_CASSINI_DEADLINE_SECS";
 
 pub const DEFAULT_EXPIRY_THRESHOLD_SECS: i64 = 60;
 pub const DEFAULT_TICK_SECS: u64 = 30;
@@ -72,6 +73,12 @@ pub const DEFAULT_JITTER_WINDOW_SECS: u64 = 180;
 /// operation (canary or app-level write) before HealthCheckActor fails itself.
 /// Covers both "never connected" and "was connected, then went dark."
 pub const DEFAULT_GRAPH_DEADLINE_SECS: u64 = 120;
+/// How long the agent may go without a Cassini connection, from startup or from a
+/// disconnect, before the health actor gives up on it. About what the liveness
+/// probe amounted to before the actor owned this decision; to be tuned together
+/// with Cassini session repair, since a longer grace only helps once a reconnect
+/// really restores the agent's subscriptions.
+pub const DEFAULT_CASSINI_DEADLINE_SECS: u64 = 60;
 
 // ---------------------------------------------------------------------------
 // HealthStatus — typed status enum
@@ -817,27 +824,29 @@ mod tests {
 
     static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-    const ALL_HEALTH_ENV: [&str; 8] = [
-        POLAR_HEALTH_FILE_ENV,
-        POLAR_HEALTH_CERTS_ENV,
-        POLAR_HEALTH_EXPIRY_SECS_ENV,
-        POLAR_HEALTH_STALE_SECS_ENV,
-        POLAR_HEALTH_TICK_SECS_ENV,
-        POLAR_HEALTH_DEP_ENDPOINTS_ENV,
-        POLAR_HEALTH_REJUVENATION_SECS_ENV,
-        POLAR_HEALTH_GRAPH_DEADLINE_SECS_ENV,
-    ];
+    /// Removes every health variable, whatever settings exist today or are added
+    /// later, so one test's environment cannot leak into the next.
+    fn clear_health_env() {
+        let names: Vec<String> = std::env::vars()
+            .map(|(name, _)| name)
+            .filter(|name| name.starts_with("POLAR_HEALTH_"))
+            .collect();
+        // SAFETY: callers hold ENV_LOCK, and no other test reads these.
+        unsafe {
+            for name in names {
+                std::env::remove_var(name);
+            }
+        }
+    }
 
     /// Clears every health variable, applies `vars`, and clears them again on drop.
     struct EnvGuard;
 
     impl EnvGuard {
         fn set(vars: &[(&str, &str)]) -> Self {
+            clear_health_env();
             // SAFETY: callers hold ENV_LOCK, and no other test reads these.
             unsafe {
-                for name in ALL_HEALTH_ENV {
-                    std::env::remove_var(name);
-                }
                 for (name, value) in vars {
                     std::env::set_var(name, value);
                 }
@@ -848,12 +857,7 @@ mod tests {
 
     impl Drop for EnvGuard {
         fn drop(&mut self) {
-            // SAFETY: see `set`.
-            unsafe {
-                for name in ALL_HEALTH_ENV {
-                    std::env::remove_var(name);
-                }
-            }
+            clear_health_env();
         }
     }
 
@@ -1059,7 +1063,8 @@ mod tests {
         let file = dir.path().join("no-such-dir").join("health.json");
         let _env = EnvGuard::set(&[(POLAR_HEALTH_FILE_ENV, file.to_str().unwrap())]);
 
-        let (_actor, handle) = Actor::spawn(None, HealthCheckActor, args()).await.unwrap();
+        let (actor, handle) = Actor::spawn(None, HealthCheckActor, args()).await.unwrap();
+        actor.cast(HealthCheckMessage::CassiniConnected).unwrap();
 
         // Three failed ticks at 30 s, so well inside five periods.
         let ended = tokio::time::timeout(Duration::from_secs(150), handle).await;
@@ -1077,6 +1082,7 @@ mod tests {
         let _env = EnvGuard::set(&[(POLAR_HEALTH_FILE_ENV, file.to_str().unwrap())]);
 
         let (actor, handle) = Actor::spawn(None, HealthCheckActor, args()).await.unwrap();
+        actor.cast(HealthCheckMessage::CassiniConnected).unwrap();
         // A directory where the temp file should go makes that write fail once.
         let tmp = format!("{}.tmp", file.display());
         fs::create_dir(&tmp).unwrap();
@@ -1219,6 +1225,7 @@ mod tests {
 
         let (a, seen, _collector) = args_with_verdicts().await;
         let (actor, handle) = Actor::spawn(None, HealthCheckActor, a).await.unwrap();
+        actor.cast(HealthCheckMessage::CassiniConnected).unwrap();
         tokio::time::sleep(Duration::from_secs(200)).await;
 
         assert_eq!(actor.get_status(), ActorStatus::Running);
@@ -1248,5 +1255,81 @@ mod tests {
         actor.cast(HealthCheckMessage::CassiniConnected).unwrap();
         let ended = tokio::time::timeout(Duration::from_secs(600), handle).await;
         assert!(ended.is_ok(), "the actor never stopped for rejuvenation");
+    }
+
+    // -- the Cassini deadline ----------------------------------------------------------
+
+    #[tokio::test(start_paused = true)]
+    async fn losing_cassini_for_too_long_becomes_a_verdict() {
+        let _lock = ENV_LOCK.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("health.json");
+        let _env = EnvGuard::set(&[(POLAR_HEALTH_FILE_ENV, file.to_str().unwrap())]);
+
+        let (a, seen, _collector) = args_with_verdicts().await;
+        let (actor, handle) = Actor::spawn(None, HealthCheckActor, a).await.unwrap();
+        actor.cast(HealthCheckMessage::CassiniConnected).unwrap();
+        tokio::time::sleep(Duration::from_secs(100)).await;
+        assert!(seen.lock().unwrap().is_empty(), "connected, so no verdict");
+
+        actor.cast(HealthCheckMessage::CassiniDisconnected).unwrap();
+        // The deadline is 60 s, so by 100 s later there is exactly one verdict.
+        tokio::time::sleep(Duration::from_secs(100)).await;
+
+        let seen = seen.lock().unwrap().clone();
+        assert_eq!(seen.len(), 1, "exactly one verdict: {seen:?}");
+        assert!(
+            matches!(&seen[0], HealthVerdict::Unhealthy(r) if r.contains("cassini unreachable"))
+        );
+        assert_eq!(read_state(&file).unwrap().phase, HealthPhase::ShuttingDown);
+        assert_eq!(actor.get_status(), ActorStatus::Running);
+
+        actor.stop(None);
+        handle.await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_reconnect_inside_the_deadline_gives_no_verdict() {
+        let _lock = ENV_LOCK.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("health.json");
+        let _env = EnvGuard::set(&[
+            (POLAR_HEALTH_FILE_ENV, file.to_str().unwrap()),
+            (POLAR_HEALTH_CASSINI_DEADLINE_SECS_ENV, "100"),
+        ]);
+
+        let (a, seen, _collector) = args_with_verdicts().await;
+        let (actor, handle) = Actor::spawn(None, HealthCheckActor, a).await.unwrap();
+        actor.cast(HealthCheckMessage::CassiniConnected).unwrap();
+        tokio::time::sleep(Duration::from_secs(10)).await;
+        for _ in 0..5 {
+            actor.cast(HealthCheckMessage::CassiniDisconnected).unwrap();
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            actor.cast(HealthCheckMessage::CassiniConnected).unwrap();
+            tokio::time::sleep(Duration::from_secs(60)).await;
+        }
+
+        assert!(
+            seen.lock().unwrap().is_empty(),
+            "outages were each under the deadline"
+        );
+        assert_eq!(actor.get_status(), ActorStatus::Running);
+        actor.stop(None);
+        handle.await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn without_a_recipient_losing_cassini_fails_the_actor() {
+        let _lock = ENV_LOCK.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("health.json");
+        let _env = EnvGuard::set(&[(POLAR_HEALTH_FILE_ENV, file.to_str().unwrap())]);
+
+        let (_actor, handle) = Actor::spawn(None, HealthCheckActor, args()).await.unwrap();
+        let ended = tokio::time::timeout(Duration::from_secs(200), handle).await;
+        assert!(
+            ended.is_ok(),
+            "Cassini never came up and the actor never failed"
+        );
     }
 }

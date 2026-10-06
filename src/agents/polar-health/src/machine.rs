@@ -58,7 +58,12 @@ pub(crate) struct HealthMachine {
     expects_graph: bool,
     rejuvenation_threshold_secs: i64,
     graph_deadline_secs: u64,
+    cassini_deadline_secs: u64,
     cassini_connected: bool,
+    /// Since when Cassini has been unreachable: from startup until the first
+    /// connect, and from each disconnect until the next connect. `None` while
+    /// connected.
+    cassini_down_since: Option<u64>,
     graph_connected: bool,
     phase: RejuvenationPhase,
     /// Unix seconds of the last `GraphAvailable`; `None` if never seen.
@@ -78,7 +83,9 @@ impl HealthMachine {
             expects_graph: config.expects_graph,
             rejuvenation_threshold_secs: config.rejuvenation_threshold_secs,
             graph_deadline_secs: config.graph_deadline_secs,
+            cassini_deadline_secs: config.cassini_deadline_secs,
             cassini_connected: false,
+            cassini_down_since: Some(now),
             graph_connected: false,
             phase: RejuvenationPhase::Normal,
             last_graph_success_secs: None,
@@ -165,11 +172,14 @@ impl HealthMachine {
         match msg {
             HealthCheckMessage::CassiniConnected => {
                 self.cassini_connected = true;
+                self.cassini_down_since = None;
                 tracing::debug!("healthcheck: cassini connected");
                 None
             }
             HealthCheckMessage::CassiniDisconnected => {
                 self.cassini_connected = false;
+                // A repeated disconnect does not restart the outage.
+                self.cassini_down_since.get_or_insert(now);
                 tracing::warn!("healthcheck: cassini disconnected");
                 // Don't fail: the TCP client will attempt to reconnect. The tick
                 // catches it if reconnection does not succeed.
@@ -257,6 +267,23 @@ impl HealthMachine {
         })
     }
 
+    /// `Err` when Cassini has been unreachable for longer than the deadline.
+    fn check_cassini_deadline(&self, now: u64) -> Result<(), String> {
+        match self.cassini_down_since {
+            Some(since) => {
+                let elapsed = now.saturating_sub(since);
+                if elapsed > self.cassini_deadline_secs {
+                    return Err(format!(
+                        "cassini unreachable for {elapsed}s (deadline: {}s)",
+                        self.cassini_deadline_secs
+                    ));
+                }
+                Ok(())
+            }
+            None => Ok(()),
+        }
+    }
+
     /// The first half of a tick: the hard deadlines, then the phase.
     pub(crate) fn tick(&mut self, now: u64, certs: &CertReading) -> TickStep {
         // Once the verdict is given there is nothing left to judge. The agent is
@@ -283,6 +310,11 @@ impl HealthMachine {
         if let Err(reason) = self.check_graph_deadline(now) {
             tracing::error!("healthcheck: {reason}");
             return self.unhealthy_verdict(now, reason, false);
+        }
+
+        if let Err(reason) = self.check_cassini_deadline(now) {
+            tracing::error!("healthcheck: {reason}");
+            return self.unhealthy_verdict(now, reason, self.graph_connected);
         }
 
         match self.phase.clone() {
@@ -402,6 +434,7 @@ mod tests {
             expiry_threshold_secs: 60,
             tick_secs: 30,
             graph_deadline_secs: 120,
+            cassini_deadline_secs: 60,
             cert_paths: vec![],
             dep_cert_endpoints: vec![],
         }
@@ -816,6 +849,108 @@ mod tests {
         for _ in 0..2 {
             assert_eq!(m.record_write(Err("x".into())), None);
         }
+    }
+
+    // -- the Cassini deadline -------------------------------------------------
+
+    fn cassini_verdict(step: TickStep) -> String {
+        match done(step).next {
+            Next::Verdict(HealthVerdict::Unhealthy(reason)) => reason,
+            other => panic!("expected an Unhealthy verdict, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cassini_never_connecting_gives_a_verdict_after_the_deadline() {
+        let mut m = machine(false);
+        assert_eq!(
+            done(m.tick(T0 + 60, &certs(Some(3000)))).next,
+            Next::Reschedule,
+            "exactly at the deadline is still inside it"
+        );
+        let reason = cassini_verdict(m.tick(T0 + 61, &certs(Some(3000))));
+        assert!(reason.contains("cassini unreachable for 61s"), "{reason}");
+        assert!(reason.contains("deadline: 60s"), "{reason}");
+    }
+
+    #[test]
+    fn a_disconnect_starts_the_clock_from_the_disconnect() {
+        let mut m = connected(false);
+        // Connected for a long time first: the outage is timed from the disconnect.
+        m.on_message(&HealthCheckMessage::CassiniDisconnected, T0 + 1000);
+        assert_eq!(
+            done(m.tick(T0 + 1060, &certs(Some(3000)))).next,
+            Next::Reschedule
+        );
+        let reason = cassini_verdict(m.tick(T0 + 1061, &certs(Some(3000))));
+        assert!(reason.contains("61s"), "{reason}");
+    }
+
+    #[test]
+    fn reconnecting_resets_the_clock() {
+        let mut m = connected(false);
+        m.on_message(&HealthCheckMessage::CassiniDisconnected, T0 + 100);
+        m.on_message(&HealthCheckMessage::CassiniConnected, T0 + 150);
+        assert_eq!(
+            done(m.tick(T0 + 400, &certs(Some(3000)))).next,
+            Next::Reschedule
+        );
+        // A later outage is timed afresh.
+        m.on_message(&HealthCheckMessage::CassiniDisconnected, T0 + 500);
+        assert_eq!(
+            done(m.tick(T0 + 560, &certs(Some(3000)))).next,
+            Next::Reschedule
+        );
+        assert!(cassini_verdict(m.tick(T0 + 561, &certs(Some(3000)))).contains("61s"));
+    }
+
+    #[test]
+    fn repeated_disconnects_do_not_restart_the_clock() {
+        let mut m = connected(false);
+        m.on_message(&HealthCheckMessage::CassiniDisconnected, T0 + 100);
+        m.on_message(&HealthCheckMessage::CassiniDisconnected, T0 + 130);
+        m.on_message(&HealthCheckMessage::CassiniDisconnected, T0 + 159);
+        assert!(
+            cassini_verdict(m.tick(T0 + 161, &certs(Some(3000)))).contains("61s"),
+            "timed from the first disconnect"
+        );
+    }
+
+    #[test]
+    fn the_cassini_verdict_writes_unhealthy_and_shutting_down() {
+        let mut m = machine(false);
+        let w = done(m.tick(T0 + 100, &certs(Some(3000)))).write.unwrap();
+        assert_eq!(w.status, HealthStatus::Unhealthy);
+        assert_eq!(w.phase, HealthPhase::ShuttingDown);
+    }
+
+    #[test]
+    fn the_cassini_deadline_applies_in_every_phase() {
+        for phase in [
+            RejuvenationPhase::Normal,
+            RejuvenationPhase::WaitingForDeps,
+            RejuvenationPhase::Jittering {
+                fire_at_secs: T0 + 10_000,
+            },
+        ] {
+            let mut m = machine(false);
+            m.phase = phase.clone();
+            let reason = cassini_verdict(m.tick(T0 + 61, &certs(Some(200))));
+            assert!(
+                reason.contains("cassini unreachable"),
+                "{phase:?}: {reason}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_hard_certificate_failure_is_reported_before_a_cassini_outage() {
+        let mut m = machine(false);
+        let bad = CertReading {
+            hard: Err("expired".into()),
+            min_ttl: None,
+        };
+        assert_eq!(cassini_verdict(m.tick(T0 + 100, &bad)), "expired");
     }
 
     // -- verdicts -------------------------------------------------------------

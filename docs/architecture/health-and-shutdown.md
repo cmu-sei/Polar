@@ -83,6 +83,7 @@ than queueing behind a timer.
 | Rejuvenation threshold | 300 s | `POLAR_HEALTH_REJUVENATION_SECS` |
 | Jitter window | 180 s | |
 | Graph deadline | 120 s | `POLAR_HEALTH_GRAPH_DEADLINE_SECS` |
+| Cassini disconnect deadline | 60 s | `POLAR_HEALTH_CASSINI_DEADLINE_SECS` |
 | Probe stale threshold | 90 s | `POLAR_HEALTH_STALE_SECS` |
 
 The ordering `rejuvenation > expiry` is an invariant. *Target:* a startup
@@ -114,10 +115,14 @@ Hard deadlines belong to the actor, not to the probe:
 
 - **Certificate**: the agent's own cert is below the expiry floor.
 - **Graph**: `expects_graph` and no graph connection within the graph deadline.
-- **Cassini disconnect**: *Target.* An actor-owned deadline on a disconnected
-  Cassini connection, defaulting to today's effective ~60 s. The value is tuned
-  together with Cassini session repair (see section 7), because a grace period is
-  only worth having once reconnection actually restores sessions.
+- **Cassini disconnect**: Cassini has been unreachable for longer than
+  `POLAR_HEALTH_CASSINI_DEADLINE_SECS` (default 60 s), timed from startup until the
+  first connect and from each disconnect until the next connect. A repeated
+  disconnect does not restart the clock, and a reconnect resets it. The 60 s is
+  about what the liveness probe amounted to before the actor owned this decision.
+  It is tuned together with Cassini session repair (see section 7), because a
+  longer grace period is only worth having once a reconnect really restores the
+  agent's subscriptions.
 
 A deadline, or a rejuvenation, is reported as an explicit verdict message,
 `HealthVerdict::Rejuvenate` or `HealthVerdict::Unhealthy(reason)`, sent once to
