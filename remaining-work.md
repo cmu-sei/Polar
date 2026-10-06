@@ -28,13 +28,13 @@ Last updated: 2026-10-06.
 
 Design: `docs/architecture/health-and-shutdown.md` (Target sections). Scope: agents on `polar-agent-builder`; everything else only has to keep compiling. Method: tests first (red before green, stated in the commit message), one fix per commit, no behaviour change inside a refactor commit. Goal: every builder agent inherits correct health and shutdown behaviour, with no change to the six domain supervisors (the `PrepareShutdown` / `ProceedWithShutdown` protocol stays as it is).
 
-- [ ] S1 Testability refactor (no behaviour change; characterization tests pin today's behaviour first)
+- [x] S1 Testability refactor, done 2026-10-06 (commits 1e5321a to 48addc5: `HealthConfig`, clock-free `certs`, pure `HealthMachine`, probe in `polar_health::probe`, orphan and unused dependencies removed; the crate went from 0 tests to 73 with no behaviour change; the one visible difference is that probe certificate errors now quote the path)
   - `HealthConfig` (env plus `HealthCheckArgs` merged in one place) with `validate()`; today the merge lives inside `pre_start`
   - Pure `HealthMachine`: `step(now, inputs) -> {file to write, action}`, with an injected clock and jitter source, so phases and deadlines are testable without sleeping or sockets
   - Probe logic moved from `polar-healthcheck/src/main.rs` into a `polar-health` library module; the binary becomes a thin wrapper
   - Dev-dependencies: `rcgen` (real certificates with chosen lifetimes), `tempfile`, tokio `test-util` (paused time)
   - Separate hygiene commit: delete the orphan `lib/src/health.rs`, remove unused dependencies
-- [ ] S2 Health actor fixes (each its own commit, test first)
+- [x] S2 Health actor fixes, done 2026-10-06 (f5885f4, 7e1b1e3, 2925e46, b4ee6e2, 7d726b1, 179ccf9, 4d07a99, 09b684b; 127 tests in `polar-health`). The builder does not use verdicts yet, that is S3. What changed beyond the plan: the actor's clock follows tokio virtual time in test builds only (`clock.rs`), because deadlines are measured in wall seconds and timers run on tokio time; `HealthCheckArgs` gained `verdict_to: Option<Arc<OutputPort<HealthVerdict>>>`, so twelve construction sites outside the crate gained `verdict_to: None`; a `DepsChecked` message hands the network check to a task; the startup check also requires the probe stale limit to exceed twice the tick, and an unparseable numeric variable is now an error
   - One tick chain, fire-and-forget, started at `pre_start` (today `CassiniConnected` starts it with `send_after(..).await`, which blocks the handler for the tick period and can start more than one chain on reconnect)
   - Write the health file on every tick in every phase (the stale-file bug), plus the additive informational `phase` field
   - `write()` stops swallowing errors: log them, and after N consecutive failures report an `Unhealthy` verdict (a file that cannot be written will go stale and the probe will kill the pod anyway; better to end orderly)
