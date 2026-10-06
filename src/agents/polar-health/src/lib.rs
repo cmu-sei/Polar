@@ -508,6 +508,17 @@ async fn deps_healthy(endpoints: &[DepCertEndpoint]) -> bool {
     all_healthy
 }
 
+/// Schedules the next tick, and returns at once.
+///
+/// `send_after` hands back a handle that resolves only after the whole period has
+/// passed, so awaiting it would hold this actor's handler, and every message
+/// queued behind it, for `tick_secs`. Dropping the handle detaches the timer.
+/// There is only ever one tick chain: it starts in `pre_start`, and each tick
+/// schedules the next one only when it has finished.
+fn schedule_tick(myself: &ActorRef<HealthCheckMessage>, tick_secs: u64) {
+    drop(myself.send_after(Duration::from_secs(tick_secs), || HealthCheckMessage::Tick));
+}
+
 /// Carries out what the machine decided after a tick.
 async fn finish_tick(
     myself: &ActorRef<HealthCheckMessage>,
@@ -519,9 +530,7 @@ async fn finish_tick(
     }
     match outcome.next {
         Next::Reschedule => {
-            let _ = myself
-                .send_after(Duration::from_secs(tick_secs), || HealthCheckMessage::Tick)
-                .await;
+            schedule_tick(myself, tick_secs);
             Ok(())
         }
         Next::Fail(reason) => Err(ActorProcessingErr::from(reason)),
@@ -544,11 +553,14 @@ impl Actor for HealthCheckActor {
 
     async fn pre_start(
         &self,
-        _myself: ActorRef<Self::Msg>,
+        myself: ActorRef<Self::Msg>,
         args: HealthCheckArgs,
     ) -> Result<Self::State, ActorProcessingErr> {
         let config = HealthConfig::load(args).map_err(ActorProcessingErr::from)?;
         let machine = HealthMachine::new(&config, HealthState::now());
+        // The one tick chain. It runs from startup, so the hard deadlines and the
+        // health file do not wait for Cassini to connect.
+        schedule_tick(&myself, config.tick_secs);
         Ok(HealthCheckActorState { config, machine })
     }
 
@@ -582,14 +594,6 @@ impl Actor for HealthCheckActor {
             message => {
                 if let Some(write) = state.machine.on_message(&message, HealthState::now()) {
                     write.write();
-                }
-                if matches!(message, HealthCheckMessage::CassiniConnected) {
-                    // The first tick is scheduled when Cassini first connects.
-                    let _ = myself
-                        .send_after(Duration::from_secs(state.config.tick_secs), || {
-                            HealthCheckMessage::Tick
-                        })
-                        .await;
                 }
             }
         }
@@ -733,7 +737,19 @@ mod tests {
         what: &str,
         want: impl Fn(&HealthState) -> bool,
     ) -> HealthState {
-        for _ in 0..80 {
+        wait_for_state_within(path, what, Duration::from_secs(8), want).await
+    }
+
+    /// As `wait_for_state`, with a chosen budget. Under paused time the budget
+    /// is virtual, so a long one costs nothing.
+    async fn wait_for_state_within(
+        path: &std::path::Path,
+        what: &str,
+        budget: Duration,
+        want: impl Fn(&HealthState) -> bool,
+    ) -> HealthState {
+        let polls = budget.as_millis() / 100;
+        for _ in 0..polls {
             if let Some(state) = read_state(path)
                 && want(&state)
             {
@@ -826,6 +842,70 @@ mod tests {
         // Starts fine; the precedence itself is pinned in the config tests once
         // the settings live in HealthConfig.
         let (actor, handle) = Actor::spawn(None, HealthCheckActor, a).await.unwrap();
+        actor.stop(None);
+        handle.await.unwrap();
+    }
+
+    // -- the tick chain ---------------------------------------------------------
+    //
+    // Paused time: the 30 s default tick costs nothing, and the clock only moves
+    // when every task is idle, so "how long did this take" is exact.
+
+    #[tokio::test(start_paused = true)]
+    async fn ticks_run_from_startup_without_waiting_for_cassini() {
+        let _lock = ENV_LOCK.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("health.json");
+        let _env = EnvGuard::set(&[(POLAR_HEALTH_FILE_ENV, file.to_str().unwrap())]);
+
+        let (actor, handle) = Actor::spawn(None, HealthCheckActor, args()).await.unwrap();
+        assert!(
+            read_state(&file).is_none(),
+            "nothing is written before a tick"
+        );
+
+        // Cassini never connects, yet the first tick still reports in.
+        let state = wait_for_state_within(
+            &file,
+            "a file from the first tick with Cassini never connected",
+            Duration::from_secs(60),
+            |_| true,
+        )
+        .await;
+        assert_eq!(state.status, HealthStatus::Unhealthy);
+        assert!(!state.cassini_connected);
+
+        actor.stop(None);
+        handle.await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_disconnect_is_written_without_waiting_out_a_tick_period() {
+        let _lock = ENV_LOCK.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("health.json");
+        let _env = EnvGuard::set(&[(POLAR_HEALTH_FILE_ENV, file.to_str().unwrap())]);
+
+        let (actor, handle) = Actor::spawn(None, HealthCheckActor, args()).await.unwrap();
+        actor.cast(HealthCheckMessage::CassiniConnected).unwrap();
+        actor.cast(HealthCheckMessage::CassiniDisconnected).unwrap();
+
+        let started = tokio::time::Instant::now();
+        wait_for_state_within(
+            &file,
+            "unhealthy after the disconnect",
+            Duration::from_secs(60),
+            |s| s.status == HealthStatus::Unhealthy && !s.cassini_connected,
+        )
+        .await;
+        // The handler used to sleep out the whole 30 s tick period inside the
+        // Cassini connected message, so the disconnect queued behind it.
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the disconnect took {:?} to be written",
+            started.elapsed()
+        );
+
         actor.stop(None);
         handle.await.unwrap();
     }

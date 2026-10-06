@@ -68,6 +68,12 @@ Normal ──(cert TTL < rejuvenation threshold)──▶ WaitingForDeps ──(
   were issued together does not restart together.
 - On `fire_at` the actor stops cleanly with a stated reason.
 
+There is one tick chain. It starts when the actor starts, not when Cassini first
+connects, so the file and the hard deadlines are live from the first tick. Each
+tick schedules the next only when it has finished, and scheduling never blocks
+the actor, so a message such as a Cassini disconnect is handled at once rather
+than queueing behind a timer.
+
 ### Constants and environment
 
 | Value | Default | Env override |
