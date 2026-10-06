@@ -92,7 +92,7 @@ export def needed [files: list<string>] {
     }
     if ($problems | is-not-empty) {
         let listing = ($problems | str join "\n  ")
-        error make { msg: $"image table and manifests disagree:\n  ($listing)" }
+        error make --unspanned { msg: $"image table and manifests disagree:\n  ($listing)" }
     }
     $found | uniq-by image
 }
@@ -105,7 +105,7 @@ export def named [names: list<string>] {
     if ($unknown | is-not-empty) {
         let known = ($rows | get image | str join ", ")
         let bad = ($unknown | str join ", ")
-        error make { msg: $"unknown image\(s\): ($bad). Known: ($known)" }
+        error make --unspanned { msg: $"unknown image\(s\): ($bad). Known: ($known)" }
     }
     $rows | where image in $names | insert ref ""
 }

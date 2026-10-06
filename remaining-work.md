@@ -1,9 +1,9 @@
 # Remaining work
 
 The single source of truth for what is left. Update it as items finish; do not rely on conversation memory.
-Last updated: 2026-10-02.
+Last updated: 2026-10-06.
 
-## Done (2026-09-29 to 2026-10-02)
+## Done (2026-09-29 to 2026-10-06)
 
 - [x] Observer `/admin-action` relay; admin CLI over HTTP (`--observer-url` explicit, no default)
 - [x] `claim` subcommand (two-phase, ECDSA P-256 claim keys)
@@ -21,6 +21,7 @@ Last updated: 2026-10-02.
 - [x] Configuration catalog, jira pair: both Rust agents on `polar-agent-builder` (full shutdown handshake, non-zero exits, bare single-wrapped wire format, hand-written backoff machinery and dead GitLab code removed, issues observer fails loudly with incremental pulls); `workloads/jira.nuon` plus per-target env in `local-minimal` and `local`; golden diff showed only `POLAR_CAPABILITIES` and `--check-dep-cert`; jira chart and the dead jira/kube render arms removed. Both targets render; on the cluster the processor is healthy, and the observer fails loudly and the Job restarts it with backoff (verified against a network failure and against Atlassian returning 404)
 - [x] kube-consumer shutdown handshake fixed (it never answered `PrepareShutdown`, so a rejuvenating pod hung instead of exiting) and verified on the cluster; kube-consumer and kube-observer `main` now exit non-zero when the supervisor stops; `ProcessGroupChanged` is a no-op in both kube supervisors
 - [x] kube-observer deployed to the cluster and working with kube-consumer end to end (observer registers with Cassini, watches, the consumer receives and projects the initial listing without graph errors); `kube-observer-resources.yaml` applied; `kubectl diff` of it is empty afterwards
+- [x] Image building in stages (`infra/images.nu`, `just images-build|images-push|images-mirror|image|images-all`): `build` needs only nix; `push` needs the registry but not the cluster; `mirror` copies third-party images; `sync` does all of it and drops the u7s node's cached copy of rebuilt images. A failing image no longer aborts a stage (rest are attempted, summary, non-zero exit); mirror retries 3 times; error messages are one clean line. Verified against the real tools: build, push, mirror, sync, the failure summary (bogus mirror row), eviction (image pulled into the node cache, gone after `just image`), registry-down and unknown-name errors. `images.nu push` no longer mirrors or evicts; that is `sync`
 
 ## Next: orchestration and Justfile
 
