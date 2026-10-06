@@ -33,7 +33,10 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use x509_parser::prelude::*;
 
+mod certs;
 pub mod config;
+#[cfg(test)]
+mod test_support;
 
 pub use config::HealthConfig;
 
@@ -465,69 +468,6 @@ pub struct HealthCheckActorState {
 }
 
 impl HealthCheckActorState {
-    /// Check all own cert paths against the hard expiry threshold.
-    /// Returns `Err` with a description if any cert is missing, unparseable,
-    /// or within the expiry threshold.
-    fn check_certs(&self) -> Result<(), String> {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|e| format!("system clock error: {e}"))?
-            .as_secs() as i64;
-
-        if self.cert_paths.is_empty() {
-            tracing::warn!("healthcheck: no cert paths configured, skipping cert check");
-            return Ok(());
-        }
-
-        for path in &self.cert_paths {
-            let data = fs::read(path)
-                .map_err(|e| format!("failed to read cert '{path}': {e}"))?;
-
-            let (_, pem) = parse_x509_pem(&data)
-                .map_err(|e| format!("failed to parse PEM '{path}': {e}"))?;
-
-            let cert = pem
-                .parse_x509()
-                .map_err(|e| format!("failed to parse x509 in '{path}': {e}"))?;
-
-            let not_after = cert.validity().not_after.timestamp();
-            let secs_remaining = not_after.checked_sub(now).ok_or_else(|| {
-                format!("certificate timestamp arithmetic overflow for '{path}'")
-            })?;
-
-            if secs_remaining < self.expiry_threshold_secs {
-                return Err(format!(
-                    "cert '{path}' expires in {secs_remaining}s (hard threshold: {}s)",
-                    self.expiry_threshold_secs
-                ));
-            }
-
-            tracing::debug!("cert '{path}' valid for {secs_remaining}s");
-        }
-
-        Ok(())
-    }
-
-    /// Returns the minimum seconds remaining across all own certs,
-    /// or `None` if no cert paths are configured or none are parseable.
-    fn min_cert_ttl(&self) -> Option<i64> {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .ok()?
-            .as_secs() as i64;
-
-        self.cert_paths
-            .iter()
-            .filter_map(|path| {
-                let data = fs::read(path).ok()?;
-                let (_, pem) = parse_x509_pem(&data).ok()?;
-                let cert = pem.parse_x509().ok()?;
-                let not_after = cert.validity().not_after.timestamp();
-                not_after.checked_sub(now)
-            })
-            .reduce(i64::min)
-    }
-
     /// Returns `true` if all required connections are established.
     /// Note: uses graph_connected (actor spawned), not graph availability.
     /// Graph availability is tracked separately via last_graph_success_secs
@@ -708,7 +648,10 @@ impl Actor for HealthCheckActor {
                 // agents, graph availability. Always checked regardless of
                 // rejuvenation phase.
                 // ----------------------------------------------------------------
-                if let Err(reason) = state.check_certs() {
+                let now_secs = HealthState::now() as i64;
+                if let Err(reason) =
+                    certs::check_hard(&state.cert_paths, state.expiry_threshold_secs, now_secs)
+                {
                     tracing::error!("healthcheck: cert check failed (hard deadline): {reason}");
                     HealthState::unhealthy(
                         state.cassini_connected,
@@ -753,7 +696,7 @@ impl Actor for HealthCheckActor {
                         }
 
                         // Check whether we've entered the rejuvenation window
-                        match state.min_cert_ttl() {
+                        match certs::min_ttl(&state.cert_paths, now_secs) {
                             None => {
                                 tracing::warn!(
                                     "healthcheck: could not determine cert TTL, \
@@ -877,27 +820,10 @@ impl Actor for HealthCheckActor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ::time::OffsetDateTime;
+    use crate::test_support::cert_file;
     use ractor::ActorStatus;
 
     // -- helpers ------------------------------------------------------------
-
-    /// PEM for a self-signed certificate valid from an hour ago until
-    /// `ttl_secs` from now (negative = already expired).
-    fn cert_pem(ttl_secs: i64) -> String {
-        let mut params =
-            rcgen::CertificateParams::new(vec!["test.local".to_string()]).expect("cert params");
-        params.not_before = OffsetDateTime::now_utc() - ::time::Duration::hours(1);
-        params.not_after = OffsetDateTime::now_utc() + ::time::Duration::seconds(ttl_secs);
-        let key = rcgen::KeyPair::generate().expect("key");
-        params.self_signed(&key).expect("self sign").pem()
-    }
-
-    fn cert_file(dir: &tempfile::TempDir, name: &str, ttl_secs: i64) -> String {
-        let path = dir.path().join(name);
-        fs::write(&path, cert_pem(ttl_secs)).expect("write cert");
-        path.to_string_lossy().into_owned()
-    }
 
     fn state(cert_paths: Vec<String>) -> HealthCheckActorState {
         HealthCheckActorState {
@@ -914,94 +840,6 @@ mod tests {
             last_graph_success_secs: None,
             actor_start_secs: HealthState::now(),
         }
-    }
-
-    // -- own certificate checks ---------------------------------------------
-
-    #[test]
-    fn check_certs_without_paths_is_ok() {
-        assert!(state(vec![]).check_certs().is_ok());
-    }
-
-    #[test]
-    fn check_certs_accepts_a_long_lived_cert() {
-        let dir = tempfile::tempdir().unwrap();
-        let s = state(vec![cert_file(&dir, "a.pem", 3600)]);
-        assert!(s.check_certs().is_ok());
-    }
-
-    #[test]
-    fn check_certs_rejects_a_cert_inside_the_hard_threshold() {
-        let dir = tempfile::tempdir().unwrap();
-        let s = state(vec![cert_file(&dir, "a.pem", 30)]);
-        let err = s.check_certs().unwrap_err();
-        assert!(err.contains("hard threshold"), "{err}");
-    }
-
-    #[test]
-    fn check_certs_rejects_an_expired_cert() {
-        let dir = tempfile::tempdir().unwrap();
-        let s = state(vec![cert_file(&dir, "a.pem", -10)]);
-        assert!(s.check_certs().is_err());
-    }
-
-    #[test]
-    fn check_certs_rejects_a_missing_file() {
-        let s = state(vec!["/nonexistent/polar-health-test.pem".to_string()]);
-        let err = s.check_certs().unwrap_err();
-        assert!(err.contains("failed to read cert"), "{err}");
-    }
-
-    #[test]
-    fn check_certs_rejects_garbage() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("junk.pem");
-        fs::write(&path, "not a pem").unwrap();
-        let s = state(vec![path.to_string_lossy().into_owned()]);
-        let err = s.check_certs().unwrap_err();
-        assert!(err.contains("failed to parse PEM"), "{err}");
-    }
-
-    #[test]
-    fn check_certs_fails_when_any_one_cert_is_short() {
-        let dir = tempfile::tempdir().unwrap();
-        let s = state(vec![
-            cert_file(&dir, "long.pem", 3600),
-            cert_file(&dir, "short.pem", 30),
-        ]);
-        assert!(s.check_certs().is_err());
-    }
-
-    #[test]
-    fn min_cert_ttl_is_none_without_paths() {
-        assert_eq!(state(vec![]).min_cert_ttl(), None);
-    }
-
-    #[test]
-    fn min_cert_ttl_is_the_smallest_remaining() {
-        let dir = tempfile::tempdir().unwrap();
-        let s = state(vec![
-            cert_file(&dir, "long.pem", 3600),
-            cert_file(&dir, "short.pem", 600),
-        ]);
-        let ttl = s.min_cert_ttl().expect("ttl");
-        assert!((595..=600).contains(&ttl), "ttl was {ttl}");
-    }
-
-    #[test]
-    fn min_cert_ttl_skips_unreadable_certs() {
-        let dir = tempfile::tempdir().unwrap();
-        let s = state(vec![
-            "/nonexistent/polar-health-test.pem".to_string(),
-            cert_file(&dir, "ok.pem", 600),
-        ]);
-        assert!(s.min_cert_ttl().is_some());
-    }
-
-    #[test]
-    fn min_cert_ttl_is_none_when_nothing_is_readable() {
-        let s = state(vec!["/nonexistent/polar-health-test.pem".to_string()]);
-        assert_eq!(s.min_cert_ttl(), None);
     }
 
     // -- connection and graph rules -----------------------------------------
