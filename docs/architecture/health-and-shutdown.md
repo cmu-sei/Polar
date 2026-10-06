@@ -103,6 +103,11 @@ the connection state. (It used to be written only in the Normal phase, so a
 rejuvenation that waited longer than the probe's 90 s limit let the file go stale
 and the kubelet killed the pod before the graceful path ran.)
 
+A write that fails is logged with its reason. The file is the probe's only
+evidence, so a file that cannot be written would go stale and get the pod killed
+without explanation; after three failed writes in a row the actor reports
+itself unhealthy, with the reason, instead.
+
 ### Deadlines
 
 Hard deadlines belong to the actor, not to the probe:

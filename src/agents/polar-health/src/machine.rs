@@ -48,6 +48,11 @@ pub(crate) enum TickStep {
     NeedDeps,
 }
 
+/// How many health file writes in a row may fail before the actor gives up.
+/// The probe tolerates a stale file for 90 s, three ticks, so by the time this
+/// fires the file is already about to read as dead.
+pub(crate) const MAX_CONSECUTIVE_WRITE_FAILURES: u32 = 3;
+
 /// Turns a random number into a delay inside the jitter window.
 pub(crate) fn jitter_secs(random: u32) -> u64 {
     u64::from(random) % DEFAULT_JITTER_WINDOW_SECS
@@ -65,6 +70,8 @@ pub(crate) struct HealthMachine {
     last_graph_success_secs: Option<u64>,
     /// Unix seconds the machine started; anchors the "graph never came up" deadline.
     start_secs: u64,
+    /// Health file writes that have failed since the last one that worked.
+    write_failures: u32,
 }
 
 impl HealthMachine {
@@ -78,6 +85,27 @@ impl HealthMachine {
             phase: RejuvenationPhase::Normal,
             last_graph_success_secs: None,
             start_secs: now,
+            write_failures: 0,
+        }
+    }
+
+    /// Records how a health file write went. Returns the reason to fail the actor
+    /// once [`MAX_CONSECUTIVE_WRITE_FAILURES`] writes in a row have failed.
+    pub(crate) fn record_write(&mut self, result: Result<(), String>) -> Option<String> {
+        match result {
+            Ok(()) => {
+                self.write_failures = 0;
+                None
+            }
+            Err(reason) => {
+                self.write_failures += 1;
+                (self.write_failures >= MAX_CONSECUTIVE_WRITE_FAILURES).then(|| {
+                    format!(
+                        "health file could not be written {} times in a row: {reason}",
+                        self.write_failures
+                    )
+                })
+            }
         }
     }
 
@@ -713,6 +741,30 @@ mod tests {
         };
         let w = done(m.tick(T0 + 30, &bad)).write.unwrap();
         assert_eq!(w.phase, HealthPhase::Jittering);
+    }
+
+    #[test]
+    fn write_failures_are_tolerated_until_the_third_in_a_row() {
+        let mut m = machine(false);
+        assert_eq!(m.record_write(Err("disk full".into())), None);
+        assert_eq!(m.record_write(Err("disk full".into())), None);
+        let reason = m
+            .record_write(Err("disk full".into()))
+            .expect("third fails");
+        assert!(reason.contains("3 times in a row"), "{reason}");
+        assert!(reason.contains("disk full"), "{reason}");
+    }
+
+    #[test]
+    fn a_successful_write_resets_the_failure_count() {
+        let mut m = machine(false);
+        for _ in 0..2 {
+            assert_eq!(m.record_write(Err("x".into())), None);
+        }
+        assert_eq!(m.record_write(Ok(())), None);
+        for _ in 0..2 {
+            assert_eq!(m.record_write(Err("x".into())), None);
+        }
     }
 
     /// The health file is the liveness probe's only evidence that the agent is

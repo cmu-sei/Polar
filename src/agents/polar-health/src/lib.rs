@@ -179,26 +179,22 @@ impl HealthState {
 
     /// Write the health state atomically to the configured path.
     /// Uses a tmp file + rename to avoid partial reads by the healthcheck binary.
-    pub fn write(&self) {
+    pub fn write(&self) -> Result<(), String> {
         let path = std::env::var(POLAR_HEALTH_FILE_ENV)
             .unwrap_or_else(|_| POLAR_HEALTH_FILE_DEFAULT.to_string());
+        self.write_to(&path)
+    }
 
-        let json = match serde_json::to_string(self) {
-            Ok(j) => j,
-            Err(e) => {
-                tracing::warn!("Failed to serialize health state: {e}");
-                return;
-            }
-        };
+    /// As [`write`](Self::write), to `path`.
+    pub fn write_to(&self, path: &str) -> Result<(), String> {
+        let json = serde_json::to_string(self)
+            .map_err(|e| format!("failed to serialize health state: {e}"))?;
 
         let tmp = format!("{path}.tmp");
-        if let Err(e) = fs::write(&tmp, &json) {
-            tracing::warn!("Failed to write health state tmp file {tmp}: {e}");
-            return;
-        }
-        if let Err(e) = fs::rename(&tmp, &path) {
-            tracing::warn!("Failed to rename health state tmp file to {path}: {e}");
-        }
+        fs::write(&tmp, &json)
+            .map_err(|e| format!("failed to write health state tmp file {tmp}: {e}"))?;
+        fs::rename(&tmp, path)
+            .map_err(|e| format!("failed to rename health state tmp file to {path}: {e}"))
     }
 
     pub fn now() -> u64 {
@@ -556,25 +552,51 @@ fn schedule_tick(myself: &ActorRef<HealthCheckMessage>, tick_secs: u64) {
     drop(myself.send_after(Duration::from_secs(tick_secs), || HealthCheckMessage::Tick));
 }
 
+/// Writes the health file and tells the machine how it went.
+///
+/// A failed write is logged. The file is the liveness probe's only evidence, so
+/// a file that cannot be written will go stale and the kubelet will kill the
+/// pod without a word of explanation; after enough failures in a row the actor
+/// reports itself unhealthy instead, with the reason.
+fn persist(
+    state: &mut HealthCheckActorState,
+    health: &HealthState,
+) -> Result<(), ActorProcessingErr> {
+    let result = health.write();
+    if let Err(reason) = &result {
+        tracing::warn!("healthcheck: {reason}");
+    }
+    match state.machine.record_write(result) {
+        Some(reason) => {
+            tracing::error!("healthcheck: {reason}");
+            Err(ActorProcessingErr::from(reason))
+        }
+        None => Ok(()),
+    }
+}
+
 /// Carries out what the machine decided after a tick.
 async fn finish_tick(
     myself: &ActorRef<HealthCheckMessage>,
-    tick_secs: u64,
+    state: &mut HealthCheckActorState,
     outcome: TickOutcome,
 ) -> Result<(), ActorProcessingErr> {
-    if let Some(state) = outcome.write {
-        state.write();
-    }
+    let written = match &outcome.write {
+        Some(health) => persist(state, health),
+        None => Ok(()),
+    };
     match outcome.next {
-        Next::Reschedule => {
-            schedule_tick(myself, tick_secs);
-            Ok(())
-        }
+        // A hard deadline or a rejuvenation outranks a failed write.
         Next::Fail(reason) => Err(ActorProcessingErr::from(reason)),
         Next::Stop(reason) => {
             // Ordinary Ractor supervision is the mechanism: the supervisor sees a
             // genuine SupervisionEvent::ActorTerminated carrying this reason.
             myself.stop(Some(reason));
+            Ok(())
+        }
+        Next::Reschedule => {
+            written?;
+            schedule_tick(myself, state.config.tick_secs);
             Ok(())
         }
     }
@@ -625,12 +647,12 @@ impl Actor for HealthCheckActor {
                             .deps_checked(HealthState::now(), healthy, jitter)
                     }
                 };
-                finish_tick(&myself, state.config.tick_secs, outcome).await?;
+                finish_tick(&myself, state, outcome).await?;
             }
 
             message => {
                 if let Some(write) = state.machine.on_message(&message, HealthState::now()) {
-                    write.write();
+                    persist(state, &write)?;
                 }
             }
         }
@@ -960,6 +982,47 @@ mod tests {
             started.elapsed()
         );
 
+        actor.stop(None);
+        handle.await.unwrap();
+    }
+
+    // -- a health file that cannot be written -------------------------------------
+
+    #[tokio::test(start_paused = true)]
+    async fn an_actor_that_cannot_write_its_file_reports_itself_unhealthy() {
+        let _lock = ENV_LOCK.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        // The directory does not exist, so every write fails.
+        let file = dir.path().join("no-such-dir").join("health.json");
+        let _env = EnvGuard::set(&[(POLAR_HEALTH_FILE_ENV, file.to_str().unwrap())]);
+
+        let (_actor, handle) = Actor::spawn(None, HealthCheckActor, args()).await.unwrap();
+
+        // Three failed ticks at 30 s, so well inside five periods.
+        let ended = tokio::time::timeout(Duration::from_secs(150), handle).await;
+        assert!(
+            ended.is_ok(),
+            "the actor was still running after 150 s of failed writes"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn occasional_write_failures_do_not_end_the_actor() {
+        let _lock = ENV_LOCK.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("health.json");
+        let _env = EnvGuard::set(&[(POLAR_HEALTH_FILE_ENV, file.to_str().unwrap())]);
+
+        let (actor, handle) = Actor::spawn(None, HealthCheckActor, args()).await.unwrap();
+        // A directory where the temp file should go makes that write fail once.
+        let tmp = format!("{}.tmp", file.display());
+        fs::create_dir(&tmp).unwrap();
+        tokio::time::sleep(Duration::from_secs(45)).await;
+        fs::remove_dir(&tmp).unwrap();
+        tokio::time::sleep(Duration::from_secs(120)).await;
+
+        assert_eq!(actor.get_status(), ActorStatus::Running);
+        assert!(read_state(&file).is_some(), "writing recovered");
         actor.stop(None);
         handle.await.unwrap();
     }
