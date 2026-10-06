@@ -1,0 +1,28 @@
+sequenceDiagram
+    participant Trigger
+    participant Infra as InfrastructureSupervisor
+    participant Domain as domain supervisor
+    participant Children as domain children
+    participant InfraChildren as infra children
+    participant Process as process
+
+    autonumber
+    Note over Trigger,Domain: Triggers: health verdict (rejuvenation or hard deadline),<br/>unexpected death of health, router, Cassini client or crypto,<br/>SIGTERM or SIGINT from the kubelet
+    Trigger->>Infra: reason
+    Note over Infra: begin_shutdown(reason)<br/>log the reason, ignore repeats
+    Infra->>Infra: start watchdog (bounded budget)
+    Infra->>Domain: InfrastructureEvent::PrepareShutdown
+
+    Domain->>Children: stop and drain (bounded)
+    Children-->>Domain: stopped
+    Domain->>Infra: ProceedWithShutdown
+
+    Infra->>InfraChildren: stop (bounded)<br/>health, router, tcp client, crypto
+    InfraChildren-->>Infra: terminated
+    Infra->>Process: exit non-zero (never 0)
+    Note over Infra,Process: Job replaces the pod,<br/>polar-init issues fresh certs
+
+    alt domain supervisor never answers
+        Note over Infra: watchdog expires
+        Infra->>Process: exit 1
+    end

@@ -1,0 +1,43 @@
+sequenceDiagram
+    participant Kubelet
+    participant Probe as polar-healthcheck
+    participant File as liveness file
+    participant Health as HealthCheckActor
+    participant Infra as InfrastructureSupervisor
+
+    autonumber
+    Note over Health: Normal phase, tick every 30s
+    loop every tick, in every phase
+        Health->>Health: evaluate Cassini, graph, certs
+        Health->>File: write status, timestamp, phase
+    end
+
+    loop every 30s after 150s initial delay
+        Kubelet->>Probe: exec
+        Probe->>File: read
+        Note over Probe: freshness only:<br/>file parses and is younger than 90s
+        Probe-->>Kubelet: exit 0
+    end
+
+    Note over Health: own cert TTL below 300s
+    Health->>Health: phase = WaitingForDeps
+    Health->>File: write (WaitingForDeps)
+    Note over Health: dependency certs healthy
+    Health->>Health: phase = Jittering, random delay in 180s window
+    Health->>File: write (Jittering), file stays fresh
+    Health->>Infra: HealthVerdict::Rejuvenate
+    Note over Infra: begin_shutdown, see shutdown_pipeline
+
+    alt hard deadline
+        Note over Health: own cert below 60s, graph or Cassini deadline
+        Health->>Infra: HealthVerdict::Unhealthy(reason)
+        Note over Infra: begin_shutdown, same orderly path
+    end
+
+    alt process wedged
+        Note over Health,File: nothing in-process runs, file goes stale
+        Kubelet->>Probe: exec
+        Probe->>File: read
+        Probe-->>Kubelet: exit 1 (stale)
+        Note over Kubelet: after 2 failures: SIGTERM,<br/>then SIGKILL after the grace period
+    end

@@ -46,6 +46,8 @@ The builder path is untested in a cluster.
 
 Failed graph canary -> healthcheck actor dies -> supervisor exits the agent -> Job restarts
 the pod -> `polar-init` issues fresh certs -> ledger replays from `events.jsonl` on the PVC.
+(This is the behavior as observed. The health and shutdown rework replaces "actor dies"
+with an explicit verdict and an orderly shutdown pipeline; see `health-and-shutdown.md`.)
 credentials-agent must be restartable on its existing storage mount with new mTLS certs and
 rebuild state from the ledger.
 

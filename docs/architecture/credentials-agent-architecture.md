@@ -794,7 +794,8 @@ identity alone, is what makes this safe rather than disruptive:
 - **Health-check-triggered rejuvenation**: `restartPolicy: Never` plus
   the Job controller mean a `polar_health` deadline firing does not
   restart a container in place — it fails the pod outright, and the
-  Job controller schedules an entirely new one. New pod, new UID, the
+  Job controller schedules an entirely new one. (The ending should be an
+  orderly shutdown with exit code 1; see `health-and-shutdown.md`.) New pod, new UID, the
   same mechanism as a rolling restart, with no special-casing required.
 - **A pod requesting its own renewal**: same identity, same UID, cert
   already valid — correctly refused. This is the actual defensive

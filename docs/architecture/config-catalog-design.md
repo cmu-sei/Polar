@@ -128,7 +128,9 @@ Facts learned from the jira migration:
   pod (`restartPolicy: Never`, large `backoff_limit`). This replaced the hand-written
   backoff machinery, which was removed. The entrypoint also returns an error when the
   supervisor stops, so nothing exits 0.
-- **Shutdown handshake.** HealthCheckActor termination ->
+- **Shutdown handshake** (as built; the target design with a single shutdown funnel,
+  SIGTERM handling and a watchdog is in `health-and-shutdown.md`).
+  HealthCheckActor termination ->
   `InfrastructureEvent::PrepareShutdown` -> the domain supervisor stops its own
   children, then casts `ProceedWithShutdown` to the InfrastructureSupervisor -> the
   domain supervisor exits non-zero when the infrastructure actor terminates (matched
