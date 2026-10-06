@@ -32,16 +32,24 @@
 static NAMED_ACTOR_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 // ---- External crates ----
-use cassini_client::{TCPClientConfig, TcpClientActor, TcpClientArgs, TcpClientMessage};
-use cassini_types::{ClientEvent, WireTraceCtx};
+use cassini_types::ClientEvent;
 use cert_client::handshake::HandshakeClient;
-use polar::health::{DepCertEndpoint, HealthCheckActor, HealthCheckArgs, HealthCheckMessage};
+use polar::Supervisor;
+use polar::cassini::{CassiniClient, TcpClient, UnsubscribeRequest};
 use polar::request_reply::Envelope;
-use polar::{Supervisor, SupervisorMessage};
+use polar_agent_builder::{
+    AgentBuilder, HealthClient, HealthHandle, InfrastructureEvent, InfrastructureSupervisorMessage,
+    Subscription,
+};
 use ractor::registry::where_is;
-use ractor::{Actor, ActorProcessingErr, ActorRef, OutputPort, SupervisionEvent, async_trait};
-use std::sync::Arc;
+use ractor::{Actor, ActorProcessingErr, ActorRef, SupervisionEvent, async_trait};
+use std::time::Duration;
 use tracing::{debug, error, info, warn};
+
+// The tests below spawn stand-ins for the Cassini client; the supervisor itself no longer
+// names this type (the agent builder owns the client).
+#[cfg(test)]
+use cassini_client::TcpClientMessage;
 
 // ---- credentials_agent_common: topics ----
 use credentials_agent_common::{
@@ -104,9 +112,42 @@ use crate::admin_action_actor::{AdminActionActor, AdminActionActorArgs};
 use crate::store_secret::StoreSecretHandler;
 use crate::store_secret_actor::{StoreSecretActor, StoreSecretActorArgs, StoreSecretDispatch};
 
-const HEALTHCHECK_ACTOR_NAME: &str = "polar.credentials-agent.healthcheck";
 const LEDGER_ACTOR_NAME: &str = "polar.credentials-agent.ledger";
-pub const BROKER_CLIENT_NAME: &str = "CREDENTIALS_AGENT_CONSUMER_CLIENT";
+
+/// Name given to the agent builder. It registers the Cassini client as
+/// "<SERVICE_NAME>.tcp".
+pub const SERVICE_NAME: &str = "credentials-agent-consumer";
+
+/// How the handler actors find the Cassini client to publish their replies:
+/// by registry name, on every publish. It must equal the name the builder
+/// registers (checked by a test), and because it is looked up each time, a
+/// client the builder respawns under the same name is picked up with no
+/// further wiring.
+pub const BROKER_CLIENT_NAME: &str = "credentials-agent-consumer.tcp";
+
+/// How long in-flight requests get to finish once shutdown has begun, with
+/// new ones no longer arriving, before the ledger and projection are stopped.
+const DRAIN_WINDOW_SECS: u64 = 5;
+
+/// Every topic this agent subscribes to. One subscription each; the same list
+/// is unsubscribed from when shutdown begins.
+pub const REQUEST_TOPICS: [&str; 15] = [
+    CREDENTIALS_GRANTS_TOPIC,
+    CREDENTIALS_REVOCATIONS_TOPIC,
+    CREDENTIALS_ACCOUNT_PROVISIONING_TOPIC,
+    credentials_agent_common::CREDENTIALS_ADMIN_ACTION_REQUESTS_TOPIC,
+    credentials_agent_common::CREDENTIALS_ACCOUNT_REQUESTS_TOPIC,
+    CREDENTIALS_ISSUANCE_REQUESTS_TOPIC,
+    CREDENTIALS_IDENTITY_NORMALIZATION_REQUESTS_TOPIC,
+    CREDENTIALS_ESCROW_KEY_REQUESTS_TOPIC,
+    CREDENTIALS_CERTIFICATE_REQUESTS_TOPIC,
+    CREDENTIALS_STORE_SECRET_REQUESTS_TOPIC,
+    CREDENTIALS_RETRIEVE_SECRET_REQUESTS_TOPIC,
+    CREDENTIALS_RETRIEVE_AGENT_ESCROW_KEYPAIR_REQUESTS_TOPIC,
+    CREDENTIALS_AGENT_ESCROW_ISSUANCE_REQUESTS_TOPIC,
+    CREDENTIALS_AGENT_ESCROW_KEY_REQUESTS_TOPIC,
+    CREDENTIALS_DECRYPT_ON_BEHALF_OF_REQUESTS_TOPIC,
+];
 
 /// Path to the ledger's own event log -- the actual source of truth,
 /// per credentials-agent-architecture.md. Expected to live on a
@@ -141,21 +182,46 @@ const AGENT_ESCROW_ISSUANCE_ACTOR_NAME: &str = "polar.credentials-agent.agent-es
 const AGENT_ESCROW_KEY_ACTOR_NAME: &str = "polar.credentials-agent.agent-escrow-key";
 const DECRYPT_ON_BEHALF_OF_ACTOR_NAME: &str = "polar.credentials-agent.decrypt-on-behalf-of";
 
+/// This supervisor's own message type. The shared `polar::SupervisorMessage`
+/// cannot carry the infrastructure signals (respawn, prepare-shutdown) without
+/// `polar-agent-builder` depending back on `polar`, so, like the other
+/// builder-based supervisors, this one defines exactly the messages it handles.
+pub enum ConsumerSupervisorMessage {
+    /// Connection lifecycle events from the Cassini client, and, re-wrapped by
+    /// the subscriptions, every message published on a request topic.
+    ClientEvent { event: ClientEvent },
+    /// The infrastructure supervisor replaced a Cassini client that died.
+    InfrastructureRespawned { tcp_client: TcpClient },
+    /// The health check ended for rejuvenation. Drain, stop this agent's own
+    /// children, then answer `ProceedWithShutdown`.
+    PrepareShutdown,
+    /// The drain window has elapsed.
+    DrainElapsed,
+}
+
 pub struct ConsumerSupervisor;
 
 pub struct ConsumerSupervisorState {
     /// Owns the graph projection, and its own GraphControllerActor as
-    /// a direct child -- see projection.rs's own module doc. The only
-    /// child actor reference genuinely held here: LedgerActor,
-    /// IssuanceActor, and IdentityNormalizationActor were previously
-    /// also held as fields, but spawn_linked already ties their
-    /// lifecycle to this supervisor via ractor's own linking --
-    /// nothing in this file ever actually read those fields, and the
-    /// compiler was correctly flagging genuine dead code, not a false
-    /// positive.
+    /// a direct child -- see projection.rs's own module doc. The other
+    /// handler actors are tied to this supervisor by spawn_linked and nothing
+    /// here reads them, so only the two the shutdown sequence stops by hand
+    /// are held.
     projection_actor: ActorRef<ProjectionMessage>,
-    healthcheck: ActorRef<HealthCheckMessage>,
+    /// The source of truth: stopped first at shutdown, which waits for the
+    /// append in progress.
+    ledger: ActorRef<LedgerMessage>,
+    healthcheck: HealthHandle,
+    /// Used only to unsubscribe at shutdown; replaced when the builder
+    /// respawns the client.
+    broker_client: TcpClient,
+    /// Answered with `ProceedWithShutdown` once this agent's own children are
+    /// down.
+    infrastructure: ActorRef<InfrastructureSupervisorMessage>,
     draining: bool,
+    /// The drain was started by `PrepareShutdown` (as opposed to a failure),
+    /// so it ends by releasing the infrastructure and not by exiting.
+    rejuvenating: bool,
 }
 
 impl Supervisor for ConsumerSupervisor {
@@ -437,11 +503,89 @@ impl ConsumerSupervisor {
     }
 }
 
+impl ConsumerSupervisor {
+    /// One subscription per request topic. Each re-wraps what the router
+    /// delivers (topic, payload, the broker-verified `published_by`, trace
+    /// context) as a `ClientEvent::MessagePublished` for this supervisor, so
+    /// the draining check and the dispatch below stay where they were and a
+    /// request can never be dispatched without having gone through them.
+    /// A subscription binds registering the topic with the router to
+    /// subscribing on the wire, so neither can be forgotten.
+    fn request_subscriptions(
+        supervisor: &ActorRef<ConsumerSupervisorMessage>,
+    ) -> Vec<Subscription> {
+        REQUEST_TOPICS
+            .iter()
+            .map(|topic| {
+                let supervisor = supervisor.clone();
+                Subscription::new(*topic, move |incoming| {
+                    let event = ClientEvent::MessagePublished {
+                        topic: incoming.topic,
+                        payload: incoming.payload,
+                        trace_ctx: incoming.trace_ctx,
+                        published_by: incoming.published_by,
+                    };
+                    if let Err(e) =
+                        supervisor.send_message(ConsumerSupervisorMessage::ClientEvent { event })
+                    {
+                        warn!("AgentBuilder: failed to deliver routed message to supervisor: {e}");
+                    }
+                })
+            })
+            .collect()
+    }
+
+    /// Routes one request to its handler actor. Four topics carry the
+    /// broker-verified `published_by`, which the shared `Supervisor` trait
+    /// cannot (it is cross-cutting and cannot gain a parameter for one
+    /// agent's need): stored_by, requested_by and the like must be verified by
+    /// the broker, never self-reported.
+    fn dispatch_request(topic: String, payload: Vec<u8>, published_by: Option<String>) {
+        if topic == CREDENTIALS_STORE_SECRET_REQUESTS_TOPIC {
+            ConsumerSupervisor::dispatch_store_secret_request(payload, published_by);
+        } else if topic == CREDENTIALS_RETRIEVE_SECRET_REQUESTS_TOPIC {
+            ConsumerSupervisor::dispatch_retrieve_secret_request(payload, published_by);
+        } else if topic == CREDENTIALS_RETRIEVE_AGENT_ESCROW_KEYPAIR_REQUESTS_TOPIC {
+            ConsumerSupervisor::dispatch_agent_escrow_keypair_bootstrap_request(
+                payload,
+                published_by,
+            );
+        } else if topic == CREDENTIALS_DECRYPT_ON_BEHALF_OF_REQUESTS_TOPIC {
+            ConsumerSupervisor::dispatch_decrypt_on_behalf_of_request(payload, published_by);
+        } else {
+            ConsumerSupervisor::deserialize_and_dispatch(topic, payload);
+        }
+    }
+
+    /// Schedules `DrainElapsed`. Not awaited: the timer runs detached, so this
+    /// supervisor keeps handling (and logging) messages while the window is open.
+    fn schedule_drain_end(myself: &ActorRef<ConsumerSupervisorMessage>) {
+        // Dropping the handle detaches the timer; it still fires.
+        drop(myself.send_after(Duration::from_secs(DRAIN_WINDOW_SECS), || {
+            ConsumerSupervisorMessage::DrainElapsed
+        }));
+    }
+
+    /// Tells the broker this agent is going dark, so it stops routing requests
+    /// here. Failures are logged and do not stop the shutdown.
+    fn unsubscribe_from_topics(client: &TcpClient) {
+        for topic in REQUEST_TOPICS {
+            if let Err(e) = client.unsubscribe(UnsubscribeRequest {
+                topic: topic.to_string(),
+                trace_ctx: None,
+            }) {
+                warn!("CONSUMER_SUPERVISOR: unsubscribe from '{topic}' failed (continuing): {e}");
+            }
+        }
+    }
+}
+
 #[async_trait]
 impl Actor for ConsumerSupervisor {
-    type Msg = SupervisorMessage;
+    type Msg = ConsumerSupervisorMessage;
     type State = ConsumerSupervisorState;
     type Arguments = ();
+
 
     async fn pre_start(
         &self,
@@ -766,135 +910,156 @@ impl Actor for ConsumerSupervisor {
         .await
         .map_err(ActorProcessingErr::from)?;
 
-        let dep_cert_endpoints = vec![
-            DepCertEndpoint::parse("cassini-ip-svc.polar.svc.cluster.local:8080:300")
-                .map_err(ActorProcessingErr::from)?,
-            DepCertEndpoint::parse("polar-db-svc.polar-graph.svc.cluster.local:7687:300")
-                .map_err(ActorProcessingErr::from)?,
-        ];
+        // The health check, the router, the request subscriptions and the Cassini
+        // client come from the agent builder, spawned last so every handler
+        // actor exists before a request can arrive. Deliberately NOT
+        // `with_encryption()`: CryptoActor is the gateway to the Credentials
+        // Agent, and its requests go to the very topics this agent serves, so
+        // this agent would be asking itself for its own keys (and its
+        // polar-init must never run the escrow bootstrap against itself).
+        // Deliberately NOT `with_graph_write()` either: that makes the health
+        // check depend on Neo4j, and this agent's health must not -- the ledger
+        // is its source of truth and the graph only a projection of it. The
+        // dependency endpoints (Cassini and Neo4j certificates) come from
+        // POLAR_HEALTH_DEP_ENDPOINTS in the deployment.
+        let mut builder = AgentBuilder::new(myself.clone(), SERVICE_NAME)
+            .with_lifecycle_handler(|event| Some(ConsumerSupervisorMessage::ClientEvent { event }));
+        for subscription in Self::request_subscriptions(&myself) {
+            builder = builder.with_subscription(subscription);
+        }
+        let resources = builder.build().await?;
 
-        let (healthcheck, _) = HealthCheckActor::spawn_linked(
-            Some(HEALTHCHECK_ACTOR_NAME.to_string()),
-            HealthCheckActor,
-            HealthCheckArgs {
-                expects_graph: false,
-                rejuvenation_threshold_secs: 300,
-                dep_cert_endpoints,
-            },
-            myself.get_cell(),
-        )
-        .await
-        .map_err(ActorProcessingErr::from)?;
-
-        let events_output = Arc::new(OutputPort::default());
-        events_output.subscribe(myself.clone(), |event| {
-            Some(SupervisorMessage::ClientEvent { event })
-        });
-
-        let client_config = TCPClientConfig::new()?;
-
-        let (_client, _) = Actor::spawn_linked(
-            Some(BROKER_CLIENT_NAME.to_string()),
-            TcpClientActor,
-            TcpClientArgs {
-                config: client_config,
-                registration_id: None,
-                delivery: cassini_client::DeliveryMode::Broadcast(events_output),
-            },
-            myself.clone().into(),
-        )
-        .await?;
+        // The "infrastructure -> domain" half of the respawn/shutdown protocol.
+        // Without this subscription the infrastructure supervisor would wait
+        // forever for a ProceedWithShutdown after rejuvenation.
+        resources
+            .infrastructure_events
+            .subscribe(myself.clone(), |event| match event {
+                InfrastructureEvent::Respawned { tcp_client, .. } => {
+                    Some(ConsumerSupervisorMessage::InfrastructureRespawned { tcp_client })
+                }
+                InfrastructureEvent::PrepareShutdown => {
+                    Some(ConsumerSupervisorMessage::PrepareShutdown)
+                }
+            });
 
         Ok(ConsumerSupervisorState {
             projection_actor,
-            healthcheck,
+            ledger,
+            healthcheck: resources.healthcheck,
+            broker_client: resources.tcp_client,
+            infrastructure: resources.infrastructure,
             draining: false,
+            rejuvenating: false,
         })
     }
 
     async fn handle(
         &self,
-        _myself: ActorRef<Self::Msg>,
+        myself: ActorRef<Self::Msg>,
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
-            SupervisorMessage::Heartbeat => {}
-            SupervisorMessage::GraphSignal(_) => {
-                // Nothing subscribes to produce this anymore -- the
-                // graph controller is spawned eagerly with no signal
-                // consumer, since this agent's health never depends
-                // on graph availability. Kept as an explicit no-op
-                // arm, not a wildcard, so this stays visible and
-                // intentional rather than silently swallowed by a
-                // catch-all.
-            }
-            SupervisorMessage::ForceExit => {
-                warn!("CONSUMER_SUPERVISOR: drain window elapsed, beginning graceful shutdown");
-                // ProjectionActor owns its own GraphControllerActor as
-                // a direct, linked child now -- stopping it cascades
-                // down to stop the graph controller cleanly too,
-                // rather than the supervisor needing its own separate
-                // reference to reach it directly.
+            ConsumerSupervisorMessage::InfrastructureRespawned { tcp_client } => {
+                // The handler actors find the client by registry name on every
+                // publish, so they pick the new one up on their own; only the
+                // handle kept here for unsubscribing needs replacing. The
+                // builder's lifecycle handler re-subscribes when it registers.
                 warn!(
-                    "CONSUMER_SUPERVISOR: stopping projection actor (and its graph controller) \
-                     and waiting for any in-flight write to complete before exiting"
+                    "CONSUMER_SUPERVISOR: TCP client was respawned by the infrastructure supervisor"
                 );
+                state.broker_client = tcp_client;
+            }
+
+            ConsumerSupervisorMessage::PrepareShutdown => {
+                if state.draining {
+                    // A failure already started a drain that ends in exit(1);
+                    // the handshake is moot.
+                    warn!(
+                        "CONSUMER_SUPERVISOR: PrepareShutdown received while already draining; \
+                         the pending exit will end the process"
+                    );
+                } else {
+                    state.draining = true;
+                    state.rejuvenating = true;
+                    info!(
+                        "CONSUMER_SUPERVISOR: PrepareShutdown received (rejuvenation), \
+                         unsubscribing from Cassini and entering drain window"
+                    );
+                    Self::unsubscribe_from_topics(&state.broker_client);
+                    Self::schedule_drain_end(&myself);
+                }
+            }
+
+            ConsumerSupervisorMessage::DrainElapsed => {
+                warn!("CONSUMER_SUPERVISOR: drain window elapsed, beginning shutdown");
+
+                // The ledger first: it is the source of truth, and stopping it
+                // waits for the append in progress. The projection is derived
+                // and rebuilt from the ledger at startup, so anything still
+                // queued for it is not lost.
+                match state
+                    .ledger
+                    .stop_and_wait(
+                        Some("supervisor shutting down".into()),
+                        Some(Duration::from_secs(10)),
+                    )
+                    .await
+                {
+                    Ok(()) => info!("CONSUMER_SUPERVISOR: ledger stopped cleanly"),
+                    Err(e) => error!(
+                        "CONSUMER_SUPERVISOR: ledger did not stop cleanly within 10s, \
+                         exiting anyway: {e:?}"
+                    ),
+                }
+
+                // The projection owns its own graph controller as a linked
+                // child, so stopping it flushes the graph controller too.
                 match state
                     .projection_actor
                     .stop_and_wait(
                         Some("supervisor shutting down".into()),
-                        Some(std::time::Duration::from_secs(30)),
+                        Some(Duration::from_secs(30)),
                     )
                     .await
                 {
                     Ok(()) => info!("CONSUMER_SUPERVISOR: projection actor stopped cleanly"),
                     Err(e) => error!(
-                        "CONSUMER_SUPERVISOR: projection actor did not stop cleanly within \
-                         30s, exiting anyway: {e:?}"
+                        "CONSUMER_SUPERVISOR: projection actor did not stop cleanly \
+                         within 30s, exiting anyway: {e:?}"
                     ),
                 }
-                warn!("CONSUMER_SUPERVISOR: exiting now");
-                std::process::exit(1);
-            }
-            SupervisorMessage::ClientEvent { event } => match event {
-                ClientEvent::Registered { .. } => {
-                    let _ = state.healthcheck.cast(HealthCheckMessage::CassiniConnected);
-                    // Graph controller is spawned eagerly in pre_start now, not here -- this
-                    // agent's own health never depends on graph availability at all (expects_graph:
-                    // false), so there's no GraphConnected signal to cast, and no lazy
-                    // spawn-on-Registered logic needed. This is different from most every other
-                    // consumer in Polar, since Credentials Agent's source of truth is its own
-                    // event-sourced log and the bits that end up in the graph are simply a state
-                    // projection.
-                    if let Some(client) = where_is(BROKER_CLIENT_NAME.to_string()) {
-                        for topic in [
-                            CREDENTIALS_GRANTS_TOPIC,
-                            CREDENTIALS_REVOCATIONS_TOPIC,
-                            CREDENTIALS_ACCOUNT_PROVISIONING_TOPIC,
-                            credentials_agent_common::CREDENTIALS_ADMIN_ACTION_REQUESTS_TOPIC,
-                            credentials_agent_common::CREDENTIALS_ACCOUNT_REQUESTS_TOPIC,
-                            CREDENTIALS_ISSUANCE_REQUESTS_TOPIC,
-                            CREDENTIALS_IDENTITY_NORMALIZATION_REQUESTS_TOPIC,
-                            CREDENTIALS_ESCROW_KEY_REQUESTS_TOPIC,
-                            CREDENTIALS_CERTIFICATE_REQUESTS_TOPIC,
-                            CREDENTIALS_STORE_SECRET_REQUESTS_TOPIC,
-                            CREDENTIALS_RETRIEVE_SECRET_REQUESTS_TOPIC,
-                            CREDENTIALS_RETRIEVE_AGENT_ESCROW_KEYPAIR_REQUESTS_TOPIC,
-                            CREDENTIALS_AGENT_ESCROW_ISSUANCE_REQUESTS_TOPIC,
-                            CREDENTIALS_AGENT_ESCROW_KEY_REQUESTS_TOPIC,
-                            CREDENTIALS_DECRYPT_ON_BEHALF_OF_REQUESTS_TOPIC,
-                        ] {
-                            if let Err(e) = client.send_message(TcpClientMessage::Subscribe {
-                                topic: topic.to_string(),
-                                trace_ctx: WireTraceCtx::from_current_span(),
-                            }) {
-                                error!("Failed to subscribe to {topic}: {e}");
-                            }
-                        }
-                    } else {
-                        error!("Broker client not found while attempting to subscribe");
+
+                if state.rejuvenating {
+                    // Our own children are down; let the infrastructure stop.
+                    // Its termination (handle_supervisor_evt) exits the process
+                    // with a non-zero status.
+                    info!(
+                        "CONSUMER_SUPERVISOR: domain shutdown complete, releasing infrastructure"
+                    );
+                    if let Err(e) = state
+                        .infrastructure
+                        .cast(InfrastructureSupervisorMessage::ProceedWithShutdown)
+                    {
+                        error!(
+                            "CONSUMER_SUPERVISOR: could not tell infrastructure to proceed ({e}); \
+                             exiting now"
+                        );
+                        std::process::exit(1);
                     }
+                } else {
+                    warn!("CONSUMER_SUPERVISOR: exiting now");
+                    std::process::exit(1);
+                }
+            }
+
+            ConsumerSupervisorMessage::ClientEvent { event } => match event {
+                ClientEvent::Registered { .. } => {
+                    // The builder has already (re)subscribed to every request
+                    // topic; this is only the health signal. No graph signal:
+                    // this agent's health never depends on graph availability.
+                    let _ = state.healthcheck.cassini_connected();
                 }
                 ClientEvent::MessagePublished {
                     topic,
@@ -910,79 +1075,77 @@ impl Actor for ConsumerSupervisor {
                             payload.len()
                         );
                         // TODO: publish to dead-letter queue once Cassini supports one.
-                    } else if topic == CREDENTIALS_STORE_SECRET_REQUESTS_TOPIC {
-                        // Not routed through the shared Supervisor
-                        // trait's own deserialize_and_dispatch --
-                        // that signature is cross-cutting (every
-                        // agent implements it) and can't gain a
-                        // published_by parameter just for this one,
-                        // credentials-agent-specific need. This is
-                        // the one dispatch path that genuinely
-                        // requires it: stored_by must be
-                        // broker-verified, never self-reported.
-                        ConsumerSupervisor::dispatch_store_secret_request(payload, published_by);
-                    } else if topic == CREDENTIALS_RETRIEVE_SECRET_REQUESTS_TOPIC {
-                        // Same reasoning as dispatch_store_secret_request
-                        // above -- requested_by must be broker-verified,
-                        // never self-reported, since it's what
-                        // RetrieveSecretHandler derives the
-                        // re-encryption target from.
-                        ConsumerSupervisor::dispatch_retrieve_secret_request(payload, published_by);
-                    } else if topic == CREDENTIALS_RETRIEVE_AGENT_ESCROW_KEYPAIR_REQUESTS_TOPIC {
-                        // Same reasoning as dispatch_store_secret_request
-                        // above -- requested_by must be broker-verified,
-                        // since it's what AgentEscrowKeypairBootstrapHandler
-                        // derives the escrowed-secret lookup name from.
-                        ConsumerSupervisor::dispatch_agent_escrow_keypair_bootstrap_request(
-                            payload,
-                            published_by,
-                        );
-                    } else if topic == CREDENTIALS_DECRYPT_ON_BEHALF_OF_REQUESTS_TOPIC {
-                        // Same reasoning as dispatch_retrieve_secret_request
-                        // above -- requested_by must be broker-verified,
-                        // since it's the real, sole input PolicyActor's
-                        // own CheckAuthorization derives the requester's
-                        // resolved permissions from.
-                        ConsumerSupervisor::dispatch_decrypt_on_behalf_of_request(
-                            payload,
-                            published_by,
-                        );
                     } else {
-                        ConsumerSupervisor::deserialize_and_dispatch(topic, payload);
+                        Self::dispatch_request(topic, payload, published_by);
                     }
+                }
+                ClientEvent::TransportError { reason } => {
+                    // Reported so the health check can fail and the Job restart
+                    // this pod. Without it a consumer that lost its Cassini
+                    // session stays up but subscribed to nothing.
+                    warn!("Transport error (awaiting reconnect): {reason}");
+                    let _ = state.healthcheck.cassini_disconnected();
                 }
                 _ => {}
             },
         }
         Ok(())
-    } 
+    }
 
     async fn handle_supervisor_evt(
         &self,
         myself: ActorRef<Self::Msg>,
         message: SupervisionEvent,
-        _state: &mut Self::State,
+        state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
             SupervisionEvent::ActorTerminated(actor, _, reason) => {
-                let name = actor.get_name();
-                if name.as_deref() == Some(HEALTHCHECK_ACTOR_NAME) {
-                    info!("Healthcheck actor terminated ({reason:?}), exiting");
-                    myself.stop(None);
-                } else if name.as_deref() == Some(LEDGER_ACTOR_NAME) {
-                    error!("Ledger actor terminated ({reason:?}) -- exiting, since the ledger is this agent's actual source of truth and nothing else can safely continue without it");
-                    myself.stop(None);
+                // The infrastructure supervisor is a direct child (the builder
+                // spawned it linked; the health check is its child, so
+                // rejuvenation arrives as PrepareShutdown, not as a termination
+                // here). Its termination is the end of the shutdown handshake,
+                // or the infrastructure dying on its own; either way the process
+                // exits so the Job starts a pod with fresh certificates. It is
+                // spawned unnamed, so match by id.
+                if actor.get_id() == state.infrastructure.get_id() {
+                    info!(
+                        "CONSUMER_SUPERVISOR: infrastructure terminated ({reason:?}), exiting so the Job restarts the pod"
+                    );
+                    std::process::exit(1);
+                } else if actor.get_id() == state.ledger.get_id() && !state.draining {
+                    // Not our own doing: the ledger is this agent's source of
+                    // truth and nothing can safely continue without it.
+                    error!(
+                        "CONSUMER_SUPERVISOR: ledger actor terminated ({reason:?}) unexpectedly -- exiting"
+                    );
+                    std::process::exit(1);
                 }
             }
             SupervisionEvent::ActorFailed(actor, err) => {
-                error!("Child actor {actor:?} failed: {err}");
-                myself.stop(None);
+                error!("CONSUMER_SUPERVISOR: child {actor:?} failed: {err}");
+                if actor.get_id() == state.ledger.get_id() {
+                    error!("CONSUMER_SUPERVISOR: the ledger failed -- exiting");
+                    std::process::exit(1);
+                }
+                // Any other child failure is fatal too, but give in-flight
+                // work a bounded window first (handle() logs, not dispatches,
+                // while draining), then DrainElapsed stops the ledger and
+                // projection and exits.
+                if !state.draining {
+                    state.draining = true;
+                    warn!(
+                        "CONSUMER_SUPERVISOR: entering drain window before exit; any \
+                         requests that arrive will be logged, not processed"
+                    );
+                    Self::schedule_drain_end(&myself);
+                }
             }
             _ => {}
         }
         Ok(())
     }
 }
+
 
 #[cfg(test)]
 mod tests {
@@ -2176,5 +2339,139 @@ mod decrypt_on_behalf_of_wiring_tests {
         decrypt_on_behalf_of_actor.stop_and_wait(None, None).await.unwrap();
         broker_client.stop_and_wait(None, None).await.unwrap();
         ledger.stop_and_wait(None, None).await.unwrap();
+    }
+}
+
+#[cfg(test)]
+mod builder_wiring_tests {
+    use super::*;
+    use std::collections::HashSet;
+    use std::sync::{Arc, Mutex};
+
+    /// The handler actors publish their replies through
+    /// `where_is(BROKER_CLIENT_NAME)`. If this name and the one the agent
+    /// builder registers ever differ, every reply is silently dropped: the
+    /// lookup finds nothing, and nothing is logged.
+    #[test]
+    fn handler_actors_find_the_client_under_the_name_the_builder_registers() {
+        assert_eq!(BROKER_CLIENT_NAME, format!("{SERVICE_NAME}.tcp"));
+    }
+
+    #[test]
+    fn there_are_fifteen_distinct_request_topics() {
+        let distinct: HashSet<&str> = REQUEST_TOPICS.iter().copied().collect();
+        assert_eq!(REQUEST_TOPICS.len(), 15);
+        assert_eq!(
+            distinct.len(),
+            15,
+            "a topic is listed twice: {REQUEST_TOPICS:?}"
+        );
+    }
+
+    /// The topics whose requester must be broker-verified are all subscribed
+    /// to; dropping one from the list would silently stop that flow.
+    #[test]
+    fn every_topic_that_needs_the_verified_sender_is_subscribed() {
+        for topic in [
+            CREDENTIALS_STORE_SECRET_REQUESTS_TOPIC,
+            CREDENTIALS_RETRIEVE_SECRET_REQUESTS_TOPIC,
+            CREDENTIALS_RETRIEVE_AGENT_ESCROW_KEYPAIR_REQUESTS_TOPIC,
+            CREDENTIALS_DECRYPT_ON_BEHALF_OF_REQUESTS_TOPIC,
+        ] {
+            assert!(
+                REQUEST_TOPICS.contains(&topic),
+                "{topic} is not subscribed to"
+            );
+        }
+    }
+
+    /// A minimal stand-in for the supervisor: records the client events it is
+    /// sent, so the subscriptions' delivery closures can be exercised without
+    /// a broker.
+    struct FakeSupervisor {
+        received: Arc<Mutex<Vec<ClientEvent>>>,
+    }
+
+    #[async_trait]
+    impl Actor for FakeSupervisor {
+        type Msg = ConsumerSupervisorMessage;
+        type State = ();
+        type Arguments = ();
+
+        async fn pre_start(
+            &self,
+            _myself: ActorRef<Self::Msg>,
+            _args: (),
+        ) -> Result<Self::State, ActorProcessingErr> {
+            Ok(())
+        }
+
+        async fn handle(
+            &self,
+            _myself: ActorRef<Self::Msg>,
+            message: Self::Msg,
+            _state: &mut Self::State,
+        ) -> Result<(), ActorProcessingErr> {
+            if let ConsumerSupervisorMessage::ClientEvent { event } = message {
+                self.received.lock().unwrap().push(event);
+            }
+            Ok(())
+        }
+    }
+
+    /// Every subscription hands its message to the supervisor as a
+    /// `MessagePublished` with the topic, the payload and, above all, the
+    /// broker-verified sender intact: the handlers derive who is asking from
+    /// it, so losing or rewriting it would be a security bug.
+    #[tokio::test]
+    async fn each_subscription_forwards_its_topic_payload_and_verified_sender() {
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let (supervisor, _) = Actor::spawn(
+            None,
+            FakeSupervisor {
+                received: received.clone(),
+            },
+            (),
+        )
+        .await
+        .unwrap();
+
+        let subscriptions = ConsumerSupervisor::request_subscriptions(&supervisor);
+        let subscribed: HashSet<&str> = subscriptions.iter().map(|s| s.topic.as_str()).collect();
+        let expected: HashSet<&str> = REQUEST_TOPICS.iter().copied().collect();
+        assert_eq!(
+            subscribed, expected,
+            "one subscription per request topic, and no others"
+        );
+
+        for subscription in &subscriptions {
+            (subscription.deliver)(polar_router::IncomingMessage {
+                topic: subscription.topic.clone(),
+                payload: vec![1, 2, 3],
+                published_by: Some("a.verified.identity".to_string()),
+                trace_ctx: None,
+            });
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let events = received.lock().unwrap();
+        assert_eq!(events.len(), REQUEST_TOPICS.len());
+        let mut forwarded = HashSet::new();
+        for event in events.iter() {
+            match event {
+                ClientEvent::MessagePublished {
+                    topic,
+                    payload,
+                    published_by,
+                    ..
+                } => {
+                    assert_eq!(payload, &vec![1, 2, 3]);
+                    assert_eq!(published_by.as_deref(), Some("a.verified.identity"));
+                    forwarded.insert(topic.as_str());
+                }
+                other => panic!("expected MessagePublished, got {other:?}"),
+            }
+        }
+        assert_eq!(forwarded, expected);
     }
 }
