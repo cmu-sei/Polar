@@ -39,13 +39,17 @@
   {image: "jira-processor",  tag: "latest", kind: "nix", attr: "polarPkgs.jiraAgent.processorImage"}
   {image: "gitlab-observer", tag: "latest", kind: "nix", attr: "polarPkgs.gitlabAgent.observerImage"}
   {image: "gitlab-consumer", tag: "latest", kind: "nix", attr: "polarPkgs.gitlabAgent.consumerImage"}
+  {image: "git-observer",        tag: "latest", kind: "nix", attr: "polarPkgs.gitAgent.observerImage"}
+  {image: "git-processor",       tag: "latest", kind: "nix", attr: "polarPkgs.gitAgent.processorImage"}
+  {image: "git-scheduler",       tag: "latest", kind: "nix", attr: "polarPkgs.gitAgent.schedulerImage"}  # short-term; being retired
+  {image: "openapi-observer",    tag: "latest", kind: "nix", attr: "polarPkgs.webAgent.observerImage"}
+  {image: "openapi-processor",   tag: "latest", kind: "nix", attr: "polarPkgs.webAgent.processorImage"}
+  {image: "scheduler-observer",  tag: "latest", kind: "nix", attr: "polarPkgs.scheduler.observerImage"}
+  {image: "scheduler-processor", tag: "latest", kind: "nix", attr: "polarPkgs.scheduler.processorImage"}
+  {image: "oci-resolver",        tag: "latest", kind: "nix", attr: "polarPkgs.ociResolver.resolverImage"}
+  {image: "build-processor",     tag: "latest", kind: "nix", attr: "buildProcessorImage"}
 
   # ── Cassini test harness (not deployed by any target; `just image <name>`) ──
   {image: "harness-producer", tag: "latest", kind: "nix", attr: "polarPkgs.cassini.producerImage"}
   {image: "harness-sink",     tag: "latest", kind: "nix", attr: "polarPkgs.cassini.sinkImage"}
-
-  # TODO: git-observer, git-processor, git-scheduler, openapi-observer,
-  # openapi-processor, oci-resolver, scheduler-observer, scheduler-processor,
-  # build-processor. Their attrs live in the `git-agents`, `openapi`,
-  # `scheduler` and `build-agents` Justfile recipes.
 ]
