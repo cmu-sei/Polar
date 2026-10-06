@@ -120,9 +120,17 @@ nu infra/resolve.nu check
 
 # Images
 nu infra/images.nu list                     # every image the repo knows how to produce
-just image kube-observer                    # build and push one
-just images-all                             # build and push everything in the table
+just images-build kube-observer             # stage 1: build only (needs nix; no registry, no cluster)
+just images-push kube-observer              # stage 2: build and push to the registry (no cluster)
+just images-mirror                          # stage 3: copy third-party images into the registry
+just image kube-observer                    # every stage, then drop the node's stale cached copy
+just images-all                             # every stage for everything in the table
 ```
+
+The `build`, `push` and `mirror` recipes take no names to mean every image. A
+failing image does not stop the stage: the rest are attempted and the stage ends
+with a summary and a non-zero exit. The node cache step of `image` and
+`images-all` is skipped when no u7s node exists.
 
 `up.nu` prints its plan first and skips what the target does not need. Its steps:
 preflight, render, images (`--dev`), namespaces, cluster CA, secrets and

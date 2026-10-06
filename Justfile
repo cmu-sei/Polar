@@ -756,13 +756,27 @@ neo4j-load-dump dump_path:
         "ALTER USER neo4j SET PASSWORD '$NEO4J_PASSWORD' CHANGE NOT REQUIRED"
     echo "Done. If you changed users, re-run: just user-cert-install"
 
-# Build and push named images to the local registry.  just image kube-observer jira-observer
-image +names: registry-up
-    nu infra/images.nu push {{names}}
+# Build the nix images (archives under result/). Needs only nix: no registry, no cluster.
+# With no names, builds every image.  just images-build kube-observer
+images-build *names:
+    nu infra/images.nu build {{ if names == "" { "--all" } else { names } }}
 
-# Build and push every image in infra/images.nuon.
+# Build and push to the local registry. Needs the registry, not the cluster.
+images-push *names: registry-up
+    nu infra/images.nu push {{ if names == "" { "--all" } else { names } }}
+
+# Copy third-party images from upstream into the local registry.
+images-mirror *names: registry-up
+    nu infra/images.nu mirror {{ if names == "" { "--all" } else { names } }}
+
+# Every stage for the named images, then drop the cluster node's stale copies.
+#   just image kube-observer jira-observer
+image +names: registry-up
+    nu infra/images.nu sync {{names}}
+
+# Every stage for every image in infra/images.nuon.
 images-all: registry-up
-    nu infra/images.nu push --all
+    nu infra/images.nu sync --all
 
 # ── nix-usernetes (local cluster) ────────────────────────────────────────────
 #

@@ -26,7 +26,7 @@ Last updated: 2026-10-02.
 
 - [ ] Real fresh-cluster `up.nu` run end to end (provision + claim path has only been exercised on the resume path); confirm wait selectors (`job-name=...`), `polar-neo4j` statefulset, `pgrep -f svc/<name>`; record the user's `nu --version`
 - [ ] `images.nuon`: add rows for git-observer/processor/scheduler, openapi-observer/processor, oci-resolver, scheduler-observer/processor, build-processor (attrs are in the `git-agents`, `openapi`, `scheduler`, `build-agents` recipes); then delete those four recipes
-- [ ] Justfile: the `Agent containers` recipe (hardcoded `nix build ... -o result-*` list) duplicates the image table; replace with `nu infra/images.nu push --all` once the table is complete
+- [ ] Justfile: the `Agent containers` recipe (hardcoded `nix build ... -o result-*` list) duplicates the image table; replace with `just images-push` once the table is complete
 - [ ] Justfile: remove stale dev-PKI recipes (`setup-cert-issuer`, `issue-dev-certs`, `run-jwks`, `run-cert-issuer`) and their comment block; fix leftover references (startup comment `just cluster-build-all && ...`, comment mentioning `just cluster-load-*`, orphaned "Pull and push the local-path provisioner" comment)
 - [ ] Justfile: wrapper to provision further users signed with an existing admin cert (`admin-provision` is bootstrap-only)
 - [ ] Justfile: Neo4j password helper; cluster status/health recipe; check `cluster-ctx`/`cluster-reset` against what `up.nu` expects

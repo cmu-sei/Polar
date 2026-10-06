@@ -5,9 +5,26 @@
 # infra/images.nuon. Used two ways:
 #
 #   as a module (infra/up.nu):   use images.nu; images sync (images needed $files)
-#   as a script (the Justfile):  nu infra/images.nu push kube-observer jira-observer
-#                                nu infra/images.nu push --all
+#   as a script (the Justfile):  nu infra/images.nu build --all
+#                                nu infra/images.nu push kube-observer jira-observer
+#                                nu infra/images.nu sync --all
 #                                nu infra/images.nu list
+#
+# Stages. Each needs only what is listed, so the earlier ones work on a machine
+# with no registry and no cluster:
+#
+#   build   builds the nix images (leaves archives under result/)
+#           needs: nix
+#   push    build, then pushes nix images and the external archives to the registry
+#           needs: nix, the registry. Never touches the cluster
+#   mirror  copies third-party images from upstream into the registry
+#           needs: the registry, the internet
+#   sync    every stage above, then drops the cluster node's stale copy of what
+#           was rebuilt (this is what up.nu and `just image` use)
+#           needs: all of the above; the node cache step is skipped when no node exists
+#
+# A failing image is reported and the stage carries on with the rest; the stage
+# ends with a summary and a non-zero exit when anything failed.
 #
 # Environment (all optional):
 #   POLAR_REGISTRY         where this machine pushes     (default localhost:5000)
@@ -116,8 +133,11 @@ def archive [row: record] {
             let platform = $"(^uname -m | str trim)-linux"
             mkdir result
             let out = $"result/($row.image)"
-            ^nix build -L $".#packages.($platform).($row.attr)" -o $out
-            if $env.LAST_EXIT_CODE != 0 { error make { msg: $"nix build failed for ($row.image) \(attr ($row.attr)\)" } }
+            try {
+                ^nix build -L $".#packages.($platform).($row.attr)" -o $out
+            } catch {
+                error make --unspanned { msg: $"nix build failed \(attr ($row.attr)\)" }
+            }
             $out
         }
         "external" => {
@@ -125,71 +145,188 @@ def archive [row: record] {
             if ($p | path exists) {
                 $p
             } else if (in_registry $row) {
-                print $"  ($row.image): archive not found at ($p), but the registry already has it; skipping"
+                print $"      archive not found at ($p), but the registry already has it; skipping"
                 null
             } else {
-                error make { msg: $"($row.image): archive not found at ($p). Build it, or set ($row.env) to its path." }
+                error make --unspanned { msg: $"archive not found at ($p). Build it, or set ($row.env) to its path." }
             }
         }
         _ => null
     }
 }
 
-def skopeo_ok [label: string] {
-    if $env.LAST_EXIT_CODE != 0 { error make { msg: $"skopeo copy failed for ($label)" } }
+# ── Steps ───────────────────────────────────────────────────────────────────
+
+def push_archive [row: record, a: string] {
+    try {
+        ^skopeo copy $"docker-archive:($a)" $"docker://(registry)/(dest $row)" --dest-tls-verify=false
+    } catch {
+        error make --unspanned { msg: $"skopeo could not push the archive to (registry)" }
+    }
 }
 
-# Build, mirror and push the given rows to the local registry.
-export def sync [rows: list] {
-    let total = ($rows | length)
-    for it in ($rows | enumerate) {
-        let row = $it.item
-        print $"  [($it.index + 1)/($total)] ($row.image):($row.tag)  \(($row.kind)\)"
-        if $row.kind == "mirror" {
-            if (in_registry $row) {
-                print "      already in the registry"
+# Upstream registries fail transiently (a 503 on a blob is common), hence the retries.
+def mirror_row [row: record] {
+    if (in_registry $row) {
+        print "      already in the registry"
+    } else {
+        try {
+            ^skopeo copy --retry-times 3 --override-os linux --override-arch (arch) $"docker://($row.upstream)" $"docker://(registry)/(dest $row)" --dest-tls-verify=false
+        } catch {
+            error make --unspanned { msg: $"skopeo could not copy ($row.upstream) into (registry)" }
+        }
+    }
+}
+
+# Nodes keep a pulled :latest and never re-pull it (IfNotPresent), so drop their
+# copy of what was just rebuilt. The name is the one the node knows the image by,
+# built from the row, so every path (by name, --all, from manifests) evicts. A
+# failure is reported: a stale cache here looks exactly like running the new code.
+def evict_row [row: record] {
+    let node_ref = $"(node_registry)/(dest $row)"
+    try {
+        let r = (do { ^podman exec u7s ctr -n k8s.io images rm $node_ref } | complete)
+        if $r.exit_code != 0 and not ($r.stderr | str contains "not found") {
+            print $"      could not evict ($node_ref) from the node: ($r.stderr | str trim)"
+        }
+    } catch {|e|
+        print $"      could not evict ($node_ref) from the node: ($e.msg)"
+    }
+}
+
+# ── Stages ──────────────────────────────────────────────────────────────────
+
+# Which kinds of row each stage handles.
+def applies [stage: string, kind: string] {
+    match $stage {
+        "build" => ($kind == "nix")
+        "push" => ($kind in ["nix" "external"])
+        "mirror" => ($kind == "mirror")
+        "sync" => true
+        _ => false
+    }
+}
+
+# Is there a u7s node whose image cache could be stale?
+def node_present [] {
+    try { (do { ^podman container exists u7s } | complete).exit_code == 0 } catch { false }
+}
+
+def require_registry [] {
+    let r = (try { do { ^curl -sf --max-time 3 $"http://(registry)/v2/" } | complete } catch { { exit_code: 1 } })
+    if $r.exit_code != 0 {
+        error make --unspanned { msg: $"the registry at (registry) is not reachable. Start it with `just registry-up`, or set POLAR_REGISTRY." }
+    }
+}
+
+def do_row [stage: string, row: record, evict: bool] {
+    if $row.kind == "mirror" {
+        mirror_row $row
+    } else {
+        let a = (archive $row)
+        if $a != null {
+            if $stage == "build" {
+                print $"      built: ($a)"
             } else {
-                ^skopeo copy --override-os linux --override-arch (arch) $"docker://($row.upstream)" $"docker://(registry)/(dest $row)" --dest-tls-verify=false
-                skopeo_ok $row.image
-            }
-        } else {
-            let a = (archive $row)
-            if $a != null {
-                ^skopeo copy $"docker-archive:($a)" $"docker://(registry)/(dest $row)" --dest-tls-verify=false
-                skopeo_ok $row.image
-                # Nodes keep a pulled :latest and never re-pull it (IfNotPresent),
-                # so drop their copy of what was just rebuilt. The name is the one
-                # the node knows the image by, built from the row, so every path
-                # (by name, --all, from manifests) evicts. A failure is reported:
-                # a stale cache here looks exactly like running the new code.
-                if (runtime) == "u7s" {
-                    let node_ref = $"(node_registry)/(dest $row)"
-                    try {
-                        let r = (do { ^podman exec u7s ctr -n k8s.io images rm $node_ref } | complete)
-                        if $r.exit_code != 0 and not ($r.stderr | str contains "not found") {
-                            print $"      could not evict ($node_ref) from the node: ($r.stderr | str trim)"
-                        }
-                    } catch {|e|
-                        print $"      could not evict ($node_ref) from the node: ($e.msg)"
-                    }
-                }
+                push_archive $row $a
+                if $stage == "sync" and $evict { evict_row $row }
             }
         }
     }
+}
+
+# Runs one stage over the rows it applies to. Returns how many it handled; raises
+# once at the end, after trying every row, when any of them failed.
+def run_stage [stage: string, rows: list] {
+    if $stage in ["push" "mirror" "sync"] { require_registry }
+
+    let todo = ($rows | where {|r| applies $stage $r.kind })
+    let skipped = ($rows | where {|r| not (applies $stage $r.kind) } | get image)
+    if ($skipped | is-not-empty) {
+        let names = ($skipped | str join ", ")
+        print $"  not part of the '($stage)' stage: ($names)"
+    }
+
+    let evict = ($stage == "sync") and ((runtime) == "u7s") and (node_present)
+    if $stage == "sync" and (runtime) == "u7s" and not $evict {
+        print "  no u7s node found; leaving node image caches alone"
+    }
+
+    let total = ($todo | length)
+    mut failures: list<any> = []
+    for it in ($todo | enumerate) {
+        let row = $it.item
+        print $"  [($it.index + 1)/($total)] ($row.image):($row.tag)  \(($row.kind)\)"
+        let err = (try { do_row $stage $row $evict; null } catch {|e| $e.msg })
+        if $err != null {
+            print $"      FAILED: ($err)"
+            $failures = ($failures | append { image: $row.image, error: $err })
+        }
+    }
+
+    if ($failures | is-not-empty) {
+        let failed = ($failures | length)
+        print ""
+        print $"($failed) of ($total) failed in the '($stage)' stage:"
+        for f in $failures { print $"  ($f.image): ($f.error)" }
+        error make --unspanned { msg: $"($failed) image\(s\) failed in the '($stage)' stage" }
+    }
+    $total
+}
+
+# Every stage, for the given rows. Used by infra/up.nu.
+export def sync [rows: list] {
+    run_stage "sync" $rows | ignore
 }
 
 # ── Script entry points ─────────────────────────────────────────────────────
 
 def main [] { help main }
 
-# Build and push the named images (or every image in the table with --all).
+def rows_for [names: list<string>, all: bool] {
+    if $all {
+        load_table | insert ref ""
+    } else if ($names | is-empty) {
+        error make --unspanned { msg: "name at least one image, or pass --all" }
+    } else {
+        named $names
+    }
+}
+
+# Stage 1: build the nix images. Needs no registry and no cluster.
+def "main build" [
+    ...names: string
+    --all
+] {
+    let n = (run_stage "build" (rows_for $names $all))
+    print $"built ($n) image\(s\); the archives are under result/"
+}
+
+# Stage 2: build, then push to the registry. Needs the registry, not the cluster.
 def "main push" [
     ...names: string
     --all
 ] {
-    let rows = if $all { load_table | insert ref "" } else { named $names }
-    sync $rows
-    print $"pushed ($rows | length) image\(s\) to (registry)"
+    let n = (run_stage "push" (rows_for $names $all))
+    print $"pushed ($n) image\(s\) to (registry)"
+}
+
+# Stage 3: copy third-party images from upstream into the registry. Needs the internet.
+def "main mirror" [
+    ...names: string
+    --all
+] {
+    let n = (run_stage "mirror" (rows_for $names $all))
+    print $"mirrored ($n) image\(s\) into (registry)"
+}
+
+# Every stage, then drop the cluster node's stale copies.
+def "main sync" [
+    ...names: string
+    --all
+] {
+    let n = (run_stage "sync" (rows_for $names $all))
+    print $"synced ($n) image\(s\) to (registry)"
 }
 
 # List the images in the table.
