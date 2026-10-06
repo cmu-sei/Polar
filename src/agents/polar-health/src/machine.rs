@@ -12,22 +12,17 @@
 use crate::certs::CertReading;
 use crate::{
     DEFAULT_JITTER_WINDOW_SECS, HealthCheckMessage, HealthConfig, HealthPhase, HealthState,
-    RejuvenationPhase,
+    HealthVerdict, RejuvenationPhase,
 };
-
-/// The reason the actor stops with when rejuvenation fires.
-pub(crate) const REJUVENATION_STOP_REASON: &str =
-    "rejuvenation: certificate rejuvenation threshold reached";
 
 /// What the actor does after a tick.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Next {
     /// Schedule another tick.
     Reschedule,
-    /// A hard deadline passed: fail the actor with this reason.
-    Fail(String),
-    /// Rejuvenation fired: stop the actor with this reason.
-    Stop(String),
+    /// The machine has decided the agent must end. Emitted once; from then on the
+    /// machine only keeps the health file fresh.
+    Verdict(HealthVerdict),
 }
 
 #[derive(Debug, Clone)]
@@ -72,6 +67,9 @@ pub(crate) struct HealthMachine {
     start_secs: u64,
     /// Health file writes that have failed since the last one that worked.
     write_failures: u32,
+    /// The verdict, once one has been given. After it the machine judges nothing
+    /// more: it only keeps the health file fresh while the agent shuts down.
+    concluded: Option<HealthVerdict>,
 }
 
 impl HealthMachine {
@@ -86,6 +84,23 @@ impl HealthMachine {
             last_graph_success_secs: None,
             start_secs: now,
             write_failures: 0,
+            concluded: None,
+        }
+    }
+
+    /// Records that a verdict has been given. The actor calls this for a verdict
+    /// it raised itself (a health file that cannot be written); the machine does
+    /// it for the ones it emits.
+    pub(crate) fn conclude(&mut self, verdict: &HealthVerdict) {
+        self.concluded = Some(verdict.clone());
+    }
+
+    /// The phase to put in the health file.
+    fn file_phase(&self) -> HealthPhase {
+        if self.concluded.is_some() {
+            HealthPhase::ShuttingDown
+        } else {
+            HealthPhase::from(&self.phase)
         }
     }
 
@@ -99,6 +114,9 @@ impl HealthMachine {
             }
             Err(reason) => {
                 self.write_failures += 1;
+                if self.concluded.is_some() {
+                    return None;
+                }
                 (self.write_failures >= MAX_CONSECUTIVE_WRITE_FAILURES).then(|| {
                     format!(
                         "health file could not be written {} times in a row: {reason}",
@@ -116,7 +134,7 @@ impl HealthMachine {
 
     fn unhealthy(&self, now: u64, cassini: bool, graph: bool) -> HealthState {
         HealthState::at(crate::HealthStatus::Unhealthy, now, cassini, graph)
-            .with_phase(HealthPhase::from(&self.phase))
+            .with_phase(self.file_phase())
     }
 
     fn healthy(&self, now: u64) -> HealthState {
@@ -126,7 +144,7 @@ impl HealthMachine {
             self.cassini_connected,
             self.graph_connected,
         )
-        .with_phase(HealthPhase::from(&self.phase))
+        .with_phase(self.file_phase())
     }
 
     /// The state to write on a tick that has no other news: healthy or unhealthy
@@ -228,23 +246,43 @@ impl HealthMachine {
         Ok(())
     }
 
+    /// Gives an unhealthy verdict. The file is written as shutting down, with the
+    /// graph reported as `graph` (a graph deadline reports it down).
+    fn unhealthy_verdict(&mut self, now: u64, reason: String, graph: bool) -> TickStep {
+        let verdict = HealthVerdict::Unhealthy(reason);
+        self.conclude(&verdict);
+        TickStep::Done(TickOutcome {
+            write: Some(self.unhealthy(now, self.cassini_connected, graph)),
+            next: Next::Verdict(verdict),
+        })
+    }
+
     /// The first half of a tick: the hard deadlines, then the phase.
     pub(crate) fn tick(&mut self, now: u64, certs: &CertReading) -> TickStep {
+        // Once the verdict is given there is nothing left to judge. The agent is
+        // shutting down, and the health file must stay fresh until it has.
+        if let Some(verdict) = &self.concluded {
+            let write = match verdict {
+                HealthVerdict::Rejuvenate => self.current_state(now),
+                HealthVerdict::Unhealthy(_) => {
+                    self.unhealthy(now, self.cassini_connected, self.graph_connected)
+                }
+            };
+            return TickStep::Done(TickOutcome {
+                write: Some(write),
+                next: Next::Reschedule,
+            });
+        }
+
         // Hard deadlines come first, in every phase.
         if let Err(reason) = &certs.hard {
             tracing::error!("healthcheck: cert check failed (hard deadline): {reason}");
-            return TickStep::Done(TickOutcome {
-                write: Some(self.unhealthy(now, self.cassini_connected, self.graph_connected)),
-                next: Next::Fail(reason.clone()),
-            });
+            return self.unhealthy_verdict(now, reason.clone(), self.graph_connected);
         }
 
         if let Err(reason) = self.check_graph_deadline(now) {
             tracing::error!("healthcheck: {reason}");
-            return TickStep::Done(TickOutcome {
-                write: Some(self.unhealthy(now, self.cassini_connected, false)),
-                next: Next::Fail(reason),
-            });
+            return self.unhealthy_verdict(now, reason, false);
         }
 
         match self.phase.clone() {
@@ -296,10 +334,12 @@ impl HealthMachine {
 
             RejuvenationPhase::Jittering { fire_at_secs } => {
                 if now >= fire_at_secs {
-                    tracing::info!("healthcheck: jitter elapsed, terminating for rejuvenation");
+                    tracing::info!("healthcheck: jitter elapsed, rejuvenating");
+                    let verdict = HealthVerdict::Rejuvenate;
+                    self.conclude(&verdict);
                     TickStep::Done(TickOutcome {
-                        write: None,
-                        next: Next::Stop(REJUVENATION_STOP_REASON.to_string()),
+                        write: Some(self.current_state(now)),
+                        next: Next::Verdict(verdict),
                     })
                 } else {
                     let remaining = fire_at_secs.saturating_sub(now);
@@ -351,7 +391,7 @@ impl HealthMachine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{HealthPhase, HealthStatus};
+    use crate::{HealthPhase, HealthStatus, HealthVerdict};
 
     const T0: u64 = 1_000_000;
 
@@ -529,7 +569,10 @@ mod tests {
             min_ttl: Some(10),
         };
         let o = done(m.tick(T0 + 30, &reading));
-        assert_eq!(o.next, Next::Fail("cert expires soon".to_string()));
+        assert_eq!(
+            o.next,
+            Next::Verdict(HealthVerdict::Unhealthy("cert expires soon".to_string()))
+        );
         let w = o.write.unwrap();
         assert_eq!(w.status, HealthStatus::Unhealthy);
         assert!(w.cassini_connected);
@@ -551,7 +594,11 @@ mod tests {
             let mut m = connected(false);
             m.phase = phase.clone();
             let o = done(m.tick(T0 + 30, &bad));
-            assert_eq!(o.next, Next::Fail("expired".to_string()), "{phase:?}");
+            assert_eq!(
+                o.next,
+                Next::Verdict(HealthVerdict::Unhealthy("expired".to_string())),
+                "{phase:?}"
+            );
         }
     }
 
@@ -562,8 +609,10 @@ mod tests {
         m.on_message(&HealthCheckMessage::GraphConnected, T0);
         let o = done(m.tick(T0 + 121, &certs(Some(3000))));
         match o.next {
-            Next::Fail(reason) => assert!(reason.contains("never became available"), "{reason}"),
-            other => panic!("expected Fail, got {other:?}"),
+            Next::Verdict(HealthVerdict::Unhealthy(reason)) => {
+                assert!(reason.contains("never became available"), "{reason}")
+            }
+            other => panic!("expected an Unhealthy verdict, got {other:?}"),
         }
         let w = o.write.unwrap();
         assert_eq!(w.status, HealthStatus::Unhealthy);
@@ -644,7 +693,7 @@ mod tests {
         m.phase = RejuvenationPhase::WaitingForDeps;
         m.deps_checked(T0 + 30, true, 0);
         let o = done(m.tick(T0 + 60, &certs(Some(200))));
-        assert_eq!(o.next, Next::Stop(REJUVENATION_STOP_REASON.to_string()));
+        assert_eq!(o.next, Next::Verdict(HealthVerdict::Rejuvenate));
     }
 
     #[test]
@@ -659,7 +708,7 @@ mod tests {
         );
         assert_eq!(
             done(m.tick(T0 + 100, &certs(Some(200)))).next,
-            Next::Stop(REJUVENATION_STOP_REASON.to_string()),
+            Next::Verdict(HealthVerdict::Rejuvenate),
             "now == fire_at fires"
         );
     }
@@ -735,12 +784,14 @@ mod tests {
             .unwrap();
         assert_eq!(w.phase, HealthPhase::Jittering);
 
+        // A hard failure is a verdict, so the file it writes already says the agent
+        // is shutting down.
         let bad = CertReading {
             hard: Err("expired".into()),
             min_ttl: None,
         };
         let w = done(m.tick(T0 + 30, &bad)).write.unwrap();
-        assert_eq!(w.phase, HealthPhase::Jittering);
+        assert_eq!(w.phase, HealthPhase::ShuttingDown);
     }
 
     #[test]
@@ -767,6 +818,110 @@ mod tests {
         }
     }
 
+    // -- verdicts -------------------------------------------------------------
+
+    /// A machine one tick from a rejuvenation verdict.
+    fn about_to_rejuvenate() -> HealthMachine {
+        let mut m = connected(false);
+        m.phase = RejuvenationPhase::Jittering { fire_at_secs: T0 };
+        m
+    }
+
+    #[test]
+    fn a_verdict_is_followed_by_a_write_that_says_the_agent_is_shutting_down() {
+        let mut m = about_to_rejuvenate();
+        let o = done(m.tick(T0 + 30, &certs(Some(200))));
+        assert_eq!(o.next, Next::Verdict(HealthVerdict::Rejuvenate));
+        let w = o.write.expect("the verdict tick still refreshes the file");
+        assert_eq!(w.phase, HealthPhase::ShuttingDown);
+        assert_eq!(
+            w.status,
+            HealthStatus::Healthy,
+            "rejuvenating is not unhealthy"
+        );
+    }
+
+    #[test]
+    fn an_unhealthy_verdict_writes_unhealthy_while_shutting_down() {
+        let mut m = connected(false);
+        let bad = CertReading {
+            hard: Err("expired".into()),
+            min_ttl: None,
+        };
+        let w = done(m.tick(T0 + 30, &bad)).write.unwrap();
+        assert_eq!(w.phase, HealthPhase::ShuttingDown);
+        assert_eq!(w.status, HealthStatus::Unhealthy);
+    }
+
+    #[test]
+    fn after_a_verdict_the_machine_keeps_the_file_fresh_and_judges_nothing_more() {
+        let mut m = about_to_rejuvenate();
+        done(m.tick(T0 + 30, &certs(Some(200))));
+
+        // Even a certificate that has since expired produces no second verdict.
+        let bad = CertReading {
+            hard: Err("expired".into()),
+            min_ttl: None,
+        };
+        for i in 2..6 {
+            let o = done(m.tick(T0 + 30 * i, &bad));
+            assert_eq!(o.next, Next::Reschedule, "tick {i}");
+            let w = o.write.expect("still refreshed");
+            assert_eq!(w.timestamp, T0 + 30 * i);
+            assert_eq!(w.phase, HealthPhase::ShuttingDown);
+        }
+    }
+
+    #[test]
+    fn a_rejuvenation_verdict_follows_the_connections_afterwards() {
+        let mut m = about_to_rejuvenate();
+        done(m.tick(T0 + 30, &certs(Some(200))));
+        m.on_message(&HealthCheckMessage::CassiniDisconnected, T0 + 40);
+        let w = done(m.tick(T0 + 60, &certs(Some(200)))).write.unwrap();
+        assert_eq!(w.status, HealthStatus::Unhealthy);
+        assert_eq!(w.phase, HealthPhase::ShuttingDown);
+    }
+
+    #[test]
+    fn an_unhealthy_verdict_stays_unhealthy_afterwards_whatever_the_connections() {
+        let mut m = connected(false);
+        let bad = CertReading {
+            hard: Err("expired".into()),
+            min_ttl: None,
+        };
+        done(m.tick(T0 + 30, &bad));
+        let w = done(m.tick(T0 + 60, &certs(Some(3000)))).write.unwrap();
+        assert_eq!(w.status, HealthStatus::Unhealthy);
+    }
+
+    #[test]
+    fn messages_after_a_verdict_are_written_as_shutting_down() {
+        let mut m = about_to_rejuvenate();
+        done(m.tick(T0 + 30, &certs(Some(200))));
+        let w = m
+            .on_message(&HealthCheckMessage::CassiniDisconnected, T0 + 40)
+            .unwrap();
+        assert_eq!(w.phase, HealthPhase::ShuttingDown);
+    }
+
+    #[test]
+    fn once_concluded_a_failing_write_does_not_start_a_second_verdict() {
+        let mut m = about_to_rejuvenate();
+        done(m.tick(T0 + 30, &certs(Some(200))));
+        for _ in 0..10 {
+            assert_eq!(m.record_write(Err("disk full".into())), None);
+        }
+    }
+
+    #[test]
+    fn the_actor_can_conclude_the_machine_itself_for_a_write_failure() {
+        let mut m = connected(false);
+        m.conclude(&HealthVerdict::Unhealthy("cannot write".into()));
+        let w = done(m.tick(T0 + 30, &certs(Some(3000)))).write.unwrap();
+        assert_eq!(w.status, HealthStatus::Unhealthy);
+        assert_eq!(w.phase, HealthPhase::ShuttingDown);
+    }
+
     /// The health file is the liveness probe's only evidence that the agent is
     /// alive, so every tick must refresh it, in every phase. Writing it only in
     /// the Normal phase let it go stale during a rejuvenation that waits longer
@@ -785,7 +940,7 @@ mod tests {
                 TickStep::Done(o) => o,
                 TickStep::NeedDeps => m.deps_checked(now, true, 150),
             };
-            if let Next::Stop(_) = outcome.next {
+            if let Next::Verdict(_) = outcome.next {
                 stopped = true;
                 break;
             }

@@ -110,6 +110,7 @@ mod tests {
             expects_graph: true,
             rejuvenation_threshold_secs: 300,
             dep_cert_endpoints: vec![DepCertEndpoint::parse("from-args.example:443:100").unwrap()],
+            verdict_to: None,
         }
     }
 

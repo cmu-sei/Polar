@@ -218,6 +218,7 @@ impl Actor for Broker {
             Some("cassini.healthcheck".to_string()),
             HealthCheckActor,
             HealthCheckArgs {
+                verdict_to: None,
                 expects_graph: false,
                 // 12-hour rejuvenation threshold — Cassini uses long-lived certs
                 // to minimize disruption to connected agents.

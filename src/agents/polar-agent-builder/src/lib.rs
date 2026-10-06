@@ -211,6 +211,7 @@ impl<M: ractor::Message> AgentBuilder<M> {
         // deployment sets from the same `needs`, so there is no
         // endpoint list to keep in sync with the manifest here.
         let health_check_args = HealthCheckArgs {
+            verdict_to: None,
             expects_graph: required.contains(&Capability::GraphWrite),
             rejuvenation_threshold_secs: DEFAULT_REJUVENATION_THRESHOLD_SECS,
             dep_cert_endpoints: Vec::new(),

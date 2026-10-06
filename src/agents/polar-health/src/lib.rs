@@ -25,7 +25,7 @@
 //!     never became available at all, or was available and then went dark --
 //!     the actor fails itself, which the supervisor treats as fatal.
 
-use ractor::{Actor, ActorProcessingErr, ActorRef, async_trait};
+use ractor::{Actor, ActorProcessingErr, ActorRef, OutputPort, async_trait};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::net::TcpStream;
@@ -34,6 +34,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use x509_parser::prelude::*;
 
 mod certs;
+mod clock;
 pub mod config;
 mod machine;
 pub mod probe;
@@ -106,6 +107,9 @@ pub enum HealthPhase {
     Normal,
     WaitingForDeps,
     Jittering,
+    /// The agent has been told to end (a verdict was given) and is draining. The
+    /// file keeps being refreshed so the probe does not kill it mid-drain.
+    ShuttingDown,
 }
 
 impl From<&RejuvenationPhase> for HealthPhase {
@@ -198,13 +202,7 @@ impl HealthState {
     }
 
     pub fn now() -> u64 {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_else(|e| {
-                tracing::warn!("SystemTime before UNIX_EPOCH: {e}");
-                Duration::ZERO
-            })
-            .as_secs()
+        crate::clock::now_secs()
     }
 }
 
@@ -444,6 +442,36 @@ pub enum RejuvenationPhase {
 }
 
 // ---------------------------------------------------------------------------
+// HealthVerdict
+// ---------------------------------------------------------------------------
+
+/// The health actor's decision that the agent must end.
+///
+/// Sent once, to whoever the actor was given in `HealthCheckArgs::verdict_to`.
+/// The actor reports its decision with a message and does not die to make a
+/// point, so it can keep the health file fresh while the agent shuts down.
+#[derive(Debug, Clone, PartialEq)]
+pub enum HealthVerdict {
+    /// The certificates are due for rejuvenation and the dependencies are ready.
+    /// Not a fault: the agent should end in an orderly way and be replaced.
+    Rejuvenate,
+    /// A hard deadline passed or the actor can no longer do its job.
+    Unhealthy(String),
+}
+
+impl HealthVerdict {
+    /// A sentence for logs and for the reason an agent exits with.
+    pub fn reason(&self) -> String {
+        match self {
+            HealthVerdict::Rejuvenate => {
+                "rejuvenation: certificate rejuvenation threshold reached".to_string()
+            }
+            HealthVerdict::Unhealthy(reason) => reason.clone(),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // HealthCheckMessage
 // ---------------------------------------------------------------------------
 
@@ -484,6 +512,14 @@ pub struct HealthCheckArgs {
     /// Dependency TLS endpoints to check during rejuvenation.
     /// Parsed from `"host:port:min_ttl_seconds"`.
     pub dep_cert_endpoints: Vec<DepCertEndpoint>,
+
+    /// Where to send the verdict that the agent must end.
+    ///
+    /// With a recipient, the actor sends one [`HealthVerdict`] and stays alive,
+    /// refreshing the health file while the agent shuts down. With `None` it
+    /// ends itself instead (fails on a hard deadline, stops for rejuvenation),
+    /// which is what agents that do not use the builder rely on.
+    pub verdict_to: Option<Arc<OutputPort<HealthVerdict>>>,
 }
 
 impl std::fmt::Debug for HealthCheckArgs {
@@ -492,6 +528,7 @@ impl std::fmt::Debug for HealthCheckArgs {
             .field("expects_graph", &self.expects_graph)
             .field("rejuvenation_threshold_secs", &self.rejuvenation_threshold_secs)
             .field("dep_cert_endpoints", &self.dep_cert_endpoints)
+            .field("verdict_to", &self.verdict_to.is_some())
             .finish()
     }
 }
@@ -503,6 +540,7 @@ impl std::fmt::Debug for HealthCheckArgs {
 pub struct HealthCheckActorState {
     config: HealthConfig,
     machine: HealthMachine,
+    verdict_to: Option<Arc<OutputPort<HealthVerdict>>>,
 }
 
 /// Whether every dependency endpoint has a healthy certificate TTL.
@@ -557,21 +595,42 @@ fn schedule_tick(myself: &ActorRef<HealthCheckMessage>, tick_secs: u64) {
 /// A failed write is logged. The file is the liveness probe's only evidence, so
 /// a file that cannot be written will go stale and the kubelet will kill the
 /// pod without a word of explanation; after enough failures in a row the actor
-/// reports itself unhealthy instead, with the reason.
-fn persist(
-    state: &mut HealthCheckActorState,
-    health: &HealthState,
-) -> Result<(), ActorProcessingErr> {
+/// gives a verdict instead, with the reason. Returns that verdict, if so.
+fn persist(state: &mut HealthCheckActorState, health: &HealthState) -> Option<HealthVerdict> {
     let result = health.write();
     if let Err(reason) = &result {
         tracing::warn!("healthcheck: {reason}");
     }
-    match state.machine.record_write(result) {
-        Some(reason) => {
-            tracing::error!("healthcheck: {reason}");
-            Err(ActorProcessingErr::from(reason))
+    let reason = state.machine.record_write(result)?;
+    tracing::error!("healthcheck: {reason}");
+    let verdict = HealthVerdict::Unhealthy(reason);
+    state.machine.conclude(&verdict);
+    Some(verdict)
+}
+
+/// Hands the verdict over. Returns whether the actor goes on (and so keeps
+/// ticking): with a recipient it does, so it can keep the file fresh through the
+/// shutdown; without one it ends itself.
+fn deliver(
+    myself: &ActorRef<HealthCheckMessage>,
+    state: &HealthCheckActorState,
+    verdict: HealthVerdict,
+) -> Result<bool, ActorProcessingErr> {
+    match &state.verdict_to {
+        Some(port) => {
+            tracing::warn!("healthcheck: verdict: {}", verdict.reason());
+            port.send(verdict);
+            Ok(true)
         }
-        None => Ok(()),
+        None => match verdict {
+            HealthVerdict::Unhealthy(reason) => Err(ActorProcessingErr::from(reason)),
+            HealthVerdict::Rejuvenate => {
+                // Ordinary Ractor supervision is the mechanism: the supervisor sees
+                // a genuine SupervisionEvent::ActorTerminated carrying this reason.
+                myself.stop(Some(verdict.reason()));
+                Ok(false)
+            }
+        },
     }
 }
 
@@ -581,25 +640,20 @@ async fn finish_tick(
     state: &mut HealthCheckActorState,
     outcome: TickOutcome,
 ) -> Result<(), ActorProcessingErr> {
-    let written = match &outcome.write {
-        Some(health) => persist(state, health),
-        None => Ok(()),
+    let write_verdict = outcome.write.as_ref().and_then(|h| persist(state, h));
+    // A verdict from the machine outranks one about a failed write.
+    let verdict = match outcome.next {
+        Next::Verdict(v) => Some(v),
+        Next::Reschedule => write_verdict,
     };
-    match outcome.next {
-        // A hard deadline or a rejuvenation outranks a failed write.
-        Next::Fail(reason) => Err(ActorProcessingErr::from(reason)),
-        Next::Stop(reason) => {
-            // Ordinary Ractor supervision is the mechanism: the supervisor sees a
-            // genuine SupervisionEvent::ActorTerminated carrying this reason.
-            myself.stop(Some(reason));
-            Ok(())
-        }
-        Next::Reschedule => {
-            written?;
-            schedule_tick(myself, state.config.tick_secs);
-            Ok(())
-        }
+    let goes_on = match verdict {
+        Some(v) => deliver(myself, state, v)?,
+        None => true,
+    };
+    if goes_on {
+        schedule_tick(myself, state.config.tick_secs);
     }
+    Ok(())
 }
 
 pub struct HealthCheckActor;
@@ -615,12 +669,17 @@ impl Actor for HealthCheckActor {
         myself: ActorRef<Self::Msg>,
         args: HealthCheckArgs,
     ) -> Result<Self::State, ActorProcessingErr> {
+        let verdict_to = args.verdict_to.clone();
         let config = HealthConfig::load(args).map_err(ActorProcessingErr::from)?;
         let machine = HealthMachine::new(&config, HealthState::now());
         // The one tick chain. It runs from startup, so the hard deadlines and the
         // health file do not wait for Cassini to connect.
         schedule_tick(&myself, config.tick_secs);
-        Ok(HealthCheckActorState { config, machine })
+        Ok(HealthCheckActorState {
+            config,
+            machine,
+            verdict_to,
+        })
     }
 
     async fn handle(
@@ -651,8 +710,11 @@ impl Actor for HealthCheckActor {
             }
 
             message => {
-                if let Some(write) = state.machine.on_message(&message, HealthState::now()) {
-                    persist(state, &write)?;
+                if let Some(write) = state.machine.on_message(&message, HealthState::now())
+                    && let Some(verdict) = persist(state, &write)
+                {
+                    // The tick chain is already running; this only delivers.
+                    deliver(&myself, state, verdict)?;
                 }
             }
         }
@@ -800,6 +862,7 @@ mod tests {
             expects_graph: false,
             rejuvenation_threshold_secs: 300,
             dep_cert_endpoints: vec![],
+            verdict_to: None,
         }
     }
 
@@ -1025,5 +1088,165 @@ mod tests {
         assert!(read_state(&file).is_some(), "writing recovered");
         actor.stop(None);
         handle.await.unwrap();
+    }
+
+    // -- verdicts ------------------------------------------------------------------
+
+    /// Collects the verdicts an actor sends, for the tests to read.
+    struct Collector;
+
+    #[async_trait]
+    impl Actor for Collector {
+        type Msg = HealthVerdict;
+        type State = Arc<std::sync::Mutex<Vec<HealthVerdict>>>;
+        type Arguments = Self::State;
+
+        async fn pre_start(
+            &self,
+            _myself: ActorRef<Self::Msg>,
+            seen: Self::State,
+        ) -> Result<Self::State, ActorProcessingErr> {
+            Ok(seen)
+        }
+
+        async fn handle(
+            &self,
+            _myself: ActorRef<Self::Msg>,
+            verdict: Self::Msg,
+            seen: &mut Self::State,
+        ) -> Result<(), ActorProcessingErr> {
+            seen.lock().unwrap().push(verdict);
+            Ok(())
+        }
+    }
+
+    /// Args whose verdicts go to a collector, and the list it fills.
+    async fn args_with_verdicts() -> (
+        HealthCheckArgs,
+        Arc<std::sync::Mutex<Vec<HealthVerdict>>>,
+        ActorRef<HealthVerdict>,
+    ) {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (collector, _) = Actor::spawn(None, Collector, seen.clone()).await.unwrap();
+        let port = Arc::new(OutputPort::default());
+        port.subscribe(collector.clone(), Some);
+        let mut a = args();
+        a.verdict_to = Some(port);
+        (a, seen, collector)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_hard_deadline_becomes_a_verdict_and_the_actor_stays_alive() {
+        let _lock = ENV_LOCK.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("health.json");
+        let cert = cert_file(&dir, "agent.pem", 20);
+        let _env = EnvGuard::set(&[
+            (POLAR_HEALTH_FILE_ENV, file.to_str().unwrap()),
+            (POLAR_HEALTH_CERTS_ENV, &cert),
+        ]);
+
+        let (a, seen, _collector) = args_with_verdicts().await;
+        let (actor, handle) = Actor::spawn(None, HealthCheckActor, a).await.unwrap();
+
+        let first = wait_for_state_within(
+            &file,
+            "the file from the verdict tick",
+            Duration::from_secs(60),
+            |s| s.phase == HealthPhase::ShuttingDown,
+        )
+        .await;
+        assert_eq!(first.status, HealthStatus::Unhealthy);
+
+        // The actor must keep refreshing the file while the agent drains, or the
+        // liveness probe kills the pod mid-shutdown.
+        tokio::time::sleep(Duration::from_secs(100)).await;
+        assert_eq!(actor.get_status(), ActorStatus::Running);
+        let later = read_state(&file).unwrap();
+        assert!(later.timestamp >= first.timestamp);
+        assert_eq!(later.phase, HealthPhase::ShuttingDown);
+
+        let seen = seen.lock().unwrap().clone();
+        assert_eq!(seen.len(), 1, "exactly one verdict: {seen:?}");
+        assert!(matches!(&seen[0], HealthVerdict::Unhealthy(r) if r.contains("hard threshold")));
+
+        actor.stop(None);
+        handle.await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_rejuvenation_becomes_a_verdict_and_the_actor_stays_alive() {
+        let _lock = ENV_LOCK.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("health.json");
+        let cert = cert_file(&dir, "agent.pem", 3600);
+        let _env = EnvGuard::set(&[
+            (POLAR_HEALTH_FILE_ENV, file.to_str().unwrap()),
+            (POLAR_HEALTH_CERTS_ENV, &cert),
+            // Rejuvenate as soon as the cert is under two hours from expiry.
+            (POLAR_HEALTH_REJUVENATION_SECS_ENV, "7200"),
+        ]);
+
+        let (a, seen, _collector) = args_with_verdicts().await;
+        let (actor, handle) = Actor::spawn(None, HealthCheckActor, a).await.unwrap();
+        actor.cast(HealthCheckMessage::CassiniConnected).unwrap();
+
+        // Enters the window on tick 1, checks deps on tick 2, then at most 180 s
+        // of jitter.
+        let state = wait_for_state_within(
+            &file,
+            "a shutting_down file after the rejuvenation verdict",
+            Duration::from_secs(400),
+            |s| s.phase == HealthPhase::ShuttingDown,
+        )
+        .await;
+        assert_eq!(state.status, HealthStatus::Healthy);
+
+        tokio::time::sleep(Duration::from_secs(100)).await;
+        assert_eq!(actor.get_status(), ActorStatus::Running);
+        assert_eq!(*seen.lock().unwrap(), vec![HealthVerdict::Rejuvenate]);
+
+        actor.stop(None);
+        handle.await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_unwritable_file_becomes_a_verdict_and_the_actor_stays_alive() {
+        let _lock = ENV_LOCK.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("no-such-dir").join("health.json");
+        let _env = EnvGuard::set(&[(POLAR_HEALTH_FILE_ENV, file.to_str().unwrap())]);
+
+        let (a, seen, _collector) = args_with_verdicts().await;
+        let (actor, handle) = Actor::spawn(None, HealthCheckActor, a).await.unwrap();
+        tokio::time::sleep(Duration::from_secs(200)).await;
+
+        assert_eq!(actor.get_status(), ActorStatus::Running);
+        let seen = seen.lock().unwrap().clone();
+        assert_eq!(seen.len(), 1, "exactly one verdict: {seen:?}");
+        assert!(matches!(&seen[0], HealthVerdict::Unhealthy(r) if r.contains("3 times in a row")));
+
+        actor.stop(None);
+        handle.await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn without_a_recipient_a_rejuvenation_still_stops_the_actor() {
+        // Agents that have not moved to the builder pass no recipient, and rely on
+        // the actor ending itself.
+        let _lock = ENV_LOCK.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("health.json");
+        let cert = cert_file(&dir, "agent.pem", 3600);
+        let _env = EnvGuard::set(&[
+            (POLAR_HEALTH_FILE_ENV, file.to_str().unwrap()),
+            (POLAR_HEALTH_CERTS_ENV, &cert),
+            (POLAR_HEALTH_REJUVENATION_SECS_ENV, "7200"),
+        ]);
+
+        let (actor, handle) = Actor::spawn(None, HealthCheckActor, args()).await.unwrap();
+        actor.cast(HealthCheckMessage::CassiniConnected).unwrap();
+        let ended = tokio::time::timeout(Duration::from_secs(600), handle).await;
+        assert!(ended.is_ok(), "the actor never stopped for rejuvenation");
     }
 }

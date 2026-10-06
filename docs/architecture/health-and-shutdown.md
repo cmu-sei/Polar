@@ -94,7 +94,7 @@ bad combination rather than misbehaving later.
 
 The actor writes a JSON file each tick: `status`, `timestamp`,
 `cassini_connected`, `graph_connected`, `phase`. The `phase` field (`normal`,
-`waiting_for_deps`, `jittering`) is informational: it lets an operator reading
+`waiting_for_deps`, `jittering`, `shutting_down`) is informational: it lets an operator reading
 the file tell "rejuvenating" from "unhealthy", the probe ignores it, and files
 written before it existed read as `normal`.
 
@@ -119,9 +119,19 @@ Hard deadlines belong to the actor, not to the probe:
   together with Cassini session repair (see section 7), because a grace period is
   only worth having once reconnection actually restores sessions.
 
-*Today* a deadline makes the actor return `Err`, so it fails and the supervisor
-reacts abruptly. *Target:* a deadline is reported as an explicit verdict message
-(section 4), and the actor stays alive long enough to report it.
+A deadline, or a rejuvenation, is reported as an explicit verdict message,
+`HealthVerdict::Rejuvenate` or `HealthVerdict::Unhealthy(reason)`, sent once to
+the recipient the actor was given. The actor does not die to deliver it. It stays
+alive and goes on ticking, and every tick refreshes the file with
+`phase = shutting_down`, so the liveness probe does not kill the agent in the
+middle of its drain. After the verdict it judges nothing further. A rejuvenating
+agent still reports healthy while it drains; an unhealthy one reports unhealthy.
+
+The same verdict is raised when the actor cannot write its file three times in a
+row. An actor given no recipient (agents that have not moved to the builder, and
+the Cassini broker) ends itself as before: it fails on a hard deadline and stops
+for rejuvenation. The builder's infrastructure supervisor does not use the
+verdict yet; that is the next stage of the rework.
 
 ## 4. The InfrastructureSupervisor shutdown pipeline
 

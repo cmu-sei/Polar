@@ -94,6 +94,7 @@ impl Actor for RootSupervisor {
             Some(HEALTHCHECK_ACTOR_NAME.to_string()),
             HealthCheckActor,
             HealthCheckArgs {
+                verdict_to: None,
                 expects_graph: false,
                 rejuvenation_threshold_secs: 300,
                 dep_cert_endpoints,
