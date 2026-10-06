@@ -91,6 +91,18 @@ consistency check validates the whole set (tick < stale threshold, jitter window
 fits between rejuvenation and expiry, and so on) and the agent fails fast on a
 bad combination rather than misbehaving later.
 
+### Dependency checks
+
+In `WaitingForDeps` the actor checks that each dependency's certificate has enough
+life left (`POLAR_HEALTH_DEP_ENDPOINTS`, from the catalog `needs`). The checks run
+at the same time, in a task, so a tick never waits on the network and the actor
+keeps handling messages meanwhile; the tick chain pauses until the result arrives.
+Each check is bounded: 5 s to connect, 5 s for each read or write, and 10 s in
+all. Before this, the connect had no limit of its own (about two minutes against a
+host that drops packets) and the endpoints were checked one after another, inside
+the message handler. `polar-init` uses the same check when it waits for dependency
+certificates, so it gains the same limits.
+
 ### The liveness file
 
 The actor writes a JSON file each tick: `status`, `timestamp`,

@@ -255,6 +255,45 @@ fn validate_hostname(hostname: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Time limits for checking a dependency's certificate.
+#[derive(Debug, Clone, Copy)]
+pub struct DepCheckLimits {
+    /// Opening the TCP connection. Without this the operating system decides,
+    /// which for a host that drops packets is about two minutes.
+    pub connect: Duration,
+    /// Each read and write during the TLS handshake.
+    pub io: Duration,
+    /// The whole check, enforced by the health actor around it.
+    pub overall: Duration,
+}
+
+impl Default for DepCheckLimits {
+    fn default() -> Self {
+        Self {
+            connect: Duration::from_secs(5),
+            io: Duration::from_secs(5),
+            overall: Duration::from_secs(10),
+        }
+    }
+}
+
+/// Connects to the first address of `addr` that answers within `timeout` each.
+fn connect_within(addr: &str, timeout: Duration) -> Result<TcpStream, String> {
+    use std::net::ToSocketAddrs;
+
+    let addrs = addr
+        .to_socket_addrs()
+        .map_err(|e| format!("failed to resolve {addr}: {e}"))?;
+    let mut last = format!("no addresses found for {addr}");
+    for candidate in addrs {
+        match TcpStream::connect_timeout(&candidate, timeout) {
+            Ok(stream) => return Ok(stream),
+            Err(e) => last = format!("failed to connect to {addr}: {e}"),
+        }
+    }
+    Err(last)
+}
+
 /// A dependency TLS endpoint whose server certificate TTL we check
 /// before and during rejuvenation.
 ///
@@ -316,20 +355,26 @@ impl DepCertEndpoint {
     /// cert against a CA (we only care about the cert's TTL, not its
     /// trust chain, since we manage the CA ourselves).
     pub fn check_ttl(&self) -> Result<i64, String> {
+        self.check_ttl_within(&DepCheckLimits::default())
+    }
+
+    /// As [`check_ttl`](Self::check_ttl), with chosen time limits. The connect and
+    /// each read and write are bounded, so a host that drops packets or a server
+    /// that goes quiet cannot hold the caller for long.
+    pub fn check_ttl_within(&self, limits: &DepCheckLimits) -> Result<i64, String> {
         use rustls::ClientConfig;
         use rustls::pki_types::ServerName;
         use std::io::Write;
 
         let addr = format!("{}:{}", self.host, self.port);
 
-        let stream = TcpStream::connect(&addr)
-            .map_err(|e| format!("failed to connect to {addr}: {e}"))?;
+        let stream = connect_within(&addr, limits.connect)?;
 
         stream
-            .set_read_timeout(Some(Duration::from_secs(5)))
+            .set_read_timeout(Some(limits.io))
             .map_err(|e| format!("failed to set read timeout on {addr}: {e}"))?;
         stream
-            .set_write_timeout(Some(Duration::from_secs(5)))
+            .set_write_timeout(Some(limits.io))
             .map_err(|e| format!("failed to set write timeout on {addr}: {e}"))?;
 
         // We use a dangerous config that skips cert verification — we only
@@ -502,6 +547,11 @@ pub enum HealthCheckMessage {
     GraphOpFailed(String),
     /// Internal periodic tick — do not send externally.
     Tick,
+    /// Internal: the dependency check a tick started has finished — do not send
+    /// externally. A tick that needs the dependencies hands the network check to
+    /// a task and carries on when this arrives, so the actor keeps handling
+    /// messages in the meantime.
+    DepsChecked(bool),
 }
 
 // ---------------------------------------------------------------------------
@@ -548,40 +598,63 @@ pub struct HealthCheckActorState {
     config: HealthConfig,
     machine: HealthMachine,
     verdict_to: Option<Arc<OutputPort<HealthVerdict>>>,
+    /// A dependency check is running on behalf of the current tick. The tick
+    /// chain is paused until it reports back.
+    awaiting_deps: bool,
 }
 
 /// Whether every dependency endpoint has a healthy certificate TTL.
-/// Logs a warning for each that fails and does not short-circuit, so all
-/// failures are visible in a single tick.
-///
-/// `check_ttl()` does blocking network and TLS handshake I/O (up to ~5s per
-/// endpoint through its read and write timeouts), so each runs through
-/// `spawn_blocking` rather than holding up the thread this tick runs on.
 async fn deps_healthy(endpoints: &[DepCertEndpoint]) -> bool {
+    deps_healthy_within(endpoints, &DepCheckLimits::default()).await
+}
+
+/// As [`deps_healthy`], with chosen limits.
+///
+/// The endpoints are checked at the same time, each on a blocking thread (the
+/// check does blocking network and TLS I/O) and each held to `limits.overall`,
+/// so the whole check takes no longer than the slowest single one, never the sum.
+/// A warning is logged for each that fails, so all failures show in one tick.
+async fn deps_healthy_within(endpoints: &[DepCertEndpoint], limits: &DepCheckLimits) -> bool {
     if endpoints.is_empty() {
         return true;
     }
 
-    let mut all_healthy = true;
+    let mut checks = tokio::task::JoinSet::new();
     for dep in endpoints {
         let dep = dep.clone();
-        let result = tokio::task::spawn_blocking(move || dep.check_ttl()).await;
+        let limits = *limits;
+        checks.spawn(async move {
+            let label = format!("{}:{}", dep.host, dep.port);
+            let overall = limits.overall;
+            let check = tokio::task::spawn_blocking(move || dep.check_ttl_within(&limits));
+            match tokio::time::timeout(overall, check).await {
+                Ok(Ok(Ok(remaining))) => {
+                    tracing::debug!("dep cert {label} healthy, {remaining}s remaining");
+                    true
+                }
+                Ok(Ok(Err(reason))) => {
+                    tracing::warn!("healthcheck: dep cert unhealthy: {reason}");
+                    false
+                }
+                Ok(Err(join_err)) => {
+                    tracing::warn!(
+                        "healthcheck: dep cert check of {label} panicked or was cancelled: {join_err}"
+                    );
+                    false
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        "healthcheck: dep cert check of {label} did not finish within {overall:?}"
+                    );
+                    false
+                }
+            }
+        });
+    }
 
-        match result {
-            Ok(Ok(remaining)) => {
-                tracing::debug!("dep cert healthy, {remaining}s remaining");
-            }
-            Ok(Err(reason)) => {
-                tracing::warn!("healthcheck: dep cert unhealthy: {reason}");
-                all_healthy = false;
-            }
-            Err(join_err) => {
-                tracing::warn!(
-                    "healthcheck: dep cert check task panicked or was cancelled: {join_err}"
-                );
-                all_healthy = false;
-            }
-        }
+    let mut all_healthy = true;
+    while let Some(result) = checks.join_next().await {
+        all_healthy &= result.unwrap_or(false);
     }
     all_healthy
 }
@@ -686,6 +759,7 @@ impl Actor for HealthCheckActor {
             config,
             machine,
             verdict_to,
+            awaiting_deps: false,
         })
     }
 
@@ -703,16 +777,32 @@ impl Actor for HealthCheckActor {
                     state.config.expiry_threshold_secs,
                     now as i64,
                 );
-                let outcome = match state.machine.tick(now, &certs) {
-                    TickStep::Done(outcome) => outcome,
+                match state.machine.tick(now, &certs) {
+                    TickStep::Done(outcome) => finish_tick(&myself, state, outcome).await?,
                     TickStep::NeedDeps => {
-                        let healthy = deps_healthy(&state.config.dep_cert_endpoints).await;
-                        let jitter = machine::jitter_secs(rand::random::<u32>());
-                        state
-                            .machine
-                            .deps_checked(HealthState::now(), healthy, jitter)
+                        // The network check runs in a task. The tick chain pauses
+                        // here and resumes when DepsChecked arrives, and the actor
+                        // handles other messages in the meantime.
+                        state.awaiting_deps = true;
+                        let endpoints = state.config.dep_cert_endpoints.clone();
+                        let me = myself.clone();
+                        tokio::spawn(async move {
+                            let healthy = deps_healthy(&endpoints).await;
+                            let _ = me.cast(HealthCheckMessage::DepsChecked(healthy));
+                        });
                     }
-                };
+                }
+            }
+
+            HealthCheckMessage::DepsChecked(healthy) => {
+                if !std::mem::take(&mut state.awaiting_deps) {
+                    tracing::warn!("healthcheck: ignoring a dependency result nobody asked for");
+                    return Ok(());
+                }
+                let jitter = machine::jitter_secs(rand::random::<u32>());
+                let outcome = state
+                    .machine
+                    .deps_checked(HealthState::now(), healthy, jitter);
                 finish_tick(&myself, state, outcome).await?;
             }
 
@@ -1331,5 +1421,241 @@ mod tests {
             ended.is_ok(),
             "Cassini never came up and the actor never failed"
         );
+    }
+
+    // -- dependency endpoints ------------------------------------------------------
+    //
+    // These use real local sockets and real time, with short limits.
+
+    use std::net::TcpListener;
+
+    fn limits(io_ms: u64, overall_ms: u64) -> DepCheckLimits {
+        DepCheckLimits {
+            connect: Duration::from_millis(500),
+            io: Duration::from_millis(io_ms),
+            overall: Duration::from_millis(overall_ms),
+        }
+    }
+
+    fn endpoint(port: u16, min_ttl_secs: i64) -> DepCertEndpoint {
+        DepCertEndpoint::parse(&format!("127.0.0.1:{port}:{min_ttl_secs}")).unwrap()
+    }
+
+    /// A server that accepts connections and then says nothing.
+    fn silent_server() -> (u16, TcpListener) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let accepter = listener.try_clone().unwrap();
+        std::thread::spawn(move || {
+            let mut held = Vec::new();
+            while let Ok((stream, _)) = accepter.accept() {
+                held.push(stream); // never answered, never closed
+            }
+        });
+        (port, listener)
+    }
+
+    /// A local TLS server whose certificate has `cert_ttl_secs` left. Serves
+    /// `connections` handshakes, then stops.
+    fn tls_server(cert_ttl_secs: i64, connections: usize) -> u16 {
+        use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+
+        let mut params =
+            rcgen::CertificateParams::new(vec!["localhost".to_string()]).expect("params");
+        params.not_before = ::time::OffsetDateTime::now_utc() - ::time::Duration::hours(1);
+        params.not_after =
+            ::time::OffsetDateTime::now_utc() + ::time::Duration::seconds(cert_ttl_secs);
+        let key = rcgen::KeyPair::generate().expect("key");
+        let cert = params.self_signed(&key).expect("cert");
+        let config = Arc::new(
+            rustls::ServerConfig::builder()
+                .with_no_client_auth()
+                .with_single_cert(
+                    vec![CertificateDer::from(cert.der().to_vec())],
+                    PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key.serialize_der())),
+                )
+                .expect("server config"),
+        );
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for _ in 0..connections {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    return;
+                };
+                let mut conn = rustls::ServerConnection::new(config.clone()).unwrap();
+                while conn.is_handshaking() {
+                    if conn.complete_io(&mut stream).is_err() {
+                        break;
+                    }
+                }
+            }
+        });
+        port
+    }
+
+    #[test]
+    fn a_healthy_dependency_reports_its_remaining_ttl() {
+        let port = tls_server(3600, 1);
+        let remaining = endpoint(port, 300)
+            .check_ttl_within(&limits(2000, 4000))
+            .expect("healthy");
+        assert!(
+            (3590..=3600).contains(&remaining),
+            "remaining was {remaining}"
+        );
+    }
+
+    #[test]
+    fn a_dependency_with_too_little_ttl_is_unhealthy() {
+        let port = tls_server(120, 1);
+        let err = endpoint(port, 300)
+            .check_ttl_within(&limits(2000, 4000))
+            .unwrap_err();
+        assert!(err.contains("expires in"), "{err}");
+        assert!(err.contains("minimum required: 300s"), "{err}");
+    }
+
+    #[test]
+    fn a_silent_server_is_given_up_on_at_the_io_limit() {
+        let (port, _server) = silent_server();
+        let started = std::time::Instant::now();
+        let err = endpoint(port, 300)
+            .check_ttl_within(&limits(300, 4000))
+            .unwrap_err();
+        assert!(err.contains("handshake"), "{err}");
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "{:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn a_closed_port_fails_at_once() {
+        let port = {
+            let l = TcpListener::bind("127.0.0.1:0").unwrap();
+            l.local_addr().unwrap().port()
+        };
+        let started = std::time::Instant::now();
+        let err = endpoint(port, 300)
+            .check_ttl_within(&limits(2000, 4000))
+            .unwrap_err();
+        assert!(err.contains("failed to connect"), "{err}");
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[tokio::test]
+    async fn dependencies_are_checked_at_the_same_time() {
+        // Three silent servers at 400 ms each: one after another would take 1.2 s.
+        let servers: Vec<_> = (0..3).map(|_| silent_server()).collect();
+        let endpoints: Vec<_> = servers.iter().map(|(p, _)| endpoint(*p, 300)).collect();
+
+        let started = std::time::Instant::now();
+        let healthy = deps_healthy_within(&endpoints, &limits(400, 4000)).await;
+        let took = started.elapsed();
+
+        assert!(!healthy);
+        assert!(
+            took < Duration::from_millis(1100),
+            "took {took:?}, so not concurrent"
+        );
+    }
+
+    #[tokio::test]
+    async fn one_unhealthy_dependency_makes_them_all_unhealthy() {
+        let good = tls_server(3600, 1);
+        let bad = tls_server(60, 1);
+        let endpoints = vec![endpoint(good, 300), endpoint(bad, 300)];
+        assert!(!deps_healthy_within(&endpoints, &limits(2000, 4000)).await);
+
+        let both_good = vec![
+            endpoint(tls_server(3600, 1), 300),
+            endpoint(tls_server(3600, 1), 300),
+        ];
+        assert!(deps_healthy_within(&both_good, &limits(2000, 4000)).await);
+    }
+
+    #[tokio::test]
+    async fn no_dependencies_is_healthy() {
+        assert!(deps_healthy_within(&[], &limits(100, 200)).await);
+    }
+
+    #[tokio::test]
+    async fn a_dependency_check_never_outlasts_the_overall_budget() {
+        // The io limit is longer than the overall one, so only the overall limit
+        // can end this check early.
+        let (port, _server) = silent_server();
+        let started = std::time::Instant::now();
+        let healthy = deps_healthy_within(&[endpoint(port, 300)], &limits(1500, 300)).await;
+        assert!(!healthy);
+        assert!(
+            started.elapsed() < Duration::from_millis(1000),
+            "{:?}",
+            started.elapsed()
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_unreachable_dependency_keeps_the_agent_waiting_and_the_file_fresh() {
+        let _lock = ENV_LOCK.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("health.json");
+        let cert = cert_file(&dir, "agent.pem", 3600);
+        let closed = {
+            let l = TcpListener::bind("127.0.0.1:0").unwrap();
+            l.local_addr().unwrap().port()
+        };
+        let _env = EnvGuard::set(&[
+            (POLAR_HEALTH_FILE_ENV, file.to_str().unwrap()),
+            (POLAR_HEALTH_CERTS_ENV, &cert),
+            (POLAR_HEALTH_REJUVENATION_SECS_ENV, "7200"),
+            (
+                POLAR_HEALTH_DEP_ENDPOINTS_ENV,
+                &format!("127.0.0.1:{closed}:300"),
+            ),
+        ]);
+
+        let (a, seen, _collector) = args_with_verdicts().await;
+        let (actor, handle) = Actor::spawn(None, HealthCheckActor, a).await.unwrap();
+        actor.cast(HealthCheckMessage::CassiniConnected).unwrap();
+
+        // Several periods of an unhealthy dependency: still waiting, file kept
+        // fresh by the ticks that follow each check, and no verdict.
+        let mut stamps = vec![];
+        for _ in 0..6 {
+            tokio::time::sleep(Duration::from_secs(40)).await;
+            let state = read_state(&file).expect("a file");
+            assert_eq!(state.phase, HealthPhase::WaitingForDeps);
+            stamps.push(state.timestamp);
+        }
+        assert!(stamps.windows(2).all(|w| w[1] >= w[0]));
+        assert!(
+            stamps.first() < stamps.last(),
+            "the file kept being refreshed: {stamps:?}"
+        );
+        assert!(seen.lock().unwrap().is_empty());
+
+        actor.stop(None);
+        handle.await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_stray_deps_checked_message_is_ignored() {
+        let _lock = ENV_LOCK.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("health.json");
+        let _env = EnvGuard::set(&[(POLAR_HEALTH_FILE_ENV, file.to_str().unwrap())]);
+
+        let (actor, handle) = Actor::spawn(None, HealthCheckActor, args()).await.unwrap();
+        actor.cast(HealthCheckMessage::CassiniConnected).unwrap();
+        actor.cast(HealthCheckMessage::DepsChecked(true)).unwrap();
+        tokio::time::sleep(Duration::from_secs(100)).await;
+
+        assert_eq!(actor.get_status(), ActorStatus::Running);
+        assert_eq!(read_state(&file).unwrap().phase, HealthPhase::Normal);
+        actor.stop(None);
+        handle.await.unwrap();
     }
 }

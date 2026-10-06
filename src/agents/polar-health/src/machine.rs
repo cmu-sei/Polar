@@ -210,7 +210,7 @@ impl HealthMachine {
                 // gone on too long.
                 Some(self.unhealthy(now, self.cassini_connected, self.graph_connected))
             }
-            HealthCheckMessage::Tick => None,
+            HealthCheckMessage::Tick | HealthCheckMessage::DepsChecked(_) => None,
         }
     }
 
