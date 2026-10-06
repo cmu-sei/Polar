@@ -62,6 +62,21 @@ pub(crate) fn min_ttl(paths: &[String], now: i64) -> Option<i64> {
         .reduce(i64::min)
 }
 
+/// What the certificates look like at one moment, gathered once per tick.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct CertReading {
+    /// `Err` when a certificate is past the hard threshold, or unreadable.
+    pub hard: Result<(), String>,
+    pub min_ttl: Option<i64>,
+}
+
+pub(crate) fn read(paths: &[String], expiry_threshold_secs: i64, now: i64) -> CertReading {
+    CertReading {
+        hard: check_hard(paths, expiry_threshold_secs, now),
+        min_ttl: min_ttl(paths, now),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -164,5 +179,14 @@ mod tests {
         assert!(check_hard(&paths, 60, now + 560).is_err());
         let ttl = ttl_secs(&paths[0], now + 500).unwrap();
         assert!((95..=100).contains(&ttl), "ttl was {ttl}");
+    }
+
+    #[test]
+    fn read_gathers_both_views() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = vec![cert_file(&dir, "a.pem", 600)];
+        let reading = read(&paths, 60, now_secs());
+        assert!(reading.hard.is_ok());
+        assert!(reading.min_ttl.is_some());
     }
 }

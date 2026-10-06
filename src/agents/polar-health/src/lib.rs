@@ -35,10 +35,12 @@ use x509_parser::prelude::*;
 
 mod certs;
 pub mod config;
+mod machine;
 #[cfg(test)]
 mod test_support;
 
 pub use config::HealthConfig;
+use machine::{HealthMachine, Next, TickOutcome, TickStep};
 
 // ---------------------------------------------------------------------------
 // Environment variable constants
@@ -102,6 +104,21 @@ pub struct HealthState {
 }
 
 impl HealthState {
+    /// A state with an explicit timestamp, for callers that do not read the clock.
+    pub fn at(
+        status: HealthStatus,
+        timestamp: u64,
+        cassini_connected: bool,
+        graph_connected: bool,
+    ) -> Self {
+        Self {
+            status,
+            timestamp,
+            cassini_connected,
+            graph_connected,
+        }
+    }
+
     pub fn healthy(cassini_connected: bool, graph_connected: bool) -> Self {
         Self {
             status: HealthStatus::Healthy,
@@ -444,117 +461,75 @@ impl std::fmt::Debug for HealthCheckArgs {
 }
 
 // ---------------------------------------------------------------------------
-// HealthCheckActorState
+// HealthCheckActor
 // ---------------------------------------------------------------------------
 
 pub struct HealthCheckActorState {
-    pub cassini_connected: bool,
-    pub graph_connected: bool,
-    pub expects_graph: bool,
-    pub expiry_threshold_secs: i64,
-    pub rejuvenation_threshold_secs: i64,
-    pub tick_secs: u64,
-    pub cert_paths: Vec<String>,
-    pub dep_cert_endpoints: Vec<DepCertEndpoint>,
-    pub rejuvenation_phase: RejuvenationPhase,
-    /// Seconds an expects_graph agent may go without a real graph success
-    /// before HealthCheckActor fails itself.
-    pub graph_deadline_secs: u64,
-    /// Unix timestamp of the last GraphAvailable. None if never seen.
-    pub last_graph_success_secs: Option<u64>,
-    /// Unix timestamp this actor started — anchors the deadline for the
-    /// "never succeeded even once" case.
-    pub actor_start_secs: u64,
+    config: HealthConfig,
+    machine: HealthMachine,
 }
 
-impl HealthCheckActorState {
-    /// Returns `true` if all required connections are established.
-    /// Note: uses graph_connected (actor spawned), not graph availability.
-    /// Graph availability is tracked separately via last_graph_success_secs
-    /// and enforced by the deadline check in Tick.
-    fn connections_healthy(&self) -> bool {
-        if !self.cassini_connected {
-            return false;
-        }
-        if self.expects_graph && !self.graph_connected {
-            return false;
-        }
-        true
+/// Whether every dependency endpoint has a healthy certificate TTL.
+/// Logs a warning for each that fails and does not short-circuit, so all
+/// failures are visible in a single tick.
+///
+/// `check_ttl()` does blocking network and TLS handshake I/O (up to ~5s per
+/// endpoint through its read and write timeouts), so each runs through
+/// `spawn_blocking` rather than holding up the thread this tick runs on.
+async fn deps_healthy(endpoints: &[DepCertEndpoint]) -> bool {
+    if endpoints.is_empty() {
+        return true;
     }
 
-    /// Returns `true` if all dep cert endpoints have healthy TTLs.
-    /// Logs warnings for any that fail; does not short-circuit so all
-    /// failures are visible in a single tick.
-    ///
-    /// check_ttl() does blocking network + TLS handshake I/O (up to ~5s per
-    /// endpoint via its read/write timeouts). We run it via spawn_blocking
-    /// so it doesn't hold up whatever thread this tick is running on.
-    async fn deps_healthy(&self) -> bool {
-        if self.dep_cert_endpoints.is_empty() {
-            return true;
-        }
+    let mut all_healthy = true;
+    for dep in endpoints {
+        let dep = dep.clone();
+        let result = tokio::task::spawn_blocking(move || dep.check_ttl()).await;
 
-        let mut all_healthy = true;
-        for dep in &self.dep_cert_endpoints {
-            let dep = dep.clone();
-            let result = tokio::task::spawn_blocking(move || dep.check_ttl()).await;
-
-            match result {
-                Ok(Ok(remaining)) => {
-                    tracing::debug!("dep cert healthy, {remaining}s remaining");
-                }
-                Ok(Err(reason)) => {
-                    tracing::warn!("healthcheck: dep cert unhealthy: {reason}");
-                    all_healthy = false;
-                }
-                Err(join_err) => {
-                    tracing::warn!(
-                        "healthcheck: dep cert check task panicked or was cancelled: {join_err}"
-                    );
-                    all_healthy = false;
-                }
+        match result {
+            Ok(Ok(remaining)) => {
+                tracing::debug!("dep cert healthy, {remaining}s remaining");
+            }
+            Ok(Err(reason)) => {
+                tracing::warn!("healthcheck: dep cert unhealthy: {reason}");
+                all_healthy = false;
+            }
+            Err(join_err) => {
+                tracing::warn!(
+                    "healthcheck: dep cert check task panicked or was cancelled: {join_err}"
+                );
+                all_healthy = false;
             }
         }
-        all_healthy
     }
-
-    /// Checks the graph availability deadline for expects_graph agents.
-    /// Returns `Err` describing the violation if the deadline has been
-    /// exceeded, whether the graph never became available or went dark
-    /// after previously succeeding.
-    fn check_graph_deadline(&self) -> Result<(), String> {
-        if !self.expects_graph {
-            return Ok(());
-        }
-
-        let now = HealthState::now();
-        match self.last_graph_success_secs {
-            Some(last_success) => {
-                let elapsed = now.saturating_sub(last_success);
-                if elapsed > self.graph_deadline_secs {
-                    return Err(format!(
-                        "graph unavailable for {elapsed}s (deadline: {}s)",
-                        self.graph_deadline_secs
-                    ));
-                }
-            }
-            None => {
-                let elapsed = now.saturating_sub(self.actor_start_secs);
-                if elapsed > self.graph_deadline_secs {
-                    return Err(format!(
-                        "graph never became available within {elapsed}s (deadline: {}s)",
-                        self.graph_deadline_secs
-                    ));
-                }
-            }
-        }
-        Ok(())
-    }
+    all_healthy
 }
 
-// ---------------------------------------------------------------------------
-// HealthCheckActor
-// ---------------------------------------------------------------------------
+/// Carries out what the machine decided after a tick.
+async fn finish_tick(
+    myself: &ActorRef<HealthCheckMessage>,
+    tick_secs: u64,
+    outcome: TickOutcome,
+) -> Result<(), ActorProcessingErr> {
+    if let Some(state) = outcome.write {
+        state.write();
+    }
+    match outcome.next {
+        Next::Reschedule => {
+            let _ = myself
+                .send_after(Duration::from_secs(tick_secs), || HealthCheckMessage::Tick)
+                .await;
+            Ok(())
+        }
+        Next::Fail(reason) => Err(ActorProcessingErr::from(reason)),
+        Next::Stop(reason) => {
+            // Ordinary Ractor supervision is the mechanism: the supervisor sees a
+            // genuine SupervisionEvent::ActorTerminated carrying this reason.
+            myself.stop(Some(reason));
+            Ok(())
+        }
+    }
+}
 
 pub struct HealthCheckActor;
 
@@ -570,21 +545,8 @@ impl Actor for HealthCheckActor {
         args: HealthCheckArgs,
     ) -> Result<Self::State, ActorProcessingErr> {
         let config = HealthConfig::load(args).map_err(ActorProcessingErr::from)?;
-
-        Ok(HealthCheckActorState {
-            cassini_connected: false,
-            graph_connected: false,
-            expects_graph: config.expects_graph,
-            expiry_threshold_secs: config.expiry_threshold_secs,
-            rejuvenation_threshold_secs: config.rejuvenation_threshold_secs,
-            tick_secs: config.tick_secs,
-            cert_paths: config.cert_paths,
-            dep_cert_endpoints: config.dep_cert_endpoints,
-            rejuvenation_phase: RejuvenationPhase::Normal,
-            graph_deadline_secs: config.graph_deadline_secs,
-            last_graph_success_secs: None,
-            actor_start_secs: HealthState::now(),
-        })
+        let machine = HealthMachine::new(&config, HealthState::now());
+        Ok(HealthCheckActorState { config, machine })
     }
 
     async fn handle(
@@ -594,214 +556,37 @@ impl Actor for HealthCheckActor {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
-            HealthCheckMessage::CassiniConnected => {
-                state.cassini_connected = true;
-                tracing::debug!("healthcheck: cassini connected");
-                let _ = myself
-                    .send_after(
-                        Duration::from_secs(state.tick_secs),
-                        || HealthCheckMessage::Tick,
-                    )
-                    .await;
-            }
-
-            HealthCheckMessage::CassiniDisconnected => {
-                state.cassini_connected = false;
-                tracing::warn!("healthcheck: cassini disconnected");
-                HealthState::unhealthy(false, state.graph_connected).write();
-                // Don't fail — the TCP client will attempt to reconnect.
-                // The tick-based connection health check will catch it if
-                // reconnection doesn't succeed.
-            }
-
-            HealthCheckMessage::GraphConnected => {
-                state.graph_connected = true;
-                tracing::debug!("healthcheck: graph connected (actor spawned; not yet verified)");
-            }
-
-            HealthCheckMessage::GraphDisconnected => {
-                state.graph_connected = false;
-                tracing::warn!("healthcheck: graph disconnected");
-                if state.expects_graph {
-                    HealthState::unhealthy(state.cassini_connected, false).write();
-                }
-                // Don't fail — allow reconnection to recover.
-            }
-
-            HealthCheckMessage::GraphAvailable => {
-                state.graph_connected = true;
-                state.last_graph_success_secs = Some(HealthState::now());
-                tracing::debug!("healthcheck: graph available (real op succeeded)");
-            }
-
-            HealthCheckMessage::GraphOpFailed(reason) => {
-                tracing::warn!("healthcheck: graph op failed: {reason}");
-                HealthState::unhealthy(state.cassini_connected, state.graph_connected).write();
-                // Don't fail immediately — a single failed op could be
-                // transient. check_graph_deadline (run every Tick) is what
-                // decides whether this has gone on too long.
-            }
-
             HealthCheckMessage::Tick => {
-                // ----------------------------------------------------------------
-                // Hard deadline checks — own certs and, for expects_graph
-                // agents, graph availability. Always checked regardless of
-                // rejuvenation phase.
-                // ----------------------------------------------------------------
-                let now_secs = HealthState::now() as i64;
-                if let Err(reason) =
-                    certs::check_hard(&state.cert_paths, state.expiry_threshold_secs, now_secs)
-                {
-                    tracing::error!("healthcheck: cert check failed (hard deadline): {reason}");
-                    HealthState::unhealthy(
-                        state.cassini_connected,
-                        state.graph_connected,
-                    )
-                    .write();
-                    return Err(ActorProcessingErr::from(reason));
+                let now = HealthState::now();
+                let certs = certs::read(
+                    &state.config.cert_paths,
+                    state.config.expiry_threshold_secs,
+                    now as i64,
+                );
+                let outcome = match state.machine.tick(now, &certs) {
+                    TickStep::Done(outcome) => outcome,
+                    TickStep::NeedDeps => {
+                        let healthy = deps_healthy(&state.config.dep_cert_endpoints).await;
+                        let jitter = machine::jitter_secs(rand::random::<u32>());
+                        state
+                            .machine
+                            .deps_checked(HealthState::now(), healthy, jitter)
+                    }
+                };
+                finish_tick(&myself, state.config.tick_secs, outcome).await?;
+            }
+
+            message => {
+                if let Some(write) = state.machine.on_message(&message, HealthState::now()) {
+                    write.write();
                 }
-
-                if let Err(reason) = state.check_graph_deadline() {
-                    tracing::error!("healthcheck: {reason}");
-                    HealthState::unhealthy(state.cassini_connected, false).write();
-                    return Err(ActorProcessingErr::from(reason));
-                }
-
-                match state.rejuvenation_phase.clone() {
-                    // ------------------------------------------------------------
-                    // Normal operation
-                    // ------------------------------------------------------------
-                    RejuvenationPhase::Normal => {
-                        // Connection health check
-                        if !state.connections_healthy() {
-                            tracing::warn!(
-                                "healthcheck: connections unhealthy (cassini={} graph={} expects_graph={}), waiting for recovery",
-                                state.cassini_connected,
-                                state.graph_connected,
-                                state.expects_graph
-                            );
-                            HealthState::unhealthy(
-                                state.cassini_connected,
-                                state.graph_connected,
-                            )
-                            .write();
-                            // Don't fail — reschedule tick and wait for recovery.
-                            let _ = myself
-                                .send_after(
-                                    Duration::from_secs(state.tick_secs),
-                                    || HealthCheckMessage::Tick,
-                                )
-                                .await;
-                            return Ok(());
-                        }
-
-                        // Check whether we've entered the rejuvenation window
-                        match certs::min_ttl(&state.cert_paths, now_secs) {
-                            None => {
-                                tracing::warn!(
-                                    "healthcheck: could not determine cert TTL, \
-                                     skipping rejuvenation window check"
-                                );
-                            }
-                            Some(min_ttl) => {
-                                if min_ttl <= state.rejuvenation_threshold_secs {
-                                    tracing::info!(
-                                        "healthcheck: entering rejuvenation mode \
-                                         (cert TTL {min_ttl}s <= threshold {}s)",
-                                        state.rejuvenation_threshold_secs
-                                    );
-                                    state.rejuvenation_phase =
-                                        RejuvenationPhase::WaitingForDeps;
-                                }
-                            }
-                        }
-
-                        HealthState::healthy(
-                            state.cassini_connected,
-                            state.graph_connected,
-                        )
-                        .write();
-
-                        let _ = myself
-                            .send_after(
-                                Duration::from_secs(state.tick_secs),
-                                || HealthCheckMessage::Tick,
-                            )
-                            .await;
-                    }
-
-                    // ------------------------------------------------------------
-                    // Rejuvenation: waiting for dep certs to be healthy
-                    // ------------------------------------------------------------
-                    RejuvenationPhase::WaitingForDeps => {
-                        if state.deps_healthy().await {
-                            // Jitter window must dominate tick_secs, or every
-                            // agent that enters this phase around the same
-                            // time (e.g. after a shared cert-issuer rotation)
-                            // fires within one tick of each other regardless
-                            // of the jitter value chosen -- a thundering herd
-                            // on cert-issuer. DEFAULT_JITTER_WINDOW_SECS (180s)
-                            // comfortably exceeds the default 30s tick.
-                            let jitter_secs =
-                                u64::from(rand::random::<u32>()) % DEFAULT_JITTER_WINDOW_SECS;
-                            let fire_at_secs = HealthState::now()
-                                .checked_add(jitter_secs)
-                                .unwrap_or(HealthState::now());
-
-                            tracing::info!(
-                                "healthcheck: deps healthy, jitter {jitter_secs}s (window {}s), \
-                                 will signal shutdown at t={fire_at_secs}",
-                                DEFAULT_JITTER_WINDOW_SECS
-                            );
-                            state.rejuvenation_phase =
-                                RejuvenationPhase::Jittering { fire_at_secs };
-                        } else {
-                            tracing::info!(
-                                "healthcheck: rejuvenation — waiting for dep certs to become healthy"
-                            );
-                        }
-
-                        let _ = myself
-                            .send_after(
-                                Duration::from_secs(state.tick_secs),
-                                || HealthCheckMessage::Tick,
-                            )
-                            .await;
-                    }
-
-                    // ------------------------------------------------------------
-                    // Rejuvenation: jitter timer running
-                    // ------------------------------------------------------------
-                    RejuvenationPhase::Jittering { fire_at_secs } => {
-                        let now = HealthState::now();
-                        if now >= fire_at_secs {
-                            tracing::info!(
-                                "healthcheck: jitter elapsed, terminating for rejuvenation"
-                            );
-                            // Ordinary, real Ractor supervision is the
-                            // whole, sufficient mechanism -- our own
-                            // supervisor sees this via a genuine
-                            // SupervisionEvent::ActorTerminated,
-                            // carrying this exact, real reason string,
-                            // with no separate port/ack handshake
-                            // needed at all.
-                            myself.stop(Some(
-                                "rejuvenation: certificate rejuvenation threshold reached"
-                                    .to_string(),
-                            ));
-                        } else {
-                            let remaining = fire_at_secs.saturating_sub(now);
-                            tracing::debug!(
-                                "healthcheck: jitter pending, {remaining}s until shutdown signal"
-                            );
-                            let _ = myself
-                                .send_after(
-                                    Duration::from_secs(state.tick_secs),
-                                    || HealthCheckMessage::Tick,
-                                )
-                                .await;
-                        }
-                    }
+                if matches!(message, HealthCheckMessage::CassiniConnected) {
+                    // The first tick is scheduled when Cassini first connects.
+                    let _ = myself
+                        .send_after(Duration::from_secs(state.config.tick_secs), || {
+                            HealthCheckMessage::Tick
+                        })
+                        .await;
                 }
             }
         }
@@ -824,88 +609,6 @@ mod tests {
     use ractor::ActorStatus;
 
     // -- helpers ------------------------------------------------------------
-
-    fn state(cert_paths: Vec<String>) -> HealthCheckActorState {
-        HealthCheckActorState {
-            cassini_connected: false,
-            graph_connected: false,
-            expects_graph: false,
-            expiry_threshold_secs: 60,
-            rejuvenation_threshold_secs: 300,
-            tick_secs: 30,
-            cert_paths,
-            dep_cert_endpoints: vec![],
-            rejuvenation_phase: RejuvenationPhase::Normal,
-            graph_deadline_secs: 120,
-            last_graph_success_secs: None,
-            actor_start_secs: HealthState::now(),
-        }
-    }
-
-    // -- connection and graph rules -----------------------------------------
-
-    #[test]
-    fn connections_healthy_matrix() {
-        for (cassini, graph, expects_graph, healthy) in [
-            (false, false, false, false),
-            (true, false, false, true),
-            (true, true, false, true),
-            (false, true, true, false),
-            (true, false, true, false),
-            (true, true, true, true),
-        ] {
-            let mut s = state(vec![]);
-            s.cassini_connected = cassini;
-            s.graph_connected = graph;
-            s.expects_graph = expects_graph;
-            assert_eq!(
-                s.connections_healthy(),
-                healthy,
-                "cassini={cassini} graph={graph} expects_graph={expects_graph}"
-            );
-        }
-    }
-
-    #[test]
-    fn graph_deadline_is_ignored_when_no_graph_is_expected() {
-        let mut s = state(vec![]);
-        s.actor_start_secs = HealthState::now() - 10_000;
-        assert!(s.check_graph_deadline().is_ok());
-    }
-
-    #[test]
-    fn graph_deadline_holds_after_a_recent_success() {
-        let mut s = state(vec![]);
-        s.expects_graph = true;
-        s.last_graph_success_secs = Some(HealthState::now() - 100);
-        assert!(s.check_graph_deadline().is_ok());
-    }
-
-    #[test]
-    fn graph_deadline_fires_after_the_graph_goes_dark() {
-        let mut s = state(vec![]);
-        s.expects_graph = true;
-        s.last_graph_success_secs = Some(HealthState::now() - 121);
-        let err = s.check_graph_deadline().unwrap_err();
-        assert!(err.contains("graph unavailable"), "{err}");
-    }
-
-    #[test]
-    fn graph_deadline_fires_when_the_graph_never_came_up() {
-        let mut s = state(vec![]);
-        s.expects_graph = true;
-        s.actor_start_secs = HealthState::now() - 121;
-        let err = s.check_graph_deadline().unwrap_err();
-        assert!(err.contains("never became available"), "{err}");
-    }
-
-    #[test]
-    fn graph_deadline_does_not_fire_inside_the_startup_window() {
-        let mut s = state(vec![]);
-        s.expects_graph = true;
-        s.actor_start_secs = HealthState::now() - 30;
-        assert!(s.check_graph_deadline().is_ok());
-    }
 
     // -- dependency endpoint parsing ----------------------------------------
 
