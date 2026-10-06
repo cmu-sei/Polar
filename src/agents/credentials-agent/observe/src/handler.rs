@@ -58,8 +58,55 @@ use tracing::{warn, error};
 /// cassini-request-reply-protocol.md: `min(token_remaining_lifetime / 3, 100s)`.
 const MAX_TIMEOUT_SECS: i64 = 100;
 
+/// The Cassini client the request handlers publish through.
+///
+/// A handle rather than a bare `ActorRef`: when the agent builder detects
+/// that the TCP client died and spawns a fresh one, the supervisor calls
+/// `replace`, and every handler picks up the new client on its next
+/// request. A bare `ActorRef` captured at startup would keep publishing
+/// into the dead client for the rest of the pod's life.
+///
+/// `send_message` has the same signature as `ActorRef::send_message`, so
+/// a handler publishes exactly as it did before.
+pub struct BrokerHandle {
+    current: std::sync::RwLock<ActorRef<TcpClientMessage>>,
+}
+
+impl BrokerHandle {
+    pub fn new(client: ActorRef<TcpClientMessage>) -> Self {
+        Self {
+            current: std::sync::RwLock::new(client),
+        }
+    }
+
+    /// Points every later `send_message` at `client`.
+    pub fn replace(&self, client: ActorRef<TcpClientMessage>) {
+        // A poisoned lock only means another thread panicked while holding
+        // it; the ActorRef inside is still valid, so keep going.
+        *self.current.write().unwrap_or_else(|e| e.into_inner()) = client;
+    }
+
+    pub fn send_message(
+        &self,
+        message: TcpClientMessage,
+    ) -> Result<(), ractor::MessagingErr<TcpClientMessage>> {
+        let client = self
+            .current
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        client.send_message(message)
+    }
+}
+
+impl From<ActorRef<TcpClientMessage>> for BrokerHandle {
+    fn from(client: ActorRef<TcpClientMessage>) -> Self {
+        Self::new(client)
+    }
+}
+
 pub struct ObserverState {
-    pub broker_client: ActorRef<TcpClientMessage>,
+    pub broker_client: BrokerHandle,
     pub issuance_reply_router: Arc<ReplyRouter<IssuanceReply>>,
     pub identity_reply_router: Arc<ReplyRouter<IdentityNormalizationReply>>,
     pub account_reply_router: Arc<ReplyRouter<AccountReply>>,
@@ -493,7 +540,7 @@ mod tests {
         .unwrap();
 
         let state = Arc::new(ObserverState {
-            broker_client: broker,
+            broker_client: broker.into(),
             issuance_reply_router: reply_router,
             identity_reply_router: Arc::new(ReplyRouter::new()),
             account_reply_router: Arc::new(ReplyRouter::new()),
@@ -523,7 +570,7 @@ mod tests {
         let broker = spawn_fake_broker(reply_router.clone(), canned_reply).await;
 
         let state = Arc::new(ObserverState {
-            broker_client: broker,
+            broker_client: broker.into(),
             issuance_reply_router: reply_router,
             identity_reply_router: Arc::new(ReplyRouter::new()),
             account_reply_router: Arc::new(ReplyRouter::new()),
@@ -551,7 +598,7 @@ mod tests {
         let broker = spawn_fake_broker(reply_router.clone(), canned_reply).await;
 
         let state = Arc::new(ObserverState {
-            broker_client: broker,
+            broker_client: broker.into(),
             issuance_reply_router: reply_router,
             identity_reply_router: Arc::new(ReplyRouter::new()),
             account_reply_router: Arc::new(ReplyRouter::new()),
@@ -601,7 +648,7 @@ mod tests {
         let (broker, _) = Actor::spawn(None, SilentBroker, ()).await.unwrap();
         let reply_router = Arc::new(ReplyRouter::new());
         let state = Arc::new(ObserverState {
-            broker_client: broker,
+            broker_client: broker.into(),
             issuance_reply_router: reply_router,
             identity_reply_router: Arc::new(ReplyRouter::new()),
             account_reply_router: Arc::new(ReplyRouter::new()),
@@ -717,7 +764,7 @@ mod tests {
         let broker = spawn_fake_identity_broker(identity_reply_router.clone(), canned_reply).await;
 
         let state = Arc::new(ObserverState {
-            broker_client: broker,
+            broker_client: broker.into(),
             issuance_reply_router: Arc::new(ReplyRouter::new()),
             identity_reply_router,
             account_reply_router: Arc::new(ReplyRouter::new()),
@@ -744,7 +791,7 @@ mod tests {
         let broker = spawn_fake_identity_broker(identity_reply_router.clone(), canned_reply).await;
 
         let state = Arc::new(ObserverState {
-            broker_client: broker,
+            broker_client: broker.into(),
             issuance_reply_router: Arc::new(ReplyRouter::new()),
             identity_reply_router,
             account_reply_router: Arc::new(ReplyRouter::new()),
@@ -789,7 +836,7 @@ mod tests {
 
         let (broker, _) = Actor::spawn(None, SilentBroker, ()).await.unwrap();
         let state = Arc::new(ObserverState {
-            broker_client: broker,
+            broker_client: broker.into(),
             issuance_reply_router: Arc::new(ReplyRouter::new()),
             identity_reply_router: Arc::new(ReplyRouter::new()),
             account_reply_router: Arc::new(ReplyRouter::new()),
@@ -915,7 +962,7 @@ mod account_tests {
         account_reply_router: Arc<ReplyRouter<AccountReply>>,
     ) -> Arc<ObserverState> {
         Arc::new(ObserverState {
-            broker_client: broker,
+            broker_client: broker.into(),
             issuance_reply_router: Arc::new(ReplyRouter::new()),
             identity_reply_router: Arc::new(ReplyRouter::new()),
             account_reply_router,
@@ -1094,5 +1141,87 @@ mod admin_action_status_tests {
                 "for {label}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod broker_handle_tests {
+    use super::*;
+    use ractor::{Actor, ActorProcessingErr, async_trait};
+
+    /// Records the topic of every publish it receives, so a test can see
+    /// which of two clients a BrokerHandle actually sent to.
+    struct RecordingClient {
+        seen: tokio::sync::mpsc::UnboundedSender<String>,
+    }
+
+    #[async_trait]
+    impl Actor for RecordingClient {
+        type Msg = TcpClientMessage;
+        type State = ();
+        type Arguments = ();
+
+        async fn pre_start(
+            &self,
+            _myself: ActorRef<Self::Msg>,
+            _args: (),
+        ) -> Result<Self::State, ActorProcessingErr> {
+            Ok(())
+        }
+
+        async fn handle(
+            &self,
+            _myself: ActorRef<Self::Msg>,
+            message: Self::Msg,
+            _state: &mut Self::State,
+        ) -> Result<(), ActorProcessingErr> {
+            if let TcpClientMessage::Publish { topic, .. } = message {
+                let _ = self.seen.send(topic);
+            }
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn broker_handle_sends_to_whichever_client_it_currently_holds() {
+        let (tx_old, mut rx_old) = tokio::sync::mpsc::unbounded_channel();
+        let (tx_new, mut rx_new) = tokio::sync::mpsc::unbounded_channel();
+        let (old, _) = Actor::spawn(None, RecordingClient { seen: tx_old }, ())
+            .await
+            .unwrap();
+        let (new, _) = Actor::spawn(None, RecordingClient { seen: tx_new }, ())
+            .await
+            .unwrap();
+
+        let handle = BrokerHandle::new(old);
+        assert!(
+            handle
+                .send_message(TcpClientMessage::publish(
+                    "before".to_string(),
+                    vec![],
+                    None
+                ))
+                .is_ok()
+        );
+
+        // What the supervisor does when the agent builder respawns the
+        // TCP client: every later publish must reach the fresh one.
+        handle.replace(new);
+        assert!(
+            handle
+                .send_message(TcpClientMessage::publish("after".to_string(), vec![], None))
+                .is_ok()
+        );
+
+        assert_eq!(rx_old.recv().await.as_deref(), Some("before"));
+        assert_eq!(rx_new.recv().await.as_deref(), Some("after"));
+        assert!(
+            rx_old.try_recv().is_err(),
+            "the replaced client must not receive anything sent after the swap"
+        );
+        assert!(
+            rx_new.try_recv().is_err(),
+            "the new client must not receive anything sent before the swap"
+        );
     }
 }

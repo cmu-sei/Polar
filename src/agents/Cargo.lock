@@ -1440,6 +1440,8 @@ dependencies = [
  "credentials_agent_common",
  "jwt_utils",
  "polar",
+ "polar-agent-builder",
+ "polar-router",
  "ractor",
  "rcgen",
  "rkyv",
