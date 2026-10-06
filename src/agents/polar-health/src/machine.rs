@@ -435,6 +435,7 @@ mod tests {
             tick_secs: 30,
             graph_deadline_secs: 120,
             cassini_deadline_secs: 60,
+            probe_stale_secs: 90,
             cert_paths: vec![],
             dep_cert_endpoints: vec![],
         }

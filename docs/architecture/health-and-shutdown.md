@@ -86,10 +86,28 @@ than queueing behind a timer.
 | Cassini disconnect deadline | 60 s | `POLAR_HEALTH_CASSINI_DEADLINE_SECS` |
 | Probe stale threshold | 90 s | `POLAR_HEALTH_STALE_SECS` |
 
-The ordering `rejuvenation > expiry` is an invariant. *Target:* a startup
-consistency check validates the whole set (tick < stale threshold, jitter window
-fits between rejuvenation and expiry, and so on) and the agent fails fast on a
-bad combination rather than misbehaving later.
+### Startup consistency check
+
+The actor validates its settings when it starts and refuses to run, with a message
+that names the problem, if they contradict each other. A crash-looping agent with a
+clear reason in its log is better than one that quietly misbehaves later.
+
+- A numeric variable that is set but is not a whole number is an error. A typo
+  used to fall back to the default without a word. A blank value still means the
+  default.
+- The tick, the graph deadline and the Cassini deadline are at least 1 second.
+- `POLAR_HEALTH_EXPIRY_SECS` is positive and `POLAR_HEALTH_REJUVENATION_SECS` is
+  greater than it.
+- A rejuvenation can finish before the certificate reaches the hard floor. The
+  slowest case is a tick to notice the window and check the dependencies, the
+  longest jitter, and a tick to act: two ticks plus the jitter window. The room
+  between the rejuvenation threshold and the expiry floor must be at least that.
+  With the defaults it is 240 s needed and exactly 240 s available, so there is
+  nothing to spare; raising the tick or the jitter window means raising the
+  threshold.
+- The probe's staleness limit (`POLAR_HEALTH_STALE_SECS`, read from the same pod
+  environment) exceeds twice the tick, so one slow tick does not make the probe
+  call a healthy agent dead.
 
 ### Dependency checks
 
