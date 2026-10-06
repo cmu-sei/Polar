@@ -91,10 +91,10 @@ The actor writes a JSON file each tick: `status`, `timestamp`,
 informational `phase` field (additive; the probe ignores it) so an operator
 reading the file can tell "rejuvenating" from "unhealthy".
 
-*Today*, the file is written only in the Normal phase. `WaitingForDeps` and
-`Jittering` do not write it, so a long rejuvenation wait lets the file go stale
-and the probe kills the pod before the graceful path runs. *Target:* the file is
-written every tick in every phase.
+The file is written every tick in every phase, healthy or unhealthy according to
+the connection state. (It used to be written only in the Normal phase, so a
+rejuvenation that waited longer than the probe's 90 s limit let the file go stale
+and the kubelet killed the pod before the graceful path ran.)
 
 ### Deadlines
 

@@ -98,6 +98,18 @@ impl HealthMachine {
         )
     }
 
+    /// The state to write on a tick that has no other news: healthy or unhealthy
+    /// according to the connections, as in the Normal phase. Every tick writes
+    /// one, in every phase, because the file is the liveness probe's only evidence
+    /// that the agent is still running.
+    fn current_state(&self, now: u64) -> HealthState {
+        if self.connections_healthy() {
+            self.healthy(now)
+        } else {
+            self.unhealthy(now, self.cassini_connected, self.graph_connected)
+        }
+    }
+
     /// Applies a connection or graph message. Returns the state to write, if the
     /// message calls for one. `Tick` is not handled here (see [`tick`](Self::tick)).
     pub(crate) fn on_message(&mut self, msg: &HealthCheckMessage, now: u64) -> Option<HealthState> {
@@ -264,7 +276,7 @@ impl HealthMachine {
                         "healthcheck: jitter pending, {remaining}s until shutdown signal"
                     );
                     TickStep::Done(TickOutcome {
-                        write: None,
+                        write: Some(self.current_state(now)),
                         next: Next::Reschedule,
                     })
                 }
@@ -299,7 +311,7 @@ impl HealthMachine {
         }
 
         TickOutcome {
-            write: None,
+            write: Some(self.current_state(now)),
             next: Next::Reschedule,
         }
     }
@@ -630,45 +642,73 @@ mod tests {
         assert_eq!(jitter_secs(181), 1);
     }
 
-    /// KNOWN DEFECT, pinned as it is today (health rework S2 flips this test):
-    /// the health file is written only in the Normal phase. WaitingForDeps and
-    /// Jittering write nothing, so a rejuvenation that waits longer than the
-    /// probe's 90 s staleness limit lets the file go stale and the kubelet kills
-    /// the pod before the graceful path runs.
     #[test]
-    fn pinned_defect_rejuvenation_writes_no_file_after_the_first_tick() {
+    fn rejuvenation_ticks_still_report_the_connection_state() {
+        for phase in [
+            RejuvenationPhase::WaitingForDeps,
+            RejuvenationPhase::Jittering {
+                fire_at_secs: T0 + 1000,
+            },
+        ] {
+            // Connected: healthy.
+            let mut up = connected(false);
+            up.phase = phase.clone();
+            let o = match up.tick(T0 + 30, &certs(Some(200))) {
+                TickStep::Done(o) => o,
+                TickStep::NeedDeps => up.deps_checked(T0 + 30, false, 0),
+            };
+            assert_eq!(o.write.unwrap().status, HealthStatus::Healthy, "{phase:?}");
+
+            // Cassini down: unhealthy, still written.
+            let mut down = connected(false);
+            down.on_message(&HealthCheckMessage::CassiniDisconnected, T0);
+            down.phase = phase.clone();
+            let o = match down.tick(T0 + 30, &certs(Some(200))) {
+                TickStep::Done(o) => o,
+                TickStep::NeedDeps => down.deps_checked(T0 + 30, false, 0),
+            };
+            let w = o.write.expect("a write");
+            assert_eq!(w.status, HealthStatus::Unhealthy, "{phase:?}");
+            assert!(!w.cassini_connected);
+        }
+    }
+
+    /// The health file is the liveness probe's only evidence that the agent is
+    /// alive, so every tick must refresh it, in every phase. Writing it only in
+    /// the Normal phase let it go stale during a rejuvenation that waits longer
+    /// than the probe's 90 s limit, and the kubelet killed the pod before the
+    /// graceful shutdown could run.
+    #[test]
+    fn rejuvenation_refreshes_the_file_on_every_tick() {
         let mut m = connected(false);
         let mut now = T0;
-        let mut last_write = None;
-        let mut ticks_after_entering = 0;
-        let jitter = 150;
+        let mut written = vec![];
+        let mut stopped = false;
 
-        // Tick until the machine stops.
         for _ in 0..100 {
             now += 30;
-            let step = m.tick(now, &certs(Some(200)));
-            let outcome = match step {
+            let outcome = match m.tick(now, &certs(Some(200))) {
                 TickStep::Done(o) => o,
-                TickStep::NeedDeps => m.deps_checked(now, true, jitter),
+                TickStep::NeedDeps => m.deps_checked(now, true, 150),
             };
-            if let Some(w) = &outcome.write {
-                last_write = Some(w.timestamp);
-            }
-            if *m.phase() != RejuvenationPhase::Normal {
-                ticks_after_entering += 1;
-            }
             if let Next::Stop(_) = outcome.next {
+                stopped = true;
                 break;
+            }
+            match outcome.write {
+                Some(w) => written.push(w.timestamp),
+                None => panic!(
+                    "the tick at +{}s wrote nothing while in {:?}",
+                    now - T0,
+                    m.phase()
+                ),
             }
         }
 
-        // Entered on the first tick (written then), jittered 150 s, stopped.
-        assert_eq!(last_write, Some(T0 + 30));
-        assert!(
-            now - last_write.unwrap() > 90,
-            "stale for {}s",
-            now - T0 - 30
-        );
-        assert!(ticks_after_entering > 5);
+        assert!(stopped, "the rejuvenation never fired");
+        // 150 s of jitter is more than the probe's 90 s limit; every gap between
+        // writes, and the gap to the stop, must stay within one tick.
+        assert!(written.windows(2).all(|w| w[1] - w[0] == 30), "{written:?}");
+        assert!(now - written.last().unwrap() <= 30);
     }
 }
