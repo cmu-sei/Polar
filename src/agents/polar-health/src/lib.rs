@@ -93,6 +93,32 @@ impl std::fmt::Display for HealthStatus {
 }
 
 // ---------------------------------------------------------------------------
+// HealthPhase — informational, for whoever reads the health file
+// ---------------------------------------------------------------------------
+
+/// Which stage of its life the agent is in, written into the health file so an
+/// operator can tell "rejuvenating" from "unhealthy". The liveness probe ignores
+/// it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HealthPhase {
+    #[default]
+    Normal,
+    WaitingForDeps,
+    Jittering,
+}
+
+impl From<&RejuvenationPhase> for HealthPhase {
+    fn from(phase: &RejuvenationPhase) -> Self {
+        match phase {
+            RejuvenationPhase::Normal => HealthPhase::Normal,
+            RejuvenationPhase::WaitingForDeps => HealthPhase::WaitingForDeps,
+            RejuvenationPhase::Jittering { .. } => HealthPhase::Jittering,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // HealthState — the JSON file format read by polar-healthcheck
 // ---------------------------------------------------------------------------
 
@@ -104,6 +130,9 @@ pub struct HealthState {
     #[serde(default)]
     pub cassini_connected: bool,
     pub graph_connected: bool,
+    /// Informational. Files written before this field existed read as `Normal`.
+    #[serde(default)]
+    pub phase: HealthPhase,
 }
 
 impl HealthState {
@@ -119,7 +148,13 @@ impl HealthState {
             timestamp,
             cassini_connected,
             graph_connected,
+            phase: HealthPhase::Normal,
         }
+    }
+
+    pub fn with_phase(mut self, phase: HealthPhase) -> Self {
+        self.phase = phase;
+        self
     }
 
     pub fn healthy(cassini_connected: bool, graph_connected: bool) -> Self {
@@ -128,6 +163,7 @@ impl HealthState {
             timestamp: Self::now(),
             cassini_connected,
             graph_connected,
+            phase: HealthPhase::Normal,
         }
     }
 
@@ -137,6 +173,7 @@ impl HealthState {
             timestamp: Self::now(),
             cassini_connected,
             graph_connected,
+            phase: HealthPhase::Normal,
         }
     }
 
@@ -661,6 +698,23 @@ mod tests {
         let old = r#"{"status":"healthy","timestamp":1,"graph_connected":true}"#;
         let state: HealthState = serde_json::from_str(old).unwrap();
         assert!(!state.cassini_connected);
+    }
+
+    #[test]
+    fn health_state_reads_files_written_before_the_phase_field_existed() {
+        let old =
+            r#"{"status":"healthy","timestamp":1,"cassini_connected":true,"graph_connected":true}"#;
+        let state: HealthState = serde_json::from_str(old).unwrap();
+        assert_eq!(state.phase, HealthPhase::Normal);
+    }
+
+    #[test]
+    fn the_phase_is_written_in_snake_case() {
+        let state = HealthState::healthy(true, true).with_phase(HealthPhase::WaitingForDeps);
+        let json = serde_json::to_string(&state).unwrap();
+        assert!(json.contains(r#""phase":"waiting_for_deps""#), "{json}");
+        let back: HealthState = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.phase, HealthPhase::WaitingForDeps);
     }
 
     #[test]

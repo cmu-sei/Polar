@@ -93,9 +93,10 @@ bad combination rather than misbehaving later.
 ### The liveness file
 
 The actor writes a JSON file each tick: `status`, `timestamp`,
-`cassini_connected`, `graph_connected`. *Target:* it also writes an
-informational `phase` field (additive; the probe ignores it) so an operator
-reading the file can tell "rejuvenating" from "unhealthy".
+`cassini_connected`, `graph_connected`, `phase`. The `phase` field (`normal`,
+`waiting_for_deps`, `jittering`) is informational: it lets an operator reading
+the file tell "rejuvenating" from "unhealthy", the probe ignores it, and files
+written before it existed read as `normal`.
 
 The file is written every tick in every phase, healthy or unhealthy according to
 the connection state. (It used to be written only in the Normal phase, so a

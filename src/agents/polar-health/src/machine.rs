@@ -11,7 +11,8 @@
 
 use crate::certs::CertReading;
 use crate::{
-    DEFAULT_JITTER_WINDOW_SECS, HealthCheckMessage, HealthConfig, HealthState, RejuvenationPhase,
+    DEFAULT_JITTER_WINDOW_SECS, HealthCheckMessage, HealthConfig, HealthPhase, HealthState,
+    RejuvenationPhase,
 };
 
 /// The reason the actor stops with when rejuvenation fires.
@@ -87,6 +88,7 @@ impl HealthMachine {
 
     fn unhealthy(&self, now: u64, cassini: bool, graph: bool) -> HealthState {
         HealthState::at(crate::HealthStatus::Unhealthy, now, cassini, graph)
+            .with_phase(HealthPhase::from(&self.phase))
     }
 
     fn healthy(&self, now: u64) -> HealthState {
@@ -96,6 +98,7 @@ impl HealthMachine {
             self.cassini_connected,
             self.graph_connected,
         )
+        .with_phase(HealthPhase::from(&self.phase))
     }
 
     /// The state to write on a tick that has no other news: healthy or unhealthy
@@ -320,7 +323,7 @@ impl HealthMachine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::HealthStatus;
+    use crate::{HealthPhase, HealthStatus};
 
     const T0: u64 = 1_000_000;
 
@@ -671,6 +674,45 @@ mod tests {
             assert_eq!(w.status, HealthStatus::Unhealthy, "{phase:?}");
             assert!(!w.cassini_connected);
         }
+    }
+
+    #[test]
+    fn every_written_state_names_the_phase_it_was_written_in() {
+        // Normal.
+        let mut m = connected(false);
+        let w = done(m.tick(T0 + 30, &certs(Some(3000)))).write.unwrap();
+        assert_eq!(w.phase, HealthPhase::Normal);
+
+        // The tick that enters the window already reports WaitingForDeps.
+        let w = done(m.tick(T0 + 60, &certs(Some(200)))).write.unwrap();
+        assert_eq!(w.phase, HealthPhase::WaitingForDeps);
+
+        // WaitingForDeps, then the tick that starts the jitter reports Jittering.
+        let w = m.deps_checked(T0 + 90, false, 0).write.unwrap();
+        assert_eq!(w.phase, HealthPhase::WaitingForDeps);
+        let w = m.deps_checked(T0 + 120, true, 100).write.unwrap();
+        assert_eq!(w.phase, HealthPhase::Jittering);
+        let w = done(m.tick(T0 + 150, &certs(Some(200)))).write.unwrap();
+        assert_eq!(w.phase, HealthPhase::Jittering);
+    }
+
+    #[test]
+    fn messages_and_failures_also_carry_the_phase() {
+        let mut m = connected(false);
+        m.phase = RejuvenationPhase::Jittering {
+            fire_at_secs: T0 + 100,
+        };
+        let w = m
+            .on_message(&HealthCheckMessage::CassiniDisconnected, T0)
+            .unwrap();
+        assert_eq!(w.phase, HealthPhase::Jittering);
+
+        let bad = CertReading {
+            hard: Err("expired".into()),
+            min_ttl: None,
+        };
+        let w = done(m.tick(T0 + 30, &bad)).write.unwrap();
+        assert_eq!(w.phase, HealthPhase::Jittering);
     }
 
     /// The health file is the liveness probe's only evidence that the agent is

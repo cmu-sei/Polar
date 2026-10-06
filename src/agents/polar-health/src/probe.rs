@@ -187,6 +187,21 @@ mod tests {
     }
 
     #[test]
+    fn the_probe_does_not_care_which_phase_the_agent_is_in() {
+        for phase in [
+            crate::HealthPhase::Normal,
+            crate::HealthPhase::WaitingForDeps,
+            crate::HealthPhase::Jittering,
+        ] {
+            let f = Fixture::new();
+            let state =
+                HealthState::at(HealthStatus::Healthy, NOW - 10, true, true).with_phase(phase);
+            fs::write(f.health_file(), serde_json::to_string(&state).unwrap()).unwrap();
+            assert!(run(&f.config(&[]), NOW).ok, "{phase:?}");
+        }
+    }
+
+    #[test]
     fn a_stale_file_fails() {
         let f = Fixture::new();
         f.write_state(HealthStatus::Healthy, NOW - 91);
