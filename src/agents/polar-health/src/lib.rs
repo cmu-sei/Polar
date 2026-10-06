@@ -915,3 +915,424 @@ impl Actor for HealthCheckActor {
         Ok(())
     }
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+//
+// These pin the behaviour of the health system as it is, before the testability
+// refactor. Where today's behaviour is a known defect (see the "Health system
+// rework" plan in remaining-work.md) the test says so, and the fix flips it.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ::time::OffsetDateTime;
+    use ractor::ActorStatus;
+
+    // -- helpers ------------------------------------------------------------
+
+    /// PEM for a self-signed certificate valid from an hour ago until
+    /// `ttl_secs` from now (negative = already expired).
+    fn cert_pem(ttl_secs: i64) -> String {
+        let mut params =
+            rcgen::CertificateParams::new(vec!["test.local".to_string()]).expect("cert params");
+        params.not_before = OffsetDateTime::now_utc() - ::time::Duration::hours(1);
+        params.not_after = OffsetDateTime::now_utc() + ::time::Duration::seconds(ttl_secs);
+        let key = rcgen::KeyPair::generate().expect("key");
+        params.self_signed(&key).expect("self sign").pem()
+    }
+
+    fn cert_file(dir: &tempfile::TempDir, name: &str, ttl_secs: i64) -> String {
+        let path = dir.path().join(name);
+        fs::write(&path, cert_pem(ttl_secs)).expect("write cert");
+        path.to_string_lossy().into_owned()
+    }
+
+    fn state(cert_paths: Vec<String>) -> HealthCheckActorState {
+        HealthCheckActorState {
+            cassini_connected: false,
+            graph_connected: false,
+            expects_graph: false,
+            expiry_threshold_secs: 60,
+            rejuvenation_threshold_secs: 300,
+            tick_secs: 30,
+            cert_paths,
+            dep_cert_endpoints: vec![],
+            rejuvenation_phase: RejuvenationPhase::Normal,
+            graph_deadline_secs: 120,
+            last_graph_success_secs: None,
+            actor_start_secs: HealthState::now(),
+        }
+    }
+
+    // -- own certificate checks ---------------------------------------------
+
+    #[test]
+    fn check_certs_without_paths_is_ok() {
+        assert!(state(vec![]).check_certs().is_ok());
+    }
+
+    #[test]
+    fn check_certs_accepts_a_long_lived_cert() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(vec![cert_file(&dir, "a.pem", 3600)]);
+        assert!(s.check_certs().is_ok());
+    }
+
+    #[test]
+    fn check_certs_rejects_a_cert_inside_the_hard_threshold() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(vec![cert_file(&dir, "a.pem", 30)]);
+        let err = s.check_certs().unwrap_err();
+        assert!(err.contains("hard threshold"), "{err}");
+    }
+
+    #[test]
+    fn check_certs_rejects_an_expired_cert() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(vec![cert_file(&dir, "a.pem", -10)]);
+        assert!(s.check_certs().is_err());
+    }
+
+    #[test]
+    fn check_certs_rejects_a_missing_file() {
+        let s = state(vec!["/nonexistent/polar-health-test.pem".to_string()]);
+        let err = s.check_certs().unwrap_err();
+        assert!(err.contains("failed to read cert"), "{err}");
+    }
+
+    #[test]
+    fn check_certs_rejects_garbage() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("junk.pem");
+        fs::write(&path, "not a pem").unwrap();
+        let s = state(vec![path.to_string_lossy().into_owned()]);
+        let err = s.check_certs().unwrap_err();
+        assert!(err.contains("failed to parse PEM"), "{err}");
+    }
+
+    #[test]
+    fn check_certs_fails_when_any_one_cert_is_short() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(vec![
+            cert_file(&dir, "long.pem", 3600),
+            cert_file(&dir, "short.pem", 30),
+        ]);
+        assert!(s.check_certs().is_err());
+    }
+
+    #[test]
+    fn min_cert_ttl_is_none_without_paths() {
+        assert_eq!(state(vec![]).min_cert_ttl(), None);
+    }
+
+    #[test]
+    fn min_cert_ttl_is_the_smallest_remaining() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(vec![
+            cert_file(&dir, "long.pem", 3600),
+            cert_file(&dir, "short.pem", 600),
+        ]);
+        let ttl = s.min_cert_ttl().expect("ttl");
+        assert!((595..=600).contains(&ttl), "ttl was {ttl}");
+    }
+
+    #[test]
+    fn min_cert_ttl_skips_unreadable_certs() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(vec![
+            "/nonexistent/polar-health-test.pem".to_string(),
+            cert_file(&dir, "ok.pem", 600),
+        ]);
+        assert!(s.min_cert_ttl().is_some());
+    }
+
+    #[test]
+    fn min_cert_ttl_is_none_when_nothing_is_readable() {
+        let s = state(vec!["/nonexistent/polar-health-test.pem".to_string()]);
+        assert_eq!(s.min_cert_ttl(), None);
+    }
+
+    // -- connection and graph rules -----------------------------------------
+
+    #[test]
+    fn connections_healthy_matrix() {
+        for (cassini, graph, expects_graph, healthy) in [
+            (false, false, false, false),
+            (true, false, false, true),
+            (true, true, false, true),
+            (false, true, true, false),
+            (true, false, true, false),
+            (true, true, true, true),
+        ] {
+            let mut s = state(vec![]);
+            s.cassini_connected = cassini;
+            s.graph_connected = graph;
+            s.expects_graph = expects_graph;
+            assert_eq!(
+                s.connections_healthy(),
+                healthy,
+                "cassini={cassini} graph={graph} expects_graph={expects_graph}"
+            );
+        }
+    }
+
+    #[test]
+    fn graph_deadline_is_ignored_when_no_graph_is_expected() {
+        let mut s = state(vec![]);
+        s.actor_start_secs = HealthState::now() - 10_000;
+        assert!(s.check_graph_deadline().is_ok());
+    }
+
+    #[test]
+    fn graph_deadline_holds_after_a_recent_success() {
+        let mut s = state(vec![]);
+        s.expects_graph = true;
+        s.last_graph_success_secs = Some(HealthState::now() - 100);
+        assert!(s.check_graph_deadline().is_ok());
+    }
+
+    #[test]
+    fn graph_deadline_fires_after_the_graph_goes_dark() {
+        let mut s = state(vec![]);
+        s.expects_graph = true;
+        s.last_graph_success_secs = Some(HealthState::now() - 121);
+        let err = s.check_graph_deadline().unwrap_err();
+        assert!(err.contains("graph unavailable"), "{err}");
+    }
+
+    #[test]
+    fn graph_deadline_fires_when_the_graph_never_came_up() {
+        let mut s = state(vec![]);
+        s.expects_graph = true;
+        s.actor_start_secs = HealthState::now() - 121;
+        let err = s.check_graph_deadline().unwrap_err();
+        assert!(err.contains("never became available"), "{err}");
+    }
+
+    #[test]
+    fn graph_deadline_does_not_fire_inside_the_startup_window() {
+        let mut s = state(vec![]);
+        s.expects_graph = true;
+        s.actor_start_secs = HealthState::now() - 30;
+        assert!(s.check_graph_deadline().is_ok());
+    }
+
+    // -- dependency endpoint parsing ----------------------------------------
+
+    #[test]
+    fn dep_endpoint_parses_host_port_and_ttl() {
+        let e = DepCertEndpoint::parse("cassini.polar.svc.cluster.local:8080:300").unwrap();
+        assert_eq!(e.host, "cassini.polar.svc.cluster.local");
+        assert_eq!(e.port, 8080);
+        assert_eq!(e.min_ttl_secs, 300);
+    }
+
+    #[test]
+    fn dep_endpoint_rejects_malformed_input() {
+        for bad in [
+            "",
+            "host",
+            "host:8080",
+            "host:0:300",
+            "host:notaport:300",
+            "host:8080:-1",
+            "host:8080:soon",
+            "-bad.example:8080:300",
+            "bad..example:8080:300",
+            "bad_host:8080:300",
+        ] {
+            assert!(DepCertEndpoint::parse(bad).is_err(), "accepted {bad:?}");
+        }
+    }
+
+    // -- the file format the probe reads --------------------------------------
+
+    #[test]
+    fn health_state_round_trips_through_json() {
+        let json = serde_json::to_string(&HealthState::healthy(true, false)).unwrap();
+        let back: HealthState = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.status, HealthStatus::Healthy);
+        assert!(back.cassini_connected);
+        assert!(!back.graph_connected);
+    }
+
+    #[test]
+    fn health_state_reads_files_written_before_cassini_connected_existed() {
+        let old = r#"{"status":"healthy","timestamp":1,"graph_connected":true}"#;
+        let state: HealthState = serde_json::from_str(old).unwrap();
+        assert!(!state.cassini_connected);
+    }
+
+    #[test]
+    fn health_status_serialises_lowercase() {
+        assert_eq!(
+            serde_json::to_string(&HealthStatus::Unhealthy).unwrap(),
+            "\"unhealthy\""
+        );
+    }
+
+    // -- the whole actor ----------------------------------------------------
+    //
+    // These go through the real actor, real files and real (1 s) ticks, so they
+    // keep passing unchanged across the refactor. The actor reads its settings
+    // from the process environment, so they run one at a time.
+
+    static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    const ALL_HEALTH_ENV: [&str; 8] = [
+        POLAR_HEALTH_FILE_ENV,
+        POLAR_HEALTH_CERTS_ENV,
+        POLAR_HEALTH_EXPIRY_SECS_ENV,
+        POLAR_HEALTH_STALE_SECS_ENV,
+        POLAR_HEALTH_TICK_SECS_ENV,
+        POLAR_HEALTH_DEP_ENDPOINTS_ENV,
+        POLAR_HEALTH_REJUVENATION_SECS_ENV,
+        POLAR_HEALTH_GRAPH_DEADLINE_SECS_ENV,
+    ];
+
+    /// Clears every health variable, applies `vars`, and clears them again on drop.
+    struct EnvGuard;
+
+    impl EnvGuard {
+        fn set(vars: &[(&str, &str)]) -> Self {
+            // SAFETY: callers hold ENV_LOCK, and no other test reads these.
+            unsafe {
+                for name in ALL_HEALTH_ENV {
+                    std::env::remove_var(name);
+                }
+                for (name, value) in vars {
+                    std::env::set_var(name, value);
+                }
+            }
+            EnvGuard
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            // SAFETY: see `set`.
+            unsafe {
+                for name in ALL_HEALTH_ENV {
+                    std::env::remove_var(name);
+                }
+            }
+        }
+    }
+
+    fn args() -> HealthCheckArgs {
+        HealthCheckArgs {
+            expects_graph: false,
+            rejuvenation_threshold_secs: 300,
+            dep_cert_endpoints: vec![],
+        }
+    }
+
+    fn read_state(path: &std::path::Path) -> Option<HealthState> {
+        serde_json::from_str(&fs::read_to_string(path).ok()?).ok()
+    }
+
+    /// Polls the health file until `want` accepts it, or panics after 8 s.
+    async fn wait_for_state(
+        path: &std::path::Path,
+        what: &str,
+        want: impl Fn(&HealthState) -> bool,
+    ) -> HealthState {
+        for _ in 0..80 {
+            if let Some(state) = read_state(path)
+                && want(&state)
+            {
+                return state;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        panic!("health file never showed: {what}");
+    }
+
+    #[tokio::test]
+    async fn actor_reports_healthy_then_unhealthy_when_cassini_drops() {
+        let _lock = ENV_LOCK.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("health.json");
+        let cert = cert_file(&dir, "agent.pem", 3600);
+        let _env = EnvGuard::set(&[
+            (POLAR_HEALTH_FILE_ENV, file.to_str().unwrap()),
+            (POLAR_HEALTH_CERTS_ENV, &cert),
+            (POLAR_HEALTH_TICK_SECS_ENV, "1"),
+        ]);
+
+        let (actor, handle) = Actor::spawn(None, HealthCheckActor, args()).await.unwrap();
+
+        // Nothing is written until Cassini connects: the tick chain starts there.
+        actor.cast(HealthCheckMessage::CassiniConnected).unwrap();
+        wait_for_state(&file, "healthy with cassini connected", |s| {
+            s.status == HealthStatus::Healthy && s.cassini_connected
+        })
+        .await;
+
+        // A disconnect is written immediately, not at the next tick.
+        actor.cast(HealthCheckMessage::CassiniDisconnected).unwrap();
+        wait_for_state(&file, "unhealthy after the disconnect", |s| {
+            s.status == HealthStatus::Unhealthy && !s.cassini_connected
+        })
+        .await;
+
+        actor.stop(None);
+        handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn actor_fails_and_writes_unhealthy_when_its_cert_is_inside_the_hard_threshold() {
+        let _lock = ENV_LOCK.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("health.json");
+        let cert = cert_file(&dir, "agent.pem", 20);
+        let _env = EnvGuard::set(&[
+            (POLAR_HEALTH_FILE_ENV, file.to_str().unwrap()),
+            (POLAR_HEALTH_CERTS_ENV, &cert),
+            (POLAR_HEALTH_TICK_SECS_ENV, "1"),
+        ]);
+
+        let (actor, handle) = Actor::spawn(None, HealthCheckActor, args()).await.unwrap();
+        actor.cast(HealthCheckMessage::CassiniConnected).unwrap();
+
+        wait_for_state(&file, "unhealthy after the cert deadline", |s| {
+            s.status == HealthStatus::Unhealthy
+        })
+        .await;
+        // Today a hard deadline is the actor failing itself.
+        handle.await.unwrap();
+        assert_eq!(actor.get_status(), ActorStatus::Stopped);
+    }
+
+    #[tokio::test]
+    async fn actor_refuses_to_start_when_rejuvenation_is_not_above_expiry() {
+        let _lock = ENV_LOCK.lock().await;
+        let _env = EnvGuard::set(&[
+            (POLAR_HEALTH_EXPIRY_SECS_ENV, "60"),
+            (POLAR_HEALTH_REJUVENATION_SECS_ENV, "60"),
+        ]);
+        assert!(Actor::spawn(None, HealthCheckActor, args()).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn actor_refuses_to_start_on_a_malformed_dependency_endpoint() {
+        let _lock = ENV_LOCK.lock().await;
+        let _env = EnvGuard::set(&[(POLAR_HEALTH_DEP_ENDPOINTS_ENV, "not-an-endpoint")]);
+        assert!(Actor::spawn(None, HealthCheckActor, args()).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn actor_starts_when_dependency_endpoints_come_from_both_env_and_args() {
+        let _lock = ENV_LOCK.lock().await;
+        let _env = EnvGuard::set(&[(POLAR_HEALTH_DEP_ENDPOINTS_ENV, "a.example:443:300")]);
+        let mut a = args();
+        a.dep_cert_endpoints = vec![DepCertEndpoint::parse("b.example:443:300").unwrap()];
+        // Starts fine; the precedence itself is pinned in the config tests once
+        // the settings live in HealthConfig.
+        let (actor, handle) = Actor::spawn(None, HealthCheckActor, a).await.unwrap();
+        actor.stop(None);
+        handle.await.unwrap();
+    }
+}
