@@ -5570,8 +5570,6 @@ name = "polar-healthcheck"
 version = "1.0.0"
 dependencies = [
  "polar-health",
- "serde_json",
- "x509-parser",
 ]
 
 [[package]]

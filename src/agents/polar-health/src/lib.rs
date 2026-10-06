@@ -36,6 +36,7 @@ use x509_parser::prelude::*;
 mod certs;
 pub mod config;
 mod machine;
+pub mod probe;
 #[cfg(test)]
 mod test_support;
 
@@ -58,6 +59,8 @@ pub const POLAR_HEALTH_GRAPH_DEADLINE_SECS_ENV: &str = "POLAR_HEALTH_GRAPH_DEADL
 
 pub const DEFAULT_EXPIRY_THRESHOLD_SECS: i64 = 60;
 pub const DEFAULT_TICK_SECS: u64 = 30;
+/// How old the health file may get before the liveness probe fails.
+pub const DEFAULT_STALE_THRESHOLD_SECS: u64 = 90;
 pub const DEFAULT_REJUVENATION_THRESHOLD_SECS: i64 = 300;
 /// Jitter window width in seconds. Must comfortably exceed DEFAULT_TICK_SECS
 /// (and any agent's configured tick_secs) or jitter effectively rounds up to
