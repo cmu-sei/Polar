@@ -1,3 +1,4 @@
+use super::environment::{GraphSettings, GraphTls};
 use neo4rs::{BoltNull, BoltType, Graph, Query};
 use ractor::{Actor, ActorProcessingErr, ActorRef, async_trait, RpcReplyPort};
 use ractor::concurrency::Duration;
@@ -806,8 +807,25 @@ impl GraphControllerActor {
     pub fn neo_config_from(
         env: &dyn polar_env::Env,
     ) -> Result<neo4rs::Config, ractor::ActorProcessingErr> {
-        use super::environment::{GraphSettings, GraphTls};
         let settings = GraphSettings::from_env(env).map_err(ractor::ActorProcessingErr::from)?;
+        Self::neo_config_for(settings)
+    }
+
+    /// The connection to use for `args`: from the settings it was given, or, for an agent
+    /// not yet on the builder, from the process.
+    pub fn neo_config_for_args(
+        args: &GraphControllerArgs,
+    ) -> Result<neo4rs::Config, ractor::ActorProcessingErr> {
+        match &args.settings {
+            Some(settings) => Self::neo_config_for(settings.clone()),
+            None => Self::get_neo_config(),
+        }
+    }
+
+    /// The connection for settings already read and judged.
+    pub fn neo_config_for(
+        settings: GraphSettings,
+    ) -> Result<neo4rs::Config, ractor::ActorProcessingErr> {
 
         info!("Using Neo4j database at {}", settings.endpoint);
 
@@ -842,8 +860,30 @@ impl GraphControllerActor {
     }
 }
 
+/// What the graph controller is started with. Built with [`new`](Self::new), so a field added
+/// later touches none of its callers.
+#[non_exhaustive]
 pub struct GraphControllerArgs {
     pub signal_port: std::sync::Arc<ractor::OutputPort<GraphSignal>>,
+    /// The connection settings, already read and judged. The agent builder supplies them
+    /// from its snapshot. `None` is for agents not yet on the builder: the controller then
+    /// reads the process, as it always did, until the last of them moves.
+    pub settings: Option<GraphSettings>,
+}
+
+impl GraphControllerArgs {
+    pub fn new(signal_port: std::sync::Arc<ractor::OutputPort<GraphSignal>>) -> Self {
+        Self {
+            signal_port,
+            settings: None,
+        }
+    }
+
+    /// Connect with these settings instead of reading the process.
+    pub fn with_settings(mut self, settings: GraphSettings) -> Self {
+        self.settings = Some(settings);
+        self
+    }
 }
 
 pub struct GraphControllerState {
@@ -863,7 +903,7 @@ impl Actor for GraphControllerActor {
         args: Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
         debug!("GraphControllerActor starting");
-        match Self::get_neo_config() {
+        match Self::neo_config_for_args(&args) {
             Ok(conf) => match Graph::connect(conf) {
                 Ok(graph) => Ok(GraphControllerState {
                     graph,
@@ -946,5 +986,49 @@ impl Actor for GraphControllerActor {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod environment_tests {
+    use super::*;
+    use crate::graph::environment::GraphSettings;
+    use std::collections::HashMap;
+
+    fn settings() -> GraphSettings {
+        let env: HashMap<String, String> = [
+            ("GRAPH_DB", "neo4j"),
+            ("GRAPH_USER", "neo4j"),
+            ("GRAPH_PASSWORD", "pw"),
+            ("GRAPH_ENDPOINT", "bolt://given-by-the-builder:7687"),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+        GraphSettings::from_env(&env).unwrap()
+    }
+
+    fn args() -> GraphControllerArgs {
+        GraphControllerArgs::new(std::sync::Arc::new(ractor::OutputPort::default()))
+    }
+
+    #[test]
+    fn a_controller_given_its_settings_builds_its_connection_from_them() {
+        // A developer shell may export GRAPH_ variables, so what shows which source was used
+        // is the endpoint: only the settings given name this one.
+        let config =
+            GraphControllerActor::neo_config_for_args(&args().with_settings(settings())).unwrap();
+        let shown = format!("{config:?}");
+        assert!(shown.contains("given-by-the-builder"), "{shown}");
+    }
+
+    #[test]
+    fn a_controller_given_nothing_reads_the_process_as_it_always_did() {
+        // The legacy path for agents not yet on the builder. Pinned by what it says when the
+        // process has none of the variables, which names them.
+        if std::env::var("GRAPH_ENDPOINT").is_err() {
+            let error = GraphControllerActor::neo_config_for_args(&args()).unwrap_err();
+            assert!(error.to_string().contains("GRAPH_ENDPOINT"), "{error}");
+        }
     }
 }

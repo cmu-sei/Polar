@@ -139,7 +139,7 @@ impl Actor for RootSupervisor {
                     let (graph_controller, _) = GraphControllerActor::spawn_linked(
                         Some(format!("{}.graph_controller", SERVICE_NAME)),
                         GraphControllerActor,
-                        polar::graph::controller::GraphControllerArgs { signal_port: graph_signal_port },
+                        polar::graph::controller::GraphControllerArgs::new(graph_signal_port),
                         myself.get_cell(),
                     )
                     .await?;

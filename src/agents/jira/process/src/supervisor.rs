@@ -188,9 +188,11 @@ impl Actor for ConsumerSupervisor {
         let (graph_controller, _) = GraphControllerActor::spawn_linked(
             Some("jira.process.graph.controller".to_string()),
             GraphControllerActor,
-            GraphControllerArgs {
-                signal_port: graph_signal_port,
-            },
+            // The settings come from the builder's snapshot, which already judged them.
+            GraphControllerArgs::new(graph_signal_port).with_settings(
+                polar::graph::environment::GraphSettings::from_env(&*resources.config)
+                    .map_err(ActorProcessingErr::from)?,
+            ),
             myself.get_cell(),
         )
         .await

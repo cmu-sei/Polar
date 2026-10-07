@@ -118,7 +118,9 @@ impl Actor for ProjectionActor {
         let (graph_controller, _) = GraphControllerActor::spawn_linked(
             Some("credentials-agent.projection.graph.controller".to_string()),
             GraphControllerActor,
-            GraphControllerArgs { signal_port },
+            // Not given settings: this actor is spawned before the builder runs (the projection
+            // must not wait for Cassini), so there is no snapshot yet and it reads the process.
+            GraphControllerArgs::new(signal_port),
             myself.get_cell(),
         )
         .await

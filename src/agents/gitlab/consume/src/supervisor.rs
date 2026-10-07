@@ -219,7 +219,7 @@ impl Actor for ConsumerSupervisor {
                     match Actor::spawn_linked(
                         Some("polar.gitlab.consumer.graph".to_string()),
                         GraphControllerActor,
-                        polar::graph::controller::GraphControllerArgs { signal_port: graph_signal_port },
+                        polar::graph::controller::GraphControllerArgs::new(graph_signal_port),
                         myself.get_cell(),
                     )
                     .await

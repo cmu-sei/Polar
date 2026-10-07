@@ -268,7 +268,7 @@ impl Actor for GitRepoProcessingManager {
                     let (controller, _) = Actor::spawn_linked(
                         Some("git.process.graph.controller".to_string()), // BUG FIX: was "linker.graph.controller" -- copy-pasted from provenance/linker, wrong actor name for this agent
                         GraphControllerActor,
-                        polar::graph::controller::GraphControllerArgs { signal_port: graph_signal_port },
+                        polar::graph::controller::GraphControllerArgs::new(graph_signal_port),
                         myself.get_cell(),
                     )
                     .await?;

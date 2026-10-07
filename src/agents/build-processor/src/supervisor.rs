@@ -150,9 +150,7 @@ impl Actor for BuildProcessorSupervisor {
                     let (controller, _) = Actor::spawn_linked(
                         Some(format!("{BUILD_PROCESSOR_NAME}.graph.controller")),
                         GraphControllerActor,
-                        polar::graph::controller::GraphControllerArgs {
-                            signal_port: graph_signal_port,
-                        },
+                        polar::graph::controller::GraphControllerArgs::new(graph_signal_port),
                         myself.clone().into(),
                     )
                     .await?;
