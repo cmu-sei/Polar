@@ -93,19 +93,6 @@ pub fn describe_text() -> String {
     text
 }
 
-/// Stops the agent before anything is spawned if its environment is not sound.
-pub fn ensure_environment_is_sound(env: &dyn Env) -> Result<(), ractor::ActorProcessingErr> {
-    let problems = check_environment(env);
-    if problems.is_empty() {
-        Ok(())
-    } else {
-        Err(ractor::ActorProcessingErr::from(format!(
-            "this agent's environment is not sound: {}",
-            problems.join("; ")
-        )))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -177,18 +164,6 @@ mod tests {
     fn a_problem_says_what_the_variable_is_for() {
         let problems = check_environment(&env(&[("POLAR_SHUTDOWN_BUDGET_SECS", "soon")]));
         assert!(problems[0].contains("drain"), "{problems:?}");
-    }
-
-    #[test]
-    fn an_unsound_environment_stops_the_agent_with_every_problem_in_one_message() {
-        let bad = env(&[
-            ("POLAR_SHUTDOWN_BUDGET_SECS", "0"),
-            ("POLAR_HEALTH_TICK_SECS", "soon"),
-        ]);
-        let err = ensure_environment_is_sound(&bad).unwrap_err().to_string();
-        assert!(err.contains("POLAR_SHUTDOWN_BUDGET_SECS"), "{err}");
-        assert!(err.contains("POLAR_HEALTH_TICK_SECS"), "{err}");
-        assert!(ensure_environment_is_sound(&env(&[])).is_ok());
     }
 
     #[test]

@@ -31,6 +31,7 @@ pub use infrastructure::{
 pub mod message;
 pub use message::{Encrypted, Outbound, Plaintext};
 pub mod shutdown;
+pub(crate) mod startup;
 pub use shutdown::{DEFAULT_SHUTDOWN_BUDGET, SHUTDOWN_BUDGET_ENV};
 
 use cassini_client::TcpClientMessage;
@@ -102,6 +103,10 @@ pub struct AgentResources {
     /// once your own, domain-specific children have genuinely, fully
     /// shut down.
     pub infrastructure: ActorRef<crate::infrastructure::InfrastructureSupervisorMessage>,
+    /// The one snapshot of the environment the builder took: the variables the builder, its
+    /// components and this agent declared, and nothing else. Read a declared variable with
+    /// `config.read(&VAR)`; one nobody declared is refused.
+    pub config: Arc<polar_env::Config>,
 }
 
 pub struct AgentBuilder<M: ractor::Message> {
@@ -112,6 +117,7 @@ pub struct AgentBuilder<M: ractor::Message> {
     map_lifecycle_event: Option<Box<dyn Fn(ClientEvent) -> Option<M> + Send + Sync>>,
     wants_crypto: bool,
     shutdown_budget: Option<std::time::Duration>,
+    environment: Vec<&'static polar_env::Section>,
 }
 
 impl<M: ractor::Message> AgentBuilder<M> {
@@ -124,7 +130,18 @@ impl<M: ractor::Message> AgentBuilder<M> {
             map_lifecycle_event: None,
             wants_crypto: false,
             shutdown_budget: None,
+            environment: Vec::new(),
         }
+    }
+
+    /// Declares the variables this agent's own code reads. They join the builder's and its
+    /// components' in the one snapshot, are checked with them before anything spawns (so a
+    /// missing or malformed one is named at startup, together with every other problem),
+    /// and are read afterwards from `AgentResources::config`. A variable that is not
+    /// declared is not in the snapshot, so the agent cannot read it by accident.
+    pub fn with_environment(mut self, section: &'static polar_env::Section) -> Self {
+        self.environment.push(section);
+        self
     }
 
     /// How long this agent's domain supervisor needs to drain, from being told to
@@ -195,54 +212,29 @@ impl<M: ractor::Message> AgentBuilder<M> {
     }
 
     pub async fn build(self) -> Result<AgentResources, ActorProcessingErr> {
-        // The environment as a whole, before anything else: every variable the builder and
-        // its components read must be sound, and every problem is reported together.
-        environment::ensure_environment_is_sound(&polar_env::ProcessEnv)?;
-
-        // Every agent built here is a Cassini client; the rest are what
-        // its own code declared. Checked before anything is spawned, so
-        // a mismatch with the deployment is one clear, immediate,
-        // non-zero exit instead of a half-started agent.
+        // Every agent built here is a Cassini client; the rest are what its own code
+        // declared.
         let mut required = self.requires.clone();
         if !required.contains(&Capability::Cassini) {
             required.insert(0, Capability::Cassini);
         }
-        let provided = std::env::var(capability::PROVIDED_ENV).ok();
-        match capability::check(&required, provided.as_deref()) {
-            capability::CapabilityCheck::Satisfied => {}
-            capability::CapabilityCheck::NotDeclared => {
-                tracing::warn!(
-                    "{} is not set: the deployment did not declare its capabilities, so \
-                     this agent's requirements ({}) cannot be checked",
-                    capability::PROVIDED_ENV,
-                    required
-                        .iter()
-                        .map(|c| c.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                );
-            }
-            capability::CapabilityCheck::Missing(missing) => {
-                return Err(ActorProcessingErr::from(capability::missing_message(
-                    &missing,
-                    provided.as_deref(),
-                )));
-            }
-        }
 
-        let shutdown_budget = shutdown::budget(self.shutdown_budget, &polar_env::ProcessEnv)
-            .map_err(ActorProcessingErr::from)?;
+        // One snapshot of the process environment, judged as a whole before anything else
+        // happens. Everything after this reads the snapshot.
+        let startup = startup::prepare(
+            &polar_env::ProcessEnv,
+            &self.environment,
+            &required,
+            self.shutdown_budget,
+        )
+        .map_err(ActorProcessingErr::from)?;
 
-        // Derived, not passed in: whether to watch the graph follows
-        // from the capabilities. The dependency endpoints are read by
-        // HealthCheckActor from POLAR_HEALTH_DEP_ENDPOINTS, which the
-        // deployment sets from the same `needs`, so there is no
-        // endpoint list to keep in sync with the manifest here.
         let health_check_args = HealthCheckArgs::new(
-            required.contains(&Capability::GraphWrite),
-            polar_health::DEFAULT_REJUVENATION_THRESHOLD_SECS,
-            Vec::new(),
-        );
+            startup.health.expects_graph,
+            startup.health.rejuvenation_threshold_secs,
+            startup.health.dep_cert_endpoints.clone(),
+        )
+        .with_config(startup.health);
 
         let myself_cell = self.myself.get_cell();
 
@@ -257,9 +249,10 @@ impl<M: ractor::Message> AgentBuilder<M> {
             infrastructure::InfrastructureSupervisorArgs {
                 service_name: self.service_name.clone(),
                 health_check_args,
+                config: startup.config,
                 subscriptions: self.subscriptions,
                 wants_crypto: self.wants_crypto,
-                shutdown_budget,
+                shutdown_budget: startup.shutdown_budget,
                 listen_for_signals: true,
                 process_exit: shutdown::real_process_exit(),
                 tcp_spawner: Arc::new(infrastructure::CassiniSpawner),

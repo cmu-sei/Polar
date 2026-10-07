@@ -126,6 +126,9 @@ impl TcpClientSpawner for CassiniSpawner {
 pub struct InfrastructureSupervisorArgs {
     pub service_name: String,
     pub health_check_args: HealthCheckArgs,
+    /// The one snapshot of the environment the builder took. Held for the life of the
+    /// agent, and handed out through `AgentResources::config`.
+    pub config: Arc<polar_env::Config>,
     pub subscriptions: Vec<Subscription>,
     pub wants_crypto: bool,
     /// How long the domain supervisor has to drain before the process exits anyway.
@@ -138,6 +141,7 @@ pub struct InfrastructureSupervisorArgs {
 }
 
 pub struct InfrastructureSupervisorState {
+    config: Arc<polar_env::Config>,
     events_output: Arc<OutputPort<ClientEvent>>,
     infrastructure_events: Arc<OutputPort<InfrastructureEvent>>,
     router: ActorRef<polar_router::RouterMessage>,
@@ -324,8 +328,7 @@ impl Actor for InfrastructureSupervisor {
         verdicts.subscribe(myself.clone(), |verdict| {
             Some(InfrastructureSupervisorMessage::Health(verdict))
         });
-        let mut health_check_args = args.health_check_args;
-        health_check_args.verdict_to = Some(verdicts);
+        let health_check_args = args.health_check_args.with_verdict_to(verdicts);
 
         let (healthcheck, _) = HealthCheckActor::spawn_linked(
             None,
@@ -406,6 +409,7 @@ impl Actor for InfrastructureSupervisor {
         }
 
         Ok(InfrastructureSupervisorState {
+            config: args.config,
             events_output,
             infrastructure_events,
             router,
@@ -487,6 +491,7 @@ impl Actor for InfrastructureSupervisor {
                     events_output: state.events_output.clone(),
                     infrastructure_events: state.infrastructure_events.clone(),
                     infrastructure: myself.clone(),
+                    config: state.config.clone(),
                 });
             }
         }
@@ -621,25 +626,13 @@ mod tests {
         }
     }
 
+    use std::collections::HashMap;
+
     // -- the rig -----------------------------------------------------------------------
     //
-    // The real supervisor with a real router and a real health actor. The health
-    // actor reads the process environment, so rigs take turns.
-
-    static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
-    fn clear_health_env() {
-        let names: Vec<String> = std::env::vars()
-            .map(|(name, _)| name)
-            .filter(|name| name.starts_with("POLAR_HEALTH_"))
-            .collect();
-        // SAFETY: callers hold ENV_LOCK, and no other test reads these.
-        unsafe {
-            for name in names {
-                std::env::remove_var(name);
-            }
-        }
-    }
+    // The real supervisor with a real router and a real health actor. The health actor is
+    // handed its settings from a snapshot of a map, as the builder hands them from the
+    // process, so rigs share nothing and run side by side.
 
     struct Rig {
         infra: ActorRef<InfrastructureSupervisorMessage>,
@@ -649,13 +642,6 @@ mod tests {
         exits: Arc<Mutex<Vec<i32>>>,
         spawner: Arc<FakeSpawner>,
         _dir: tempfile::TempDir,
-        _lock: tokio::sync::MutexGuard<'static, ()>,
-    }
-
-    impl Drop for Rig {
-        fn drop(&mut self) {
-            clear_health_env();
-        }
     }
 
     impl Rig {
@@ -668,20 +654,20 @@ mod tests {
             health_env: &[(&str, &str)],
             listen_for_signals: bool,
         ) -> Self {
-            let lock = ENV_LOCK.lock().await;
             let dir = tempfile::tempdir().unwrap();
-            clear_health_env();
-            // SAFETY: ENV_LOCK is held.
-            unsafe {
-                std::env::set_var(
+            let vars: HashMap<String, String> = [
+                (
                     "POLAR_HEALTH_FILE",
                     dir.path().join("health.json").to_str().unwrap(),
-                );
-                std::env::set_var("POLAR_HEALTH_CASSINI_DEADLINE_SECS", "100000");
-                for (name, value) in health_env {
-                    std::env::set_var(name, value);
-                }
-            }
+                ),
+                ("POLAR_HEALTH_CASSINI_DEADLINE_SECS", "100000"),
+            ]
+            .into_iter()
+            .chain(health_env.iter().copied())
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+            let startup =
+                crate::startup::prepare(&vars, &[], &[crate::Capability::Cassini], None).unwrap();
 
             let exits = Arc::new(Mutex::new(Vec::new()));
             let recorded = exits.clone();
@@ -692,7 +678,9 @@ mod tests {
                 InfrastructureSupervisor,
                 InfrastructureSupervisorArgs {
                     service_name: service.to_string(),
-                    health_check_args: HealthCheckArgs::new(false, 300, vec![]),
+                    health_check_args: HealthCheckArgs::new(false, 300, vec![])
+                        .with_config(startup.health),
+                    config: startup.config,
                     subscriptions: vec![],
                     wants_crypto: false,
                     shutdown_budget: budget,
@@ -721,7 +709,6 @@ mod tests {
                 exits,
                 spawner,
                 _dir: dir,
-                _lock: lock,
             }
         }
 
@@ -752,6 +739,29 @@ mod tests {
     }
 
     // -- the funnel ----------------------------------------------------------------------
+
+    #[tokio::test(start_paused = true)]
+    async fn the_resources_carry_the_snapshot_the_supervisor_holds() {
+        let rig = Rig::standard("infra-config").await;
+        // Declared by the health section, set in the rig's map: in the snapshot.
+        assert_eq!(
+            rig.resources
+                .config
+                .read(&polar_health::vars::CASSINI_DEADLINE_SECS)
+                .unwrap(),
+            100000
+        );
+        // Not declared by anything: refused, not read from wherever it might be.
+        assert!(matches!(
+            rig.resources
+                .config
+                .read(&polar_env::Optional::<String>::text(
+                    "NOT_DECLARED",
+                    "nothing declares this"
+                )),
+            Err(polar_env::ConfigError::Undeclared(_))
+        ));
+    }
 
     #[tokio::test(start_paused = true)]
     async fn a_request_to_shut_down_tells_the_domain_supervisor_once() {
