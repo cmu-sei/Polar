@@ -145,6 +145,15 @@ pub struct Config {
     overrides: HashMap<&'static str, String>,
 }
 
+/// A configuration is an environment too: what a component's parser reads is the
+/// snapshot with overrides on top, and only the variables a registered section declared.
+/// This is how a component is handed its settings without ever seeing the process.
+impl Env for Config {
+    fn var(&self, name: &str) -> Option<String> {
+        self.view().var(name)
+    }
+}
+
 impl Config {
     pub fn builder(env: &dyn Env) -> ConfigBuilder<'_> {
         ConfigBuilder {
@@ -634,5 +643,38 @@ mod tests {
             .apply_overrides(&[("TOKEN", "leak-me"), ("HOST", "x")])
             .unwrap_err();
         assert!(!problems.join(" ").contains("leak-me"), "{problems:?}");
+    }
+
+    // -- a Config is itself an environment --------------------------------------------
+
+    #[test]
+    fn a_config_read_as_an_env_shows_declared_variables_and_nothing_else() {
+        let c = Config::builder(&env(&[("HOST", "h"), ("STRAY", "ambient")]))
+            .register(&EXAMPLE)
+            .build();
+        let as_env: &dyn crate::Env = &c;
+        assert_eq!(as_env.var("HOST").as_deref(), Some("h"));
+        // Set in the source environment, declared by nothing: it never got in.
+        assert_eq!(as_env.var("STRAY"), None);
+    }
+
+    #[test]
+    fn a_config_read_as_an_env_shows_overrides_over_the_snapshot() {
+        let mut c = Config::builder(&env(&[("HOST", "h"), ("LOW", "2")]))
+            .register(&EXAMPLE)
+            .build();
+        c.apply_overrides(&[("LOW", "4")]).unwrap();
+        let as_env: &dyn crate::Env = &c;
+        assert_eq!(as_env.var("LOW").as_deref(), Some("4"));
+    }
+
+    #[test]
+    fn components_can_read_their_own_settings_from_a_config() {
+        // The shape the health actor uses: a component's parser takes an Env, and is
+        // handed the Config the builder took.
+        let c = Config::builder(&env(&[("HOST", "h"), ("HIGH", "30")]))
+            .register(&EXAMPLE)
+            .build();
+        assert_eq!(HIGH.read(&c).unwrap(), 30);
     }
 }
