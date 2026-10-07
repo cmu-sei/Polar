@@ -83,7 +83,7 @@
 
 use keyutils_raw::{
     KEY_POS_ALL, KEY_SPEC_SESSION_KEYRING, KEY_SPEC_USER_KEYRING, KEY_USR_ALL,
-    KEYCTL_SUPPORTS_DECRYPT, add_key, keyctl_describe, keyctl_link, keyctl_pkey_decrypt, keyctl_pkey_query,
+    KEYCTL_SUPPORTS_DECRYPT, add_key, keyctl_describe, keyctl_link, keyctl_pkey_decrypt, keyctl_pkey_query, keyctl_revoke,
     keyctl_setperm, keyctl_unlink,
 };
 // Re-exported so callers holding a serial this crate returned (e.g.
@@ -286,6 +286,14 @@ pub fn adopt_asymmetric_key(raw_serial: i32, expected_description: &str) -> Opti
     supports_decrypt(serial).then_some(serial)
 }
 
+/// Removes a key this crate loaded from the user keyring, so it does not outlive the thing it
+/// was for. Revoking the key makes it unusable for everyone who holds its number, and unlinking
+/// it lets the kernel free it. Already gone is not an error.
+pub fn unload_key(serial: KeyringSerial) {
+    let _ = keyctl_revoke(serial);
+    let _ = keyctl_unlink(serial, KEY_SPEC_USER_KEYRING);
+}
+
 /// Decrypts `ciphertext` using the kernel-held private key at
 /// `serial`. The raw RSA private key material never leaves the
 /// kernel at all -- only the raw, still-OAEP-padded modular-
@@ -459,5 +467,20 @@ mod tests {
         assert_eq!(adopt_asymmetric_key(0, "anything"), None);
         assert_eq!(adopt_asymmetric_key(-1, "anything"), None);
         assert_eq!(adopt_asymmetric_key(i32::MAX, "anything"), None);
+    }
+
+    #[test]
+    fn an_unloaded_key_can_no_longer_be_adopted_or_used() {
+        let (serial, _) = loaded("polar-kernel-keyring-unload-test");
+        assert!(adopt_asymmetric_key(serial.get(), "polar-kernel-keyring-unload-test").is_some());
+
+        unload_key(serial);
+
+        assert_eq!(
+            adopt_asymmetric_key(serial.get(), "polar-kernel-keyring-unload-test"),
+            None
+        );
+        // Unloading what is already gone is not an error.
+        unload_key(serial);
     }
 }
