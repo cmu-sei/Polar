@@ -94,7 +94,7 @@ use rsa::pkcs8::{DecodePrivateKey, DecodePublicKey, EncodePrivateKey};
 use rsa::{RsaPrivateKey, RsaPublicKey};
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::{error, warn};
+use tracing::{error, info, warn};
 use x25519_dalek::{EphemeralSecret, PublicKey};
 
 /// How long CryptoActor waits for a single correlated reply from the
@@ -1018,10 +1018,24 @@ async fn ensure_escrow_keypair_bootstrapped(
 /// and the key is this identity's and usable. Anything less is `None`, and the caller takes
 /// the key itself.
 fn adopt_key_left_by_init(path: &str, own_identity: &str) -> Option<EscrowKeypairHandle> {
-    let raw = std::fs::read_to_string(path).ok()?;
-    let serial: i32 = raw.trim().parse().ok()?;
-    polar_kernel_keyring::adopt_asymmetric_key(serial, own_identity)
-        .map(EscrowKeypairHandle::KernelBacked)
+    let Ok(raw) = std::fs::read_to_string(path) else {
+        info!("no escrow key handle at {path}: this process will hold the key itself");
+        return None;
+    };
+    let Ok(serial) = raw.trim().parse::<i32>() else {
+        warn!("the escrow key handle at {path} is not a key number: this process will hold the key itself");
+        return None;
+    };
+    match polar_kernel_keyring::adopt_asymmetric_key(serial, own_identity) {
+        Some(adopted) => {
+            info!("adopted escrow key {serial} from the kernel keyring: this process never holds the key");
+            Some(EscrowKeypairHandle::KernelBacked(adopted))
+        }
+        None => {
+            warn!("the key {serial} named in {path} is not this identity's or cannot be used: this process will hold the key itself");
+            None
+        }
+    }
 }
 
 /// The real handler behind CryptoMessage::DecryptOwnMessage -- see
