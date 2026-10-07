@@ -133,9 +133,12 @@ impl<M: ractor::Message> AgentBuilder<M> {
     /// How long this agent's domain supervisor needs to drain, from being told to
     /// shut down to releasing the infrastructure. If it has not finished by then the
     /// process exits 1 regardless, so an agent whose drain can take longer than the
-    /// default (20 s) must say so. The deployment's own value
-    /// (`POLAR_SHUTDOWN_BUDGET_SECS`), which also sizes the pod's termination grace
-    /// period, takes precedence when it is set.
+    /// default (20 s) must say so.
+    ///
+    /// This is a requirement, checked against what the deployment provides
+    /// (`POLAR_SHUTDOWN_BUDGET_SECS`, which also sizes the pod's termination grace
+    /// period): the deployment may give more, never less, and `build()` refuses to
+    /// start when it gives less.
     pub fn with_shutdown_budget(mut self, budget: std::time::Duration) -> Self {
         self.shutdown_budget = Some(budget);
         self

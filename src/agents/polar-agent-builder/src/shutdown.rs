@@ -26,36 +26,45 @@ pub const DEFAULT_SHUTDOWN_BUDGET: Duration = Duration::from_secs(20);
 
 /// Works out the shutdown budget.
 ///
-/// The deployment's value wins when it is set, because it is also what sizes the
-/// pod's termination grace period; otherwise the budget the agent's own code
-/// declared; otherwise the default. A set value that is not a whole number of
-/// seconds, at least 1, is an error.
+/// The code says what it needs and the deployment says what it provides, and the two
+/// must agree, as they do for capabilities:
+///
+/// - `declared` is the budget the agent's own code says it needs to drain
+///   (`AgentBuilder::with_shutdown_budget`). It is a requirement, not a preference.
+/// - `env` is what the deployment provides, `POLAR_SHUTDOWN_BUDGET_SECS`, which also
+///   sizes the pod's termination grace period.
+///
+/// A deployment may give an agent more than it needs, which is only a longer
+/// ceiling. It may not give it less: the drain would be cut short, so that is an
+/// error, and the message says where each number is set. Lowering what the code needs
+/// is a change to the code, which is the point. An agent that declared nothing is
+/// taking the default (20 s) as a guess, not a requirement, so the deployment may
+/// set it freely.
+///
+/// A set value that is not a whole number of seconds, at least 1, is an error.
 pub fn budget(declared: Option<Duration>, env: Option<&str>) -> Result<Duration, String> {
-    let fallback = declared.unwrap_or(DEFAULT_SHUTDOWN_BUDGET);
-    match env.map(str::trim).filter(|raw| !raw.is_empty()) {
-        None => Ok(fallback),
-        Some(raw) => {
-            let secs: u64 = raw.parse().map_err(|_| {
-                format!(
-                    "{SHUTDOWN_BUDGET_ENV} must be a whole number of seconds, at least 1, got '{raw}'"
-                )
-            })?;
-            if secs < 1 {
-                return Err(format!(
-                    "{SHUTDOWN_BUDGET_ENV} must be a whole number of seconds, at least 1, got '{raw}'"
-                ));
-            }
-            let from_env = Duration::from_secs(secs);
-            if from_env < fallback {
-                tracing::warn!(
-                    "{SHUTDOWN_BUDGET_ENV} ({secs}s) is shorter than the {}s this agent \
-                     declared it needs to drain; the deployment's value is used",
-                    fallback.as_secs()
-                );
-            }
-            Ok(from_env)
-        }
+    let Some(raw) = env.map(str::trim).filter(|raw| !raw.is_empty()) else {
+        return Ok(declared.unwrap_or(DEFAULT_SHUTDOWN_BUDGET));
+    };
+
+    let secs: u64 = raw.parse().ok().filter(|secs| *secs >= 1).ok_or_else(|| {
+        format!("{SHUTDOWN_BUDGET_ENV} must be a whole number of seconds, at least 1, got '{raw}'")
+    })?;
+    let provided = Duration::from_secs(secs);
+
+    if let Some(needed) = declared
+        && provided < needed
+    {
+        return Err(format!(
+            "{SHUTDOWN_BUDGET_ENV} is {secs}s, but this agent needs at least {}s to drain \
+             (declared in its code with with_shutdown_budget). The deployment must give it \
+             at least that: raise `shutdown.budget_secs` for this workload in the catalog. \
+             If the agent really can drain faster, lower the declaration in its supervisor \
+             instead, as a change someone reviews.",
+            needed.as_secs()
+        ));
     }
+    Ok(provided)
 }
 
 /// Ends the process. A value, so a test can watch for the call instead of dying.
@@ -277,17 +286,45 @@ mod tests {
     }
 
     #[test]
-    fn the_deployment_value_wins_over_the_declared_one_in_both_directions() {
+    fn the_deployment_may_give_an_agent_more_than_it_declared_it_needs() {
         let declared = Some(Duration::from_secs(50));
         assert_eq!(
             budget(declared, Some("90")).unwrap(),
             Duration::from_secs(90)
         );
         assert_eq!(
-            budget(declared, Some("30")).unwrap(),
-            Duration::from_secs(30)
+            budget(declared, Some("50")).unwrap(),
+            Duration::from_secs(50)
         );
+    }
+
+    #[test]
+    fn the_deployment_may_not_give_an_agent_less_than_it_declared_it_needs() {
+        // The code says what it needs to drain. A deployment that gives less would
+        // cut the drain short, so the agent refuses to start, and the message says
+        // which number to change and where.
+        let err = budget(Some(Duration::from_secs(50)), Some("30")).unwrap_err();
+        assert!(err.contains(SHUTDOWN_BUDGET_ENV), "{err}");
+        assert!(
+            err.contains("30s"),
+            "the deployment's value is shown: {err}"
+        );
+        assert!(err.contains("50s"), "the declared need is shown: {err}");
+        assert!(
+            err.contains("with_shutdown_budget"),
+            "where the need is declared: {err}"
+        );
+        assert!(
+            err.contains("budget_secs"),
+            "where the deployment sets it: {err}"
+        );
+    }
+
+    #[test]
+    fn an_agent_that_declared_nothing_accepts_whatever_the_deployment_gives() {
+        // The default is a guess, not a requirement.
         assert_eq!(budget(None, Some("5")).unwrap(), Duration::from_secs(5));
+        assert_eq!(budget(None, Some("300")).unwrap(), Duration::from_secs(300));
     }
 
     #[test]
