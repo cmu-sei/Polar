@@ -62,6 +62,8 @@
 //! which every genuinely router-based consumer (kube-consumer, the
 //! first real one) now uses.
 
+pub mod environment;
+
 use cassini_client::TcpClientMessage;
 use cert_issuer_common::keypair::{KeyAlgorithm, KeypairError};
 use credentials_agent_common::agent_escrow_issuance::{
@@ -91,12 +93,6 @@ use std::sync::Arc;
 use std::time::Duration;
 use tracing::{error, warn};
 use x25519_dalek::{EphemeralSecret, PublicKey};
-
-/// The standard, in-cluster path for a pod's own, Kubernetes-mounted
-/// service-account token -- mirrors cert-issuer/server's own oidc.rs,
-/// the existing, established pattern for this in this codebase.
-/// Overridable via KUBERNETES_SA_TOKEN, matching that same precedent.
-const KUBERNETES_SA_TOKEN_PATH: &str = "/var/run/secrets/kubernetes.io/serviceaccount/token";
 
 /// How long CryptoActor waits for a single correlated reply from the
 /// Credentials Agent before giving up -- generous relative to what a
@@ -238,6 +234,7 @@ pub enum CryptoMessage {
     },
 }
 
+#[non_exhaustive]
 pub struct CryptoActorArgs {
     /// The consuming agent's own, already-spawned TcpClientActor --
     /// shared, not a second connection. See
@@ -252,6 +249,30 @@ pub struct CryptoActorArgs {
     /// earlier, real design, before RouterActor existed) -- see this
     /// crate's own, top-level doc comment for the full reasoning.
     pub router: ActorRef<polar_router::RouterMessage>,
+    /// The certificate and token paths, already read and judged. The agent builder supplies
+    /// them from its snapshot of the environment. `None` is for agents not yet on the
+    /// builder (polar-init): the actor then reads the process, as it always did.
+    pub settings: Option<environment::CryptoSettings>,
+}
+
+impl CryptoActorArgs {
+    /// Built with this and the `with_` methods, so a field added later touches no caller.
+    pub fn new(
+        tcp_client: ActorRef<TcpClientMessage>,
+        router: ActorRef<polar_router::RouterMessage>,
+    ) -> Self {
+        Self {
+            tcp_client,
+            router,
+            settings: None,
+        }
+    }
+
+    /// Start on these settings instead of reading the process.
+    pub fn with_settings(mut self, settings: environment::CryptoSettings) -> Self {
+        self.settings = Some(settings);
+        self
+    }
 }
 
 pub struct CryptoActorState {
@@ -290,6 +311,8 @@ pub struct CryptoActorState {
     cached_recipient_public_keys:
         Arc<tokio::sync::Mutex<std::collections::HashMap<String, (RsaPublicKey, String)>>>,
     own_identity: String,
+    /// Where the service-account token is, from the settings the actor started with.
+    service_account_token_path: String,
 }
 
 pub struct CryptoActor;
@@ -314,11 +337,14 @@ impl Actor for CryptoActor {
         // every crypto-adjacent concern -- including this one --
         // rather than every, real caller needing its own, separate
         // way to learn or compute the same, real identity string.
+        let settings = match args.settings {
+            Some(settings) => settings,
+            None => environment::CryptoSettings::from_env(&polar_env::ProcessEnv)
+                .map_err(ActorProcessingErr::from)?,
+        };
         let own_identity = {
-            let path = std::env::var("TLS_CLIENT_CERT").map_err(|e| {
-                ActorProcessingErr::from(format!("TLS_CLIENT_CERT must be set: {e}"))
-            })?;
-            let certificate_pem = std::fs::read_to_string(&path).map_err(|e| {
+            let path = &settings.own_certificate_path;
+            let certificate_pem = std::fs::read_to_string(path).map_err(|e| {
                 ActorProcessingErr::from(format!("failed to read {path}: {e}"))
             })?;
             cert_issuer_common::permission::extract_own_identity(&certificate_pem)
@@ -375,6 +401,7 @@ impl Actor for CryptoActor {
                 std::collections::HashMap::new(),
             )),
             own_identity,
+            service_account_token_path: settings.service_account_token_path,
         })
     }
 
@@ -510,6 +537,7 @@ impl Actor for CryptoActor {
                 let cached_key = state.cached_credentials_agent_escrow_key.clone();
                 let escrow_keypair_handle = state.escrow_keypair_handle.clone();
                 let own_identity = state.own_identity.clone();
+                let sa_token_path = state.service_account_token_path.clone();
                 tokio::spawn(async move {
                     let result = handle_decrypt_own_message(
                         tcp_client,
@@ -520,6 +548,7 @@ impl Actor for CryptoActor {
                         cached_key,
                         escrow_keypair_handle,
                         own_identity,
+                        sa_token_path,
                         ciphertext,
                     )
                     .await;
@@ -561,6 +590,7 @@ impl Actor for CryptoActor {
                 let cached_key = state.cached_credentials_agent_escrow_key.clone();
                 let escrow_keypair_handle = state.escrow_keypair_handle.clone();
                 let own_identity = state.own_identity.clone();
+                let sa_token_path = state.service_account_token_path.clone();
                 tokio::spawn(async move {
                     let result = handle_ensure_bootstrapped(
                         tcp_client,
@@ -571,6 +601,7 @@ impl Actor for CryptoActor {
                         cached_key,
                         escrow_keypair_handle,
                         own_identity,
+                        sa_token_path,
                     )
                     .await;
                     let _ = reply.send(result);
@@ -780,10 +811,8 @@ async fn publish_retrieve_agent_escrow_keypair_request(
 /// for this in this codebase): re-read on every call, never cached,
 /// since Kubernetes rotates this token automatically and a cached
 /// copy could genuinely be expired by the time it's used.
-fn read_kubernetes_sa_token() -> Result<String, CryptoError> {
-    let path = std::env::var("KUBERNETES_SA_TOKEN")
-        .unwrap_or_else(|_| KUBERNETES_SA_TOKEN_PATH.to_string());
-    std::fs::read_to_string(&path)
+fn read_kubernetes_sa_token(path: &str) -> Result<String, CryptoError> {
+    std::fs::read_to_string(path)
         .map(|s| s.trim().to_string())
         .map_err(|e| CryptoError::CredentialUnavailable(format!("{path}: {e}")))
 }
@@ -799,6 +828,7 @@ async fn handle_ensure_own_escrow_keypair(
     store_secret_reply_router: Arc<ReplyRouter<StoreSecretReply>>,
     cached_key: Arc<tokio::sync::Mutex<Option<String>>>,
     own_identity: String,
+    sa_token_path: String,
 ) -> Result<RsaPrivateKey, CryptoError> {
     // Step 1: retrieve-first. A real Err here (broker unreachable,
     // timeout, a genuine refusal) propagates directly -- issuance is
@@ -817,7 +847,7 @@ async fn handle_ensure_own_escrow_keypair(
     // Step 2: issuance fallback. Read this pod's own, real Kubernetes
     // credential -- the same one cert-issuer's own oidc.rs already
     // knows how to validate on the receiving end.
-    let credential = read_kubernetes_sa_token()?;
+    let credential = read_kubernetes_sa_token(&sa_token_path)?;
 
     // Step 3: generate a real CSR, RSA specifically -- this is the
     // agent's own encryption-capable escrow identity, not a
@@ -888,6 +918,7 @@ async fn ensure_escrow_keypair_bootstrapped(
     cached_key: Arc<tokio::sync::Mutex<Option<String>>>,
     escrow_keypair_handle: Arc<tokio::sync::Mutex<Option<EscrowKeypairHandle>>>,
     own_identity: String,
+    sa_token_path: String,
 ) -> Result<(), CryptoError> {
     let mut handle_guard = escrow_keypair_handle.lock().await;
 
@@ -900,6 +931,7 @@ async fn ensure_escrow_keypair_bootstrapped(
             store_secret_reply_router,
             cached_key,
             own_identity.clone(),
+            sa_token_path,
         )
         .await?;
 
@@ -946,6 +978,7 @@ async fn handle_decrypt_own_message(
     cached_key: Arc<tokio::sync::Mutex<Option<String>>>,
     escrow_keypair_handle: Arc<tokio::sync::Mutex<Option<EscrowKeypairHandle>>>,
     own_identity: String,
+    sa_token_path: String,
     ciphertext: Vec<u8>,
 ) -> Result<Vec<u8>, CryptoError> {
     ensure_escrow_keypair_bootstrapped(
@@ -957,6 +990,7 @@ async fn handle_decrypt_own_message(
         cached_key,
         escrow_keypair_handle.clone(),
         own_identity,
+        sa_token_path,
     )
     .await?;
 
@@ -986,6 +1020,7 @@ async fn handle_ensure_bootstrapped(
     cached_key: Arc<tokio::sync::Mutex<Option<String>>>,
     escrow_keypair_handle: Arc<tokio::sync::Mutex<Option<EscrowKeypairHandle>>>,
     own_identity: String,
+    sa_token_path: String,
 ) -> Result<(), CryptoError> {
     ensure_escrow_keypair_bootstrapped(
         tcp_client,
@@ -996,6 +1031,7 @@ async fn handle_ensure_bootstrapped(
         cached_key,
         escrow_keypair_handle,
         own_identity,
+        sa_token_path,
     )
     .await
 }
@@ -1403,6 +1439,16 @@ mod tests {
         stored_escrow_keypair_pem: Option<String>,
         issue_agent_escrow_certificates: bool,
         recipient_public_key_pem: Option<String>,
+        /// Where the actor looks for the service-account token. Tests that reach the
+        /// issuance path give it a real file; the others never read it.
+        service_account_token_path: Option<String>,
+    }
+
+    /// A temporary file standing in for the in-cluster, mounted service-account token.
+    fn write_test_service_account_token() -> tempfile::NamedTempFile {
+        let token_file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(token_file.path(), "fake-k8s-service-account-token\n").unwrap();
+        token_file
     }
 
     /// pre_start now derives its own identity by reading a real,
@@ -1410,7 +1456,7 @@ mod tests {
     /// self-signed certificate carrying "test-agent" as its own
     /// identity SAN (mirroring extract_own_identity's own, real
     /// test fixtures directly), writes it to a real, temporary file,
-    /// and points the env var at it, so every test in this module
+    /// and hands the actor its path in its settings, so every test in this module
     /// continues to genuinely exercise "test-agent" as this actor's
     /// own identity, exactly as before this migration.
     fn write_test_agent_certificate() -> tempfile::NamedTempFile {
@@ -1439,6 +1485,10 @@ mod tests {
         Arc<std::sync::Mutex<Option<Vec<u8>>>>,
         Arc<std::sync::atomic::AtomicUsize>,
     ) {
+        let service_account_token_path = config
+            .service_account_token_path
+            .clone()
+            .unwrap_or_else(|| environment::KUBERNETES_SA_TOKEN_PATH.to_string());
         let (private_key, public_key_pem) = test_credentials_agent_keypair();
         let escrow_key_queries = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let agent_escrow_key_queries = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -1467,24 +1517,20 @@ mod tests {
         .unwrap();
 
         let own_cert_file = write_test_agent_certificate();
-        unsafe {
-            std::env::set_var("TLS_CLIENT_CERT", own_cert_file.path());
-        }
 
         let (crypto_actor, _) = Actor::spawn(
             None,
             CryptoActor,
-            CryptoActorArgs {
-                tcp_client: fake_agent,
-                router,
-            },
+            CryptoActorArgs::new(fake_agent, router).with_settings(
+                environment::CryptoSettings {
+                    own_certificate_path: own_cert_file.path().to_string_lossy().into_owned(),
+                    service_account_token_path: service_account_token_path.clone(),
+                },
+            ),
         )
         .await
         .unwrap();
 
-        unsafe {
-            std::env::remove_var("TLS_CLIENT_CERT");
-        }
         // own_cert_file must outlive pre_start's own, real read of it
         // above -- explicitly kept alive until here, then dropped
         // (and its own, temp file deleted) only now.
@@ -1543,22 +1589,17 @@ mod tests {
     }
     #[tokio::test]
     async fn decrypt_own_message_falls_back_to_real_issuance_when_nothing_is_escrowed_yet() {
+        // The actor reads the token from disk each time it asks for an escrow keypair, so
+        // it is given a real file standing in for the mounted service-account token.
+        let token_file = write_test_service_account_token();
         let ((crypto_actor, _), last_stored_secret_plaintext, _) =
             spawn_crypto_actor_with_fake_credentials_agent_configured(FakeCredentialsAgentConfig {
+                service_account_token_path: Some(token_file.path().to_string_lossy().into_owned()),
                 stored_escrow_keypair_pem: None,
                 issue_agent_escrow_certificates: true,
                 ..Default::default()
             })
             .await;
-
-        // read_kubernetes_sa_token() genuinely reads from disk --
-        // point it at a real, temp file standing in for the
-        // in-cluster, mounted service-account token.
-        let token_file = tempfile::NamedTempFile::new().unwrap();
-        std::fs::write(token_file.path(), "fake-k8s-service-account-token\n").unwrap();
-        unsafe {
-            std::env::set_var("KUBERNETES_SA_TOKEN", token_file.path());
-        }
 
         // The real proof this is a genuine issuance, not a stub:
         // encrypt to the *newly-issued* key's own public half
@@ -1605,9 +1646,6 @@ mod tests {
             other => panic!("expected Ok(_), got {other:?}"),
         }
 
-        unsafe {
-            std::env::remove_var("KUBERNETES_SA_TOKEN");
-        }
     }
 
     #[tokio::test]
@@ -1652,8 +1690,14 @@ mod tests {
     #[tokio::test]
     async fn decrypt_own_message_fails_with_issuance_refused_when_nothing_is_escrowed_and_issuance_itself_is_refused()
      {
+        // read_kubernetes_sa_token() genuinely reads from disk before the fake agent's own
+        // refusal is ever reached, so the actor is given a real, valid token file, or this
+        // would fail with CredentialUnavailable instead of the real thing this test means to
+        // prove.
+        let token_file = write_test_service_account_token();
         let ((crypto_actor, _), _, _) =
             spawn_crypto_actor_with_fake_credentials_agent_configured(FakeCredentialsAgentConfig {
+                service_account_token_path: Some(token_file.path().to_string_lossy().into_owned()),
                 stored_escrow_keypair_pem: None,
                 // Deliberately false -- issuance genuinely gets
                 // attempted (nothing is escrowed yet), and this is
@@ -1667,17 +1711,6 @@ mod tests {
             })
             .await;
 
-        // read_kubernetes_sa_token() genuinely reads from disk before
-        // the fake agent's own refusal is ever reached -- still needs
-        // a real, valid token file, or this would fail with
-        // CredentialUnavailable instead of the real thing this test
-        // means to prove.
-        let token_file = tempfile::NamedTempFile::new().unwrap();
-        std::fs::write(token_file.path(), "fake-k8s-service-account-token\n").unwrap();
-        unsafe {
-            std::env::set_var("KUBERNETES_SA_TOKEN", token_file.path());
-        }
-
         let result = ractor::call!(crypto_actor, |reply| {
             CryptoMessage::DecryptOwnMessage {
                 ciphertext: vec![0u8; 32],
@@ -1685,10 +1718,6 @@ mod tests {
             }
         })
         .unwrap();
-
-        unsafe {
-            std::env::remove_var("KUBERNETES_SA_TOKEN");
-        }
 
         match result {
             Err(CryptoError::IssuanceRefused(_)) => {}
@@ -1698,28 +1727,22 @@ mod tests {
 
     #[tokio::test]
     async fn ensure_bootstrapped_genuinely_issues_and_escrows_a_real_keypair_as_a_pure_side_effect() {
+        // The actor reads the token from disk each time it asks for an escrow keypair, so
+        // it is given a real file standing in for the mounted service-account token.
+        let token_file = write_test_service_account_token();
         let ((crypto_actor, _), last_stored_secret_plaintext, _) =
             spawn_crypto_actor_with_fake_credentials_agent_configured(FakeCredentialsAgentConfig {
+                service_account_token_path: Some(token_file.path().to_string_lossy().into_owned()),
                 stored_escrow_keypair_pem: None,
                 issue_agent_escrow_certificates: true,
                 ..Default::default()
             })
             .await;
 
-        let token_file = tempfile::NamedTempFile::new().unwrap();
-        std::fs::write(token_file.path(), "fake-k8s-service-account-token\n").unwrap();
-        unsafe {
-            std::env::set_var("KUBERNETES_SA_TOKEN", token_file.path());
-        }
-
         let result = ractor::call!(crypto_actor, |reply| {
             CryptoMessage::EnsureBootstrapped { reply }
         })
         .unwrap();
-
-        unsafe {
-            std::env::remove_var("KUBERNETES_SA_TOKEN");
-        }
 
         assert!(result.is_ok(), "expected Ok(()), got {result:?}");
 

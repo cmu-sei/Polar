@@ -290,10 +290,7 @@ impl InfrastructureSupervisor {
             let (crypto_actor, _) = polar_crypto::CryptoActor::spawn_linked(
                 None,
                 polar_crypto::CryptoActor,
-                polar_crypto::CryptoActorArgs {
-                    tcp_client: new_tcp_client.as_actor_ref(),
-                    router: state.router.clone(),
-                },
+                polar_crypto::CryptoActorArgs::new(new_tcp_client.as_actor_ref(), state.router.clone()),
                 myself.get_cell(),
             )
             .await
@@ -403,10 +400,7 @@ impl Actor for InfrastructureSupervisor {
             let (crypto_actor, _) = polar_crypto::CryptoActor::spawn_linked(
                 None,
                 polar_crypto::CryptoActor,
-                polar_crypto::CryptoActorArgs {
-                    tcp_client: tcp_client.as_actor_ref(),
-                    router: router.clone(),
-                },
+                polar_crypto::CryptoActorArgs::new(tcp_client.as_actor_ref(), router.clone()),
                 myself_cell,
             )
             .await

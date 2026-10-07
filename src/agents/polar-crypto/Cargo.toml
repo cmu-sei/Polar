@@ -12,6 +12,7 @@ tracing = { workspace = true }
 rkyv = { workspace = true }
 uuid = { workspace = true }
 polar = { workspace = true }
+polar-env = { workspace = true }
 cassini-client = { workspace = true }
 cassini-types = { workspace = true }
 credentials_agent_common = { workspace = true }

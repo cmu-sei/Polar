@@ -237,10 +237,7 @@ mod tests {
         let (crypto_actor, _) = Actor::spawn(
             None,
             polar_crypto::CryptoActor,
-            polar_crypto::CryptoActorArgs {
-                tcp_client: fake_agent,
-                router,
-            },
+            polar_crypto::CryptoActorArgs::new(fake_agent, router),
         )
         .await
         .unwrap();
@@ -346,10 +343,7 @@ mod tests {
         let (crypto_actor, _) = Actor::spawn(
             None,
             polar_crypto::CryptoActor,
-            polar_crypto::CryptoActorArgs {
-                tcp_client: fake_agent,
-                router,
-            },
+            polar_crypto::CryptoActorArgs::new(fake_agent, router),
         )
         .await
         .unwrap();

@@ -379,10 +379,7 @@ async fn ensure_escrow_bootstrapped(own_identity: &str) {
     let (crypto_actor, _) = Actor::spawn(
         None,
         polar_crypto::CryptoActor,
-        polar_crypto::CryptoActorArgs {
-            tcp_client: tcp_client.clone(),
-            router,
-        },
+        polar_crypto::CryptoActorArgs::new(tcp_client.clone(), router),
     )
     .await
     .expect("CryptoActor::pre_start does no fallible work of its own -- spawning it can't genuinely fail here");
