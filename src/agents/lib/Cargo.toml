@@ -14,6 +14,7 @@ neo4rs.workspace = true
 opentelemetry-otlp.workspace = true
 opentelemetry_sdk.workspace = true
 opentelemetry.workspace = true
+polar-env.workspace = true
 polar-health.workspace = true
 polar-router.workspace = true
 ractor.workspace = true

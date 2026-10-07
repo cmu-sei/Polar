@@ -5462,6 +5462,7 @@ dependencies = [
  "opentelemetry-otlp",
  "opentelemetry_sdk",
  "polar",
+ "polar-env",
  "polar-health",
  "polar-router",
  "polar-test-graph",
