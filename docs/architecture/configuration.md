@@ -145,10 +145,13 @@ only the declared variables, the three layers with a source reported for each va
 and `Dynamic` mutability on every declaration, and all-or-nothing overrides that re-check every
 section's relations); the health actor and probe on it; the builder's shared check
 (`environment::check_environment`); the `polar-config-check` binary run by `resolve.nu check`;
-and the catalog's own checks. Nothing uses `Config` yet.
+and the catalog's own checks. The builder takes the one `Config` snapshot in `build()`
+(`startup::prepare`, a pure function of an `Env`), with `with_environment` for an agent's own
+sections; the infrastructure supervisor holds it and hands it out as `AgentResources::config`; the
+health actor is handed its parsed `HealthConfig` and never sees an environment, and agents not yet
+on the builder keep reading the process until they move.
 
-Next, in order: the builder taking the snapshot, the infrastructure supervisor holding it and the
-health actor receiving its parsed configuration (which also takes the process environment out of
-the actor tests); then the capability-to-section mapping, `--describe --json` and an `--effective`
-view; then the lint. After that, the ConfigurationActor shell, then the scheduler integration,
-then the credentials agent's use of it. Every step is in `remaining-work.md`.
+Next, in order: the capability-to-section mapping (the Cassini client and graph sections, so
+they join the snapshot), `--describe --json` and an `--effective` view; then the lint. After that,
+the ConfigurationActor shell, then the scheduler integration, then the credentials agent's use of
+it. Every step is in `remaining-work.md`.
