@@ -124,12 +124,15 @@ running a "check configuration and exit" mode in the agent's own image.
 
 ## 8. What exists today, and the order
 
-Built: the declaration layer (`polar-env`), the health actor and probe on it, the builder's
-shared check (`environment::check_environment`), the `polar-config-check` binary run by
-`resolve.nu check`, and the catalog's own checks.
+Built: the declaration layer (`polar-env`), including the pure layered `Config` (a snapshot of
+only the declared variables, the three layers with a source reported for each value, `Static`
+and `Dynamic` mutability on every declaration, and all-or-nothing overrides that re-check every
+section's relations); the health actor and probe on it; the builder's shared check
+(`environment::check_environment`); the `polar-config-check` binary run by `resolve.nu check`;
+and the catalog's own checks. Nothing uses `Config` yet.
 
-Next, in order: the pure layered `Config` (with mutability, sources and transactional
-overrides); the builder taking the snapshot and the infrastructure supervisor holding it; then
-the capability-to-section mapping, `--describe --json` and an `--effective` view; then the
-lint. After that, the ConfigurationActor shell, then the scheduler integration, then the
-credentials agent's use of it. Every step is in `remaining-work.md`.
+Next, in order: the builder taking the snapshot, the infrastructure supervisor holding it and the
+health actor receiving its parsed configuration (which also takes the process environment out of
+the actor tests); then the capability-to-section mapping, `--describe --json` and an `--effective`
+view; then the lint. After that, the ConfigurationActor shell, then the scheduler integration,
+then the credentials agent's use of it. Every step is in `remaining-work.md`.
