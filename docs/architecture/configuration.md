@@ -54,6 +54,12 @@ address, the capabilities and the health safety invariants stay Static.
   directly, with no process-wide state to lock.
 - **Domain code** reads its own variables through `AgentResources`, and an undeclared read is
   refused, so the list of variables cannot exist apart from the code that reads it.
+- **A controlled process environment.** The snapshot copies only declared variables, once. An
+  undeclared variable that happens to be set, a secret included, never enters the agent's
+  configuration, and later changes to the process environment are not seen. What the agent
+  runs on is exactly what its code declared, which is a security property (nothing ambient
+  leaks in or can be injected late) and a correctness one (the effective configuration is the
+  same one that was checked).
 - A lint (`disallowed-methods` for `std::env::var` and its siblings) keeps direct reads from
   creeping back.
 
@@ -95,10 +101,20 @@ It is also the agent that cannot depend on remote configuration to start, becaus
 identity for everyone else. It starts on its environment alone and takes the rest when it
 arrives. Open questions, not decisions:
 
-- **Authenticity.** Who may publish an override, and how does the receiver know a message is
-  from them? A topic being writable is not authorization. Likely a check at the receiver of the
-  publisher's identity and of the change's origin, against policy (`polar-policy` already
-  wraps Cedar).
+- **Authenticity (direction from David, 2026-10-07).** The user who creates a config signs
+  their work, and the receiver verifies the signature before applying anything. A writable topic
+  is not authorization, and neither is a repository a push reached: the signature is what ties a
+  change to a person. What exists to build on, found by reading the code (earlier chats could
+  not be searched from here, so nothing recorded in them is assumed): users and agents already
+  hold certificates issued by Polar's CA (cert-issuer), so the signer's identity can be the same
+  one the rest of the system uses, and a signature can be checked back to the CA; `polar-policy`
+  wraps Cedar, so "may this signer set this variable on this agent" is a policy question the
+  system already knows how to ask; `cert-issuer` verifies OIDC token signatures (`oidc.rs`). What
+  does not exist: any signing or verifying of configuration. `policy-config` only clones and
+  pulls the policy repository, and `jwt-utils` states it verifies nothing. Still to decide: the
+  signed form (a detached signature over a canonical encoding of the schedule, or signed git
+  commits), and what the receiver checks (chain to the CA, signer authorized by policy for that
+  variable and agent, version newer than the last applied).
 - **Ordering.** Versions must be monotonic, so an old override cannot be replayed over a newer
   one.
 - **Fail closed.** Before any policy has arrived, the credentials agent needs a safe default,
