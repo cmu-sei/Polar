@@ -196,3 +196,39 @@ fn an_unknown_argument_is_a_usage_error() {
         stderr(&o)
     );
 }
+
+#[test]
+fn describe_json_is_machine_readable_and_complete() {
+    let o = run(&["--describe", "--json"], &[]);
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    let json: serde_json::Value = serde_json::from_str(&stdout(&o)).expect("stdout is JSON");
+    let names: Vec<_> = json["sections"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["builder", "health", "cassini-client", "graph"]);
+    // Nothing else on stdout, so a pipe into another tool gets exactly the document.
+    assert!(stdout(&o).trim_start().starts_with('{'));
+}
+
+#[test]
+fn describe_json_never_contains_a_value_from_the_environment() {
+    let o = run(
+        &["--describe", "--json"],
+        &[
+            ("GRAPH_PASSWORD", "hunter2"),
+            ("BROKER_ADDR", "secret-host:1"),
+        ],
+    );
+    assert_eq!(o.status.code(), Some(0));
+    assert!(!stdout(&o).contains("hunter2"));
+    assert!(!stdout(&o).contains("secret-host"));
+}
+
+#[test]
+fn json_alone_is_a_usage_error() {
+    let o = run(&["--json"], &[]);
+    assert_eq!(o.status.code(), Some(2));
+}

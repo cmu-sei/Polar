@@ -20,7 +20,7 @@
 //! (encryption, the Kubernetes API read) moves onto `polar-env`.
 
 use crate::capability::Capability;
-use polar_env::{Described, Env, Kind, Optional, Section, VarDesc};
+use polar_env::{Described, Env, Kind, Mutability, Optional, Section, VarDesc};
 
 /// The capabilities the deployment provides.
 pub const CAPABILITIES: Optional<Vec<String>> = Optional::list(
@@ -72,12 +72,23 @@ pub fn sections_for(capabilities: &[Capability]) -> Vec<&'static Section> {
         .collect()
 }
 
-/// Every section there is, for describing what an agent can read.
-pub fn all_sections() -> Vec<&'static Section> {
+/// Every section there is, each with the capability that brings it (`None` for the ones
+/// every agent has), for describing what an agent can read.
+fn tagged_sections() -> Vec<(Option<Capability>, &'static Section)> {
     base_sections()
         .into_iter()
-        .chain(sections_for(&Capability::ALL))
+        .map(|section| (None, section))
+        .chain(Capability::ALL.into_iter().flat_map(|capability| {
+            sections_for(&[capability])
+                .into_iter()
+                .map(move |section| (Some(capability), section))
+        }))
         .collect()
+}
+
+/// Every section there is, for describing what an agent can read.
+pub fn all_sections() -> Vec<&'static Section> {
+    tagged_sections().into_iter().map(|(_, s)| s).collect()
 }
 
 /// The sections that apply to a deployment that provides what `env` says it provides:
@@ -114,6 +125,59 @@ pub fn describe() -> Vec<(&'static str, Vec<VarDesc>)> {
         .collect()
 }
 
+fn kind_name(kind: Kind) -> &'static str {
+    match kind {
+        Kind::Required => "required",
+        Kind::Optional => "optional",
+        Kind::Default => "default",
+    }
+}
+
+fn mutability_name(mutability: Mutability) -> &'static str {
+    match mutability {
+        Mutability::Static => "static",
+        Mutability::Dynamic => "dynamic",
+    }
+}
+
+/// [`describe`] as JSON, for tools: scaffolding a workload entry or a schedule, and validating
+/// a schedule against what an agent declares it may change.
+///
+/// `{"sections": [{"name", "capability", "variables": [{"name", "kind", "default", "secret",
+/// "mutability", "type", "doc"}]}]}`. `capability` is the name in `POLAR_CAPABILITIES` that
+/// brings the section, or null for the sections every agent has; `kind` is `required`,
+/// `optional` or `default`; `mutability` is `static` or `dynamic` (only a dynamic variable
+/// accepts a scheduled override). It describes declarations and never an environment, so no
+/// value, secret or otherwise, can appear in it.
+pub fn describe_json() -> serde_json::Value {
+    let sections: Vec<_> = tagged_sections()
+        .into_iter()
+        .map(|(capability, section)| {
+            let variables: Vec<_> = section
+                .describe()
+                .into_iter()
+                .map(|v| {
+                    serde_json::json!({
+                        "name": v.name,
+                        "kind": kind_name(v.kind),
+                        "default": v.default,
+                        "secret": v.secret,
+                        "mutability": mutability_name(v.mutability),
+                        "type": v.type_name,
+                        "doc": v.doc,
+                    })
+                })
+                .collect();
+            serde_json::json!({
+                "name": section.name,
+                "capability": capability.map(Capability::as_str),
+                "variables": variables,
+            })
+        })
+        .collect();
+    serde_json::json!({ "sections": sections })
+}
+
 /// [`describe`] as text, one variable per line under its section.
 pub fn describe_text() -> String {
     let mut text = String::new();
@@ -121,9 +185,8 @@ pub fn describe_text() -> String {
         text.push_str(&format!("{section}\n"));
         for variable in variables {
             let kind = match variable.kind {
-                Kind::Required => "required".to_string(),
-                Kind::Optional => "optional".to_string(),
                 Kind::Default => format!("default {}", variable.default.unwrap_or("")),
+                other => kind_name(other).to_string(),
             };
             let secret = if variable.secret { ", secret" } else { "" };
             text.push_str(&format!(
@@ -304,6 +367,84 @@ mod tests {
                 "{expected} missing from {names:?}"
             );
         }
+    }
+
+    fn json() -> serde_json::Value {
+        describe_json()
+    }
+
+    fn variable<'a>(json: &'a serde_json::Value, name: &str) -> &'a serde_json::Value {
+        json["sections"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|s| s["variables"].as_array().unwrap())
+            .find(|v| v["name"] == name)
+            .unwrap_or_else(|| panic!("{name} is not described"))
+    }
+
+    #[test]
+    fn the_json_description_has_every_variable_the_text_one_has() {
+        let json = json();
+        let in_json: usize = json["sections"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["variables"].as_array().unwrap().len())
+            .sum();
+        let in_text: usize = describe().iter().map(|(_, vars)| vars.len()).sum();
+        assert_eq!(in_json, in_text);
+        assert!(in_json > 10);
+    }
+
+    #[test]
+    fn a_variable_says_what_a_scaffold_needs_to_know() {
+        let json = json();
+        let tick = variable(&json, "POLAR_HEALTH_TICK_SECS");
+        assert_eq!(tick["kind"], "default");
+        assert_eq!(tick["default"], "30");
+        assert_eq!(tick["secret"], false);
+        assert_eq!(tick["mutability"], "static");
+        assert!(tick["type"].as_str().unwrap().contains("seconds"));
+        assert!(
+            tick["doc"]
+                .as_str()
+                .unwrap()
+                .contains("between health ticks")
+        );
+
+        let broker = variable(&json, "BROKER_ADDR");
+        assert_eq!(broker["kind"], "required");
+        assert!(broker["default"].is_null());
+
+        let queue = variable(&json, "CASSINI_QUEUE_PATH");
+        assert_eq!(queue["kind"], "optional");
+    }
+
+    #[test]
+    fn a_secret_is_marked_and_no_value_appears_anywhere() {
+        let json = json();
+        assert_eq!(variable(&json, "GRAPH_PASSWORD")["secret"], true);
+        // It describes declarations, never an environment, so no value can be in it.
+        assert!(!json.to_string().contains("hunter2"));
+    }
+
+    #[test]
+    fn a_section_says_which_capability_brings_it() {
+        let json = json();
+        let capability = |name: &str| {
+            json["sections"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|s| s["name"] == name)
+                .unwrap_or_else(|| panic!("no section {name}"))["capability"]
+                .clone()
+        };
+        assert!(capability("builder").is_null(), "every agent has it");
+        assert!(capability("health").is_null());
+        assert_eq!(capability("cassini-client"), "cassini");
+        assert_eq!(capability("graph"), "graph-write");
     }
 
     #[test]

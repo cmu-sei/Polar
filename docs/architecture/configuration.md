@@ -124,8 +124,7 @@ arrives. Open questions, not decisions:
 
 ## 7. The schema export (direction)
 
-`polar-config-check --describe --json` (not yet machine-readable; today it prints for people)
-returns every variable with its type, default, purpose, secrecy and mutability. That one
+`polar-config-check --describe --json` returns, as one JSON document, every variable with its type, default, purpose, secrecy and mutability. That one
 export serves three uses:
 
 - **Scaffolding a workload entry** at render time: start from a minimal entry, run the check,
@@ -161,6 +160,6 @@ its settings from it (the credentials consumer too: the builder is split into `c
 environment and spawns nothing, and `build()`, which spawns, so a domain supervisor can take its own
 settings from the snapshot before it starts the actors that need them).
 
-Next, in order: `--describe --json` and an `--effective` view; then the lint. After that,
+Next, in order: an `--effective` view; then the lint. After that,
 the ConfigurationActor shell, then the scheduler integration, then the credentials agent's use of
 it. Every step is in `remaining-work.md`.

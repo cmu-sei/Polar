@@ -640,6 +640,9 @@ mod tests {
         let settings =
             polar::graph::environment::GraphSettings::from_env(&**configured.config()).unwrap();
         assert_eq!(settings.endpoint, "bolt+s://db:7687");
-        assert!(!configured.startup.health.expects_graph, "health does not watch the graph");
+        assert!(
+            !configured.startup.health.expects_graph,
+            "health does not watch the graph"
+        );
     }
 }

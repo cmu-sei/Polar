@@ -13,15 +13,18 @@
 //! status is 0 if there were none, 1 if there were, 2 for a usage error.
 //!
 //! `--describe` instead prints every variable the agent reads, by section, with its kind,
-//! default and what it is for.
+//! default and what it is for. `--describe --json` prints the same as one JSON document, for
+//! tools that scaffold a workload entry or a schedule, or validate one: see
+//! `environment::describe_json` for its shape.
 
 use polar_agent_builder::environment;
 use polar_env::ProcessEnv;
 use std::process::ExitCode;
 
-const USAGE: &str = "usage: polar-config-check [--describe]\n\n\
+const USAGE: &str = "usage: polar-config-check [--describe [--json]]\n\n\
     Checks the environment of this process the way an agent built by polar-agent-builder\n\
-    checks its own when it starts. With --describe, lists the variables instead.";
+    checks its own when it starts. With --describe, lists the variables instead, and with\n\
+    --json as one JSON document.";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -34,6 +37,10 @@ fn main() -> ExitCode {
         [] => check(),
         ["--describe"] => {
             print!("{}", environment::describe_text());
+            ExitCode::SUCCESS
+        }
+        ["--describe", "--json"] => {
+            println!("{}", environment::describe_json());
             ExitCode::SUCCESS
         }
         _ => {
