@@ -7,8 +7,10 @@ never 137; a forced rejuvenation of kube-observer (threshold above the certifica
 it enters the window at once) ran three times in a row, each time logging the reason and exiting 1,
 one of them with a 181 s lifetime and a long jitter that the old probe would have killed; and an
 agent whose PID 1 was stopped was killed by the probe with 137 after 153 s, as the simulation
-bounds it. What was not observed: the natural one-hour rejuvenation of an undisturbed agent,
-whose pods were gone by the time they were looked at (see the work item), and broker-restart
+bounds it; and jira-processor rejuvenated naturally, after about an hour, through a jitter of
+about three minutes with no failed probe, exiting 1 with its reason logged. What was not observed:
+the natural rejuvenation of the other four agents, whose previous pods were gone before they were
+looked at (see the work item), and broker-restart
 recovery, which waits for the Cassini pair.
 
 Scope: agents built on `polar-agent-builder`. Agents that have not migrated keep
