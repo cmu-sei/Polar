@@ -322,7 +322,7 @@ def check_all [target: string] {
             {
                 who: $n
                 identity: $"($r.service_account).($r.namespace)"
-                rules: ((health_problems $n $r._settings.health) ++ (shutdown_problems $n $r._settings.shutdown))
+                rules: ((environment_problems $n $r.env) ++ (shutdown_problems $n $r._settings.shutdown))
                 error: null
             }
         } catch {|e|

@@ -71,8 +71,13 @@ def main [] {
             assert equal $st.shutdown.budget_secs 45
             assert equal $st.shutdown.grace_margin_secs 10
             assert equal $st.shutdown.termination_grace_secs 55
-            assert equal $st.health.jitter_window_secs 180
             assert equal $st.health.rejuvenation_secs 300
+        }
+
+        "the real catalog passes `check`, including the agent's own environment check": {
+            let r = (^nu ($RESOLVER) check | complete)
+            assert equal $r.exit_code 0 $r.stderr
+            assert ($r.stdout | str contains "resolve cleanly")
         }
 
         "the template does not see the settings record": {

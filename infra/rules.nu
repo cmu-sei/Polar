@@ -1,56 +1,66 @@
 #!/usr/bin/env nu
 # infra/rules.nu
 #
-# Rules about the health and shutdown settings a workload resolves to. Each is a
-# pure function of a record that returns the problems it finds (an empty list means
-# none), so `resolve.nu check` can run them over every workload and the tests in
-# infra/tests/rules.nu can run them over made-up ones.
+# Checks on what a workload resolves to, run by `resolve.nu check`. Each returns the problems
+# it finds (an empty list means none).
 #
-# Why they exist: the agent's own code checks these when it starts (polar-health's
-# HealthConfig::validate and the builder's budget check) and refuses to run on a bad
-# combination. That is the authority. Checking the same things here moves the failure
-# to render time, before a pod exists, instead of leaving it as a crash loop.
+# Whoever owns a fact owns the rule about it:
 #
-# They mirror the Rust rules; they do not share them. The formulas exist in both
-# places, and the numbers they depend on are tied together by a test in polar-health
-# (tests/catalog.rs) that reads infra/config/kinds.nuon and compares it with the Rust
-# defaults, so changing one side without the other fails a build.
+#   - What the agent's code needs of its environment, which variables, what values, what must
+#     hold between them (the health actor's rejuvenation room, the probe against the tick),
+#     is the code's, so the rules are Rust. `environment_problems` runs the very function the
+#     agent runs when it starts, through `polar-config-check`, on the environment the workload
+#     will be given. There is no second copy of those rules here to drift.
+#   - What only the deployment knows is the deployment's, so it is here: the pod's termination
+#     grace period against the shutdown budget, a Kubernetes fact no agent knows.
 
-# Problems with a workload's `health` settings. `h` has tick_secs, expiry_secs,
-# rejuvenation_secs, stale_secs and jitter_window_secs.
-export def health_problems [who: string, h: record]: nothing -> list<string> {
-    mut problems: list<string> = []
+const INFRA = (path self | path dirname)
 
-    if $h.tick_secs < 1 {
-        $problems = ($problems | append $"($who): health.tick_secs must be at least 1, got ($h.tick_secs)")
-    }
-    if $h.expiry_secs <= 0 {
-        $problems = ($problems | append $"($who): health.expiry_secs must be positive, got ($h.expiry_secs)")
-    }
+# Prefixes of the variables an agent reads. The checker must see only what the workload is
+# given, so any of these set in the caller's shell are unset for the check.
+const AGENT_ENV_PREFIXES = '^(POLAR_|GRAPH_|TLS_|BROKER_|CASSINI_)'
 
-    if $h.rejuvenation_secs <= $h.expiry_secs {
-        $problems = ($problems | append $"($who): health.rejuvenation_secs \(($h.rejuvenation_secs)\) must be greater than health.expiry_secs \(($h.expiry_secs)\)")
+# The command that runs polar-config-check: the binary named by POLAR_CONFIG_CHECK if that is
+# set (a prebuilt one, in CI), otherwise `cargo run`, which rebuilds it when the code changed.
+# Not finding it is an error, never a skipped check: a check that quietly does not run is how
+# the rules drift.
+def checker []: nothing -> list<string> {
+    let explicit = ($env | get -o POLAR_CONFIG_CHECK)
+    if $explicit != null {
+        [$explicit]
     } else {
-        # A rejuvenation has to finish before the certificate reaches the hard floor.
-        # The slowest case is a tick to notice the window and check the dependencies,
-        # the longest jitter, and a tick to act on it: two ticks plus the jitter window.
-        let needed = (2 * $h.tick_secs + $h.jitter_window_secs)
-        let room = ($h.rejuvenation_secs - $h.expiry_secs)
-        if $room < $needed {
-            $problems = ($problems | append (
-                $"($who): a rejuvenation can take ($needed)s \(two ticks of ($h.tick_secs)s plus the ($h.jitter_window_secs)s jitter window\), "
-                + $"but health.rejuvenation_secs \(($h.rejuvenation_secs)\) minus health.expiry_secs \(($h.expiry_secs)\) leaves ($room)s, "
-                + "so the certificate could reach its hard expiry floor before the agent could rejuvenate"
-            ))
-        }
+        let manifest = ($INFRA | path dirname | path join "src" "agents" "Cargo.toml")
+        ["cargo" "run" "--quiet" "--manifest-path" $manifest "--package" "polar-agent-builder" "--bin" "polar-config-check" "--"]
     }
+}
 
-    # The probe must tolerate one slow tick, or it calls a healthy agent dead.
-    if $h.stale_secs <= (2 * $h.tick_secs) {
-        $problems = ($problems | append $"($who): health.stale_secs \(($h.stale_secs)\) must exceed twice health.tick_secs \(($h.tick_secs)\), or the liveness probe would call the agent dead after a single slow tick")
+# Problems with the environment a workload will be given, judged by the agent's own code.
+# `entries` is the workload's resolved `env` list; those that come from a secret have no value
+# here and are left out (none of the rules read them).
+export def environment_problems [who: string, entries: list]: nothing -> list<string> {
+    let unset = (
+        $env | columns
+        | where {|c| ($c =~ $AGENT_ENV_PREFIXES) and ($c != "POLAR_CONFIG_CHECK") }
+        | each {|n| ["-u" $n] }
+        | flatten
+    )
+    let set = ($entries | where value != null | each {|e| $"($e.name)=($e.value)" })
+    let command = (checker)
+
+    let result = (^env ...$unset ...$set ...$command | complete)
+
+    # 0: sound. 1: problems, one per stderr line. Anything else means the checker itself
+    # failed (not built, bad usage), which is not a finding about the workload.
+    if $result.exit_code == 0 {
+        []
+    } else if $result.exit_code == 1 {
+        $result.stderr
+        | lines
+        | where {|l| $l starts-with "ERROR: " }
+        | each {|l| $"($who): ($l | str replace 'ERROR: ' '')" }
+    } else {
+        error make --unspanned { msg: $"polar-config-check failed to run for ($who) \(exit ($result.exit_code)\): ($result.stderr)" }
     }
-
-    $problems
 }
 
 # Problems with a workload's `shutdown` settings. `s` has budget_secs,

@@ -17,11 +17,11 @@
 
     probe: { initial_delay_secs: 150, period_secs: 30, failure_threshold: 2, timeout_secs: 5 }
 
-    # Read by HealthCheckActor and the polar-healthcheck probe. Each number is also
-    # what the Rust side defaults to (polar-health), and the agent validates them
-    # together when it starts; `resolve.nu check` runs the same rules here, so a bad
-    # combination fails at render time instead of as a crash loop. A test in
-    # polar-health (tests/catalog.rs) fails if these drift from the Rust defaults.
+    # Read by HealthCheckActor and the polar-healthcheck probe. These become the agent's
+    # environment (POLAR_HEALTH_*), and `resolve.nu check` runs the agent's own check of
+    # that environment over every workload (polar-config-check), so a combination the agent
+    # would refuse to start on, such as no room to rejuvenate before the certificate expires,
+    # fails the render and names the variables. The rules live in the Rust code, not here.
     health: {
       dir: "/var/run/polar-health"
       volume: "polar-health"
@@ -32,10 +32,6 @@
       rejuvenation_secs: 300
       # The liveness probe fails when the health file is older than this.
       stale_secs: 90
-      # The longest random delay before a rejuvenation fires. Not set in the
-      # environment: it is a constant in polar-health, copied here so the rules can
-      # use it.
-      jitter_window_secs: 180
     }
 
     # How long the agent has to drain once told to shut down. The agent builder

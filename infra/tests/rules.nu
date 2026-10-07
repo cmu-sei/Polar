@@ -7,22 +7,12 @@
 #
 #   nu infra/tests/rules.nu
 #
-# The rules mirror the checks the Rust side makes when an agent starts
-# (polar-health HealthConfig::validate), so a bad combination fails at render time
-# instead of as a crash loop. Where a case below is an exact boundary, it is the same
-# boundary the Rust tests pin.
+# The health rules are not here: they are Rust, and `environment_problems` runs the very
+# function the agent runs when it starts, through polar-config-check. What is here is what
+# only the deployment knows: the grace period against the budget.
 
 use std/assert
 use ../rules.nu *
-
-# The settings every agent gets today, which the Rust defaults match.
-const GOOD_HEALTH = {
-    tick_secs: 30
-    expiry_secs: 60
-    rejuvenation_secs: 300
-    stale_secs: 90
-    jitter_window_secs: 180
-}
 
 const GOOD_SHUTDOWN = { budget_secs: 20, grace_margin_secs: 10, termination_grace_secs: 30 }
 
@@ -32,58 +22,48 @@ def has [problems: list<string>, needle: string] {
 
 def main [] {
     let tests = {
-        "the defaults have no health problems": {
-            assert equal (health_problems "w" $GOOD_HEALTH) []
+        "a workload's real environment passes the real checker": {
+            let entries = [
+                { name: "POLAR_CAPABILITIES", value: "cassini,graph-write" }
+                { name: "POLAR_SHUTDOWN_BUDGET_SECS", value: "45" }
+                { name: "POLAR_HEALTH_TICK_SECS", value: "30" }
+                { name: "POLAR_HEALTH_REJUVENATION_SECS", value: "300" }
+            ]
+            assert equal (environment_problems "w" $entries) []
         }
 
-        "a zero tick is a problem": {
-            let p = (health_problems "w" ($GOOD_HEALTH | update tick_secs 0))
-            assert (has $p "health.tick_secs must be at least 1")
-        }
-
-        "expiry must be positive": {
-            let p = (health_problems "w" ($GOOD_HEALTH | update expiry_secs 0))
-            assert (has $p "health.expiry_secs must be positive")
-        }
-
-        "rejuvenation must exceed expiry": {
-            let p = (health_problems "w" ($GOOD_HEALTH | update rejuvenation_secs 60))
-            assert (has $p "must be greater than health.expiry_secs")
-        }
-
-        "when the order is wrong the room is not reported as well": {
-            let p = (health_problems "w" ($GOOD_HEALTH | update rejuvenation_secs 60))
-            assert equal ($p | length) 1
-        }
-
-        "a rejuvenation needs room for two ticks and the jitter window, exactly": {
-            # 2 x 30 + 180 = 240, and 300 - 60 is 240: it fits, with nothing to spare.
-            assert equal (health_problems "w" $GOOD_HEALTH) []
-            let p = (health_problems "w" ($GOOD_HEALTH | update rejuvenation_secs 299))
-            assert (has $p "hard expiry floor")
-            assert (has $p "240s")
-        }
-
-        "a longer tick needs more room": {
-            assert (health_problems "w" ($GOOD_HEALTH | update tick_secs 31) | is-not-empty)
-            let ok = ($GOOD_HEALTH | update tick_secs 31 | update rejuvenation_secs 302 | update stale_secs 90)
-            assert equal (health_problems "w" $ok) []
-        }
-
-        "the probe must tolerate a missed tick": {
-            let p = (health_problems "w" ($GOOD_HEALTH | update stale_secs 60))
-            assert (has $p "health.stale_secs (60) must exceed twice health.tick_secs (30)")
-            assert equal (health_problems "w" ($GOOD_HEALTH | update stale_secs 61)) []
-        }
-
-        "every problem names the workload": {
-            let p = (health_problems "kube-consumer" ($GOOD_HEALTH | update tick_secs 0))
+        "a bad environment fails, and each problem names the workload": {
+            let entries = [
+                { name: "POLAR_SHUTDOWN_BUDGET_SECS", value: "0" }
+                { name: "POLAR_HEALTH_TICK_SECS", value: "soon" }
+            ]
+            let p = (environment_problems "kube-consumer" $entries)
+            assert equal ($p | length) 2
             assert ($p | all {|x| $x | str starts-with "kube-consumer: " })
+            assert (has $p "POLAR_SHUTDOWN_BUDGET_SECS")
+            assert (has $p "POLAR_HEALTH_TICK_SECS")
         }
 
-        "several problems are all reported": {
-            let p = (health_problems "w" ($GOOD_HEALTH | update tick_secs 0 | update expiry_secs 0))
-            assert (($p | length) >= 2)
+        "a relation between variables is caught, with the variables named": {
+            let p = (environment_problems "w" [{ name: "POLAR_HEALTH_REJUVENATION_SECS", value: "250" }])
+            assert equal ($p | length) 1
+            assert (has $p "POLAR_HEALTH_REJUVENATION_SECS")
+            assert (has $p "hard expiry floor")
+        }
+
+        "entries that come from a secret are skipped, not passed as empty": {
+            let entries = [
+                { name: "GRAPH_PASSWORD", value: null, secret: "polar-graph-pw", key: "secret" }
+                { name: "POLAR_HEALTH_TICK_SECS", value: "30" }
+            ]
+            assert equal (environment_problems "w" $entries) []
+        }
+
+        "the caller's own environment does not leak into the check": {
+            # The shell running the tests may have these set; the check must not see them.
+            with-env { POLAR_HEALTH_TICK_SECS: "soon", POLAR_SHUTDOWN_BUDGET_SECS: "0" } {
+                assert equal (environment_problems "w" []) []
+            }
         }
 
         "the default shutdown settings have no problems": {

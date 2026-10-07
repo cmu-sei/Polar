@@ -444,18 +444,31 @@ much the deployment provides (`shutdown.budget_secs`):
 
 | Where | When | What it does |
 |---|---|---|
-| `resolve.nu check`, running `infra/rules.nu` | render time | a workload's health and shutdown settings must be consistent: tick at least 1 s; rejuvenation greater than expiry; room between them for two ticks plus the jitter window; the probe stale limit above twice the tick; the grace period above the budget. Each failure names the workload and both numbers |
-| `AgentBuilder::build()` | agent startup | `POLAR_SHUTDOWN_BUDGET_SECS` must be at least what the code declared, else it exits non-zero naming both numbers. The deployment may give more, never less |
-| `tests/catalog.rs` in `polar-agent-builder` | build time | the numbers the catalog and the Rust code share (tick, expiry, rejuvenation, stale limit, jitter window, default budget) must be equal, so changing one side alone fails a build |
+| `resolve.nu check`, running `polar-config-check` | render time | the environment each workload will be given is judged by the agent's own check, the same function the agent runs when it starts: every variable the agent reads must parse, and what must hold between them must hold (room to rejuvenate before the certificate expires, the probe's stale limit above twice the tick, ...). Each problem names the workload, the variable and what it is for |
+| `resolve.nu check`, running `infra/rules.nu` | render time | what only the deployment knows: the pod's termination grace period must exceed the shutdown budget |
+| `AgentBuilder::build()` | agent startup | the whole environment is checked first (the same function), and `POLAR_SHUTDOWN_BUDGET_SECS` must be at least what the code declared, else it exits non-zero naming both numbers. The deployment may give more, never less |
 
 So raising a number is a catalog change. Lowering what the code needs is a change to the
-code, which someone has to review. The Nushell rules mirror the checks the agent makes
-itself when it starts (`polar-health`'s `HealthConfig::validate`); they do not share them,
-and the agent's own check remains the authority. They exist to fail at render time, naming
-the cause, instead of as a crash loop. The test above ties the numbers they depend on to
-the Rust defaults, not the formulas.
+code, which someone has to review.
 
-Run the catalog's tests with `nu infra/tests/rules.nu` and `nu infra/tests/resolve.nu`.
+**Whoever owns a fact owns the rule about it.** What the agent's code needs of its
+environment is the code's, so those rules are Rust and are not repeated in Nushell:
+`resolve.nu check` runs `polar-config-check`, a small program in `polar-agent-builder` that
+reads the environment a workload will be given and calls `environment::check_environment`,
+the function `build()` calls. Change a rule or a constant in the Rust and the render check
+changes with it, with no second copy to update. What only the deployment knows (the grace
+period against the budget) is here, in `infra/rules.nu`.
+
+Each variable is declared once, with `polar-env`: name, type, default, what it is for, and
+whether it is secret. The check, the agent's own reads and the documentation all come from
+that declaration. `polar-config-check --describe` lists every variable the agent reads,
+by section.
+
+`resolve.nu check` runs the checker with `cargo run`, which rebuilds it when the code has
+changed. Set `POLAR_CONFIG_CHECK` to the path of a prebuilt binary to skip that (for CI).
+The checker not being found or failing is an error, never a skipped check.
+
+Run the catalog's tests with `nu infra/tests/rules.nu` and `nu infra/tests/resolve.nu`; the checker's own tests are `cargo test -p polar-agent-builder`.
 
 In Rust an agent declares what its own code needs:
 
