@@ -211,7 +211,22 @@ impl<M: ractor::Message> AgentBuilder<M> {
         self
     }
 
-    pub async fn build(self) -> Result<AgentResources, ActorProcessingErr> {
+    /// Reads and judges the environment, and spawns nothing.
+    ///
+    /// This is the first half of [`build`](Self::build). Take it first when the domain
+    /// supervisor needs its own settings (from [`ConfiguredAgent::config`]) before it starts
+    /// the actors that use them, and spawn the infrastructure afterwards with
+    /// [`ConfiguredAgent::build`]. An unsound environment fails here, with every problem, before
+    /// anything has been started.
+    pub fn configure(self) -> Result<ConfiguredAgent<M>, ActorProcessingErr> {
+        self.configure_from(&polar_env::ProcessEnv)
+    }
+
+    /// As [`configure`](Self::configure), reading `env`.
+    pub(crate) fn configure_from(
+        self,
+        env: &dyn polar_env::Env,
+    ) -> Result<ConfiguredAgent<M>, ActorProcessingErr> {
         // Every agent built here is a Cassini client; the rest are what its own code
         // declared.
         let mut required = self.requires.clone();
@@ -219,16 +234,46 @@ impl<M: ractor::Message> AgentBuilder<M> {
             required.insert(0, Capability::Cassini);
         }
 
-        // One snapshot of the process environment, judged as a whole before anything else
-        // happens. Everything after this reads the snapshot.
-        let startup = startup::prepare(
-            &polar_env::ProcessEnv,
-            &self.environment,
-            &required,
-            self.shutdown_budget,
-        )
-        .map_err(ActorProcessingErr::from)?;
+        // One snapshot of the environment, judged as a whole before anything else happens.
+        // Everything after this reads the snapshot.
+        let startup = startup::prepare(env, &self.environment, &required, self.shutdown_budget)
+            .map_err(ActorProcessingErr::from)?;
 
+        Ok(ConfiguredAgent {
+            builder: self,
+            startup,
+        })
+    }
+
+    /// Reads the environment and spawns the infrastructure: [`configure`](Self::configure)
+    /// then [`ConfiguredAgent::build`].
+    pub async fn build(self) -> Result<AgentResources, ActorProcessingErr> {
+        self.configure()?.build().await
+    }
+}
+
+/// An agent whose environment has been read and judged, and whose infrastructure is not yet
+/// spawned. From [`AgentBuilder::configure`].
+pub struct ConfiguredAgent<M: ractor::Message> {
+    builder: AgentBuilder<M>,
+    startup: startup::Startup,
+}
+
+impl<M: ractor::Message> ConfiguredAgent<M> {
+    /// The snapshot the infrastructure will run on. Read the agent's own settings from it
+    /// with `config.read(&VAR)`, or parse a component's settings with its own
+    /// `from_env(&*config)`.
+    pub fn config(&self) -> &Arc<polar_env::Config> {
+        &self.startup.config
+    }
+
+    /// Spawns the infrastructure: the health check, the router, the subscriptions and the
+    /// Cassini client, on the snapshot taken when this was configured.
+    pub async fn build(self) -> Result<AgentResources, ActorProcessingErr> {
+        let ConfiguredAgent {
+            builder: this,
+            startup,
+        } = self;
         let health_check_args = HealthCheckArgs::new(
             startup.health.expects_graph,
             startup.health.rejuvenation_threshold_secs,
@@ -236,7 +281,7 @@ impl<M: ractor::Message> AgentBuilder<M> {
         )
         .with_config(startup.health);
 
-        let myself_cell = self.myself.get_cell();
+        let myself_cell = this.myself.get_cell();
 
         // The real, entire, foundational subtree -- HealthCheckActor,
         // RouterActor, this agent's own subscriptions, TcpClient, and
@@ -247,11 +292,11 @@ impl<M: ractor::Message> AgentBuilder<M> {
             None,
             InfrastructureSupervisor,
             infrastructure::InfrastructureSupervisorArgs {
-                service_name: self.service_name.clone(),
+                service_name: this.service_name.clone(),
                 health_check_args,
                 config: startup.config,
-                subscriptions: self.subscriptions,
-                wants_crypto: self.wants_crypto,
+                subscriptions: this.subscriptions,
+                wants_crypto: this.wants_crypto,
                 shutdown_budget: startup.shutdown_budget,
                 listen_for_signals: true,
                 process_exit: shutdown::real_process_exit(),
@@ -273,12 +318,12 @@ impl<M: ractor::Message> AgentBuilder<M> {
         // other real port in this codebase already uses (matching
         // TcpClient::spawn_with_router's own, previous, direct
         // parameter exactly, just one real layer removed now).
-        let map_lifecycle_event = self
+        let map_lifecycle_event = this
             .map_lifecycle_event
             .unwrap_or_else(|| Box::new(|_event| None));
         resources
             .events_output
-            .subscribe(self.myself, move |event| map_lifecycle_event(event));
+            .subscribe(this.myself, move |event| map_lifecycle_event(event));
 
         Ok(resources)
     }
@@ -346,6 +391,7 @@ pub(crate) fn build_lifecycle_handler<M: ractor::Message>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use polar_env::Env;
     use ractor::{Actor, async_trait};
     use std::sync::{Arc, Mutex};
 
@@ -508,5 +554,73 @@ mod tests {
             result,
             Some(FakeMessage::Forwarded("still-works".to_string()))
         );
+    }
+
+    // -- configuring is reading the environment, and spawns nothing --------------------
+
+    struct Idle;
+
+    #[async_trait]
+    impl Actor for Idle {
+        type Msg = FakeMessage;
+        type State = ();
+        type Arguments = ();
+
+        async fn pre_start(
+            &self,
+            _myself: ActorRef<Self::Msg>,
+            _args: (),
+        ) -> Result<Self::State, ActorProcessingErr> {
+            Ok(())
+        }
+    }
+
+    fn map(pairs: &[(&str, &str)]) -> std::collections::HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn configuring_takes_the_snapshot_before_anything_is_spawned() {
+        let (idle, _) = Actor::spawn(None, Idle, ()).await.unwrap();
+        let env = map(environment::fixtures::CASSINI_ENV);
+        let configured = AgentBuilder::new(idle, "configure-test")
+            .configure_from(&env)
+            .unwrap();
+
+        // The snapshot is there to read, so a domain supervisor can take its own settings
+        // from it before it starts the actors that need them.
+        assert_eq!(
+            configured.config().var("BROKER_ADDR").as_deref(),
+            Some("cassini:8080")
+        );
+        // Nothing was spawned: the client's name is not registered.
+        assert!(ractor::registry::where_is("configure-test.tcp".to_string()).is_none());
+    }
+
+    #[tokio::test]
+    async fn configuring_refuses_an_unsound_environment_with_every_problem() {
+        let (idle, _) = Actor::spawn(None, Idle, ()).await.unwrap();
+        let error = AgentBuilder::new(idle, "configure-bad")
+            .configure_from(&map(&[("POLAR_HEALTH_TICK_SECS", "soon")]))
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(error.contains("POLAR_HEALTH_TICK_SECS"), "{error}");
+        assert!(error.contains("BROKER_ADDR"), "the client's too: {error}");
+    }
+
+    #[tokio::test]
+    async fn what_the_agent_declares_is_judged_when_configuring() {
+        let (idle, _) = Actor::spawn(None, Idle, ()).await.unwrap();
+        let error = AgentBuilder::new(idle, "configure-graph")
+            .with_graph_write()
+            .configure_from(&map(environment::fixtures::CASSINI_ENV))
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(error.contains("GRAPH_ENDPOINT"), "{error}");
     }
 }
