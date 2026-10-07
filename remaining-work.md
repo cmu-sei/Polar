@@ -42,7 +42,7 @@ Design: `docs/architecture/health-and-shutdown.md` (Target sections). Scope: age
   - Actor-owned Cassini disconnect deadline (`POLAR_HEALTH_CASSINI_DEADLINE_SECS`, default 60 s, tuned later with the Cassini pair)
   - Dependency checks: connect timeout, run concurrently, and do not block the tick (shared with `polar-init`'s `wait_for_dep_certs`, which calls the same blocking `check_ttl`)
   - Startup consistency check: tick < stale threshold, rejuvenation > expiry, jitter window fits between rejuvenation and expiry; fail fast on a bad combination
-- [ ] S3 Infrastructure supervisor shutdown pipeline (`polar-agent-builder/src/infrastructure.rs`)
+- [x] S3 Infrastructure supervisor shutdown pipeline, done 2026-10-07 (b651e3a, 8bcfc22 and the per-agent budgets that follow it; 52 tests in `polar-agent-builder`, 34 of them new, the supervisor having had none). Not as planned: the decisions are pure functions in `shutdown.rs` and the Cassini client is made through a small spawner trait so tests need no broker; the watchdog is a detached task, not a message to the supervisor; a `virtual-time` feature on `polar-health` lets the builder's tests run the health actor on paused time; and each of the six agents declares its own shutdown budget now (pulled forward from S5, because every one of their drains can exceed the 20 s default and S3 is what bounds them). Not done: a respawn storm guard for a Cassini client that keeps dying and being replaced (today it is replaced without limit, as before)
   - `begin_shutdown(reason)` funnel with explicit state (`Running`, `Draining{deadline}`, `Stopping`), idempotent, logs the reason; every existing exit path routes through it
   - Accept `HealthVerdict`; unexpected death of the health actor, router or crypto actor, or a non-recoverable Cassini client failure, becomes `begin_shutdown`. Keep today's TCP client respawn (`Respawned`) for recoverable deaths
   - In-process watchdog: the supervisor exits 1 if `ProceedWithShutdown` does not arrive within the shutdown budget (default 20 s; a domain supervisor can declare a larger one, the consumer needs about 50 s); bounded stop for each infrastructure child
@@ -54,7 +54,7 @@ Design: `docs/architecture/health-and-shutdown.md` (Target sections). Scope: age
 - [ ] S5 Catalog and charts
   - `terminationGracePeriodSeconds` in the catalog and `agent.dhall`, derived from the declared shutdown budget plus a margin; the same value reaches the builder as `POLAR_SHUTDOWN_BUDGET_SECS`; the two hand-written credentials charts get it directly until they move to the catalog
   - `resolve.nu check` rules: grace period above the budget, and the existing rejuvenation > expiry rule
-  - Consumer declares its budget (5 s drain + 10 s ledger + 30 s projection, about 45 s, so grace 60 s)
+  - (Done in S3's follow-up: every agent declares its budget.) The catalog still has to carry the budget, so `terminationGracePeriodSeconds` is derived from it plus a margin: credentials consumer 50 s so grace 65 s, the others in the same way
 - [ ] S6 Cluster verification (needs David's go-ahead before any cluster change)
   - Natural-length jitter on credentials observer and consumer, kube observer and consumer: previous pod exit code is 1 with a logged reason, never 137 (`lastState.terminated.exitCode`)
   - `kubectl delete pod` runs the full drain and exits 1 within the grace period; SIGSTOP on PID 1 is still killed by the probe (the wedge case, 137 is expected there)
