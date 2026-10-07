@@ -191,16 +191,8 @@ impl HealthState {
         }
     }
 
-    /// Write the health state atomically to the configured path.
+    /// Write the health state atomically to `path`.
     /// Uses a tmp file + rename to avoid partial reads by the healthcheck binary.
-    pub fn write(&self) -> Result<(), String> {
-        let path = vars::FILE
-            .read(&polar_env::ProcessEnv)
-            .unwrap_or_else(|_| POLAR_HEALTH_FILE_DEFAULT.to_string());
-        self.write_to(&path)
-    }
-
-    /// As [`write`](Self::write), to `path`.
     pub fn write_to(&self, path: &str) -> Result<(), String> {
         let json = serde_json::to_string(self)
             .map_err(|e| format!("failed to serialize health state: {e}"))?;
@@ -562,7 +554,13 @@ pub enum HealthCheckMessage {
 // HealthCheckArgs
 // ---------------------------------------------------------------------------
 
+/// What the health actor is started with.
+///
+/// Built with [`new`](Self::new) and the `with_` methods, never as a literal, so a field
+/// added later does not touch every agent that starts one (the struct is
+/// `non_exhaustive` to keep it so).
 #[derive(Clone)]
+#[non_exhaustive]
 pub struct HealthCheckArgs {
     /// Does this agent connect to a graph database?
     pub expects_graph: bool,
@@ -581,6 +579,42 @@ pub struct HealthCheckArgs {
     /// ends itself instead (fails on a hard deadline, stops for rejuvenation),
     /// which is what agents that do not use the builder rely on.
     pub verdict_to: Option<Arc<OutputPort<HealthVerdict>>>,
+
+    /// The settings, already parsed. The builder supplies them from the one snapshot of
+    /// the environment it took, so the actor never reads the process.
+    ///
+    /// `None` is for agents not yet on the builder: the actor then reads the process
+    /// environment itself, as it always did. That path goes when the last of them moves.
+    pub config: Option<HealthConfig>,
+}
+
+impl HealthCheckArgs {
+    /// The three things an agent knows about itself; everything else is configuration.
+    pub fn new(
+        expects_graph: bool,
+        rejuvenation_threshold_secs: i64,
+        dep_cert_endpoints: Vec<DepCertEndpoint>,
+    ) -> Self {
+        Self {
+            expects_graph,
+            rejuvenation_threshold_secs,
+            dep_cert_endpoints,
+            verdict_to: None,
+            config: None,
+        }
+    }
+
+    /// Send the verdict here and keep the actor alive, instead of ending it.
+    pub fn with_verdict_to(mut self, port: Arc<OutputPort<HealthVerdict>>) -> Self {
+        self.verdict_to = Some(port);
+        self
+    }
+
+    /// Start on these settings, without reading the process environment.
+    pub fn with_config(mut self, config: HealthConfig) -> Self {
+        self.config = Some(config);
+        self
+    }
 }
 
 impl std::fmt::Debug for HealthCheckArgs {
@@ -593,6 +627,7 @@ impl std::fmt::Debug for HealthCheckArgs {
             )
             .field("dep_cert_endpoints", &self.dep_cert_endpoints)
             .field("verdict_to", &self.verdict_to.is_some())
+            .field("config", &self.config)
             .finish()
     }
 }
@@ -684,7 +719,7 @@ fn schedule_tick(myself: &ActorRef<HealthCheckMessage>, tick_secs: u64) {
 /// pod without a word of explanation; after enough failures in a row the actor
 /// gives a verdict instead, with the reason. Returns that verdict, if so.
 fn persist(state: &mut HealthCheckActorState, health: &HealthState) -> Option<HealthVerdict> {
-    let result = health.write();
+    let result = health.write_to(&state.config.file_path);
     if let Err(reason) = &result {
         tracing::warn!("healthcheck: {reason}");
     }
@@ -757,7 +792,13 @@ impl Actor for HealthCheckActor {
         args: HealthCheckArgs,
     ) -> Result<Self::State, ActorProcessingErr> {
         let verdict_to = args.verdict_to.clone();
-        let config = HealthConfig::load(args).map_err(ActorProcessingErr::from)?;
+        let config = match args.config {
+            Some(config) => {
+                config.validate().map_err(ActorProcessingErr::from)?;
+                config
+            }
+            None => HealthConfig::load(args).map_err(ActorProcessingErr::from)?,
+        };
         let machine = HealthMachine::new(&config, HealthState::now());
         // The one tick chain. It runs from startup, so the hard deadlines and the
         // health file do not wait for Cassini to connect.
@@ -915,56 +956,21 @@ mod tests {
 
     // -- the whole actor ----------------------------------------------------
     //
-    // These go through the real actor, real files and real (1 s) ticks, so they
-    // keep passing unchanged across the refactor. The actor reads its settings
-    // from the process environment, so they run one at a time.
+    // These go through the real actor, real files and real (1 s) ticks. The actor is
+    // handed its settings parsed, as the builder hands them, and never reads the process
+    // environment, so they can run side by side.
 
-    static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
-    /// Removes every health variable, whatever settings exist today or are added
-    /// later, so one test's environment cannot leak into the next.
-    fn clear_health_env() {
-        let names: Vec<String> = std::env::vars()
-            .map(|(name, _)| name)
-            .filter(|name| name.starts_with("POLAR_HEALTH_"))
+    /// The settings the builder would hand over for these variables.
+    fn health_config(vars: &[(&str, &str)]) -> HealthConfig {
+        let map: std::collections::HashMap<String, String> = vars
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect();
-        // SAFETY: callers hold ENV_LOCK, and no other test reads these.
-        unsafe {
-            for name in names {
-                std::env::remove_var(name);
-            }
-        }
-    }
-
-    /// Clears every health variable, applies `vars`, and clears them again on drop.
-    struct EnvGuard;
-
-    impl EnvGuard {
-        fn set(vars: &[(&str, &str)]) -> Self {
-            clear_health_env();
-            // SAFETY: callers hold ENV_LOCK, and no other test reads these.
-            unsafe {
-                for (name, value) in vars {
-                    std::env::set_var(name, value);
-                }
-            }
-            EnvGuard
-        }
-    }
-
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            clear_health_env();
-        }
+        HealthConfig::from_env(HealthCheckArgs::new(false, 300, vec![]), &map).unwrap()
     }
 
     fn args() -> HealthCheckArgs {
-        HealthCheckArgs {
-            expects_graph: false,
-            rejuvenation_threshold_secs: 300,
-            dep_cert_endpoints: vec![],
-            verdict_to: None,
-        }
+        HealthCheckArgs::new(false, 300, vec![]).with_config(health_config(&[]))
     }
 
     fn read_state(path: &std::path::Path) -> Option<HealthState> {
@@ -1002,17 +1008,18 @@ mod tests {
 
     #[tokio::test]
     async fn actor_reports_healthy_then_unhealthy_when_cassini_drops() {
-        let _lock = ENV_LOCK.lock().await;
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("health.json");
         let cert = cert_file(&dir, "agent.pem", 3600);
-        let _env = EnvGuard::set(&[
+        let config = health_config(&[
             (POLAR_HEALTH_FILE_ENV, file.to_str().unwrap()),
             (POLAR_HEALTH_CERTS_ENV, &cert),
             (POLAR_HEALTH_TICK_SECS_ENV, "1"),
         ]);
 
-        let (actor, handle) = Actor::spawn(None, HealthCheckActor, args()).await.unwrap();
+        let (actor, handle) = Actor::spawn(None, HealthCheckActor, args().with_config(config))
+            .await
+            .unwrap();
 
         // Nothing is written until Cassini connects: the tick chain starts there.
         actor.cast(HealthCheckMessage::CassiniConnected).unwrap();
@@ -1034,17 +1041,18 @@ mod tests {
 
     #[tokio::test]
     async fn actor_fails_and_writes_unhealthy_when_its_cert_is_inside_the_hard_threshold() {
-        let _lock = ENV_LOCK.lock().await;
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("health.json");
         let cert = cert_file(&dir, "agent.pem", 20);
-        let _env = EnvGuard::set(&[
+        let config = health_config(&[
             (POLAR_HEALTH_FILE_ENV, file.to_str().unwrap()),
             (POLAR_HEALTH_CERTS_ENV, &cert),
             (POLAR_HEALTH_TICK_SECS_ENV, "1"),
         ]);
 
-        let (actor, handle) = Actor::spawn(None, HealthCheckActor, args()).await.unwrap();
+        let (actor, handle) = Actor::spawn(None, HealthCheckActor, args().with_config(config))
+            .await
+            .unwrap();
         actor.cast(HealthCheckMessage::CassiniConnected).unwrap();
 
         wait_for_state(&file, "unhealthy after the cert deadline", |s| {
@@ -1057,33 +1065,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn actor_refuses_to_start_when_rejuvenation_is_not_above_expiry() {
-        let _lock = ENV_LOCK.lock().await;
-        let _env = EnvGuard::set(&[
-            (POLAR_HEALTH_EXPIRY_SECS_ENV, "60"),
-            (POLAR_HEALTH_REJUVENATION_SECS_ENV, "60"),
-        ]);
-        assert!(Actor::spawn(None, HealthCheckActor, args()).await.is_err());
-    }
-
-    #[tokio::test]
-    async fn actor_refuses_to_start_on_a_malformed_dependency_endpoint() {
-        let _lock = ENV_LOCK.lock().await;
-        let _env = EnvGuard::set(&[(POLAR_HEALTH_DEP_ENDPOINTS_ENV, "not-an-endpoint")]);
-        assert!(Actor::spawn(None, HealthCheckActor, args()).await.is_err());
-    }
-
-    #[tokio::test]
-    async fn actor_starts_when_dependency_endpoints_come_from_both_env_and_args() {
-        let _lock = ENV_LOCK.lock().await;
-        let _env = EnvGuard::set(&[(POLAR_HEALTH_DEP_ENDPOINTS_ENV, "a.example:443:300")]);
-        let mut a = args();
-        a.dep_cert_endpoints = vec![DepCertEndpoint::parse("b.example:443:300").unwrap()];
-        // Starts fine; the precedence itself is pinned in the config tests once
-        // the settings live in HealthConfig.
-        let (actor, handle) = Actor::spawn(None, HealthCheckActor, a).await.unwrap();
-        actor.stop(None);
-        handle.await.unwrap();
+    async fn actor_refuses_to_start_on_settings_that_contradict_each_other() {
+        // The parsing and the rules are tested on HealthConfig. What is pinned here is
+        // that an actor handed settings that were built some other way (the fields are
+        // public) still will not run on a state its own startup check refuses.
+        let mut config = health_config(&[]);
+        config.rejuvenation_threshold_secs = config.expiry_threshold_secs;
+        let refused = Actor::spawn(None, HealthCheckActor, args().with_config(config)).await;
+        assert!(refused.is_err());
     }
 
     // -- the tick chain ---------------------------------------------------------
@@ -1093,12 +1082,13 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn ticks_run_from_startup_without_waiting_for_cassini() {
-        let _lock = ENV_LOCK.lock().await;
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("health.json");
-        let _env = EnvGuard::set(&[(POLAR_HEALTH_FILE_ENV, file.to_str().unwrap())]);
+        let config = health_config(&[(POLAR_HEALTH_FILE_ENV, file.to_str().unwrap())]);
 
-        let (actor, handle) = Actor::spawn(None, HealthCheckActor, args()).await.unwrap();
+        let (actor, handle) = Actor::spawn(None, HealthCheckActor, args().with_config(config))
+            .await
+            .unwrap();
         assert!(
             read_state(&file).is_none(),
             "nothing is written before a tick"
@@ -1121,12 +1111,13 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn a_disconnect_is_written_without_waiting_out_a_tick_period() {
-        let _lock = ENV_LOCK.lock().await;
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("health.json");
-        let _env = EnvGuard::set(&[(POLAR_HEALTH_FILE_ENV, file.to_str().unwrap())]);
+        let config = health_config(&[(POLAR_HEALTH_FILE_ENV, file.to_str().unwrap())]);
 
-        let (actor, handle) = Actor::spawn(None, HealthCheckActor, args()).await.unwrap();
+        let (actor, handle) = Actor::spawn(None, HealthCheckActor, args().with_config(config))
+            .await
+            .unwrap();
         actor.cast(HealthCheckMessage::CassiniConnected).unwrap();
         actor.cast(HealthCheckMessage::CassiniDisconnected).unwrap();
 
@@ -1154,13 +1145,14 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn an_actor_that_cannot_write_its_file_reports_itself_unhealthy() {
-        let _lock = ENV_LOCK.lock().await;
         let dir = tempfile::tempdir().unwrap();
         // The directory does not exist, so every write fails.
         let file = dir.path().join("no-such-dir").join("health.json");
-        let _env = EnvGuard::set(&[(POLAR_HEALTH_FILE_ENV, file.to_str().unwrap())]);
+        let config = health_config(&[(POLAR_HEALTH_FILE_ENV, file.to_str().unwrap())]);
 
-        let (actor, handle) = Actor::spawn(None, HealthCheckActor, args()).await.unwrap();
+        let (actor, handle) = Actor::spawn(None, HealthCheckActor, args().with_config(config))
+            .await
+            .unwrap();
         actor.cast(HealthCheckMessage::CassiniConnected).unwrap();
 
         // Three failed ticks at 30 s, so well inside five periods.
@@ -1173,12 +1165,13 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn occasional_write_failures_do_not_end_the_actor() {
-        let _lock = ENV_LOCK.lock().await;
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("health.json");
-        let _env = EnvGuard::set(&[(POLAR_HEALTH_FILE_ENV, file.to_str().unwrap())]);
+        let config = health_config(&[(POLAR_HEALTH_FILE_ENV, file.to_str().unwrap())]);
 
-        let (actor, handle) = Actor::spawn(None, HealthCheckActor, args()).await.unwrap();
+        let (actor, handle) = Actor::spawn(None, HealthCheckActor, args().with_config(config))
+            .await
+            .unwrap();
         actor.cast(HealthCheckMessage::CassiniConnected).unwrap();
         // A directory where the temp file should go makes that write fail once.
         let tmp = format!("{}.tmp", file.display());
@@ -1224,7 +1217,9 @@ mod tests {
     }
 
     /// Args whose verdicts go to a collector, and the list it fills.
-    async fn args_with_verdicts() -> (
+    async fn args_with_verdicts(
+        config: HealthConfig,
+    ) -> (
         HealthCheckArgs,
         Arc<std::sync::Mutex<Vec<HealthVerdict>>>,
         ActorRef<HealthVerdict>,
@@ -1233,23 +1228,21 @@ mod tests {
         let (collector, _) = Actor::spawn(None, Collector, seen.clone()).await.unwrap();
         let port = Arc::new(OutputPort::default());
         port.subscribe(collector.clone(), Some);
-        let mut a = args();
-        a.verdict_to = Some(port);
+        let a = args().with_config(config).with_verdict_to(port);
         (a, seen, collector)
     }
 
     #[tokio::test(start_paused = true)]
     async fn a_hard_deadline_becomes_a_verdict_and_the_actor_stays_alive() {
-        let _lock = ENV_LOCK.lock().await;
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("health.json");
         let cert = cert_file(&dir, "agent.pem", 20);
-        let _env = EnvGuard::set(&[
+        let config = health_config(&[
             (POLAR_HEALTH_FILE_ENV, file.to_str().unwrap()),
             (POLAR_HEALTH_CERTS_ENV, &cert),
         ]);
 
-        let (a, seen, _collector) = args_with_verdicts().await;
+        let (a, seen, _collector) = args_with_verdicts(config).await;
         let (actor, handle) = Actor::spawn(None, HealthCheckActor, a).await.unwrap();
 
         let first = wait_for_state_within(
@@ -1279,18 +1272,17 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn a_rejuvenation_becomes_a_verdict_and_the_actor_stays_alive() {
-        let _lock = ENV_LOCK.lock().await;
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("health.json");
         let cert = cert_file(&dir, "agent.pem", 3600);
-        let _env = EnvGuard::set(&[
+        let config = health_config(&[
             (POLAR_HEALTH_FILE_ENV, file.to_str().unwrap()),
             (POLAR_HEALTH_CERTS_ENV, &cert),
             // Rejuvenate as soon as the cert is under two hours from expiry.
             (POLAR_HEALTH_REJUVENATION_SECS_ENV, "7200"),
         ]);
 
-        let (a, seen, _collector) = args_with_verdicts().await;
+        let (a, seen, _collector) = args_with_verdicts(config).await;
         let (actor, handle) = Actor::spawn(None, HealthCheckActor, a).await.unwrap();
         actor.cast(HealthCheckMessage::CassiniConnected).unwrap();
 
@@ -1315,12 +1307,11 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn an_unwritable_file_becomes_a_verdict_and_the_actor_stays_alive() {
-        let _lock = ENV_LOCK.lock().await;
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("no-such-dir").join("health.json");
-        let _env = EnvGuard::set(&[(POLAR_HEALTH_FILE_ENV, file.to_str().unwrap())]);
+        let config = health_config(&[(POLAR_HEALTH_FILE_ENV, file.to_str().unwrap())]);
 
-        let (a, seen, _collector) = args_with_verdicts().await;
+        let (a, seen, _collector) = args_with_verdicts(config).await;
         let (actor, handle) = Actor::spawn(None, HealthCheckActor, a).await.unwrap();
         actor.cast(HealthCheckMessage::CassiniConnected).unwrap();
         tokio::time::sleep(Duration::from_secs(200)).await;
@@ -1338,17 +1329,18 @@ mod tests {
     async fn without_a_recipient_a_rejuvenation_still_stops_the_actor() {
         // Agents that have not moved to the builder pass no recipient, and rely on
         // the actor ending itself.
-        let _lock = ENV_LOCK.lock().await;
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("health.json");
         let cert = cert_file(&dir, "agent.pem", 3600);
-        let _env = EnvGuard::set(&[
+        let config = health_config(&[
             (POLAR_HEALTH_FILE_ENV, file.to_str().unwrap()),
             (POLAR_HEALTH_CERTS_ENV, &cert),
             (POLAR_HEALTH_REJUVENATION_SECS_ENV, "7200"),
         ]);
 
-        let (actor, handle) = Actor::spawn(None, HealthCheckActor, args()).await.unwrap();
+        let (actor, handle) = Actor::spawn(None, HealthCheckActor, args().with_config(config))
+            .await
+            .unwrap();
         actor.cast(HealthCheckMessage::CassiniConnected).unwrap();
         let ended = tokio::time::timeout(Duration::from_secs(600), handle).await;
         assert!(ended.is_ok(), "the actor never stopped for rejuvenation");
@@ -1358,12 +1350,11 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn losing_cassini_for_too_long_becomes_a_verdict() {
-        let _lock = ENV_LOCK.lock().await;
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("health.json");
-        let _env = EnvGuard::set(&[(POLAR_HEALTH_FILE_ENV, file.to_str().unwrap())]);
+        let config = health_config(&[(POLAR_HEALTH_FILE_ENV, file.to_str().unwrap())]);
 
-        let (a, seen, _collector) = args_with_verdicts().await;
+        let (a, seen, _collector) = args_with_verdicts(config).await;
         let (actor, handle) = Actor::spawn(None, HealthCheckActor, a).await.unwrap();
         actor.cast(HealthCheckMessage::CassiniConnected).unwrap();
         tokio::time::sleep(Duration::from_secs(100)).await;
@@ -1387,15 +1378,14 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn a_reconnect_inside_the_deadline_gives_no_verdict() {
-        let _lock = ENV_LOCK.lock().await;
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("health.json");
-        let _env = EnvGuard::set(&[
+        let config = health_config(&[
             (POLAR_HEALTH_FILE_ENV, file.to_str().unwrap()),
             (POLAR_HEALTH_CASSINI_DEADLINE_SECS_ENV, "100"),
         ]);
 
-        let (a, seen, _collector) = args_with_verdicts().await;
+        let (a, seen, _collector) = args_with_verdicts(config).await;
         let (actor, handle) = Actor::spawn(None, HealthCheckActor, a).await.unwrap();
         actor.cast(HealthCheckMessage::CassiniConnected).unwrap();
         tokio::time::sleep(Duration::from_secs(10)).await;
@@ -1417,12 +1407,13 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn without_a_recipient_losing_cassini_fails_the_actor() {
-        let _lock = ENV_LOCK.lock().await;
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("health.json");
-        let _env = EnvGuard::set(&[(POLAR_HEALTH_FILE_ENV, file.to_str().unwrap())]);
+        let config = health_config(&[(POLAR_HEALTH_FILE_ENV, file.to_str().unwrap())]);
 
-        let (_actor, handle) = Actor::spawn(None, HealthCheckActor, args()).await.unwrap();
+        let (_actor, handle) = Actor::spawn(None, HealthCheckActor, args().with_config(config))
+            .await
+            .unwrap();
         let ended = tokio::time::timeout(Duration::from_secs(200), handle).await;
         assert!(
             ended.is_ok(),
@@ -1606,7 +1597,6 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn an_unreachable_dependency_keeps_the_agent_waiting_and_the_file_fresh() {
-        let _lock = ENV_LOCK.lock().await;
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("health.json");
         let cert = cert_file(&dir, "agent.pem", 3600);
@@ -1614,7 +1604,7 @@ mod tests {
             let l = TcpListener::bind("127.0.0.1:0").unwrap();
             l.local_addr().unwrap().port()
         };
-        let _env = EnvGuard::set(&[
+        let config = health_config(&[
             (POLAR_HEALTH_FILE_ENV, file.to_str().unwrap()),
             (POLAR_HEALTH_CERTS_ENV, &cert),
             (POLAR_HEALTH_REJUVENATION_SECS_ENV, "7200"),
@@ -1624,7 +1614,7 @@ mod tests {
             ),
         ]);
 
-        let (a, seen, _collector) = args_with_verdicts().await;
+        let (a, seen, _collector) = args_with_verdicts(config).await;
         let (actor, handle) = Actor::spawn(None, HealthCheckActor, a).await.unwrap();
         actor.cast(HealthCheckMessage::CassiniConnected).unwrap();
 
@@ -1650,12 +1640,13 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn a_stray_deps_checked_message_is_ignored() {
-        let _lock = ENV_LOCK.lock().await;
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("health.json");
-        let _env = EnvGuard::set(&[(POLAR_HEALTH_FILE_ENV, file.to_str().unwrap())]);
+        let config = health_config(&[(POLAR_HEALTH_FILE_ENV, file.to_str().unwrap())]);
 
-        let (actor, handle) = Actor::spawn(None, HealthCheckActor, args()).await.unwrap();
+        let (actor, handle) = Actor::spawn(None, HealthCheckActor, args().with_config(config))
+            .await
+            .unwrap();
         actor.cast(HealthCheckMessage::CassiniConnected).unwrap();
         actor.cast(HealthCheckMessage::DepsChecked(true)).unwrap();
         tokio::time::sleep(Duration::from_secs(100)).await;

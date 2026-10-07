@@ -217,16 +217,9 @@ impl Actor for Broker {
         let (healthcheck, _) = HealthCheckActor::spawn_linked(
             Some("cassini.healthcheck".to_string()),
             HealthCheckActor,
-            HealthCheckArgs {
-                verdict_to: None,
-                expects_graph: false,
-                // 12-hour rejuvenation threshold — Cassini uses long-lived certs
-                // to minimize disruption to connected agents.
-                rejuvenation_threshold_secs: 300,
-                // No dep cert endpoints — cert-issuer is HTTP only.
-                // Availability is proven implicitly by successful cert issuance.
-                dep_cert_endpoints: vec![],
-            },
+            // No dep cert endpoints: cert-issuer is HTTP only, and its availability is
+            // proven implicitly by successful cert issuance.
+            HealthCheckArgs::new(false, 300, vec![]),
             myself.get_cell(),
         )
         .await

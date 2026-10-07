@@ -692,12 +692,7 @@ mod tests {
                 InfrastructureSupervisor,
                 InfrastructureSupervisorArgs {
                     service_name: service.to_string(),
-                    health_check_args: HealthCheckArgs {
-                        expects_graph: false,
-                        rejuvenation_threshold_secs: 300,
-                        dep_cert_endpoints: vec![],
-                        verdict_to: None,
-                    },
+                    health_check_args: HealthCheckArgs::new(false, 300, vec![]),
                     subscriptions: vec![],
                     wants_crypto: false,
                     shutdown_budget: budget,

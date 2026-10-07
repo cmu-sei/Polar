@@ -207,12 +207,7 @@ impl Actor for GitRepoProcessingManager {
         let (healthcheck, _) = HealthCheckActor::spawn_linked(
             Some(HEALTHCHECK_ACTOR_NAME.to_string()),
             HealthCheckActor,
-            HealthCheckArgs {
-                verdict_to: None,
-                expects_graph: true,
-                rejuvenation_threshold_secs: 300,
-                dep_cert_endpoints,
-            },
+            HealthCheckArgs::new(true, 300, dep_cert_endpoints),
             myself.get_cell(),
         )
         .await

@@ -168,11 +168,10 @@ impl Actor for ConsumerSupervisor {
         let (healthcheck, _) = Actor::spawn_linked(
             Some("polar.healthcheck".to_string()),
             HealthCheckActor,
-            HealthCheckArgs {
-                verdict_to: None,
-                expects_graph: true,
-                rejuvenation_threshold_secs: 300,
-                dep_cert_endpoints: vec![
+            HealthCheckArgs::new(
+                true,
+                300,
+                vec![
                     DepCertEndpoint {
                         host: "cassini-ip-svc.polar.svc.cluster.local".to_string(),
                         port: 8080,
@@ -184,7 +183,7 @@ impl Actor for ConsumerSupervisor {
                         min_ttl_secs: 300,
                     },
                 ],
-            },
+            ),
             myself.clone().into(),
         )
         .await?;

@@ -3,7 +3,7 @@
 //! without spawning an actor or touching the process environment.
 
 use crate::vars::{
-    CASSINI_DEADLINE_SECS, CERTS, DEP_ENDPOINTS, EXPIRY_SECS, GRAPH_DEADLINE_SECS,
+    CASSINI_DEADLINE_SECS, CERTS, DEP_ENDPOINTS, EXPIRY_SECS, FILE, GRAPH_DEADLINE_SECS,
     POLAR_HEALTH_CASSINI_DEADLINE_SECS_ENV, POLAR_HEALTH_EXPIRY_SECS_ENV,
     POLAR_HEALTH_GRAPH_DEADLINE_SECS_ENV, POLAR_HEALTH_REJUVENATION_SECS_ENV,
     POLAR_HEALTH_STALE_SECS_ENV, POLAR_HEALTH_TICK_SECS_ENV, REJUVENATION_SECS, STALE_SECS,
@@ -31,6 +31,8 @@ pub struct HealthConfig {
     /// from the same pod environment; the actor reads it only to check that its own
     /// tick is fast enough for the probe.
     pub probe_stale_secs: u64,
+    /// Where the health file is written, which is where the liveness probe reads it.
+    pub file_path: String,
     /// The agent's own client certificates.
     pub cert_paths: Vec<String>,
     /// Dependency endpoints whose certificates must be healthy before rejuvenating.
@@ -67,6 +69,7 @@ impl HealthConfig {
     pub fn from_env(args: HealthCheckArgs, env: &dyn Env) -> Result<Self, String> {
         let mut problems: Vec<String> = Vec::new();
 
+        let file_path = take!(problems, FILE.read(env), String::new());
         let cert_paths = take!(problems, CERTS.read(env), None);
         let dep_cert_endpoints = take!(problems, DEP_ENDPOINTS.read(env), None);
         let rejuvenation = take!(problems, REJUVENATION_SECS.read(env), None);
@@ -88,6 +91,7 @@ impl HealthConfig {
             graph_deadline_secs,
             cassini_deadline_secs,
             probe_stale_secs,
+            file_path,
             cert_paths: cert_paths.unwrap_or_default(),
             dep_cert_endpoints: dep_cert_endpoints.unwrap_or(args.dep_cert_endpoints),
         };
@@ -171,12 +175,11 @@ mod tests {
     use std::collections::HashMap;
 
     fn args() -> HealthCheckArgs {
-        HealthCheckArgs {
-            expects_graph: true,
-            rejuvenation_threshold_secs: 300,
-            dep_cert_endpoints: vec![DepCertEndpoint::parse("from-args.example:443:100").unwrap()],
-            verdict_to: None,
-        }
+        HealthCheckArgs::new(
+            true,
+            300,
+            vec![DepCertEndpoint::parse("from-args.example:443:100").unwrap()],
+        )
     }
 
     fn load(vars: &[(&str, &str)]) -> Result<HealthConfig, String> {
@@ -216,6 +219,20 @@ mod tests {
         assert_eq!(c.expiry_threshold_secs, 120);
         assert_eq!(c.tick_secs, 5);
         assert_eq!(c.graph_deadline_secs, 40);
+    }
+
+    #[test]
+    fn the_health_file_is_where_the_probe_looks_by_default_and_where_the_deployment_says() {
+        assert_eq!(
+            load(&[]).unwrap().file_path,
+            crate::POLAR_HEALTH_FILE_DEFAULT
+        );
+        assert_eq!(
+            load(&[(POLAR_HEALTH_FILE_ENV, "/run/h.json")])
+                .unwrap()
+                .file_path,
+            "/run/h.json"
+        );
     }
 
     #[test]

@@ -134,12 +134,7 @@ static VARIABLES: &[&dyn Described] = &[
 /// What must hold between the variables. Run only when each of them parses, so the
 /// configuration it builds cannot fail for a reason already reported.
 fn relations(env: &dyn Env) -> Vec<String> {
-    let args = HealthCheckArgs {
-        expects_graph: false,
-        rejuvenation_threshold_secs: DEFAULT_REJUVENATION_THRESHOLD_SECS,
-        dep_cert_endpoints: Vec::new(),
-        verdict_to: None,
-    };
+    let args = HealthCheckArgs::new(false, DEFAULT_REJUVENATION_THRESHOLD_SECS, Vec::new());
     match HealthConfig::from_env(args, env) {
         Ok(_) => Vec::new(),
         Err(problem) => vec![problem],

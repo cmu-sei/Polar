@@ -238,12 +238,11 @@ impl<M: ractor::Message> AgentBuilder<M> {
         // HealthCheckActor from POLAR_HEALTH_DEP_ENDPOINTS, which the
         // deployment sets from the same `needs`, so there is no
         // endpoint list to keep in sync with the manifest here.
-        let health_check_args = HealthCheckArgs {
-            verdict_to: None,
-            expects_graph: required.contains(&Capability::GraphWrite),
-            rejuvenation_threshold_secs: polar_health::DEFAULT_REJUVENATION_THRESHOLD_SECS,
-            dep_cert_endpoints: Vec::new(),
-        };
+        let health_check_args = HealthCheckArgs::new(
+            required.contains(&Capability::GraphWrite),
+            polar_health::DEFAULT_REJUVENATION_THRESHOLD_SECS,
+            Vec::new(),
+        );
 
         let myself_cell = self.myself.get_cell();
 

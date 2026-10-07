@@ -436,6 +436,7 @@ mod tests {
             graph_deadline_secs: 120,
             cassini_deadline_secs: 60,
             probe_stale_secs: 90,
+            file_path: String::new(),
             cert_paths: vec![],
             dep_cert_endpoints: vec![],
         }

@@ -42,6 +42,7 @@ fn config() -> HealthConfig {
         graph_deadline_secs: 120,
         cassini_deadline_secs: 60,
         probe_stale_secs: STALE,
+        file_path: String::new(),
         cert_paths: vec![],
         dep_cert_endpoints: vec![],
     }
