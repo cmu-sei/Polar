@@ -78,17 +78,17 @@ use credentials_agent_common::escrow_key::EscrowKeyRequest;
 use credentials_agent_common::escrow_secret::EscrowedSecret;
 use credentials_agent_common::secret::{StoreRefusalReason, StoreSecretReply, StoreSecretRequest};
 use credentials_agent_common::{
-    CREDENTIALS_AGENT_ESCROW_ISSUANCE_REPLIES_TOPIC, CREDENTIALS_AGENT_ESCROW_ISSUANCE_REQUESTS_TOPIC,
-    CREDENTIALS_AGENT_ESCROW_KEY_REPLIES_TOPIC, CREDENTIALS_AGENT_ESCROW_KEY_REQUESTS_TOPIC,
-    CREDENTIALS_ESCROW_KEY_REPLIES_TOPIC, CREDENTIALS_ESCROW_KEY_REQUESTS_TOPIC,
-    CREDENTIALS_RETRIEVE_AGENT_ESCROW_KEYPAIR_REPLIES_TOPIC,
-    CREDENTIALS_RETRIEVE_AGENT_ESCROW_KEYPAIR_REQUESTS_TOPIC, CREDENTIALS_STORE_SECRET_REPLIES_TOPIC,
-    CREDENTIALS_STORE_SECRET_REQUESTS_TOPIC,
+    CREDENTIALS_AGENT_ESCROW_ISSUANCE_REPLIES_TOPIC,
+    CREDENTIALS_AGENT_ESCROW_ISSUANCE_REQUESTS_TOPIC, CREDENTIALS_AGENT_ESCROW_KEY_REPLIES_TOPIC,
+    CREDENTIALS_AGENT_ESCROW_KEY_REQUESTS_TOPIC, CREDENTIALS_ESCROW_KEY_REPLIES_TOPIC,
+    CREDENTIALS_ESCROW_KEY_REQUESTS_TOPIC, CREDENTIALS_RETRIEVE_AGENT_ESCROW_KEYPAIR_REPLIES_TOPIC,
+    CREDENTIALS_RETRIEVE_AGENT_ESCROW_KEYPAIR_REQUESTS_TOPIC,
+    CREDENTIALS_STORE_SECRET_REPLIES_TOPIC, CREDENTIALS_STORE_SECRET_REQUESTS_TOPIC,
 };
 use polar::request_reply::{Envelope, ReplyRouter};
 use ractor::{Actor, ActorProcessingErr, ActorRef, RpcReplyPort, async_trait};
-use rsa::{RsaPrivateKey, RsaPublicKey};
 use rsa::pkcs8::{DecodePrivateKey, DecodePublicKey, EncodePrivateKey};
+use rsa::{RsaPrivateKey, RsaPublicKey};
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{error, warn};
@@ -228,10 +228,7 @@ pub enum CryptoMessage {
     /// pre_start builds its own closure knowing exactly which topic
     /// it's for; this variant exists only because all five, real
     /// closures share the same underlying delivery shape.
-    RoutedReply {
-        topic: String,
-        payload: Vec<u8>,
-    },
+    RoutedReply { topic: String, payload: Vec<u8> },
 }
 
 #[non_exhaustive]
@@ -344,9 +341,8 @@ impl Actor for CryptoActor {
         };
         let own_identity = {
             let path = &settings.own_certificate_path;
-            let certificate_pem = std::fs::read_to_string(path).map_err(|e| {
-                ActorProcessingErr::from(format!("failed to read {path}: {e}"))
-            })?;
+            let certificate_pem = std::fs::read_to_string(path)
+                .map_err(|e| ActorProcessingErr::from(format!("failed to read {path}: {e}")))?;
             cert_issuer_common::permission::extract_own_identity(&certificate_pem)
                 .map_err(|e| ActorProcessingErr::from(e.to_string()))?
         };
@@ -369,17 +365,22 @@ impl Actor for CryptoActor {
             CREDENTIALS_AGENT_ESCROW_KEY_REPLIES_TOPIC,
         ] {
             let myself_for_deliver = myself.clone();
-            if let Err(e) = args.router.send_message(polar_router::RouterMessage::Register {
-                topic: topic.to_string(),
-                deliver: Box::new(move |incoming: polar_router::IncomingMessage| {
-                    if let Err(e) = myself_for_deliver.send_message(CryptoMessage::RoutedReply {
-                        topic: incoming.topic,
-                        payload: incoming.payload,
-                    }) {
-                        warn!("CryptoActor: failed to deliver routed reply to self: {e}");
-                    }
-                }),
-            }) {
+            if let Err(e) = args
+                .router
+                .send_message(polar_router::RouterMessage::Register {
+                    topic: topic.to_string(),
+                    deliver: Box::new(move |incoming: polar_router::IncomingMessage| {
+                        if let Err(e) =
+                            myself_for_deliver.send_message(CryptoMessage::RoutedReply {
+                                topic: incoming.topic,
+                                payload: incoming.payload,
+                            })
+                        {
+                            warn!("CryptoActor: failed to deliver routed reply to self: {e}");
+                        }
+                    }),
+                })
+            {
                 error!("CryptoActor failed to register topic {topic} with RouterActor: {e}");
             }
         }
@@ -435,7 +436,10 @@ impl Actor for CryptoActor {
             CryptoMessage::RoutedReply { topic, payload }
                 if topic == CREDENTIALS_ESCROW_KEY_REPLIES_TOPIC =>
             {
-                match rkyv::from_bytes::<Envelope<credentials_agent_common::escrow_key::EscrowKeyReply>, rkyv::rancor::Error>(&payload)
+                match rkyv::from_bytes::<
+                    Envelope<credentials_agent_common::escrow_key::EscrowKeyReply>,
+                    rkyv::rancor::Error,
+                >(&payload)
                 {
                     Ok(envelope) => state
                         .escrow_key_reply_router
@@ -457,7 +461,10 @@ impl Actor for CryptoActor {
             CryptoMessage::RoutedReply { topic, payload }
                 if topic == CREDENTIALS_RETRIEVE_AGENT_ESCROW_KEYPAIR_REPLIES_TOPIC =>
             {
-                match rkyv::from_bytes::<Envelope<RetrieveAgentEscrowKeypairReply>, rkyv::rancor::Error>(&payload)
+                match rkyv::from_bytes::<
+                    Envelope<RetrieveAgentEscrowKeypairReply>,
+                    rkyv::rancor::Error,
+                >(&payload)
                 {
                     Ok(envelope) => state
                         .retrieve_agent_escrow_keypair_reply_router
@@ -470,22 +477,29 @@ impl Actor for CryptoActor {
             CryptoMessage::RoutedReply { topic, payload }
                 if topic == CREDENTIALS_AGENT_ESCROW_ISSUANCE_REPLIES_TOPIC =>
             {
-                match rkyv::from_bytes::<Envelope<AgentEscrowIssuanceReply>, rkyv::rancor::Error>(&payload)
-                {
+                match rkyv::from_bytes::<Envelope<AgentEscrowIssuanceReply>, rkyv::rancor::Error>(
+                    &payload,
+                ) {
                     Ok(envelope) => state
                         .agent_escrow_issuance_reply_router
                         .deliver(&envelope.correlation_id, envelope.payload),
-                    Err(e) => warn!("CryptoActor failed to deserialize agent escrow-issuance reply: {e}"),
+                    Err(e) => {
+                        warn!("CryptoActor failed to deserialize agent escrow-issuance reply: {e}")
+                    }
                 }
             }
             CryptoMessage::RoutedReply { topic, payload }
                 if topic == CREDENTIALS_AGENT_ESCROW_KEY_REPLIES_TOPIC =>
             {
-                match rkyv::from_bytes::<Envelope<AgentEscrowKeyReply>, rkyv::rancor::Error>(&payload) {
+                match rkyv::from_bytes::<Envelope<AgentEscrowKeyReply>, rkyv::rancor::Error>(
+                    &payload,
+                ) {
                     Ok(envelope) => state
                         .agent_escrow_key_reply_router
                         .deliver(&envelope.correlation_id, envelope.payload),
-                    Err(e) => warn!("CryptoActor failed to deserialize agent escrow-key reply: {e}"),
+                    Err(e) => {
+                        warn!("CryptoActor failed to deserialize agent escrow-key reply: {e}")
+                    }
                 }
             }
             CryptoMessage::RoutedReply { .. } => {
@@ -650,7 +664,9 @@ async fn handle_store_secret(
 
 async fn query_escrow_key(
     tcp_client: &ActorRef<TcpClientMessage>,
-    escrow_key_reply_router: &Arc<ReplyRouter<credentials_agent_common::escrow_key::EscrowKeyReply>>,
+    escrow_key_reply_router: &Arc<
+        ReplyRouter<credentials_agent_common::escrow_key::EscrowKeyReply>,
+    >,
 ) -> Result<String, CryptoError> {
     let correlation_id = uuid::Uuid::new_v4().to_string();
 
@@ -762,8 +778,12 @@ async fn handle_retrieve_own_escrow_keypair(
             Ok(Some(private_key))
         }
         RetrieveAgentEscrowKeypairReply::NotFound => Ok(None),
-        RetrieveAgentEscrowKeypairReply::Refused { reason } => Err(CryptoError::RetrieveRefused(reason)),
-        RetrieveAgentEscrowKeypairReply::Failed { detail } => Err(CryptoError::RetrieveFailed(detail)),
+        RetrieveAgentEscrowKeypairReply::Refused { reason } => {
+            Err(CryptoError::RetrieveRefused(reason))
+        }
+        RetrieveAgentEscrowKeypairReply::Failed { detail } => {
+            Err(CryptoError::RetrieveFailed(detail))
+        }
     }
 }
 
@@ -853,11 +873,8 @@ async fn handle_ensure_own_escrow_keypair(
     // agent's own encryption-capable escrow identity, not a
     // signing-only mTLS credential. See KeyAlgorithm::Rsa's own doc
     // comment (cert-issuer-common) for the full reasoning.
-    let csr_output = cert_issuer_common::keypair::generate_csr(
-        &own_identity,
-        &KeyAlgorithm::Rsa,
-        &[],
-    )?;
+    let csr_output =
+        cert_issuer_common::keypair::generate_csr(&own_identity, &KeyAlgorithm::Rsa, &[])?;
 
     // Step 4: the actual issuance request/reply round trip.
     let issuance_reply = publish_agent_escrow_issuance_request(
@@ -995,7 +1012,10 @@ async fn handle_decrypt_own_message(
     .await?;
 
     let handle_guard = escrow_keypair_handle.lock().await;
-    match handle_guard.as_ref().expect("ensure_escrow_keypair_bootstrapped just populated this") {
+    match handle_guard
+        .as_ref()
+        .expect("ensure_escrow_keypair_bootstrapped just populated this")
+    {
         EscrowKeypairHandle::KernelBacked(serial) => {
             polar_kernel_keyring::decrypt(*serial, &ciphertext)
                 .map_err(|e| CryptoError::DecryptFailed(e.to_string()))
@@ -1047,7 +1067,9 @@ async fn handle_ensure_bootstrapped(
 async fn handle_encrypt_for_recipient(
     tcp_client: ActorRef<TcpClientMessage>,
     agent_escrow_key_reply_router: Arc<ReplyRouter<AgentEscrowKeyReply>>,
-    cached_recipient_public_keys: Arc<tokio::sync::Mutex<std::collections::HashMap<String, (RsaPublicKey, String)>>>,
+    cached_recipient_public_keys: Arc<
+        tokio::sync::Mutex<std::collections::HashMap<String, (RsaPublicKey, String)>>,
+    >,
     recipient_identity: String,
     plaintext: Vec<u8>,
 ) -> Result<Vec<u8>, CryptoError> {
@@ -1361,10 +1383,17 @@ mod tests {
                     let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&reply)
                         .unwrap()
                         .to_vec();
-                    route(CREDENTIALS_RETRIEVE_AGENT_ESCROW_KEYPAIR_REPLIES_TOPIC, bytes);
+                    route(
+                        CREDENTIALS_RETRIEVE_AGENT_ESCROW_KEYPAIR_REPLIES_TOPIC,
+                        bytes,
+                    );
                 }
             } else if topic == CREDENTIALS_AGENT_ESCROW_ISSUANCE_REQUESTS_TOPIC {
-                if let Ok(envelope) = rkyv::from_bytes::<Envelope<AgentEscrowIssuanceRequest>, rkyv::rancor::Error>(&payload) {
+                if let Ok(envelope) = rkyv::from_bytes::<
+                    Envelope<AgentEscrowIssuanceRequest>,
+                    rkyv::rancor::Error,
+                >(&payload)
+                {
                     let reply_payload = if self.issue_agent_escrow_certificates {
                         AgentEscrowIssuanceReply::Issued {
                             // A real, well-formed certificate isn't
@@ -1396,8 +1425,10 @@ mod tests {
                     route(CREDENTIALS_AGENT_ESCROW_ISSUANCE_REPLIES_TOPIC, bytes);
                 }
             } else if topic == CREDENTIALS_AGENT_ESCROW_KEY_REQUESTS_TOPIC {
-                if let Ok(envelope) =
-                    rkyv::from_bytes::<Envelope<AgentEscrowKeyRequest>, rkyv::rancor::Error>(&payload)
+                if let Ok(envelope) = rkyv::from_bytes::<
+                    Envelope<AgentEscrowKeyRequest>,
+                    rkyv::rancor::Error,
+                >(&payload)
                 {
                     self.agent_escrow_key_queries
                         .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -1422,13 +1453,13 @@ mod tests {
         }
     }
 
-    async fn spawn_crypto_actor_with_fake_credentials_agent() -> (
-        ActorRef<CryptoMessage>,
-        Arc<std::sync::atomic::AtomicUsize>,
-    ) {
-        spawn_crypto_actor_with_fake_credentials_agent_configured(FakeCredentialsAgentConfig::default())
-            .await
-            .0
+    async fn spawn_crypto_actor_with_fake_credentials_agent()
+    -> (ActorRef<CryptoMessage>, Arc<std::sync::atomic::AtomicUsize>) {
+        spawn_crypto_actor_with_fake_credentials_agent_configured(
+            FakeCredentialsAgentConfig::default(),
+        )
+        .await
+        .0
     }
 
     /// Configures the shared FakeCredentialsAgent's own, real behavior
@@ -1466,8 +1497,7 @@ mod tests {
             rsa::pkcs8::EncodePrivateKey::to_pkcs8_pem(&private_key, rsa::pkcs8::LineEnding::LF)
                 .unwrap();
         let key_pair = rcgen::KeyPair::from_pem(&private_key_pem).unwrap();
-        let params =
-            rcgen::CertificateParams::new(vec!["test-agent".to_string()]).unwrap();
+        let params = rcgen::CertificateParams::new(vec!["test-agent".to_string()]).unwrap();
         let certificate_pem = params.self_signed(&key_pair).unwrap().pem();
 
         let file = tempfile::NamedTempFile::new().unwrap();
@@ -1478,10 +1508,7 @@ mod tests {
     async fn spawn_crypto_actor_with_fake_credentials_agent_configured(
         config: FakeCredentialsAgentConfig,
     ) -> (
-        (
-            ActorRef<CryptoMessage>,
-            Arc<std::sync::atomic::AtomicUsize>,
-        ),
+        (ActorRef<CryptoMessage>, Arc<std::sync::atomic::AtomicUsize>),
         Arc<std::sync::Mutex<Option<Vec<u8>>>>,
         Arc<std::sync::atomic::AtomicUsize>,
     ) {
@@ -1521,12 +1548,10 @@ mod tests {
         let (crypto_actor, _) = Actor::spawn(
             None,
             CryptoActor,
-            CryptoActorArgs::new(fake_agent, router).with_settings(
-                environment::CryptoSettings {
-                    own_certificate_path: own_cert_file.path().to_string_lossy().into_owned(),
-                    service_account_token_path: service_account_token_path.clone(),
-                },
-            ),
+            CryptoActorArgs::new(fake_agent, router).with_settings(environment::CryptoSettings {
+                own_certificate_path: own_cert_file.path().to_string_lossy().into_owned(),
+                service_account_token_path: service_account_token_path.clone(),
+            }),
         )
         .await
         .unwrap();
@@ -1548,14 +1573,11 @@ mod tests {
         let (crypto_actor, _escrow_key_queries) =
             spawn_crypto_actor_with_fake_credentials_agent().await;
 
-        let result = ractor::call!(
-            crypto_actor,
-            |reply| CryptoMessage::StoreSecret {
-                name: "gitlab-token".to_string(),
-                plaintext: b"a real secret from a real actor".to_vec(),
-                reply,
-            }
-        )
+        let result = ractor::call!(crypto_actor, |reply| CryptoMessage::StoreSecret {
+            name: "gitlab-token".to_string(),
+            plaintext: b"a real secret from a real actor".to_vec(),
+            reply,
+        })
         .unwrap();
 
         assert!(result.is_ok(), "expected Ok(()), got {result:?}");
@@ -1567,14 +1589,11 @@ mod tests {
             spawn_crypto_actor_with_fake_credentials_agent().await;
 
         for _ in 0..3 {
-            let result = ractor::call!(
-                crypto_actor,
-                |reply| CryptoMessage::StoreSecret {
-                    name: "gitlab-token".to_string(),
-                    plaintext: b"a real secret from a real actor".to_vec(),
-                    reply,
-                }
-            )
+            let result = ractor::call!(crypto_actor, |reply| CryptoMessage::StoreSecret {
+                name: "gitlab-token".to_string(),
+                plaintext: b"a real secret from a real actor".to_vec(),
+                reply,
+            })
             .unwrap();
             assert!(result.is_ok(), "expected Ok(()), got {result:?}");
         }
@@ -1645,11 +1664,11 @@ mod tests {
             Ok(decrypted) => assert_eq!(decrypted, plaintext),
             other => panic!("expected Ok(_), got {other:?}"),
         }
-
     }
 
     #[tokio::test]
-    async fn decrypt_own_message_genuinely_round_trips_a_real_message_when_a_key_is_already_escrowed() {
+    async fn decrypt_own_message_genuinely_round_trips_a_real_message_when_a_key_is_already_escrowed()
+     {
         let mut rng = rand::rng();
         let previously_escrowed_key = RsaPrivateKey::new(&mut rng, 2048).unwrap();
         let previously_escrowed_key_pem = rsa::pkcs8::EncodePrivateKey::to_pkcs8_pem(
@@ -1726,7 +1745,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ensure_bootstrapped_genuinely_issues_and_escrows_a_real_keypair_as_a_pure_side_effect() {
+    async fn ensure_bootstrapped_genuinely_issues_and_escrows_a_real_keypair_as_a_pure_side_effect()
+    {
         // The actor reads the token from disk each time it asks for an escrow keypair, so
         // it is given a real file standing in for the mounted service-account token.
         let token_file = write_test_service_account_token();
@@ -1765,16 +1785,22 @@ mod tests {
             CryptoMessage::EnsureBootstrapped { reply }
         })
         .unwrap();
-        assert!(second_result.is_ok(), "expected Ok(()), got {second_result:?}");
+        assert!(
+            second_result.is_ok(),
+            "expected Ok(()), got {second_result:?}"
+        );
     }
 
     #[tokio::test]
-    async fn encrypt_for_recipient_genuinely_round_trips_a_real_message_to_a_real_recipient_public_key() {
+    async fn encrypt_for_recipient_genuinely_round_trips_a_real_message_to_a_real_recipient_public_key()
+     {
         let mut rng = rand::rng();
         let recipient_key = RsaPrivateKey::new(&mut rng, 2048).unwrap();
-        let recipient_public_key_pem =
-            rsa::pkcs8::EncodePublicKey::to_public_key_pem(&recipient_key.to_public_key(), rsa::pkcs8::LineEnding::LF)
-                .unwrap();
+        let recipient_public_key_pem = rsa::pkcs8::EncodePublicKey::to_public_key_pem(
+            &recipient_key.to_public_key(),
+            rsa::pkcs8::LineEnding::LF,
+        )
+        .unwrap();
 
         let ((crypto_actor, _), _, _) =
             spawn_crypto_actor_with_fake_credentials_agent_configured(FakeCredentialsAgentConfig {
@@ -1813,9 +1839,11 @@ mod tests {
     async fn encrypt_for_recipient_genuinely_caches_the_recipient_key_after_the_first_query() {
         let mut rng = rand::rng();
         let recipient_key = RsaPrivateKey::new(&mut rng, 2048).unwrap();
-        let recipient_public_key_pem =
-            rsa::pkcs8::EncodePublicKey::to_public_key_pem(&recipient_key.to_public_key(), rsa::pkcs8::LineEnding::LF)
-                .unwrap();
+        let recipient_public_key_pem = rsa::pkcs8::EncodePublicKey::to_public_key_pem(
+            &recipient_key.to_public_key(),
+            rsa::pkcs8::LineEnding::LF,
+        )
+        .unwrap();
 
         let ((crypto_actor, _), _, agent_escrow_key_queries) =
             spawn_crypto_actor_with_fake_credentials_agent_configured(FakeCredentialsAgentConfig {
@@ -1844,7 +1872,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn encrypt_for_recipient_fails_with_recipient_key_not_found_when_the_recipient_has_no_usable_key() {
+    async fn encrypt_for_recipient_fails_with_recipient_key_not_found_when_the_recipient_has_no_usable_key()
+     {
         let ((crypto_actor, _), _, _) =
             spawn_crypto_actor_with_fake_credentials_agent_configured(FakeCredentialsAgentConfig {
                 recipient_public_key_pem: None,
@@ -1869,4 +1898,3 @@ mod tests {
         }
     }
 }
-
