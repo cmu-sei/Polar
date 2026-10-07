@@ -151,7 +151,12 @@ sections; the infrastructure supervisor holds it and hands it out as `AgentResou
 health actor is handed its parsed `HealthConfig` and never sees an environment, and agents not yet
 on the builder keep reading the process until they move.
 
-Next, in order: the capability-to-section mapping (the Cassini client and graph sections, so
-they join the snapshot), `--describe --json` and an `--effective` view; then the lint. After that,
+Each capability brings the sections of the components it uses (`environment::sections_for`): the
+Cassini client's and the graph's, declared in their own crates, so the builder judges them at
+startup and the checker judges them for the environment a workload is given. Encryption and the
+Kubernetes API read bring none until `polar-crypto` is on `polar-env`.
+
+Next, in order: handing the Cassini client and the graph controller their settings from the
+snapshot (today they still read the process), `--describe --json` and an `--effective` view; then the lint. After that,
 the ConfigurationActor shell, then the scheduler integration, then the credentials agent's use of
 it. Every step is in `remaining-work.md`.
