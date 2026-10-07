@@ -87,6 +87,11 @@ than queueing behind a timer.
 
 ### Startup consistency check
 
+The same check runs before the pod exists: `resolve.nu check` hands the environment each
+workload will be given to `polar-config-check`, which calls the function the agent runs, so a
+bad combination fails the render naming the workload and the variables. There is one
+implementation of these rules, in the health actor's crate.
+
 The actor validates its settings when it starts and refuses to run, with a message
 that names the problem, if they contradict each other. A crash-looping agent with a
 clear reason in its log is better than one that quietly misbehaves later.
