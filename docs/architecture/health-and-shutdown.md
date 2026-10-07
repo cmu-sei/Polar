@@ -1,9 +1,8 @@
 # Agent Health and Shutdown
 
-Status: **implemented in code (stages S1 to S4 of the rework), not yet verified on a
-cluster.** The pod's termination grace period, which the catalog will derive from each
-agent's shutdown budget, is still to do (stage S5). The remaining-work item "Health
-system rework" tracks what is left.
+Status: **implemented in code and in the catalog (stages S1 to S5 of the rework), not yet
+verified on a cluster.** What is left is that verification (stage S6). The remaining-work
+item "Health system rework" tracks it.
 
 Scope: agents built on `polar-agent-builder`. Agents that have not migrated keep
 their hand-written health wiring; they only need to keep compiling.
@@ -224,10 +223,32 @@ Design decisions:
 ### Termination grace
 
 SIGTERM handling only helps if the kubelet waits long enough. The Kubernetes
-default grace period is 30 s. `terminationGracePeriodSeconds` must exceed the
-slowest drain. The credentials-agent consumer's worst case is about 45 s, so it
-needs about 60 s. The catalog carries the value, and the two hand-written
-credentials charts carry it until they move to the catalog.
+default grace period is 30 s, and several agents drain for longer, so the pod's
+`terminationGracePeriodSeconds` is set from the agent's shutdown budget: the budget plus
+a 10 s margin. Kubernetes sends SIGKILL when it ends, and the agent's own watchdog exits
+at the budget, so the pod has to be allowed to live longer than that.
+
+The number has one home. The catalog (`infra/config/kinds.nuon`, `shutdown`) holds the
+default and each workload overrides its budget; the resolver derives
+`POLAR_SHUTDOWN_BUDGET_SECS` and the grace period from it, and the grace period cannot
+be set on its own. The agent's code declares the least it needs (`with_shutdown_budget`),
+and the builder refuses to start if the deployment gives less. So a deployment can raise a
+budget freely, and lowering what an agent needs is a code change someone has to review.
+`resolve.nu check` also rejects, at render time, a grace period that does not exceed the
+budget, and settings in which a rejuvenation could not finish before the certificate's
+hard floor.
+
+| Agent | Budget | Grace period | What it is made of |
+|---|---|---|---|
+| credentials consumer | 50 s | 60 s | 5 s drain window, ledger stop, projection stop (up to 30 s) |
+| credentials observer | 40 s | 50 s | HTTP drain, up to 30 s |
+| kube consumer | 45 s | 55 s | 5 s drain window, graph controller stop (up to 30 s) |
+| kube observer | 40 s | 50 s | three watchers stopped in turn, 10 s each |
+| jira observer | 40 s | 50 s | each observer stopped in turn, 10 s each |
+| jira processor | 40 s | 50 s | graph controller stop, up to 30 s |
+
+The four catalog workloads get these from the catalog. The two credentials agents are still
+hand-written charts and carry the same numbers directly until they move to the catalog.
 
 ## 5. The Kubernetes liveness probe
 

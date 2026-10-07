@@ -77,6 +77,10 @@ Derived, never hand-written per agent:
 - `POLAR_HEALTH_CERTS` = comma-joined client cert paths of the needs
 - `POLAR_HEALTH_DEP_ENDPOINTS` = comma-joined `host:port:ttl` of the needs' dependencies
 - `POLAR_CAPABILITIES` = comma-joined capability names (kind default first)
+- `POLAR_HEALTH_REJUVENATION_SECS`, `_STALE_SECS` (and the existing `_EXPIRY_SECS`, `_TICK_SECS`)
+  from the kind's `health` block
+- `POLAR_SHUTDOWN_BUDGET_SECS` from the kind's `shutdown` block, and the pod's
+  `terminationGracePeriodSeconds` = budget + margin, never set separately
 - init `--check-dep-cert host:port:ttl` and `--cert type:dir:alg[:sans]`
 - a workload's ServiceAccount is uniform: render.nu emits one for every workload
   identity no manifest declares (the catalog does not need to).

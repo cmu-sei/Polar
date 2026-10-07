@@ -255,6 +255,19 @@ agent:
 - `POLAR_CAPABILITIES`, the comma-joined `needs`, which the agent's own builder checks at startup
 - the volumes, mounts and `--cert` specs for every client certificate
 
+From the kind's `health` and `shutdown` blocks (a workload overrides any of them) it
+derives the rest of the health and shutdown configuration:
+
+- `POLAR_HEALTH_EXPIRY_SECS`, `_TICK_SECS`, `_REJUVENATION_SECS` and `_STALE_SECS`, which the
+  health actor validates together when the agent starts and the liveness probe reads
+- `POLAR_SHUTDOWN_BUDGET_SECS`, the most the agent may take to drain once told to shut down
+- the pod's `terminationGracePeriodSeconds`, which is the budget plus `shutdown.grace_margin_secs`
+  and is **never set on its own**, so it cannot disagree with the budget. Kubernetes sends
+  SIGKILL when it ends, and the agent's own watchdog exits at the budget, so the pod has to
+  be allowed to live longer than that.
+
+`nu infra/resolve.nu settings <workload>` prints the numbers the rules below read.
+
 ### Layering
 
 For scalar and record fields, later wins: **kind defaults** (`kinds.nuon`) <
@@ -424,6 +437,25 @@ One vocabulary, two enforcement points:
 |---|---|---|
 | `resolve.nu check` | render time | an unknown `needs` entry, or a capability that does not answer every facet, fails |
 | `AgentBuilder::build()` | agent startup | the agent's declared requirements must be a subset of `POLAR_CAPABILITIES`, else it exits non-zero (a Job restarts) |
+
+The same shape applies to time. The agent's code declares the least it needs to drain
+(`.with_shutdown_budget(..)`, a requirement, not a preference) and the catalog says how
+much the deployment provides (`shutdown.budget_secs`):
+
+| Where | When | What it does |
+|---|---|---|
+| `resolve.nu check`, running `infra/rules.nu` | render time | a workload's health and shutdown settings must be consistent: tick at least 1 s; rejuvenation greater than expiry; room between them for two ticks plus the jitter window; the probe stale limit above twice the tick; the grace period above the budget. Each failure names the workload and both numbers |
+| `AgentBuilder::build()` | agent startup | `POLAR_SHUTDOWN_BUDGET_SECS` must be at least what the code declared, else it exits non-zero naming both numbers. The deployment may give more, never less |
+| `tests/catalog.rs` in `polar-agent-builder` | build time | the numbers the catalog and the Rust code share (tick, expiry, rejuvenation, stale limit, jitter window, default budget) must be equal, so changing one side alone fails a build |
+
+So raising a number is a catalog change. Lowering what the code needs is a change to the
+code, which someone has to review. The Nushell rules mirror the checks the agent makes
+itself when it starts (`polar-health`'s `HealthConfig::validate`); they do not share them,
+and the agent's own check remains the authority. They exist to fail at render time, naming
+the cause, instead of as a crash loop. The test above ties the numbers they depend on to
+the Rust defaults, not the formulas.
+
+Run the catalog's tests with `nu infra/tests/rules.nu` and `nu infra/tests/resolve.nu`.
 
 In Rust an agent declares what its own code needs:
 
