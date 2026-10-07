@@ -2,15 +2,14 @@
 //! `HealthCheckArgs` in one place so the merge and its validation can be tested
 //! without spawning an actor or touching the process environment.
 
-use crate::env::number;
-use crate::{
-    DEFAULT_CASSINI_DEADLINE_SECS, DEFAULT_EXPIRY_THRESHOLD_SECS, DEFAULT_GRAPH_DEADLINE_SECS,
-    DEFAULT_JITTER_WINDOW_SECS, DEFAULT_STALE_THRESHOLD_SECS, DEFAULT_TICK_SECS, DepCertEndpoint,
-    HealthCheckArgs, POLAR_HEALTH_CASSINI_DEADLINE_SECS_ENV, POLAR_HEALTH_CERTS_ENV,
-    POLAR_HEALTH_DEP_ENDPOINTS_ENV, POLAR_HEALTH_EXPIRY_SECS_ENV,
-    POLAR_HEALTH_GRAPH_DEADLINE_SECS_ENV, POLAR_HEALTH_REJUVENATION_SECS_ENV,
-    POLAR_HEALTH_STALE_SECS_ENV, POLAR_HEALTH_TICK_SECS_ENV,
+use crate::vars::{
+    CASSINI_DEADLINE_SECS, CERTS, DEP_ENDPOINTS, EXPIRY_SECS, GRAPH_DEADLINE_SECS,
+    POLAR_HEALTH_CASSINI_DEADLINE_SECS_ENV, POLAR_HEALTH_GRAPH_DEADLINE_SECS_ENV,
+    POLAR_HEALTH_STALE_SECS_ENV, POLAR_HEALTH_TICK_SECS_ENV, REJUVENATION_SECS, STALE_SECS,
+    TICK_SECS,
 };
+use crate::{DEFAULT_JITTER_WINDOW_SECS, DepCertEndpoint, HealthCheckArgs};
+use polar_env::{Env, ProcessEnv};
 
 /// Everything the health actor is configured with.
 #[derive(Debug, Clone)]
@@ -37,56 +36,59 @@ pub struct HealthConfig {
     pub dep_cert_endpoints: Vec<DepCertEndpoint>,
 }
 
+/// The value of a read, or its problem recorded and a placeholder put in its place so the
+/// rest can still be read and every problem reported together.
+macro_rules! take {
+    ($problems:ident, $read:expr, $placeholder:expr) => {
+        match $read {
+            Ok(value) => value,
+            Err(error) => {
+                $problems.push(error.to_string());
+                $placeholder
+            }
+        }
+    };
+}
+
 impl HealthConfig {
     /// Merges the process environment over `args`, then validates.
     pub fn load(args: HealthCheckArgs) -> Result<Self, String> {
-        Self::from_lookup(args, |name| std::env::var(name).ok())
+        Self::from_env(args, &ProcessEnv)
     }
 
-    /// As [`load`](Self::load), reading variables through `lookup`.
+    /// As [`load`](Self::load), reading variables from `env`.
     ///
     /// The environment wins over `args` for the dependency endpoints and the
     /// rejuvenation threshold, so a deployment can set them without a code change.
-    /// A numeric variable that is set but does not parse is an error, since a typo
-    /// would otherwise quietly run the agent on settings nobody chose. A blank one
-    /// means the default.
-    pub fn from_lookup(
-        args: HealthCheckArgs,
-        lookup: impl Fn(&str) -> Option<String>,
-    ) -> Result<Self, String> {
-        let cert_paths = lookup(POLAR_HEALTH_CERTS_ENV)
-            .unwrap_or_default()
-            .split(',')
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(String::from)
-            .collect();
+    /// A variable that is set but does not parse is an error, since a typo would
+    /// otherwise quietly run the agent on settings nobody chose; a blank one means the
+    /// default. Every such problem is reported together, so one restart shows them all.
+    pub fn from_env(args: HealthCheckArgs, env: &dyn Env) -> Result<Self, String> {
+        let mut problems: Vec<String> = Vec::new();
 
-        let dep_cert_endpoints = match lookup(POLAR_HEALTH_DEP_ENDPOINTS_ENV) {
-            Some(raw) if !raw.trim().is_empty() => raw
-                .split(',')
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(DepCertEndpoint::parse)
-                .collect::<Result<Vec<_>, _>>()?,
-            _ => args.dep_cert_endpoints,
-        };
+        let cert_paths = take!(problems, CERTS.read(env), None);
+        let dep_cert_endpoints = take!(problems, DEP_ENDPOINTS.read(env), None);
+        let rejuvenation = take!(problems, REJUVENATION_SECS.read(env), None);
+        let expiry_threshold_secs = take!(problems, EXPIRY_SECS.read(env), 0);
+        let tick_secs = take!(problems, TICK_SECS.read(env), 0);
+        let graph_deadline_secs = take!(problems, GRAPH_DEADLINE_SECS.read(env), 0);
+        let cassini_deadline_secs = take!(problems, CASSINI_DEADLINE_SECS.read(env), 0);
+        let probe_stale_secs = take!(problems, STALE_SECS.read(env), 0);
+
+        if !problems.is_empty() {
+            return Err(problems.join("; "));
+        }
 
         let config = Self {
             expects_graph: args.expects_graph,
-            rejuvenation_threshold_secs: number(&lookup, POLAR_HEALTH_REJUVENATION_SECS_ENV)?
-                .unwrap_or(args.rejuvenation_threshold_secs),
-            expiry_threshold_secs: number(&lookup, POLAR_HEALTH_EXPIRY_SECS_ENV)?
-                .unwrap_or(DEFAULT_EXPIRY_THRESHOLD_SECS),
-            tick_secs: number(&lookup, POLAR_HEALTH_TICK_SECS_ENV)?.unwrap_or(DEFAULT_TICK_SECS),
-            graph_deadline_secs: number(&lookup, POLAR_HEALTH_GRAPH_DEADLINE_SECS_ENV)?
-                .unwrap_or(DEFAULT_GRAPH_DEADLINE_SECS),
-            cassini_deadline_secs: number(&lookup, POLAR_HEALTH_CASSINI_DEADLINE_SECS_ENV)?
-                .unwrap_or(DEFAULT_CASSINI_DEADLINE_SECS),
-            probe_stale_secs: number(&lookup, POLAR_HEALTH_STALE_SECS_ENV)?
-                .unwrap_or(DEFAULT_STALE_THRESHOLD_SECS),
-            cert_paths,
-            dep_cert_endpoints,
+            rejuvenation_threshold_secs: rejuvenation.unwrap_or(args.rejuvenation_threshold_secs),
+            expiry_threshold_secs,
+            tick_secs,
+            graph_deadline_secs,
+            cassini_deadline_secs,
+            probe_stale_secs,
+            cert_paths: cert_paths.unwrap_or_default(),
+            dep_cert_endpoints: dep_cert_endpoints.unwrap_or(args.dep_cert_endpoints),
         };
         config.validate()?;
         Ok(config)
@@ -156,6 +158,14 @@ impl HealthConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::vars::{
+        DEFAULT_CASSINI_DEADLINE_SECS, DEFAULT_EXPIRY_THRESHOLD_SECS, DEFAULT_GRAPH_DEADLINE_SECS,
+        DEFAULT_TICK_SECS,
+    };
+    use crate::vars::{
+        POLAR_HEALTH_CERTS_ENV, POLAR_HEALTH_DEP_ENDPOINTS_ENV, POLAR_HEALTH_EXPIRY_SECS_ENV,
+        POLAR_HEALTH_FILE_ENV, POLAR_HEALTH_REJUVENATION_SECS_ENV,
+    };
     use std::collections::HashMap;
 
     fn args() -> HealthCheckArgs {
@@ -172,7 +182,7 @@ mod tests {
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect();
-        HealthConfig::from_lookup(args(), |name| map.get(name).cloned())
+        HealthConfig::from_env(args(), &map)
     }
 
     #[test]
@@ -380,5 +390,119 @@ mod tests {
         ])
         .unwrap_err();
         assert!(err.contains("expected host:port"), "{err}");
+    }
+
+    // -- the declarations ---------------------------------------------------------------
+
+    #[test]
+    fn every_problem_with_the_variables_is_reported_at_once() {
+        // The old code stopped at the first one, so fixing a pod meant a restart per typo.
+        let err = load(&[
+            (POLAR_HEALTH_TICK_SECS_ENV, "soon"),
+            (POLAR_HEALTH_EXPIRY_SECS_ENV, "x"),
+            (POLAR_HEALTH_STALE_SECS_ENV, "-1"),
+        ])
+        .unwrap_err();
+        for name in [
+            POLAR_HEALTH_TICK_SECS_ENV,
+            POLAR_HEALTH_EXPIRY_SECS_ENV,
+            POLAR_HEALTH_STALE_SECS_ENV,
+        ] {
+            assert!(err.contains(name), "{name} missing from: {err}");
+        }
+    }
+
+    #[test]
+    fn an_error_names_the_variable_and_what_it_is_for() {
+        let err = load(&[(POLAR_HEALTH_TICK_SECS_ENV, "soon")]).unwrap_err();
+        assert!(err.contains("between health ticks"), "{err}");
+    }
+
+    #[test]
+    fn the_section_describes_every_variable_the_actor_reads() {
+        let mut names: Vec<_> = crate::vars::SECTION
+            .describe()
+            .iter()
+            .map(|d| d.name)
+            .collect();
+        names.sort();
+        let mut expected = vec![
+            POLAR_HEALTH_CASSINI_DEADLINE_SECS_ENV,
+            POLAR_HEALTH_CERTS_ENV,
+            POLAR_HEALTH_DEP_ENDPOINTS_ENV,
+            POLAR_HEALTH_EXPIRY_SECS_ENV,
+            POLAR_HEALTH_FILE_ENV,
+            POLAR_HEALTH_GRAPH_DEADLINE_SECS_ENV,
+            POLAR_HEALTH_REJUVENATION_SECS_ENV,
+            POLAR_HEALTH_STALE_SECS_ENV,
+            POLAR_HEALTH_TICK_SECS_ENV,
+        ];
+        expected.sort();
+        assert_eq!(names, expected);
+    }
+
+    #[test]
+    fn the_defaults_in_the_declarations_are_the_defaults_in_the_constants() {
+        let defaults: HashMap<_, _> = crate::vars::SECTION
+            .describe()
+            .into_iter()
+            .map(|d| (d.name, d.default))
+            .collect();
+        assert_eq!(defaults[POLAR_HEALTH_TICK_SECS_ENV], Some("30"));
+        assert_eq!(defaults[POLAR_HEALTH_EXPIRY_SECS_ENV], Some("60"));
+        assert_eq!(defaults[POLAR_HEALTH_STALE_SECS_ENV], Some("90"));
+        assert_eq!(defaults[POLAR_HEALTH_GRAPH_DEADLINE_SECS_ENV], Some("120"));
+        assert_eq!(defaults[POLAR_HEALTH_CASSINI_DEADLINE_SECS_ENV], Some("60"));
+        assert_eq!(
+            defaults[POLAR_HEALTH_FILE_ENV],
+            Some(crate::POLAR_HEALTH_FILE_DEFAULT)
+        );
+        // These two take their value from the agent when the deployment says nothing.
+        assert_eq!(defaults[POLAR_HEALTH_CERTS_ENV], None);
+        assert_eq!(defaults[POLAR_HEALTH_REJUVENATION_SECS_ENV], None);
+    }
+
+    #[test]
+    fn every_declared_default_parses() {
+        assert_eq!(
+            crate::vars::SECTION.defaults_problems(),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn an_empty_environment_is_acceptable_because_everything_has_a_default() {
+        let nothing: HashMap<String, String> = HashMap::new();
+        assert_eq!(crate::vars::SECTION.check(&nothing), Vec::<String>::new());
+    }
+
+    #[test]
+    fn the_section_runs_the_relations_when_the_variables_are_sound() {
+        let env: HashMap<String, String> = [(
+            POLAR_HEALTH_REJUVENATION_SECS_ENV.to_string(),
+            "100".to_string(),
+        )]
+        .into();
+        let problems = crate::vars::SECTION.check(&env);
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(problems[0].contains("hard expiry floor"), "{problems:?}");
+    }
+
+    #[test]
+    fn the_section_does_not_run_the_relations_on_variables_that_do_not_parse() {
+        let env: HashMap<String, String> = [
+            (
+                POLAR_HEALTH_REJUVENATION_SECS_ENV.to_string(),
+                "100".to_string(),
+            ),
+            (POLAR_HEALTH_TICK_SECS_ENV.to_string(), "soon".to_string()),
+        ]
+        .into();
+        let problems = crate::vars::SECTION.check(&env);
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(
+            problems[0].starts_with(POLAR_HEALTH_TICK_SECS_ENV),
+            "{problems:?}"
+        );
     }
 }

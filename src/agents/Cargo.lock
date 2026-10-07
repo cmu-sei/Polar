@@ -5555,6 +5555,7 @@ version = "1.0.0"
 name = "polar-health"
 version = "1.0.0"
 dependencies = [
+ "polar-env",
  "ractor",
  "rand 0.10.3",
  "rcgen",

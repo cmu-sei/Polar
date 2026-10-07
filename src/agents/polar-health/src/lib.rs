@@ -36,52 +36,40 @@ use x509_parser::prelude::*;
 mod certs;
 mod clock;
 pub mod config;
-mod env;
 mod machine;
 pub mod probe;
 #[cfg(test)]
 mod simulation;
 #[cfg(test)]
 mod test_support;
+pub mod vars;
 
 pub use config::HealthConfig;
 use machine::{HealthMachine, Next, TickOutcome, TickStep};
 
 // ---------------------------------------------------------------------------
-// Environment variable constants
+// Environment variables
 // ---------------------------------------------------------------------------
+//
+// Declared once, in `vars`. The names and defaults below are derived from those
+// declarations, not repeated.
 
-pub const POLAR_HEALTH_FILE_ENV: &str = "POLAR_HEALTH_FILE";
-pub const POLAR_HEALTH_FILE_DEFAULT: &str = "/tmp/polar-health.json";
-pub const POLAR_HEALTH_CERTS_ENV: &str = "POLAR_HEALTH_CERTS";
-pub const POLAR_HEALTH_EXPIRY_SECS_ENV: &str = "POLAR_HEALTH_EXPIRY_SECS";
-pub const POLAR_HEALTH_STALE_SECS_ENV: &str = "POLAR_HEALTH_STALE_SECS";
-pub const POLAR_HEALTH_TICK_SECS_ENV: &str = "POLAR_HEALTH_TICK_SECS";
-pub const POLAR_HEALTH_DEP_ENDPOINTS_ENV: &str = "POLAR_HEALTH_DEP_ENDPOINTS";
-pub const POLAR_HEALTH_REJUVENATION_SECS_ENV: &str = "POLAR_HEALTH_REJUVENATION_SECS";
-pub const POLAR_HEALTH_GRAPH_DEADLINE_SECS_ENV: &str = "POLAR_HEALTH_GRAPH_DEADLINE_SECS";
-pub const POLAR_HEALTH_CASSINI_DEADLINE_SECS_ENV: &str = "POLAR_HEALTH_CASSINI_DEADLINE_SECS";
+pub use vars::{
+    DEFAULT_CASSINI_DEADLINE_SECS, DEFAULT_EXPIRY_THRESHOLD_SECS, DEFAULT_GRAPH_DEADLINE_SECS,
+    DEFAULT_REJUVENATION_THRESHOLD_SECS, DEFAULT_STALE_THRESHOLD_SECS, DEFAULT_TICK_SECS,
+    POLAR_HEALTH_CASSINI_DEADLINE_SECS_ENV, POLAR_HEALTH_CERTS_ENV, POLAR_HEALTH_DEP_ENDPOINTS_ENV,
+    POLAR_HEALTH_EXPIRY_SECS_ENV, POLAR_HEALTH_FILE_DEFAULT, POLAR_HEALTH_FILE_ENV,
+    POLAR_HEALTH_GRAPH_DEADLINE_SECS_ENV, POLAR_HEALTH_REJUVENATION_SECS_ENV,
+    POLAR_HEALTH_STALE_SECS_ENV, POLAR_HEALTH_TICK_SECS_ENV,
+};
 
-pub const DEFAULT_EXPIRY_THRESHOLD_SECS: i64 = 60;
-pub const DEFAULT_TICK_SECS: u64 = 30;
-/// How old the health file may get before the liveness probe fails.
-pub const DEFAULT_STALE_THRESHOLD_SECS: u64 = 90;
-pub const DEFAULT_REJUVENATION_THRESHOLD_SECS: i64 = 300;
 /// Jitter window width in seconds. Must comfortably exceed DEFAULT_TICK_SECS
 /// (and any agent's configured tick_secs) or jitter effectively rounds up to
 /// the next tick boundary and every agent in WaitingForDeps at the same time
 /// fires within one tick of each other -- a thundering herd on cert-issuer.
+/// Not an environment variable: it is how the actor behaves, and the room a
+/// rejuvenation needs depends on it.
 pub const DEFAULT_JITTER_WINDOW_SECS: u64 = 180;
-/// How long a graph-expecting agent may go without a real successful graph
-/// operation (canary or app-level write) before HealthCheckActor fails itself.
-/// Covers both "never connected" and "was connected, then went dark."
-pub const DEFAULT_GRAPH_DEADLINE_SECS: u64 = 120;
-/// How long the agent may go without a Cassini connection, from startup or from a
-/// disconnect, before the health actor gives up on it. About what the liveness
-/// probe amounted to before the actor owned this decision; to be tuned together
-/// with Cassini session repair, since a longer grace only helps once a reconnect
-/// really restores the agent's subscriptions.
-pub const DEFAULT_CASSINI_DEADLINE_SECS: u64 = 60;
 
 // ---------------------------------------------------------------------------
 // HealthStatus — typed status enum
@@ -206,7 +194,8 @@ impl HealthState {
     /// Write the health state atomically to the configured path.
     /// Uses a tmp file + rename to avoid partial reads by the healthcheck binary.
     pub fn write(&self) -> Result<(), String> {
-        let path = std::env::var(POLAR_HEALTH_FILE_ENV)
+        let path = vars::FILE
+            .read(&polar_env::ProcessEnv)
             .unwrap_or_else(|_| POLAR_HEALTH_FILE_DEFAULT.to_string());
         self.write_to(&path)
     }

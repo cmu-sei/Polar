@@ -16,11 +16,9 @@
 
 use std::fs;
 
-use crate::env::number;
-use crate::{
-    DEFAULT_STALE_THRESHOLD_SECS, HealthState, POLAR_HEALTH_FILE_DEFAULT, POLAR_HEALTH_FILE_ENV,
-    POLAR_HEALTH_STALE_SECS_ENV,
-};
+use crate::HealthState;
+use crate::vars::{FILE, STALE_SECS};
+use polar_env::{Env, ProcessEnv};
 
 /// What the probe is configured with.
 #[derive(Debug, Clone)]
@@ -33,19 +31,25 @@ pub struct ProbeConfig {
 
 impl ProbeConfig {
     pub fn from_env() -> Result<Self, String> {
-        Self::from_lookup(|name| std::env::var(name).ok())
+        Self::read(&ProcessEnv)
     }
 
-    /// As [`from_env`](Self::from_env), reading variables through `lookup`.
-    /// A numeric variable that is set but is not a number is an error, as it is for
-    /// the actor, which reads the same variable.
-    pub fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Result<Self, String> {
-        Ok(Self {
-            health_file: lookup(POLAR_HEALTH_FILE_ENV)
-                .unwrap_or_else(|| POLAR_HEALTH_FILE_DEFAULT.to_string()),
-            stale_threshold_secs: number(&lookup, POLAR_HEALTH_STALE_SECS_ENV)?
-                .unwrap_or(DEFAULT_STALE_THRESHOLD_SECS),
-        })
+    /// As [`from_env`](Self::from_env), reading variables from `env`. A variable that is
+    /// set but is not a number is an error, as it is for the actor, which reads the same
+    /// declaration.
+    pub fn read(env: &dyn Env) -> Result<Self, String> {
+        match (FILE.read(env), STALE_SECS.read(env)) {
+            (Ok(health_file), Ok(stale_threshold_secs)) => Ok(Self {
+                health_file,
+                stale_threshold_secs,
+            }),
+            (file, stale) => Err([file.err(), stale.err()]
+                .into_iter()
+                .flatten()
+                .map(|error| error.to_string())
+                .collect::<Vec<_>>()
+                .join("; ")),
+        }
     }
 }
 
@@ -111,7 +115,9 @@ pub fn run(config: &ProbeConfig, now: u64) -> ProbeReport {
 mod tests {
     use super::*;
     use crate::test_support::cert_file;
-    use crate::{HealthStatus, POLAR_HEALTH_CERTS_ENV};
+    use crate::{
+        HealthStatus, POLAR_HEALTH_CERTS_ENV, POLAR_HEALTH_FILE_ENV, POLAR_HEALTH_STALE_SECS_ENV,
+    };
 
     const NOW: u64 = 2_000_000;
 
@@ -138,7 +144,7 @@ mod tests {
         fn config(&self, certs: &[String]) -> ProbeConfig {
             let joined = certs.join(",");
             let file = self.health_file();
-            ProbeConfig::from_lookup(|name| match name {
+            ProbeConfig::read(&|name: &str| match name {
                 POLAR_HEALTH_CERTS_ENV => Some(joined.clone()),
                 POLAR_HEALTH_FILE_ENV => Some(file.clone()),
                 _ => None,
@@ -277,11 +283,11 @@ mod tests {
 
     #[test]
     fn settings_come_from_the_environment_with_defaults() {
-        let d = ProbeConfig::from_lookup(|_| None).unwrap();
+        let d = ProbeConfig::read(&|_: &str| None::<String>).unwrap();
         assert_eq!(d.stale_threshold_secs, 90);
         assert_eq!(d.health_file, "/tmp/polar-health.json");
 
-        let c = ProbeConfig::from_lookup(|name| match name {
+        let c = ProbeConfig::read(&|name: &str| match name {
             POLAR_HEALTH_STALE_SECS_ENV => Some("45".into()),
             POLAR_HEALTH_FILE_ENV => Some("/run/h.json".into()),
             _ => None,
@@ -293,7 +299,7 @@ mod tests {
 
     #[test]
     fn a_malformed_stale_threshold_is_an_error_as_it_is_for_the_actor() {
-        let err = ProbeConfig::from_lookup(|name| {
+        let err = ProbeConfig::read(&|name: &str| {
             (name == POLAR_HEALTH_STALE_SECS_ENV).then(|| "soon".to_string())
         })
         .unwrap_err();
