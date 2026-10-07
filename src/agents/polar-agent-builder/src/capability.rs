@@ -13,7 +13,7 @@ use std::fmt;
 
 /// Environment variable the deployment sets to the comma-separated list of
 /// capabilities it provides.
-pub const PROVIDED_ENV: &str = "POLAR_CAPABILITIES";
+pub const PROVIDED_ENV: &str = crate::environment::CAPABILITIES.name();
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Capability {

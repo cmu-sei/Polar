@@ -12,14 +12,16 @@
 //!   exits regardless.
 //! - [`spawn_signal_listener`]: SIGTERM and SIGINT become a shutdown request.
 
+use crate::environment;
 use crate::infrastructure::InfrastructureSupervisorMessage;
+use polar_env::Env;
 use ractor::ActorRef;
 use std::sync::Arc;
 use std::time::Duration;
 
 /// The deployment's shutdown budget in whole seconds. The catalog derives it, and
 /// derives `terminationGracePeriodSeconds` from the same value.
-pub const SHUTDOWN_BUDGET_ENV: &str = "POLAR_SHUTDOWN_BUDGET_SECS";
+pub const SHUTDOWN_BUDGET_ENV: &str = environment::SHUTDOWN_BUDGET_SECS.name();
 
 /// How long the domain supervisor gets to drain when nothing says otherwise.
 pub const DEFAULT_SHUTDOWN_BUDGET: Duration = Duration::from_secs(20);
@@ -42,14 +44,13 @@ pub const DEFAULT_SHUTDOWN_BUDGET: Duration = Duration::from_secs(20);
 /// set it freely.
 ///
 /// A set value that is not a whole number of seconds, at least 1, is an error.
-pub fn budget(declared: Option<Duration>, env: Option<&str>) -> Result<Duration, String> {
-    let Some(raw) = env.map(str::trim).filter(|raw| !raw.is_empty()) else {
+pub fn budget(declared: Option<Duration>, env: &dyn Env) -> Result<Duration, String> {
+    let provided = environment::SHUTDOWN_BUDGET_SECS
+        .read(env)
+        .map_err(|error| error.to_string())?;
+    let Some(secs) = provided else {
         return Ok(declared.unwrap_or(DEFAULT_SHUTDOWN_BUDGET));
     };
-
-    let secs: u64 = raw.parse().ok().filter(|secs| *secs >= 1).ok_or_else(|| {
-        format!("{SHUTDOWN_BUDGET_ENV} must be a whole number of seconds, at least 1, got '{raw}'")
-    })?;
     let provided = Duration::from_secs(secs);
 
     if let Some(needed) = declared
@@ -270,17 +271,23 @@ pub(crate) fn spawn_signal_listener(supervisor: ActorRef<InfrastructureSuperviso
 mod tests {
     use super::*;
 
+    /// `budget` with the deployment value given as text, or not at all.
+    fn budget_with(declared: Option<Duration>, env: Option<&str>) -> Result<Duration, String> {
+        let value = env.map(String::from);
+        budget(declared, &move |_: &str| value.clone())
+    }
+
     // -- the budget -----------------------------------------------------------
 
     #[test]
     fn the_budget_defaults_to_twenty_seconds() {
-        assert_eq!(budget(None, None).unwrap(), Duration::from_secs(20));
+        assert_eq!(budget_with(None, None).unwrap(), Duration::from_secs(20));
     }
 
     #[test]
     fn a_budget_the_agent_declares_replaces_the_default() {
         assert_eq!(
-            budget(Some(Duration::from_secs(50)), None).unwrap(),
+            budget_with(Some(Duration::from_secs(50)), None).unwrap(),
             Duration::from_secs(50)
         );
     }
@@ -289,11 +296,11 @@ mod tests {
     fn the_deployment_may_give_an_agent_more_than_it_declared_it_needs() {
         let declared = Some(Duration::from_secs(50));
         assert_eq!(
-            budget(declared, Some("90")).unwrap(),
+            budget_with(declared, Some("90")).unwrap(),
             Duration::from_secs(90)
         );
         assert_eq!(
-            budget(declared, Some("50")).unwrap(),
+            budget_with(declared, Some("50")).unwrap(),
             Duration::from_secs(50)
         );
     }
@@ -303,7 +310,7 @@ mod tests {
         // The code says what it needs to drain. A deployment that gives less would
         // cut the drain short, so the agent refuses to start, and the message says
         // which number to change and where.
-        let err = budget(Some(Duration::from_secs(50)), Some("30")).unwrap_err();
+        let err = budget_with(Some(Duration::from_secs(50)), Some("30")).unwrap_err();
         assert!(err.contains(SHUTDOWN_BUDGET_ENV), "{err}");
         assert!(
             err.contains("30s"),
@@ -323,20 +330,32 @@ mod tests {
     #[test]
     fn an_agent_that_declared_nothing_accepts_whatever_the_deployment_gives() {
         // The default is a guess, not a requirement.
-        assert_eq!(budget(None, Some("5")).unwrap(), Duration::from_secs(5));
-        assert_eq!(budget(None, Some("300")).unwrap(), Duration::from_secs(300));
+        assert_eq!(
+            budget_with(None, Some("5")).unwrap(),
+            Duration::from_secs(5)
+        );
+        assert_eq!(
+            budget_with(None, Some("300")).unwrap(),
+            Duration::from_secs(300)
+        );
     }
 
     #[test]
     fn a_blank_deployment_value_means_nothing_was_set() {
-        assert_eq!(budget(None, Some("  ")).unwrap(), DEFAULT_SHUTDOWN_BUDGET);
-        assert_eq!(budget(None, Some("")).unwrap(), DEFAULT_SHUTDOWN_BUDGET);
+        assert_eq!(
+            budget_with(None, Some("  ")).unwrap(),
+            DEFAULT_SHUTDOWN_BUDGET
+        );
+        assert_eq!(
+            budget_with(None, Some("")).unwrap(),
+            DEFAULT_SHUTDOWN_BUDGET
+        );
     }
 
     #[test]
     fn a_bad_deployment_value_is_an_error_that_names_the_variable() {
         for bad in ["soon", "1.5", "-3", "0", "20s"] {
-            let err = budget(None, Some(bad)).unwrap_err();
+            let err = budget_with(None, Some(bad)).unwrap_err();
             assert!(err.contains(SHUTDOWN_BUDGET_ENV), "{bad}: {err}");
             assert!(err.contains(bad), "{bad}: {err}");
         }

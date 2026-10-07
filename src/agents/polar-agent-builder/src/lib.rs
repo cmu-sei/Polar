@@ -20,6 +20,7 @@
 pub mod capability;
 pub use capability::Capability;
 pub mod crypto;
+pub mod environment;
 pub use crypto::{CryptoClient, CryptoHandle};
 pub mod health;
 pub use health::{HealthClient, HealthHandle};
@@ -194,6 +195,10 @@ impl<M: ractor::Message> AgentBuilder<M> {
     }
 
     pub async fn build(self) -> Result<AgentResources, ActorProcessingErr> {
+        // The environment as a whole, before anything else: every variable the builder and
+        // its components read must be sound, and every problem is reported together.
+        environment::ensure_environment_is_sound(&polar_env::ProcessEnv)?;
+
         // Every agent built here is a Cassini client; the rest are what
         // its own code declared. Checked before anything is spawned, so
         // a mismatch with the deployment is one clear, immediate,
@@ -225,11 +230,8 @@ impl<M: ractor::Message> AgentBuilder<M> {
             }
         }
 
-        let shutdown_budget = shutdown::budget(
-            self.shutdown_budget,
-            std::env::var(SHUTDOWN_BUDGET_ENV).ok().as_deref(),
-        )
-        .map_err(ActorProcessingErr::from)?;
+        let shutdown_budget = shutdown::budget(self.shutdown_budget, &polar_env::ProcessEnv)
+            .map_err(ActorProcessingErr::from)?;
 
         // Derived, not passed in: whether to watch the graph follows
         // from the capabilities. The dependency endpoints are read by
