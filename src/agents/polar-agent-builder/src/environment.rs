@@ -18,7 +18,7 @@
 //! A section is added here for each capability's components as they are moved onto
 //! `polar-env` (the Cassini client, the graph).
 
-use polar_env::{Described, Env, Optional, Section, VarDesc};
+use polar_env::{Described, Env, Kind, Optional, Section, VarDesc};
 
 /// The capabilities the deployment provides.
 pub const CAPABILITIES: Optional<Vec<String>> = Optional::list(
@@ -70,6 +70,27 @@ pub fn describe() -> Vec<(&'static str, Vec<VarDesc>)> {
         .iter()
         .map(|section| (section.name, section.describe()))
         .collect()
+}
+
+/// [`describe`] as text, one variable per line under its section.
+pub fn describe_text() -> String {
+    let mut text = String::new();
+    for (section, variables) in describe() {
+        text.push_str(&format!("{section}\n"));
+        for variable in variables {
+            let kind = match variable.kind {
+                Kind::Required => "required".to_string(),
+                Kind::Optional => "optional".to_string(),
+                Kind::Default => format!("default {}", variable.default.unwrap_or("")),
+            };
+            let secret = if variable.secret { ", secret" } else { "" };
+            text.push_str(&format!(
+                "  {}  [{kind}{secret}]  {}  {}\n",
+                variable.name, variable.type_name, variable.doc
+            ));
+        }
+    }
+    text
 }
 
 /// Stops the agent before anything is spawned if its environment is not sound.
