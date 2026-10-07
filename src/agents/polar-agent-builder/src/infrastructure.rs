@@ -29,6 +29,7 @@ use crate::crypto::CryptoHandle;
 use crate::health::HealthHandle;
 use crate::shutdown::{self, Action, Child, Death, ProcessExit, ShutdownMachine};
 use crate::{AgentResources, Subscription, build_lifecycle_handler};
+use cassini_client::TCPClientConfig;
 use cassini_types::ClientEvent;
 use polar::cassini::TcpClient;
 use polar_health::{HealthCheckActor, HealthCheckArgs, HealthVerdict};
@@ -105,6 +106,7 @@ pub(crate) trait TcpClientSpawner: Send + Sync {
         supervisor: ActorRef<InfrastructureSupervisorMessage>,
         lifecycle: LifecycleHandler,
         router: ActorRef<polar_router::RouterMessage>,
+        config: TCPClientConfig,
     ) -> Result<TcpClient, ActorProcessingErr>;
 }
 
@@ -118,8 +120,10 @@ impl TcpClientSpawner for CassiniSpawner {
         supervisor: ActorRef<InfrastructureSupervisorMessage>,
         lifecycle: LifecycleHandler,
         router: ActorRef<polar_router::RouterMessage>,
+        config: TCPClientConfig,
     ) -> Result<TcpClient, ActorProcessingErr> {
-        TcpClient::spawn_with_router(service_name, supervisor, lifecycle, router).await
+        TcpClient::spawn_with_router_config(service_name, supervisor, lifecycle, router, config)
+            .await
     }
 }
 
@@ -267,6 +271,10 @@ impl InfrastructureSupervisor {
             }),
         ));
 
+        // From the snapshot, as at the first start: a respawn is not a second reading of
+        // the process.
+        let client_config =
+            TCPClientConfig::from_env(&*state.config).map_err(ActorProcessingErr::from)?;
         let new_tcp_client = state
             .tcp_spawner
             .spawn(
@@ -274,6 +282,7 @@ impl InfrastructureSupervisor {
                 myself.clone(),
                 lifecycle_handler,
                 state.router.clone(),
+                client_config,
             )
             .await?;
 
@@ -377,6 +386,8 @@ impl Actor for InfrastructureSupervisor {
             }),
         ));
 
+        let client_config =
+            TCPClientConfig::from_env(&*args.config).map_err(ActorProcessingErr::from)?;
         let tcp_client = args
             .tcp_spawner
             .spawn(
@@ -384,6 +395,7 @@ impl Actor for InfrastructureSupervisor {
                 myself.clone(),
                 lifecycle_handler,
                 router.clone(),
+                client_config,
             )
             .await?;
 
@@ -564,6 +576,8 @@ mod tests {
         spawned: AtomicUsize,
         fail_next_spawn: AtomicBool,
         clients_fail_on_message: AtomicBool,
+        /// The configuration each client was started with, in order.
+        configs: Mutex<Vec<TCPClientConfig>>,
     }
 
     #[async_trait]
@@ -574,7 +588,9 @@ mod tests {
             supervisor: ActorRef<InfrastructureSupervisorMessage>,
             _lifecycle: LifecycleHandler,
             _router: ActorRef<polar_router::RouterMessage>,
+            config: TCPClientConfig,
         ) -> Result<TcpClient, ActorProcessingErr> {
+            self.configs.lock().unwrap().push(config);
             if self.fail_next_spawn.swap(false, Ordering::SeqCst) {
                 return Err(ActorProcessingErr::from(
                     "the fake spawner was made to fail",
@@ -968,6 +984,22 @@ mod tests {
         );
         assert_eq!(rig.events(), ["respawned"], "told, and not shut down");
         assert!(rig.infra.get_status() == ActorStatus::Running);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_client_is_started_and_restarted_with_the_snapshots_coordinates() {
+        // The rig's process has no BROKER_ADDR; the snapshot is built from a map that does.
+        let rig = Rig::standard("infra-tcp-config").await;
+        rig.resources.tcp_client.as_actor_ref().kill();
+        rig.settle().await;
+
+        let configs = rig.spawner.configs.lock().unwrap().clone();
+        assert_eq!(configs.len(), 2, "the first client and its replacement");
+        for config in configs {
+            assert_eq!(config.broker_endpoint, "cassini:8080");
+            assert_eq!(config.server_name, "cassini.local");
+            assert_eq!(config.client_certificate_path, "/c/cert.pem");
+        }
     }
 
     #[tokio::test(start_paused = true)]

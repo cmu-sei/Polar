@@ -131,6 +131,30 @@ impl TcpClient {
         M: Send + 'static,
         F: Fn(ClientEvent) -> Option<M> + Send + Sync + 'static,
     {
+        Self::spawn_with_router_config(
+            service_name,
+            supervisor,
+            map_event,
+            router,
+            TCPClientConfig::new()?,
+        )
+        .await
+    }
+
+    /// As [`spawn_with_router`](Self::spawn_with_router), with the broker coordinates
+    /// supplied instead of read from the process environment. The agent builder uses this,
+    /// handing the client what it read once into its snapshot.
+    pub async fn spawn_with_router_config<M, F>(
+        service_name: &str,
+        supervisor: ActorRef<M>,
+        map_event: F,
+        router: ActorRef<polar_router::RouterMessage>,
+        config: TCPClientConfig,
+    ) -> Result<Self, ActorProcessingErr>
+    where
+        M: Send + 'static,
+        F: Fn(ClientEvent) -> Option<M> + Send + Sync + 'static,
+    {
         let supervisor_for_lifecycle = supervisor.clone();
         let lifecycle: std::sync::Arc<dyn Fn(ClientEvent) + Send + Sync> =
             std::sync::Arc::new(move |event: ClientEvent| {
@@ -140,8 +164,6 @@ impl TcpClient {
                     tracing::warn!("TcpClient: failed to deliver lifecycle event to supervisor: {e}");
                 }
             });
-
-        let config = TCPClientConfig::new()?;
 
         let (inner, _) = Actor::spawn_linked(
             Some(format!("{service_name}.tcp")),
