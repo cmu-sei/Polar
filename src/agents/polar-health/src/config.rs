@@ -2,6 +2,7 @@
 //! `HealthCheckArgs` in one place so the merge and its validation can be tested
 //! without spawning an actor or touching the process environment.
 
+use crate::env::number;
 use crate::{
     DEFAULT_CASSINI_DEADLINE_SECS, DEFAULT_EXPIRY_THRESHOLD_SECS, DEFAULT_GRAPH_DEADLINE_SECS,
     DEFAULT_JITTER_WINDOW_SECS, DEFAULT_STALE_THRESHOLD_SECS, DEFAULT_TICK_SECS, DepCertEndpoint,
@@ -149,23 +150,6 @@ impl HealthConfig {
             ));
         }
         Ok(())
-    }
-}
-
-/// Reads a whole number of seconds. `None` when the variable is unset or blank;
-/// an error naming the variable when it is set to something that is not a number.
-fn number<T: std::str::FromStr>(
-    lookup: &impl Fn(&str) -> Option<String>,
-    name: &str,
-) -> Result<Option<T>, String> {
-    match lookup(name) {
-        None => Ok(None),
-        Some(raw) if raw.trim().is_empty() => Ok(None),
-        Some(raw) => raw
-            .trim()
-            .parse::<T>()
-            .map(Some)
-            .map_err(|_| format!("{name} must be a whole number of seconds, got '{raw}'")),
     }
 }
 

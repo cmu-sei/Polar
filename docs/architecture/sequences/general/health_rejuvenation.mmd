@@ -27,6 +27,9 @@ sequenceDiagram
     Health->>File: write (Jittering), file stays fresh
     Health->>Infra: HealthVerdict::Rejuvenate
     Note over Infra: begin_shutdown, see shutdown_pipeline
+    loop every tick during the drain
+        Health->>File: write (shutting_down), probe keeps passing
+    end
 
     alt hard deadline
         Note over Health: own cert below 60s, graph or Cassini deadline

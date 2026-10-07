@@ -36,8 +36,11 @@ use x509_parser::prelude::*;
 mod certs;
 mod clock;
 pub mod config;
+mod env;
 mod machine;
 pub mod probe;
+#[cfg(test)]
+mod simulation;
 #[cfg(test)]
 mod test_support;
 
@@ -117,6 +120,18 @@ pub enum HealthPhase {
     /// The agent has been told to end (a verdict was given) and is draining. The
     /// file keeps being refreshed so the probe does not kill it mid-drain.
     ShuttingDown,
+}
+
+impl std::fmt::Display for HealthPhase {
+    /// The same names the health file uses.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            HealthPhase::Normal => "normal",
+            HealthPhase::WaitingForDeps => "waiting_for_deps",
+            HealthPhase::Jittering => "jittering",
+            HealthPhase::ShuttingDown => "shutting_down",
+        })
+    }
 }
 
 impl From<&RejuvenationPhase> for HealthPhase {

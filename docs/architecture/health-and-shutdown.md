@@ -1,9 +1,9 @@
 # Agent Health and Shutdown
 
-Status: **design agreed 2026-10-06; implementation pending.** Sections marked
-*Today* describe the code on `feat/ace-integration`. Sections marked *Target*
-describe the agreed design. The remaining-work item "Health system rework"
-tracks the move from one to the other.
+Status: **implemented in code (stages S1 to S4 of the rework), not yet verified on a
+cluster.** The pod's termination grace period, which the catalog will derive from each
+agent's shutdown budget, is still to do (stage S5). The remaining-work item "Health
+system rework" tracks what is left.
 
 Scope: agents built on `polar-agent-builder`. Agents that have not migrated keep
 their hand-written health wiring; they only need to keep compiling.
@@ -231,32 +231,63 @@ credentials charts carry it until they move to the catalog.
 
 ## 5. The Kubernetes liveness probe
 
-`polar-healthcheck` is the container's liveness exec probe. Chart settings:
-`initialDelaySeconds` 150, `periodSeconds` 30, `failureThreshold` 2,
-`timeoutSeconds` 5.
+`polar-healthcheck` is the container's liveness exec probe. The catalog sets it for
+every agent (`infra/config/kinds.nuon`, `probe`): `initialDelaySeconds` 150,
+`periodSeconds` 30, `failureThreshold` 2, `timeoutSeconds` 5.
 
-*Today* it exits 1 on any of: stale file (older than 90 s), unreadable or
-unparseable file, `status != Healthy`, or certificate TTL under 60 s. It also
-prints an "ERROR: agent status is ..." line even when the agent is healthy.
+It is a dead-man's switch and checks one thing: **the health file exists, parses,
+and is no older than `POLAR_HEALTH_STALE_SECS` (90 s).** It fails otherwise. It does
+not judge the agent's `status`, its connections, or its certificates. Those are the
+actor's decisions, made earlier and acted on in an orderly way, and judging them a
+second time here could only make the two disagree. Every disagreement used to end
+the same way, with the kubelet killing a pod the actor was in the middle of shutting
+down. The probe prints what the agent reports about itself (status, phase,
+connections), for whoever reads the pod's events, and does not act on it. A
+malformed `POLAR_HEALTH_STALE_SECS` is an error, as it is for the actor, which reads
+the same variable.
 
-*Target:* the probe checks **freshness only**: the file exists, parses, and its
-timestamp is younger than the stale threshold. It does not re-judge `status` or
-certificate TTL, because the actor already judged those and acts on them
-gracefully. Re-judging in the probe would let two components disagree, and the
-disagreement always resolves to a SIGKILL. The probe logic moves into the
-`polar-health` library so it can be tested without a process boundary.
+The logic is `polar_health::probe::judge`, a pure function of the file's contents and
+the time, so it can be tested without a process.
 
-When the probe fails twice, the kubelet sends SIGTERM and then SIGKILL after the
-grace period. *Target:* SIGTERM now starts the orderly pipeline, so even a probe
-kill has a chance to end gracefully. *Today* PID 1 ignores SIGTERM and every probe
-kill ends in exit code 137.
+### What the probe is for
+
+With every tick in every phase writing the file, and the drain after a verdict
+bounded by the shutdown budget (always shorter than the staleness limit), the probe
+should never fire on a working agent. It fires when nothing in the process can run:
+
+- the process is deadlocked or wedged, so the actor stops writing; or
+- the actor has died without anyone noticing.
+
+How fast it acts then is a bound, not a hope. The file turns stale 91 s after the
+last write, the first probe to see it fails (at most one period later), and the
+second consecutive failure, a period after that, kills the pod: at most
+91 + 30 + 30 = 151 s after the last write, never before 91 s.
+
+### How this is tested
+
+`simulation.rs` runs the real health machine next to a model of the kubelet with
+the catalog's probe settings, in virtual time. It sweeps every jitter value (0 to
+179 s) against every phase of the actor's ticks relative to the kubelet's probes
+(5,400 pods) and checks:
+
+- an agent rejuvenating, and then draining after its verdict, is never killed;
+- the slowest rejuvenation in the sweep still gives its verdict before the
+  certificate reaches the hard floor, with 1 s to spare;
+- an agent draining after an *unhealthy* verdict is not killed either;
+- an actor that stops writing is killed, within the bound above, whatever phase it
+  was in; and one that stops after its verdict ends itself first;
+- a healthy agent is never killed over an hour.
+
+Putting the two old defects back (no file writes during the rejuvenation phases;
+the probe judging status) makes those tests fail, the first at a jitter of 91 s,
+which is the kill seen on the cluster.
 
 ## 6. How to read an ending
 
 | Observed exit | Meaning |
 |---|---|
 | 1, log shows a shutdown reason | Orderly. The reason says which trigger fired. |
-| 137, no shutdown reason logged | The kubelet killed the pod: the file went stale or SIGTERM was ignored. In the *Target* design this means the process was wedged. |
+| 137, no shutdown reason logged | The kubelet killed the pod. The actor writes the file every tick and SIGTERM is handled, so this now means the process was wedged, or the pod's grace period is shorter than the agent's shutdown budget (until stage S5 sets it). |
 | 0 | A bug. No agent should exit 0. |
 
 After verification of the rework, a naturally occurring rejuvenation should end
@@ -282,5 +313,4 @@ with exit code 1 and a logged reason, never 137.
 - [`shutdown_pipeline.mmd`](sequences/general/shutdown_pipeline.mmd): the
   shutdown funnel, its triggers, and the watchdog.
 
-Both show the *Target* design. See `sequences/assets/asset_regeneration.md` to
-re-render.
+See `sequences/assets/asset_regeneration.md` to re-render.

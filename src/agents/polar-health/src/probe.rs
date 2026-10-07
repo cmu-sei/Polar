@@ -1,58 +1,51 @@
 //! The Kubernetes liveness probe, as a library.
 //!
-//! `polar-healthcheck` is a thin wrapper around [`run`]. The logic lives here so
-//! it can be tested against real files and a chosen clock, without a process
-//! boundary.
+//! The probe is the dead-man's switch for the one case the health actor cannot cover:
+//! a process in which nothing runs any more. It asks one question, whether the actor
+//! is still writing the health file, and answers it from the file's age alone.
+//!
+//! It deliberately does not re-judge anything the actor already decided. Health
+//! status, connection state and certificate lifetimes are the actor's business: it
+//! acts on them, in an orderly way, long before they matter. A probe that judged
+//! them a second time could only disagree with the actor, and every disagreement
+//! ends in the kubelet killing a pod the actor was in the middle of shutting down.
+//!
+//! `polar-healthcheck` is a thin wrapper around [`run`]. The logic lives here so it
+//! can be tested against a chosen clock, and run against the machine in
+//! `simulation.rs`, without a process boundary.
 
 use std::fs;
 
+use crate::env::number;
 use crate::{
-    DEFAULT_EXPIRY_THRESHOLD_SECS, DEFAULT_STALE_THRESHOLD_SECS, HealthState, HealthStatus,
-    POLAR_HEALTH_CERTS_ENV, POLAR_HEALTH_EXPIRY_SECS_ENV, POLAR_HEALTH_FILE_DEFAULT,
-    POLAR_HEALTH_FILE_ENV, POLAR_HEALTH_STALE_SECS_ENV, certs,
+    DEFAULT_STALE_THRESHOLD_SECS, HealthState, POLAR_HEALTH_FILE_DEFAULT, POLAR_HEALTH_FILE_ENV,
+    POLAR_HEALTH_STALE_SECS_ENV,
 };
 
 /// What the probe is configured with.
 #[derive(Debug, Clone)]
 pub struct ProbeConfig {
-    /// Certificates to check; empty means skip the certificate check.
-    pub cert_paths: Vec<String>,
-    /// Fail if a certificate has less than this much life left.
-    pub expiry_threshold_secs: i64,
     /// The health file the agent's actor writes.
     pub health_file: String,
     /// Fail if the health file is older than this.
     pub stale_threshold_secs: u64,
-    /// The raw value of `POLAR_HEALTH_CERTS`, kept to tell "unset" from "set but empty".
-    certs_env_empty: bool,
 }
 
 impl ProbeConfig {
-    pub fn from_env() -> Self {
+    pub fn from_env() -> Result<Self, String> {
         Self::from_lookup(|name| std::env::var(name).ok())
     }
 
     /// As [`from_env`](Self::from_env), reading variables through `lookup`.
-    /// A numeric variable that does not parse falls back to the default.
-    pub fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Self {
-        let certs_env = lookup(POLAR_HEALTH_CERTS_ENV).unwrap_or_default();
-        Self {
-            certs_env_empty: certs_env.is_empty(),
-            cert_paths: certs_env
-                .split(',')
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(String::from)
-                .collect(),
-            expiry_threshold_secs: lookup(POLAR_HEALTH_EXPIRY_SECS_ENV)
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(DEFAULT_EXPIRY_THRESHOLD_SECS),
+    /// A numeric variable that is set but is not a number is an error, as it is for
+    /// the actor, which reads the same variable.
+    pub fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Result<Self, String> {
+        Ok(Self {
             health_file: lookup(POLAR_HEALTH_FILE_ENV)
                 .unwrap_or_else(|| POLAR_HEALTH_FILE_DEFAULT.to_string()),
-            stale_threshold_secs: lookup(POLAR_HEALTH_STALE_SECS_ENV)
-                .and_then(|s| s.parse().ok())
+            stale_threshold_secs: number(&lookup, POLAR_HEALTH_STALE_SECS_ENV)?
                 .unwrap_or(DEFAULT_STALE_THRESHOLD_SECS),
-        }
+        })
     }
 }
 
@@ -64,80 +57,53 @@ pub struct ProbeReport {
     pub lines: Vec<String>,
 }
 
-fn check_certs(config: &ProbeConfig, now: i64, lines: &mut Vec<String>) -> bool {
-    if config.certs_env_empty {
-        lines.push(format!(
-            "WARN: {POLAR_HEALTH_CERTS_ENV} not set, skipping cert checks"
-        ));
-        return true;
-    }
-
-    let mut all_ok = true;
-    for path in &config.cert_paths {
-        match certs::ttl_secs(path, now) {
-            Err(e) => {
-                lines.push(format!("ERROR: {e}"));
-                all_ok = false;
-            }
-            Ok(secs_remaining) if secs_remaining < config.expiry_threshold_secs => {
-                lines.push(format!(
-                    "ERROR: cert {path} expires in {secs_remaining}s (threshold: {}s)",
-                    config.expiry_threshold_secs
-                ));
-                all_ok = false;
-            }
-            Ok(secs_remaining) => {
-                lines.push(format!("OK: cert {path} valid for {secs_remaining}s"));
-            }
+impl ProbeReport {
+    fn failed(line: String) -> Self {
+        Self {
+            ok: false,
+            lines: vec![format!("ERROR: {line}")],
         }
     }
-    all_ok
 }
 
-fn check_health_file(config: &ProbeConfig, now: u64, lines: &mut Vec<String>) -> bool {
-    let path = &config.health_file;
-
-    let contents = match fs::read_to_string(path) {
-        Ok(c) => c,
-        Err(e) => {
-            lines.push(format!("ERROR: failed to read health file {path}: {e}"));
-            return false;
-        }
-    };
-    let state = match serde_json::from_str::<HealthState>(&contents) {
-        Ok(s) => s,
-        Err(e) => {
-            lines.push(format!("ERROR: failed to parse health file {path}: {e}"));
-            return false;
-        }
+/// Judges the contents of the health file at `now` (Unix seconds).
+///
+/// Passes if the file parses and is no older than `stale_threshold_secs`. What the
+/// file says about the agent is reported, for whoever reads the pod's events, and
+/// never judged.
+pub fn judge(contents: &str, now: u64, stale_threshold_secs: u64) -> ProbeReport {
+    let state = match serde_json::from_str::<HealthState>(contents) {
+        Ok(state) => state,
+        Err(e) => return ProbeReport::failed(format!("failed to parse health file: {e}")),
     };
 
+    // A timestamp in the future (a clock that stepped back) counts as fresh: the
+    // actor wrote it, and the probe's question is only whether it is still writing.
     let age = now.saturating_sub(state.timestamp);
-    if age > config.stale_threshold_secs {
-        lines.push(format!(
-            "ERROR: health file is {age}s old (threshold: {}s)",
-            config.stale_threshold_secs
+    if age > stale_threshold_secs {
+        return ProbeReport::failed(format!(
+            "health file is {age}s old (threshold: {stale_threshold_secs}s)"
         ));
-        return false;
     }
 
-    // Printed whether or not the agent is healthy; the wording is wrong for the
-    // healthy case and the probe rework (S4) removes it.
-    lines.push(format!(
-        "ERROR: agent status is '{}' (cassini={}, graph={})",
-        state.status, state.cassini_connected, state.graph_connected
-    ));
-    state.status == HealthStatus::Healthy
+    ProbeReport {
+        ok: true,
+        lines: vec![format!(
+            "OK: health file is {age}s old (threshold: {stale_threshold_secs}s); the agent \
+             reports '{}' (phase {}, cassini={}, graph={})",
+            state.status, state.phase, state.cassini_connected, state.graph_connected
+        )],
+    }
 }
 
-/// Runs both checks at `now` (Unix seconds). Neither short-circuits the other.
+/// Reads the health file and judges it at `now`.
 pub fn run(config: &ProbeConfig, now: u64) -> ProbeReport {
-    let mut lines = Vec::new();
-    let certs_ok = check_certs(config, now as i64, &mut lines);
-    let health_ok = check_health_file(config, now, &mut lines);
-    ProbeReport {
-        ok: certs_ok && health_ok,
-        lines,
+    match fs::read_to_string(&config.health_file) {
+        Ok(contents) => judge(&contents, now, config.stale_threshold_secs),
+        Err(e) => ProbeReport::failed(format!(
+            "failed to read health file {}: {e}",
+            config.health_file
+        )),
     }
 }
 
@@ -145,6 +111,7 @@ pub fn run(config: &ProbeConfig, now: u64) -> ProbeReport {
 mod tests {
     use super::*;
     use crate::test_support::cert_file;
+    use crate::{HealthStatus, POLAR_HEALTH_CERTS_ENV};
 
     const NOW: u64 = 2_000_000;
 
@@ -176,6 +143,7 @@ mod tests {
                 POLAR_HEALTH_FILE_ENV => Some(file.clone()),
                 _ => None,
             })
+            .unwrap()
         }
     }
 
@@ -225,12 +193,15 @@ mod tests {
     }
 
     #[test]
-    fn an_unhealthy_status_fails_today() {
-        // The probe re-judges the status the actor already decided. The rework
-        // (S4) makes the probe freshness-only and flips this.
-        let f = Fixture::new();
-        f.write_state(HealthStatus::Unhealthy, NOW - 10);
-        assert!(!run(&f.config(&[]), NOW).ok);
+    fn an_unhealthy_status_does_not_fail_a_fresh_file() {
+        // The actor decides health and acts on it. The probe only asks whether the
+        // actor is still alive and reporting, so a fresh file passes whatever the
+        // status says; judging it again here could only make the two disagree.
+        for status in [HealthStatus::Healthy, HealthStatus::Unhealthy] {
+            let f = Fixture::new();
+            f.write_state(status.clone(), NOW - 10);
+            assert!(run(&f.config(&[]), NOW).ok, "{status:?}");
+        }
     }
 
     #[test]
@@ -268,53 +239,27 @@ mod tests {
     }
 
     #[test]
-    fn an_unset_cert_variable_skips_the_cert_check() {
-        let f = Fixture::new();
-        f.write_state(HealthStatus::Healthy, NOW);
-        let file = f.health_file();
-        let config =
-            ProbeConfig::from_lookup(|name| (name == POLAR_HEALTH_FILE_ENV).then(|| file.clone()));
-        let report = run(&config, NOW);
-        assert!(report.ok);
-        assert!(report.lines[0].starts_with("WARN:"), "{:?}", report.lines);
-    }
-
-    #[test]
-    fn a_short_lived_cert_fails_even_with_a_healthy_file() {
-        let f = Fixture::new();
-        f.write_state(HealthStatus::Healthy, crate::HealthState::now());
-        let cert = cert_file(&f.dir, "a.pem", 30);
-        let now = crate::HealthState::now();
-        let report = run(&f.config(&[cert]), now);
-        assert!(!report.ok);
-        assert!(report.lines.iter().any(|l| l.contains("threshold: 60s")));
-    }
-
-    #[test]
-    fn a_missing_cert_fails() {
-        let f = Fixture::new();
-        f.write_state(HealthStatus::Healthy, NOW);
-        let report = run(
-            &f.config(&["/nonexistent/polar-probe-test.pem".into()]),
-            NOW,
-        );
-        assert!(!report.ok);
-    }
-
-    #[test]
-    fn every_cert_is_reported_not_just_the_first_failure() {
+    fn certificates_are_not_the_probes_business() {
+        // The actor checks the agent's own certificates and reports a verdict well
+        // before they matter; the probe used to check them a second time.
         let f = Fixture::new();
         f.write_state(HealthStatus::Healthy, crate::HealthState::now());
         let short = cert_file(&f.dir, "short.pem", 30);
-        let long = cert_file(&f.dir, "long.pem", 3600);
-        let report = run(&f.config(&[short, long]), crate::HealthState::now());
-        assert!(!report.ok);
-        assert!(report.lines.iter().any(|l| l.starts_with("ERROR: cert")));
-        assert!(report.lines.iter().any(|l| l.starts_with("OK: cert")));
+        let expired = cert_file(&f.dir, "expired.pem", -100);
+        let report = run(
+            &f.config(&[short, expired, "/nonexistent/polar-probe-test.pem".into()]),
+            crate::HealthState::now(),
+        );
+        assert!(report.ok, "{:?}", report.lines);
+        assert!(
+            report.lines.iter().all(|l| !l.contains("cert")),
+            "the probe says nothing about certificates: {:?}",
+            report.lines
+        );
     }
 
     #[test]
-    fn a_bad_certificate_does_not_hide_a_stale_file() {
+    fn a_stale_file_is_still_reported_when_certificates_are_bad() {
         let f = Fixture::new();
         f.write_state(HealthStatus::Healthy, NOW - 500);
         let report = run(
@@ -326,42 +271,66 @@ mod tests {
             report
                 .lines
                 .iter()
-                .any(|l| l.contains("failed to read cert"))
+                .any(|l| l.contains("health file is 500s old"))
         );
-        assert!(report.lines.iter().any(|l| l.contains("health file is")));
     }
 
     #[test]
     fn settings_come_from_the_environment_with_defaults() {
-        let d = ProbeConfig::from_lookup(|_| None);
-        assert_eq!(d.expiry_threshold_secs, 60);
+        let d = ProbeConfig::from_lookup(|_| None).unwrap();
         assert_eq!(d.stale_threshold_secs, 90);
         assert_eq!(d.health_file, "/tmp/polar-health.json");
 
         let c = ProbeConfig::from_lookup(|name| match name {
-            POLAR_HEALTH_EXPIRY_SECS_ENV => Some("120".into()),
             POLAR_HEALTH_STALE_SECS_ENV => Some("45".into()),
             POLAR_HEALTH_FILE_ENV => Some("/run/h.json".into()),
             _ => None,
-        });
-        assert_eq!(c.expiry_threshold_secs, 120);
+        })
+        .unwrap();
         assert_eq!(c.stale_threshold_secs, 45);
         assert_eq!(c.health_file, "/run/h.json");
     }
 
-    /// Cosmetic defect pinned as it is: a healthy agent still prints an
-    /// "ERROR: agent status is" line. The probe rework removes it.
     #[test]
-    fn pinned_defect_a_healthy_agent_still_prints_an_error_line() {
+    fn a_malformed_stale_threshold_is_an_error_as_it_is_for_the_actor() {
+        let err = ProbeConfig::from_lookup(|name| {
+            (name == POLAR_HEALTH_STALE_SECS_ENV).then(|| "soon".to_string())
+        })
+        .unwrap_err();
+        assert!(err.contains(POLAR_HEALTH_STALE_SECS_ENV), "{err}");
+    }
+
+    #[test]
+    fn judge_needs_no_file() {
+        let state = HealthState::at(HealthStatus::Healthy, 1000, true, true);
+        let json = serde_json::to_string(&state).unwrap();
+        assert!(judge(&json, 1090, 90).ok);
+        assert!(!judge(&json, 1091, 90).ok);
+        assert!(!judge("{not json", 1000, 90).ok);
+    }
+
+    #[test]
+    fn a_fresh_file_reports_one_informational_line_and_no_error() {
         let f = Fixture::new();
-        f.write_state(HealthStatus::Healthy, NOW);
+        f.write_state(HealthStatus::Healthy, NOW - 4);
+        let report = run(&f.config(&[]), NOW);
+        assert!(report.ok);
+        assert_eq!(report.lines.len(), 1, "{:?}", report.lines);
+        let line = &report.lines[0];
+        assert!(line.starts_with("OK: health file is 4s old"), "{line}");
+        assert!(line.contains("'healthy'"), "{line}");
+        assert!(line.contains("normal"), "the phase is shown: {line}");
+    }
+
+    #[test]
+    fn what_the_agent_says_about_itself_is_shown_even_when_it_is_unhealthy() {
+        // Informational only: it is what an operator reads in the pod events.
+        let f = Fixture::new();
+        f.write_state(HealthStatus::Unhealthy, NOW - 4);
         let report = run(&f.config(&[]), NOW);
         assert!(report.ok);
         assert!(
-            report
-                .lines
-                .iter()
-                .any(|l| l.starts_with("ERROR: agent status is 'healthy'")),
+            report.lines[0].contains("'unhealthy'"),
             "{:?}",
             report.lines
         );
