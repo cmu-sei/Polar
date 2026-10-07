@@ -103,10 +103,6 @@ pub struct AgentResources {
     pub infrastructure: ActorRef<crate::infrastructure::InfrastructureSupervisorMessage>,
 }
 
-/// Seconds before its own certificate expires that an agent enters
-/// rejuvenation mode. The same for every agent today.
-const DEFAULT_REJUVENATION_THRESHOLD_SECS: i64 = 300;
-
 pub struct AgentBuilder<M: ractor::Message> {
     myself: ActorRef<M>,
     service_name: String,
@@ -243,7 +239,7 @@ impl<M: ractor::Message> AgentBuilder<M> {
         let health_check_args = HealthCheckArgs {
             verdict_to: None,
             expects_graph: required.contains(&Capability::GraphWrite),
-            rejuvenation_threshold_secs: DEFAULT_REJUVENATION_THRESHOLD_SECS,
+            rejuvenation_threshold_secs: polar_health::DEFAULT_REJUVENATION_THRESHOLD_SECS,
             dep_cert_endpoints: Vec::new(),
         };
 
