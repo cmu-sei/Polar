@@ -17,7 +17,7 @@
 //!
 //! Each capability brings the sections of the components it uses ([`sections_for`]): the
 //! Cassini client's and the graph's today. A section is added there as another component
-//! (encryption, the Kubernetes API read) moves onto `polar-env`.
+//! (the Kubernetes API read) moves onto `polar-env`.
 
 use crate::capability::Capability;
 use polar_env::{Described, Env, Kind, Mutability, Optional, Section, VarDesc};
@@ -59,7 +59,7 @@ pub fn base_sections() -> [&'static Section; 2] {
 }
 
 /// The sections of the components a capability brings. A capability whose components are not
-/// yet on `polar-env` (encryption, the Kubernetes API read) brings none, and is listed in
+/// yet on `polar-env` (the Kubernetes API read) brings none, and is listed in
 /// `remaining-work.md` with the port.
 pub fn sections_for(capabilities: &[Capability]) -> Vec<&'static Section> {
     capabilities
@@ -67,7 +67,8 @@ pub fn sections_for(capabilities: &[Capability]) -> Vec<&'static Section> {
         .filter_map(|capability| match capability {
             Capability::Cassini => Some(&cassini_client::environment::SECTION),
             Capability::GraphWrite => Some(&polar::graph::environment::SECTION),
-            Capability::Encryption | Capability::KubeApiRead => None,
+            Capability::Encryption => Some(&polar_crypto::environment::SECTION),
+            Capability::KubeApiRead => None,
         })
         .collect()
 }
@@ -366,8 +367,9 @@ mod tests {
             names(&[Capability::Cassini, Capability::GraphWrite]),
             ["cassini-client", "graph"]
         );
-        // Their components are not on polar-env yet; recorded in remaining-work.md.
-        assert!(names(&[Capability::Encryption, Capability::KubeApiRead]).is_empty());
+        assert_eq!(names(&[Capability::Encryption]), ["crypto"]);
+        // Its component is not on polar-env yet; recorded in remaining-work.md.
+        assert!(names(&[Capability::KubeApiRead]).is_empty());
     }
 
     #[test]
@@ -410,7 +412,10 @@ mod tests {
     fn the_environment_describes_itself_by_section() {
         let described = describe();
         let sections: Vec<_> = described.iter().map(|(name, _)| *name).collect();
-        assert_eq!(sections, ["builder", "health", "cassini-client", "graph"]);
+        assert_eq!(
+            sections,
+            ["builder", "health", "cassini-client", "graph", "crypto"]
+        );
 
         let names: Vec<_> = described
             .iter()
@@ -507,6 +512,7 @@ mod tests {
         assert!(capability("health").is_null());
         assert_eq!(capability("cassini-client"), "cassini");
         assert_eq!(capability("graph"), "graph-write");
+        assert_eq!(capability("crypto"), "encryption");
     }
 
     fn resolved<'a>(report: &'a [polar_env::Resolved], name: &str) -> &'a polar_env::Resolved {

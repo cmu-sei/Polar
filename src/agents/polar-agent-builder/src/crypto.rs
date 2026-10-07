@@ -112,10 +112,7 @@ impl CryptoClient for CryptoHandle {
     }
 }
 
-// These tests set TLS_CLIENT_CERT because polar-crypto still reads it from the process. The
-// allowance goes when polar-crypto is on polar-env and takes its settings as an argument.
 #[cfg(test)]
-#[allow(clippy::disallowed_methods)]
 mod tests {
     use super::*;
     use credentials_agent_common::agent_escrow_key::{AgentEscrowKeyReply, AgentEscrowKeyRequest};
@@ -230,21 +227,20 @@ mod tests {
         .unwrap();
 
         let own_cert_file = write_test_agent_certificate();
-        unsafe {
-            std::env::set_var("TLS_CLIENT_CERT", own_cert_file.path());
-        }
 
         let (crypto_actor, _) = Actor::spawn(
             None,
             polar_crypto::CryptoActor,
-            polar_crypto::CryptoActorArgs::new(fake_agent, router),
+            polar_crypto::CryptoActorArgs::new(fake_agent, router).with_settings(
+                polar_crypto::environment::CryptoSettings {
+                    own_certificate_path: own_cert_file.path().to_string_lossy().into_owned(),
+                    service_account_token_path: "/unused".to_string(),
+                },
+            ),
         )
         .await
         .unwrap();
 
-        unsafe {
-            std::env::remove_var("TLS_CLIENT_CERT");
-        }
         drop(own_cert_file);
 
         let handle = CryptoHandle::new(crypto_actor);
@@ -336,21 +332,20 @@ mod tests {
         .unwrap();
 
         let own_cert_file = write_test_agent_certificate();
-        unsafe {
-            std::env::set_var("TLS_CLIENT_CERT", own_cert_file.path());
-        }
 
         let (crypto_actor, _) = Actor::spawn(
             None,
             polar_crypto::CryptoActor,
-            polar_crypto::CryptoActorArgs::new(fake_agent, router),
+            polar_crypto::CryptoActorArgs::new(fake_agent, router).with_settings(
+                polar_crypto::environment::CryptoSettings {
+                    own_certificate_path: own_cert_file.path().to_string_lossy().into_owned(),
+                    service_account_token_path: "/unused".to_string(),
+                },
+            ),
         )
         .await
         .unwrap();
 
-        unsafe {
-            std::env::remove_var("TLS_CLIENT_CERT");
-        }
         drop(own_cert_file);
 
         let handle = CryptoHandle::new(crypto_actor);

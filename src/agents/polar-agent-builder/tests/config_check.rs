@@ -208,7 +208,10 @@ fn describe_json_is_machine_readable_and_complete() {
         .iter()
         .map(|s| s["name"].as_str().unwrap())
         .collect();
-    assert_eq!(names, ["builder", "health", "cassini-client", "graph"]);
+    assert_eq!(
+        names,
+        ["builder", "health", "cassini-client", "graph", "crypto"]
+    );
     // Nothing else on stdout, so a pipe into another tool gets exactly the document.
     assert!(stdout(&o).trim_start().starts_with('{'));
 }

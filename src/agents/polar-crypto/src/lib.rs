@@ -62,6 +62,9 @@
 //! which every genuinely router-based consumer (kube-consumer, the
 //! first real one) now uses.
 
+// Reading the process environment goes through polar-env (see clippy.toml).
+#![deny(clippy::disallowed_methods)]
+
 pub mod environment;
 
 use cassini_client::TcpClientMessage;
