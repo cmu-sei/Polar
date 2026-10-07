@@ -17,8 +17,34 @@
 
     probe: { initial_delay_secs: 150, period_secs: 30, failure_threshold: 2, timeout_secs: 5 }
 
-    # Read by HealthCheckActor and the polar-healthcheck probe.
-    health: { dir: "/var/run/polar-health", volume: "polar-health", expiry_secs: 60, tick_secs: 30 }
+    # Read by HealthCheckActor and the polar-healthcheck probe. Each number is also
+    # what the Rust side defaults to (polar-health), and the agent validates them
+    # together when it starts; `resolve.nu check` runs the same rules here, so a bad
+    # combination fails at render time instead of as a crash loop. A test in
+    # polar-health (tests/catalog.rs) fails if these drift from the Rust defaults.
+    health: {
+      dir: "/var/run/polar-health"
+      volume: "polar-health"
+      # The agent is failed outright when its certificate has less than this left.
+      expiry_secs: 60
+      tick_secs: 30
+      # It starts to rejuvenate when its certificate has this much left.
+      rejuvenation_secs: 300
+      # The liveness probe fails when the health file is older than this.
+      stale_secs: 90
+      # The longest random delay before a rejuvenation fires. Not set in the
+      # environment: it is a constant in polar-health, copied here so the rules can
+      # use it.
+      jitter_window_secs: 180
+    }
+
+    # How long the agent has to drain once told to shut down. The agent builder
+    # exits the process 1 when the budget runs out (its watchdog). The pod's
+    # terminationGracePeriodSeconds is derived: budget plus the margin, so Kubernetes
+    # does not SIGKILL the pod before the watchdog has ended it. It cannot be set
+    # separately. A workload overrides the budget; its code declares the least it
+    # needs (with_shutdown_budget), and the agent refuses to start if this is less.
+    shutdown: { budget_secs: 20, grace_margin_secs: 10 }
 
     # The projected token polar-init presents to cert-issuer.
     sa_token: { volume: "sa-token", path: "/workspace/token", expiration_secs: 3600 }

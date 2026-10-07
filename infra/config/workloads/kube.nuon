@@ -8,6 +8,9 @@
     kind: "agent"
     image: "kube-observer"
     needs: ["kube-api-read"]
+    # Its three watchers are stopped one after another, each bounded at 10 s, plus
+    # a margin. The code declares the same (SHUTDOWN_BUDGET in its supervisor).
+    shutdown: { budget_secs: 40 }
   }
 
   {
@@ -15,5 +18,8 @@
     kind: "agent"
     image: "kube-consumer"
     needs: ["graph-write", "encryption"]
+    # The 5 s drain window and the graph controller's stop, up to 30 s, plus a
+    # margin. The code declares the same (SHUTDOWN_BUDGET in its supervisor).
+    shutdown: { budget_secs: 45 }
   }
 ]

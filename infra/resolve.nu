@@ -21,6 +21,8 @@
 # Capabilities (config/capabilities.nuon) are unioned into lists
 # (env, volumes, mounts, certs, dependency checks), in the order declared.
 
+use rules.nu *
+
 const INFRA = (path self | path dirname)
 const CONFIG = ($INFRA | path join "config")
 
@@ -190,6 +192,11 @@ export def resolve [name: string, target: string = $DEFAULT_TARGET] {
         $env_list = ($env_list | append (env_entry $e $vars "entry" $name))
     }
 
+    # Shutdown: the grace period is derived, never set on its own, so it cannot
+    # disagree with the budget.
+    let sd = $spec.shutdown
+    let grace = ($sd.budget_secs + $sd.grace_margin_secs)
+
     # Health: the files and thresholds HealthCheckActor and polar-healthcheck read.
     let h = $spec.health
     $volumes = ($volumes | append { name: $h.volume, secret: null, audience: null, from: "kind" })
@@ -201,6 +208,11 @@ export def resolve [name: string, target: string = $DEFAULT_TARGET] {
         { name: "POLAR_HEALTH_CERTS", value: $cert_files }
         { name: "POLAR_HEALTH_EXPIRY_SECS", value: ($h.expiry_secs | into string) }
         { name: "POLAR_HEALTH_TICK_SECS", value: ($h.tick_secs | into string) }
+        { name: "POLAR_HEALTH_REJUVENATION_SECS", value: ($h.rejuvenation_secs | into string) }
+        { name: "POLAR_HEALTH_STALE_SECS", value: ($h.stale_secs | into string) }
+        # The most the agent may take to drain. Its code declares the least it
+        # needs; the agent refuses to start if this is less.
+        { name: "POLAR_SHUTDOWN_BUDGET_SECS", value: ($sd.budget_secs | into string) }
         { name: "POLAR_HEALTH_DEP_ENDPOINTS", value: $dep_list }
         # What this deployment provides. The agent builder compares it with
         # what the code requires and refuses to start on a mismatch.
@@ -232,6 +244,7 @@ export def resolve [name: string, target: string = $DEFAULT_TARGET] {
         backoff_limit: $spec.backoff_limit
         ttl_after_finished_secs: $spec.ttl_after_finished_secs
         probe: $spec.probe
+        termination_grace_secs: $grace
         proxy_ca_cert: null
         needs: $needs
         env: $env_list
@@ -242,6 +255,7 @@ export def resolve [name: string, target: string = $DEFAULT_TARGET] {
         certs: ($certs | get spec)
         resources: { cluster_roles: ($cluster_roles | reject from), sa_token_secrets: (if $sa_secret == null { [] } else { [$sa_secret] }) }
         _origin: $origin
+        _settings: { health: $h, shutdown: ($sd | insert termination_grace_secs $grace) }
         _from: { roles: $cluster_roles, env: $env_list, volumes: $volumes, mounts: $mounts, deps: $deps, certs: $certs }
     }
 }
@@ -249,7 +263,7 @@ export def resolve [name: string, target: string = $DEFAULT_TARGET] {
 # What the template takes: the resolved record without provenance.
 def for_template [r: record] {
     $r
-    | reject _origin _from resources
+    | reject _origin _from _settings resources
     | update env { reject from }
     | update volumes { reject from }
     | update mounts { reject from }
@@ -305,12 +319,18 @@ def check_all [target: string] {
     let results = ($names | each {|n|
         try {
             let r = (resolve $n $target)
-            { who: $n, identity: $"($r.service_account).($r.namespace)", error: null }
+            {
+                who: $n
+                identity: $"($r.service_account).($r.namespace)"
+                rules: ((health_problems $n $r._settings.health) ++ (shutdown_problems $n $r._settings.shutdown))
+                error: null
+            }
         } catch {|e|
-            { who: $n, identity: null, error: $e.msg }
+            { who: $n, identity: null, rules: [], error: $e.msg }
         }
     })
     for r in ($results | where error != null) { $problems = ($problems | append $r.error) }
+    for r in $results { for p in $r.rules { $problems = ($problems | append $p) } }
     let sas = ($results | where error == null)
 
     # A workload's ServiceAccount becomes the SAN of its certificate, so two
@@ -342,6 +362,7 @@ def actual_of [file: string] {
         restart_policy: $pod.restartPolicy
         backoff_limit: $doc.spec.backoffLimit
         ttl_after_finished_secs: $doc.spec.ttlSecondsAfterFinished
+        termination_grace_secs: ($pod | get -o terminationGracePeriodSeconds)
         env: ($c.env | each {|e|
             {
                 name: $e.name
@@ -374,6 +395,7 @@ def expected_of [r: record] {
         restart_policy: $r.restart_policy
         backoff_limit: $r.backoff_limit
         ttl_after_finished_secs: $r.ttl_after_finished_secs
+        termination_grace_secs: $r.termination_grace_secs
         env: ($r.env | each {|e| { name: $e.name, value: $e.value, secret: $e.secret, key: $e.key } })
         volumes: ($r.volumes | each {|v| { name: $v.name, secret: $v.secret, audience: $v.audience } })
         mounts: ($r.mounts | each {|m| { name: $m.name, path: $m.path, read_only: $m.read_only } })
@@ -434,7 +456,7 @@ def "main explain" [
     print $"  needs: ($r.needs | str join ', ')"
     print ""
     print "  values:"
-    for k in [namespace image pull_policy polar_init_image cert_issuer_url service_account sa_token_secret automount_sa_token restart_policy backoff_limit ttl_after_finished_secs] {
+    for k in [namespace image pull_policy polar_init_image cert_issuer_url service_account sa_token_secret automount_sa_token restart_policy backoff_limit ttl_after_finished_secs termination_grace_secs] {
         let v = ($r | get $k)
         let o = ($r._origin | get -o $k | default "derived")
         print $"    ($k | fill -w 24)  (one_line $v)   [($o)]"
@@ -469,6 +491,14 @@ def "main explain" [
         print $"    ClusterRole ($c.name) bound to ($r.service_account): ($rules)   [($c.from)]"
     }
     if ($r.resources.sa_token_secrets | is-empty) and ($r._from.roles | is-empty) { print "    (none)" }
+}
+
+# The health and shutdown settings the rules in rules.nu read, as JSON.
+def "main settings" [
+    name: string
+    --target: string = $DEFAULT_TARGET
+] {
+    (resolve $name $target)._settings | to json
 }
 
 # The record the workload's template takes, as JSON.

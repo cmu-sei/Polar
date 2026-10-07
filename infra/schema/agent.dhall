@@ -114,6 +114,7 @@ let render =
               , automountServiceAccountToken = v.automount_sa_token
               , volumes = Some volumes
               , restartPolicy = Some v.restart_policy
+              , terminationGracePeriodSeconds = Some v.termination_grace_secs
               , initContainers = Some
                 [ functions.makePolarInitContainer
                     v.polar_init_image
