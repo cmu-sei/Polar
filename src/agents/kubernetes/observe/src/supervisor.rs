@@ -30,6 +30,11 @@ use kube_common::{RESOURCE_APPLIED_ACTION, RESOURCE_DELETED_ACTION, RawKubeEvent
 pub type NamespaceWatcherMap = HashMap<String, ActorRef<()>>;
 pub type Watcher = ActorRef<WatcherMsg>;
 
+/// How long the infrastructure supervisor gives this agent to drain: its three
+/// watchers are stopped one after another, each bounded at 10 s, plus a margin. If
+/// it is not done by then the process exits 1 regardless.
+const SHUTDOWN_BUDGET: Duration = Duration::from_secs(3 * 10 + 10);
+
 /// This supervisor's own, real, local message type -- the shared,
 /// core polar::SupervisorMessage can't structurally carry either of
 /// the two, new, real signals this migration needs
@@ -128,6 +133,7 @@ impl Actor for ClusterObserverSupervisor {
         // provisions (ClusterRole, binding, token); the builder checks
         // that against POLAR_CAPABILITIES before anything starts.
         let resources = AgentBuilder::new(myself.clone(), TCP_CLIENT_NAME)
+            .with_shutdown_budget(SHUTDOWN_BUDGET)
             .requires(Capability::KubeApiRead)
             .with_lifecycle_handler(|event| Some(ObserverSupervisorMessage::ClientEvent { event }))
             .build()

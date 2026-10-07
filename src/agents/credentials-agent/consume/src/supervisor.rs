@@ -129,6 +129,12 @@ pub const BROKER_CLIENT_NAME: &str = "credentials-agent-consumer.tcp";
 /// new ones no longer arriving, before the ledger and projection are stopped.
 const DRAIN_WINDOW_SECS: u64 = 5;
 
+/// How long the infrastructure supervisor gives this agent to drain, from being
+/// told to shut down to releasing it: the drain window, the ledger's stop (10 s)
+/// and the projection's stop (30 s), plus a margin. If it is not done by then the
+/// process exits 1 regardless.
+const SHUTDOWN_BUDGET: Duration = Duration::from_secs(50);
+
 /// Every topic this agent subscribes to. One subscription each; the same list
 /// is unsubscribed from when shutdown begins.
 pub const REQUEST_TOPICS: [&str; 15] = [
@@ -923,6 +929,7 @@ impl Actor for ConsumerSupervisor {
         // dependency endpoints (Cassini and Neo4j certificates) come from
         // POLAR_HEALTH_DEP_ENDPOINTS in the deployment.
         let mut builder = AgentBuilder::new(myself.clone(), SERVICE_NAME)
+            .with_shutdown_budget(SHUTDOWN_BUDGET)
             .with_lifecycle_handler(|event| Some(ConsumerSupervisorMessage::ClientEvent { event }));
         for subscription in Self::request_subscriptions(&myself) {
             builder = builder.with_subscription(subscription);

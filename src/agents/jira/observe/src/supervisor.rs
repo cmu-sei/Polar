@@ -44,6 +44,12 @@ use tracing::{debug, error, info, warn};
 /// messages, so this has to be bounded.
 const OBSERVER_STOP_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// How long the infrastructure supervisor gives this agent to drain: each observer
+/// is stopped in turn, bounded at `OBSERVER_STOP_TIMEOUT`, so this allows for
+/// several, plus a margin. If it is not done by then the process exits 1
+/// regardless.
+const SHUTDOWN_BUDGET: Duration = Duration::from_secs(OBSERVER_STOP_TIMEOUT.as_secs() * 3 + 10);
+
 /// This supervisor's own message type. polar::SupervisorMessage cannot carry
 /// the infrastructure signals without polar-agent-builder depending back on
 /// lib, so the builder is generic over the message (see kube-observer).
@@ -231,6 +237,7 @@ impl Actor for ObserverSupervisor {
         // depend on Cassini, which is the default capability, so there is
         // nothing to declare beyond the lifecycle handler.
         let resources = AgentBuilder::new(myself.clone(), BROKER_CLIENT_NAME)
+            .with_shutdown_budget(SHUTDOWN_BUDGET)
             .with_lifecycle_handler(|event| Some(ObserverSupervisorMessage::ClientEvent { event }))
             .build()
             .await?;

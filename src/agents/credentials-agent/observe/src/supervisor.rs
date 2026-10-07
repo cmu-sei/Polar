@@ -70,6 +70,11 @@ const DEFAULT_PORT: &str = "8080";
 /// holding the pod's replacement back for minutes.
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// How long the infrastructure supervisor gives this agent to drain: the HTTP
+/// server's drain, which can use all of `DRAIN_TIMEOUT`, plus a margin. If it is
+/// not done by then the process exits 1 regardless.
+const SHUTDOWN_BUDGET: Duration = Duration::from_secs(DRAIN_TIMEOUT.as_secs() + 10);
+
 /// The four reply routers: one per request/reply flow this observer fronts.
 /// Shared between the subscriptions that fill them and the HTTP handlers
 /// that wait on them.
@@ -225,6 +230,7 @@ impl Actor for ObserverSupervisor {
         let routers = ReplyRouters::default();
 
         let mut builder = AgentBuilder::new(myself.clone(), SERVICE_NAME)
+            .with_shutdown_budget(SHUTDOWN_BUDGET)
             .with_lifecycle_handler(|event| Some(ObserverSupervisorMessage::ClientEvent { event }));
         for subscription in reply_subscriptions(&routers) {
             builder = builder.with_subscription(subscription);

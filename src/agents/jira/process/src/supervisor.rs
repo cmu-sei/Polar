@@ -32,6 +32,11 @@ const JIRA_TOPICS: [&str; 4] = [
     JIRA_ISSUES_CONSUMER_TOPIC,
 ];
 
+/// How long the infrastructure supervisor gives this agent to drain: the graph
+/// controller's stop (up to 30 s) plus a margin. If it is not done by then the
+/// process exits 1 regardless.
+const SHUTDOWN_BUDGET: Duration = Duration::from_secs(30 + 10);
+
 /// This supervisor's own message type. polar::SupervisorMessage cannot
 /// carry the two infrastructure signals without polar-agent-builder
 /// depending back on lib, so the builder is generic over the message and
@@ -149,7 +154,9 @@ impl Actor for ConsumerSupervisor {
         // spawning anything, and reads the dependency endpoints from
         // POLAR_HEALTH_DEP_ENDPOINTS. This agent never encrypts a payload,
         // so it does not declare encryption.
-        let mut builder = AgentBuilder::new(myself.clone(), BROKER_CLIENT_NAME).with_graph_write();
+        let mut builder = AgentBuilder::new(myself.clone(), BROKER_CLIENT_NAME)
+            .with_shutdown_budget(SHUTDOWN_BUDGET)
+            .with_graph_write();
         for subscription in Self::jira_subscriptions(&myself) {
             builder = builder.with_subscription(subscription);
         }

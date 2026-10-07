@@ -42,6 +42,11 @@ use tracing::warn;
 
 const DRAIN_WINDOW_SECS: u64 = 5;
 
+/// How long the infrastructure supervisor gives this agent to drain: the drain
+/// window and the graph controller's stop (up to 30 s), plus a margin. If it is
+/// not done by then the process exits 1 regardless.
+const SHUTDOWN_BUDGET: Duration = Duration::from_secs(DRAIN_WINDOW_SECS + 30 + 10);
+
 /// This supervisor's own message type. The shared `polar::SupervisorMessage`
 /// cannot carry the two infrastructure signals (respawn, prepare-shutdown)
 /// without `polar-agent-builder` depending back on `polar`, so, like
@@ -373,6 +378,7 @@ impl Actor for ClusterConsumerSupervisor {
         // Subscription for the complete, real reasoning), TcpClient,
         // and CryptoActor -- collapsed into one, real, composed call.
         let mut builder = AgentBuilder::new(myself.clone(), BROKER_CLIENT_NAME)
+            .with_shutdown_budget(SHUTDOWN_BUDGET)
             .with_graph_write();
 
         for subscription in Self::kube_subscriptions(&myself) {
