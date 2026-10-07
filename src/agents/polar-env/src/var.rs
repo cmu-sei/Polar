@@ -163,6 +163,11 @@ pub struct Defaulted<T> {
 }
 
 impl<T> Required<T> {
+    /// The variable's name, usable in a constant.
+    pub const fn name(&self) -> &'static str {
+        self.0.name
+    }
+
     pub const fn new(
         name: &'static str,
         doc: &'static str,
@@ -186,6 +191,11 @@ impl<T> Required<T> {
 }
 
 impl<T> Optional<T> {
+    /// The variable's name, usable in a constant.
+    pub const fn name(&self) -> &'static str {
+        self.0.name
+    }
+
     pub const fn new(
         name: &'static str,
         doc: &'static str,
@@ -209,6 +219,11 @@ impl<T> Optional<T> {
 }
 
 impl<T> Defaulted<T> {
+    /// The variable's name, usable in a constant.
+    pub const fn name(&self) -> &'static str {
+        self.spec.name
+    }
+
     pub const fn new(
         name: &'static str,
         doc: &'static str,
@@ -522,6 +537,17 @@ mod tests {
             ALL.iter().map(|v| v.desc().name).collect::<Vec<_>>(),
             ["A", "B"]
         );
+    }
+
+    #[test]
+    fn a_declaration_knows_its_name_at_compile_time() {
+        // So a constant for the name can be derived from the declaration, and the name
+        // is written once.
+        const R: Required<String> = Required::text("A_NAME", "d");
+        const O: Optional<u64> = Optional::number("B_NAME", "d");
+        const D: Defaulted<u64> = Defaulted::number("C_NAME", "d", "1");
+        const NAMES: [&str; 3] = [R.name(), O.name(), D.name()];
+        assert_eq!(NAMES, ["A_NAME", "B_NAME", "C_NAME"]);
     }
 
     // keeps the imports honest
