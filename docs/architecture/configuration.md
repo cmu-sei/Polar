@@ -156,7 +156,10 @@ Cassini client's and the graph's, declared in their own crates, so the builder j
 startup and the checker judges them for the environment a workload is given. Encryption and the
 Kubernetes API read bring none until `polar-crypto` is on `polar-env`.
 
-Next, in order: handing the Cassini client and the graph controller their settings from the
-snapshot (today they still read the process), `--describe --json` and an `--effective` view; then the lint. After that,
+The Cassini client is started, and restarted, from the snapshot, and the graph controller is handed
+its settings from it (the credentials consumer's projection excepted, as it starts before the
+builder; see `remaining-work.md`).
+
+Next, in order: `--describe --json` and an `--effective` view; then the lint. After that,
 the ConfigurationActor shell, then the scheduler integration, then the credentials agent's use of
 it. Every step is in `remaining-work.md`.
