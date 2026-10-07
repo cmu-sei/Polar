@@ -5,6 +5,12 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 
+[ features ]
+# Makes the health clock follow tokio's paused time, so a test of a crate that uses
+# the health actor can run a whole rejuvenation or deadline in virtual time. Only for
+# dev-dependencies; never enabled in a release build.
+virtual-time = []
+
 [ dependencies ]
 rand = { workspace = true }
 ractor = { workspace = true }

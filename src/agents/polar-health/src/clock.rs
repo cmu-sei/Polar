@@ -16,8 +16,12 @@ pub(crate) fn now_secs() -> u64 {
 /// Under tokio's paused time, timers advance without the wall clock moving, so a
 /// test could never reach a deadline the machine measures in wall seconds. Tests
 /// add how far the paused clock has run ahead of real time. In a runtime that is
-/// not paused this is zero, and in a release build it does not exist.
-#[cfg(test)]
+/// not paused this is zero.
+///
+/// It exists in this crate's own tests, and in the tests of a crate that depends on
+/// it and turns on the `virtual-time` feature in its dev-dependencies. A release
+/// build has neither, so it reads the wall clock and nothing else.
+#[cfg(any(test, feature = "virtual-time"))]
 fn virtual_offset_secs() -> u64 {
     tokio::time::Instant::now()
         .into_std()
@@ -25,7 +29,7 @@ fn virtual_offset_secs() -> u64 {
         .as_secs()
 }
 
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "virtual-time")))]
 fn virtual_offset_secs() -> u64 {
     0
 }
