@@ -37,12 +37,14 @@
 //! with an empty string. A variable marked secret is never shown in an error or a
 //! description.
 
+mod config;
 mod env;
 mod error;
 mod section;
 mod var;
 
+pub use config::{Config, ConfigBuilder, ConfigError, Resolved, Source};
 pub use env::{Env, ProcessEnv};
 pub use error::{EnvError, Problem};
 pub use section::Section;
-pub use var::{Defaulted, Described, Kind, Optional, Required, VarDesc};
+pub use var::{Defaulted, Described, Kind, Mutability, Optional, Readable, Required, VarDesc};

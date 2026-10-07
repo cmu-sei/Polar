@@ -16,6 +16,19 @@ pub enum Kind {
     Default,
 }
 
+/// Whether a variable may change while the agent runs.
+///
+/// `Static` (the default) is read once, when the agent starts: TLS paths, the broker
+/// address, the capabilities, the health safety invariants. `Dynamic` may also be
+/// overridden at runtime, by a scheduled configuration, and subscribers are told when it
+/// changes. The code declares which, so what may change while an agent runs is decided by the
+/// code and not by whoever publishes the configuration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mutability {
+    Static,
+    Dynamic,
+}
+
 /// What a declaration says about itself.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VarDesc {
@@ -25,6 +38,7 @@ pub struct VarDesc {
     /// The default, as text, for a [`Defaulted`] variable.
     pub default: Option<&'static str>,
     pub secret: bool,
+    pub mutability: Mutability,
     /// For people: "text", "whole number", "whole number of seconds", ...
     pub type_name: &'static str,
 }
@@ -45,6 +59,7 @@ struct Spec<T> {
     doc: &'static str,
     type_name: &'static str,
     secret: bool,
+    mutability: Mutability,
     parse: fn(&str) -> Result<T, String>,
 }
 
@@ -60,6 +75,7 @@ impl<T> Spec<T> {
             doc,
             type_name,
             secret: false,
+            mutability: Mutability::Static,
             parse,
         }
     }
@@ -70,6 +86,18 @@ impl<T> Spec<T> {
             doc: self.doc,
             type_name: self.type_name,
             secret: true,
+            mutability: self.mutability,
+            parse: self.parse,
+        }
+    }
+
+    const fn dynamic(&self) -> Self {
+        Self {
+            name: self.name,
+            doc: self.doc,
+            type_name: self.type_name,
+            secret: self.secret,
+            mutability: Mutability::Dynamic,
             parse: self.parse,
         }
     }
@@ -109,6 +137,7 @@ impl<T> Spec<T> {
             kind,
             default,
             secret: self.secret,
+            mutability: self.mutability,
             type_name: self.type_name,
         }
     }
@@ -182,6 +211,11 @@ impl<T> Required<T> {
         Self(self.0.secret())
     }
 
+    /// May be overridden while the agent runs. See [`Mutability`].
+    pub const fn dynamic(self) -> Self {
+        Self(self.0.dynamic())
+    }
+
     pub fn read(&self, env: &dyn Env) -> Result<T, EnvError> {
         match self.0.raw(env) {
             Some(text) => self.0.parse_text(&text),
@@ -208,6 +242,11 @@ impl<T> Optional<T> {
     /// Never shown in an error or a description.
     pub const fn secret(self) -> Self {
         Self(self.0.secret())
+    }
+
+    /// May be overridden while the agent runs. See [`Mutability`].
+    pub const fn dynamic(self) -> Self {
+        Self(self.0.dynamic())
     }
 
     pub fn read(&self, env: &dyn Env) -> Result<Option<T>, EnvError> {
@@ -245,12 +284,68 @@ impl<T> Defaulted<T> {
         }
     }
 
+    /// May be overridden while the agent runs. See [`Mutability`].
+    pub const fn dynamic(self) -> Self {
+        Self {
+            spec: self.spec.dynamic(),
+            default: self.default,
+        }
+    }
+
     pub fn read(&self, env: &dyn Env) -> Result<T, EnvError> {
         let text = self
             .spec
             .raw(env)
             .unwrap_or_else(|| self.default.to_string());
         self.spec.parse_text(&text)
+    }
+}
+
+/// A declaration that can be read, whatever it reads to.
+///
+/// [`Config::read`](crate::Config::read) takes any of the three kinds through this, and
+/// checks the variable is declared by a registered section before reading it.
+pub trait Readable: Described {
+    type Out;
+
+    fn name(&self) -> &'static str;
+
+    fn read_from(&self, env: &dyn Env) -> Result<Self::Out, EnvError>;
+}
+
+impl<T: Send + Sync> Readable for Required<T> {
+    type Out = T;
+
+    fn name(&self) -> &'static str {
+        self.0.name
+    }
+
+    fn read_from(&self, env: &dyn Env) -> Result<T, EnvError> {
+        self.read(env)
+    }
+}
+
+impl<T: Send + Sync> Readable for Optional<T> {
+    type Out = Option<T>;
+
+    fn name(&self) -> &'static str {
+        self.0.name
+    }
+
+    fn read_from(&self, env: &dyn Env) -> Result<Option<T>, EnvError> {
+        self.read(env)
+    }
+}
+
+impl<T: Send + Sync> Readable for Defaulted<T> {
+    type Out = T;
+
+    fn name(&self) -> &'static str {
+        self.spec.name
+    }
+
+    fn read_from(&self, env: &dyn Env) -> Result<T, EnvError> {
+        self.read(env)
     }
 }
 
@@ -548,6 +643,72 @@ mod tests {
         const D: Defaulted<u64> = Defaulted::number("C_NAME", "d", "1");
         const NAMES: [&str; 3] = [R.name(), O.name(), D.name()];
         assert_eq!(NAMES, ["A_NAME", "B_NAME", "C_NAME"]);
+    }
+
+    // -- mutability --------------------------------------------------------------
+
+    #[test]
+    fn a_variable_is_static_unless_it_says_it_may_change_at_runtime() {
+        assert_eq!(
+            Required::<String>::text("A", "d").desc().mutability,
+            Mutability::Static
+        );
+        assert_eq!(
+            Optional::<u64>::number("B", "d").desc().mutability,
+            Mutability::Static
+        );
+        assert_eq!(
+            Defaulted::<u64>::number("C", "d", "1").desc().mutability,
+            Mutability::Static
+        );
+    }
+
+    #[test]
+    fn any_kind_can_be_declared_dynamic() {
+        assert_eq!(
+            Required::<String>::text("A", "d")
+                .dynamic()
+                .desc()
+                .mutability,
+            Mutability::Dynamic
+        );
+        assert_eq!(
+            Optional::<u64>::number("B", "d")
+                .dynamic()
+                .desc()
+                .mutability,
+            Mutability::Dynamic
+        );
+        assert_eq!(
+            Defaulted::<u64>::number("C", "d", "1")
+                .dynamic()
+                .desc()
+                .mutability,
+            Mutability::Dynamic
+        );
+    }
+
+    #[test]
+    fn dynamic_and_secret_combine_in_either_order() {
+        let a = Optional::<String>::text("A", "d").secret().dynamic().desc();
+        let b = Optional::<String>::text("A", "d").dynamic().secret().desc();
+        assert!(a.secret && b.secret);
+        assert_eq!(
+            (a.mutability, b.mutability),
+            (Mutability::Dynamic, Mutability::Dynamic)
+        );
+    }
+
+    #[test]
+    fn a_variable_can_be_read_through_the_common_trait() {
+        fn name_of<R: Readable>(v: &R) -> &'static str {
+            v.name()
+        }
+        assert_eq!(name_of(&Required::<String>::text("R", "d")), "R");
+        let d = Defaulted::<u64>::number("D", "d", "7");
+        assert_eq!(Readable::read_from(&d, &env(&[])).unwrap(), 7);
+        let o = Optional::<u64>::number("O", "d");
+        assert_eq!(Readable::read_from(&o, &env(&[])).unwrap(), None);
     }
 
     // keeps the imports honest
