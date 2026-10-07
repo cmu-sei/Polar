@@ -920,6 +920,7 @@ dependencies = [
  "chrono",
  "clap",
  "opentelemetry",
+ "polar-env",
  "polar-router",
  "proptest",
  "ractor",

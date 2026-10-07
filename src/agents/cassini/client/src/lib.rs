@@ -1,5 +1,7 @@
 pub use cassini_tracing::{init_tracing, shutdown_tracing};
 pub use cassini_tracing::{try_set_parent_otel, try_set_parent_wire};
+pub mod environment;
+
 use cassini_types::{ClientEvent, ClientMessage, ControlOp, WireTraceCtx};
 use ractor::concurrency::{Duration, sleep};
 use ractor::{Actor, ActorProcessingErr, ActorRef, Message, OutputPort, RpcReplyPort, async_trait};
@@ -66,8 +68,10 @@ impl MessageQueue {
     }
 
     pub fn from_env() -> Option<Self> {
-        std::env::var("CASSINI_QUEUE_PATH")
+        environment::CASSINI_QUEUE_PATH
+            .read(&polar_env::ProcessEnv)
             .ok()
+            .flatten()
             .map(|p| Self::new(PathBuf::from(p)))
     }
 
@@ -217,14 +221,34 @@ impl TCPClientConfig {
         }
     }
 
-    /// Read filepaths from the environment and return. If we can't read these, we can't start
+    /// Read the coordinates from the process environment. If we can't read these, we can't
+    /// start, and the error names every variable that is missing.
     pub fn new() -> Result<Self, ActorProcessingErr> {
-        let client_certificate_path = env::var("TLS_CLIENT_CERT")?;
-        let client_key_path = env::var("TLS_CLIENT_KEY")?;
-        let ca_certificate_path = env::var("TLS_CA_CERT")?;
-        let broker_endpoint = env::var("BROKER_ADDR")?;
-        let server_name = env::var("CASSINI_SERVER_NAME")?;
+        Self::from_env(&polar_env::ProcessEnv).map_err(ActorProcessingErr::from)
+    }
 
+    /// As [`new`](Self::new), reading from `env`, so a snapshot or a test supplies its own.
+    /// Every problem is reported together, each naming the variable and what it is for.
+    pub fn from_env(env: &dyn polar_env::Env) -> Result<Self, String> {
+        use environment::{
+            BROKER_ADDR, CASSINI_SERVER_NAME, TLS_CA_CERT, TLS_CLIENT_CERT, TLS_CLIENT_KEY,
+        };
+        let mut problems = Vec::new();
+        let mut take = |read: Result<String, polar_env::EnvError>| match read {
+            Ok(value) => value,
+            Err(error) => {
+                problems.push(error.to_string());
+                String::new()
+            }
+        };
+        let client_certificate_path = take(TLS_CLIENT_CERT.read(env));
+        let client_key_path = take(TLS_CLIENT_KEY.read(env));
+        let ca_certificate_path = take(TLS_CA_CERT.read(env));
+        let broker_endpoint = take(BROKER_ADDR.read(env));
+        let server_name = take(CASSINI_SERVER_NAME.read(env));
+        if !problems.is_empty() {
+            return Err(problems.join("; "));
+        }
         Ok(TCPClientConfig {
             broker_endpoint,
             server_name,
