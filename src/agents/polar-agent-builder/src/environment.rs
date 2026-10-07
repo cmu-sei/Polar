@@ -178,6 +178,67 @@ pub fn describe_json() -> serde_json::Value {
     serde_json::json!({ "sections": sections })
 }
 
+/// What an environment resolves to: a snapshot of the variables declared by the sections
+/// that apply to a deployment providing what `env` says it provides (the same sections
+/// [`check_environment`] judges), with the value each takes, and where that came from.
+pub fn effective(env: &dyn Env) -> polar_env::Config {
+    let mut builder = polar_env::Config::builder(env);
+    for section in sections_provided_by(env) {
+        builder = builder.register(section);
+    }
+    builder.build()
+}
+
+/// [`effective`]'s report as text: each section, then one line per variable with its value
+/// (a secret is shown as `<hidden>`), its source and whether a scheduled override may change it.
+pub fn effective_text(report: &[polar_env::Resolved]) -> String {
+    let mut text = String::new();
+    let mut section = "";
+    for variable in report {
+        if variable.section != section {
+            section = variable.section;
+            text.push_str(&format!("{section}\n"));
+        }
+        let value = variable.value.as_deref().unwrap_or("(not set)");
+        text.push_str(&format!(
+            "  {} = {value}  [{}, {}]\n",
+            variable.name,
+            variable.source.as_str(),
+            mutability_name(variable.mutability)
+        ));
+    }
+    text
+}
+
+/// [`effective`]'s report as JSON: `{"sections": [{"name", "variables": [{"name", "value",
+/// "source", "mutability", "secret"}]}]}`. `value` is null when unset and `"<hidden>"` for
+/// a secret that is set.
+pub fn effective_json(report: &[polar_env::Resolved]) -> serde_json::Value {
+    let mut sections: Vec<(&str, Vec<serde_json::Value>)> = Vec::new();
+    for variable in report {
+        if sections.last().map(|(name, _)| *name) != Some(variable.section) {
+            sections.push((variable.section, Vec::new()));
+        }
+        sections
+            .last_mut()
+            .expect("just pushed")
+            .1
+            .push(serde_json::json!({
+                "name": variable.name,
+                "value": variable.value,
+                "source": variable.source.as_str(),
+                "mutability": mutability_name(variable.mutability),
+                "secret": variable.secret,
+            }));
+    }
+    serde_json::json!({
+        "sections": sections
+            .into_iter()
+            .map(|(name, variables)| serde_json::json!({ "name": name, "variables": variables }))
+            .collect::<Vec<_>>()
+    })
+}
+
 /// [`describe`] as text, one variable per line under its section.
 pub fn describe_text() -> String {
     let mut text = String::new();
@@ -223,6 +284,7 @@ mod tests {
     use super::fixtures::{CASSINI_ENV, GRAPH_ENV};
     use super::*;
     use polar_env::Env;
+    use polar_env::Source;
     use std::collections::HashMap;
 
     fn env(pairs: &[(&str, &str)]) -> HashMap<String, String> {
@@ -445,6 +507,106 @@ mod tests {
         assert!(capability("health").is_null());
         assert_eq!(capability("cassini-client"), "cassini");
         assert_eq!(capability("graph"), "graph-write");
+    }
+
+    fn resolved<'a>(report: &'a [polar_env::Resolved], name: &str) -> &'a polar_env::Resolved {
+        report
+            .iter()
+            .find(|r| r.name == name)
+            .unwrap_or_else(|| panic!("{name} is not in the report"))
+    }
+
+    #[test]
+    fn the_effective_view_says_where_each_value_came_from() {
+        let mut vars = CASSINI_ENV.to_vec();
+        vars.extend_from_slice(&[
+            ("POLAR_CAPABILITIES", "cassini"),
+            ("POLAR_HEALTH_TICK_SECS", "15"),
+        ]);
+        let report = effective(&env(&vars)).report();
+
+        let tick = resolved(&report, "POLAR_HEALTH_TICK_SECS");
+        assert_eq!(
+            (tick.value.as_deref(), tick.source),
+            (Some("15"), Source::Env)
+        );
+        let stale = resolved(&report, "POLAR_HEALTH_STALE_SECS");
+        assert_eq!(
+            (stale.value.as_deref(), stale.source),
+            (Some("90"), Source::Default)
+        );
+        let queue = resolved(&report, "CASSINI_QUEUE_PATH");
+        assert_eq!(
+            (queue.value.as_deref(), queue.source),
+            (None, Source::Unset)
+        );
+    }
+
+    #[test]
+    fn the_effective_view_covers_what_the_deployment_provides_and_no_more() {
+        let mut vars = CASSINI_ENV.to_vec();
+        vars.push(("POLAR_CAPABILITIES", "cassini"));
+        let report = effective(&env(&vars)).report();
+        assert!(report.iter().any(|r| r.name == "BROKER_ADDR"));
+        assert!(!report.iter().any(|r| r.name == "GRAPH_ENDPOINT"));
+
+        vars.push(("POLAR_CAPABILITIES", "cassini,graph-write"));
+        let report = effective(&env(&vars)).report();
+        assert!(report.iter().any(|r| r.name == "GRAPH_ENDPOINT"));
+    }
+
+    #[test]
+    fn the_effective_view_never_shows_a_secret() {
+        let mut vars = CASSINI_ENV.to_vec();
+        vars.extend_from_slice(GRAPH_ENV);
+        vars.push(("POLAR_CAPABILITIES", "cassini,graph-write"));
+        vars.push(("GRAPH_PASSWORD", "hunter2"));
+        let config = effective(&env(&vars));
+        let report = config.report();
+        assert_eq!(
+            resolved(&report, "GRAPH_PASSWORD").value.as_deref(),
+            Some("<hidden>")
+        );
+        assert!(!effective_text(&report).contains("hunter2"));
+        assert!(!effective_json(&report).to_string().contains("hunter2"));
+    }
+
+    #[test]
+    fn the_effective_text_is_one_line_per_variable_under_its_section() {
+        let text = effective_text(&effective(&env(&[("POLAR_HEALTH_TICK_SECS", "15")])).report());
+        assert!(
+            text.starts_with("health\n") || text.contains("\nhealth\n"),
+            "{text}"
+        );
+        assert!(
+            text.contains("POLAR_HEALTH_TICK_SECS = 15  [env, static]"),
+            "{text}"
+        );
+        assert!(
+            text.contains("POLAR_HEALTH_STALE_SECS = 90  [default, static]"),
+            "{text}"
+        );
+        assert!(
+            text.contains("CASSINI_QUEUE_PATH") == false,
+            "not provided: {text}"
+        );
+    }
+
+    #[test]
+    fn the_effective_json_has_the_same_variables() {
+        let report = effective(&env(&[("POLAR_HEALTH_TICK_SECS", "15")])).report();
+        let json = effective_json(&report);
+        let tick = json["sections"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|s| s["variables"].as_array().unwrap())
+            .find(|v| v["name"] == "POLAR_HEALTH_TICK_SECS")
+            .unwrap();
+        assert_eq!(tick["value"], "15");
+        assert_eq!(tick["source"], "env");
+        assert_eq!(tick["mutability"], "static");
+        assert_eq!(tick["secret"], false);
     }
 
     #[test]

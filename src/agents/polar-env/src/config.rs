@@ -37,6 +37,18 @@ pub enum Source {
     Unset,
 }
 
+impl Source {
+    /// The name a report shows.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Source::Override => "override",
+            Source::Env => "env",
+            Source::Default => "default",
+            Source::Unset => "unset",
+        }
+    }
+}
+
 /// One variable as it currently resolves.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Resolved {
@@ -676,5 +688,13 @@ mod tests {
             .register(&EXAMPLE)
             .build();
         assert_eq!(HIGH.read(&c).unwrap(), 30);
+    }
+
+    #[test]
+    fn a_source_has_a_name_for_reports() {
+        assert_eq!(Source::Override.as_str(), "override");
+        assert_eq!(Source::Env.as_str(), "env");
+        assert_eq!(Source::Default.as_str(), "default");
+        assert_eq!(Source::Unset.as_str(), "unset");
     }
 }

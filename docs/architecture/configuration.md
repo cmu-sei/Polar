@@ -160,6 +160,9 @@ its settings from it (the credentials consumer too: the builder is split into `c
 environment and spawns nothing, and `build()`, which spawns, so a domain supervisor can take its own
 settings from the snapshot before it starts the actors that need them).
 
-Next, in order: an `--effective` view; then the lint. After that,
+`polar-config-check --effective` shows what an environment resolves to, value by value with its
+source, secrets hidden.
+
+Next, in order: the lint. After that,
 the ConfigurationActor shell, then the scheduler integration, then the credentials agent's use of
 it. Every step is in `remaining-work.md`.

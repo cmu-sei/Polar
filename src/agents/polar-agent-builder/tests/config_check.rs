@@ -232,3 +232,66 @@ fn json_alone_is_a_usage_error() {
     let o = run(&["--json"], &[]);
     assert_eq!(o.status.code(), Some(2));
 }
+
+#[test]
+fn effective_shows_each_value_and_where_it_came_from() {
+    let o = run(&["--effective"], &[("POLAR_HEALTH_TICK_SECS", "15")]);
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    let out = stdout(&o);
+    assert!(
+        out.contains("POLAR_HEALTH_TICK_SECS = 15  [env, static]"),
+        "{out}"
+    );
+    assert!(
+        out.contains("POLAR_HEALTH_STALE_SECS = 90  [default, static]"),
+        "{out}"
+    );
+}
+
+#[test]
+fn effective_json_is_one_document() {
+    let o = run(
+        &["--effective", "--json"],
+        &[("POLAR_HEALTH_TICK_SECS", "15")],
+    );
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    let json: serde_json::Value = serde_json::from_str(&stdout(&o)).expect("stdout is JSON");
+    assert!(json["sections"].as_array().unwrap().len() >= 2);
+}
+
+#[test]
+fn effective_hides_secrets_and_ignores_what_nothing_declared() {
+    let o = run(
+        &["--effective"],
+        &[
+            ("POLAR_CAPABILITIES", "graph-write"),
+            ("GRAPH_PASSWORD", "hunter2"),
+            ("GRAPH_DB", "n"),
+            ("GRAPH_USER", "n"),
+            ("GRAPH_ENDPOINT", "bolt://x:1"),
+            ("AN_UNRELATED_SECRET", "leak-me"),
+        ],
+    );
+    let out = stdout(&o);
+    assert!(out.contains("GRAPH_PASSWORD = <hidden>"), "{out}");
+    assert!(
+        !out.contains("hunter2") && !out.contains("leak-me"),
+        "{out}"
+    );
+    assert!(!out.contains("AN_UNRELATED_SECRET"), "{out}");
+}
+
+#[test]
+fn effective_still_reports_what_is_wrong_and_fails() {
+    let o = run(&["--effective"], &[("POLAR_HEALTH_TICK_SECS", "soon")]);
+    assert_eq!(o.status.code(), Some(1));
+    assert!(
+        stdout(&o).contains("POLAR_HEALTH_TICK_SECS"),
+        "shows it anyway"
+    );
+    assert!(
+        stderr(&o).contains("ERROR: POLAR_HEALTH_TICK_SECS"),
+        "{}",
+        stderr(&o)
+    );
+}
