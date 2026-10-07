@@ -11,6 +11,7 @@ cassini-types = { workspace = true }
 cert-issuer-common = { path = "../cert-issuer/common" }
 clap = { workspace = true }
 polar-crypto.workspace = true
+polar-env.workspace = true
 polar-health = { path = "../polar-health" }
 polar-router.workspace = true
 ractor = { workspace = true }

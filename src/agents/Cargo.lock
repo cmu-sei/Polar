@@ -5591,6 +5591,7 @@ dependencies = [
  "cert-issuer-common",
  "clap",
  "polar-crypto",
+ "polar-env",
  "polar-health",
  "polar-router",
  "ractor",

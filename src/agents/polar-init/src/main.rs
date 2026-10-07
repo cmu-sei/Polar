@@ -13,7 +13,8 @@
 //! exits are for unrecoverable configuration errors (bad args, missing
 //! SA token, etc.) that require operator intervention.
 //!
-//! Environment variables:
+//! Environment variables, each declared in `environment.rs` (run it against a bad one to see
+//! them all named at once, before anything waits):
 //!   POLAR_INIT_CERT_ISSUER_URL   URL of the cert issuer service (required)
 //!   POLAR_INIT_TOKEN_PATH        Path to projected SA token
 //!                                (default: /workspace/token)
@@ -21,11 +22,21 @@
 //!                                verified against from the first request.
 //!                                If unset, the CA is fetched once from
 //!                                GET /ca without verification and pinned.
+//!   POLAR_INIT_SKIP_ESCROW_BOOTSTRAP
+//!                                Any non-empty value skips the escrow bootstrap
+//!   TLS_*, BROKER_ADDR, CASSINI_SERVER_NAME, KUBERNETES_SA_TOKEN
+//!                                The Cassini client's and the crypto actor's,
+//!                                required unless the bootstrap is skipped
+
+// Reading the process environment goes through polar-env (see clippy.toml).
+#![deny(clippy::disallowed_methods)]
+
+mod environment;
 
 use std::str::FromStr;
 use std::time::Duration;
 
-use cassini_client::{TCPClientConfig, TcpClientActor, TcpClientArgs};
+use cassini_client::{TcpClientActor, TcpClientArgs};
 use cert_client::{handshake, output, token};
 use cert_issuer_common::keypair;
 use cert_issuer_common::{
@@ -36,19 +47,7 @@ use clap::Parser;
 use polar_health::DepCertEndpoint;
 use ractor::Actor;
 
-const DEFAULT_TOKEN_PATH: &str = "/workspace/token";
 const POLL_INTERVAL_SECS: u64 = 5;
-
-/// If set (to any non-empty value), skips the escrow-keypair
-/// bootstrap phase entirely -- required for the three core services
-/// (the Credentials Agent itself, cert-issuer, and Cassini) whose own
-/// polar-init instance would otherwise create a genuine, unresolvable
-/// circularity: CryptoActor is the single gateway to the Credentials
-/// Agent, so the Credentials Agent's own bootstrap can't depend on it
-/// existing yet. See CryptoMessage::EnsureBootstrapped's own doc
-/// comment (polar-crypto) for the complete, real reasoning behind
-/// this phase existing at all.
-const SKIP_ESCROW_BOOTSTRAP_ENV: &str = "POLAR_INIT_SKIP_ESCROW_BOOTSTRAP";
 
 // ---------------------------------------------------------------------------
 // CertRequest — parsed from --cert <type:dir:key-algorithm:extra-sans>
@@ -206,16 +205,19 @@ async fn main() {
         std::process::exit(1);
     }
 
-    let cert_issuer_url = match std::env::var("POLAR_INIT_CERT_ISSUER_URL") {
-        Ok(url) if !url.is_empty() => url,
-        _ => {
-            eprintln!("error: POLAR_INIT_CERT_ISSUER_URL must be set and non-empty");
+    // The environment is read once and judged as a whole before the first wait, so a mistake
+    // in it is one clear exit naming every problem, never a hang or a late failure.
+    let settings = match environment::InitSettings::from_env(&environment::snapshot(
+        &polar_env::ProcessEnv,
+    )) {
+        Ok(settings) => settings,
+        Err(problems) => {
+            eprintln!("error: this container's environment is not sound: {problems}");
             std::process::exit(1);
         }
     };
-
-    let token_path = std::env::var("POLAR_INIT_TOKEN_PATH")
-        .unwrap_or_else(|_| DEFAULT_TOKEN_PATH.to_string());
+    let cert_issuer_url = settings.cert_issuer_url.clone();
+    let token_path = settings.token_path.clone();
 
     // Phase 1: wait for all dep cert endpoints to be healthy.
     if !dep_endpoints.is_empty() {
@@ -261,7 +263,7 @@ async fn main() {
     // The trust decision is made once, here. With POLAR_INIT_CA_CERT set the
     // client verifies cert-issuer against that file from its first request;
     // without it, the CA is fetched once and pinned (the degraded mode).
-    let ca_path = handshake::HandshakeClient::ca_path_from_env("POLAR_INIT_CA_CERT");
+    let ca_path = settings.ca_cert_path.clone();
     let client = loop {
         match handshake::HandshakeClient::for_trust_mode(
             cert_issuer_url.clone(),
@@ -293,20 +295,16 @@ async fn main() {
     // Phase 4: ensure this identity's own escrow keypair genuinely
     // exists and is escrowed with the Credentials Agent -- skipped
     // entirely for the three core services (see
-    // SKIP_ESCROW_BOOTSTRAP_ENV's own doc comment for why). This is
+    // environment::SKIP_ESCROW_BOOTSTRAP's own doc comment for why). This is
     // the only point in this agent's entire lifecycle where the SA
     // token read above is ever readable at all; the main, long-
     // running agent container never has it mounted.
-    let skip_escrow_bootstrap = std::env::var(SKIP_ESCROW_BOOTSTRAP_ENV)
-        .map(|v| !v.is_empty())
-        .unwrap_or(false);
-
-    if skip_escrow_bootstrap {
-        tracing::info!(
-            "{SKIP_ESCROW_BOOTSTRAP_ENV} is set, skipping escrow-keypair bootstrap"
-        );
-    } else {
-        ensure_escrow_bootstrapped(&dns_identity).await;
+    match &settings.escrow {
+        None => tracing::info!(
+            "{} is set, skipping escrow-keypair bootstrap",
+            environment::SKIP_ESCROW_BOOTSTRAP.name()
+        ),
+        Some(escrow) => ensure_escrow_bootstrapped(&dns_identity, escrow).await,
     }
 
     tracing::info!("polar-init complete, handing off to main container");
@@ -329,22 +327,11 @@ async fn main() {
 /// is a genuine no-op: this flow never observes a ClientEvent
 /// lifecycle event (Registered, TransportError, etc.) at all, only
 /// CryptoActor's own EnsureBootstrapped reply.
-async fn ensure_escrow_bootstrapped(own_identity: &str) {
-    // Reads TLS_CA_CERT/TLS_CLIENT_CERT/TLS_CLIENT_KEY/BROKER_ADDR/
-    // CASSINI_SERVER_NAME from the environment -- the exact same,
-    // established commonClientEnv every agent's own main container
-    // already gets (infra/schema/constants.dhall), now also present
-    // on this init container's own env (see makePolarInitContainer's
-    // own, real Dhall definition).
-    let client_config = loop {
-        match TCPClientConfig::new() {
-            Ok(config) => break config,
-            Err(e) => {
-                tracing::warn!("Cassini client config not yet ready: {e}, retrying...");
-                tokio::time::sleep(Duration::from_secs(POLL_INTERVAL_SECS)).await;
-            }
-        }
-    };
+async fn ensure_escrow_bootstrapped(own_identity: &str, escrow: &environment::EscrowSettings) {
+    // The client's coordinates (TLS_CA_CERT, TLS_CLIENT_CERT, TLS_CLIENT_KEY, BROKER_ADDR and
+    // CASSINI_SERVER_NAME, the same commonClientEnv every agent's main container gets) were
+    // read and judged with the rest of the environment at startup, so they are certainly here.
+    let client_config = escrow.client.clone();
 
     let (router, _) = Actor::spawn(None, polar_router::RouterActor, ())
         .await
@@ -379,7 +366,8 @@ async fn ensure_escrow_bootstrapped(own_identity: &str) {
     let (crypto_actor, _) = Actor::spawn(
         None,
         polar_crypto::CryptoActor,
-        polar_crypto::CryptoActorArgs::new(tcp_client.clone(), router),
+        polar_crypto::CryptoActorArgs::new(tcp_client.clone(), router)
+            .with_settings(escrow.crypto.clone()),
     )
     .await
     .expect("CryptoActor::pre_start does no fallible work of its own -- spawning it can't genuinely fail here");

@@ -63,7 +63,7 @@ address, the capabilities and the health safety invariants stay Static.
 - **A lint keeps direct reads out.** `clippy.toml` disallows `std::env::var`, `var_os`, `vars`,
   `vars_os`, `set_var` and `remove_var`, and a crate enforces it with
   `#![deny(clippy::disallowed_methods)]` in its root. A crate opts in when it has moved onto
-  `polar-env` (today `polar-env`, `polar-health`, `polar-healthcheck`, `polar-agent-builder` and `polar-crypto`),
+  `polar-env` (today `polar-env`, `polar-health`, `polar-healthcheck`, `polar-agent-builder`, `polar-crypto` and `polar-init`),
   copying the file in; `ProcessEnv` is the one allowed read. The rest of the workspace is not
   enforced yet because about 90 direct reads in 36 files are still to be ported.
 
