@@ -1,8 +1,15 @@
 # Agent Health and Shutdown
 
-Status: **implemented in code and in the catalog (stages S1 to S5 of the rework), not yet
-verified on a cluster.** What is left is that verification (stage S6). The remaining-work
-item "Health system rework" tracks it.
+Status: **implemented in code and in the catalog (stages S1 to S5 of the rework) and verified
+on the dev cluster (stage S6, 2026-10-07).** What was observed: `kubectl delete pod` on the
+credentials consumer and on kube-consumer ran the orderly shutdown and exited 1 in 5 and 6 s,
+never 137; a forced rejuvenation of kube-observer (threshold above the certificate lifetime, so
+it enters the window at once) ran three times in a row, each time logging the reason and exiting 1,
+one of them with a 181 s lifetime and a long jitter that the old probe would have killed; and an
+agent whose PID 1 was stopped was killed by the probe with 137 after 153 s, as the simulation
+bounds it. What was not observed: the natural one-hour rejuvenation of an undisturbed agent,
+whose pods were gone by the time they were looked at (see the work item), and broker-restart
+recovery, which waits for the Cassini pair.
 
 Scope: agents built on `polar-agent-builder`. Agents that have not migrated keep
 their hand-written health wiring; they only need to keep compiling.
