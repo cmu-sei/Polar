@@ -341,7 +341,10 @@ configuration supports it, adds the resulting private key to the
 pod's shared session-keyring via the kernel's asymmetric-key subsystem
 (`add_key()`), writing only the resulting integer key-serial handle to
 the same shared `emptyDir` volume already used for `cert.pem`/
-`key.pem` (a new file, `escrow-key-handle`). `CryptoActor` (below)
+`key.pem` (a new file, `escrow-key-handle`; its path is `POLAR_ESCROW_KEY_HANDLE`,
+built 2026-10-07: `polar-init` writes it from what `EnsureBootstrapped` reports,
+and `CryptoActor` adopts the key by it only if the key's description is its own
+identity, since the user keyring is shared by UID). `CryptoActor` (below)
 references that serial directly for `KEYCTL_PKEY_DECRYPT`/
 `KEYCTL_PKEY_SIGN` operations — the raw private key bytes are never
 copied into the agent's own userspace-readable memory at all, at any

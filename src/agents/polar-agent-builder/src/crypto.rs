@@ -105,9 +105,12 @@ impl CryptoClient for CryptoHandle {
     }
 
     async fn ensure_bootstrapped(&self) -> Result<(), CryptoError> {
+        // How the key ended up held matters to the init container, which reports it to the
+        // workload; here the bootstrap is only needed to have happened.
         let result = ractor::call!(self.actor, |reply| CryptoMessage::EnsureBootstrapped {
             reply,
-        });
+        })
+        .map(|outcome| outcome.map(|_custody| ()));
         flatten_call_result(result)
     }
 }
@@ -235,6 +238,7 @@ mod tests {
                 polar_crypto::environment::CryptoSettings {
                     own_certificate_path: own_cert_file.path().to_string_lossy().into_owned(),
                     service_account_token_path: "/unused".to_string(),
+                    escrow_key_handle_path: "/nonexistent/escrow-key-handle".to_string(),
                 },
             ),
         )
@@ -340,6 +344,7 @@ mod tests {
                 polar_crypto::environment::CryptoSettings {
                     own_certificate_path: own_cert_file.path().to_string_lossy().into_owned(),
                     service_account_token_path: "/unused".to_string(),
+                    escrow_key_handle_path: "/nonexistent/escrow-key-handle".to_string(),
                 },
             ),
         )

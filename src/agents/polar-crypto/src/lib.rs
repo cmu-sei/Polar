@@ -160,6 +160,23 @@ enum EscrowKeypairHandle {
     InMemory(RsaPrivateKey),
 }
 
+/// How an agent's escrow key is held once it has been bootstrapped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Custody {
+    /// In the kernel keyring, under this key number. The process holds only the number.
+    Kernel { serial: i32 },
+    /// In this process's own memory, because the kernel could not hold it.
+    Memory,
+}
+
+/// Where the actor finds what it needs on disk: the service-account token, and the number of a
+/// key an init container loaded.
+#[derive(Debug, Clone)]
+struct KeyPaths {
+    service_account_token: String,
+    escrow_key_handle: String,
+}
+
 pub enum CryptoMessage {
     /// The Cassini client has registered (or re-registered after a
     /// reconnect). The client drops any Subscribe sent before
@@ -220,7 +237,7 @@ pub enum CryptoMessage {
     /// DecryptOwnMessage or EncryptForRecipient is genuinely used,
     /// without ever needing issuance itself.
     EnsureBootstrapped {
-        reply: RpcReplyPort<Result<(), CryptoError>>,
+        reply: RpcReplyPort<Result<Custody, CryptoError>>,
     },
     /// Internal: a raw, incoming message on one of this actor's own,
     /// registered reply topics, forwarded by RouterActor. Carries the
@@ -311,8 +328,8 @@ pub struct CryptoActorState {
     cached_recipient_public_keys:
         Arc<tokio::sync::Mutex<std::collections::HashMap<String, (RsaPublicKey, String)>>>,
     own_identity: String,
-    /// Where the service-account token is, from the settings the actor started with.
-    service_account_token_path: String,
+    /// Where the token and the key number are, from the settings the actor started with.
+    paths: KeyPaths,
 }
 
 pub struct CryptoActor;
@@ -405,7 +422,10 @@ impl Actor for CryptoActor {
                 std::collections::HashMap::new(),
             )),
             own_identity,
-            service_account_token_path: settings.service_account_token_path,
+            paths: KeyPaths {
+                service_account_token: settings.service_account_token_path,
+                escrow_key_handle: settings.escrow_key_handle_path,
+            },
         })
     }
 
@@ -554,7 +574,7 @@ impl Actor for CryptoActor {
                 let cached_key = state.cached_credentials_agent_escrow_key.clone();
                 let escrow_keypair_handle = state.escrow_keypair_handle.clone();
                 let own_identity = state.own_identity.clone();
-                let sa_token_path = state.service_account_token_path.clone();
+                let paths = state.paths.clone();
                 tokio::spawn(async move {
                     let result = handle_decrypt_own_message(
                         tcp_client,
@@ -565,7 +585,7 @@ impl Actor for CryptoActor {
                         cached_key,
                         escrow_keypair_handle,
                         own_identity,
-                        sa_token_path,
+                        paths,
                         ciphertext,
                     )
                     .await;
@@ -607,7 +627,7 @@ impl Actor for CryptoActor {
                 let cached_key = state.cached_credentials_agent_escrow_key.clone();
                 let escrow_keypair_handle = state.escrow_keypair_handle.clone();
                 let own_identity = state.own_identity.clone();
-                let sa_token_path = state.service_account_token_path.clone();
+                let paths = state.paths.clone();
                 tokio::spawn(async move {
                     let result = handle_ensure_bootstrapped(
                         tcp_client,
@@ -618,7 +638,7 @@ impl Actor for CryptoActor {
                         cached_key,
                         escrow_keypair_handle,
                         own_identity,
-                        sa_token_path,
+                        paths,
                     )
                     .await;
                     let _ = reply.send(result);
@@ -851,7 +871,7 @@ async fn handle_ensure_own_escrow_keypair(
     store_secret_reply_router: Arc<ReplyRouter<StoreSecretReply>>,
     cached_key: Arc<tokio::sync::Mutex<Option<String>>>,
     own_identity: String,
-    sa_token_path: String,
+    paths: KeyPaths,
 ) -> Result<RsaPrivateKey, CryptoError> {
     // Step 1: retrieve-first. A real Err here (broker unreachable,
     // timeout, a genuine refusal) propagates directly -- issuance is
@@ -870,7 +890,7 @@ async fn handle_ensure_own_escrow_keypair(
     // Step 2: issuance fallback. Read this pod's own, real Kubernetes
     // credential -- the same one cert-issuer's own oidc.rs already
     // knows how to validate on the receiving end.
-    let credential = read_kubernetes_sa_token(&sa_token_path)?;
+    let credential = read_kubernetes_sa_token(&paths.service_account_token)?;
 
     // Step 3: generate a real CSR, RSA specifically -- this is the
     // agent's own encryption-capable escrow identity, not a
@@ -938,9 +958,19 @@ async fn ensure_escrow_keypair_bootstrapped(
     cached_key: Arc<tokio::sync::Mutex<Option<String>>>,
     escrow_keypair_handle: Arc<tokio::sync::Mutex<Option<EscrowKeypairHandle>>>,
     own_identity: String,
-    sa_token_path: String,
-) -> Result<(), CryptoError> {
+    paths: KeyPaths,
+) -> Result<Custody, CryptoError> {
     let mut handle_guard = escrow_keypair_handle.lock().await;
+
+    // An init container may already have loaded this agent's key into the kernel keyring and
+    // left its number: take that, and the key is never retrieved, never parsed and never in
+    // this process at all. Only when there is no such key, or it is not ours, or the kernel
+    // cannot use it, does the actor get the key itself, as before.
+    if handle_guard.is_none()
+        && let Some(adopted) = adopt_key_left_by_init(&paths.escrow_key_handle, &own_identity)
+    {
+        *handle_guard = Some(adopted);
+    }
 
     if handle_guard.is_none() {
         let private_key = handle_ensure_own_escrow_keypair(
@@ -951,7 +981,7 @@ async fn ensure_escrow_keypair_bootstrapped(
             store_secret_reply_router,
             cached_key,
             own_identity.clone(),
-            sa_token_path,
+            paths,
         )
         .await?;
 
@@ -976,7 +1006,22 @@ async fn ensure_escrow_keypair_bootstrapped(
         *handle_guard = Some(new_handle);
     }
 
-    Ok(())
+    Ok(match handle_guard.as_ref().expect("populated just above") {
+        EscrowKeypairHandle::KernelBacked(serial) => Custody::Kernel {
+            serial: serial.get(),
+        },
+        EscrowKeypairHandle::InMemory(_) => Custody::Memory,
+    })
+}
+
+/// The key an init container loaded into the kernel keyring, if it left its number at `path`
+/// and the key is this identity's and usable. Anything less is `None`, and the caller takes
+/// the key itself.
+fn adopt_key_left_by_init(path: &str, own_identity: &str) -> Option<EscrowKeypairHandle> {
+    let raw = std::fs::read_to_string(path).ok()?;
+    let serial: i32 = raw.trim().parse().ok()?;
+    polar_kernel_keyring::adopt_asymmetric_key(serial, own_identity)
+        .map(EscrowKeypairHandle::KernelBacked)
 }
 
 /// The real handler behind CryptoMessage::DecryptOwnMessage -- see
@@ -998,7 +1043,7 @@ async fn handle_decrypt_own_message(
     cached_key: Arc<tokio::sync::Mutex<Option<String>>>,
     escrow_keypair_handle: Arc<tokio::sync::Mutex<Option<EscrowKeypairHandle>>>,
     own_identity: String,
-    sa_token_path: String,
+    paths: KeyPaths,
     ciphertext: Vec<u8>,
 ) -> Result<Vec<u8>, CryptoError> {
     ensure_escrow_keypair_bootstrapped(
@@ -1010,7 +1055,7 @@ async fn handle_decrypt_own_message(
         cached_key,
         escrow_keypair_handle.clone(),
         own_identity,
-        sa_token_path,
+        paths,
     )
     .await?;
 
@@ -1043,8 +1088,8 @@ async fn handle_ensure_bootstrapped(
     cached_key: Arc<tokio::sync::Mutex<Option<String>>>,
     escrow_keypair_handle: Arc<tokio::sync::Mutex<Option<EscrowKeypairHandle>>>,
     own_identity: String,
-    sa_token_path: String,
-) -> Result<(), CryptoError> {
+    paths: KeyPaths,
+) -> Result<Custody, CryptoError> {
     ensure_escrow_keypair_bootstrapped(
         tcp_client,
         retrieve_agent_escrow_keypair_reply_router,
@@ -1054,7 +1099,7 @@ async fn handle_ensure_bootstrapped(
         cached_key,
         escrow_keypair_handle,
         own_identity,
-        sa_token_path,
+        paths,
     )
     .await
 }
@@ -1476,6 +1521,11 @@ mod tests {
         /// Where the actor looks for the service-account token. Tests that reach the
         /// issuance path give it a real file; the others never read it.
         service_account_token_path: Option<String>,
+        /// Where the actor looks for a key number the init container left. None means a path
+        /// where there is nothing, as in a pod whose init container passed no key.
+        escrow_key_handle_path: Option<String>,
+        /// The identity in the actor's certificate; unique per actor when not given.
+        identity: Option<String>,
     }
 
     /// A temporary file standing in for the in-cluster, mounted service-account token.
@@ -1493,14 +1543,14 @@ mod tests {
     /// and hands the actor its path in its settings, so every test in this module
     /// continues to genuinely exercise "test-agent" as this actor's
     /// own identity, exactly as before this migration.
-    fn write_test_agent_certificate() -> tempfile::NamedTempFile {
+    fn write_test_agent_certificate(identity: &str) -> tempfile::NamedTempFile {
         let mut rng = rand::rng();
         let private_key = RsaPrivateKey::new(&mut rng, 2048).unwrap();
         let private_key_pem =
             rsa::pkcs8::EncodePrivateKey::to_pkcs8_pem(&private_key, rsa::pkcs8::LineEnding::LF)
                 .unwrap();
         let key_pair = rcgen::KeyPair::from_pem(&private_key_pem).unwrap();
-        let params = rcgen::CertificateParams::new(vec!["test-agent".to_string()]).unwrap();
+        let params = rcgen::CertificateParams::new(vec![identity.to_string()]).unwrap();
         let certificate_pem = params.self_signed(&key_pair).unwrap().pem();
 
         let file = tempfile::NamedTempFile::new().unwrap();
@@ -1519,6 +1569,10 @@ mod tests {
             .service_account_token_path
             .clone()
             .unwrap_or_else(|| environment::KUBERNETES_SA_TOKEN_PATH.to_string());
+        let escrow_key_handle_path = config
+            .escrow_key_handle_path
+            .clone()
+            .unwrap_or_else(|| "/nonexistent/escrow-key-handle".to_string());
         let (private_key, public_key_pem) = test_credentials_agent_keypair();
         let escrow_key_queries = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let agent_escrow_key_queries = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -1546,7 +1600,13 @@ mod tests {
         .await
         .unwrap();
 
-        let own_cert_file = write_test_agent_certificate();
+        // Each actor gets an identity of its own: keys loaded into the one real keyring under
+        // the same description replace each other, which tests running side by side would hit.
+        let identity = config
+            .identity
+            .clone()
+            .unwrap_or_else(|| format!("test-agent-{}", uuid::Uuid::new_v4()));
+        let own_cert_file = write_test_agent_certificate(&identity);
 
         let (crypto_actor, _) = Actor::spawn(
             None,
@@ -1554,6 +1614,7 @@ mod tests {
             CryptoActorArgs::new(fake_agent, router).with_settings(environment::CryptoSettings {
                 own_certificate_path: own_cert_file.path().to_string_lossy().into_owned(),
                 service_account_token_path: service_account_token_path.clone(),
+                escrow_key_handle_path: escrow_key_handle_path.clone(),
             }),
         )
         .await
@@ -1898,6 +1959,145 @@ mod tests {
                 assert_eq!(identity, "never-issued-agent");
             }
             other => panic!("expected Err(RecipientKeyNotFound(_)), got {other:?}"),
+        }
+    }
+
+    // -- a key the init container loaded into the kernel keyring ---------------------------
+
+    /// Loads a key into the real kernel keyring under `description`, as the init container
+    /// does, and returns its number with the public half to encrypt to.
+    fn load_key_as_the_init_container_would(
+        description: &str,
+    ) -> (polar_kernel_keyring::KeyringSerial, RsaPublicKey) {
+        let mut rng = rand::rng();
+        let private_key = RsaPrivateKey::new(&mut rng, 2048).unwrap();
+        let der = private_key.to_pkcs8_der().unwrap();
+        let serial = polar_kernel_keyring::try_load_asymmetric_key(description, der.as_bytes())
+            .expect("this machine must support kernel-keyring asymmetric keys for this test");
+        (serial, private_key.to_public_key())
+    }
+
+    fn write_handle(serial: i32) -> tempfile::NamedTempFile {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), format!("{serial}\n")).unwrap();
+        file
+    }
+
+    #[tokio::test]
+    async fn a_key_the_init_container_loaded_is_adopted_and_never_asked_for() {
+        let identity = format!("test-agent-{}", uuid::Uuid::new_v4());
+        let (serial, public_key) = load_key_as_the_init_container_would(&identity);
+        let handle = write_handle(serial.get());
+
+        // The credentials agent refuses everything: nothing escrowed, no issuance. If the
+        // actor tried to retrieve or issue a key, this would fail.
+        let ((crypto_actor, _), _, _) =
+            spawn_crypto_actor_with_fake_credentials_agent_configured(FakeCredentialsAgentConfig {
+                stored_escrow_keypair_pem: None,
+                issue_agent_escrow_certificates: false,
+                escrow_key_handle_path: Some(handle.path().to_string_lossy().into_owned()),
+                identity: Some(identity.clone()),
+                ..Default::default()
+            })
+            .await;
+
+        let custody = ractor::call!(crypto_actor, |reply| CryptoMessage::EnsureBootstrapped {
+            reply
+        })
+        .unwrap()
+        .expect("adopting the passed key needs nothing from the credentials agent");
+        assert_eq!(
+            custody,
+            Custody::Kernel {
+                serial: serial.get()
+            }
+        );
+
+        let mut rng = rand::rng();
+        let ciphertext = public_key
+            .encrypt(
+                &mut rng,
+                rsa::Oaep::<sha2_011::Sha256>::new(),
+                b"addressed to the adopted key",
+            )
+            .unwrap();
+        let decrypted = ractor::call!(crypto_actor, |reply| CryptoMessage::DecryptOwnMessage {
+            ciphertext,
+            reply
+        })
+        .unwrap()
+        .unwrap();
+        assert_eq!(decrypted, b"addressed to the adopted key");
+
+        polar_kernel_keyring::unload_key(serial);
+    }
+
+    #[tokio::test]
+    async fn a_key_loaded_under_another_identity_is_not_adopted() {
+        let (stranger, _) = load_key_as_the_init_container_would("someone-else");
+        let handle = write_handle(stranger.get());
+
+        let mut rng = rand::rng();
+        let escrowed = RsaPrivateKey::new(&mut rng, 2048).unwrap();
+        let escrowed_pem =
+            rsa::pkcs8::EncodePrivateKey::to_pkcs8_pem(&escrowed, rsa::pkcs8::LineEnding::LF)
+                .unwrap();
+        let ((crypto_actor, _), _, _) =
+            spawn_crypto_actor_with_fake_credentials_agent_configured(FakeCredentialsAgentConfig {
+                stored_escrow_keypair_pem: Some(escrowed_pem.to_string()),
+                escrow_key_handle_path: Some(handle.path().to_string_lossy().into_owned()),
+                ..Default::default()
+            })
+            .await;
+
+        let custody = ractor::call!(crypto_actor, |reply| CryptoMessage::EnsureBootstrapped {
+            reply
+        })
+        .unwrap()
+        .expect("falls back to retrieving the escrowed key");
+        assert_ne!(
+            custody,
+            Custody::Kernel {
+                serial: stranger.get()
+            },
+            "someone else's key is never taken"
+        );
+
+        polar_kernel_keyring::unload_key(stranger);
+        if let Custody::Kernel { serial } = custody {
+            if let Some(own) = polar_kernel_keyring::KeyringSerial::new(serial) {
+                polar_kernel_keyring::unload_key(own);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_handle_file_that_is_not_a_number_falls_back_to_the_existing_path() {
+        let handle = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(handle.path(), "not a key number").unwrap();
+
+        let mut rng = rand::rng();
+        let escrowed = RsaPrivateKey::new(&mut rng, 2048).unwrap();
+        let escrowed_pem =
+            rsa::pkcs8::EncodePrivateKey::to_pkcs8_pem(&escrowed, rsa::pkcs8::LineEnding::LF)
+                .unwrap();
+        let ((crypto_actor, _), _, _) =
+            spawn_crypto_actor_with_fake_credentials_agent_configured(FakeCredentialsAgentConfig {
+                stored_escrow_keypair_pem: Some(escrowed_pem.to_string()),
+                escrow_key_handle_path: Some(handle.path().to_string_lossy().into_owned()),
+                ..Default::default()
+            })
+            .await;
+
+        let custody = ractor::call!(crypto_actor, |reply| CryptoMessage::EnsureBootstrapped {
+            reply
+        })
+        .unwrap();
+        assert!(custody.is_ok(), "{custody:?}");
+        if let Ok(Custody::Kernel { serial }) = custody {
+            if let Some(own) = polar_kernel_keyring::KeyringSerial::new(serial) {
+                polar_kernel_keyring::unload_key(own);
+            }
         }
     }
 }

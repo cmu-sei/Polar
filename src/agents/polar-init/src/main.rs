@@ -32,6 +32,7 @@
 #![deny(clippy::disallowed_methods)]
 
 mod environment;
+mod handle;
 
 use std::str::FromStr;
 use std::time::Duration;
@@ -390,8 +391,16 @@ async fn ensure_escrow_bootstrapped(own_identity: &str, escrow: &environment::Es
         match ractor::call!(crypto_actor, |reply| {
             polar_crypto::CryptoMessage::EnsureBootstrapped { reply }
         }) {
-            Ok(Ok(())) => {
-                tracing::info!("escrow-keypair bootstrap complete");
+            Ok(Ok(custody)) => {
+                tracing::info!("escrow-keypair bootstrap complete ({custody:?})");
+                // Tell the workload how the key is held: its number if the kernel holds it,
+                // nothing if this process had to, so the workload does what it always did.
+                if let Err(e) =
+                    handle::record_custody(&escrow.crypto.escrow_key_handle_path, custody)
+                {
+                    // Not fatal: without a number the workload retrieves the key itself.
+                    tracing::warn!("{e}; the workload will hold the key itself");
+                }
                 return;
             }
             Ok(Err(e)) => {

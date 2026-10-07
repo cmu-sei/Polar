@@ -17,7 +17,16 @@ pub const KUBERNETES_SA_TOKEN: Defaulted<String> = Defaulted::text(
     KUBERNETES_SA_TOKEN_PATH,
 );
 
-static VARIABLES: &[&dyn Described] = &[&KUBERNETES_SA_TOKEN];
+/// Beside the certificates, in the volume the init container and the workload already share.
+pub const DEFAULT_ESCROW_KEY_HANDLE_PATH: &str = "/etc/tls/certs/escrow-key-handle";
+
+pub const ESCROW_KEY_HANDLE: Defaulted<String> = Defaulted::text(
+    "POLAR_ESCROW_KEY_HANDLE",
+    "where the init container leaves the number of this agent's escrow key in the kernel keyring, for the workload to adopt; no file means the workload holds the key itself",
+    DEFAULT_ESCROW_KEY_HANDLE_PATH,
+);
+
+static VARIABLES: &[&dyn Described] = &[&KUBERNETES_SA_TOKEN, &ESCROW_KEY_HANDLE];
 
 /// What the crypto actor reads beyond the Cassini client's own variables. Applies to every
 /// agent with the encryption capability, which always has the Cassini client too.
@@ -34,6 +43,8 @@ pub struct CryptoSettings {
     pub own_certificate_path: String,
     /// The service-account token, read afresh each time it is needed.
     pub service_account_token_path: String,
+    /// Where the key number the init container left is looked for, and written.
+    pub escrow_key_handle_path: String,
 }
 
 impl CryptoSettings {
@@ -49,12 +60,14 @@ impl CryptoSettings {
         };
         let own_certificate_path = take(TLS_CLIENT_CERT.read(env));
         let service_account_token_path = take(KUBERNETES_SA_TOKEN.read(env));
+        let escrow_key_handle_path = take(ESCROW_KEY_HANDLE.read(env));
         if !problems.is_empty() {
             return Err(problems.join("; "));
         }
         Ok(Self {
             own_certificate_path,
             service_account_token_path,
+            escrow_key_handle_path,
         })
     }
 }
@@ -79,6 +92,18 @@ mod tests {
     }
 
     #[test]
+    fn the_key_handle_is_beside_the_certificates_unless_the_deployment_says() {
+        let s = CryptoSettings::from_env(&env(&[("TLS_CLIENT_CERT", "/c/cert.pem")])).unwrap();
+        assert_eq!(s.escrow_key_handle_path, DEFAULT_ESCROW_KEY_HANDLE_PATH);
+        let s = CryptoSettings::from_env(&env(&[
+            ("TLS_CLIENT_CERT", "/c/cert.pem"),
+            ("POLAR_ESCROW_KEY_HANDLE", "/run/handle"),
+        ]))
+        .unwrap();
+        assert_eq!(s.escrow_key_handle_path, "/run/handle");
+    }
+
+    #[test]
     fn the_deployment_may_say_where_the_token_is() {
         let s = CryptoSettings::from_env(&env(&[
             ("TLS_CLIENT_CERT", "/c/cert.pem"),
@@ -100,7 +125,7 @@ mod tests {
         let names: Vec<_> = SECTION.describe().iter().map(|v| v.name).collect();
         assert_eq!(
             names,
-            ["KUBERNETES_SA_TOKEN"],
+            ["KUBERNETES_SA_TOKEN", "POLAR_ESCROW_KEY_HANDLE"],
             "TLS_CLIENT_CERT is the client's"
         );
         assert!(
