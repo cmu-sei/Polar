@@ -124,14 +124,21 @@ mod tests {
 
     #[test]
     fn a_deployment_may_provide_more_than_the_code_requires() {
-        let r = check(&[Capability::Cassini], Some("cassini,graph-write,future-thing"));
+        let r = check(
+            &[Capability::Cassini],
+            Some("cassini,graph-write,future-thing"),
+        );
         assert_eq!(r, CapabilityCheck::Satisfied);
     }
 
     #[test]
     fn missing_lists_exactly_what_is_not_provided() {
         let r = check(
-            &[Capability::Cassini, Capability::GraphWrite, Capability::Encryption],
+            &[
+                Capability::Cassini,
+                Capability::GraphWrite,
+                Capability::Encryption,
+            ],
             Some("cassini"),
         );
         assert_eq!(
@@ -154,12 +161,18 @@ mod tests {
 
     #[test]
     fn an_undeclared_deployment_cannot_be_checked() {
-        assert_eq!(check(&[Capability::Cassini], None), CapabilityCheck::NotDeclared);
+        assert_eq!(
+            check(&[Capability::Cassini], None),
+            CapabilityCheck::NotDeclared
+        );
     }
 
     #[test]
     fn duplicate_requirements_are_reported_once() {
-        let r = check(&[Capability::Encryption, Capability::Encryption], Some("cassini"));
+        let r = check(
+            &[Capability::Encryption, Capability::Encryption],
+            Some("cassini"),
+        );
         assert_eq!(r, CapabilityCheck::Missing(vec![Capability::Encryption]));
     }
 
@@ -188,8 +201,8 @@ mod tests {
 
     #[test]
     fn names_match_the_deployment_catalog() {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../../infra/config/capabilities.nuon");
+        let path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../infra/config/capabilities.nuon");
         // Built from a source tree that does not include infra/ (a filtered
         // nix source, a published crate): nothing to compare against.
         let Ok(nuon) = std::fs::read_to_string(&path) else {
@@ -198,7 +211,10 @@ mod tests {
         };
 
         let mut in_catalog = catalog_keys(&nuon);
-        let mut in_code: Vec<String> = Capability::ALL.iter().map(|c| c.as_str().to_string()).collect();
+        let mut in_code: Vec<String> = Capability::ALL
+            .iter()
+            .map(|c| c.as_str().to_string())
+            .collect();
         in_catalog.sort();
         in_code.sort();
 
@@ -212,6 +228,9 @@ mod tests {
     #[test]
     fn the_key_parser_ignores_nested_and_commented_lines() {
         let nuon = "# header\n{\n  # a comment: {\n  alpha: {\n    pod: {\n    }\n  }\n  beta-two: {\n  }\n}\n";
-        assert_eq!(catalog_keys(nuon), vec!["alpha".to_string(), "beta-two".to_string()]);
+        assert_eq!(
+            catalog_keys(nuon),
+            vec!["alpha".to_string(), "beta-two".to_string()]
+        );
     }
 }

@@ -430,9 +430,9 @@ impl DepCertEndpoint {
             .map_err(|e| format!("system clock error: {e}"))?
             .as_secs() as i64;
 
-        let remaining = not_after.checked_sub(now).ok_or_else(|| {
-            format!("certificate timestamp arithmetic overflow for {addr}")
-        })?;
+        let remaining = not_after
+            .checked_sub(now)
+            .ok_or_else(|| format!("certificate timestamp arithmetic overflow for {addr}"))?;
 
         if remaining < self.min_ttl_secs {
             Err(format!(
@@ -598,7 +598,10 @@ impl std::fmt::Debug for HealthCheckArgs {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("HealthCheckArgs")
             .field("expects_graph", &self.expects_graph)
-            .field("rejuvenation_threshold_secs", &self.rejuvenation_threshold_secs)
+            .field(
+                "rejuvenation_threshold_secs",
+                &self.rejuvenation_threshold_secs,
+            )
             .field("dep_cert_endpoints", &self.dep_cert_endpoints)
             .field("verdict_to", &self.verdict_to.is_some())
             .finish()

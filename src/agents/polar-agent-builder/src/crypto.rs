@@ -157,17 +157,25 @@ mod tests {
                 return Ok(());
             };
             if topic == credentials_agent_common::CREDENTIALS_AGENT_ESCROW_KEY_REQUESTS_TOPIC {
-                if let Ok(envelope) = rkyv::from_bytes::<Envelope<AgentEscrowKeyRequest>, rkyv::rancor::Error>(&payload) {
+                if let Ok(envelope) = rkyv::from_bytes::<
+                    Envelope<AgentEscrowKeyRequest>,
+                    rkyv::rancor::Error,
+                >(&payload)
+                {
                     let reply = Envelope {
                         correlation_id: envelope.correlation_id,
                         payload: AgentEscrowKeyReply::Found {
                             public_key_pem: self.recipient_public_key_pem.clone(),
                         },
                     };
-                    let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&reply).unwrap().to_vec();
+                    let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&reply)
+                        .unwrap()
+                        .to_vec();
                     let _ = self.router.send_message(polar_router::RouterMessage::Route(
                         polar_router::IncomingMessage {
-                            topic: credentials_agent_common::CREDENTIALS_AGENT_ESCROW_KEY_REPLIES_TOPIC.to_string(),
+                            topic:
+                                credentials_agent_common::CREDENTIALS_AGENT_ESCROW_KEY_REPLIES_TOPIC
+                                    .to_string(),
                             payload: bytes,
                             published_by: None,
                             trace_ctx: None,
@@ -182,8 +190,9 @@ mod tests {
     fn write_test_agent_certificate() -> tempfile::NamedTempFile {
         let mut rng = rand::rng();
         let private_key = rsa::RsaPrivateKey::new(&mut rng, 2048).unwrap();
-        let private_key_pem =
-            private_key.to_pkcs8_pem(rsa::pkcs8::LineEnding::LF).unwrap();
+        let private_key_pem = private_key
+            .to_pkcs8_pem(rsa::pkcs8::LineEnding::LF)
+            .unwrap();
         let key_pair = rcgen::KeyPair::from_pem(&private_key_pem).unwrap();
         let params = rcgen::CertificateParams::new(vec!["test-agent".to_string()]).unwrap();
         let certificate_pem = params.self_signed(&key_pair).unwrap().pem();
@@ -286,12 +295,18 @@ mod tests {
                     return Ok(());
                 };
                 if topic == credentials_agent_common::CREDENTIALS_AGENT_ESCROW_KEY_REQUESTS_TOPIC {
-                    if let Ok(envelope) = rkyv::from_bytes::<Envelope<AgentEscrowKeyRequest>, rkyv::rancor::Error>(&payload) {
+                    if let Ok(envelope) = rkyv::from_bytes::<
+                        Envelope<AgentEscrowKeyRequest>,
+                        rkyv::rancor::Error,
+                    >(&payload)
+                    {
                         let reply = Envelope {
                             correlation_id: envelope.correlation_id,
                             payload: AgentEscrowKeyReply::NotFound,
                         };
-                        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&reply).unwrap().to_vec();
+                        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&reply)
+                            .unwrap()
+                            .to_vec();
                         let _ = self.router.send_message(polar_router::RouterMessage::Route(
                             polar_router::IncomingMessage {
                                 topic: credentials_agent_common::CREDENTIALS_AGENT_ESCROW_KEY_REPLIES_TOPIC.to_string(),

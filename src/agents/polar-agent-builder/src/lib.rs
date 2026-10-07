@@ -24,7 +24,9 @@ pub use crypto::{CryptoClient, CryptoHandle};
 pub mod health;
 pub use health::{HealthClient, HealthHandle};
 pub mod infrastructure;
-pub use infrastructure::{InfrastructureEvent, InfrastructureSupervisor, InfrastructureSupervisorMessage};
+pub use infrastructure::{
+    InfrastructureEvent, InfrastructureSupervisor, InfrastructureSupervisorMessage,
+};
 pub mod message;
 pub use message::{Encrypted, Outbound, Plaintext};
 pub mod shutdown;
@@ -209,7 +211,11 @@ impl<M: ractor::Message> AgentBuilder<M> {
                     "{} is not set: the deployment did not declare its capabilities, so \
                      this agent's requirements ({}) cannot be checked",
                     capability::PROVIDED_ENV,
-                    required.iter().map(|c| c.as_str()).collect::<Vec<_>>().join(", ")
+                    required
+                        .iter()
+                        .map(|c| c.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 );
             }
             capability::CapabilityCheck::Missing(missing) => {
@@ -472,7 +478,9 @@ mod tests {
 
         assert_eq!(
             result,
-            Some(FakeMessage::Forwarded("a real, genuine disconnect".to_string()))
+            Some(FakeMessage::Forwarded(
+                "a real, genuine disconnect".to_string()
+            ))
         );
 
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;

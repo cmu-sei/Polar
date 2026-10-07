@@ -120,7 +120,11 @@ mod tests {
 
     #[async_trait]
     impl CryptoClient for FakeCrypto {
-        async fn store_secret(&self, _name: String, _plaintext: Vec<u8>) -> Result<(), CryptoError> {
+        async fn store_secret(
+            &self,
+            _name: String,
+            _plaintext: Vec<u8>,
+        ) -> Result<(), CryptoError> {
             Ok(())
         }
         async fn decrypt_own_message(&self, ciphertext: Vec<u8>) -> Result<Vec<u8>, CryptoError> {

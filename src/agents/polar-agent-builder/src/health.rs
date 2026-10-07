@@ -14,7 +14,10 @@ pub trait HealthClient: Send + Sync {
     fn graph_connected(&self) -> Result<(), ractor::MessagingErr<HealthCheckMessage>>;
     fn graph_disconnected(&self) -> Result<(), ractor::MessagingErr<HealthCheckMessage>>;
     fn graph_available(&self) -> Result<(), ractor::MessagingErr<HealthCheckMessage>>;
-    fn graph_op_failed(&self, reason: String) -> Result<(), ractor::MessagingErr<HealthCheckMessage>>;
+    fn graph_op_failed(
+        &self,
+        reason: String,
+    ) -> Result<(), ractor::MessagingErr<HealthCheckMessage>>;
 }
 
 /// The real, live implementation of HealthClient -- a thin wrapper
@@ -58,7 +61,10 @@ impl HealthClient for HealthHandle {
         self.actor.cast(HealthCheckMessage::GraphAvailable)
     }
 
-    fn graph_op_failed(&self, reason: String) -> Result<(), ractor::MessagingErr<HealthCheckMessage>> {
+    fn graph_op_failed(
+        &self,
+        reason: String,
+    ) -> Result<(), ractor::MessagingErr<HealthCheckMessage>> {
         self.actor.cast(HealthCheckMessage::GraphOpFailed(reason))
     }
 }
@@ -124,14 +130,19 @@ mod tests {
         handle.graph_connected().unwrap();
         handle.graph_disconnected().unwrap();
         handle.graph_available().unwrap();
-        handle.graph_op_failed("a real, genuine failure reason".to_string()).unwrap();
+        handle
+            .graph_op_failed("a real, genuine failure reason".to_string())
+            .unwrap();
 
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
         let messages = received.lock().unwrap();
         assert_eq!(messages.len(), 6);
         assert!(matches!(messages[0], HealthCheckMessage::CassiniConnected));
-        assert!(matches!(messages[1], HealthCheckMessage::CassiniDisconnected));
+        assert!(matches!(
+            messages[1],
+            HealthCheckMessage::CassiniDisconnected
+        ));
         assert!(matches!(messages[2], HealthCheckMessage::GraphConnected));
         assert!(matches!(messages[3], HealthCheckMessage::GraphDisconnected));
         assert!(matches!(messages[4], HealthCheckMessage::GraphAvailable));
