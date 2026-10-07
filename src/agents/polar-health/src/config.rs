@@ -4,7 +4,8 @@
 
 use crate::vars::{
     CASSINI_DEADLINE_SECS, CERTS, DEP_ENDPOINTS, EXPIRY_SECS, GRAPH_DEADLINE_SECS,
-    POLAR_HEALTH_CASSINI_DEADLINE_SECS_ENV, POLAR_HEALTH_GRAPH_DEADLINE_SECS_ENV,
+    POLAR_HEALTH_CASSINI_DEADLINE_SECS_ENV, POLAR_HEALTH_EXPIRY_SECS_ENV,
+    POLAR_HEALTH_GRAPH_DEADLINE_SECS_ENV, POLAR_HEALTH_REJUVENATION_SECS_ENV,
     POLAR_HEALTH_STALE_SECS_ENV, POLAR_HEALTH_TICK_SECS_ENV, REJUVENATION_SECS, STALE_SECS,
     TICK_SECS,
 };
@@ -99,13 +100,14 @@ impl HealthConfig {
     pub fn validate(&self) -> Result<(), String> {
         if self.expiry_threshold_secs <= 0 {
             return Err(format!(
-                "POLAR_HEALTH_EXPIRY_SECS must be positive, got {}",
+                "{POLAR_HEALTH_EXPIRY_SECS_ENV} must be positive, got {}",
                 self.expiry_threshold_secs
             ));
         }
         if self.rejuvenation_threshold_secs <= self.expiry_threshold_secs {
             return Err(format!(
-                "rejuvenation_threshold_secs ({}) must be greater than expiry_threshold_secs ({})",
+                "{POLAR_HEALTH_REJUVENATION_SECS_ENV} ({}) must be greater than \
+                 {POLAR_HEALTH_EXPIRY_SECS_ENV} ({})",
                 self.rejuvenation_threshold_secs, self.expiry_threshold_secs
             ));
         }
@@ -132,10 +134,10 @@ impl HealthConfig {
         let room = (self.rejuvenation_threshold_secs - self.expiry_threshold_secs) as u64;
         if room < needed {
             return Err(format!(
-                "rejuvenation_threshold_secs ({}) minus expiry_threshold_secs ({}) leaves {room}s, \
-                 but a rejuvenation can take {needed}s (two ticks of {}s plus the {}s jitter \
-                 window), so the certificate could reach its hard expiry floor before the \
-                 agent could rejuvenate",
+                "{POLAR_HEALTH_REJUVENATION_SECS_ENV} ({}) minus {POLAR_HEALTH_EXPIRY_SECS_ENV} ({}) \
+                 leaves {room}s, but a rejuvenation can take {needed}s (two ticks of \
+                 {POLAR_HEALTH_TICK_SECS_ENV} = {}s plus the {}s jitter window), so the \
+                 certificate could reach its hard expiry floor before the agent could rejuvenate",
                 self.rejuvenation_threshold_secs,
                 self.expiry_threshold_secs,
                 self.tick_secs,
@@ -504,5 +506,40 @@ mod tests {
             problems[0].starts_with(POLAR_HEALTH_TICK_SECS_ENV),
             "{problems:?}"
         );
+    }
+
+    #[test]
+    fn a_relation_problem_speaks_of_the_variables_the_deployer_sets() {
+        // Whoever fixes a deployment has the variable names in front of them, not the
+        // names of the fields they are read into.
+        for (set, mentions) in [
+            (
+                vec![
+                    (POLAR_HEALTH_REJUVENATION_SECS_ENV, "60"),
+                    (POLAR_HEALTH_EXPIRY_SECS_ENV, "60"),
+                ],
+                vec![
+                    POLAR_HEALTH_REJUVENATION_SECS_ENV,
+                    POLAR_HEALTH_EXPIRY_SECS_ENV,
+                ],
+            ),
+            (
+                vec![(POLAR_HEALTH_REJUVENATION_SECS_ENV, "250")],
+                vec![
+                    POLAR_HEALTH_REJUVENATION_SECS_ENV,
+                    POLAR_HEALTH_EXPIRY_SECS_ENV,
+                    POLAR_HEALTH_TICK_SECS_ENV,
+                ],
+            ),
+        ] {
+            let err = load(&set).unwrap_err();
+            for name in mentions {
+                assert!(err.contains(name), "{name} missing from: {err}");
+            }
+            assert!(
+                !err.contains("_threshold_secs"),
+                "a field name leaked into: {err}"
+            );
+        }
     }
 }
