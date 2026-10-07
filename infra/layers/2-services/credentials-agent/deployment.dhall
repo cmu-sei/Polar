@@ -84,6 +84,12 @@ let render =
                 , k8s.EnvVar::{ name = "POLAR_HEALTH_EXPIRY_SECS",   value = Some "60" }
                 , k8s.EnvVar::{ name = "POLAR_HEALTH_TICK_SECS",     value = Some "30" }
                 , k8s.EnvVar::{ name = "POLAR_HEALTH_DEP_ENDPOINTS", value = Some "${Constants.cassiniDNSName}:${Natural/show Constants.cassiniPort}:300,${Constants.neo4jDNSName}:7687:300" }
+                -- The most the agent may take to drain. Its code declares the least
+                -- it needs (SHUTDOWN_BUDGET in its supervisor) and it refuses to
+                -- start if this is less. Until this agent moves to the catalog,
+                -- which derives both numbers, the grace period below is this plus
+                -- the catalog's 10 s margin.
+                , k8s.EnvVar::{ name = "POLAR_SHUTDOWN_BUDGET_SECS", value = Some "50" }
                 ]
               # caMainEnv
 
@@ -99,6 +105,7 @@ let render =
               , serviceAccountName = Some v.name
               , automountServiceAccountToken = Some False
               , restartPolicy    = Some "Never"
+              , terminationGracePeriodSeconds = Some 60
               , volumes          = Some volumes
               , initContainers   = Some
                 [ functions.makePolarInitContainer
