@@ -126,6 +126,7 @@ Design: `docs/architecture/config-catalog-design.md`. Pattern per agent: migrate
 
 ## Credentials-agent and identity
 
+- [ ] The two credentials charts carry their shutdown numbers by hand (`infra/layers/2-services/credentials-agent/deployment.dhall`: consumer budget 50 s, grace 60 s; `observer.dhall`: observer 40 s and 50 s), until they move to the catalog, where both numbers are derived from one place. Until then nothing ties them to what the Rust code declares (`SHUTDOWN_BUDGET` in each supervisor) except the builder's startup check, which fails the pod, not the render. The catalog entries in the credentials pair remove the problem; a preflight check (see the health-rules item under the hygiene section) would also catch it before then. Found 2026-10-07
 - [ ] Admin `reissue` action: revoke old cert, return account to pending with the same `account_id`, holder reruns `claim` (provisioning an existing username is refused today: `AccountAlreadyExists`)
 - [ ] Expiry check on admin actions (the consumer appears not to check the author cert's validity period; verify)
 - [ ] Investigate why the consumer pod died shortly after the first provision in the previous cluster (never got its logs)
@@ -142,6 +143,7 @@ Design: `docs/architecture/config-catalog-design.md`. Pattern per agent: migrate
 
 ## Dev environment and hygiene
 
+- [ ] No `just` recipe runs the catalog's Nushell tests. They are `nu infra/tests/rules.nu` (14 tests of the health and shutdown rules in `infra/rules.nu`) and `nu infra/tests/resolve.nu` (6 tests of what the resolver produces for the real catalog). Add a recipe (for example `just infra-test`, running both and `nu infra/resolve.nu check`) and decide where it runs before a commit. Found 2026-10-07
 - [ ] Workspace clippy cannot pass `-D warnings`, so the `AGENTS.md` rule (`cargo clippy --workspace -- -D warnings` before a commit) cannot be met as written. Found 2026-10-07; David chose to leave it for now and handle it after the health work. About 19 findings in five crates, all from the toolchain in use (nightly 1.101). `cargo clippy -- -D warnings` applies to every workspace crate it compiles, so the first failing crate (`polar-router`) stops the run, which is why it looks like one problem. The list:
   - `polar-router/src/lib.rs:110`: `clippy::map_entry`, `contains_key` then `insert` on `state.registrations` (use the `Entry` API; keep the duplicate-registration error)
   - `polar-agent-builder` (6): five collapsible `if` (four of them the nested `if let` in `infrastructure.rs` `ClientEvent::Registered`, one more elsewhere), one redundant closure
