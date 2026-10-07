@@ -170,36 +170,56 @@ verdict yet; that is the next stage of the rework.
 
 ## 4. The InfrastructureSupervisor shutdown pipeline
 
-*Target.* One funnel, `begin_shutdown(reason)`, with every trigger feeding it.
-The reason is logged each time.
+One funnel, `begin_shutdown(reason)`, with every trigger feeding it. The reason is
+logged each time. The decisions live in `polar-agent-builder/src/shutdown.rs`, as
+plain functions that can be tested without starting an actor.
 
-| Trigger | Today | Target |
+| Trigger | Before | Now |
 |---|---|---|
 | Health verdict: rejuvenation reached | orderly | orderly |
 | Health verdict: hard deadline (cert, graph, Cassini) | abrupt (actor fails) | orderly |
-| HealthCheckActor dies unexpectedly (panic, bug) | abrupt | orderly, logged as a severe fault |
-| Router / Cassini client / CryptoActor dies unexpectedly | abrupt | orderly |
+| HealthCheckActor dies unexpectedly (panic, bug) | abrupt | orderly, logged as a fault in the health actor |
+| Router / CryptoActor dies unexpectedly | abrupt | orderly |
+| Cassini client fails (error or panic) | abrupt | orderly |
+| Cassini client stops cleanly | replaced | replaced (if it cannot be replaced: orderly) |
 | SIGTERM or SIGINT | ignored by PID 1 | orderly |
-| `kubectl delete`, rollout, node drain | SIGKILL after the grace period | orderly, via SIGTERM |
+| `kubectl delete`, rollout, node drain | SIGKILL after the grace period | orderly, via SIGTERM (grace period: stage S5) |
 
 Design decisions:
 
 - **Verdict messages, not death.** The HealthCheckActor reports its decision with
-  an explicit message and never uses its own termination as the signal. Its
-  *unexpected* death is still treated as "something is very wrong" and triggers
-  shutdown, but it is the exception path, not the protocol.
+  an explicit message, delivered through a port the supervisor gives it, and never
+  uses its own termination as the signal. Its *unexpected* death is still treated
+  as "something is very wrong" and triggers shutdown, but it is the exception path,
+  not the protocol.
 - **One pipeline.** `PrepareShutdown` → domain supervisor drains and stops its own
-  children → `ProceedWithShutdown` → infrastructure children stop → process exits
-  non-zero. Every trigger takes the same steps.
-- **Shutdown is idempotent.** A second trigger while shutting down (for example
-  SIGTERM during a rejuvenation drain) is logged and ignored.
-- **In-process watchdog.** The supervisor waits a bounded time for
-  `ProceedWithShutdown`. If the domain supervisor does not answer in time, the
-  process exits 1 anyway. Previously the supervisor waited indefinitely and only
-  the Kubernetes probe could end a hung shutdown. With the watchdog the probe
-  covers only what it should: a process in which nothing can run.
-- **Bounded steps.** Each step has its own timeout. Safety comes from the bounds,
-  never from assuming the children are still alive.
+  children → `ProceedWithShutdown` → infrastructure children stop → the domain
+  supervisor exits non-zero when the infrastructure supervisor ends. Every trigger
+  takes the same steps, and the domain supervisor needs no change to get it.
+- **Shutdown is idempotent.** The first trigger starts it; a second while it is
+  under way (SIGTERM during a rejuvenation drain, Kubernetes growing impatient) is
+  logged and changes nothing. The domain supervisor is told once.
+- **Children ending during a shutdown are expected.** Once it has begun, the
+  children are being stopped on purpose, so nothing they do starts anything:
+  no second `PrepareShutdown`, no new Cassini client. (Stopping the health actor
+  used to start a second shutdown.)
+- **In-process watchdog.** When the shutdown begins, a detached task starts a clock
+  for the shutdown budget. If the process is still alive when it runs out, the
+  domain supervisor never finished, and the process exits 1. Previously the
+  supervisor waited indefinitely and only the Kubernetes probe could end a hung
+  shutdown. With the watchdog the probe covers only what it should: a process in
+  which nothing can run. The task does not depend on the supervisor actor still
+  being alive.
+- **The shutdown budget.** 20 s by default. An agent whose drain takes longer
+  declares it in code with `AgentBuilder::with_shutdown_budget`. The deployment's
+  `POLAR_SHUTDOWN_BUDGET_SECS` wins when it is set, because the same value sizes the
+  pod's termination grace period; a value that is not a whole number of seconds is
+  an error at startup.
+- **Bounded steps.** Stopping the infrastructure children is bounded at 10 s.
+  Safety comes from the bounds, never from assuming the children are still alive.
+- **Signals.** SIGTERM and SIGINT are turned into a shutdown request by a listener
+  the builder starts. If it cannot register, that is logged as an error, because
+  the pod will not shut down in an orderly way when Kubernetes asks.
 
 ### Termination grace
 

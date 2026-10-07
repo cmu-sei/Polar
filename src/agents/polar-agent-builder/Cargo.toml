@@ -17,11 +17,15 @@ polar-router.workspace = true
 ractor.workspace = true
 rkyv.workspace = true
 thiserror.workspace = true
+tokio.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+polar-health = { path = "../polar-health", features = ["virtual-time"] }
 rand.workspace = true
 rcgen.workspace = true
 rsa.workspace = true
 tempfile.workspace = true
-tokio.workspace = true
+libc.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["test-util"] }

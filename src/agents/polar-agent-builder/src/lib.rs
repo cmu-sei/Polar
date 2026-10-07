@@ -27,6 +27,8 @@ pub mod infrastructure;
 pub use infrastructure::{InfrastructureEvent, InfrastructureSupervisor, InfrastructureSupervisorMessage};
 pub mod message;
 pub use message::{Encrypted, Outbound, Plaintext};
+pub mod shutdown;
+pub use shutdown::{DEFAULT_SHUTDOWN_BUDGET, SHUTDOWN_BUDGET_ENV};
 
 use cassini_client::TcpClientMessage;
 use cassini_types::ClientEvent;
@@ -110,6 +112,7 @@ pub struct AgentBuilder<M: ractor::Message> {
     requires: Vec<Capability>,
     map_lifecycle_event: Option<Box<dyn Fn(ClientEvent) -> Option<M> + Send + Sync>>,
     wants_crypto: bool,
+    shutdown_budget: Option<std::time::Duration>,
 }
 
 impl<M: ractor::Message> AgentBuilder<M> {
@@ -121,7 +124,19 @@ impl<M: ractor::Message> AgentBuilder<M> {
             requires: Vec::new(),
             map_lifecycle_event: None,
             wants_crypto: false,
+            shutdown_budget: None,
         }
+    }
+
+    /// How long this agent's domain supervisor needs to drain, from being told to
+    /// shut down to releasing the infrastructure. If it has not finished by then the
+    /// process exits 1 regardless, so an agent whose drain can take longer than the
+    /// default (20 s) must say so. The deployment's own value
+    /// (`POLAR_SHUTDOWN_BUDGET_SECS`), which also sizes the pod's termination grace
+    /// period, takes precedence when it is set.
+    pub fn with_shutdown_budget(mut self, budget: std::time::Duration) -> Self {
+        self.shutdown_budget = Some(budget);
+        self
     }
 
     /// Declares a capability this agent's own code needs from its
@@ -205,6 +220,12 @@ impl<M: ractor::Message> AgentBuilder<M> {
             }
         }
 
+        let shutdown_budget = shutdown::budget(
+            self.shutdown_budget,
+            std::env::var(SHUTDOWN_BUDGET_ENV).ok().as_deref(),
+        )
+        .map_err(ActorProcessingErr::from)?;
+
         // Derived, not passed in: whether to watch the graph follows
         // from the capabilities. The dependency endpoints are read by
         // HealthCheckActor from POLAR_HEALTH_DEP_ENDPOINTS, which the
@@ -232,6 +253,10 @@ impl<M: ractor::Message> AgentBuilder<M> {
                 health_check_args,
                 subscriptions: self.subscriptions,
                 wants_crypto: self.wants_crypto,
+                shutdown_budget,
+                listen_for_signals: true,
+                process_exit: shutdown::real_process_exit(),
+                tcp_spawner: Arc::new(infrastructure::CassiniSpawner),
             },
             myself_cell,
         )
