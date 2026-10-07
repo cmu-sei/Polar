@@ -15,6 +15,8 @@ pub trait Env {
 pub struct ProcessEnv;
 
 impl Env for ProcessEnv {
+    // The one place the process environment is read. Everything else reads through an Env.
+    #[allow(clippy::disallowed_methods)]
     fn var(&self, name: &str) -> Option<String> {
         // A value that is not valid UTF-8 is still a value; losing a character is better
         // than reporting it as not set.

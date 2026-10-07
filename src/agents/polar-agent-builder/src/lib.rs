@@ -16,6 +16,8 @@
 //! registers a topic without also, automatically, subscribing to it,
 //! or vice versa. build() itself is the one, sole, real orchestrator;
 //! nothing it produces can exist in a half-wired state.
+// Reading the process environment goes through polar-env (see clippy.toml).
+#![deny(clippy::disallowed_methods)]
 
 pub mod capability;
 pub use capability::Capability;

@@ -60,8 +60,12 @@ address, the capabilities and the health safety invariants stay Static.
   runs on is exactly what its code declared, which is a security property (nothing ambient
   leaks in or can be injected late) and a correctness one (the effective configuration is the
   same one that was checked).
-- A lint (`disallowed-methods` for `std::env::var` and its siblings) keeps direct reads from
-  creeping back.
+- **A lint keeps direct reads out.** `clippy.toml` disallows `std::env::var`, `var_os`, `vars`,
+  `vars_os`, `set_var` and `remove_var`, and a crate enforces it with
+  `#![deny(clippy::disallowed_methods)]` in its root. A crate opts in when it has moved onto
+  `polar-env` (today `polar-env`, `polar-health`, `polar-healthcheck` and `polar-agent-builder`),
+  copying the file in; `ProcessEnv` is the one allowed read. The rest of the workspace is not
+  enforced yet because about 90 direct reads in 36 files are still to be ported.
 
 ## 5. The ConfigurationActor and scheduled overrides (direction)
 
@@ -163,6 +167,5 @@ settings from the snapshot before it starts the actors that need them).
 `polar-config-check --effective` shows what an environment resolves to, value by value with its
 source, secrets hidden.
 
-Next, in order: the lint. After that,
-the ConfigurationActor shell, then the scheduler integration, then the credentials agent's use of
+Next, in order: the ConfigurationActor shell, then the scheduler integration, then the credentials agent's use of
 it. Every step is in `remaining-work.md`.

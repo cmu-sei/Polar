@@ -112,7 +112,10 @@ impl CryptoClient for CryptoHandle {
     }
 }
 
+// These tests set TLS_CLIENT_CERT because polar-crypto still reads it from the process. The
+// allowance goes when polar-crypto is on polar-env and takes its settings as an argument.
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)]
 mod tests {
     use super::*;
     use credentials_agent_common::agent_escrow_key::{AgentEscrowKeyReply, AgentEscrowKeyRequest};

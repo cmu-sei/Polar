@@ -22,6 +22,8 @@
 //! (the environment or a default) and whether a scheduled override may change it. Only
 //! declared variables are shown, as only declared variables ever reach an agent. Problems are
 //! still reported, and still fail. `--effective --json` is the same as one JSON document.
+// Reading the process environment goes through polar-env (see clippy.toml).
+#![deny(clippy::disallowed_methods)]
 
 use polar_agent_builder::environment;
 use polar_env::ProcessEnv;

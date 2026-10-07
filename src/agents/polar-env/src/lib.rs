@@ -36,6 +36,8 @@
 //! A blank value counts as unset, as it does in Kubernetes manifests that set a name
 //! with an empty string. A variable marked secret is never shown in an error or a
 //! description.
+// Reading the process environment goes through polar-env (see clippy.toml).
+#![deny(clippy::disallowed_methods)]
 
 mod config;
 mod env;

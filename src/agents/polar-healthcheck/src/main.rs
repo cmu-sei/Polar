@@ -14,6 +14,8 @@
 //! Environment variables:
 //!   POLAR_HEALTH_FILE         Path to agent health state JSON (default: /tmp/polar-health.json)
 //!   POLAR_HEALTH_STALE_SECS   Fail if health file is older than N seconds (default: 90)
+// Reading the process environment goes through polar-env (see clippy.toml).
+#![deny(clippy::disallowed_methods)]
 
 use polar_health::HealthState;
 use polar_health::probe::{self, ProbeConfig};

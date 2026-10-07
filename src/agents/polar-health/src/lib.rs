@@ -24,6 +24,8 @@
 //!     operation. If that exceeds graph_deadline_secs -- whether the graph
 //!     never became available at all, or was available and then went dark --
 //!     the actor fails itself, which the supervisor treats as fatal.
+// Reading the process environment goes through polar-env (see clippy.toml).
+#![deny(clippy::disallowed_methods)]
 
 use ractor::{Actor, ActorProcessingErr, ActorRef, OutputPort, async_trait};
 use serde::{Deserialize, Serialize};
