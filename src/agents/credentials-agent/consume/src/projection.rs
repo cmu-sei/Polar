@@ -68,6 +68,8 @@ pub struct ProjectionActorArgs {
     /// other's ActorRef before both are already spawned. Set shortly
     /// after startup via SetLedger, once LedgerActor actually exists.
     pub ledger: Option<ActorRef<LedgerMessage>>,
+    /// How to reach the graph, from the builder's snapshot of the environment.
+    pub graph: polar::graph::environment::GraphSettings,
 }
 
 pub struct ProjectionActorState {
@@ -118,9 +120,7 @@ impl Actor for ProjectionActor {
         let (graph_controller, _) = GraphControllerActor::spawn_linked(
             Some("credentials-agent.projection.graph.controller".to_string()),
             GraphControllerActor,
-            // Not given settings: this actor is spawned before the builder runs (the projection
-            // must not wait for Cassini), so there is no snapshot yet and it reads the process.
-            GraphControllerArgs::new(signal_port),
+            GraphControllerArgs::new(signal_port).with_settings(args.graph.clone()),
             myself.get_cell(),
         )
         .await

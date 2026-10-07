@@ -623,4 +623,23 @@ mod tests {
             .to_string();
         assert!(error.contains("GRAPH_ENDPOINT"), "{error}");
     }
+
+    #[tokio::test]
+    async fn an_agent_can_take_the_graph_settings_without_making_its_health_depend_on_the_graph() {
+        // The credentials consumer's case: it projects to the graph but must not have its
+        // health watch Neo4j, so it declares the graph section itself instead of requiring
+        // the graph-write capability.
+        let (idle, _) = Actor::spawn(None, Idle, ()).await.unwrap();
+        let mut vars = environment::fixtures::CASSINI_ENV.to_vec();
+        vars.extend_from_slice(environment::fixtures::GRAPH_ENV);
+        let configured = AgentBuilder::new(idle, "configure-projection")
+            .with_environment(&polar::graph::environment::SECTION)
+            .configure_from(&map(&vars))
+            .unwrap();
+
+        let settings =
+            polar::graph::environment::GraphSettings::from_env(&**configured.config()).unwrap();
+        assert_eq!(settings.endpoint, "bolt+s://db:7687");
+        assert!(!configured.startup.health.expects_graph, "health does not watch the graph");
+    }
 }

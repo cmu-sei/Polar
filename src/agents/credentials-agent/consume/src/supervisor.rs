@@ -600,6 +600,28 @@ impl Actor for ConsumerSupervisor {
     ) -> Result<Self::State, ActorProcessingErr> {
         debug!("{myself:?} starting");
 
+        // The environment is read and judged first, before any actor is spawned, and the
+        // agent's own settings come from that one snapshot. Declaring the graph section here
+        // rather than requiring the graph-write capability is deliberate: this agent
+        // projects to the graph but its health must not depend on Neo4j (the ledger is its
+        // source of truth and the graph only a projection of it). Deliberately NOT
+        // `with_encryption()` either: CryptoActor is the gateway to the Credentials Agent,
+        // and its requests go to the very topics this agent serves, so this agent would be
+        // asking itself for its own keys (and its polar-init must never run the escrow
+        // bootstrap against itself). The dependency endpoints (Cassini and Neo4j
+        // certificates) come from POLAR_HEALTH_DEP_ENDPOINTS in the deployment.
+        let mut builder = AgentBuilder::new(myself.clone(), SERVICE_NAME)
+            .with_shutdown_budget(SHUTDOWN_BUDGET)
+            .with_environment(&polar::graph::environment::SECTION)
+            .with_lifecycle_handler(|event| Some(ConsumerSupervisorMessage::ClientEvent { event }));
+        for subscription in Self::request_subscriptions(&myself) {
+            builder = builder.with_subscription(subscription);
+        }
+        let configured = builder.configure()?;
+        let graph_settings =
+            polar::graph::environment::GraphSettings::from_env(&**configured.config())
+                .map_err(ActorProcessingErr::from)?;
+
         let log_path = std::env::var(CREDENTIALS_EVENT_LOG_PATH_ENV)
             .unwrap_or_else(|_| CREDENTIALS_EVENT_LOG_PATH_DEFAULT.to_string());
 
@@ -624,7 +646,10 @@ impl Actor for ConsumerSupervisor {
         let (projection_actor, _) = ProjectionActor::spawn_linked(
             Some("credentials-agent.consumer.projection".to_string()),
             ProjectionActor,
-            ProjectionActorArgs { ledger: None },
+            ProjectionActorArgs {
+                ledger: None,
+                graph: graph_settings,
+            },
             myself.get_cell(),
         )
         .await
@@ -918,23 +943,8 @@ impl Actor for ConsumerSupervisor {
 
         // The health check, the router, the request subscriptions and the Cassini
         // client come from the agent builder, spawned last so every handler
-        // actor exists before a request can arrive. Deliberately NOT
-        // `with_encryption()`: CryptoActor is the gateway to the Credentials
-        // Agent, and its requests go to the very topics this agent serves, so
-        // this agent would be asking itself for its own keys (and its
-        // polar-init must never run the escrow bootstrap against itself).
-        // Deliberately NOT `with_graph_write()` either: that makes the health
-        // check depend on Neo4j, and this agent's health must not -- the ledger
-        // is its source of truth and the graph only a projection of it. The
-        // dependency endpoints (Cassini and Neo4j certificates) come from
-        // POLAR_HEALTH_DEP_ENDPOINTS in the deployment.
-        let mut builder = AgentBuilder::new(myself.clone(), SERVICE_NAME)
-            .with_shutdown_budget(SHUTDOWN_BUDGET)
-            .with_lifecycle_handler(|event| Some(ConsumerSupervisorMessage::ClientEvent { event }));
-        for subscription in Self::request_subscriptions(&myself) {
-            builder = builder.with_subscription(subscription);
-        }
-        let resources = builder.build().await?;
+        // actor exists before a request can arrive. It was configured first, above.
+        let resources = configured.build().await?;
 
         // The "infrastructure -> domain" half of the respawn/shutdown protocol.
         // Without this subscription the infrastructure supervisor would wait

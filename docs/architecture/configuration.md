@@ -157,8 +157,9 @@ startup and the checker judges them for the environment a workload is given. Enc
 Kubernetes API read bring none until `polar-crypto` is on `polar-env`.
 
 The Cassini client is started, and restarted, from the snapshot, and the graph controller is handed
-its settings from it (the credentials consumer's projection excepted, as it starts before the
-builder; see `remaining-work.md`).
+its settings from it (the credentials consumer too: the builder is split into `configure()`, which reads and judges the
+environment and spawns nothing, and `build()`, which spawns, so a domain supervisor can take its own
+settings from the snapshot before it starts the actors that need them).
 
 Next, in order: `--describe --json` and an `--effective` view; then the lint. After that,
 the ConfigurationActor shell, then the scheduler integration, then the credentials agent's use of
