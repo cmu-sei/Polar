@@ -663,6 +663,7 @@ mod tests {
                 ("POLAR_HEALTH_CASSINI_DEADLINE_SECS", "100000"),
             ]
             .into_iter()
+            .chain(crate::environment::fixtures::CASSINI_ENV.iter().copied())
             .chain(health_env.iter().copied())
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect();

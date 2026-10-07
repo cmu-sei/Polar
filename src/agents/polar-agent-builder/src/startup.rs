@@ -42,8 +42,9 @@ pub(crate) fn prepare(
     declared_budget: Option<Duration>,
 ) -> Result<Startup, String> {
     let mut builder = Config::builder(env);
-    for section in environment::sections()
+    for section in environment::base_sections()
         .into_iter()
+        .chain(environment::sections_for(required))
         .chain(agent_sections.iter().copied())
     {
         builder = builder.register(section);
@@ -106,6 +107,7 @@ pub(crate) fn prepare(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::environment::fixtures::{CASSINI_ENV, GRAPH_ENV};
     use polar_env::{Described, Required};
     use std::collections::HashMap;
 
@@ -116,8 +118,19 @@ mod tests {
             .collect()
     }
 
+    /// A deployment that provides what the agent needs: the client's and, when the agent
+    /// writes to the graph, the graph's variables, plus `pairs`.
+    fn deployment(pairs: &[(&str, &str)], required: &[Capability]) -> HashMap<String, String> {
+        let mut vars = CASSINI_ENV.to_vec();
+        if required.contains(&Capability::GraphWrite) {
+            vars.extend_from_slice(GRAPH_ENV);
+        }
+        vars.extend_from_slice(pairs);
+        env(&vars)
+    }
+
     fn prepared(pairs: &[(&str, &str)], required: &[Capability]) -> Result<Startup, String> {
-        prepare(&env(pairs), &[], required, None)
+        prepare(&deployment(pairs, required), &[], required, None)
     }
 
     // An agent's own section: one variable only this agent reads.
@@ -136,6 +149,43 @@ mod tests {
         assert_eq!(s.shutdown_budget, shutdown::DEFAULT_SHUTDOWN_BUDGET);
         assert_eq!(s.health.file_path, polar_health::POLAR_HEALTH_FILE_DEFAULT);
         assert!(!s.health.expects_graph);
+    }
+
+    #[test]
+    fn an_agent_that_needs_the_broker_is_refused_without_its_coordinates() {
+        let err = prepare(&env(&[]), &[], &[Capability::Cassini], None)
+            .err()
+            .unwrap();
+        for name in ["TLS_CLIENT_CERT", "BROKER_ADDR", "CASSINI_SERVER_NAME"] {
+            assert!(err.contains(name), "{name}: {err}");
+        }
+    }
+
+    #[test]
+    fn an_agent_that_writes_to_the_graph_is_refused_without_its_graph_settings() {
+        let err = prepare(
+            &env(CASSINI_ENV),
+            &[],
+            &[Capability::Cassini, Capability::GraphWrite],
+            None,
+        )
+        .err()
+        .unwrap();
+        assert!(err.contains("GRAPH_ENDPOINT"), "{err}");
+        assert!(!err.contains("hunter2"));
+    }
+
+    #[test]
+    fn what_a_capability_does_not_need_is_not_demanded() {
+        // No graph capability, so no graph variables, and none that happen to be set get in.
+        let s = prepare(
+            &env(&[CASSINI_ENV, &[("GRAPH_PASSWORD", "hunter2")]].concat()),
+            &[],
+            &[Capability::Cassini],
+            None,
+        )
+        .unwrap();
+        assert_eq!(s.config.var("GRAPH_PASSWORD"), None);
     }
 
     #[test]
@@ -173,13 +223,18 @@ mod tests {
 
     #[test]
     fn a_section_the_agent_declared_is_checked_and_readable() {
-        let missing = prepare(&env(&[]), &[&AGENT], &[Capability::Cassini], None)
-            .err()
-            .unwrap();
+        let missing = prepare(
+            &deployment(&[], &[]),
+            &[&AGENT],
+            &[Capability::Cassini],
+            None,
+        )
+        .err()
+        .unwrap();
         assert!(missing.contains("AGENT_BUCKET"), "{missing}");
 
         let s = prepare(
-            &env(&[("AGENT_BUCKET", "b1")]),
+            &deployment(&[("AGENT_BUCKET", "b1")], &[]),
             &[&AGENT],
             &[Capability::Cassini],
             None,
@@ -232,7 +287,7 @@ mod tests {
     #[test]
     fn the_budget_the_deployment_gives_must_cover_what_the_code_declares() {
         let short = prepare(
-            &env(&[("POLAR_SHUTDOWN_BUDGET_SECS", "10")]),
+            &deployment(&[("POLAR_SHUTDOWN_BUDGET_SECS", "10")], &[]),
             &[],
             &[Capability::Cassini],
             Some(Duration::from_secs(40)),
@@ -242,7 +297,7 @@ mod tests {
         assert!(short.contains("POLAR_SHUTDOWN_BUDGET_SECS"), "{short}");
 
         let enough = prepare(
-            &env(&[("POLAR_SHUTDOWN_BUDGET_SECS", "50")]),
+            &deployment(&[("POLAR_SHUTDOWN_BUDGET_SECS", "50")], &[]),
             &[],
             &[Capability::Cassini],
             Some(Duration::from_secs(40)),

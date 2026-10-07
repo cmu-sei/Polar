@@ -35,6 +35,24 @@ fn what_a_workload_is_given_passes() {
         &[],
         &[
             ("POLAR_CAPABILITIES", "cassini,graph-write,encryption"),
+            ("TLS_CLIENT_CERT", "/etc/tls/certs/cert.pem"),
+            ("TLS_CLIENT_KEY", "/etc/tls/certs/key.pem"),
+            ("TLS_CA_CERT", "/etc/tls/certs/ca.pem"),
+            ("BROKER_ADDR", "cassini-ip-svc.polar.svc.cluster.local:8080"),
+            (
+                "CASSINI_SERVER_NAME",
+                "cassini-ip-svc.polar.svc.cluster.local",
+            ),
+            ("GRAPH_DB", "neo4j"),
+            ("GRAPH_USER", "neo4j"),
+            ("GRAPH_PASSWORD", "from-secret"),
+            (
+                "GRAPH_ENDPOINT",
+                "bolt+s://polar-db-svc.polar-graph.svc.cluster.local:7687",
+            ),
+            ("GRAPH_CLIENT_CERT", "/etc/neo4j-client-tls/cert.pem"),
+            ("GRAPH_CLIENT_KEY", "/etc/neo4j-client-tls/key.pem"),
+            ("GRAPH_CA_CERT", "/etc/neo4j-client-tls/ca.pem"),
             ("POLAR_SHUTDOWN_BUDGET_SECS", "45"),
             (
                 "POLAR_HEALTH_FILE",
@@ -55,6 +73,37 @@ fn what_a_workload_is_given_passes() {
         ],
     );
     assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+}
+
+#[test]
+fn a_provided_capability_whose_environment_is_missing_fails_the_check() {
+    let o = run(&[], &[("POLAR_CAPABILITIES", "cassini,graph-write")]);
+    assert_eq!(o.status.code(), Some(1));
+    let err = stderr(&o);
+    for name in [
+        "ERROR: TLS_CLIENT_CERT",
+        "ERROR: BROKER_ADDR",
+        "ERROR: GRAPH_ENDPOINT",
+    ] {
+        assert!(err.contains(name), "{name}: {err}");
+    }
+}
+
+#[test]
+fn a_partial_graph_tls_configuration_fails_the_check() {
+    let o = run(
+        &[],
+        &[
+            ("POLAR_CAPABILITIES", "graph-write"),
+            ("GRAPH_DB", "neo4j"),
+            ("GRAPH_USER", "neo4j"),
+            ("GRAPH_PASSWORD", "from-secret"),
+            ("GRAPH_ENDPOINT", "bolt+s://db:7687"),
+            ("GRAPH_CLIENT_CERT", "/c.pem"),
+        ],
+    );
+    assert_eq!(o.status.code(), Some(1));
+    assert!(stderr(&o).contains("incomplete"), "{}", stderr(&o));
 }
 
 #[test]
@@ -117,6 +166,9 @@ fn describe_lists_every_variable_by_section() {
         "POLAR_SHUTDOWN_BUDGET_SECS",
         "POLAR_HEALTH_TICK_SECS",
         "POLAR_HEALTH_FILE",
+        "cassini-client",
+        "BROKER_ADDR",
+        "GRAPH_ENDPOINT",
     ] {
         assert!(out.contains(expected), "{expected} missing from:\n{out}");
     }

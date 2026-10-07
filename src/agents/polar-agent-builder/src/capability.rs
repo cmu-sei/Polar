@@ -36,6 +36,20 @@ impl Capability {
         Capability::KubeApiRead,
     ];
 
+    /// The capability a name in `POLAR_CAPABILITIES` stands for, if this code knows it.
+    pub fn from_name(name: &str) -> Option<Capability> {
+        Capability::ALL.into_iter().find(|c| c.as_str() == name)
+    }
+
+    /// The known capabilities in a comma-separated `POLAR_CAPABILITIES` value. Names this
+    /// code does not know are ignored, as in [`check`].
+    pub fn parse_list(raw: &str) -> Vec<Capability> {
+        raw.split(',')
+            .map(str::trim)
+            .filter_map(Capability::from_name)
+            .collect()
+    }
+
     /// The name used in `capabilities.nuon` and in `POLAR_CAPABILITIES`.
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -112,6 +126,19 @@ pub fn missing_message(missing: &[Capability], provided: Option<&str>) -> String
 mod tests {
     use super::*;
     use std::path::Path;
+
+    #[test]
+    fn names_map_to_capabilities_and_unknown_ones_are_ignored() {
+        assert_eq!(
+            Capability::parse_list(" cassini, graph-write ,nonsense,,"),
+            [Capability::Cassini, Capability::GraphWrite]
+        );
+        assert_eq!(
+            Capability::from_name("encryption"),
+            Some(Capability::Encryption)
+        );
+        assert_eq!(Capability::from_name("Cassini"), None);
+    }
 
     #[test]
     fn satisfied_when_every_requirement_is_provided() {

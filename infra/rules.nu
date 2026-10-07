@@ -18,6 +18,9 @@ const INFRA = (path self | path dirname)
 
 # Prefixes of the variables an agent reads. The checker must see only what the workload is
 # given, so any of these set in the caller's shell are unset for the check.
+# What the checker is given for a variable the pod will get from a secret.
+const SECRET_PLACEHOLDER = "from-secret"
+
 const AGENT_ENV_PREFIXES = '^(POLAR_|GRAPH_|TLS_|BROKER_|CASSINI_)'
 
 # The command that runs polar-config-check: the binary named by POLAR_CONFIG_CHECK if that is
@@ -35,8 +38,10 @@ def checker []: nothing -> list<string> {
 }
 
 # Problems with the environment a workload will be given, judged by the agent's own code.
-# `entries` is the workload's resolved `env` list; those that come from a secret have no value
-# here and are left out (none of the rules read them).
+# `entries` is the workload's resolved `env` list. One that comes from a secret has no value at
+# render time, so it is given a placeholder: the check is of shape, and a variable the pod gets
+# from a secret is present. The placeholder never reaches a message, since a secret is declared
+# secret and is never shown.
 export def environment_problems [who: string, entries: list]: nothing -> list<string> {
     let unset = (
         $env | columns
@@ -44,7 +49,7 @@ export def environment_problems [who: string, entries: list]: nothing -> list<st
         | each {|n| ["-u" $n] }
         | flatten
     )
-    let set = ($entries | where value != null | each {|e| $"($e.name)=($e.value)" })
+    let set = ($entries | each {|e| $"($e.name)=(if $e.value != null { $e.value } else { $SECRET_PLACEHOLDER })" })
     let command = (checker)
 
     let result = (^env ...$unset ...$set ...$command | complete)

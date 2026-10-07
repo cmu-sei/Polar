@@ -20,16 +20,46 @@ def has [problems: list<string>, needle: string] {
     $problems | any {|p| $p | str contains $needle }
 }
 
+# What a workload with the cassini and graph-write capabilities is given.
+def sound_entries []: nothing -> list {
+    [
+        { name: "POLAR_CAPABILITIES", value: "cassini,graph-write" }
+        { name: "TLS_CLIENT_CERT", value: "/etc/tls/certs/cert.pem" }
+        { name: "TLS_CLIENT_KEY", value: "/etc/tls/certs/key.pem" }
+        { name: "TLS_CA_CERT", value: "/etc/tls/certs/ca.pem" }
+        { name: "BROKER_ADDR", value: "cassini:8080" }
+        { name: "CASSINI_SERVER_NAME", value: "cassini.local" }
+        { name: "GRAPH_DB", value: "neo4j" }
+        { name: "GRAPH_USER", value: "neo4j" }
+        { name: "GRAPH_PASSWORD", value: null }
+        { name: "GRAPH_ENDPOINT", value: "bolt+s://db:7687" }
+    ]
+}
+
 def main [] {
     let tests = {
         "a workload's real environment passes the real checker": {
-            let entries = [
-                { name: "POLAR_CAPABILITIES", value: "cassini,graph-write" }
+            let entries = (sound_entries | append [
                 { name: "POLAR_SHUTDOWN_BUDGET_SECS", value: "45" }
                 { name: "POLAR_HEALTH_TICK_SECS", value: "30" }
                 { name: "POLAR_HEALTH_REJUVENATION_SECS", value: "300" }
-            ]
+            ])
             assert equal (environment_problems "w" $entries) []
+        }
+
+        "a variable that comes from a secret counts as present": {
+            # GRAPH_PASSWORD has no value at render time; it is in sound_entries as a secret.
+            let secret = (sound_entries | where name == "GRAPH_PASSWORD" | first)
+            assert ($secret.value == null)
+            assert equal (environment_problems "w" (sound_entries)) []
+        }
+
+        "a capability the workload is given must come with the environment it needs": {
+            let entries = [{ name: "POLAR_CAPABILITIES", value: "cassini,graph-write" }]
+            let p = (environment_problems "kube-consumer" $entries)
+            assert (has $p "BROKER_ADDR")
+            assert (has $p "GRAPH_ENDPOINT")
+            assert ($p | all {|x| $x | str starts-with "kube-consumer: " })
         }
 
         "a bad environment fails, and each problem names the workload": {
@@ -49,14 +79,6 @@ def main [] {
             assert equal ($p | length) 1
             assert (has $p "POLAR_HEALTH_REJUVENATION_SECS")
             assert (has $p "hard expiry floor")
-        }
-
-        "entries that come from a secret are skipped, not passed as empty": {
-            let entries = [
-                { name: "GRAPH_PASSWORD", value: null, secret: "polar-graph-pw", key: "secret" }
-                { name: "POLAR_HEALTH_TICK_SECS", value: "30" }
-            ]
-            assert equal (environment_problems "w" $entries) []
         }
 
         "the caller's own environment does not leak into the check": {
