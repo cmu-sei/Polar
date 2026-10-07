@@ -63,6 +63,7 @@ members = [
     "openapi/process",
     "openapi/observe",
     "polar-crypto",
+    "polar-env",
     "polar-health",
     "polar-healthcheck",
     "polar-init",
@@ -179,6 +180,7 @@ errno = "0.3.14"
 libc = "0.2"
 uninit = "0.3"
 polar-crypto = { path = "polar-crypto" }
+polar-env = { path = "polar-env" }
 polar-health = { path = "polar-health" }
 polar-kernel-keyring = { path = "polar-kernel-keyring" }
 polar-permissions = { path = "polar-permissions" }

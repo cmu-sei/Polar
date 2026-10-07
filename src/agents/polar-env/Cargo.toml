@@ -1,0 +1,10 @@
+[package]
+name = "polar-env"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+# No dependencies on purpose: every crate that reads the environment can depend on
+# this one without pulling anything else in.
+[dependencies]
