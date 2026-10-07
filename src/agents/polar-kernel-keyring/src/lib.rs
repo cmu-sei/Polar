@@ -83,7 +83,7 @@
 
 use keyutils_raw::{
     KEY_POS_ALL, KEY_SPEC_SESSION_KEYRING, KEY_SPEC_USER_KEYRING, KEY_USR_ALL,
-    KEYCTL_SUPPORTS_DECRYPT, add_key, keyctl_link, keyctl_pkey_decrypt, keyctl_pkey_query,
+    KEYCTL_SUPPORTS_DECRYPT, add_key, keyctl_describe, keyctl_link, keyctl_pkey_decrypt, keyctl_pkey_query,
     keyctl_setperm, keyctl_unlink,
 };
 // Re-exported so callers holding a serial this crate returned (e.g.
@@ -225,20 +225,65 @@ pub fn try_load_asymmetric_key(description: &str, der_bytes: &[u8]) -> Option<Ke
     // but avoids leaving a redundant reference lying around.
     let _ = keyctl_unlink(serial, KEY_SPEC_SESSION_KEYRING);
 
+    if supports_decrypt(serial) {
+        Some(serial)
+    } else {
+        None
+    }
+}
+
+/// Whether the kernel can decrypt with the key at `serial`, with the encoding this crate
+/// uses. Each reason it can't is logged at debug, and none is an error to a caller: the
+/// answer is simply no.
+fn supports_decrypt(serial: KeyringSerial) -> bool {
     match keyctl_pkey_query(serial, ESCROW_PKEY_INFO) {
-        Ok(query) if query.supported_ops & KEYCTL_SUPPORTS_DECRYPT != 0 => Some(serial),
+        Ok(query) if query.supported_ops & KEYCTL_SUPPORTS_DECRYPT != 0 => true,
         Ok(_) => {
             tracing::debug!(
                 "the kernel accepted the key but doesn't support decrypt on it with the \
                  requested encoding; discarding the loaded key and falling back"
             );
-            None
+            false
         }
         Err(e) => {
-            tracing::debug!("keyctl_pkey_query failed on the newly-loaded key: {e}");
-            None
+            tracing::debug!("keyctl_pkey_query failed on the key: {e}");
+            false
         }
     }
+}
+
+/// Takes a key another process loaded, given its number and the description it was loaded
+/// under (see [`try_load_asymmetric_key`]): the init container loads the key and passes the
+/// number on, and the workload adopts it without ever holding the key material.
+///
+/// The description is checked because the user keyring is shared by every process under the
+/// same UID (and, without per-pod user namespaces, the same node), so a number alone does not
+/// say whose key it is. The key must also be an asymmetric key that the kernel can decrypt
+/// with. Anything else is `None`, and the caller falls back to its own custody, as it does
+/// when no key was passed at all.
+pub fn adopt_asymmetric_key(raw_serial: i32, expected_description: &str) -> Option<KeyringSerial> {
+    // Real keys have positive ids; the negative ones name special keyrings.
+    if raw_serial <= 0 {
+        return None;
+    }
+    let serial = KeyringSerial::new(raw_serial)?;
+
+    let length = keyctl_describe(serial, None).ok()?;
+    let mut buffer = vec![0u8; length];
+    let written =
+        keyctl_describe(serial, Some(uninit::out_ref::Out::from(buffer.as_mut_slice()))).ok()?;
+    buffer.truncate(written.min(length));
+    let described = String::from_utf8(buffer).ok()?;
+    // "type;uid;gid;permissions;description", with a trailing NUL the kernel counts.
+    let mut fields = described.trim_end_matches('\0').splitn(5, ';');
+    let key_type = fields.next()?;
+    let description = fields.nth(3)?;
+    if key_type != "asymmetric" || description != expected_description {
+        tracing::debug!("not adopting key {raw_serial}: it is not the expected key");
+        return None;
+    }
+
+    supports_decrypt(serial).then_some(serial)
 }
 
 /// Decrypts `ciphertext` using the kernel-held private key at
@@ -369,5 +414,50 @@ mod tests {
              operation and this crate's own, separate OAEP unpad step are each genuinely \
              correct, not just that add_key() didn't error"
         );
+    }
+
+    // -- adopting a key another process loaded --------------------------------------------
+
+    fn loaded(description: &str) -> (KeyringSerial, RsaPublicKey) {
+        let mut rng = rand::rng();
+        let private_key = RsaPrivateKey::new(&mut rng, 2048).unwrap();
+        let public_key = RsaPublicKey::from(&private_key);
+        let der = private_key.to_pkcs8_der().unwrap();
+        let serial = try_load_asymmetric_key(description, der.as_bytes())
+            .expect("this machine must support kernel-keyring asymmetric keys for this test");
+        (serial, public_key)
+    }
+
+    #[test]
+    fn a_key_loaded_elsewhere_is_adopted_by_its_number_and_description() {
+        let (serial, public_key) = loaded("polar-kernel-keyring-adopt-test");
+        // The init container writes the number; the workload only has the number.
+        let adopted = adopt_asymmetric_key(serial.get(), "polar-kernel-keyring-adopt-test")
+            .expect("a live key with the expected description is adopted");
+        assert_eq!(adopted, serial);
+
+        let mut rng = rand::rng();
+        let ciphertext = public_key
+            .encrypt(&mut rng, Oaep::<EscrowOaepHash>::new(), b"for the adopted key")
+            .unwrap();
+        assert_eq!(decrypt(adopted, &ciphertext).unwrap(), b"for the adopted key");
+    }
+
+    #[test]
+    fn a_key_with_a_different_description_is_not_adopted() {
+        // The user keyring is shared by everything under the same UID, so a number alone
+        // does not say whose key it is.
+        let (serial, _) = loaded("polar-kernel-keyring-someone-else");
+        assert_eq!(
+            adopt_asymmetric_key(serial.get(), "polar-kernel-keyring-adopt-test"),
+            None
+        );
+    }
+
+    #[test]
+    fn a_number_that_is_not_a_key_is_not_adopted() {
+        assert_eq!(adopt_asymmetric_key(0, "anything"), None);
+        assert_eq!(adopt_asymmetric_key(-1, "anything"), None);
+        assert_eq!(adopt_asymmetric_key(i32::MAX, "anything"), None);
     }
 }
