@@ -26,11 +26,12 @@ sequenceDiagram
     end
     T-->>F: Connected(registration id)
     F->>T: Subscribe for every remembered topic
+    B->>B: the old connection is fenced: whatever it delivers late is ignored
     F->>T: retransmit the unacknowledged, in order: 42 then 43, same epoch and seq
     T->>B: PublishRequest 42, 43
-    B->>B: 42 already accepted? skip it. 43 is new: accept it
-    B-->>T: PublishRequestAck(43)
-    T-->>F: Acked(43), cumulative
+    B->>B: 42 already accepted? acknowledge it again. 43 is new: accept it
+    B-->>T: PublishRequestAck(42) and PublishRequestAck(43), each for its own message
+    T-->>F: Acked(42), Acked(43)
     F->>F: outbox empty
     F->>Disk: remove the file
     F->>F: state = Online

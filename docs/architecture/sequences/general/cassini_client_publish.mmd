@@ -9,9 +9,10 @@ sequenceDiagram
     F->>F: assign (epoch, seq) and append to the outbox
     F->>T: Send(PublishRequest, epoch, seq)
     T->>B: PublishRequest(epoch, seq)
-    B->>B: seq at or below the last accepted for this epoch? skip it, else accept it
-    B-->>T: PublishRequestAck(epoch, seq)
+    B->>B: at the session ingress, in socket order: already accepted? acknowledge again. Pending? wait. New? hand to the topic actor
+    B->>B: the topic actor accepts it
+    B-->>T: PublishRequestAck(epoch, seq), for this message only
     T-->>F: Acked(epoch, seq)
-    F->>F: remove seq and everything before it from the outbox
+    F->>F: remove exactly that entry from the outbox
     F-->>D: PublishAcknowledged (optional receipt)
-    Note over F,B: A message leaves the outbox only when the broker acknowledges it.<br/>Writing it to the socket proves nothing.
+    Note over F,B: A message leaves the outbox only when the broker acknowledges that exact message.<br/>Acks can come back in any order, because different topic actors answer.<br/>Writing it to the socket proves nothing.

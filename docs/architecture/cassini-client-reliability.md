@@ -56,8 +56,11 @@ Split what `TcpClientActor` does into a stable part and a disposable part.
 ![publish](sequences/general/cassini_client_publish.png)
 
 A message gets its `(epoch, seq)` when it enters the outbox and leaves it only when the broker
-acknowledges that exact message. The ack is cumulative: acknowledging `n` releases everything up to
-`n`. Writing to the socket proves nothing about the broker.
+acknowledges that exact message. Acks are per message and may arrive in any order: the broker's
+session hands messages to different topic actors, which accept and answer independently, so a later
+message can be acknowledged before an earlier one. A cumulative ack ("everything up to n") would
+release an earlier message that was never accepted, which is data loss, so there is none. Writing to
+the socket proves nothing about the broker.
 
 ### Losing the connection, and coming back
 
@@ -80,8 +83,10 @@ The same problem in the other direction. The broker keeps a delivery until the c
 
 ![states](sequences/general/cassini_client_facade_states.png)
 
-`Draining` is the agent's shutdown or rejuvenation: the facade keeps retransmitting until the outbox is
-empty or the shutdown budget is spent, then writes any remainder to the file. The budget therefore has
+`Draining` starts at `ProceedWithShutdown`, not at `PrepareShutdown`: domain actors legitimately
+publish while they drain, so publishing stays open until they have finished. From then on new
+publishes are refused with an error, and the facade retransmits until the outbox is empty or what is
+left of the shutdown budget is spent, then writes any remainder to the file. The budget therefore has
 to include this time.
 
 ## 4. Duplicates
@@ -91,10 +96,14 @@ unless something removes the duplicates. The technique that needs no stored set 
 sequence inside an epoch (the idea behind Kafka's idempotent producer and MQTT's QoS 2):
 
 - The facade picks a random **epoch** each time it starts and numbers messages 1, 2, 3 within it.
-- A receiver keeps one integer per sender and epoch, the highest sequence it has accepted, and drops
-  anything at or below it. That is constant state, discarded when the sender's session ends.
-- Retransmission sends the unacknowledged in order, before anything newer, so the order a receiver
-  sees is increasing.
+- A receiver keeps, per sender and epoch, a contiguous watermark (everything at or below it is
+  accepted) and a small set of accepted sequences above it, and drops anything it has already
+  accepted. The set collapses into the watermark as gaps fill, and is bounded by the sender's outbox.
+  It is discarded when the sender's session ends. A bare highest-sequence-seen is not enough: it
+  would discard a late earlier message as a duplicate.
+- Retransmission sends the unacknowledged in order, before anything newer. Within one connection the
+  order is kept by the stream; across a reconnect it is kept by fencing the old connection. Receivers
+  must still not assume that acks, or acceptance by different topic actors, follow that order.
 - Entries carry the epoch they were numbered in, also across a restart: an entry loaded from the
   file keeps its original epoch and seq, and only new messages use the new epoch.
 
@@ -108,8 +117,13 @@ matter, handled by mTLS and, for configuration, by signed monotonic versions.
 - `PublishRequest` gains `epoch` and `seq`; `PublishRequestAck` returns them (cumulative).
 - Deliveries (`PublishResponse`) carry the origin `(published_by, epoch, seq)` and a delivery id;
   `PublishResponseAck` returns the delivery id.
-- The broker keeps, per client session, the highest accepted `(epoch, seq)`, and a per-subscriber
-  outbox of unacknowledged deliveries.
+- The broker dedupes at the session's ingress, in socket order and before it fans out to topic
+  actors. Per client session and epoch it keeps a contiguous watermark (everything at or below it is
+  accepted) plus the set of accepted or pending seqs above it, which is bounded by the client's outbox
+  size. A repeat of an accepted message is acknowledged again; a repeat of a pending one is ignored,
+  because its ack is still coming. Per-subscriber it keeps an outbox of unacknowledged deliveries.
+- When a client reconnects with the same registration id the broker fences the old connection, so bytes
+  a half-dead connection delivers late cannot overtake the new connection's retransmits.
 - The per-topic queue the broker holds when there are no subscribers, and sessions, are in memory
   today. Whether they persist is a separate decision (section 6).
 

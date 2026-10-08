@@ -3,9 +3,15 @@ stateDiagram-v2
     Connecting --> Online: Connected, subscriptions sent, outbox retransmitted
     Online --> Offline: ConnectionLost, outbox written to the file
     Offline --> Connecting: backoff elapsed, transport respawned
-    Online --> Draining: PrepareShutdown
-    Offline --> Draining: PrepareShutdown
+    Online --> Draining: ProceedWithShutdown, publishes now refused
+    Offline --> Draining: ProceedWithShutdown, publishes now refused
     Draining --> [*]: outbox empty or the budget is spent, the remainder written to the file
+
+    note left of Online
+        Domain actors may publish while they drain,
+        so publishing stays open until they have finished
+        and ProceedWithShutdown arrives.
+    end note
 
     note right of Offline
         Every publish goes into the outbox
